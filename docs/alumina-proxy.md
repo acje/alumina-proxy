@@ -162,6 +162,9 @@ These are fixed build-time limits, not optional TOML settings or measured capaci
 | Total preallocated tunnel traffic storage | 128 MiB |
 | CONNECT headers | 8 KiB |
 | Buffered TLS bytes before authorization, including record framing | 64 KiB |
+| TLS plaintext record payload during inspection | 16 KiB |
+| ClientHello distinct extensions tracked (duplicate rejection) | 64 |
+| ClientHello offered supported_versions entries retained | 32 |
 | DNS response message / total resource records | 16 KiB / 128 |
 | Cached address candidates per configured name | 16 IPv4 and 16 IPv6 |
 | CNAME chain length | 8 links; loops rejected |
@@ -301,3 +304,83 @@ The planned additional control storage totals approximately 9–10 KiB against t
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob.
+
+## Security hardening — CONNECT, TLS identity, DNS cache, scheduling, and logging — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-sechd`, 2026-10-17). It pins the exact parser, DNS-cache, scheduling, and logging semantics of the security-review findings whose root cause in spec is a spec weakness or underspecification: L3, L6, L8, L9, L10, L11, L12, L13, L16, L17, and L18. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. Specification publication precedes implementation; the status table at the end assigns each surface an honest planned/implemented/deferred status.
+
+### Amended surfaces and status
+
+| Finding | Amended surface | Spec record | Code enforcement |
+| --- | --- | --- | --- |
+| L3 | CONNECT bare-CR rejection | implemented | planned |
+| L6 | Startup positive-by-eligibility classification | implemented | planned |
+| L8 | Non-`host_name` `server_name` rejection | implemented | planned |
+| L9 | Initial TLS record minimum payload | implemented | planned |
+| L10 | SNI trailing-dot normalization | implemented | planned |
+| L11 | Extension/version caps in the resource profile | implemented | already in code; pinned |
+| L12 | DNS TTL cap 86400 s (max auth lifetime 345600 s) | implemented | planned |
+| L13 | Binding-address deduplication | implemented | planned |
+| L16 | Whole-second scheduling granularity | implemented | already in code; pinned |
+| L17 | Four parser fuzz targets | implemented | planned |
+| L18 | Sink-failure drop accounting | implemented | planned |
+
+All eleven surfaces are recorded by this amendment (spec record: implemented). Code enforcement for the behavioral findings lands in later hardening groups (code status: planned); L11 and L16 document caps and behavior already present in the codebase.
+
+### L3 — CONNECT bare-CR rejection
+
+Add to the CONNECT **Reject** list (spec `:41`): reject a bare CR — an ASCII `0x0d` not immediately followed by `0x0a` — as a header line ending. Only the CRLF pair (`0x0d 0x0a`) is an accepted line ending within the CONNECT head; a `0x0d` observed without an immediately following `0x0a` is rejected as a malformed line ending. This tightens the existing bare-LF rejection to a strict CRLF-only rule. (The code fix arrives in a later hardening group; this amendment records the requirement.)
+
+### L6 — Startup positive classification uses eligible bindings
+
+The startup readiness/usable classification (spec `:65`) and the startup diagnostics state: a positive startup classification requires an eligible, non-retired positive binding for the record type — matching the "usable" predicate at `:65` — not merely a non-empty set of bindings. An entry whose bindings are all ineligible or retired does not count as a startup positive and is treated as unresolved for the allowance computation.
+
+### L8 — Reject non-`host_name` `server_name` entries
+
+Per RFC 6066 §3, the `server_name` extension's name list must contain exactly one entry and that entry's `NameType` must be `host_name` (0). Any entry whose `NameType` is not `host_name` (0) is rejected as malformed or ambiguous identity (spec `:48`) — never silently ignored or skipped by length.
+
+### L9 — Initial TLS record minimum payload
+
+The initial TLS record carrying the ClientHello handshake must have a handshake payload of at least 4 bytes: 1 byte handshake type (`0x01`, ClientHello) plus 3 bytes handshake length. A first record whose handshake payload is fewer than 4 bytes is rejected as malformed framing. This is stricter than the bare maximum payload bound (16 KiB, `:47`/`:48`) and is pinned here because the deployed parser already enforces the minimum.
+
+### L10 — SNI trailing-dot normalization
+
+SNI handling must satisfy RFC 6066 `host_name` and resolve trailing-dot normalization consistently with config/CONNECT normalization at `:61`: a single trailing dot in the SNI `server_name` is normalized (trailing dot removed) before comparison against the approved CONNECT hostname, and the normalized name is compared case-insensitively. An SNI `host_name` that is empty, an IP literal, or otherwise fails TLS hostname syntax is rejected as invalid identity.
+
+### L11 — Extension/version caps promoted into the resource profile
+
+The code-invented hard caps are promoted to spec resource-profile limits, keeping the numbers identical to the code (`src/client_hello.rs:6,9,12,15`; `src/connect.rs:8`):
+
+| Resource | Limit |
+| --- | --- |
+| CONNECT headers | 8 KiB |
+| Buffered TLS bytes before authorization, including record framing | 64 KiB |
+| TLS plaintext record payload during inspection | 16 KiB |
+| ClientHello distinct extensions tracked (duplicate rejection) | 64 |
+| ClientHello offered supported_versions entries retained | 32 |
+
+The first two rows already exist in the Initial resource profile (`:163`/`:164`); the record-payload, extension, and version rows are new to the profile. No existing profile row is loosened or otherwise altered; the caps are pinned exactly as the code enforces them today.
+
+### L12 — DNS TTL cap (deliberate new bound)
+
+Spec `:74` is amended to cap the honored DNS TTL at a fixed maximum of **86400 seconds (24 hours)**. The entry freshness deadline uses `min`(earliest supporting CNAME/address TTL, 86400); a TTL of 0 remains treated as 1 second (RFC 1035 deviation preserved). With the fixed 259200-second stale grace (`:75`), the maximum authorization lifetime is 86400 + 259200 = **345600 seconds**. This is a new deliberate deviation from "honor the received TTL without raising it": the cap only ever lowers honored TTLs, never raises one, so authorization lifetime is bounded. Recorded here as a decision; flagged for user confirmation.
+
+### L13 — Binding-address deduplication
+
+Spec `:73`/`:74` are amended to require deduplicating identical addresses (compared as parsed numeric addresses, never textual forms) at staging/publication: a record type's published eligible bindings contain no duplicate addresses. Deduplication precedes publication so the per-family attempt budget (spec `:82`) is never wasted on duplicate candidates — within a family, address index `n` always selects a distinct address.
+
+### L16 — Whole-second scheduling granularity
+
+The refresh/backoff scheduling clauses (spec `:76`–`:78`) are amended to specify that all due times, the per-second start-rate guard, and backoff-stage comparisons use whole-second resolution from a single monotonic anchor. Due-time and not-before guards compare at whole-second truncation (documenting the existing code at `src/schedule.rs:381-384`); no sub-second due times or fractions influence scheduling, so refresh/backoff spacing is captured to whole seconds only.
+
+### L17 — Four named parser fuzz targets
+
+The Verification requirement at `:225` ("parser fuzzing") is sharpened to name the four parser targets that must be driven by a real fuzz loop before serving qualification: (1) ClientHello inspection (`ChInspector::feed`), (2) CONNECT headers (`ConnectParser`), (3) DNS wire (answer/record parsing), and (4) log-record encoding. Scaffold-only harnesses that do not drive the parsers do not satisfy the requirement.
+
+### L18 — Sink-failure drop accounting
+
+Spec `:194` (Log delivery) — and the DNS reporting/log-drop accounting it shares — is amended to specify that records stranded when the sink fails or stalls (queue-accepted records that cannot be drained before the failure) are counted as dropped under the existing whole-record drop accounting, never silently lost. A stalled or failing sink increments the drop count for stranded records; it must not cause them to be retained indefinitely, nor block rejection, tunnel I/O, DNS, or deadlines.
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently; only L11 adds cap rows that reflect caps already enforced in the code, and L12 adds the new 86400-second TTL cap recorded as a deliberate bound above.
