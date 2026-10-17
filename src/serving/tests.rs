@@ -6062,8 +6062,7 @@ fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
         let body = read_all(&mut client);
         assert!(
             body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
-            "the budget-exhausted seam must refuse a pre-200 502, got {:?}",
-            body
+            "the budget-exhausted seam must refuse a pre-200 502, got {body:?}"
         );
         assert_eq!(
             serving.storage().occupied(),
@@ -6331,8 +6330,7 @@ fn expire_sweep_dialing_expired_seam_records_retry_with_zero_allocations() {
         let body = read_all(&mut client);
         assert!(
             body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
-            "the expired-dial retry must end in a pre-200 502, got {:?}",
-            body
+            "the expired-dial retry must end in a pre-200 502, got {body:?}"
         );
     });
 }

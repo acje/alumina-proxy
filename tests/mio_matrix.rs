@@ -49,13 +49,11 @@ fn boot_allocations_are_attributed_and_excluded() {
     });
     assert!(
         boot.allocs > 0,
-        "boot phase must see Poll::new/Events::with_capacity allocations: {:?}",
-        boot
+        "boot phase must see Poll::new/Events::with_capacity allocations: {boot:?}"
     );
     assert!(
         boot.deallocs > 0,
-        "boot phase must see their release once dropped: {:?}",
-        boot
+        "boot phase must see their release once dropped: {boot:?}"
     );
 
     let poll = Poll::new().expect("poll");
@@ -66,8 +64,7 @@ fn boot_allocations_are_attributed_and_excluded() {
     });
     assert!(
         steady.all_zero(),
-        "boot-held Poll/Events must not be attributed to a later steady phase: {:?}",
-        steady
+        "boot-held Poll/Events must not be attributed to a later steady phase: {steady:?}"
     );
     std::mem::forget(poll);
     std::mem::forget(events);
@@ -81,8 +78,7 @@ fn events_drop_negative_control_catches_heap_free() {
     });
     assert!(
         phase.deallocs > 0,
-        "dropping the Events heap buffer inside a named phase must be caught: {:?}",
-        phase
+        "dropping the Events heap buffer inside a named phase must be caught: {phase:?}"
     );
 }
 
@@ -96,8 +92,7 @@ fn kernel_fd_close_is_not_heap_dealloc() {
     });
     assert!(
         shutdown.all_zero(),
-        "socket drops close kernel fds (inline OwnedFd), no Rust heap is freed: {:?}",
-        shutdown
+        "socket drops close kernel fds (inline OwnedFd), no Rust heap is freed: {shutdown:?}"
     );
 }
 

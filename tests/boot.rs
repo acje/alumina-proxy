@@ -495,20 +495,14 @@ fn resolver_scanner_retention_bounded_independent_of_input_size() {
         " ".repeat(100_000),
         "#".repeat(50_000)
     ));
-    assert!(
-        small.all_zero(),
-        "small parse must not allocate: {:?}",
-        small
-    );
+    assert!(small.all_zero(), "small parse must not allocate: {small:?}");
     assert!(
         huge_ignored.all_zero(),
-        "huge ignored line must be streamed without allocation: {:?}",
-        huge_ignored
+        "huge ignored line must be streamed without allocation: {huge_ignored:?}"
     );
     assert!(
         huge_padding.all_zero(),
-        "huge padding must be skipped without allocation: {:?}",
-        huge_padding
+        "huge padding must be skipped without allocation: {huge_padding:?}"
     );
     assert_eq!(
         small, huge_ignored,

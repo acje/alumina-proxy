@@ -38,8 +38,7 @@ fn alloc_witness_positive_and_negative_attribution() {
     });
     assert!(
         unattributed.all_zero(),
-        "negative: out-of-phase allocation must not be attributed: {:?}",
-        unattributed
+        "negative: out-of-phase allocation must not be attributed: {unattributed:?}"
     );
     assert_ne!(alloc::active_phase(), Some(Phase::StartupDns));
 }
@@ -88,9 +87,7 @@ fn alloc_witness_attribution_is_isolated_across_threads() {
         });
         assert!(
             counts.all_zero(),
-            "phase {:?} must not observe cross-thread allocations: {:?}",
-            phase,
-            counts
+            "phase {phase:?} must not observe cross-thread allocations: {counts:?}"
         );
     }
 }
@@ -108,9 +105,7 @@ fn empty_loop_green_across_all_named_phases() {
         });
         assert!(
             counts.all_zero(),
-            "named phase {:?} must be allocation-free on an empty loop: {:?}",
-            phase,
-            counts
+            "named phase {phase:?} must be allocation-free on an empty loop: {counts:?}"
         );
     }
 }
