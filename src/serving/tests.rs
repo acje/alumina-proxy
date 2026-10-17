@@ -6288,6 +6288,80 @@ fn expired_connect_deadline_while_dialing_records_a_retry_through_expire_sweep()
     });
 }
 
+#[cfg(all(test, feature = "alloc-witness"))]
+#[test]
+/// The expired per-attempt connect deadline on a Dialing slot, driven through
+/// `expire_sweep` → `note_expired_dial` → `fail_current_attempt` → retry
+/// re-decision into the `NoBinding` refusal and seat release, must complete
+/// inside the `Phase::Serving` witness with zero post-boot heap allocation
+/// (M1/I26 enforcement, ov2g closure): every branch of the retry/deadline seam
+/// is now alloc-witness-covered.
+fn expire_sweep_dialing_expired_seam_records_retry_with_zero_allocations() {
+    enforcement_witness_thread(|| {
+        use crate::cache::Family;
+        use crate::connect::Feed;
+        use crate::eligibility::NumericAddr;
+        use std::net::Ipv4Addr;
+        let port = ephemeral_port();
+        let upstream_port = ephemeral_port();
+        let cfg = config_pair(port, upstream_port);
+        let mut serving = serve_on_cfg(port, cfg);
+        serving.storage_mut().publish_test_addr(
+            0,
+            NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])),
+            Family::A,
+        );
+        let mut client = connect(port);
+        pump(&mut serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted"
+        );
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match serving.slots[0]
+            .parser
+            .feed(head.as_bytes())
+            .expect("head feed")
+        {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
+        let setup = serving
+            .storage()
+            .setup_deadline(handle)
+            .expect("setup deadline");
+        serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+        serving.slots[0].approved_port = upstream_port;
+        serving.slots[0].stage = Stage::Dialing;
+        serving.slots[0].connect_family = Some(Family::A);
+        serving.slots[0].connect_deadline = Some(crate::worker::Deadline::connect_attempt(
+            Instant::now() - Duration::from_secs(3),
+            setup,
+        ));
+        let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+            serving.expire_sweep(Instant::now());
+            pump(&mut serving, 10);
+        });
+        assert!(
+            counts.all_zero(),
+            "the expire_sweep dialing-expired retry seam must allocate/deallocate nothing: {counts:?}"
+        );
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the expired-dial retry must re-decide to NoBinding and release the seat"
+        );
+        let body = read_all(&mut client);
+        assert!(
+            body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
+            "the expired-dial retry must end in a pre-200 502, got {:?}",
+            body
+        );
+    });
+}
+
 #[test]
 /// Saturated generation shifts in the token builders must fail closed without
 /// panic: the local id stays decodable and the generation stays non-matchable
