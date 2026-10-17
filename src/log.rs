@@ -16,7 +16,9 @@
 //!
 //! Address fields are never escaped: `SocketAddr` Display emits only digits,
 //! `.`, `:`, `[`, `]`, and `%`, none of which require quoting, and is written
-//! straight into the entry without an intermediate allocation.
+//! straight into the entry without an intermediate allocation. The `%` occurs
+//! only as the IPv6 zone id, which std formats as a plain decimal `u32`, so a
+//! scoped address never widens the character set.
 
 use std::fmt;
 use std::io;
@@ -1172,6 +1174,11 @@ impl LogStore {
                 }
                 Err(_) => {
                     self.sink.failed = true;
+                    while self.count > 0 {
+                        self.drop_one();
+                        self.count -= 1;
+                    }
+                    self.cursor = None;
                     return;
                 }
                 Ok(0) => {
@@ -1930,9 +1937,62 @@ mod tests {
             store.sink_has_failed(),
             "EPIPE latches the sink failed (SIGPIPE ignored by std per oracle B17)"
         );
-        assert!(store.len() >= 1, "the record is never silently lost");
+        assert_eq!(
+            store.dropped(),
+            1,
+            "the stranded record is counted as dropped, never silently lost (L18)"
+        );
+        assert_eq!(
+            store.len(),
+            0,
+            "the stranded record is cleared, not retained (L18)"
+        );
         store.drain_sink();
-        assert!(store.sink_has_failed());
+        assert!(
+            store.sink_has_failed(),
+            "a later turn keeps the failure latched"
+        );
+        assert_eq!(store.dropped(), 1, "no double-counting on a later turn");
+        let _ = writer;
+    }
+
+    #[test]
+    fn logging_sink_failure_counts_stranded_records_as_dropped() {
+        let (reader, writer) = UnixStream::pair().expect("socketpair");
+        let writer_fd = writer.as_raw_fd();
+        drop(reader);
+        let mut store = LogStore::with_fd(writer_fd).expect("pipe sink store");
+        let big = "p".repeat(4000);
+        let mut guard = 0;
+        while guard < 8 * QUEUE_SLOTS && store.len() < QUEUE_SLOTS {
+            store.startup_warning(1, &big, Family::A);
+            guard += 1;
+        }
+        assert_eq!(
+            store.len(),
+            QUEUE_SLOTS,
+            "queue holds records before the failure"
+        );
+        let dropped_before = store.dropped();
+        store.drain_sink();
+        assert!(store.sink_has_failed(), "EPIPE latches the sink failed");
+        assert_eq!(
+            store.dropped(),
+            dropped_before + QUEUE_SLOTS as u64,
+            "every record stranded at the failure is counted under whole-record drop accounting (L18)"
+        );
+        assert_eq!(
+            store.len(),
+            0,
+            "stranded records are cleared, not retained (L18)"
+        );
+        store.drain_sink();
+        assert_eq!(
+            store.dropped(),
+            dropped_before + QUEUE_SLOTS as u64,
+            "a later turn never double-counts the stranded records"
+        );
+        assert!(store.sink_has_failed(), "the failed latch persists");
         let _ = writer;
     }
 
