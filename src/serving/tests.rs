@@ -5829,6 +5829,272 @@ fn first_dial_failure_records_and_re_decides_to_no_binding_502() {
 }
 
 #[test]
+/// The complete retry loop over four real dials, end to end, against live
+/// loopback listeners on `upstream_port` (the upstream-facing machine). Each
+/// round real-dials the listener for the round's family, and the test accepts
+/// that origin side immediately — bounded and nonblocking — to prove the dial
+/// genuinely reached the network; a failed establishment is then recorded into
+/// the slot ledger exactly where the retry seam would do so. Families alternate
+/// A, Aaaa, A, Aaaa across the budget as the worker's selection flips; the
+/// budget-exhausted seam then resolves to the fixed "upstream connection
+/// failed" 502 refusal and releases the seat. The family per round is chosen by
+/// the harness because destination eligibility (alumina-skhc) excludes loopback
+/// from cache selection, so a hermetic served seam cannot select these
+/// addresses itself.
+fn full_family_alternation_retry_loop_exhausts_at_four_real_dials() {
+    use crate::cache::Family;
+    use crate::connect::Feed;
+    use crate::eligibility::NumericAddr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let port = ephemeral_port();
+    let upstream_port = ephemeral_port();
+    let v4 = StdListener::bind(SocketAddr::new(
+        IpAddr::V4([127, 0, 0, 1].into()),
+        upstream_port,
+    ))
+    .expect("live v4 listener");
+    v4.set_nonblocking(true).expect("v4 nonblocking");
+    let v6 = StdListener::bind(SocketAddr::new(
+        IpAddr::V6(Ipv6Addr::LOCALHOST),
+        upstream_port,
+    ))
+    .expect("live v6 listener");
+    v6.set_nonblocking(true).expect("v6 nonblocking");
+    let cfg = config_pair(port, upstream_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let mut client = connect(port);
+        pump(serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted"
+        );
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match serving.slots[0]
+            .parser
+            .feed(head.as_bytes())
+            .expect("head feed")
+        {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+        serving.slots[0].approved_port = upstream_port;
+        serving.slots[0].gate.on_authorized();
+        serving.slots[0].stage = Stage::Dialing;
+        let handle = serving.slots[0]
+            .handle
+            .take()
+            .expect("admitted slot handle");
+        let plan = [
+            (
+                Family::A,
+                NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])),
+                &v4,
+            ),
+            (Family::Aaaa, NumericAddr::V6(Ipv6Addr::LOCALHOST), &v6),
+            (
+                Family::A,
+                NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])),
+                &v4,
+            ),
+            (Family::Aaaa, NumericAddr::V6(Ipv6Addr::LOCALHOST), &v6),
+        ];
+        let mut seen = Vec::new();
+        for (family, addr, listener) in plan {
+            serving
+                .dial(0, addr)
+                .expect("the dial must initiate toward the live listener");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match listener.accept() {
+                    Ok((origin, _)) => {
+                        drop(origin);
+                        break;
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "the real dial must reach this origin within the window"
+                        );
+                        std::thread::yield_now();
+                    }
+                    Err(e) => panic!("accepting the real dial: {e:?}"),
+                }
+            }
+            seen.push(
+                serving.slots[0]
+                    .connect_family
+                    .expect("a live dial must carry its family"),
+            );
+            serving
+                .storage_mut()
+                .record_attempt(&handle, family)
+                .expect("record the failed establishment into the slot ledger");
+        }
+        serving.slots[0].handle = Some(handle);
+        serving
+            .fail_current_attempt(0)
+            .expect("the exhausted budget resolves to the refusal");
+        pump(serving, 10);
+        let body = read_all(&mut client);
+        assert!(
+            body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
+            "the exhausted budget must refuse a pre-200 502, got {:?}",
+            body
+        );
+        assert!(
+            body.windows(b"upstream connection failed".len())
+                .any(|w| w == b"upstream connection failed"),
+            "the budget-exhausted refusal must pin the DialFailed body, got {:?}",
+            body
+        );
+        assert_eq!(
+            seen,
+            vec![Family::A, Family::Aaaa, Family::A, Family::Aaaa],
+            "the four real dials must alternate A then the other family across the budget"
+        );
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the exhausted slot must be released back to the pool"
+        );
+    });
+}
+
+#[cfg(all(test, feature = "alloc-witness"))]
+#[test]
+/// The complete retry seam — real dial → record of the failed establishment →
+/// re-attempt across the four real dials of the family-alternation budget,
+/// ending in the `CandidatesExhausted` refusal and the seat release — must
+/// complete inside the `Phase::Serving` witness with zero post-boot heap
+/// allocation. Families are chosen per round by the harness because
+/// destination eligibility (alumina-skhc) excludes loopback from cache
+/// selection, so a hermetic served seam cannot select these addresses itself.
+fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
+    enforcement_witness_thread(|| {
+        use crate::cache::Family;
+        use crate::connect::Feed;
+        use crate::eligibility::NumericAddr;
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let port = ephemeral_port();
+        let upstream_port = ephemeral_port();
+        let v4 = StdListener::bind(SocketAddr::new(
+            IpAddr::V4([127, 0, 0, 1].into()),
+            upstream_port,
+        ))
+        .expect("live v4 listener");
+        v4.set_nonblocking(true).expect("v4 nonblocking");
+        let v6 = StdListener::bind(SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            upstream_port,
+        ))
+        .expect("live v6 listener");
+        v6.set_nonblocking(true).expect("v6 nonblocking");
+        let cfg = config_pair(port, upstream_port);
+        let mut serving = serve_on_cfg(port, cfg);
+        let mut client = connect(port);
+        pump(&mut serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted"
+        );
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match serving.slots[0]
+            .parser
+            .feed(head.as_bytes())
+            .expect("head feed")
+        {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+        serving.slots[0].approved_port = upstream_port;
+        serving.slots[0].gate.on_authorized();
+        serving.slots[0].stage = Stage::Dialing;
+        let handle = serving.slots[0]
+            .handle
+            .take()
+            .expect("admitted slot handle");
+        let plan = [
+            (
+                Family::A,
+                NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])),
+                &v4,
+            ),
+            (Family::Aaaa, NumericAddr::V6(Ipv6Addr::LOCALHOST), &v6),
+            (
+                Family::A,
+                NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])),
+                &v4,
+            ),
+            (Family::Aaaa, NumericAddr::V6(Ipv6Addr::LOCALHOST), &v6),
+        ];
+        let mut seen = [None; crate::worker::MAX_UPSTREAM_ATTEMPTS];
+        let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+            for (round, (family, addr, listener)) in plan.into_iter().enumerate() {
+                serving
+                    .dial(0, addr)
+                    .expect("the dial must initiate toward the live listener");
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    match listener.accept() {
+                        Ok((origin, _)) => {
+                            drop(origin);
+                            break;
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "the real dial must reach this origin within the window"
+                            );
+                            std::thread::yield_now();
+                        }
+                        Err(e) => panic!("accepting the real dial: {e:?}"),
+                    }
+                }
+                seen[round] = serving.slots[0].connect_family;
+                serving
+                    .storage_mut()
+                    .record_attempt(&handle, family)
+                    .expect("record the failed establishment into the slot ledger");
+            }
+            serving.slots[0].handle = Some(handle);
+            serving
+                .fail_current_attempt(0)
+                .expect("the exhausted budget resolves to the refusal");
+            pump(&mut serving, 10);
+        });
+        assert!(
+            counts.all_zero(),
+            "the full retry seam must allocate/deallocate nothing: {counts:?}"
+        );
+        assert_eq!(
+            seen,
+            [
+                Some(Family::A),
+                Some(Family::Aaaa),
+                Some(Family::A),
+                Some(Family::Aaaa),
+            ],
+            "the four real dials must alternate A then the other family across the budget"
+        );
+        let body = read_all(&mut client);
+        assert!(
+            body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
+            "the budget-exhausted seam must refuse a pre-200 502, got {:?}",
+            body
+        );
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the exhausted slot must be released back to the pool"
+        );
+    });
+}
+
+#[test]
 /// A closed upstream port for all four A bindings consumes the full slot
 /// attempt budget through the real run loop and pins the "upstream connection
 /// failed" wire body once `CandidatesExhausted` resolves.
@@ -5929,6 +6195,7 @@ fn dial_re_anchors_a_fresh_connect_deadline_at_initiation() {
             Instant::now() - Duration::from_secs(3),
             setup,
         ));
+        let dial_start = Instant::now();
         serving
             .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
             .expect("dial the live origin");
@@ -5939,15 +6206,11 @@ fn dial_re_anchors_a_fresh_connect_deadline_at_initiation() {
             "the dialing slot must carry the decided family"
         );
         let deadline = ws.connect_deadline.expect("dial re-anchored deadline");
-        let now = Instant::now();
-        let age = if deadline.limit() <= now {
-            now - deadline.limit()
-        } else {
-            Duration::ZERO
-        };
         assert!(
-            age <= Duration::from_secs(1),
-            "the anchor must be fresh, not carried over from boot: {:?}",
+            deadline.limit()
+                >= dial_start + Duration::from_secs(crate::worker::CONNECT_DEADLINE_SECS),
+            "the re-anchored deadline must run the full {} s from dial initiation, got {:?}",
+            crate::worker::CONNECT_DEADLINE_SECS,
             deadline.limit()
         );
         let _origin_stream = origin.accept().expect("accept origin side").0;

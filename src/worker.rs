@@ -119,15 +119,18 @@ impl AttemptCounts {
         AttemptCounts { a: 0, aaaa: 0 }
     }
 
+    #[must_use]
     pub const fn a(self) -> u8 {
         self.a
     }
 
+    #[must_use]
     pub const fn aaaa(self) -> u8 {
         self.aaaa
     }
 
     /// Total attempts across both families.
+    #[must_use]
     pub const fn total(self) -> u8 {
         self.a.saturating_add(self.aaaa)
     }
@@ -155,16 +158,10 @@ impl AttemptCounts {
 /// into the worker. No addresses or cache references cross its boundary in
 /// either direction, so a cache replacement between attempts still takes
 /// effect at the next attempt (docs/alumina-proxy.md:82).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AttemptLedger {
     counts: AttemptCounts,
     previous: Option<Family>,
-}
-
-impl Default for AttemptLedger {
-    fn default() -> Self {
-        AttemptLedger::new()
-    }
 }
 
 impl AttemptLedger {
@@ -176,11 +173,13 @@ impl AttemptLedger {
     }
 
     /// The per-family counters of the ledger.
+    #[must_use]
     pub const fn counts(self) -> AttemptCounts {
         self.counts
     }
 
     /// The family the last recorded attempt used, when any.
+    #[must_use]
     pub const fn previous(self) -> Option<Family> {
         self.previous
     }
@@ -1543,15 +1542,24 @@ mod tests {
             None,
             "a fresh ledger has no previous family"
         );
-        let after_a = worker.record_attempt(&slot, Family::A).expect("record A");
-        assert_eq!(after_a.counts().a(), 1, "one A attempt recorded");
-        assert_eq!(after_a.previous(), Some(Family::A), "A is now previous");
-        let after_aaaa = worker
+        assert_eq!(
+            AttemptLedger::default(),
+            AttemptLedger::new(),
+            "the derived Default must equal the explicit fresh ledger"
+        );
+        let a_ledger = worker.record_attempt(&slot, Family::A).expect("record A");
+        assert_eq!(a_ledger.counts().a(), 1, "one A attempt recorded");
+        assert_eq!(a_ledger.previous(), Some(Family::A), "A is now previous");
+        let alternate_ledger = worker
             .record_attempt(&slot, Family::Aaaa)
             .expect("record AAAA");
-        assert_eq!(after_aaaa.counts().aaaa(), 1, "one AAAA attempt recorded");
         assert_eq!(
-            after_aaaa.previous(),
+            alternate_ledger.counts().aaaa(),
+            1,
+            "one AAAA attempt recorded"
+        );
+        assert_eq!(
+            alternate_ledger.previous(),
             Some(Family::Aaaa),
             "AAAA is now previous"
         );

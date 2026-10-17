@@ -155,7 +155,7 @@ const SIGNAL_LOCAL: usize = DNS_LOCAL + 1;
 /// The local id space also carries the reserved readiness sources `DNS_LOCAL`
 /// and `SIGNAL_LOCAL`, both below `LOCAL_MASK`.
 const LOCAL_MASK: usize = 0x7ff;
-const GEN_SHIFT: usize = 11;
+const GEN_SHIFT: u32 = 11;
 const _: () = assert!(SIGNAL_LOCAL <= LOCAL_MASK);
 
 /// The owner's shutdown phase. `Serving` is ordinary operation; once the
@@ -2034,14 +2034,13 @@ impl Serving {
             }
             Ok(ConnectPhase::Peer {
                 addr,
-                family,
                 connect_deadline,
+                ..
             }) => {
                 let slot = &mut self.slots[index];
                 slot.approved = Some(approved);
                 slot.approved_port = request.port();
                 slot.gate.on_authorized();
-                slot.connect_family = Some(family);
                 slot.connect_deadline = Some(connect_deadline);
                 slot.stage = Stage::Dialing;
                 self.dial(index, addr)
@@ -2726,6 +2725,18 @@ impl Serving {
         }
     }
 
+    /// Expire the in-flight upstream dial when its per-attempt connect
+    /// deadline has passed. The per-attempt 2 s cutoff is genuinely enforced
+    /// here (docs/alumina-proxy.md:82,169 — "each with a 2-second deadline"),
+    /// so a slow-but-healthy connect that crossed the 2 s bound is failed and
+    /// retried or refused exactly like a refused one. The `Result` of
+    /// [`Serving::fail_current_attempt`] is intentionally discarded: the sweep
+    /// has no caller to carry an error, and every failure path inside it
+    /// already refuses or re-decides the slot itself.
+    fn note_expired_dial(&mut self, i: usize) {
+        let _ = self.fail_current_attempt(i);
+    }
+
     /// Enforce every passed absolute deadline in one sweep: the per-setup
     /// deadline (refuse 504 pre-200, close-only once the 200 has begun), the
     /// established-tunnel idle deadline, and the once-started FIN-drain
@@ -2746,7 +2757,7 @@ impl Serving {
                     .connect_deadline
                     .is_some_and(|d| d.is_expired(now))
             {
-                let _ = self.fail_current_attempt(i);
+                self.note_expired_dial(i);
                 continue;
             }
             if self.slots[i].idle_deadline.is_some_and(|d| now >= d) {
@@ -2779,11 +2790,20 @@ impl Serving {
     }
 }
 
+/// The generation bits of a connection token shifted into place, failing
+/// closed on saturation: a degenerate generation whose shift overflows yields
+/// the all-ones generation field with the local-id mask cleared, so the
+/// token's local id stays decodable while its generation matches no live slot
+/// — a stale drop, never a false live match and never a wrap into the local
+/// id range.
+fn shifted_generation(generation: u64) -> usize {
+    (generation as usize)
+        .checked_shl(GEN_SHIFT)
+        .unwrap_or(usize::MAX & !LOCAL_MASK)
+}
+
 fn client_token(generation: u64, index: usize) -> Token {
-    let shifted = (generation as usize)
-        .checked_shl(GEN_SHIFT as u32)
-        .unwrap_or(usize::MAX & !LOCAL_MASK);
-    Token(shifted | (index + 1))
+    Token(shifted_generation(generation) | (index + 1))
 }
 
 fn captured_fact(violation: Violation) -> Option<CapturedFact> {
@@ -2801,10 +2821,7 @@ fn captured_fact(violation: Violation) -> Option<CapturedFact> {
 }
 
 fn upstream_token(generation: u64, index: usize) -> Token {
-    let shifted = (generation as usize)
-        .checked_shl(GEN_SHIFT as u32)
-        .unwrap_or(usize::MAX & !LOCAL_MASK);
-    Token(shifted | (UPSTREAM_BASE + index))
+    Token(shifted_generation(generation) | (UPSTREAM_BASE + index))
 }
 
 fn half_close_best_effort(stream: &mut TcpStream) {
