@@ -7,11 +7,6 @@ use crate::config::{Allowlist, FixedHostname};
 /// that may arrive in the same read as the delimiter.
 pub const CONNECT_LIMIT: usize = 8 * 1024;
 
-/// The reserved default destination port, retained as the canonical HTTPS
-/// port; per-entry allowlist ports (1..=65535) now flow from config and the
-/// CONNECT line rather than this constant.
-pub const DEST_PORT: u16 = 443;
-
 const END_OF_HEAD: &[u8] = b"\r\n\r\n";
 const HTTP_11: &[u8] = b"HTTP/1.1";
 
@@ -46,6 +41,7 @@ pub enum ConnectError {
     NotHttp,
     MalformedRequestLine { detail: &'static str },
     BareLineFeed,
+    BareCarriageReturn,
     ObsFold,
     InvalidHostname { detail: &'static str },
     WrongPort { got: u16 },
@@ -63,6 +59,9 @@ impl fmt::Display for ConnectError {
                 write!(f, "CONNECT request line malformed: {detail}")
             }
             ConnectError::BareLineFeed => write!(f, "CONNECT request contains a bare line feed"),
+            ConnectError::BareCarriageReturn => {
+                write!(f, "CONNECT request contains a bare carriage return")
+            }
             ConnectError::ObsFold => write!(f, "CONNECT request contains obsolete line folding"),
             ConnectError::InvalidHostname { detail } => {
                 write!(f, "CONNECT hostname invalid: {detail}")
@@ -94,6 +93,7 @@ pub enum ConnectHeadReason {
     NotHttp,
     MalformedRequestLine,
     BareLineFeed,
+    BareCarriageReturn,
     ObsFold,
     InvalidHostname,
     WrongPort,
@@ -112,6 +112,7 @@ impl ConnectHeadReason {
             E::NotHttp => ConnectHeadReason::NotHttp,
             E::MalformedRequestLine { .. } => ConnectHeadReason::MalformedRequestLine,
             E::BareLineFeed => ConnectHeadReason::BareLineFeed,
+            E::BareCarriageReturn => ConnectHeadReason::BareCarriageReturn,
             E::ObsFold => ConnectHeadReason::ObsFold,
             E::InvalidHostname { .. } => ConnectHeadReason::InvalidHostname,
             E::WrongPort { .. } => ConnectHeadReason::WrongPort,
@@ -127,7 +128,7 @@ impl ConnectHeadReason {
     }
 
     /// The number of finite CONNECT-head discriminants.
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 11;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +224,9 @@ fn parse_request(head: &[u8]) -> Result<ConnectRequest, ConnectError> {
     if bare_line_feed(head).is_some() {
         return Err(ConnectError::BareLineFeed);
     }
+    if bare_carriage_return(head).is_some() {
+        return Err(ConnectError::BareCarriageReturn);
+    }
     let mut lines = Lines::new(head);
     let request_line = lines.next().ok_or(ConnectError::MalformedRequestLine {
         detail: "empty head",
@@ -273,6 +277,14 @@ fn bare_line_feed(head: &[u8]) -> Option<usize> {
     (0..head.len()).find(|&i| head[i] == 0x0a && (i == 0 || head[i - 1] != 0x0d))
 }
 
+/// Returns the index of the first bare carriage return, or `None` when every
+/// carriage return is immediately followed by a line feed. A `0x0d` at the end
+/// of the head is a bare carriage return because the head excludes the CRLFCRLF
+/// delimiter, so its `0x0a` cannot follow within the head.
+fn bare_carriage_return(head: &[u8]) -> Option<usize> {
+    (0..head.len()).find(|&i| head[i] == 0x0d && head.get(i + 1) != Some(&0x0a))
+}
+
 struct Lines<'a> {
     buf: &'a [u8],
     next: usize,
@@ -288,16 +300,15 @@ impl<'a> Lines<'a> {
             return None;
         }
         let rest = &self.buf[self.next..];
-        match rest.iter().position(|&b| b == 0x0a) {
-            Some(lf) => {
-                let line = &rest[..lf - 1];
-                self.next += lf + 1;
+        match rest.windows(2).position(|w| w == b"\r\n") {
+            Some(crlf) => {
+                let line = &rest[..crlf];
+                self.next += crlf + 2;
                 Some(line)
             }
             None => {
-                let line = rest.strip_suffix(b"\r").unwrap_or(rest);
                 self.next = self.buf.len() + 1;
-                Some(line)
+                Some(rest)
             }
         }
     }
@@ -347,10 +358,10 @@ fn is_tchar_header_name(name: &[u8]) -> bool {
     })
 }
 
-/// Parses a Content-Length value as decimal digits only; signs and other
-/// non-digit characters are rejected.
+/// Parses a Content-Length value as canonical decimal digits; signs,
+/// non-digit characters, and leading zeros are rejected.
 fn parse_content_length(value: &[u8]) -> Option<u64> {
-    if value.is_empty() {
+    if value.is_empty() || (value.len() > 1 && value[0] == b'0') {
         return None;
     }
     let mut total: u64 = 0;
@@ -598,6 +609,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_leading_zero_content_length() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: 000\r\n\r\n";
+        assert!(matches!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::MalformedRequestLine { .. })
+        ));
+    }
+
+    #[test]
     fn rejects_transfer_encoding() {
         let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n";
         assert_eq!(
@@ -619,6 +639,24 @@ mod tests {
     fn rejects_bare_lf() {
         let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: 0\n\r\n\r\n";
         assert_eq!(parse_full(head.as_bytes()), Err(ConnectError::BareLineFeed));
+    }
+
+    #[test]
+    fn rejects_bare_carriage_return_in_header_value() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nX-Test: a\rb\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::BareCarriageReturn)
+        );
+    }
+
+    #[test]
+    fn rejects_bare_carriage_return_before_delimiter() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nX-Test: a\r\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::BareCarriageReturn)
+        );
     }
 
     #[test]
@@ -648,6 +686,12 @@ mod tests {
             }
             Feed::Incomplete => panic!("trailing bytes must not count toward the head bound"),
         }
+    }
+
+    #[test]
+    fn lines_next_without_cr_does_not_underflow() {
+        let mut lines = Lines::new(&[0x0a]);
+        assert!(lines.next().is_some());
     }
 
     #[test]
