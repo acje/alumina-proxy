@@ -102,7 +102,9 @@ pub struct TunnelGate {
     /// stream, present once validation passes.
     hello_end: Option<usize>,
     /// Cumulative tunnel bytes successfully written upstream (barrier A
-    /// progress; monotonic).
+    /// progress; monotonic). Only a permitted write can advance it: blocked
+    /// or terminated reports never record bytes, and with the delta-based
+    /// reporter a backwards movement is structurally unrepresentable.
     upstream_committed: usize,
     /// Cumulative bytes successfully written downstream (barrier B progress;
     /// monotonic).
@@ -152,10 +154,14 @@ impl TunnelGate {
     }
 
     /// The CONNECT head completed, consuming `head_len` client-stream bytes.
-    /// Those bytes are never forwarded; tunnel bytes begin after them.
+    /// Those bytes are never forwarded; tunnel bytes begin after them. Only
+    /// the initial `AwaitConnect` head is recorded, so a late re-application
+    /// cannot corrupt the hello window (I9).
     pub fn on_connect_head(&mut self, head_len: usize) {
-        self.head_len = head_len;
-        self.hello_start = head_len;
+        if self.phase == GatePhase::AwaitConnect {
+            self.head_len = head_len;
+            self.hello_start = head_len;
+        }
     }
 
     /// CONNECT authorized and peer selected; the upstream connect begins.
@@ -198,14 +204,15 @@ impl TunnelGate {
         self.terminate(TerminateReason::ClientHelloRejected);
     }
 
-    /// A successful upstream write of `n` cumulative client->upstream bytes
-    /// (barrier A progress). The write is reported in cumulative offsets so
-    /// partial successful writes keep ordered progress; `n` must be
-    /// non-decreasing. This is the only transition that can open the gate
-    /// (D3).
-    pub fn upstream_write(&mut self, cumulative: usize) -> UpstreamWrite {
-        debug_assert!(cumulative >= self.upstream_committed);
-        self.upstream_committed = cumulative;
+    /// A successful upstream write of `advance` client->upstream tunnel bytes
+    /// since the last report (barrier A progress). The gate accumulates the
+    /// delta reports into a monotonic committed offset, so a backwards
+    /// movement is structurally unrepresentable while partial successful
+    /// writes keep ordered progress (D5). Only a *permitted* write advances
+    /// the ledger: a terminated or barrier-A-closed gate reports
+    /// [`UpstreamWrite::BlockedByBarrierA`] and records nothing (I10). This
+    /// is the only transition that can open the gate (D3).
+    pub fn upstream_write(&mut self, advance: usize) -> UpstreamWrite {
         match self.phase {
             GatePhase::Terminated(_) => UpstreamWrite::BlockedByBarrierA,
             GatePhase::AwaitConnect
@@ -214,12 +221,14 @@ impl TunnelGate {
             | GatePhase::Validating => match self.hello_end {
                 None => UpstreamWrite::BlockedByBarrierA,
                 Some(h_end) => {
+                    self.upstream_committed = self.upstream_committed.saturating_add(advance);
+                    let total = self.upstream_committed;
                     let hello_len = h_end - self.hello_start;
-                    if cumulative < hello_len {
+                    if total < hello_len {
                         UpstreamWrite::WritingHello { total: hello_len }
                     } else {
-                        let crossing = cumulative;
-                        let relay_from_open = cumulative - hello_len;
+                        let crossing = total;
+                        let relay_from_open = total - hello_len;
                         self.phase = GatePhase::RelayActive;
                         UpstreamWrite::GateOpened {
                             crossing,
@@ -336,7 +345,7 @@ mod tests {
         );
         assert!(!gate.is_open());
         assert_eq!(
-            gate.upstream_write(240),
+            gate.upstream_write(90),
             UpstreamWrite::GateOpened {
                 crossing: 240,
                 relay_from_open: 40
@@ -351,10 +360,10 @@ mod tests {
         let mut gate = authorized_gate();
         let hello_end = 120 + 200;
         gate.on_hello_validated(ValidatedHello::test_new(hello_end));
-        let commits = [0, 150, 240, 300, 300, 512];
+        let advances = [0, 150, 90, 60, 0, 212];
         let mut last_open_at = None;
-        for &c in &commits {
-            let w = gate.upstream_write(c);
+        for &step in &advances {
+            let w = gate.upstream_write(step);
             if let UpstreamWrite::GateOpened {
                 crossing,
                 relay_from_open,
@@ -368,11 +377,15 @@ mod tests {
         assert_eq!(relay, 40);
         assert_eq!(
             gate.upstream_committed(),
-            512,
-            "monotonic committed offset; equal commits are idempotent, never duplicated"
+            240,
+            "delta reports accumulate to the opening crossing; relay reports acknowledge without recording"
         );
         assert!(gate.is_open());
-        assert_eq!(gate.upstream_write(700), UpstreamWrite::Open);
+        assert_eq!(
+            gate.upstream_write(0),
+            UpstreamWrite::Open,
+            "relay reports are acknowledged without recording further bytes"
+        );
     }
 
     #[test]
@@ -459,5 +472,47 @@ mod tests {
         gate.on_response_ok();
         assert_eq!(gate.phase(), GatePhase::Validating);
         assert!(!gate.is_open());
+    }
+
+    #[test]
+    fn re_applying_the_connect_head_after_it_completed_is_ignored() {
+        let mut gate = authorized_gate();
+        let hello_end = 120 + 200;
+        gate.on_hello_validated(ValidatedHello::test_new(hello_end));
+        gate.on_connect_head(180);
+        assert_eq!(
+            gate.upstream_write(240),
+            UpstreamWrite::GateOpened {
+                crossing: 240,
+                relay_from_open: 40,
+            },
+            "a late head re-application must not shift the hello window"
+        );
+    }
+
+    #[test]
+    fn terminated_and_blocked_writes_never_record_committed_bytes() {
+        let mut terminated = authorized_gate();
+        terminated.on_hello_rejected();
+        assert_eq!(
+            terminated.upstream_write(50),
+            UpstreamWrite::BlockedByBarrierA
+        );
+        assert_eq!(
+            terminated.upstream_committed(),
+            0,
+            "a terminated gate must not record committed bytes"
+        );
+
+        let mut unvalidated = authorized_gate();
+        assert_eq!(
+            unvalidated.upstream_write(50),
+            UpstreamWrite::BlockedByBarrierA
+        );
+        assert_eq!(
+            unvalidated.upstream_committed(),
+            0,
+            "a barrier-A-closed gate must not record committed bytes"
+        );
     }
 }

@@ -2327,8 +2327,12 @@ impl Serving {
         Ok(())
     }
 
-    fn drain_to_upstream(&mut self, index: usize) -> (bool, bool) {
-        let mut wrote = false;
+    /// Drains buffered client bytes upstream until backpressure, failure, or
+    /// exhaustion. Returns the total bytes successfully written this cycle (a
+    /// structural write delta: `fwd` advanced by exactly that count) plus
+    /// whether a non-WouldBlock failure occurred.
+    fn drain_to_upstream(&mut self, index: usize) -> (usize, bool) {
+        let mut written = 0;
         let mut failed = false;
         loop {
             if self.visit_exhausted(index) {
@@ -2361,7 +2365,7 @@ impl Serving {
             };
             match outcome {
                 WriteOutcome::Wrote(n) => {
-                    wrote = true;
+                    written += n;
                     self.note_op(index, n);
                 }
                 WriteOutcome::Wait => {
@@ -2376,28 +2380,24 @@ impl Serving {
                 WriteOutcome::None => break,
             }
         }
-        (wrote, failed)
+        (written, failed)
     }
 
     fn flush_client_upstream(&mut self, index: usize) -> Result<(), ServeError> {
-        let (wrote_any, failed) = self.drain_to_upstream(index);
+        let (written, failed) = self.drain_to_upstream(index);
         if failed {
             self.close_slot(index);
             return Ok(());
         }
         let was_open = self.slots[index].gate.is_open();
-        if !wrote_any || was_open {
+        if written == 0 || was_open {
             self.slots[index].relay_cursor_reset();
             if self.visit_exhausted(index) {
                 self.reschedule(index);
             }
             return Ok(());
         }
-        let committed = {
-            let ws = &self.slots[index];
-            ws.buf_base + ws.fwd - ws.head_len
-        };
-        let outcome = self.slots[index].gate.upstream_write(committed);
+        let outcome = self.slots[index].gate.upstream_write(written);
         if matches!(
             outcome,
             UpstreamWrite::GateOpened { .. } | UpstreamWrite::Open
@@ -2412,17 +2412,13 @@ impl Serving {
             }
             self.slots[index].stage = Stage::Relay;
             self.slots[index].idle_deadline = Some(Instant::now() + IDLE_SECS);
-            let (_more, failed2) = self.drain_to_upstream(index);
+            let (written2, failed2) = self.drain_to_upstream(index);
             if failed2 {
                 self.close_slot(index);
                 return Ok(());
             }
-            let committed2 = {
-                let ws = &self.slots[index];
-                ws.buf_base + ws.fwd - ws.head_len
-            };
-            if committed2 != committed {
-                self.slots[index].gate.upstream_write(committed2);
+            if written2 > 0 {
+                self.slots[index].gate.upstream_write(written2);
             }
         }
         self.slots[index].relay_cursor_reset();
