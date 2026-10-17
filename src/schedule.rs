@@ -100,6 +100,16 @@ fn family_slot(family: Family) -> usize {
     }
 }
 
+/// A fully computed single-family schedule delta, prepared without mutating the
+/// table so a two-resource outcome (schedule plus cache) can be validated
+/// before the cache commits: any refusal is observed with neither resource
+/// changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedDue {
+    due: u64,
+    backoff: u8,
+}
+
 /// The fixed per-name, per-family DNS due table with independent retry state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Schedules {
@@ -210,10 +220,33 @@ impl Schedules {
         cacheable: bool,
         now: u64,
     ) -> Result<(), ScheduleError> {
+        let prepared = self.prepare_positive(name, family, receipt, ttl, cacheable, now)?;
+        self.commit_positive(name, family, prepared);
+        Ok(())
+    }
+
+    /// Computes the single-family schedule delta a validated positive would
+    /// apply, without mutating the table, so a caller can validate the whole
+    /// outcome before the cache changes: a `DeadlineOverflow` or out-of-range
+    /// name is refused with the slot untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NameOutOfRange` or `DeadlineOverflow` exactly as
+    /// [`Self::note_positive`].
+    pub(crate) fn prepare_positive(
+        &self,
+        name: usize,
+        family: Family,
+        receipt: u64,
+        ttl: u64,
+        cacheable: bool,
+        now: u64,
+    ) -> Result<PreparedDue, ScheduleError> {
         self.admit(name)?;
-        let slot = self.slot_mut(name, family);
+        let slot = self.slot(name, family);
         let stage = slot.backoff;
-        let (new_due, new_stage) = if cacheable {
+        let (due, backoff) = if cacheable {
             (
                 receipt
                     .checked_add(normal_refresh_interval(ttl))
@@ -227,10 +260,13 @@ impl Schedules {
                 advance_backoff(stage),
             )
         };
-        slot.due = Some(new_due);
-        slot.backoff = new_stage;
-        slot.pending = false;
-        Ok(())
+        Ok(PreparedDue { due, backoff })
+    }
+
+    /// Commits a prepared single-family delta; never fails after
+    /// [`Self::prepare_positive`] succeeded.
+    pub(crate) fn commit_positive(&mut self, name: usize, family: Family, prepared: PreparedDue) {
+        self.commit_slot(name, family, prepared);
     }
 
     /// Records an exchange failure for one family, scheduling a retry from
@@ -275,33 +311,55 @@ impl Schedules {
         receipt: u64,
         now: u64,
     ) -> Result<(), ScheduleError> {
-        self.admit(name)?;
-        let mut new_due = [0u64; 2];
-        let mut new_stage = [0u8; 2];
-        for (i, family) in [Family::A, Family::Aaaa].into_iter().enumerate() {
-            let slot = self.slot(name, family);
-            match soa {
-                Some(soa) => {
-                    new_due[i] = receipt
-                        .checked_add(negative_refresh_interval(soa))
-                        .ok_or(ScheduleError::DeadlineOverflow)?;
-                    new_stage[i] = slot.backoff;
-                }
-                None => {
-                    new_due[i] = now
-                        .checked_add(BACKOFF_STAGES[usize::from(slot.backoff)])
-                        .ok_or(ScheduleError::DeadlineOverflow)?;
-                    new_stage[i] = advance_backoff(slot.backoff);
-                }
-            }
-        }
-        for (i, family) in [Family::A, Family::Aaaa].into_iter().enumerate() {
-            let slot = self.slot_mut(name, family);
-            slot.due = Some(new_due[i]);
-            slot.backoff = new_stage[i];
-            slot.pending = false;
-        }
+        let prepared = self.prepare_nxdomain(name, soa, receipt, now)?;
+        self.commit_nxdomain(name, prepared);
         Ok(())
+    }
+
+    /// Computes the two-family schedule delta a validated NXDOMAIN would
+    /// apply, without mutating the table, so a caller can validate the whole
+    /// outcome before the cache changes: a `DeadlineOverflow` or out-of-range
+    /// name is refused with every slot untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NameOutOfRange` or `DeadlineOverflow` exactly as
+    /// [`Self::note_nxdomain`].
+    pub(crate) fn prepare_nxdomain(
+        &self,
+        name: usize,
+        soa: Option<Soa>,
+        receipt: u64,
+        now: u64,
+    ) -> Result<[PreparedDue; 2], ScheduleError> {
+        self.admit(name)?;
+        let mut prepared = [PreparedDue { due: 0, backoff: 0 }; 2];
+        for family in [Family::A, Family::Aaaa] {
+            let slot = self.slot(name, family);
+            let (due, backoff) = match soa {
+                Some(soa) => (
+                    receipt
+                        .checked_add(negative_refresh_interval(soa))
+                        .ok_or(ScheduleError::DeadlineOverflow)?,
+                    slot.backoff,
+                ),
+                None => (
+                    now.checked_add(BACKOFF_STAGES[usize::from(slot.backoff)])
+                        .ok_or(ScheduleError::DeadlineOverflow)?,
+                    advance_backoff(slot.backoff),
+                ),
+            };
+            prepared[family_slot(family)] = PreparedDue { due, backoff };
+        }
+        Ok(prepared)
+    }
+
+    /// Commits a prepared two-family delta; never fails after
+    /// [`Self::prepare_nxdomain`] succeeded.
+    pub(crate) fn commit_nxdomain(&mut self, name: usize, prepared: [PreparedDue; 2]) {
+        for family in [Family::A, Family::Aaaa] {
+            self.commit_slot(name, family, prepared[family_slot(family)]);
+        }
     }
 
     /// Records a validated NODATA for the queried family only.
@@ -323,10 +381,32 @@ impl Schedules {
         receipt: u64,
         now: u64,
     ) -> Result<(), ScheduleError> {
+        let prepared = self.prepare_nodata(name, family, soa, receipt, now)?;
+        self.commit_nodata(name, family, prepared);
+        Ok(())
+    }
+
+    /// Computes the single-family schedule delta a validated NODATA would
+    /// apply, without mutating the table, so a caller can validate the whole
+    /// outcome before the cache changes: a `DeadlineOverflow` or out-of-range
+    /// name is refused with the slot untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NameOutOfRange` or `DeadlineOverflow` exactly as
+    /// [`Self::note_nodata`].
+    pub(crate) fn prepare_nodata(
+        &self,
+        name: usize,
+        family: Family,
+        soa: Option<Soa>,
+        receipt: u64,
+        now: u64,
+    ) -> Result<PreparedDue, ScheduleError> {
         self.admit(name)?;
-        let slot = self.slot_mut(name, family);
+        let slot = self.slot(name, family);
         let stage = slot.backoff;
-        let (new_due, new_stage) = match soa {
+        let (due, backoff) = match soa {
             Some(soa) => (
                 receipt
                     .checked_add(negative_refresh_interval(soa))
@@ -339,10 +419,23 @@ impl Schedules {
                 advance_backoff(stage),
             ),
         };
-        slot.due = Some(new_due);
-        slot.backoff = new_stage;
+        Ok(PreparedDue { due, backoff })
+    }
+
+    /// Commits a prepared single-family delta; never fails after
+    /// [`Self::prepare_nodata`] succeeded.
+    pub(crate) fn commit_nodata(&mut self, name: usize, family: Family, prepared: PreparedDue) {
+        self.commit_slot(name, family, prepared);
+    }
+
+    /// Non-fallible commit of a [`PreparedDue`] onto its slot, clearing the
+    /// in-flight marker; reserved for values returned by a successful
+    /// `prepare_*`.
+    fn commit_slot(&mut self, name: usize, family: Family, prepared: PreparedDue) {
+        let slot = self.slot_mut(name, family);
+        slot.due = Some(prepared.due);
+        slot.backoff = prepared.backoff;
         slot.pending = false;
-        Ok(())
     }
 
     /// Selects at most one due exchange, scanning in fixed rotating

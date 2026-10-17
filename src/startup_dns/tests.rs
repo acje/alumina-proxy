@@ -542,6 +542,67 @@ fn resolve_publishes_positives_and_nodata_across_one_connection() {
 }
 
 #[test]
+fn ineligible_only_positive_does_not_count_as_resolved_name() {
+    let cfg = config();
+    let responder = spawn_responder(vec![vec![
+        Step::PositiveA {
+            ttl: 120,
+            octets: [93, 184, 216, 34],
+        },
+        Step::NodataWithSoa { ttl: 300, min: 60 },
+        Step::PositiveA {
+            ttl: 120,
+            octets: [10, 0, 0, 1],
+        },
+        Step::NodataWithSoa { ttl: 300, min: 60 },
+    ]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(report.exchanges, 4);
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        report.resolved_names, 1,
+        "an ineligible-only positive contributes no usable binding and must not count as resolved"
+    );
+    assert!(
+        bindings_of(&cache, 1, Family::A).is_empty(),
+        "the all-ineligible positive publishes no A binding"
+    );
+}
+
+#[test]
+fn ineligible_only_positive_classifies_as_no_eligible() {
+    let outcome = dns::Outcome::Positive {
+        family: Family::A,
+        bindings: dns::BindingList::from_slice(&[crate::eligibility::NumericAddr::V4(
+            std::net::Ipv4Addr::new(10, 0, 0, 1),
+        )])
+        .expect("bindings"),
+        ttl: 120,
+    };
+    assert_eq!(
+        classify_published(&outcome),
+        PublishedKind::NoEligible,
+        "an all-ineligible positive must never be reported usable"
+    );
+    assert_ne!(
+        classify_published(&outcome),
+        PublishedKind::ResolvedPositive,
+        "an all-ineligible positive must not count as a resolved positive"
+    );
+}
+
+#[test]
 fn positive_aaaa_publishes_v6_binding_and_schedule() {
     let cfg = config();
     let responder = spawn_responder(vec![vec![

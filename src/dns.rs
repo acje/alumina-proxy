@@ -322,34 +322,31 @@ pub fn apply_outcome(
                 ttl,
             )
             .map_err(DnsError::Cache)?;
-            cache.publish_positive(&staged).map_err(DnsError::Cache)?;
-            schedules
-                .note_positive(
-                    index,
-                    positive_family,
-                    receipt,
-                    ttl,
-                    bindings.as_slice().iter().any(|b| b.is_eligible()),
-                    now,
-                )
+            let cacheable = bindings.as_slice().iter().any(|b| b.is_eligible());
+            let prepared = schedules
+                .prepare_positive(index, positive_family, receipt, ttl, cacheable, now)
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
+            cache.publish_positive(&staged).map_err(DnsError::Cache)?;
+            schedules.commit_positive(index, positive_family, prepared);
         }
         Outcome::NxDomain { soa } => {
-            cache.evict_nxdomain(name).map_err(DnsError::Cache)?;
-            schedules
-                .note_nxdomain(index, soa, receipt, now)
+            let prepared = schedules
+                .prepare_nxdomain(index, soa, receipt, now)
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
+            cache.evict_nxdomain(name).map_err(DnsError::Cache)?;
+            schedules.commit_nxdomain(index, prepared);
         }
         Outcome::NoData {
             family: no_data_family,
             soa,
         } => {
+            let prepared = schedules
+                .prepare_nodata(index, no_data_family, soa, receipt, now)
+                .map_err(|err| DnsError::Cache(map_schedule(err)))?;
             cache
                 .evict_nodata(name, no_data_family)
                 .map_err(DnsError::Cache)?;
-            schedules
-                .note_nodata(index, no_data_family, soa, receipt, now)
-                .map_err(|err| DnsError::Cache(map_schedule(err)))?;
+            schedules.commit_nodata(index, no_data_family, prepared);
         }
     }
     Ok(())
@@ -652,7 +649,7 @@ struct Owner {
     cname: Option<(DnsName, u32)>,
     addrs: [(NumericAddr, u32); MAX_ADDRESSES],
     addr_len: u8,
-    has_any_addr: bool,
+    has_addr_data: bool,
 }
 
 impl Owner {
@@ -662,7 +659,7 @@ impl Owner {
             cname: None,
             addrs: [(NumericAddr::V4(Ipv4Addr::UNSPECIFIED), 0); MAX_ADDRESSES],
             addr_len: 0,
-            has_any_addr: false,
+            has_addr_data: false,
         }
     }
 }
@@ -704,7 +701,7 @@ fn ensure_owner(ws: &mut ResponseWorkspace, name: &DnsName) -> Result<usize, Dns
         cname: None,
         addrs: [(NumericAddr::V4(Ipv4Addr::UNSPECIFIED), 0); MAX_ADDRESSES],
         addr_len: 0,
-        has_any_addr: false,
+        has_addr_data: false,
     };
     ws.owner_len += 1;
     Ok(ws.owner_len - 1)
@@ -791,6 +788,8 @@ pub fn parse_response(
                 match rdata {
                     Rdata::A(ip) => {
                         if family != Family::A {
+                            let idx = ensure_owner(ws, &owner)?;
+                            ws.owners[idx].has_addr_data = true;
                             reader.skip(rdlen)?;
                             continue;
                         }
@@ -798,7 +797,7 @@ pub fn parse_response(
                         if ws.owners[idx].cname.is_some() {
                             return Err(DnsError::CnameCoexist);
                         }
-                        ws.owners[idx].has_any_addr = true;
+                        ws.owners[idx].has_addr_data = true;
                         let slot = ws.owners[idx].addr_len as usize;
                         if slot >= MAX_ADDRESSES {
                             return Err(DnsError::CandidatesExceeded {
@@ -810,6 +809,8 @@ pub fn parse_response(
                     }
                     Rdata::Aaaa(ip) => {
                         if family != Family::Aaaa {
+                            let idx = ensure_owner(ws, &owner)?;
+                            ws.owners[idx].has_addr_data = true;
                             reader.skip(rdlen)?;
                             continue;
                         }
@@ -817,7 +818,7 @@ pub fn parse_response(
                         if ws.owners[idx].cname.is_some() {
                             return Err(DnsError::CnameCoexist);
                         }
-                        ws.owners[idx].has_any_addr = true;
+                        ws.owners[idx].has_addr_data = true;
                         let slot = ws.owners[idx].addr_len as usize;
                         if slot >= MAX_ADDRESSES {
                             return Err(DnsError::CandidatesExceeded {
@@ -833,7 +834,7 @@ pub fn parse_response(
                             if !existing.eq_bytes(target.as_slice()) {
                                 return Err(DnsError::ConflictingCname);
                             }
-                        } else if ws.owners[idx].has_any_addr || ws.owners[idx].addr_len != 0 {
+                        } else if ws.owners[idx].addr_len != 0 {
                             return Err(DnsError::CnameCoexist);
                         } else {
                             ws.owners[idx].cname = Some((target, ttl));
@@ -930,7 +931,7 @@ pub fn parse_response(
             let terminal_data = ws.owners[..ws.owner_len]
                 .iter()
                 .find(|o| o.name.eq_bytes(terminal))
-                .map(|o| o.has_any_addr)
+                .map(|o| o.has_addr_data)
                 .unwrap_or(false);
             if terminal_data {
                 return Err(DnsError::TerminalWithoutData);
@@ -1075,6 +1076,16 @@ mod tests {
         m.extend_from_slice(&1u16.to_be_bytes());
         m.extend_from_slice(&ttl.to_be_bytes());
         m.extend_from_slice(&4u16.to_be_bytes());
+        m.extend_from_slice(&octets);
+        m
+    }
+
+    fn aaaa_record(owner: &str, octets: [u8; 16], ttl: u32) -> Vec<u8> {
+        let mut m = qname_bytes(owner);
+        m.extend_from_slice(&28u16.to_be_bytes());
+        m.extend_from_slice(&1u16.to_be_bytes());
+        m.extend_from_slice(&ttl.to_be_bytes());
+        m.extend_from_slice(&16u16.to_be_bytes());
         m.extend_from_slice(&octets);
         m
     }
@@ -1416,6 +1427,104 @@ mod tests {
     }
 
     #[test]
+    fn positive_schedule_overflow_after_stage_leaves_cache_untouched() {
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let name = cache.name_index(0).expect("index");
+        let generation = cache.entry(name, Family::A).expect("entry").generation();
+        let before_due = schedules.due_time(0, Family::A).expect("due");
+        let outcome = Outcome::Positive {
+            family: Family::A,
+            bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(10, 0, 0, 1))])
+                .expect("bindings"),
+            ttl: 120,
+        };
+        let err = apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            generation,
+            1000,
+            u64::MAX,
+            outcome,
+        )
+        .expect_err("schedule deadline overflow must refuse the whole outcome");
+        assert!(
+            matches!(err, DnsError::Cache(CacheError::DeadlineOverflow)),
+            "expected DeadlineOverflow, got {err:?}"
+        );
+        assert_eq!(
+            cache.entry(name, Family::A).expect("entry").generation(),
+            generation,
+            "cache must be untouched when the schedule refuses"
+        );
+        assert_eq!(
+            schedules.due_time(0, Family::A).expect("due"),
+            before_due,
+            "schedule must be unchanged after its own refusal"
+        );
+    }
+
+    #[test]
+    fn nxdomain_schedule_overflow_after_evict_leaves_cache_untouched() {
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let name = cache.name_index(0).expect("index");
+        let a_generation = cache.entry(name, Family::A).expect("entry").generation();
+        let aaaa_generation = cache.entry(name, Family::Aaaa).expect("entry").generation();
+        apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            a_generation,
+            1000,
+            1000,
+            Outcome::Positive {
+                family: Family::A,
+                bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(
+                    93, 184, 216, 34,
+                ))])
+                .expect("bindings"),
+                ttl: 120,
+            },
+        )
+        .expect("seed an eligible positive for the A family");
+        let seeded_generation = cache.entry(name, Family::A).expect("entry").generation();
+        assert_ne!(
+            seeded_generation, a_generation,
+            "seed advanced the A generation"
+        );
+        let err = apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            seeded_generation,
+            1000,
+            u64::MAX,
+            Outcome::NxDomain { soa: None },
+        )
+        .expect_err("nxdomain schedule deadline overflow must refuse the whole outcome");
+        assert!(
+            matches!(err, DnsError::Cache(CacheError::DeadlineOverflow)),
+            "expected DeadlineOverflow, got {err:?}"
+        );
+        assert_eq!(
+            cache.entry(name, Family::A).expect("entry").generation(),
+            seeded_generation,
+            "the A entry must survive when the schedule refuses"
+        );
+        assert!(
+            !cache.entry(name, Family::A).expect("entry").is_empty(),
+            "the seeded A binding must survive"
+        );
+        assert_eq!(
+            cache.entry(name, Family::Aaaa).expect("entry").generation(),
+            aaaa_generation,
+            "the AAAA entry must survive when the schedule refuses"
+        );
+    }
+
+    #[test]
     fn nodata_through_cname_target_without_owner_is_negative() {
         let mut msg = header(20, true, 0, 1, 1, 1, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
@@ -1545,6 +1654,38 @@ mod tests {
         msg.extend_from_slice(&soa_record("example.org", 300, 60));
         let out = parse_response_ws("sub.example.org", Family::A, 27, &msg).expect("parse");
         assert_eq!(out, Outcome::NxDomain { soa: None });
+    }
+
+    #[test]
+    fn nxdomain_with_terminal_aaaa_data_rejected_when_querying_a() {
+        let mut msg = header(0x1246, true, 3, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&aaaa_record(
+            "sub.example.org",
+            [
+                0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+            ],
+            60,
+        ));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x1246, &msg),
+            Err(DnsError::TerminalWithoutData)
+        );
+    }
+
+    #[test]
+    fn nxdomain_with_terminal_a_data_rejected_when_querying_aaaa() {
+        let mut msg = header(0x1247, true, 3, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&28u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [10, 0, 0, 1], 60));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::Aaaa, 0x1247, &msg),
+            Err(DnsError::TerminalWithoutData)
+        );
     }
 
     #[test]

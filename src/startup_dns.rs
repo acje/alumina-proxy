@@ -153,6 +153,23 @@ pub(crate) enum PublishedKind {
     Negative,
 }
 
+/// Classifies a validated DNS outcome into the window-level published kind: a
+/// positive contributes a usable name only when at least one of its binding
+/// candidates is eligible, so an all-ineligible positive is `NoEligible`.
+fn classify_published(outcome: &crate::dns::Outcome) -> PublishedKind {
+    match outcome {
+        crate::dns::Outcome::Positive { bindings, .. }
+            if bindings.as_slice().iter().any(|b| b.is_eligible()) =>
+        {
+            PublishedKind::ResolvedPositive
+        }
+        crate::dns::Outcome::Positive { .. } => PublishedKind::NoEligible,
+        crate::dns::Outcome::NxDomain { .. } | crate::dns::Outcome::NoData { .. } => {
+            PublishedKind::Negative
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExchangeResult {
     Published(PublishedKind),
@@ -881,7 +898,7 @@ impl StartupDns {
     /// The stage of the outstanding exchange, for the shared owner to observe
     /// progress (e.g. that a query has been fully written and the exchange
     /// awaits a response).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn exchange_step(&self) -> Option<ExchangeStep> {
         self.active.as_ref().map(|ex| ex.step)
     }
@@ -889,7 +906,6 @@ impl StartupDns {
     /// Repoints the retained transport peer. Startup configures it through
     /// resolution; a refresh owner repoints it by policy before starting an
     /// exchange.
-    #[allow(dead_code)]
     pub(crate) fn set_peer(&mut self, addr: SocketAddr) {
         self.addr = addr;
     }
@@ -1254,15 +1270,7 @@ impl StartupDns {
             self.filled = 0;
             match outcome {
                 Ok(outcome) => {
-                    self.last_published = Some(match &outcome {
-                        dns::Outcome::Positive { bindings, .. } if !bindings.is_empty() => {
-                            PublishedKind::ResolvedPositive
-                        }
-                        dns::Outcome::Positive { .. } => PublishedKind::NoEligible,
-                        dns::Outcome::NxDomain { .. } | dns::Outcome::NoData { .. } => {
-                            PublishedKind::Negative
-                        }
-                    });
+                    self.last_published = Some(classify_published(&outcome));
                     let name_index = cache
                         .name_index(ex.ordinal)
                         .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
