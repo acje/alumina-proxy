@@ -9,6 +9,9 @@ pub const MAX_ADDRESSES: usize = 16;
 /// Stale DNS authorization grace after TTL expiry, in seconds.
 pub const STALE_GRACE: u64 = 259_200;
 
+/// Maximum honored DNS TTL, in seconds (docs/alumina-proxy.md L12).
+pub const TTL_CAP: u64 = 86_400;
+
 const UNUSED_SLOT: NumericAddr = NumericAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 /// The two DNS record families a cache entry is keyed by.
@@ -306,7 +309,7 @@ impl Cache {
             .generation
             .checked_next()
             .ok_or(CacheError::GenerationExhausted)?;
-        let ttl = staged.ttl.max(1);
+        let ttl = staged.ttl.clamp(1, TTL_CAP);
         let freshness = staged
             .receipt
             .checked_add(ttl)
@@ -317,7 +320,7 @@ impl Cache {
         let mut eligible = [UNUSED_SLOT; MAX_ADDRESSES];
         let mut eligible_len = 0usize;
         for &addr in &staged.bindings[..usize::from(staged.binding_len)] {
-            if addr.is_eligible() {
+            if addr.is_eligible() && !eligible[..eligible_len].contains(&addr) {
                 eligible[eligible_len] = addr;
                 eligible_len += 1;
             }
@@ -485,6 +488,97 @@ mod tests {
         let entry = read(&cache, name, Family::A);
         assert_eq!(entry.deadlines(), (Some(1001), Some(1001 + STALE_GRACE)));
         assert_eq!(entry.state(1000), EntryState::Fresh);
+    }
+
+    #[test]
+    fn ttl_above_cap_is_clamped_to_max_freshness() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        publish_simple(
+            &mut cache,
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[pub_addr()],
+            1000,
+            TTL_CAP + 1,
+        );
+        let entry = read(&cache, name, Family::A);
+        assert_eq!(
+            entry.deadlines(),
+            (Some(1000 + TTL_CAP), Some(1000 + TTL_CAP + STALE_GRACE))
+        );
+        assert_eq!(entry.state(1000 + TTL_CAP - 1), EntryState::Fresh);
+        assert_eq!(entry.state(1000 + TTL_CAP), EntryState::Stale);
+    }
+
+    #[test]
+    fn ttl_at_cap_passes_unchanged() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        publish_simple(
+            &mut cache,
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[pub_addr()],
+            1000,
+            TTL_CAP,
+        );
+        let entry = read(&cache, name, Family::A);
+        assert_eq!(
+            entry.deadlines(),
+            (Some(1000 + TTL_CAP), Some(1000 + TTL_CAP + STALE_GRACE))
+        );
+        assert_eq!(entry.state(1000 + TTL_CAP - 1), EntryState::Fresh);
+        assert_eq!(entry.state(1000 + TTL_CAP), EntryState::Stale);
+    }
+
+    #[test]
+    fn publish_deduplicates_identical_addresses() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        let addrs = &[
+            pub_addr(),
+            priv_addr(),
+            pub_addr(),
+            v4([8, 8, 8, 8]),
+            pub_addr(),
+        ];
+        publish_simple(
+            &mut cache,
+            name,
+            Family::A,
+            Generation::INITIAL,
+            addrs,
+            1000,
+            300,
+        );
+        let entry = read(&cache, name, Family::A);
+        assert_eq!(entry.bindings(), &[pub_addr(), v4([8, 8, 8, 8])]);
+    }
+
+    #[test]
+    fn publish_deduplicates_identical_v6_addresses() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        let first = NumericAddr::V6(Ipv6Addr::from(
+            0x2606_4700_4700_0000_0000_0000_0000_1111_u128,
+        ));
+        let second = NumericAddr::V6(Ipv6Addr::from(
+            0x2606_4700_4700_0000_0000_0000_0000_2222_u128,
+        ));
+        publish_simple(
+            &mut cache,
+            name,
+            Family::Aaaa,
+            Generation::INITIAL,
+            &[first, second, first],
+            1000,
+            300,
+        );
+        let entry = read(&cache, name, Family::Aaaa);
+        assert_eq!(entry.bindings(), &[first, second]);
     }
 
     #[test]
