@@ -46,9 +46,7 @@ impl Fqdn {
                 return Err(format!("label {:?} not lowercase ASCII [a-z0-9-]", label));
             }
         }
-        if name.as_bytes()[0].is_ascii_digit()
-            && name.bytes().all(|b| b == b'.' || b.is_ascii_digit())
-        {
+        if is_ip_literal_shape(name.as_bytes()) {
             return Err("allowlist entry is an IP literal; use a DNS hostname".into());
         }
         let port = parse_config_port(port)?;
@@ -103,6 +101,12 @@ fn normalize_trailing_dot(name: &str) -> Result<&str, String> {
     }
 }
 
+fn is_ip_literal_shape(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes[0].is_ascii_digit()
+        && bytes.iter().all(|b| *b == b'.' || b.is_ascii_digit())
+}
+
 /// Fixed-capacity validated hostname (lowercase ASCII FQDN without a trailing
 /// dot), used on serving paths and protocol gates to avoid per-request or
 /// per-connection allocation. The label rules mirror the config `Fqdn` type;
@@ -153,7 +157,6 @@ impl FixedHostname {
             out.bytes[i] = b.to_ascii_lowercase();
         }
         let mut label_len = 0usize;
-        let mut all_digits_dots = true;
         for i in 0..=out.len {
             let b = if i == out.len { b'.' } else { out.bytes[i] };
             match b {
@@ -172,16 +175,12 @@ impl FixedHostname {
                     }
                     label_len = 0;
                 }
-                b'0'..=b'9' => {
-                    label_len += 1;
-                }
                 _ => {
                     label_len += 1;
-                    all_digits_dots = false;
                 }
             }
         }
-        if out.bytes[0].is_ascii_digit() && all_digits_dots {
+        if is_ip_literal_shape(&out.bytes[..out.len]) {
             return None;
         }
         Some(out)
@@ -202,6 +201,37 @@ mod fixed_hostname_tests {
     fn rejects_ip_literal_shape() {
         assert!(FixedHostname::normalize(b"1.2.3.4").is_none());
         assert!(FixedHostname::normalize(b"93.184.216.34").is_none());
+    }
+
+    #[test]
+    fn rejects_all_numeric_label_shapes() {
+        for input in [
+            &b"1.2.3.4"[..],
+            &b"93.184.216.34"[..],
+            &b"123"[..],
+            &b"999.999.999.999"[..],
+            &b"1.2.3.4."[..],
+        ] {
+            assert!(
+                FixedHostname::normalize(input).is_none(),
+                "expected {input:?} rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_numeric_prefixed_hostnames() {
+        for input in [
+            &b"4example.com"[..],
+            &b"123.example.com"[..],
+            &b"1-2.3.4"[..],
+            &b"0x123.example.org"[..],
+        ] {
+            assert!(
+                FixedHostname::normalize(input).is_some(),
+                "expected {input:?} accepted"
+            );
+        }
     }
 
     #[test]
@@ -249,6 +279,42 @@ mod fqdn_tests {
         assert!(Fqdn::parse("1.2.3.4:443").is_err());
         assert!(Fqdn::parse("93.184.216.34:443").is_err());
         assert!(Fqdn::parse("4example.com:443").is_ok());
+    }
+
+    #[test]
+    fn rejects_all_numeric_label_entries_per_spec() {
+        for entry in [
+            "1.2.3.4:443",
+            "93.184.216.34:443",
+            "255.255.255.255:443",
+            "123:443",
+            "999.999.999.999:443",
+        ] {
+            assert!(Fqdn::parse(entry).is_err(), "expected {entry} rejected");
+        }
+    }
+
+    #[test]
+    fn rejects_trailing_dot_ip_literal_after_normalization() {
+        assert!(Fqdn::parse("1.2.3.4.:443").is_err());
+    }
+
+    #[test]
+    fn accepts_numeric_prefixed_hostnames() {
+        for entry in [
+            "4example.com:443",
+            "123.example.com:443",
+            "1-2.3.4:443",
+            "0x123.example.org:443",
+        ] {
+            assert!(Fqdn::parse(entry).is_ok(), "expected {entry} accepted");
+        }
+    }
+
+    #[test]
+    fn rejects_empty_host_allowlist_entry_without_panic() {
+        assert!(Fqdn::parse(":443").is_err());
+        assert!(Fqdn::parse(":443.").is_err());
     }
 }
 
@@ -734,10 +800,7 @@ fn parse_listen(listen: &str) -> Result<ListenAddr, ConfigError> {
     let Some((addr_part, port_part)) = listen.rsplit_once(':') else {
         return Err(invalid());
     };
-    let port: u16 = port_part.parse().map_err(|_| invalid())?;
-    if port == 0 {
-        return Err(invalid());
-    }
+    let port = parse_config_port(port_part).map_err(|_| invalid())?;
     let ip = if let Some(rest) = addr_part.strip_prefix('[') {
         let Some(inner) = rest.strip_suffix(']') else {
             return Err(invalid());
@@ -749,6 +812,39 @@ fn parse_listen(listen: &str) -> Result<ListenAddr, ConfigError> {
         IpAddr::V4(addr)
     };
     Ok(ListenAddr { ip, port })
+}
+
+#[cfg(test)]
+mod listen_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_leading_zero_listen_port() {
+        for listen in ["0.0.0.0:08080", "0.0.0.0:00443", "[::1]:0443"] {
+            assert!(
+                matches!(parse_listen(listen), Err(ConfigError::InvalidListen { .. })),
+                "expected {listen} rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_canonical_listen_port() {
+        let v4 = parse_listen("0.0.0.0:8080").expect("canonical v4");
+        assert_eq!(v4.port(), 8080);
+        let v6 = parse_listen("[::1]:8443").expect("canonical v6");
+        assert_eq!(v6.port(), 8443);
+    }
+
+    #[test]
+    fn rejects_invalid_listen_port_forms() {
+        for listen in ["0.0.0.0:0", "0.0.0.0:65536", "0.0.0.0:", "0.0.0.0:port"] {
+            assert!(
+                matches!(parse_listen(listen), Err(ConfigError::InvalidListen { .. })),
+                "expected {listen} rejected"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
