@@ -305,6 +305,18 @@ The planned additional control storage totals approximately 9–10 KiB against t
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob.
 
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Configuration: exact reserved schema (`[any_illegal]` + positional `[actions]`), AnyIllegal first-slot `Block` `Connection`/`All`, Tarpit deferred rejection, unknown/missing keys exit 78, force-mandatory group, at most 4 KiB | Implemented (this increment) |
+| Typed detection-fact capture before erasure; early upstream data validated-domain attribution; EOF/reset operational Unknown | Implemented (this increment) |
+| Enforcement: `Block` Connection/Domain/All synchronous latch + bounded closure at the runtime detection sites; `FlareOnly` reporting context (aggregate capture counters, fold on close) | Implemented (this increment) |
+| Monitoring: new stdout log kinds + correlated aggregates, drop+count, saturation + overflow, fold | Implemented (this increment) |
+| Tarpit pacing | Deferred — no real establishment-allowed predicate; configuration selecting it fails with an explicit deferred-status diagnostic |
+| Pacing credit/burst storage | None reserved (no speculative pacing allocation) |
+
 ## Security hardening — CONNECT, TLS identity, DNS cache, scheduling, and logging — user-authorized amendment
 
 **Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-sechd`, 2026-10-17). It pins the exact parser, DNS-cache, scheduling, and logging semantics of the security-review findings whose root cause in spec is a spec weakness or underspecification: L3, L6, L8, L9, L10, L11, L12, L13, L16, L17, and L18. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. Specification publication precedes implementation; the status table at the end assigns each surface an honest planned/implemented/deferred status.
@@ -316,8 +328,8 @@ The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slo
 | L3 | CONNECT bare-CR rejection | implemented | planned |
 | L6 | Startup positive-by-eligibility classification | implemented | planned |
 | L8 | Non-`host_name` `server_name` rejection | implemented | planned |
-| L9 | Initial TLS record minimum payload | implemented | planned |
-| L10 | SNI trailing-dot normalization | implemented | planned |
+| L9 | Initial TLS record minimum payload | implemented | already in code; pinned |
+| L10 | SNI trailing-dot normalization | implemented | already in code; pinned |
 | L11 | Extension/version caps in the resource profile | implemented | already in code; pinned |
 | L12 | DNS TTL cap 86400 s (max auth lifetime 345600 s) | implemented | planned |
 | L13 | Binding-address deduplication | implemented | planned |
@@ -325,7 +337,7 @@ The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slo
 | L17 | Four parser fuzz targets | implemented | planned |
 | L18 | Sink-failure drop accounting | implemented | planned |
 
-All eleven surfaces are recorded by this amendment (spec record: implemented). Code enforcement for the behavioral findings lands in later hardening groups (code status: planned); L11 and L16 document caps and behavior already present in the codebase.
+All eleven surfaces are recorded by this amendment (spec record: implemented). Code enforcement for the behavioral findings lands in later hardening groups (code status: planned); L9, L10, L11, and L16 document caps and behavior already present in the codebase.
 
 ### L3 — CONNECT bare-CR rejection
 
@@ -375,12 +387,29 @@ The refresh/backoff scheduling clauses (spec `:76`–`:78`) are amended to speci
 
 ### L17 — Four named parser fuzz targets
 
-The Verification requirement at `:225` ("parser fuzzing") is sharpened to name the four parser targets that must be driven by a real fuzz loop before serving qualification: (1) ClientHello inspection (`ChInspector::feed`), (2) CONNECT headers (`ConnectParser`), (3) DNS wire (answer/record parsing), and (4) log-record encoding. Scaffold-only harnesses that do not drive the parsers do not satisfy the requirement.
+The Verification requirement at `:226` ("parser fuzzing") is sharpened to name the four parser targets that must be driven by a real fuzz loop before serving qualification: (1) ClientHello inspection (`ChInspector::feed`), (2) CONNECT headers (`ConnectParser`), (3) DNS wire (answer/record parsing), and (4) log-record encoding. Scaffold-only harnesses that do not drive the parsers do not satisfy the requirement.
 
 ### L18 — Sink-failure drop accounting
 
-Spec `:194` (Log delivery) — and the DNS reporting/log-drop accounting it shares — is amended to specify that records stranded when the sink fails or stalls (queue-accepted records that cannot be drained before the failure) are counted as dropped under the existing whole-record drop accounting, never silently lost. A stalled or failing sink increments the drop count for stranded records; it must not cause them to be retained indefinitely, nor block rejection, tunnel I/O, DNS, or deadlines.
+Spec `:197` (Log delivery) — and the DNS reporting/log-drop accounting it shares — is amended to specify that records stranded when the sink fails or stalls (queue-accepted records that cannot be drained before the failure) are counted as dropped under the existing whole-record drop accounting, never silently lost. A stalled or failing sink increments the drop count for stranded records; it must not cause them to be retained indefinitely, nor block rejection, tunnel I/O, DNS, or deadlines.
 
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently; only L11 adds cap rows that reflect caps already enforced in the code, and L12 adds the new 86400-second TTL cap recorded as a deliberate bound above.
+
+## CONNECT, configuration, and DNS destination-address hardening — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-skhc`, 2026-10-17). It records the user authorization for three spec-body hardening edits applied together in one review-driven increment: (1) the Protocol contract restricts CONNECT to plaintext HTTP/1.1 and declares HTTP/1.0 CONNECT unsupported; (2) Configuration declares an IP literal-shaped allowlist entry — a name whose labels are all-numeric, e.g. `1.2.3.4:443` — invalid configuration; and (3) the Addresses clause clarifies that the AS112 anycast `192.31.196.0/24`, AMT `192.52.193.0/24`, and direct-delegation AS112 `192.175.48.0/24` ranges are deliberately not excluded because they are globally routable and can legitimately host internet services. It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already committed in the body clauses above; this section records only their user authorization.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Protocol contract: plaintext HTTP/1.1 CONNECT only; HTTP/1.0 CONNECT unsupported | Implemented (this increment) |
+| Configuration: IP literal-shaped allowlist entries (all-numeric labels) invalid configuration | Implemented (this increment) |
+| Addresses: AS112 anycast / AMT / direct-delegation AS112 ranges deliberately not excluded (globally routable) | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
