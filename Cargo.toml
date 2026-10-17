@@ -6,6 +6,12 @@ publish = false
 license = "MIT OR Apache-2.0"
 description = "Alumina phase-1 foundations: F0 toolchain pin, F1/F2/F4 witness scaffolds"
 
+# SM-01: per-lint rollout proof — enable one pedantic lint and fix all its
+# sites. `uninlined_format_args` is pure formatting; args are inlined at every
+# site and no suppression is expected.
+[lints.clippy]
+uninlined_format_args = "warn"
+
 [lib]
 name = "alumina"
 path = "src/lib.rs"

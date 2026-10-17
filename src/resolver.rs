@@ -44,19 +44,18 @@ impl fmt::Display for ResolverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ResolverError::Unreadable { path, source } => {
-                write!(f, "resolver config unreadable: {}: {}", path, source)
+                write!(f, "resolver config unreadable: {path}: {source}")
             }
             ResolverError::BareNameserver => {
                 write!(f, "resolver 'nameserver' directive has no address")
             }
             ResolverError::MalformedDirective { detail } => {
-                write!(f, "resolver malformed nameserver declaration: {}", detail)
+                write!(f, "resolver malformed nameserver declaration: {detail}")
             }
             ResolverError::InvalidAddress { value } => {
                 write!(
                     f,
-                    "resolver nameserver {:?} is not a numeric IP address",
-                    value
+                    "resolver nameserver {value:?} is not a numeric IP address"
                 )
             }
             ResolverError::MissingNameserver => {
@@ -65,15 +64,13 @@ impl fmt::Display for ResolverError {
             ResolverError::NonUnicastAddress { value } => {
                 write!(
                     f,
-                    "resolver nameserver {:?} is not unicast (multicast/broadcast/unspecified rejected)",
-                    value
+                    "resolver nameserver {value:?} is not unicast (multicast/broadcast/unspecified rejected)"
                 )
             }
             ResolverError::ZonedAddress { value } => {
                 write!(
                     f,
-                    "resolver nameserver {:?} carries a zone identifier (not allowed)",
-                    value
+                    "resolver nameserver {value:?} carries a zone identifier (not allowed)"
                 )
             }
         }
@@ -168,7 +165,7 @@ fn parse_streaming<R: Read>(
                 Ok(text) => text,
                 Err(_) => {
                     return Err(ResolverError::InvalidAddress {
-                        value: format!("<non-utf8 {} bytes>", tok_len),
+                        value: format!("<non-utf8 {tok_len} bytes>"),
                     });
                 }
             };

@@ -24,10 +24,10 @@ impl BootError {
 impl fmt::Display for BootError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BootError::Config(err) => write!(f, "{}", err),
-            BootError::Resolver(err) => write!(f, "{}", err),
-            BootError::Preflight(err) => write!(f, "{}", err),
-            BootError::Storage(err) => write!(f, "{}", err),
+            BootError::Config(err) => write!(f, "{err}"),
+            BootError::Resolver(err) => write!(f, "{err}"),
+            BootError::Preflight(err) => write!(f, "{err}"),
+            BootError::Storage(err) => write!(f, "{err}"),
         }
     }
 }

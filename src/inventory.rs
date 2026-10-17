@@ -40,8 +40,7 @@ impl fmt::Display for StorageUnavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "boot traffic storage unavailable: failed to allocate {} bytes",
-            TRAFFIC_STORAGE_BYTES
+            "boot traffic storage unavailable: failed to allocate {TRAFFIC_STORAGE_BYTES} bytes"
         )
     }
 }

@@ -148,8 +148,7 @@ fn f2_all_outcome_categories_are_representable() {
     for required in REQUIRED_CATEGORIES {
         assert!(
             present.contains(&required),
-            "required F2 category {:?} must be scriptable",
-            required
+            "required F2 category {required:?} must be scriptable"
         );
     }
 

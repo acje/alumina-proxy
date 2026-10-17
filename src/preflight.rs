@@ -53,10 +53,10 @@ impl fmt::Display for PreflightError {
                 )
             }
             PreflightError::StatusUnreadable { source } => {
-                write!(f, "cannot read kernel self-status: {}", source)
+                write!(f, "cannot read kernel self-status: {source}")
             }
             PreflightError::StatusMalformed { detail } => {
-                write!(f, "kernel self-status malformed: {}", detail)
+                write!(f, "kernel self-status malformed: {detail}")
             }
             PreflightError::Root => write!(
                 f,

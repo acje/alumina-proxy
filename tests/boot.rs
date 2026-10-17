@@ -76,7 +76,7 @@ fn config_4096_exact_bound_ok_and_oversize_rejected_without_truncation() {
         config::CONFIG_DOC_LIMIT
     );
 
-    let oversized = format!("{}x", doc);
+    let oversized = format!("{doc}x");
     assert_eq!(oversized.len(), config::CONFIG_DOC_LIMIT + 1);
     assert!(matches!(
         config::parse_config_document(&oversized),
@@ -112,9 +112,7 @@ fn config_all_mandatory_fields_fail_when_missing() {
                 config::parse_config_document(doc),
                 Err(ConfigError::MissingField(f)) if f == field
             ),
-            "config missing {} must fail with MissingField({})",
-            field,
-            field
+            "config missing {field} must fail with MissingField({field})"
         );
     }
 }
@@ -185,8 +183,7 @@ fn config_wrong_types_fail_without_coercion() {
                 config::parse_config_document(doc),
                 Err(ConfigError::WrongType(_))
             ),
-            "config {} must fail as WrongType, never coerce",
-            name
+            "config {name} must fail as WrongType, never coerce"
         );
     }
 }
@@ -201,7 +198,7 @@ fn config_allowlist_empty_and_over_32_fail() {
     ));
     let mut names = Vec::new();
     for i in 0..33usize {
-        names.push(format!("\"n{}.example\"", i));
+        names.push(format!("\"n{i}.example\""));
     }
     let doc = format!(
         "allowlist = [{}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = []\nscope = []\n",
@@ -248,13 +245,11 @@ fn config_invalid_fqdn_rejected() {
         ),
     ] {
         let doc = format!(
-            "allowlist = [\"{}\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n",
-            fqdn
+            "allowlist = [\"{fqdn}\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
         );
         assert!(
             config::parse_config_document(&doc).is_err(),
-            "FQDN {} must be rejected",
-            name
+            "FQDN {name} must be rejected"
         );
     }
 }
@@ -270,8 +265,7 @@ fn config_allowlist_requires_fqdn_port_else_invalid_fqdn_exit78() {
         ("port-empty", "a.example:"),
     ] {
         let doc = format!(
-            "allowlist = [\"{}\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n",
-            entry
+            "allowlist = [\"{entry}\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
         );
         let doc_name = format!("allowlist entry {name:?} must be rejected");
         let err = config::parse_config_document(&doc).expect_err(&doc_name);
@@ -317,13 +311,11 @@ fn config_listen_variants() {
         ("empty", ""),
     ] {
         let doc = format!(
-            "allowlist = [\"a.example:443\"]\nlisten = \"{}\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n",
-            listen
+            "allowlist = [\"a.example:443\"]\nlisten = \"{listen}\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
         );
         assert!(
             config::parse_config_document(&doc).is_err(),
-            "listen {} must be rejected",
-            name
+            "listen {name} must be rejected"
         );
     }
     let ipv6_ok = "allowlist = [\"a.example:443\"]\nlisten = \"[2001:db8::1]:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
@@ -336,7 +328,7 @@ fn config_listen_variants() {
 fn config_allowlist_32_max_fits_document_bound() {
     let mut names = Vec::with_capacity(32);
     for i in 0..32usize {
-        names.push(format!("\"{}.example.com:443\"", i));
+        names.push(format!("\"{i}.example.com:443\""));
     }
     let doc = format!(
         "allowlist = [{}]\n# trailing comment padding\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n",
@@ -423,10 +415,8 @@ fn resolver_rejects_non_unicast_and_zoned_addresses() {
         ("zone-id", "fe80::1%eth0"),
     ] {
         assert!(
-            resolver::parse_resolver_config(&format!("nameserver {}\n", addr)).is_err(),
-            "{} must be rejected: {}",
-            case,
-            addr
+            resolver::parse_resolver_config(&format!("nameserver {addr}\n")).is_err(),
+            "{case} must be rejected: {addr}"
         );
     }
 }
@@ -467,7 +457,7 @@ fn resolver_bare_first_declaration_fails() {
 fn resolver_long_valid_first_padding_accepted() {
     let huge_ws = " ".repeat(150_000);
     let huge_comment = "#".repeat(60_000);
-    let doc = format!("nameserver{}1.1.1.1  {}\n", huge_ws, huge_comment);
+    let doc = format!("nameserver{huge_ws}1.1.1.1  {huge_comment}\n");
     let ns = resolver::parse_resolver_config(&doc).expect("huge nameserver-line padding accepted");
     assert_eq!(ns.addr().to_string(), "1.1.1.1");
 }
@@ -578,8 +568,7 @@ fn preflight_rejects_root_real_saved_filesystem_and_effective_uids() {
     ] {
         assert!(
             matches!(preflight::check(facts), Err(PreflightError::Root)),
-            "{} UID axis 0 must be rejected (all four != 0)",
-            axis
+            "{axis} UID axis 0 must be rejected (all four != 0)"
         );
     }
 }

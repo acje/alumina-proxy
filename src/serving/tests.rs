@@ -315,8 +315,7 @@ fn forbidden_connect_gets_403_and_releases_the_slot() {
         let body = read_until(&mut client, b"\r\n\r\n");
         assert!(
             body.starts_with(b"HTTP/1.1 403"),
-            "forbidden CONNECT must receive 403, got {:?}",
-            body
+            "forbidden CONNECT must receive 403, got {body:?}"
         );
         assert_eq!(
             serving.storage().occupied(),
@@ -585,8 +584,7 @@ fn malformed_head_gets_400() {
         let body = read_until(&mut client, b"\r\n\r\n");
         assert!(
             body.starts_with(b"HTTP/1.1 400"),
-            "malformed CONNECT must receive 400, got {:?}",
-            body
+            "malformed CONNECT must receive 400, got {body:?}"
         );
     });
 }
@@ -607,8 +605,7 @@ fn pending_capacity_refuses_with_503() {
         let body = read_until(&mut last, b"\r\n\r\n");
         assert!(
             body.starts_with(b"HTTP/1.1 503"),
-            "129th silent connect must receive 503, got {:?}",
-            body
+            "129th silent connect must receive 503, got {body:?}"
         );
         assert_eq!(
             serving.storage().occupied(),
@@ -648,8 +645,7 @@ fn setup_deadline_frees_silent_seats_with_504() {
             let expired = read_until(&mut clone, b"\r\n\r\n");
             assert!(
                 expired.starts_with(b"HTTP/1.1 504"),
-                "a silent setup must receive 504 after its deadline, slot {i} got {:?}",
-                expired
+                "a silent setup must receive 504 after its deadline, slot {i} got {expired:?}"
             );
         }
         assert_eq!(
@@ -975,8 +971,7 @@ fn not_connected_upstream_read_after_200_closes_without_injected_502() {
         let body = read_until(&mut client, b"\r\n\r\n");
         assert!(
             body.starts_with(b"HTTP/1.1 200"),
-            "the completed connect already sent 200 and the failure must not inject a 502, got {:?}",
-            body
+            "the completed connect already sent 200 and the failure must not inject a 502, got {body:?}"
         );
     });
 }
@@ -1026,8 +1021,7 @@ fn upstream_error_readiness_during_dialing_refuses_502_not_silent_close() {
         let body = read_until(&mut client, b"\r\n\r\n");
         assert!(
             body.starts_with(b"HTTP/1.1 502"),
-            "refused dialing upstream must refuse the pre-200 502, got {:?}",
-            body
+            "refused dialing upstream must refuse the pre-200 502, got {body:?}"
         );
     });
 }
@@ -1086,8 +1080,7 @@ fn dialing_upstream_read_failure_refuses_502_before_any_200() {
         let body = read_until(&mut client, b"\r\n\r\n");
         assert!(
             body.starts_with(b"HTTP/1.1 502"),
-            "a non-200-stage setup failure must produce a pre-200 502, got {:?}",
-            body
+            "a non-200-stage setup failure must produce a pre-200 502, got {body:?}"
         );
     });
 }
@@ -2095,9 +2088,7 @@ fn interleaved_a_b_a_mixed_readwrite_timer_preserves_shared_budgets() {
         assert!(
             a2 == a1,
             "A's upstream-writable token while B's visit is live must defer (reschedule), \
-             not advance A: moved {} -> {}",
-            a1,
-            a2
+             not advance A: moved {a1} -> {a2}"
         );
         assert!(
             matches!(serving.visit, VisitState::Live { slot: 1, ops, .. } if ops == b_ops_after_visit),
@@ -3155,8 +3146,7 @@ fn second_gateopening_drain_shares_the_single_visit_budget() {
         );
         assert!(
             fwd_after > 1024,
-            "the crossing visit must forward past the validated hello boundary (fwd {})",
-            fwd_after
+            "the crossing visit must forward past the validated hello boundary (fwd {fwd_after})"
         );
         assert_eq!(
             serving.slots[index].down_len, 0,
@@ -3810,8 +3800,7 @@ fn any_illegal_all_latches_before_further_io_stops_admission_and_closes_pending(
         let bb = read_until(&mut b, b"\r\n\r\n");
         assert!(
             bb.is_empty(),
-            "after Block All the offender must receive no 403 and no bytes at all (EOF/RST), got {:?}",
-            bb
+            "after Block All the offender must receive no 403 and no bytes at all (EOF/RST), got {bb:?}"
         );
 
         a.set_nonblocking(true).expect("A nonblocking");
@@ -4148,8 +4137,7 @@ fn domain_block_refuses_future_flow_of_the_ordinal_until_restart() {
         let fb = read_until(&mut future, b"\r\n\r\n");
         assert!(
             fb.starts_with(b"HTTP/1.1 403"),
-            "a future flow for the blocked ordinal must be refused before any dial, got {:?}",
-            fb
+            "a future flow for the blocked ordinal must be refused before any dial, got {fb:?}"
         );
         assert_eq!(
             serving
@@ -4200,8 +4188,7 @@ fn port_mismatch_on_domain_blocked_ordinal_is_host_not_allowlisted() {
         let body = read_until(&mut client, b"\r\n\r\n");
         assert!(
             body.starts_with(b"HTTP/1.1 403"),
-            "a port-mismatch CONNECT must be refused 403, got {:?}",
-            body
+            "a port-mismatch CONNECT must be refused 403, got {body:?}"
         );
         assert_eq!(
             serving
@@ -4261,8 +4248,7 @@ fn non443_connect_dials_the_entry_port_then_resets_approved_port_on_close_slot()
         let mb = read_until(&mut mismatch, b"\r\n\r\n");
         assert!(
             mb.starts_with(b"HTTP/1.1 403"),
-            "the :443 CONNECT must be rejected by pair-authorization, got {:?}",
-            mb
+            "the :443 CONNECT must be rejected by pair-authorization, got {mb:?}"
         );
         assert_eq!(
             serving
@@ -4282,14 +4268,12 @@ fn non443_connect_dials_the_entry_port_then_resets_approved_port_on_close_slot()
         let eb = read_until(&mut entry, b"\r\n\r\n");
         assert!(
             eb.starts_with(b"HTTP/1.1 502 Bad Gateway"),
-            "the pair-authorized CONNECT against an unpopulated cache must 502, got {:?}",
-            eb
+            "the pair-authorized CONNECT against an unpopulated cache must 502, got {eb:?}"
         );
         assert!(
             eb.windows(b"no resolved addresses".len())
                 .any(|w| w == b"no resolved addresses"),
-            "the 502 must be NoResolvedAddresses, not a refusal of the pair, got {:?}",
-            eb
+            "the 502 must be NoResolvedAddresses, not a refusal of the pair, got {eb:?}"
         );
         assert_eq!(
             serving
@@ -5077,8 +5061,7 @@ fn monitor_split_on_full_stack_distinguishes_block_action_from_later_refusal() {
         let fb = read_until(&mut future, b"\r\n\r\n");
         assert!(
             fb.starts_with(b"HTTP/1.1 403"),
-            "a future flow for the blocked ordinal must be refused before any dial, got {:?}",
-            fb
+            "a future flow for the blocked ordinal must be refused before any dial, got {fb:?}"
         );
         let m = serving.storage().enforcement().monitor();
         assert_eq!(m.actions_domain_block(ordinal), 1, "no re-applied action");
@@ -5811,14 +5794,12 @@ fn first_dial_failure_records_and_re_decides_to_no_binding_502() {
         let body = read_all(&mut client);
         assert!(
             body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
-            "the consumed single attempt must refuse a pre-200 502, got {:?}",
-            body
+            "the consumed single attempt must refuse a pre-200 502, got {body:?}"
         );
         assert!(
             body.windows(b"no resolved addresses".len())
                 .any(|w| w == b"no resolved addresses"),
-            "the retry must re-decide to NoBinding, not repeat the single-attempt DialFailed, got {:?}",
-            body
+            "the retry must re-decide to NoBinding, not repeat the single-attempt DialFailed, got {body:?}"
         );
         assert_eq!(
             serving.storage().occupied(),
@@ -5940,14 +5921,12 @@ fn full_family_alternation_retry_loop_exhausts_at_four_real_dials() {
         let body = read_all(&mut client);
         assert!(
             body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
-            "the exhausted budget must refuse a pre-200 502, got {:?}",
-            body
+            "the exhausted budget must refuse a pre-200 502, got {body:?}"
         );
         assert!(
             body.windows(b"upstream connection failed".len())
                 .any(|w| w == b"upstream connection failed"),
-            "the budget-exhausted refusal must pin the DialFailed body, got {:?}",
-            body
+            "the budget-exhausted refusal must pin the DialFailed body, got {body:?}"
         );
         assert_eq!(
             seen,
@@ -6143,14 +6122,12 @@ fn closed_dial_exhausts_the_full_attempt_budget_to_502_upstream_failed() {
         let body = read_all(&mut client);
         assert!(
             body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
-            "the exhausted budget must refuse a pre-200 502, got {:?}",
-            body
+            "the exhausted budget must refuse a pre-200 502, got {body:?}"
         );
         assert!(
             body.windows(b"upstream connection failed".len())
                 .any(|w| w == b"upstream connection failed"),
-            "the budget-exhausted refusal must pin the DialFailed body, got {:?}",
-            body
+            "the budget-exhausted refusal must pin the DialFailed body, got {body:?}"
         );
         assert_eq!(
             serving.storage().occupied(),
@@ -6218,8 +6195,7 @@ fn dial_re_anchors_a_fresh_connect_deadline_at_initiation() {
         let body = read_until(&mut client, b"\r\n\r\n");
         assert!(
             body.starts_with(b"HTTP/1.1 200"),
-            "a live origin must complete the successful CONNECT, got {:?}",
-            body
+            "a live origin must complete the successful CONNECT, got {body:?}"
         );
         serving.close_slot(0);
     });
@@ -6282,8 +6258,7 @@ fn expired_connect_deadline_while_dialing_records_a_retry_through_expire_sweep()
         let body = read_all(&mut client);
         assert!(
             body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
-            "the expired-dial retry must end in a pre-200 502, got {:?}",
-            body
+            "the expired-dial retry must end in a pre-200 502, got {body:?}"
         );
     });
 }

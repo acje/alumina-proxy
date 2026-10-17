@@ -47,7 +47,7 @@ impl Fqdn {
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
             {
-                return Err(format!("label {:?} not lowercase ASCII [a-z0-9-]", label));
+                return Err(format!("label {label:?} not lowercase ASCII [a-z0-9-]"));
             }
         }
         if is_ip_literal_shape(name.as_bytes()) {
@@ -461,17 +461,16 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::Unreadable { path, source } => {
-                write!(f, "config unreadable: {}: {}", path, source)
+                write!(f, "config unreadable: {path}: {source}")
             }
             ConfigError::OversizedDocument { got, limit } => {
                 write!(
                     f,
-                    "config exceeds {} bytes ({} bytes read); rejected without truncation",
-                    limit, got
+                    "config exceeds {limit} bytes ({got} bytes read); rejected without truncation"
                 )
             }
             ConfigError::NotUtf8 { message } => {
-                write!(f, "config is not valid UTF-8: {}", message)
+                write!(f, "config is not valid UTF-8: {message}")
             }
             ConfigError::ParseToml { message, span } => match span {
                 Some(span) => write!(
@@ -479,44 +478,40 @@ impl fmt::Display for ConfigError {
                     "config parse error at bytes {}..{}: {}",
                     span.start, span.end, message
                 ),
-                None => write!(f, "config parse error: {}", message),
+                None => write!(f, "config parse error: {message}"),
             },
             ConfigError::MissingField(field) => {
-                write!(f, "config missing required field: {}", field)
+                write!(f, "config missing required field: {field}")
             }
-            ConfigError::UnknownKey(field) => write!(f, "config unknown key: {}", field),
-            ConfigError::UnknownTable(table) => write!(f, "config unknown table: {}", table),
-            ConfigError::WrongType(field) => write!(f, "config incorrect type: {}", field),
+            ConfigError::UnknownKey(field) => write!(f, "config unknown key: {field}"),
+            ConfigError::UnknownTable(table) => write!(f, "config unknown table: {table}"),
+            ConfigError::WrongType(field) => write!(f, "config incorrect type: {field}"),
             ConfigError::AllowlistEmpty => write!(f, "config allowlist is empty (1..=32 required)"),
             ConfigError::AllowlistTooMany { got } => {
                 write!(
                     f,
-                    "config allowlist has {} entries (max {})",
-                    got, ALLOWLIST_MAX
+                    "config allowlist has {got} entries (max {ALLOWLIST_MAX})"
                 )
             }
             ConfigError::DuplicateAllowlistName(name) => {
                 write!(
                     f,
-                    "config duplicate allowlist name after normalization: {}",
-                    name
+                    "config duplicate allowlist name after normalization: {name}"
                 )
             }
             ConfigError::InvalidFqdn { name, reason } => {
-                write!(f, "config invalid FQDN {:?}: {}", name, reason)
+                write!(f, "config invalid FQDN {name:?}: {reason}")
             }
             ConfigError::InvalidListen { value } => {
                 write!(
                     f,
-                    "config listener {:?} invalid: expected numeric IPv4 or [bracketed IPv6] and port 1..=65535",
-                    value
+                    "config listener {value:?} invalid: expected numeric IPv4 or [bracketed IPv6] and port 1..=65535"
                 )
             }
             ConfigError::AllowanceOutOfRange { value } => {
                 write!(
                     f,
-                    "config startup_unresolved_allowance {} out of range 0..=allowlist_len-1",
-                    value
+                    "config startup_unresolved_allowance {value} out of range 0..=allowlist_len-1"
                 )
             }
             ConfigError::AnyIllegalScopeDomain => write!(
