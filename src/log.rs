@@ -334,6 +334,21 @@ fn encode_record(
     Some(w.len)
 }
 
+/// Verification seam for the in-repo fuzz campaign (docs/alumina-proxy.md:390):
+/// encodes attacker-controlled text as a single `name` string field of an info
+/// `startup_warning` record into a fixed slot, returning `Some(length)` when
+/// the record fit. Only the fuzz driver reaches this; no production path calls
+/// it. Overflow returns `None` with the slot left uncommitted.
+pub(crate) fn fuzz_encode_text(text: &str) -> Option<usize> {
+    let mut slot = [0u8; SLOT_BYTES];
+    encode_record(
+        &mut slot,
+        Level::Info,
+        Kind::StartupWarning,
+        &[Field::new("name", Val::Str(text))],
+    )
+}
+
 fn write_header(w: &mut Entry<'_>, level: Level, kind: Kind) -> bool {
     w.push(b"level=")
         && w.push(level.as_str().as_bytes())

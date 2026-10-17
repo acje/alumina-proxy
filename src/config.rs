@@ -18,7 +18,11 @@ pub struct Fqdn {
 }
 
 impl Fqdn {
-    fn parse(input: &str) -> Result<Fqdn, String> {
+    /// Parses one validated `<fqdn>:<port>` allowlist entry. Crate-internal
+    /// constructor; the fuzz campaign uses it to anchor the DNS-wire target on
+    /// a fixed query context, and config parsing owns the production
+    /// construction path.
+    pub(crate) fn parse(input: &str) -> Result<Fqdn, String> {
         let (host, port) = input
             .rsplit_once(':')
             .ok_or_else(|| "allowlist entry lacks a <fqdn>:<port> port".to_string())?;
@@ -366,6 +370,17 @@ pub struct Config {
 impl Config {
     pub fn allowlist(&self) -> &Allowlist {
         &self.allowlist
+    }
+
+    /// The allowlist position of an exact `<fqdn>:<port>` pair, or `None` when
+    /// no entry matches both hostname and port. The single source of allowlist
+    /// authorization shared by the serving domain-block/attribution ordinals
+    /// and the worker CONNECT decision (alumina-9t6w B1), so the pair predicate
+    /// cannot drift between sites (alumina-sechd L14).
+    pub(crate) fn allowlist_position(&self, hostname: &str, port: u16) -> Option<usize> {
+        self.allowlist().iter().position(|entry| {
+            entry.as_str().as_bytes() == hostname.as_bytes() && entry.port() == port
+        })
     }
 
     pub fn listen(&self) -> &ListenAddr {

@@ -2,7 +2,8 @@
 use alumina::alloc::{self, Phase};
 use alumina::fault::{Clock, Outcome, REQUIRED_CATEGORIES, Replay, Replayed, Script};
 use alumina::fuzz::{
-    CorpusOwnership, DeterministicGen, ParserTarget, RegisterError, Seed, fnv1a64,
+    CorpusOwnership, DeterministicGen, DriveOutcome, FuzzRun, ParserTarget, RegisterError, Seed,
+    corpus, drive_unwind, fnv1a64, fuzz_target,
 };
 
 #[test]
@@ -284,7 +285,7 @@ fn f4_target_registration_is_unique_and_stores_hash() {
         let record = ownership.find(target).expect("registered target");
         assert_eq!(*record.seed(), seed);
         assert_eq!(record.generated_inputs(), 0);
-        assert_eq!(record.target().status(), "scaffold");
+        assert_eq!(record.target().status(), "driven");
     }
 
     assert!(matches!(
@@ -321,4 +322,71 @@ fn f4_target_registration_is_unique_and_stores_hash() {
         6,
         "log-record encoding owns Slice 6"
     );
+}
+
+#[test]
+fn f5_checked_in_corpus_completes_the_real_parser() {
+    for target in ParserTarget::ALL {
+        for input in corpus(target) {
+            assert_eq!(
+                drive_unwind(target, input),
+                DriveOutcome::Complete,
+                "{target:?} checked-in corpus input must complete the real parser, not a scaffold"
+            );
+        }
+    }
+}
+
+#[test]
+fn f5_deterministic_campaign_generates_inputs_panic_free_and_folds_into_ownership() {
+    const ITER: u64 = 2_000;
+    const MAX_LEN: usize = 512;
+    let seed = Seed::from_bytes([5u8; 32]);
+    let mut ownership = CorpusOwnership::new();
+    for target in ParserTarget::ALL {
+        ownership
+            .register(target, seed.clone())
+            .expect("fresh target registers once");
+        let run: FuzzRun = fuzz_target(target, seed.clone(), ITER, MAX_LEN);
+        assert!(
+            !run.panicked(),
+            "{target:?} campaign must be crash-free over its sampled corpus"
+        );
+        assert_eq!(
+            run.generated_inputs(),
+            ITER,
+            "{target:?} must generate every input"
+        );
+        assert!(
+            run.corpus_complete() >= 1,
+            "{target:?} campaign must complete its checked-in corpus at least once"
+        );
+        assert_eq!(
+            run.generated_inputs(),
+            run.generated_complete() + run.generated_rejected() + run.generated_need_more()
+        );
+        let record = ownership.record_mut(target).expect("registered target");
+        record.set_corpus_checked_in(true);
+        record.add_generated(run.generated_inputs());
+        record.set_last_input_hash(
+            run.last_input_hash()
+                .expect("campaign records a last input hash"),
+        );
+    }
+    for target in ParserTarget::ALL {
+        let record = ownership.find(target).expect("registered target");
+        assert!(
+            record.corpus_is_checked_in(),
+            "{target:?} corpus is checked in"
+        );
+        assert_eq!(
+            record.generated_inputs(),
+            ITER,
+            "{target:?} folds its campaign count"
+        );
+        assert!(
+            record.last_input_hash().is_some(),
+            "{target:?} records the last generated input hash for reproduction"
+        );
+    }
 }

@@ -616,11 +616,10 @@ impl<'a> WorkerView<'a> {
 /// The ordinal of `request` in `view.config.allowlist()`, or `None` when the
 /// CONNECT (hostname, port) pair is not allowlisted. Authorization requires
 /// the exact configured `<fqdn>:<port>` pair: a same-name different-port
-/// request is denied.
+/// request is denied. Resolution shares the single allowlist-pair predicate
+/// with the serving domain-block/attribution ordinals (alumina-sechd L14).
 fn allowlist_ordinal(request: &ConnectRequest, config: &Config) -> Option<usize> {
-    config.allowlist().iter().position(|entry| {
-        entry.as_str().as_bytes() == request.hostname().as_bytes() && entry.port() == request.port()
-    })
+    config.allowlist_position(request.hostname(), request.port())
 }
 
 /// Decides the next CONNECT-phase action for a tunnel from the current cache.

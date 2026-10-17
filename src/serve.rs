@@ -22,6 +22,14 @@ use crate::worker::{
     Worker, WorkerClock, WorkerView,
 };
 
+/// The explicit far-future boundary for [`ServeStorage::schedule_due_instant`].
+/// A schedule due beyond `now0 + this many seconds` is clamped to this
+/// boundary instead of collapsing to the current instant, so an extreme or
+/// overflowing due can never wake the serving loop spuriously early
+/// (alumina-sechd I19). Ten years is far beyond any refresh interval and is
+/// always representable on every supported platform.
+const SCHEDULE_FAR_FUTURE_SECS: u64 = 365 * 24 * 60 * 60 * 10;
+
 /// The retained serving storage initialized once before the postboot phase.
 /// One worker owns the cache, refresh schedules, and the single DNS transport
 /// with its fixed response workspace, plus the fixed tunnel-slot lifecycle and
@@ -162,17 +170,19 @@ impl ServeStorage {
     /// and epoch the startup window wrote receipts on: `now0` plus whole
     /// seconds since the window origin. The single origin+offset continuity
     /// that keeps cache freshness comparable in serving (1cws M2r).
-    #[allow(dead_code)]
     pub(crate) fn cache_secs(&self, now: Instant) -> u64 {
         self.now0
             .saturating_add(now.saturating_duration_since(self.origin).as_secs())
     }
 
+    /// The absolute wall instant at which a due whole-second schedule value
+    /// fires, relative to the mounted clock origin. A due beyond the
+    /// documented far-future boundary is clamped to that boundary rather than
+    /// collapsing to "now", so an extreme or overflowing schedule never wakes
+    /// the loop spuriously early (alumina-sechd I19).
     pub(crate) fn schedule_due_instant(&self, due: u64) -> Instant {
-        let secs = due.saturating_sub(self.now0);
-        self.origin
-            .checked_add(Duration::from_secs(secs))
-            .unwrap_or_else(Instant::now)
+        let secs = due.saturating_sub(self.now0).min(SCHEDULE_FAR_FUTURE_SECS);
+        self.origin + Duration::from_secs(secs)
     }
 
     /// Re-anchors the retained worker and cache-seconds authority to the exact
@@ -248,12 +258,12 @@ impl ServeStorage {
     /// entry hostname and entry port together. A same-hostname different-port
     /// request is such a miss (no ordinal), so it is authoritatively denied by
     /// `decide` as `HostNotAllowlisted` rather than routed by bare hostname
-    /// (alumina-9t6w B1).
+    /// (alumina-9t6w B1). Resolution shares the single allowlist-pair predicate
+    /// with the worker decision (alumina-sechd L14).
     pub(crate) fn ordinal_for_request(&self, request: &ConnectRequest) -> Option<DomainOrdinal> {
-        let index = self.config.allowlist().iter().position(|entry| {
-            entry.as_str().as_bytes() == request.hostname().as_bytes()
-                && entry.port() == request.port()
-        })?;
+        let index = self
+            .config
+            .allowlist_position(request.hostname(), request.port())?;
         self.enforcement.control().ordinal(index)
     }
 
@@ -385,7 +395,6 @@ impl ServeStorage {
     ///
     /// Returns `ExchangeActive` when an exchange is already in progress and
     /// `Cache` when the ordinal is outside the allowlist.
-    #[allow(dead_code)]
     pub(crate) fn start_dns_exchange(
         &mut self,
         nameserver: SocketAddr,
@@ -444,7 +453,6 @@ impl ServeStorage {
 
     /// Graduates an admitted slot to established work once the successful
     /// CONNECT response completed, returning the established handle.
-    #[allow(dead_code)]
     pub(crate) fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
         self.worker.finish_setup(slot)
     }
@@ -455,21 +463,13 @@ impl ServeStorage {
     }
 
     /// Releases an established tunnel, consuming its handle.
-    #[allow(dead_code)]
     pub(crate) fn release_tunnel(&mut self, tunnel: TunnelIndex) {
         self.worker.release_tunnel(tunnel);
     }
 
     /// The absolute setup deadline of an admitted slot.
-    #[allow(dead_code)]
     pub(crate) fn setup_deadline(&self, slot: &SlotIndex) -> Option<Deadline> {
         self.worker.setup_deadline(slot)
-    }
-
-    /// The absolute setup deadline of an established tunnel.
-    #[allow(dead_code)]
-    pub(crate) fn tunnel_setup_deadline(&self, tunnel: &TunnelIndex) -> Option<Deadline> {
-        self.worker.tunnel_setup_deadline(tunnel)
     }
 
     /// The fixed slot index underlying an admitted handle, for the actual
@@ -478,20 +478,12 @@ impl ServeStorage {
         self.worker.slot_index(slot)
     }
 
-    /// The fixed slot index underlying an established handle.
-    #[allow(dead_code)]
-    pub(crate) fn tunnel_index(&self, tunnel: &TunnelIndex) -> usize {
-        self.worker.tunnel_index(tunnel)
-    }
-
     /// Counts currently in setup, from the retained worker's slot states.
-    #[allow(dead_code)]
     pub(crate) fn pending(&self) -> usize {
         self.worker.pending()
     }
 
     /// Counts currently occupied, from the retained worker's slot states.
-    #[allow(dead_code)]
     pub(crate) fn occupied(&self) -> usize {
         self.worker.occupied()
     }
@@ -1161,6 +1153,49 @@ mod tests {
         assert!(
             counts.all_zero(),
             "the correlated-detail x-segment encode + drain allocate nothing on a populated ring: {counts:?}"
+        );
+    }
+
+    fn connect_request(head: &[u8]) -> crate::connect::ConnectRequest {
+        use crate::connect::{ConnectParser, Feed};
+        let mut parser = ConnectParser::new();
+        match parser.feed(head).expect("valid connect head") {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        *parser
+            .result()
+            .copied()
+            .expect("connect result present")
+            .as_ref()
+            .expect("valid connect request")
+    }
+
+    #[test]
+    fn ordinal_for_request_resolves_exact_port_via_shared_allowlist_position_only() {
+        let storage = booted(2, 1);
+        let exact = connect_request(b"CONNECT alpha.example.org:443 HTTP/1.1\r\n\r\n");
+        assert_eq!(
+            storage.ordinal_for_request(&exact),
+            storage.enforcement().control().ordinal(0),
+            "the exact allowlist pair resolves to its entry ordinal"
+        );
+        let other_port = connect_request(b"CONNECT alpha.example.org:8443 HTTP/1.1\r\n\r\n");
+        assert_eq!(
+            storage.ordinal_for_request(&other_port),
+            None,
+            "same hostname on an unlisted port resolves to no ordinal (9t6w B1)"
+        );
+    }
+
+    #[test]
+    fn schedule_due_instant_saturates_instead_of_collapsing_to_now() {
+        use std::time::Instant;
+        let storage = booted(1, 0);
+        let far = storage.schedule_due_instant(u64::MAX);
+        assert!(
+            far > Instant::now(),
+            "overflow must saturate to the farthest instant, never collapse to now"
         );
     }
 }
