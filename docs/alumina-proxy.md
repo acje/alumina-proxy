@@ -413,3 +413,19 @@ The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slo
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## CONNECT Content-Length canonical digits — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-icdl`, 2026-10-17). It records the user authorization for the canonical-digit `Content-Length` rule on the CONNECT Accept/Reject surface: a leading-zero `Content-Length` value is invalid on that surface and is rejected fail-closed, consistent with the canonical-digit rule already applied to the CONNECT target port (`:41`). It applies to the `Content-Length` field of an accepted CONNECT request (`:40`/`:41` region): literal `Content-Length: 0` is the only accepted value (`:40`); nonzero `Content-Length` is rejected (`:41`); and a leading-zero spelling of the accepted literal is itself rejected as malformed rather than accepted. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already committed in the CONNECT head parser at `src/connect.rs:363-365`; this section records only its user authorization.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| CONNECT Accept/Reject: canonical-digit `Content-Length`; literal `Content-Length: 0` is the only accepted value | Implemented (this increment) |
+| Leading-zero `Content-Length` rejected fail-closed, consistent with the CONNECT target-port canonical-digit rule | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
