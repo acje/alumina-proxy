@@ -75,7 +75,6 @@ pub enum ChError {
     NotHandshake { content_type: u8 },
     Sslv2Framing,
     BadRecordVersion { got: u16 },
-    TruncatedRecord,
     NotClientHello { handshake_type: u8 },
     TruncatedHandshake,
     MalformedBody { detail: &'static str },
@@ -113,7 +112,6 @@ impl fmt::Display for ChError {
                     "TLS record legacy version {got:04x} not accepted for initial ClientHello"
                 )
             }
-            ChError::TruncatedRecord => write!(f, "TLS record truncated"),
             ChError::NotClientHello { handshake_type } => {
                 write!(f, "handshake type {handshake_type} is not ClientHello")
             }
@@ -193,7 +191,6 @@ impl HelloRejectReason {
             | ChError::NotHandshake { .. }
             | ChError::Sslv2Framing
             | ChError::BadRecordVersion { .. }
-            | ChError::TruncatedRecord
             | ChError::NotClientHello { .. }
             | ChError::TruncatedHandshake
             | ChError::MalformedBody { .. }
@@ -573,20 +570,22 @@ fn parse_server_names(
                 detail: "name overflows list",
             });
         }
-        if name_type == 0 {
-            *entries = entries.checked_add(1).ok_or(ChError::InvalidServerName {
-                detail: "too many host_name entries",
+        if name_type != 0 {
+            return Err(ChError::InvalidServerName {
+                detail: "non-host_name name type",
+            });
+        }
+        *entries = entries.checked_add(1).ok_or(ChError::InvalidServerName {
+            detail: "too many host_name entries",
+        })?;
+        if *entries == 1 {
+            let raw = &data[start..end];
+            let normalized = FixedHostname::normalize(raw).ok_or(ChError::InvalidServerName {
+                detail: "host_name is not a legal FQDN",
             })?;
-            if *entries == 1 {
-                let raw = &data[start..end];
-                let normalized =
-                    FixedHostname::normalize(raw).ok_or(ChError::InvalidServerName {
-                        detail: "host_name is not a legal FQDN",
-                    })?;
-                let bytes = normalized.as_bytes();
-                sni[..bytes.len()].copy_from_slice(bytes);
-                *sni_len = bytes.len();
-            }
+            let bytes = normalized.as_bytes();
+            sni[..bytes.len()].copy_from_slice(bytes);
+            *sni_len = bytes.len();
         }
         at = end;
     }
@@ -696,12 +695,49 @@ mod tests {
         let mut inspector = ChInspector::new();
         match inspector.feed(bytes)? {
             Inspect::Complete { .. } => Ok(inspector.hello().expect("complete has hello").clone()),
-            Inspect::NeedMore => Err(ChError::TruncatedRecord),
+            Inspect::NeedMore => panic!("test message must complete within a single feed"),
         }
     }
 
     fn approved(name: &str) -> FixedHostname {
         FixedHostname::normalize(name.as_bytes()).expect("valid approved name")
+    }
+
+    fn server_name_ext(names: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut names_data = Vec::new();
+        for (ty, name) in names {
+            names_data.push(*ty);
+            names_data.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            names_data.extend_from_slice(name);
+        }
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&(names_data.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&names_data);
+        ext
+    }
+
+    fn hello_with_extensions(exts: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&TLS12.to_be_bytes());
+        body.extend_from_slice(&[0u8; RANDOM_LEN]);
+        body.push(0);
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(&[0x00, 0x2f]);
+        body.push(1);
+        body.push(0);
+        let mut blob = Vec::new();
+        for (ty, data) in exts {
+            blob.extend_from_slice(&ty.to_be_bytes());
+            blob.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            blob.extend_from_slice(data);
+        }
+        body.extend_from_slice(&(blob.len() as u16).to_be_bytes());
+        body.extend_from_slice(&blob);
+        let mut handshake = vec![HANDSHAKE_CLIENT_HELLO];
+        let hl = body.len() as u32;
+        handshake.extend_from_slice(&[(hl >> 16) as u8, (hl >> 8) as u8, hl as u8]);
+        handshake.extend_from_slice(&body);
+        record(&handshake)
     }
 
     #[test]
@@ -1020,6 +1056,123 @@ mod tests {
         assert_eq!(
             parse_one(&msg),
             Err(ChError::NotHandshake { content_type: 23 })
+        );
+    }
+
+    const SV: &[u8] = &[0x02, 0x03, 0x04];
+
+    #[test]
+    fn non_host_name_sni_rejected() {
+        let wire = hello_with_extensions(&[
+            (SUPPORTED_VERSIONS, SV),
+            (SERVER_NAME, &server_name_ext(&[(1, b"unrecognized-type")])),
+        ]);
+        assert_eq!(
+            parse_one(&wire),
+            Err(ChError::InvalidServerName {
+                detail: "non-host_name name type",
+            }),
+            "a server_name entry whose NameType is not host_name (0) must fail closed"
+        );
+    }
+
+    #[test]
+    fn host_name_then_non_host_name_entry_rejected() {
+        let wire = hello_with_extensions(&[
+            (SUPPORTED_VERSIONS, SV),
+            (
+                SERVER_NAME,
+                &server_name_ext(&[(0, b"sub.example.org"), (1, b"other")]),
+            ),
+        ]);
+        assert_eq!(
+            parse_one(&wire),
+            Err(ChError::InvalidServerName {
+                detail: "non-host_name name type",
+            }),
+            "a non-host_name entry must not be silently ignored, even alongside a valid host_name"
+        );
+    }
+
+    #[test]
+    fn absent_sni_is_missing_identity() {
+        let wire = hello_with_extensions(&[(SUPPORTED_VERSIONS, SV)]);
+        let ch = parse_one(&wire).expect("an absent-SNI hello parses; validation denies it");
+        assert_eq!(ch.sni_entries(), 0);
+        assert_eq!(
+            validate(&ch, &approved("sub.example.org")),
+            Err(ChError::InvalidServerName {
+                detail: "requires exactly one host_name entry",
+            })
+        );
+    }
+
+    #[test]
+    fn fragmented_short_first_record_is_rejected() {
+        let mut inspector = ChInspector::new();
+        assert_eq!(inspector.feed(&[22, 3, 1, 0, 2]), Ok(Inspect::NeedMore));
+        assert_eq!(
+            inspector.feed(&[1, 0]),
+            Err(ChError::TruncatedHandshake),
+            "a <4-byte first-record payload must fail closed regardless of fragmentation"
+        );
+    }
+
+    #[test]
+    fn trailing_dot_other_domain_mismatch_still_rejected() {
+        let msg = hello_msg(TLS12, &[TLS13], &["sub.example.com."], false);
+        let ch = parse_one(&msg).expect("parse");
+        assert_eq!(ch.server_name(), b"sub.example.com");
+        assert_eq!(
+            validate(&ch, &approved("sub.example.org")),
+            Err(ChError::ServerNameMismatch),
+            "normalizing a trailing dot must not mask a genuine two-domain mismatch"
+        );
+    }
+
+    #[test]
+    fn accepts_exactly_32_offered_versions() {
+        let versions = [TLS13; 32];
+        let msg = hello_msg(TLS12, &versions, &["sub.example.org"], false);
+        let ch = parse_one(&msg).expect("32 offered versions must parse");
+        assert_eq!(ch.offered_versions().len(), 32);
+    }
+
+    #[test]
+    fn rejects_more_than_32_offered_versions() {
+        let versions = [TLS13; 33];
+        let msg = hello_msg(TLS12, &versions, &["sub.example.org"], false);
+        assert_eq!(
+            parse_one(&msg),
+            Err(ChError::MalformedExtension {
+                ext: SUPPORTED_VERSIONS,
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_exactly_64_extensions() {
+        let sni = server_name_ext(&[(0, b"sub.example.org")]);
+        let mut exts = vec![(SUPPORTED_VERSIONS, SV), (SERVER_NAME, &sni)];
+        for i in 0..62u16 {
+            exts.push((0x100 + i, &b""[..]));
+        }
+        let ch =
+            parse_one(&hello_with_extensions(&exts)).expect("64 distinct extensions must parse");
+        assert_eq!(ch.sni_entries(), 1);
+        assert_eq!(ch.server_name(), b"sub.example.org");
+    }
+
+    #[test]
+    fn rejects_more_than_64_extensions() {
+        let sni = server_name_ext(&[(0, b"sub.example.org")]);
+        let mut exts = vec![(SUPPORTED_VERSIONS, SV), (SERVER_NAME, &sni)];
+        for i in 0..63u16 {
+            exts.push((0x100 + i, &b""[..]));
+        }
+        assert_eq!(
+            parse_one(&hello_with_extensions(&exts)),
+            Err(ChError::TooManyExtensions)
         );
     }
 }
