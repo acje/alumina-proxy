@@ -46,6 +46,11 @@ impl Fqdn {
                 return Err(format!("label {:?} not lowercase ASCII [a-z0-9-]", label));
             }
         }
+        if name.as_bytes()[0].is_ascii_digit()
+            && name.bytes().all(|b| b == b'.' || b.is_ascii_digit())
+        {
+            return Err("allowlist entry is an IP literal; use a DNS hostname".into());
+        }
         let port = parse_config_port(port)?;
         Ok(Fqdn {
             name: name.to_owned(),
@@ -232,6 +237,18 @@ mod fixed_hostname_tests {
         let mut name = vec![b'a'; 254];
         name.push(b'.');
         assert!(FixedHostname::normalize(&name).is_none());
+    }
+}
+
+#[cfg(test)]
+mod fqdn_tests {
+    use super::Fqdn;
+
+    #[test]
+    fn rejects_ip_literal_allowlist_entry() {
+        assert!(Fqdn::parse("1.2.3.4:443").is_err());
+        assert!(Fqdn::parse("93.184.216.34:443").is_err());
+        assert!(Fqdn::parse("4example.com:443").is_ok());
     }
 }
 

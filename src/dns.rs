@@ -50,6 +50,7 @@ impl Default for DnsName {
 
 impl DnsName {
     fn from_exact(source: &[u8]) -> DnsName {
+        debug_assert!(source.len() <= NAME_CAP);
         let mut out = DnsName::default();
         out.bytes[..source.len()].copy_from_slice(source);
         out.len = source.len();
@@ -328,7 +329,7 @@ pub fn apply_outcome(
                     positive_family,
                     receipt,
                     ttl,
-                    !bindings.is_empty(),
+                    bindings.as_slice().iter().any(|b| b.is_eligible()),
                     now,
                 )
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
@@ -1362,6 +1363,39 @@ mod tests {
             .expect("due")
             .expect("some");
         assert_eq!(due, 1000 + 120, "normal refresh from receipt");
+    }
+
+    #[test]
+    fn ineligible_only_positive_schedules_backoff_not_refresh() {
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let name = cache.name_index(0).expect("index");
+        let generation = cache.entry(name, Family::A).expect("entry").generation();
+        let outcome = Outcome::Positive {
+            family: Family::A,
+            bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(10, 0, 0, 1))])
+                .expect("bindings"),
+            ttl: 120,
+        };
+        apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            generation,
+            1000,
+            1000,
+            outcome,
+        )
+        .expect("apply");
+        let due = schedules
+            .due_time(0, Family::A)
+            .expect("due")
+            .expect("scheduled");
+        assert_eq!(
+            due,
+            1000 + 1,
+            "ineligible-only positive advances the 1s retry backoff, not a normal refresh"
+        );
     }
 
     #[test]

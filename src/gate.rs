@@ -66,8 +66,6 @@ pub enum TerminateReason {
     ClientHelloRejected,
     /// Actual upstream data/EOF/reset observed while barrier B was closed.
     EarlyUpstream(Activity),
-    /// A non-200 CONNECT response completed: the tunnel setup fails.
-    ResponseNotOk,
 }
 
 /// The setup lifecycle of one tunnel with respect to the two barriers.
@@ -182,11 +180,6 @@ impl TunnelGate {
         if self.phase == GatePhase::AwaitResponse {
             self.phase = GatePhase::Validating;
         }
-    }
-
-    /// A non-200 CONNECT response completed: setup terminates, no forwarding.
-    pub fn on_response_not_ok(&mut self) {
-        self.terminate(TerminateReason::ResponseNotOk);
     }
 
     /// The client ClientHello was fully validated (a [`ValidatedHello`]
@@ -451,20 +444,6 @@ mod tests {
             GatePhase::AwaitConnect,
             "no upstream exists before the CONNECT head; activity must not advance AwaitConnect"
         );
-    }
-
-    #[test]
-    fn non_200_response_terminates_before_validation() {
-        let mut gate = TunnelGate::new();
-        gate.on_connect_head(64);
-        gate.on_authorized();
-        gate.on_upstream_connected();
-        gate.on_response_not_ok();
-        assert_eq!(
-            gate.phase(),
-            GatePhase::Terminated(TerminateReason::ResponseNotOk)
-        );
-        assert_eq!(gate.upstream_write(0), UpstreamWrite::BlockedByBarrierA);
     }
 
     #[test]

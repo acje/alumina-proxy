@@ -14,7 +14,6 @@ pub const DEST_PORT: u16 = 443;
 
 const END_OF_HEAD: &[u8] = b"\r\n\r\n";
 const HTTP_11: &[u8] = b"HTTP/1.1";
-const HTTP_10: &[u8] = b"HTTP/1.0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectRequest {
@@ -319,7 +318,7 @@ fn parse_request_line(line: &[u8]) -> Result<ConnectRequest, ConnectError> {
         .map(|p| after_method + p)
         .ok_or(ConnectError::NotHttp)?;
     let version = &line[target_end + 1..];
-    if version != HTTP_11 && version != HTTP_10 {
+    if version != HTTP_11 {
         return Err(ConnectError::NotHttp);
     }
     parse_target(&line[after_method..target_end])
@@ -557,6 +556,12 @@ mod tests {
     fn rejects_http2_version() {
         let head = "CONNECT sub.example.org:443 HTTP/2.0\r\n\r\n";
         assert_eq!(parse_full(head.as_bytes()), Err(ConnectError::NotHttp));
+    }
+
+    #[test]
+    fn rejects_http_1_0_connect() {
+        let head = b"CONNECT sub.example.org:443 HTTP/1.0\r\n\r\n";
+        assert_eq!(parse_full(head), Err(ConnectError::NotHttp));
     }
 
     #[test]
