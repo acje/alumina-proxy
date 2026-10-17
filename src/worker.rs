@@ -147,6 +147,53 @@ impl AttemptCounts {
     }
 }
 
+/// The attempt-budget state a connecting tunnel carries in its own slot: the
+/// two per-family counters plus the family of the last recorded attempt (the
+/// `previous` transitioning input for family alternation on the next retry).
+/// It lives in the slot rather than arriving as a caller argument, so the
+/// attempt budget is self-enforcing once a failed attempt is recorded back
+/// into the worker. No addresses or cache references cross its boundary in
+/// either direction, so a cache replacement between attempts still takes
+/// effect at the next attempt (docs/alumina-proxy.md:82).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttemptLedger {
+    counts: AttemptCounts,
+    previous: Option<Family>,
+}
+
+impl Default for AttemptLedger {
+    fn default() -> Self {
+        AttemptLedger::new()
+    }
+}
+
+impl AttemptLedger {
+    pub const fn new() -> AttemptLedger {
+        AttemptLedger {
+            counts: AttemptCounts::new(),
+            previous: None,
+        }
+    }
+
+    /// The per-family counters of the ledger.
+    pub const fn counts(self) -> AttemptCounts {
+        self.counts
+    }
+
+    /// The family the last recorded attempt used, when any.
+    pub const fn previous(self) -> Option<Family> {
+        self.previous
+    }
+
+    /// The ledger advanced by one failed attempt in `family`.
+    pub const fn record(self, family: Family) -> AttemptLedger {
+        AttemptLedger {
+            counts: self.counts.record(family),
+            previous: Some(family),
+        }
+    }
+}
+
 /// A fixed, saturating deadline on the precise monotonic clock. Computed once
 /// from its `Instant` anchor; expiry is evaluated against `now` exactly, so
 /// delayed timer processing can never extend an authorization window
@@ -288,8 +335,13 @@ impl TunnelIndex {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotState {
     Free,
-    InSetup { setup_deadline: Deadline },
-    Established { setup_deadline: Deadline },
+    InSetup {
+        setup_deadline: Deadline,
+        attempts: AttemptLedger,
+    },
+    Established {
+        setup_deadline: Deadline,
+    },
 }
 
 /// Reasons the single worker can refuse a new setup.
@@ -383,14 +435,16 @@ impl Worker {
         };
         *free_slot = SlotState::InSetup {
             setup_deadline: Deadline::setup(now),
+            attempts: AttemptLedger::new(),
         };
         Ok(SlotIndex(index))
     }
 
     /// The one owned decision for an in-setup tunnel: authorization and peer
-    /// selection against the current cache, with the setup deadline read from
-    /// the granted slot (never supplied by a caller) and cache seconds from
-    /// this worker's clock authority (never a free clock) (9mq9 M2r/M3).
+    /// selection against the current cache, with the setup deadline and the
+    /// attempt budget both read from the granted slot (never supplied by a
+    /// caller) and cache seconds from this worker's clock authority (never a
+    /// free clock) (9mq9 M2r/M3).
     ///
     /// # Errors
     ///
@@ -403,11 +457,51 @@ impl Worker {
         slot: &SlotIndex,
         request: &ConnectRequest,
         now: Instant,
-        counts: AttemptCounts,
-        previous: Option<Family>,
     ) -> Result<ConnectPhase, DecideError> {
         let setup = self.setup_deadline(slot).ok_or(DecideError::NotInSetup)?;
-        next_phase(request, view, now, counts, previous, setup).map_err(DecideError::Cache)
+        let attempts = self.attempt_ledger(slot).ok_or(DecideError::NotInSetup)?;
+        next_phase(
+            request,
+            view,
+            now,
+            attempts.counts(),
+            attempts.previous(),
+            setup,
+        )
+        .map_err(DecideError::Cache)
+    }
+
+    /// Records one failed attempt in `family` on the granted in-setup slot,
+    /// advancing its ledger toward the fixed attempt budget. The budget is
+    /// self-enforcing: once [`MAX_UPSTREAM_ATTEMPTS`] attempts are recorded,
+    /// any later [`Worker::decide`] for the slot resolves
+    /// [`ConnectPhase::CandidatesExhausted`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotInSetup` when the handle no longer names a live setup, so
+    /// an established or released tunnel can never grow its counters.
+    pub(crate) fn record_attempt(
+        &mut self,
+        slot: &SlotIndex,
+        family: Family,
+    ) -> Result<AttemptLedger, DecideError> {
+        match &mut self.slots[slot.index()] {
+            SlotState::InSetup { attempts, .. } => {
+                *attempts = attempts.record(family);
+                Ok(*attempts)
+            }
+            _ => Err(DecideError::NotInSetup),
+        }
+    }
+
+    /// The attempt ledger of the granted in-setup slot, or `None` when the
+    /// slot is not in setup.
+    pub(crate) fn attempt_ledger(&self, slot: &SlotIndex) -> Option<AttemptLedger> {
+        match self.slots[slot.index()] {
+            SlotState::InSetup { attempts, .. } => Some(attempts),
+            _ => None,
+        }
     }
 
     /// Graduates the setup named by `slot` to established work, returning the
@@ -418,7 +512,7 @@ impl Worker {
     /// different slot.
     #[allow(dead_code)]
     pub(crate) fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
-        if let SlotState::InSetup { setup_deadline } = self.slots[slot.index()] {
+        if let SlotState::InSetup { setup_deadline, .. } = self.slots[slot.index()] {
             self.slots[slot.index()] = SlotState::Established { setup_deadline };
         }
         TunnelIndex(slot.0)
@@ -440,9 +534,8 @@ impl Worker {
     /// when the slot is free.
     pub(crate) fn setup_deadline(&self, slot: &SlotIndex) -> Option<Deadline> {
         match self.slots[slot.index()] {
-            SlotState::InSetup { setup_deadline } | SlotState::Established { setup_deadline } => {
-                Some(setup_deadline)
-            }
+            SlotState::InSetup { setup_deadline, .. }
+            | SlotState::Established { setup_deadline } => Some(setup_deadline),
             SlotState::Free => None,
         }
     }
@@ -452,9 +545,8 @@ impl Worker {
     #[allow(dead_code)]
     pub(crate) fn tunnel_setup_deadline(&self, tunnel: &TunnelIndex) -> Option<Deadline> {
         match self.slots[tunnel.index()] {
-            SlotState::InSetup { setup_deadline } | SlotState::Established { setup_deadline } => {
-                Some(setup_deadline)
-            }
+            SlotState::InSetup { setup_deadline, .. }
+            | SlotState::Established { setup_deadline } => Some(setup_deadline),
             SlotState::Free => None,
         }
     }
@@ -1338,7 +1430,7 @@ mod tests {
         let slot = worker.admit(t0).expect("admitted");
         let req = auth_request("sub.example.org");
         let phase = worker
-            .decide(&view, &slot, &req, later(t0, 1), AttemptCounts::new(), None)
+            .decide(&view, &slot, &req, later(t0, 1))
             .expect("decision from the slot-bound deadline");
         assert!(
             matches!(
@@ -1363,6 +1455,107 @@ mod tests {
         );
         worker.release(slot);
         assert_eq!(worker.occupied(), 0);
+    }
+
+    #[test]
+    fn decide_reads_its_budget_from_the_slot_ledger_not_a_caller_arg() {
+        let t0 = anchor();
+        let clock = WorkerClock::new(t0, DNS_EPOCH);
+        let cfg = config();
+        let mut cache = cache_with(2);
+        let n = name(&cache, 0);
+        publish(
+            &mut cache,
+            n,
+            Family::A,
+            &[pub_v4(), pub_v4_b(), v4([9, 9, 9, 9])],
+            DNS_EPOCH,
+            3600,
+        );
+        publish(
+            &mut cache,
+            n,
+            Family::Aaaa,
+            &[
+                pub_v6(),
+                second_v6(),
+                v6([0x26, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            ],
+            DNS_EPOCH,
+            3600,
+        );
+        let view = view_of_clocked(&cfg, &cache, clock);
+        let mut worker = Worker::boot(clock);
+        let slot = worker.admit(t0).expect("admitted");
+        let req = auth_request("sub.example.org");
+        let phase = worker
+            .decide(&view, &slot, &req, later(t0, 1))
+            .expect("decision from the slot-bound budget");
+        assert!(
+            matches!(
+                phase,
+                ConnectPhase::Peer {
+                    family: Family::A,
+                    ..
+                }
+            ),
+            "a fresh slot ledger must offer its first attempt, got {phase:?}"
+        );
+        let mut seen = Vec::new();
+        for i in 1..=MAX_UPSTREAM_ATTEMPTS {
+            let phase = worker
+                .decide(&view, &slot, &req, later(t0, u64::try_from(i).unwrap()))
+                .expect("decision within budget");
+            let ConnectPhase::Peer { family, .. } = phase else {
+                panic!("an in-budget decision must offer a peer, got {phase:?}");
+            };
+            seen.push(family);
+            worker
+                .record_attempt(&slot, family)
+                .expect("record attempt");
+        }
+        assert_eq!(
+            seen,
+            vec![Family::A, Family::Aaaa, Family::A, Family::Aaaa],
+            "the slot ledger must alternate to the family not used last time"
+        );
+        let phase = worker
+            .decide(&view, &slot, &req, later(t0, 5))
+            .expect("decision past the budget");
+        assert_eq!(
+            phase,
+            ConnectPhase::CandidatesExhausted,
+            "the slot ledger must self-enforce the {MAX_UPSTREAM_ATTEMPTS}-attempt budget"
+        );
+        worker.release(slot);
+    }
+
+    #[test]
+    fn record_attempt_updates_the_slot_ledger_and_previous_family() {
+        let t0 = anchor();
+        let clock = WorkerClock::new(t0, DNS_EPOCH);
+        let mut worker = Worker::boot(clock);
+        let slot = worker.admit(t0).expect("admitted");
+        let fresh = worker.attempt_ledger(&slot).expect("in-setup ledger");
+        assert_eq!(fresh.counts().total(), 0, "a fresh ledger has no attempts");
+        assert_eq!(
+            fresh.previous(),
+            None,
+            "a fresh ledger has no previous family"
+        );
+        let after_a = worker.record_attempt(&slot, Family::A).expect("record A");
+        assert_eq!(after_a.counts().a(), 1, "one A attempt recorded");
+        assert_eq!(after_a.previous(), Some(Family::A), "A is now previous");
+        let after_aaaa = worker
+            .record_attempt(&slot, Family::Aaaa)
+            .expect("record AAAA");
+        assert_eq!(after_aaaa.counts().aaaa(), 1, "one AAAA attempt recorded");
+        assert_eq!(
+            after_aaaa.previous(),
+            Some(Family::Aaaa),
+            "AAAA is now previous"
+        );
+        worker.release(slot);
     }
 
     #[test]

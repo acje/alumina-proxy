@@ -18,7 +18,7 @@ use crate::startup_dns::{
     STARTUP_WINDOW_SECS, StartupDns, StartupDnsError, StartupReport, TurnResult,
 };
 use crate::worker::{
-    AdmissionError, AttemptCounts, ConnectPhase, Deadline, DecideError, SlotIndex, TunnelIndex,
+    AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, SlotIndex, TunnelIndex,
     Worker, WorkerClock, WorkerView,
 };
 
@@ -274,6 +274,27 @@ impl ServeStorage {
             .expect("publish A binding");
     }
 
+    #[cfg(test)]
+    pub(crate) fn publish_test_addr(
+        &mut self,
+        ordinal: usize,
+        addr: crate::eligibility::NumericAddr,
+        family: Family,
+    ) {
+        use crate::cache::{Generation, StagedPositive};
+        let name = self
+            .cache
+            .name_index(ordinal)
+            .expect("admitted name ordinal");
+        let receipt = self.cache_secs(Instant::now());
+        let staged =
+            StagedPositive::stage(name, family, Generation::INITIAL, &[addr], receipt, 600)
+                .expect("stage binding");
+        self.cache
+            .publish_positive(&staged)
+            .expect("publish binding");
+    }
+
     /// Whole-record log drops so far, saturating at `u64::MAX`: the
     /// documented dropped-record metric (docs/alumina-proxy.md:193).
     pub fn log_dropped(&self) -> u64 {
@@ -394,9 +415,9 @@ impl ServeStorage {
     }
 
     /// The one owned CONNECT decision for an admitted slot: reads the setup
-    /// deadline from the slot and cache seconds from this storage's clock
-    /// authority. Does not consume the handle; the event processor still needs
-    /// it to graduate or release.
+    /// deadline and the attempt ledger from the slot and cache seconds from
+    /// this storage's clock authority. Does not consume the handle; the event
+    /// processor still needs it to graduate or release.
     ///
     /// # Errors
     ///
@@ -407,11 +428,18 @@ impl ServeStorage {
         slot: &SlotIndex,
         request: &ConnectRequest,
         now: Instant,
-        counts: AttemptCounts,
-        previous: Option<Family>,
     ) -> Result<ConnectPhase, DecideError> {
-        self.worker
-            .decide(&self.work_view(), slot, request, now, counts, previous)
+        self.worker.decide(&self.work_view(), slot, request, now)
+    }
+
+    /// Records one failed attempt on the granted in-setup slot, advancing its
+    /// slot-carried attempt ledger. See [`crate::worker::Worker::record_attempt`].
+    pub(crate) fn record_attempt(
+        &mut self,
+        slot: &SlotIndex,
+        family: Family,
+    ) -> Result<AttemptLedger, DecideError> {
+        self.worker.record_attempt(slot, family)
     }
 
     /// Graduates an admitted slot to established work once the successful
@@ -888,7 +916,7 @@ mod tests {
             .expect("valid connect request");
         let slot = storage.accept(t0).expect("admitted via the owned seam");
         let phase = storage
-            .decide(&slot, &req, now, crate::worker::AttemptCounts::new(), None)
+            .decide(&slot, &req, now)
             .expect("decision via the owned seam");
         assert!(
             matches!(
@@ -953,9 +981,7 @@ mod tests {
             .expect("connect result present")
             .as_ref()
             .expect("valid connect request");
-        let phase = storage
-            .decide(&slot, &req, t0, crate::worker::AttemptCounts::new(), None)
-            .expect("decision");
+        let phase = storage.decide(&slot, &req, t0).expect("decision");
         assert!(
             matches!(
                 phase,

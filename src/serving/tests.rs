@@ -5757,3 +5757,306 @@ fn allowlisted_unresolved_connect_refusal_is_wire_pinned_through_run_once() {
         );
     });
 }
+
+/// A test config allowlisting `sub.example.org:<upstream_port>` behind a
+/// 127.0.0.1 entry listener, for retry/deadline tests that must target a
+/// controllable (possibly closed) upstream port.
+fn config_pair(port: u16, upstream_port: u16) -> crate::config::Config {
+    let doc = format!(
+        "allowlist = [\"sub.example.org:{upstream_port}\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+    );
+    crate::config::parse_config_document(&doc).expect("valid retry test config")
+}
+
+#[test]
+/// The FIRST failed dial must be recorded back into the slot ledger and the
+/// decision re-run against the advanced cursor, exactly once per failed
+/// establishment: with a single A binding the re-decision resolves 502
+/// "no resolved addresses", the body that proves a retry occurred rather than
+/// the single-attempt "upstream connection failed".
+fn first_dial_failure_records_and_re_decides_to_no_binding_502() {
+    use crate::cache::Family;
+    use crate::connect::Feed;
+    use crate::eligibility::NumericAddr;
+    use std::net::Ipv4Addr;
+    let port = ephemeral_port();
+    let upstream_port = ephemeral_port();
+    let cfg = config_pair(port, upstream_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let mut client = connect(port);
+        pump(serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted"
+        );
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match serving.slots[0]
+            .parser
+            .feed(head.as_bytes())
+            .expect("head feed")
+        {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+        serving.slots[0].approved_port = upstream_port;
+        serving.slots[0].gate.on_authorized();
+        serving.slots[0].stage = Stage::Dialing;
+        serving.slots[0].connect_family = Some(Family::A);
+        serving
+            .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
+            .expect("dial");
+        pump(serving, 10);
+        let body = read_all(&mut client);
+        assert!(
+            body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
+            "the consumed single attempt must refuse a pre-200 502, got {:?}",
+            body
+        );
+        assert!(
+            body.windows(b"no resolved addresses".len())
+                .any(|w| w == b"no resolved addresses"),
+            "the retry must re-decide to NoBinding, not repeat the single-attempt DialFailed, got {:?}",
+            body
+        );
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the refused slot must be released back to the pool"
+        );
+    });
+}
+
+#[test]
+/// A closed upstream port for all four A bindings consumes the full slot
+/// attempt budget through the real run loop and pins the "upstream connection
+/// failed" wire body once `CandidatesExhausted` resolves.
+fn closed_dial_exhausts_the_full_attempt_budget_to_502_upstream_failed() {
+    use crate::cache::Family;
+    use crate::connect::Feed;
+    use crate::eligibility::NumericAddr;
+    use std::net::Ipv4Addr;
+    let port = ephemeral_port();
+    let upstream_port = ephemeral_port();
+    let cfg = config_pair(port, upstream_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let mut client = connect(port);
+        pump(serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted"
+        );
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match serving.slots[0]
+            .parser
+            .feed(head.as_bytes())
+            .expect("head feed")
+        {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+        serving.slots[0].approved_port = upstream_port;
+        serving.slots[0].gate.on_authorized();
+        serving.slots[0].stage = Stage::Dialing;
+        serving.slots[0].connect_family = Some(Family::A);
+        let handle = serving.slots[0].handle.take().expect("admitted handle");
+        for _ in 0..3 {
+            serving
+                .storage_mut()
+                .record_attempt(&handle, Family::A)
+                .expect("record earlier A attempt");
+        }
+        serving.slots[0].handle = Some(handle);
+        serving
+            .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
+            .expect("dial");
+        pump(serving, 10);
+        let body = read_all(&mut client);
+        assert!(
+            body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
+            "the exhausted budget must refuse a pre-200 502, got {:?}",
+            body
+        );
+        assert!(
+            body.windows(b"upstream connection failed".len())
+                .any(|w| w == b"upstream connection failed"),
+            "the budget-exhausted refusal must pin the DialFailed body, got {:?}",
+            body
+        );
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the refused slot must be released back to the pool"
+        );
+    });
+}
+
+#[test]
+/// A successful dial re-anchors a fresh clipped per-attempt connect deadline
+/// at initiation (I26): after `run_decision` dials a live origin the workspace
+/// holds the dialing family and a deadline freshly clipped from the setup
+/// deadline, never a carried-over expired one.
+fn dial_re_anchors_a_fresh_connect_deadline_at_initiation() {
+    use crate::cache::Family;
+    use crate::eligibility::NumericAddr;
+    use std::net::Ipv4Addr;
+    let port = ephemeral_port();
+    let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
+    let origin_port = origin.local_addr().expect("origin addr").port();
+    let cfg = config_pair(port, origin_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let mut client = connect(port);
+        pump(serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted and dialing"
+        );
+        let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
+        let setup = serving
+            .storage()
+            .setup_deadline(handle)
+            .expect("setup deadline");
+        serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+        serving.slots[0].approved_port = origin_port;
+        serving.slots[0].gate.on_authorized();
+        serving.slots[0].stage = Stage::Dialing;
+        serving.slots[0].connect_family = Some(Family::A);
+        serving.slots[0].connect_deadline = Some(crate::worker::Deadline::connect_attempt(
+            Instant::now() - Duration::from_secs(3),
+            setup,
+        ));
+        serving
+            .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
+            .expect("dial the live origin");
+        let ws = &serving.slots[0];
+        assert_eq!(
+            ws.connect_family,
+            Some(Family::A),
+            "the dialing slot must carry the decided family"
+        );
+        let deadline = ws.connect_deadline.expect("dial re-anchored deadline");
+        let now = Instant::now();
+        let age = if deadline.limit() <= now {
+            now - deadline.limit()
+        } else {
+            Duration::ZERO
+        };
+        assert!(
+            age <= Duration::from_secs(1),
+            "the anchor must be fresh, not carried over from boot: {:?}",
+            deadline.limit()
+        );
+        let _origin_stream = origin.accept().expect("accept origin side").0;
+        pump(serving, 30);
+        let body = read_until(&mut client, b"\r\n\r\n");
+        assert!(
+            body.starts_with(b"HTTP/1.1 200"),
+            "a live origin must complete the successful CONNECT, got {:?}",
+            body
+        );
+        serving.close_slot(0);
+    });
+}
+
+#[test]
+/// An expired per-attempt connect deadline while a slot is still Dialing must
+/// record one retry and re-decide, via `expire_sweep`, rather than sit frozen
+/// on the stalled attempt (M1/I26 enforcement).
+fn expired_connect_deadline_while_dialing_records_a_retry_through_expire_sweep() {
+    use crate::cache::Family;
+    use crate::connect::Feed;
+    use crate::eligibility::NumericAddr;
+    use std::net::Ipv4Addr;
+    let port = ephemeral_port();
+    let upstream_port = ephemeral_port();
+    let cfg = config_pair(port, upstream_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        serving.storage_mut().publish_test_addr(
+            0,
+            NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])),
+            Family::A,
+        );
+        let mut client = connect(port);
+        pump(serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted"
+        );
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match serving.slots[0]
+            .parser
+            .feed(head.as_bytes())
+            .expect("head feed")
+        {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
+        let setup = serving
+            .storage()
+            .setup_deadline(handle)
+            .expect("setup deadline");
+        serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+        serving.slots[0].approved_port = upstream_port;
+        serving.slots[0].stage = Stage::Dialing;
+        serving.slots[0].connect_family = Some(Family::A);
+        serving.slots[0].connect_deadline = Some(crate::worker::Deadline::connect_attempt(
+            Instant::now() - Duration::from_secs(3),
+            setup,
+        ));
+        serving.expire_sweep(Instant::now());
+        pump(serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the expired-dial retry must re-decide to NoBinding and release the seat"
+        );
+        let body = read_all(&mut client);
+        assert!(
+            body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
+            "the expired-dial retry must end in a pre-200 502, got {:?}",
+            body
+        );
+    });
+}
+
+#[test]
+/// Saturated generation shifts in the token builders must fail closed without
+/// panic: the local id stays decodable and the generation stays non-matchable
+/// by any live slot, so a degenerate generation can only produce stale-drop.
+fn saturated_generation_tokens_fail_closed_without_panic() {
+    let idx = 3usize;
+    let ct = client_token(u64::MAX, idx);
+    assert_eq!(
+        ct.0 & LOCAL_MASK,
+        idx + 1,
+        "the saturated client token must keep its local id decodable"
+    );
+    assert_ne!(
+        (ct.0 >> GEN_SHIFT) as u64,
+        u64::MAX,
+        "the saturated generation must not falsely match a live generation"
+    );
+    let ut = upstream_token(u64::MAX, idx);
+    assert_eq!(
+        ut.0 & LOCAL_MASK,
+        UPSTREAM_BASE + idx,
+        "the saturated upstream token must keep its local id decodable"
+    );
+    let generation = 5u64;
+    assert_eq!(
+        client_token(generation, idx).0,
+        ((generation as usize) << GEN_SHIFT) | (idx + 1),
+        "ordinary in-range generations must round-trip exactly unchanged"
+    );
+    assert_eq!(
+        upstream_token(generation, idx).0,
+        ((generation as usize) << GEN_SHIFT) | (UPSTREAM_BASE + idx),
+        "ordinary in-range generations must round-trip exactly unchanged"
+    );
+}

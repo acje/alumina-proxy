@@ -43,6 +43,7 @@ use mio::{Events, Interest, Poll, Registry, Token};
 
 use signal_hook::consts::SIGTERM;
 
+use crate::cache::Family;
 use crate::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
 use crate::config::FixedHostname;
 use crate::connect::{ConnectHeadReason, ConnectParser, Feed};
@@ -54,7 +55,7 @@ use crate::gate::{Activity, TunnelGate, UpstreamWrite, ValidatedHello};
 use crate::log::{ActivityKind, RejectReason};
 use crate::serve::ServeStorage;
 use crate::startup_dns::StartupDnsError;
-use crate::worker::{AttemptCounts, ConnectPhase, MAX_TUNNELS, SlotIndex, TunnelIndex};
+use crate::worker::{ConnectPhase, Deadline, MAX_TUNNELS, SlotIndex, TunnelIndex};
 
 mod policy;
 mod reject;
@@ -524,6 +525,15 @@ struct SlotWorkspace {
     directional: DirectionalEof,
     drain_deadline: Option<Instant>,
     idle_deadline: Option<Instant>,
+    /// The family of the in-flight upstream dial, when a decision granted a
+    /// [`ConnectPhase::Peer`] peer for this slot. Tracked so a failed
+    /// establishment records on the exact family attempted and retries through
+    /// the slot-carried ledger. `None` outside a live decision dial.
+    connect_family: Option<Family>,
+    /// The clipped per-attempt connect deadline anchored at this attempt's
+    /// initiation (docs/alumina-proxy.md:189). Only meaningful while
+    /// `stage == Stage::Dialing`; `None` otherwise.
+    connect_deadline: Option<Deadline>,
     #[cfg(test)]
     visits: u16,
     #[cfg(test)]
@@ -562,6 +572,8 @@ impl SlotWorkspace {
             directional: DirectionalEof::relay(),
             drain_deadline: None,
             idle_deadline: None,
+            connect_family: None,
+            connect_deadline: None,
             #[cfg(test)]
             visits: 0,
             #[cfg(test)]
@@ -620,6 +632,8 @@ impl SlotWorkspace {
         self.directional = DirectionalEof::relay();
         self.drain_deadline = None;
         self.idle_deadline = None;
+        self.connect_family = None;
+        self.connect_deadline = None;
     }
 }
 
@@ -1175,10 +1189,7 @@ impl Serving {
             if connecting_dial {
                 match self.upstream_connectedness(index) {
                     ConnectState::Pending => return Ok(()),
-                    ConnectState::Failed => {
-                        self.refuse(index, Refusal::DialFailed);
-                        return Ok(());
-                    }
+                    ConnectState::Failed => return self.fail_current_attempt(index),
                     ConnectState::Connected => return self.upstream_writable(index),
                 }
             }
@@ -1998,9 +2009,7 @@ impl Serving {
             return Ok(());
         }
         let now = Instant::now();
-        let phase = self
-            .storage
-            .decide(slot, &request, now, AttemptCounts::new(), None);
+        let phase = self.storage.decide(slot, &request, now);
         match phase {
             Err(_) => {
                 self.refuse(index, Refusal::DialFailed);
@@ -2023,14 +2032,46 @@ impl Serving {
                 self.refuse(index, Refusal::SetupTimeout);
                 Ok(())
             }
-            Ok(ConnectPhase::Peer { addr, .. }) => {
+            Ok(ConnectPhase::Peer {
+                addr,
+                family,
+                connect_deadline,
+            }) => {
                 let slot = &mut self.slots[index];
                 slot.approved = Some(approved);
                 slot.approved_port = request.port();
                 slot.gate.on_authorized();
+                slot.connect_family = Some(family);
+                slot.connect_deadline = Some(connect_deadline);
                 slot.stage = Stage::Dialing;
                 self.dial(index, addr)
             }
+        }
+    }
+
+    /// One failed upstream establishment on a Dialing slot: drop the failed
+    /// socket, record the failed attempt family back into the slot-carried
+    /// ledger, and re-run the decision against the advanced cursor (M1).
+    /// A decision path that never granted a family is a synthetic/bypass dial;
+    /// it keeps the pre-retry single-failure refusal. Never replaces a peer the
+    /// gate has already committed to.
+    fn fail_current_attempt(&mut self, index: usize) -> Result<(), ServeError> {
+        if self.slots[index].stage != Stage::Dialing {
+            return Ok(());
+        }
+        let family = self.slots[index].connect_family;
+        self.slots[index].upstream = None;
+        if let Some(handle) = self.slots[index].handle.as_ref()
+            && let Some(family) = family
+        {
+            if self.storage.record_attempt(handle, family).is_err() {
+                self.refuse(index, Refusal::DialFailed);
+                return Ok(());
+            }
+            self.run_decision(index)
+        } else {
+            self.refuse(index, Refusal::DialFailed);
+            Ok(())
         }
     }
 
@@ -2040,6 +2081,17 @@ impl Serving {
             NumericAddr::V6(a) => IpAddr::V6(a),
         };
         let sock = SocketAddr::new(ip, self.slots[index].approved_port);
+        self.slots[index].connect_family = Some(match addr {
+            NumericAddr::V4(_) => Family::A,
+            NumericAddr::V6(_) => Family::Aaaa,
+        });
+        let now = Instant::now();
+        let setup = self.slots[index]
+            .handle
+            .as_ref()
+            .and_then(|h| self.storage.setup_deadline(h))
+            .unwrap_or_else(|| Deadline::setup(now));
+        self.slots[index].connect_deadline = Some(Deadline::connect_attempt(now, setup));
         match TcpStream::connect(sock) {
             Ok(stream) => {
                 self.slots[index].upstream = Some(stream);
@@ -2048,10 +2100,7 @@ impl Serving {
                 }
                 Ok(())
             }
-            Err(_) => {
-                self.refuse(index, Refusal::DialFailed);
-                Ok(())
-            }
+            Err(_) => self.fail_current_attempt(index),
         }
     }
 
@@ -2062,10 +2111,7 @@ impl Serving {
         match self.slots[index].stage {
             Stage::Dialing => match self.upstream_connectedness(index) {
                 ConnectState::Pending => Ok(()),
-                ConnectState::Failed => {
-                    self.refuse(index, Refusal::DialFailed);
-                    Ok(())
-                }
+                ConnectState::Failed => self.fail_current_attempt(index),
                 ConnectState::Connected => {
                     self.slots[index].gate.on_upstream_connected();
                     let ws = &mut self.slots[index];
@@ -2113,10 +2159,7 @@ impl Serving {
         match self.slots[index].stage {
             Stage::Dialing => match self.upstream_connectedness(index) {
                 ConnectState::Pending => Ok(()),
-                ConnectState::Failed => {
-                    self.refuse(index, Refusal::DialFailed);
-                    Ok(())
-                }
+                ConnectState::Failed => self.fail_current_attempt(index),
                 ConnectState::Connected => self.observe_upstream_read(index),
             },
             _ => self.observe_upstream_read(index),
@@ -2628,6 +2671,11 @@ impl Serving {
                 .as_ref()
                 .and_then(|h| self.storage.setup_deadline(h))
                 .map(|d| d.limit());
+            if self.slots[i].stage == Stage::Dialing
+                && let Some(connect) = self.slots[i].connect_deadline
+            {
+                candidate = Some(candidate.map_or(connect.limit(), |c| c.min(connect.limit())));
+            }
             if let Some(idle) = self.slots[i].idle_deadline {
                 candidate = Some(candidate.map_or(idle, |c| c.min(idle)));
             }
@@ -2693,6 +2741,14 @@ impl Serving {
                 self.expire_setup(i);
                 continue;
             }
+            if self.slots[i].stage == Stage::Dialing
+                && self.slots[i]
+                    .connect_deadline
+                    .is_some_and(|d| d.is_expired(now))
+            {
+                let _ = self.fail_current_attempt(i);
+                continue;
+            }
             if self.slots[i].idle_deadline.is_some_and(|d| now >= d) {
                 self.close_slot(i);
                 continue;
@@ -2724,7 +2780,10 @@ impl Serving {
 }
 
 fn client_token(generation: u64, index: usize) -> Token {
-    Token(((generation as usize) << GEN_SHIFT) | (index + 1))
+    let shifted = (generation as usize)
+        .checked_shl(GEN_SHIFT as u32)
+        .unwrap_or(usize::MAX & !LOCAL_MASK);
+    Token(shifted | (index + 1))
 }
 
 fn captured_fact(violation: Violation) -> Option<CapturedFact> {
@@ -2742,7 +2801,10 @@ fn captured_fact(violation: Violation) -> Option<CapturedFact> {
 }
 
 fn upstream_token(generation: u64, index: usize) -> Token {
-    Token(((generation as usize) << GEN_SHIFT) | (UPSTREAM_BASE + index))
+    let shifted = (generation as usize)
+        .checked_shl(GEN_SHIFT as u32)
+        .unwrap_or(usize::MAX & !LOCAL_MASK);
+    Token(shifted | (UPSTREAM_BASE + index))
 }
 
 fn half_close_best_effort(stream: &mut TcpStream) {
