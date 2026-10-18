@@ -125,6 +125,16 @@ impl BindingList {
 
     /// Builds a list from validated candidates, rejecting any set that exceeds
     /// `MAX_ADDRESSES` rather than retaining a truncated subset.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CandidatesExceeded` when `addrs` has more than `MAX_ADDRESSES`
+    /// entries.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the bounded candidate count does not fit `u8`, impossible
+    /// given the `MAX_ADDRESSES` bound.
     pub fn from_slice(addrs: &[NumericAddr]) -> Result<BindingList, DnsError> {
         if addrs.len() > MAX_ADDRESSES {
             return Err(DnsError::CandidatesExceeded {
@@ -431,6 +441,11 @@ fn write_qname(buf: &mut [u8], mut pos: usize, name: &str) -> Result<usize, DnsE
 ///
 /// Returns `QueryTooLong` or `BufferExhausted` when the name cannot be encoded
 /// into `buf`.
+///
+/// # Panics
+///
+/// Panics on the fixed `expect` only if the DNS `CLASS_IN` constant does not
+/// fit the one-byte wire field, which cannot happen.
 pub fn build_query(
     fqdn: &Fqdn,
     family: Family,
@@ -718,6 +733,10 @@ fn ensure_owner(ws: &mut ResponseWorkspace, name: &DnsName) -> Result<usize, Dns
 /// # Errors
 ///
 /// Returns every refusal in `DnsError` without any cache mutation.
+#[expect(
+    clippy::too_many_lines,
+    reason = "long multi-phase DNS response parser (frame, name, RR validation) kept inline for bounded fixed-buffer parsing"
+)]
 pub fn parse_response(
     ws: &mut ResponseWorkspace,
     fqdn: &Fqdn,

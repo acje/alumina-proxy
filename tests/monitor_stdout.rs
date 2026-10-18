@@ -13,6 +13,10 @@ const BODY_403: &str = "403 Forbidden";
 const LOOPS: usize = 400;
 const MAX_MONITOR_RECORDS: usize = 32;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "long stdout-stall monitor test driver"
+)]
 fn main() {
     let (rd, wr) = unsafe { nix_pipe().expect("pipe") };
     unsafe {

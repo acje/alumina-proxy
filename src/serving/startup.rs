@@ -31,6 +31,10 @@ impl Serving {
     /// advances the in-flight cooperative exchange, selects the next due step
     /// only while idle, and folds a single bounded wait over the serving poll
     /// (signal priority is handled inside [`Self::run_once`]).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "long cooperative startup-DNS window loop folding poll/exchange/selection phases"
+    )]
     pub(crate) fn run_startup_window(
         &mut self,
         nameserver: SocketAddr,

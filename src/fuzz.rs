@@ -333,6 +333,11 @@ impl FuzzRun {
 /// (docs/alumina-proxy.md:388-391). A panic aborts the campaign with the
 /// offending input's hash recorded so the input reproduces exactly. Never
 /// called on a production path; campaigns execute under `cargo test`.
+///
+/// # Panics
+///
+/// Panics on the fixed `expect` only if a bounded fuzz length does not fit
+/// `usize`, which cannot happen on supported platforms.
 #[must_use]
 pub fn fuzz_target(target: ParserTarget, seed: Seed, iterations: u64, max_len: usize) -> FuzzRun {
     let mut rng = DeterministicGen::new(seed);
@@ -464,6 +469,11 @@ impl CorpusOwnership {
         }
     }
 
+    /// Registers `target` under `seed`, recording it in the ownership set.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DuplicateTarget` when `target` is already registered.
     pub fn register(
         &mut self,
         target: ParserTarget,

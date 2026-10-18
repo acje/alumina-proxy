@@ -306,6 +306,12 @@ impl Cache {
     /// generation, advancing past the maximum generation, or the
     /// receipt-derived deadlines overflow. The entry is unchanged on every
     /// error path.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if `name` is not admitted by this cache, from the
+    /// fixed-size entry indexing that `admit` guards (a caller-contract
+    /// violation).
     pub fn publish_positive(&mut self, staged: &StagedPositive) -> Result<(), CacheError> {
         self.admit(staged.name)?;
         let entry = self.entry_mut(staged.name, staged.family);

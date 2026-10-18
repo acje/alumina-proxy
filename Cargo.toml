@@ -13,12 +13,26 @@ description = "Alumina phase-1 foundations: F0 toolchain pin, F1/F2/F4 witness s
 # every site with idiomatic `#[must_use]` (public API) or
 # `#[expect(clippy::must_use_candidate, reason = "...")]` (test-local/private,
 # value legitimately ignored). No runtime impact; attributes are compile-time.
+# SM-04: enable the doc/hygiene cluster — `missing_errors_doc` and
+# `missing_panics_doc` are resolved with idiomatic `# Errors` / `# Panics`
+# rustdoc on public fns; `too_many_lines` is resolved at long test fns and
+# coherent long encoders/drivers with tight per-fn
+# `#[expect(..., reason = "...")]`. No runtime impact; no allocation and no
+# runtime-surface change.
+# `large_stack_arrays` is intentionally NOT enabled yet: its five non-test sites
+# are the designed boot/slot-resident buffer definitions (Cache::new entries,
+# ChInspector buf+scratch, ResponseWorkspace::default owners, StartupDns
+# recv_buf), which per SM-04 contract may neither be suppressed nor heap-replaced;
+# deferred to moltke adjudication (SM-04 back-brief).
 [lints.clippy]
 uninlined_format_args = "warn"
 must_use_candidate = "warn"
 cast_lossless = "warn"
 cast_sign_loss = "warn"
 cast_possible_truncation = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+too_many_lines = "warn"
 
 [lib]
 name = "alumina"

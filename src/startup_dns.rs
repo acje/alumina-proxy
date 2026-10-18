@@ -1438,6 +1438,10 @@ impl StartupDns {
     /// Returns the underlying fatal storage, entropy, lifecycle, poll, token,
     /// deadline, or schedule error; counted per-exchange network failures are
     /// carried by the report.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "long resolve-window driver covering exchange steps, timeouts, and publish bookkeeping"
+    )]
     pub(crate) fn resolve_window(
         &mut self,
         inputs: WindowInputs<'_>,

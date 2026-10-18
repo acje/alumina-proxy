@@ -131,6 +131,11 @@ impl FixedHostname {
     }
 
     /// The normalized name as a `&str`; always ASCII by construction.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the normalized bytes are not valid UTF-8, impossible by
+    /// construction because normalization accepts ASCII input only.
     #[must_use]
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(self.as_bytes()).expect("FixedHostname is ASCII")
@@ -559,6 +564,15 @@ impl fmt::Display for ConfigError {
     }
 }
 
+/// Loads and parses the configuration document at `path`, enforcing the
+/// on-disk size limit.
+///
+/// # Errors
+///
+/// Returns `Unreadable` when the file cannot be opened or read,
+/// `OversizedDocument` when it exceeds `CONFIG_DOC_LIMIT`, `NotUtf8` when the
+/// bytes are not UTF-8, and the same errors as [`parse_config_document`] from
+/// the parse step.
 pub fn load_config_document(path: &str) -> Result<Config, ConfigError> {
     let file = File::open(path).map_err(|source| ConfigError::Unreadable {
         path: path.to_owned(),
@@ -583,6 +597,14 @@ pub fn load_config_document(path: &str) -> Result<Config, ConfigError> {
     parse_config_document(doc)
 }
 
+/// Parses a configuration document from `doc`, enforcing the size limit
+/// before TOML parsing and table conversion.
+///
+/// # Errors
+///
+/// Returns `OversizedDocument` when `doc` exceeds `CONFIG_DOC_LIMIT`,
+/// `ParseToml` when the document is not a TOML table, and the configuration
+/// validation errors emitted while converting the table.
 pub fn parse_config_document(doc: &str) -> Result<Config, ConfigError> {
     if doc.len() > CONFIG_DOC_LIMIT {
         return Err(ConfigError::OversizedDocument {

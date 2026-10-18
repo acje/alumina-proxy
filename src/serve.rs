@@ -314,6 +314,11 @@ impl ServeStorage {
     /// Arms the production stdout sink (fd 1 nonblocking). The binary calls
     /// this once after boot, before any serving stdout write; the library and
     /// tests never flip the descriptor (H2).
+    ///
+    /// # Errors
+    ///
+    /// Returns the log-store error, wrapped as `StartupDnsError`, when fd 1
+    /// cannot be switched to nonblocking or otherwise armed for the sink.
     pub fn prepare_stdout_log_sink(&mut self) -> Result<(), StartupDnsError> {
         self.logs.prepare_stdout().map_err(StartupDnsError::from)
     }

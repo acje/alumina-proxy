@@ -80,6 +80,12 @@ impl fmt::Display for ResolverError {
     }
 }
 
+/// Reads and parses the resolver configuration file at `path`.
+///
+/// # Errors
+///
+/// Returns `Unreadable` when the file cannot be opened, and the parse and
+/// address-validation errors of [`parse_resolver_config`].
 pub fn read_resolver_config_file(path: &str) -> Result<Nameserver, ResolverError> {
     let file = File::open(path).map_err(|source| ResolverError::Unreadable {
         path: path.to_owned(),
@@ -88,6 +94,12 @@ pub fn read_resolver_config_file(path: &str) -> Result<Nameserver, ResolverError
     parse_streaming(file, Some(path.to_owned()))
 }
 
+/// Parses a resolver configuration document from `text`.
+///
+/// # Errors
+///
+/// Returns `MissingNameserver` when no nameserver directive appears, and the
+/// address-validation errors of `ResolverError` for a malformed address.
 pub fn parse_resolver_config(text: &str) -> Result<Nameserver, ResolverError> {
     parse_streaming(text.as_bytes(), None)
 }

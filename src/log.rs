@@ -462,6 +462,10 @@ fn encode_record_final(
     Some(w.len)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "long monitor record serializer emitting every indexed field into the fixed slot buffer"
+)]
 fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor) -> Option<usize> {
     let mut w = Entry {
         buf: slot_buf,

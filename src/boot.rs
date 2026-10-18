@@ -41,6 +41,15 @@ pub struct BootReport {
     pub inventory: BootInventory,
 }
 
+/// Runs the complete boot sequence: kernel preflight, configuration load,
+/// resolver parse, and traffic-storage allocation.
+///
+/// # Errors
+///
+/// Returns `Preflight` when a hosting prerequisite fails, `Config` when the
+/// configuration document is unreadable or invalid, `Resolver` when the
+/// resolver file is unreadable or invalid, or `Storage` when traffic storage
+/// cannot be allocated.
 pub fn run_boot(config_path: &str, resolver_path: &str) -> Result<BootReport, BootError> {
     let facts = preflight::read_kernel_facts().map_err(BootError::Preflight)?;
     run_boot_with_facts(config_path, resolver_path, facts)

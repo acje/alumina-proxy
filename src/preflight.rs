@@ -85,6 +85,14 @@ impl fmt::Display for PreflightError {
     }
 }
 
+/// Verifies kernel-level preflight prerequisites.
+///
+/// # Errors
+///
+/// Returns the first failed prerequisite: `Root` when any real/effective/saved
+/// or filesystem UID is zero, `NonEmptyEffective`, `NonEmptyPermitted`, or
+/// `NonEmptyAmbient` when the matching capability set is non-empty, and
+/// `MissingNoNewPrivs` when the process lacks the no_new_privs flag.
 pub fn check(facts: KernelFacts) -> Result<(), PreflightError> {
     if facts.ruid == 0 || facts.euid == 0 || facts.suid == 0 || facts.fsuid == 0 {
         return Err(PreflightError::Root);
@@ -115,10 +123,21 @@ pub fn read_kernel_facts() -> Result<KernelFacts, PreflightError> {
 }
 
 #[cfg(not(target_os = "linux"))]
+/// Reads kernel facts; unavailable off-Linux.
+///
+/// # Errors
+///
+/// Always returns `NotLinux` on non-Linux hosts.
 pub fn read_kernel_facts() -> Result<KernelFacts, PreflightError> {
     Err(PreflightError::NotLinux)
 }
 
+/// Parses the `/proc/self/status` text into [`KernelFacts`].
+///
+/// # Errors
+///
+/// Returns `StatusMalformed` when a required `Uid`, `CapEff`, `CapPrm`,
+/// `CapAmb`, or `NoNewPrivs` field is missing or unparsable.
 pub fn parse_proc_status(text: &str) -> Result<KernelFacts, PreflightError> {
     let mut uids: Option<(u32, u32, u32, u32)> = None;
     let mut cap_eff: Option<u64> = None;

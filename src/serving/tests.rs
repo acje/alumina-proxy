@@ -1158,6 +1158,10 @@ fn relay_pending_tail_then_fresh_bytes_preserve_order_and_count() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "long multi-phase compaction assertion"
+)]
 fn forced_compaction_preserves_absolute_cursor_and_retained_suffix() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -1270,6 +1274,10 @@ fn forced_compaction_preserves_absolute_cursor_and_retained_suffix() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "long staged relay-fin drain/half-close assertion"
+)]
 fn relay_client_fin_drains_pending_bytes_then_half_closes_and_releases() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -1720,6 +1728,10 @@ fn batch_progress_rechecks_timers_before_the_visit_that_would_cross() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "long staged batch/coalescing assertion"
+)]
 fn one_batch_two_tokens_one_slot_share_a_single_complete_visit() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -1992,6 +2004,10 @@ fn listener_yield_at_recheck_rearms_for_queued_clients_without_new_connects() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "long interleaved budget-split behaviour assertion"
+)]
 fn interleaved_a_b_a_mixed_readwrite_timer_preserves_shared_budgets() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -2495,6 +2511,10 @@ fn preloaded_hold_drains_across_budget_splits_byte_exact_with_consuming_sink() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "long read-direction overflow-drain assertion"
+)]
 fn read_direction_held_peer_drains_across_budget_splits_without_new_edges() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3179,6 +3199,10 @@ fn second_gateopening_drain_shares_the_single_visit_budget() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "long full-buffer/eof probe assertion"
+)]
 fn full_up_buffer_never_reads_into_zero_room_or_false_eofs() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -3590,6 +3614,10 @@ fn sigterm_shutdown_path_spends_zero_allocations() {
 }
 
 #[cfg(feature = "alloc-witness")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "long alloc-witness shutdown composition body"
+)]
 fn shutdown_alloc_witness_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
@@ -5329,6 +5357,7 @@ fn capacity_refusal_wire_body_is_pinned_plain_text() {
 /// A per-token dispatch would split slot 0's client and upstream arms across
 /// two visits and false-`!live_here` reschedule the upstream arm until a
 /// re-poll re-delivers it; the coalescer must keep both arms in one visit.
+#[expect(clippy::too_many_lines, reason = "long two-pass coalescing assertion")]
 fn two_pass_coalescing_dispatches_interleaved_pair_arms_contiguously() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -5845,6 +5874,10 @@ fn first_dial_failure_records_and_re_decides_to_no_binding_502() {
 /// the harness because destination eligibility (alumina-skhc) excludes loopback
 /// from cache selection, so a hermetic served seam cannot select these
 /// addresses itself.
+#[expect(
+    clippy::too_many_lines,
+    reason = "long retry-loop exhaustion assertion over four dials"
+)]
 fn full_family_alternation_retry_loop_exhausts_at_four_real_dials() {
     use crate::cache::Family;
     use crate::connect::Feed;
@@ -5973,6 +6006,10 @@ fn full_family_alternation_retry_loop_exhausts_at_four_real_dials() {
 /// allocation. Families are chosen per round by the harness because
 /// destination eligibility (alumina-skhc) excludes loopback from cache
 /// selection, so a hermetic served seam cannot select these addresses itself.
+#[expect(
+    clippy::too_many_lines,
+    reason = "long alloc-witness retry seam assertion"
+)]
 fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
     enforcement_witness_thread(|| {
         use crate::cache::Family;

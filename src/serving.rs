@@ -1031,6 +1031,10 @@ impl Serving {
     /// # Errors
     ///
     /// Returns a serve error when a dispatched arm errors.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "long batch dispatch covering stalled-DNS pacing, timeout, and relay handoffs"
+    )]
     fn dispatch_coalesced_batch(
         &mut self,
         tokens: &[(Token, Readiness)],
@@ -1723,6 +1727,10 @@ impl Serving {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "long per-client readable path orchestrating DNS-trigger and relay steps"
+    )]
     fn client_readable(&mut self, index: usize) -> Result<(), ServeError> {
         if self.clamp_on_latch(index) {
             return Ok(());

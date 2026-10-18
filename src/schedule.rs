@@ -459,6 +459,11 @@ impl Schedules {
     ///
     /// Returns `DeadlineOverflow` only when the start-rate timestamp cannot be
     /// represented (at `now == u64::MAX`); no slot is changed.
+    ///
+    /// # Panics
+    ///
+    /// Panics on the fixed `expect` only if the round-robin scan index does not
+    /// fit `u8`, impossible given the bounded slot count.
     pub fn select_due(&mut self, now: u64) -> Result<Option<DueToken>, ScheduleError> {
         let total = self.name_count() * 2;
         for step in 0..total {
