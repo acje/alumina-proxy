@@ -96,6 +96,7 @@ absurd_extreme_comparisons = "warn"
 mistyped_literal_suffixes = "warn"
 non_octal_unix_permissions = "warn"
 nonsensical_open_options = "warn"
+size_of_in_element_count = "warn"
 
 [lib]
 name = "alumina"
