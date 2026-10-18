@@ -472,6 +472,14 @@ fn spawn_responder_first_session_only() -> (SocketAddr, thread::JoinHandle<()>) 
     (addr, handle)
 }
 
+type HeldFinalResponder = (
+    SocketAddr,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::mpsc::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+    thread::JoinHandle<()>,
+);
+
 /// A DNS responder that withholds the final allowlist answer (the query
 /// whose qname is the first distinct name beyond the initially-answered
 /// one) until the coordinator releases it, mirroring the e2e
@@ -481,14 +489,7 @@ fn spawn_responder_first_session_only() -> (SocketAddr, thread::JoinHandle<()>) 
 /// address, a flag raised once the final answer is withheld, the release
 /// sender, a channel acking the held answer's `write_response` having
 /// returned, and the thread handle.
-#[allow(clippy::type_complexity)]
-fn spawn_responder_hold_final() -> (
-    SocketAddr,
-    std::sync::Arc<std::sync::atomic::AtomicBool>,
-    std::sync::mpsc::Sender<()>,
-    std::sync::mpsc::Receiver<()>,
-    thread::JoinHandle<()>,
-) {
+fn spawn_responder_hold_final() -> HeldFinalResponder {
     let listener = StdListener::bind("127.0.0.1:0").expect("bind responder");
     let addr = listener.local_addr().expect("responder addr");
     let held_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
