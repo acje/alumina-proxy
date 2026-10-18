@@ -127,6 +127,17 @@ eq_op = "warn"
 # red flag to stop and report, not suppress). No runtime/alloc/spec change;
 # the attribute is compile-time.
 impossible_comparisons = "warn"
+# SM-10: enable the style/correctness lint — `assign_op_pattern`. Its firing
+# surface is a self-assignment (`a = a op b`) written where an idiomatic
+# compound assignment (`a op= b`) is available — clearer, and single-evaluation
+# of the accumulator on buffer-length/offset accumulation. A clippy 1.99.0
+# positive control (`-F clippy::assign_op_pattern`) on both feature matrices, a
+# toggled plant probe (`x = x + n` fires `assign_op_pattern`), and a self-assign
+# scan of `src/` + `tests/` found zero lint-proven sites on the pinned
+# toolchain (the sole `failed = failed || err` boolean accumulator is outside
+# the lint's `op=` firing surface), so the lint guards future regressions. No
+# runtime/alloc/spec change; the attribute is compile-time.
+assign_op_pattern = "warn"
 
 [lib]
 name = "alumina"
