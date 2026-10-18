@@ -116,6 +116,7 @@ useless_vec = "warn"
 large_const_arrays = "warn"
 manual_memcpy = "warn"
 map_entry = "warn"
+manual_retain = "warn"
 
 [lib]
 name = "alumina"
