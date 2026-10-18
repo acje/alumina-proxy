@@ -13,6 +13,12 @@ description = "Alumina phase-1 foundations: F0 toolchain pin, F1/F2/F4 witness s
 # every site with idiomatic `#[must_use]` (public API) or
 # `#[expect(clippy::must_use_candidate, reason = "...")]` (test-local/private,
 # value legitimately ignored). No runtime impact; attributes are compile-time.
+# SM-03: enable the correctness lint — `unused_io_amount`. Its firing surface
+# is a read/write byte count silently dropped via unwrap/expect-style
+# consumption, which would truncate relayed tunnel data. The serving relay,
+# DNS exchange and nonblocking log-sink paths already advance their offsets by
+# the returned count; the audit found zero sites on the pinned toolchain, so
+# the lint guards future regressions. No suppression expected.
 # SM-04: enable the doc/hygiene cluster — `missing_errors_doc` and
 # `missing_panics_doc` are resolved with idiomatic `# Errors` / `# Panics`
 # rustdoc on public fns; `too_many_lines` is resolved at long test fns and
@@ -84,6 +90,7 @@ redundant_else = "warn"
 if_then_some_else_none = "warn"
 option_if_let_else = "warn"
 missing_const_for_fn = "warn"
+unused_io_amount = "warn"
 
 [lib]
 name = "alumina"
