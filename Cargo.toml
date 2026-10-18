@@ -91,6 +91,7 @@ ineffective_bit_mask = "warn"
 char_indices_as_byte_indices = "warn"
 derive_ord_xor_partial_ord = "warn"
 derived_hash_with_manual_eq = "warn"
+impl_hash_borrow_with_str_and_bytes = "warn"
 
 [lib]
 name = "alumina"
