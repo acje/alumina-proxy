@@ -179,30 +179,30 @@ fn open_relay(serving: &mut Serving, index: usize) {
 #[test]
 fn read_outcome_distinguishes_activity_from_retry_wait_and_failure() {
     use std::io::ErrorKind::{ConnectionReset, Interrupted, NotConnected, Unsupported, WouldBlock};
-    assert_eq!(classify_read(Ok(7)), ReadOutcome::Activity(Activity::Data));
-    assert_eq!(classify_read(Ok(0)), ReadOutcome::Activity(Activity::Eof));
+    assert_eq!(classify_read(&Ok(7)), ReadOutcome::Activity(Activity::Data));
+    assert_eq!(classify_read(&Ok(0)), ReadOutcome::Activity(Activity::Eof));
     assert_eq!(
-        classify_read(Err(io::Error::from(ConnectionReset))),
+        classify_read(&Err(io::Error::from(ConnectionReset))),
         ReadOutcome::Activity(Activity::Reset),
         "an actual connection-reset read is the only error classified as early reset"
     );
     assert_eq!(
-        classify_read(Err(io::Error::from(WouldBlock))),
+        classify_read(&Err(io::Error::from(WouldBlock))),
         ReadOutcome::Wait,
         "WouldBlock/readiness is not activity"
     );
     assert_eq!(
-        classify_read(Err(io::Error::from(Interrupted))),
+        classify_read(&Err(io::Error::from(Interrupted))),
         ReadOutcome::Retry,
         "an interrupted read is retried, never reported as a remote reset"
     );
     assert_eq!(
-        classify_read(Err(io::Error::from(NotConnected))),
+        classify_read(&Err(io::Error::from(NotConnected))),
         ReadOutcome::Failed,
         "a not-yet-connected read is a setup failure, never silent waiting"
     );
     assert_eq!(
-        classify_read(Err(io::Error::from(Unsupported))),
+        classify_read(&Err(io::Error::from(Unsupported))),
         ReadOutcome::Failed,
         "an unknown non-reset failure keeps its identity; it is never labelled early reset"
     );
@@ -319,9 +319,7 @@ fn drive_hello(serving: &mut Serving, wire: &[u8], approved: &str) {
     ws.gate.on_authorized();
     ws.gate.on_upstream_connected();
     ws.gate.on_response_ok();
-    serving
-        .buffer_and_validate(index, &[])
-        .expect("drive hello validation");
+    serving.buffer_and_validate(index, &[]);
 }
 
 #[test]
@@ -684,7 +682,7 @@ fn stale_event_for_a_reused_slot_index_is_dropped() {
         let client =
             mio::net::TcpStream::connect(SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), port))
                 .expect("client connect");
-        serving.admit(client).expect("admit directly");
+        serving.admit(client);
         assert_eq!(serving.storage().occupied(), 1);
         let current = serving.slots[0].slot_gen;
         let stale_gen = current.wrapping_sub(1);
@@ -1132,13 +1130,9 @@ fn relay_pending_tail_then_fresh_bytes_preserve_order_and_count() {
         ws.gate.on_response_ok();
         ws.gate.on_hello_validated(ValidatedHello::test_new(10));
 
-        serving
-            .flush_client_upstream(index)
-            .expect("flush pending tail");
+        serving.flush_client_upstream(index);
         serving.append_client_bytes(index, b"FRESH");
-        serving
-            .flush_client_upstream(index)
-            .expect("flush fresh bytes");
+        serving.flush_client_upstream(index);
 
         let mut got = Vec::new();
         let mut tmp = [0u8; 64];
@@ -1238,9 +1232,7 @@ fn forced_compaction_preserves_absolute_cursor_and_retained_suffix() {
             "the retained suffix must be preserved byte-for-byte across compaction"
         );
 
-        serving
-            .flush_client_upstream(index)
-            .expect("flush compacted buffer");
+        serving.flush_client_upstream(index);
         let expected_len = suffix_before.len() + 5;
         let mut got = Vec::new();
         let mut tmp = [0u8; 65536];
@@ -3078,9 +3070,7 @@ fn stalled_reverse_fin_drains_exact_bytes_then_closes_once() {
         open_relay(serving, index);
         serving.register_client(index).expect("register client");
 
-        serving
-            .observe_down_eof(index)
-            .expect("observe stalled reverse FIN");
+        serving.observe_down_eof(index);
         assert!(
             matches!(
                 serving.slots[index].directional.down,
@@ -3826,8 +3816,8 @@ fn directional_buffer_profile_matches_the_128_mib_mandate() {
     );
 }
 
-fn serve_on_cfg(port: u16, cfg: crate::config::Config) -> Serving {
-    let storage = ServeStorage::boot(&cfg).expect("boot storage");
+fn serve_on_cfg(port: u16, cfg: &crate::config::Config) -> Serving {
+    let storage = ServeStorage::boot(cfg).expect("boot storage");
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), port))
         .expect("bind listener");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
@@ -3850,7 +3840,7 @@ fn with_serving_stack_cfg(
         .name("serving-test".into())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let mut serving = serve_on_cfg(port, cfg);
+            let mut serving = serve_on_cfg(port, &cfg);
             body(&mut serving);
         })
         .expect("spawn serving thread");
@@ -4767,9 +4757,7 @@ fn internal_missing_approval_is_unknown_closes_locally_and_unrelated_flow_surviv
             ws.gate.on_response_ok();
         }
         fabric_relay_slot(serving, 1, b"sub.example.org", b"KEEP-00");
-        serving
-            .buffer_and_validate(0, &[])
-            .expect("complete hello inspection without an approved identity");
+        serving.buffer_and_validate(0, &[]);
         assert!(
             matches!(serving.slots[0].stage, Stage::Idle),
             "the internal-fault slot closes locally"
@@ -4817,9 +4805,7 @@ fn internal_missing_complete_hello_is_unknown_and_never_latches() {
             ws.gate.on_upstream_connected();
             ws.gate.on_response_ok();
         }
-        serving
-            .hello_complete(0)
-            .expect("complete inspection without a hello result");
+        serving.hello_complete(0);
         assert!(
             matches!(serving.slots[0].stage, Stage::Idle),
             "the internal-fault slot closes locally"
@@ -4907,7 +4893,7 @@ fn block_all_latch_closure_spends_zero_allocations() {
     enforcement_witness_thread(|| {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "all", "flare_only", "connection");
-        let mut serving = serve_on_cfg(port, cfg);
+        let mut serving = serve_on_cfg(port, &cfg);
         let mut pending = connect(port);
         pending
             .write_all(b"CONNECT sub.example.org:44")
@@ -4975,7 +4961,7 @@ fn block_domain_current_flow_close_spends_zero_allocations() {
     enforcement_witness_thread(|| {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "connection", "block", "domain");
-        let mut serving = serve_on_cfg(port, cfg);
+        let mut serving = serve_on_cfg(port, &cfg);
         let _trigger_client = connect(port);
         pump(&mut serving, 20);
         let _relay_client = connect(port);
@@ -5024,7 +5010,7 @@ fn early_data_projection_spends_zero_allocations() {
     enforcement_witness_thread(|| {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "connection", "block", "domain");
-        let mut serving = serve_on_cfg(port, cfg);
+        let mut serving = serve_on_cfg(port, &cfg);
         let _client = connect(port);
         pump(&mut serving, 20);
         assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
@@ -5076,7 +5062,7 @@ fn block_all_storm_sweeps_128_slots_alloc_free() {
     enforcement_witness_thread(|| {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "all", "flare_only", "connection");
-        let mut serving = serve_on_cfg(port, cfg);
+        let mut serving = serve_on_cfg(port, &cfg);
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
         for ws in serving.slots.iter_mut() {
             ws.approved = Some(approved);
@@ -6070,7 +6056,7 @@ fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
         .expect("live v6 listener");
         v6.set_nonblocking(true).expect("v6 nonblocking");
         let cfg = config_pair(port, upstream_port);
-        let mut serving = serve_on_cfg(port, cfg);
+        let mut serving = serve_on_cfg(port, &cfg);
         let mut client = connect(port);
         pump(&mut serving, 10);
         assert_eq!(
@@ -6378,7 +6364,7 @@ fn expire_sweep_dialing_expired_seam_records_retry_with_zero_allocations() {
         let port = ephemeral_port();
         let upstream_port = ephemeral_port();
         let cfg = config_pair(port, upstream_port);
-        let mut serving = serve_on_cfg(port, cfg);
+        let mut serving = serve_on_cfg(port, &cfg);
         serving.storage_mut().publish_test_addr(
             0,
             NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])),

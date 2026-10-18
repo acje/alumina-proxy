@@ -522,6 +522,10 @@ impl Worker {
     /// grant flow guarantees that), so a misplaced call can never corrupt a
     /// different slot.
     #[allow(dead_code)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "by value encodes the consume-once linear-handle discipline (the setup handle is consumed, converting it into exactly one established handle)"
+    )]
     pub(crate) fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
         if let SlotState::InSetup { setup_deadline, .. } = self.slots[slot.index()] {
             self.slots[slot.index()] = SlotState::Established { setup_deadline };
@@ -531,12 +535,24 @@ impl Worker {
     /// Frees the granted in-setup slot for reuse, consuming the handle.
     /// Operates on the granted slot only, so closing a setup can never release
     /// another tunnel's pending or established seat (9mq9 H1r).
+    /// Consumes the setup handle so the established tunnel's handle cannot be
+    /// reused to double-free the slot. Callers re-establish via a fresh handle.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "by value encodes the consume-once linear-handle discipline (preventing double release)"
+    )]
     pub(crate) fn release(&mut self, slot: SlotIndex) {
         self.slots[slot.index()] = SlotState::Free;
     }
 
     /// Frees an established tunnel for reuse, consuming the established handle.
     #[allow(dead_code)]
+    /// Consumes the established handle, which must not be re-graduated or
+    /// double-released after a tunnel reset. Callers reap via a fresh handle.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "by value encodes the consume-once linear-handle discipline (preventing reuse after reset)"
+    )]
     pub(crate) fn release_tunnel(&mut self, tunnel: TunnelIndex) {
         self.slots[tunnel.index()] = SlotState::Free;
     }
@@ -564,13 +580,13 @@ impl Worker {
 
     /// The occupied slot index for the granted in-setup handle, for the actual
     /// event processor to key its per-slot socket/parser/buffer state.
-    pub(crate) fn slot_index(&self, slot: &SlotIndex) -> usize {
+    pub(crate) fn slot_index(slot: &SlotIndex) -> usize {
         slot.index()
     }
 
     /// The occupied slot index for the established handle.
     #[allow(dead_code)]
-    pub(crate) fn tunnel_index(&self, tunnel: &TunnelIndex) -> usize {
+    pub(crate) fn tunnel_index(tunnel: &TunnelIndex) -> usize {
         tunnel.index()
     }
 }

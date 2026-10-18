@@ -324,42 +324,26 @@ impl Monitor {
     }
 
     pub(crate) fn facts_any_illegal_overflow(&self) -> bool {
-        self.facts
-            .any_illegal
-            .iter()
-            .any(SaturatingCounter::overflow)
+        self.facts.any_illegal.iter().any(|c| c.overflow())
     }
 
     pub(crate) fn facts_early_data_overflow(&self) -> bool {
-        self.facts
-            .early_data
-            .iter()
-            .any(SaturatingCounter::overflow)
+        self.facts.early_data.iter().any(|c| c.overflow())
     }
 
     pub(crate) fn facts_unknown_overflow(&self) -> bool {
-        self.facts.unknown.iter().any(SaturatingCounter::overflow)
+        self.facts.unknown.iter().any(|c| c.overflow())
     }
 
     pub(crate) fn actions_overflow(&self) -> bool {
-        self.actions
-            .first_slot_block
-            .iter()
-            .any(SaturatingCounter::overflow)
-            || self
-                .actions
-                .domain_block
-                .iter()
-                .any(SaturatingCounter::overflow)
-            || self.actions.flare.iter().any(SaturatingCounter::overflow)
+        self.actions.first_slot_block.iter().any(|c| c.overflow())
+            || self.actions.domain_block.iter().any(|c| c.overflow())
+            || self.actions.flare.iter().any(|c| c.overflow())
             || self.actions.block_all.overflow()
     }
 
     pub(crate) fn refusals_overflow(&self) -> bool {
-        self.refusals
-            .blocked_domain
-            .iter()
-            .any(SaturatingCounter::overflow)
+        self.refusals.blocked_domain.iter().any(|c| c.overflow())
     }
 
     pub(crate) fn report_drops_overflow(&self) -> bool {

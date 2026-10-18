@@ -479,8 +479,8 @@ impl ServeStorage {
 
     /// The fixed slot index underlying an admitted handle, for the actual
     /// event processor to key its per-slot state.
-    pub(crate) fn slot_index(&self, slot: &SlotIndex) -> usize {
-        self.worker.slot_index(slot)
+    pub(crate) fn slot_index(slot: &SlotIndex) -> usize {
+        Worker::slot_index(slot)
     }
 
     /// Counts currently in setup, from the retained worker's slot states.

@@ -315,7 +315,7 @@ pub fn apply_outcome(
     generation: Generation,
     receipt: u64,
     now: u64,
-    outcome: Outcome,
+    outcome: &Outcome,
 ) -> Result<(), DnsError> {
     let name = cache
         .name_index(index)
@@ -328,23 +328,23 @@ pub fn apply_outcome(
         } => {
             let staged = StagedPositive::stage(
                 name,
-                positive_family,
+                *positive_family,
                 generation,
                 bindings.as_slice(),
                 receipt,
-                ttl,
+                *ttl,
             )
             .map_err(DnsError::Cache)?;
             let cacheable = bindings.as_slice().iter().any(|b| b.is_eligible());
             let prepared = schedules
-                .prepare_positive(index, positive_family, receipt, ttl, cacheable, now)
+                .prepare_positive(index, *positive_family, receipt, *ttl, cacheable, now)
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
             cache.publish_positive(&staged).map_err(DnsError::Cache)?;
-            schedules.commit_positive(index, positive_family, prepared);
+            schedules.commit_positive(index, *positive_family, prepared);
         }
         Outcome::NxDomain { soa } => {
             let prepared = schedules
-                .prepare_nxdomain(index, soa, receipt, now)
+                .prepare_nxdomain(index, *soa, receipt, now)
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
             cache.evict_nxdomain(name).map_err(DnsError::Cache)?;
             schedules.commit_nxdomain(index, prepared);
@@ -354,12 +354,12 @@ pub fn apply_outcome(
             soa,
         } => {
             let prepared = schedules
-                .prepare_nodata(index, no_data_family, soa, receipt, now)
+                .prepare_nodata(index, *no_data_family, *soa, receipt, now)
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
             cache
-                .evict_nodata(name, no_data_family)
+                .evict_nodata(name, *no_data_family)
                 .map_err(DnsError::Cache)?;
-            schedules.commit_nodata(index, no_data_family, prepared);
+            schedules.commit_nodata(index, *no_data_family, prepared);
         }
     }
     Ok(())
@@ -1395,7 +1395,7 @@ mod tests {
             generation,
             1000,
             1000,
-            outcome,
+            &outcome,
         )
         .expect("apply");
         let entry = cache.entry(name, Family::A).expect("entry");
@@ -1427,7 +1427,7 @@ mod tests {
             generation,
             1000,
             1000,
-            outcome,
+            &outcome,
         )
         .expect("apply");
         let due = schedules
@@ -1449,7 +1449,7 @@ mod tests {
         let gen_a = cache.entry(name, Family::A).expect("entry").generation();
         let gen_aaaa = cache.entry(name, Family::Aaaa).expect("entry").generation();
         let outcome = Outcome::NxDomain { soa: None };
-        apply_outcome(&mut cache, &mut schedules, 0, gen_a, 1000, 1000, outcome).expect("apply");
+        apply_outcome(&mut cache, &mut schedules, 0, gen_a, 1000, 1000, &outcome).expect("apply");
         assert!(cache.entry(name, Family::A).expect("entry").is_empty());
         assert!(cache.entry(name, Family::Aaaa).expect("entry").is_empty());
         assert_ne!(
@@ -1478,7 +1478,7 @@ mod tests {
             generation,
             1000,
             u64::MAX,
-            outcome,
+            &outcome,
         )
         .expect_err("schedule deadline overflow must refuse the whole outcome");
         assert!(
@@ -1511,7 +1511,7 @@ mod tests {
             a_generation,
             1000,
             1000,
-            Outcome::Positive {
+            &Outcome::Positive {
                 family: Family::A,
                 bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(
                     93, 184, 216, 34,
@@ -1533,7 +1533,7 @@ mod tests {
             seeded_generation,
             1000,
             u64::MAX,
-            Outcome::NxDomain { soa: None },
+            &Outcome::NxDomain { soa: None },
         )
         .expect_err("nxdomain schedule deadline overflow must refuse the whole outcome");
         assert!(

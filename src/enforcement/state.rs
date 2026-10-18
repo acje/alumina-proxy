@@ -24,11 +24,11 @@ impl SaturatingCounter {
         }
     }
 
-    pub const fn value(&self) -> u32 {
+    pub const fn value(self) -> u32 {
         self.value
     }
 
-    pub const fn overflow(&self) -> bool {
+    pub const fn overflow(self) -> bool {
         self.overflow
     }
 

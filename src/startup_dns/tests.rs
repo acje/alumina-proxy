@@ -191,7 +191,7 @@ fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
                         let Some(q) = read_query(&mut sock) else {
                             break;
                         };
-                        let msg = positive_a_message(&q, ttl, &octets);
+                        let msg = positive_a_message(&q, ttl, octets);
                         let mut out = Vec::with_capacity(msg.len() + 2);
                         out.extend_from_slice(
                             &u16::try_from(msg.len())
@@ -260,7 +260,7 @@ fn read_query(sock: &mut TcpStream) -> Option<Vec<u8>> {
     Some(q)
 }
 
-fn positive_a_message(q: &[u8], ttl: u32, octets: &[u8; 4]) -> Vec<u8> {
+fn positive_a_message(q: &[u8], ttl: u32, octets: [u8; 4]) -> Vec<u8> {
     let tid = u16::from_be_bytes([q[0], q[1]]);
     let qname = &q[12..q.len() - 4];
     let mut msg = Vec::new();
@@ -271,7 +271,7 @@ fn positive_a_message(q: &[u8], ttl: u32, octets: &[u8; 4]) -> Vec<u8> {
     msg.extend_from_slice(&0u16.to_be_bytes());
     msg.extend_from_slice(&0u16.to_be_bytes());
     msg.extend_from_slice(&question_from(q));
-    msg.extend_from_slice(&record(qname, 1, ttl, octets));
+    msg.extend_from_slice(&record(qname, 1, ttl, &octets));
     msg
 }
 

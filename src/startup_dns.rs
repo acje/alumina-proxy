@@ -626,7 +626,7 @@ impl StartupDns {
         })
     }
 
-    fn fresh_tid(&mut self) -> Result<u16, StartupDnsError> {
+    fn fresh_tid() -> Result<u16, StartupDnsError> {
         let mut bytes = [0u8; 2];
         getrandom::fill(&mut bytes).map_err(|_| StartupDnsError::Entropy)?;
         Ok(u16::from_be_bytes(bytes))
@@ -1295,7 +1295,7 @@ impl StartupDns {
                     generation,
                     receipt,
                     self.now_u64(),
-                    outcome,
+                    &outcome,
                 )?;
                 return Ok(RecvStep::Published);
             } else {
@@ -1601,7 +1601,7 @@ impl StartupDns {
         } else {
             None
         };
-        let tid = self.fresh_tid()?;
+        let tid = Self::fresh_tid()?;
         let qlen = dns::build_query(fqdn, family, tid, &mut self.query_buf[2..])?;
         let total = qlen + 2;
         let wire_len = u16::try_from(qlen).expect("dns query length fits u16 prefix");

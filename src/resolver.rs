@@ -258,7 +258,7 @@ impl<R: Read> Scanner<R> {
         }
     }
 
-    fn unreadable(&self, source: io::Error) -> ResolverError {
+    fn unreadable(&self, source: &io::Error) -> ResolverError {
         ResolverError::Unreadable {
             path: self
                 .source_path
@@ -276,7 +276,7 @@ impl<R: Read> Scanner<R> {
             match self.src.read(&mut self.buf) {
                 Ok(n) => break n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(self.unreadable(e)),
+                Err(e) => return Err(self.unreadable(&e)),
             }
         };
         self.len = n;

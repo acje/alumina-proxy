@@ -206,8 +206,8 @@ enum ReadOutcome {
     Failed,
 }
 
-fn classify_read(result: io::Result<usize>) -> ReadOutcome {
-    match result {
+fn classify_read(result: &io::Result<usize>) -> ReadOutcome {
+    match *result {
         Ok(0) => ReadOutcome::Activity(Activity::Eof),
         Ok(_) => ReadOutcome::Activity(Activity::Data),
         Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => ReadOutcome::Wait,
@@ -301,7 +301,7 @@ impl BatchProgress {
     /// would carry cumulative work past [`TIMER_RECHECK_EVERY`]. Checked
     /// *before* dispatching, so the sweep never lands after work has already
     /// crossed 256.
-    fn due(&self) -> bool {
+    fn due(self) -> bool {
         self.work_since_recheck as usize + 1 + VISIT_OPS as usize > TIMER_RECHECK_EVERY
     }
 
@@ -1499,7 +1499,7 @@ impl Serving {
             match listener.accept() {
                 Ok((stream, _addr)) => {
                     self.progress.accrue(1);
-                    self.admit(stream)?;
+                    self.admit(stream);
                 }
                 Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
                     self.progress.accrue(1);
@@ -1514,7 +1514,7 @@ impl Serving {
         }
     }
 
-    fn admit(&mut self, stream: TcpStream) -> Result<(), ServeError> {
+    fn admit(&mut self, stream: TcpStream) {
         let now = Instant::now();
         match self.storage.accept(now) {
             Err(_) => {
@@ -1526,10 +1526,9 @@ impl Serving {
                     .logs_mut()
                     .reject(secs, RejectReason::Capacity, client, None);
                 self.note_occupancy(now);
-                Ok(())
             }
             Ok(slot) => {
-                let index = self.storage.slot_index(&slot);
+                let index = ServeStorage::slot_index(&slot);
                 let ws = &mut self.slots[index];
                 ws.slot_gen = ws.slot_gen.wrapping_add(1);
                 ws.capture = SlotCapture::fresh(index, ws.slot_gen);
@@ -1540,7 +1539,6 @@ impl Serving {
                     self.close_slot(index);
                 }
                 self.note_occupancy(now);
-                Ok(())
             }
         }
     }
@@ -1758,14 +1756,14 @@ impl Serving {
                         self.refuse(index, Refusal::BadRequest);
                     }
                     Stage::ValidatingHello => {
-                        self.reject_hello(index, HelloRejectReason::Profile)?;
+                        self.reject_hello(index, HelloRejectReason::Profile);
                     }
                     _ => {}
                 }
                 return Ok(());
             }
             if stage == Stage::Relay && self.slots[index].fwd < self.slots[index].buf_len {
-                self.flush_client_upstream(index)?;
+                self.flush_client_upstream(index);
                 if self.slots[index].fwd < self.slots[index].buf_len {
                     return Ok(());
                 }
@@ -1790,7 +1788,8 @@ impl Serving {
                 Ok(0) => {
                     self.note_op(index, 0);
                     if self.slots[index].stage == Stage::Relay {
-                        return self.observe_up_eof(index);
+                        self.observe_up_eof(index);
+                        return Ok(());
                     }
                     self.close_slot(index);
                     return Ok(());
@@ -1810,8 +1809,8 @@ impl Serving {
             self.slots[index].buf_len += n;
             match self.slots[index].stage {
                 Stage::ReadingConnect => self.buffer_and_parse(index, &[])?,
-                Stage::ValidatingHello => self.buffer_and_validate(index, &[])?,
-                Stage::Relay => self.flush_client_upstream(index)?,
+                Stage::ValidatingHello => self.buffer_and_validate(index, &[]),
+                Stage::Relay => self.flush_client_upstream(index),
                 _ => return Ok(()),
             }
             if self.visit_exhausted(index) {
@@ -2134,9 +2133,12 @@ impl Serving {
                     Ok(())
                 }
             },
-            Stage::WritingHello => self.flush_client_upstream(index),
+            Stage::WritingHello => {
+                self.flush_client_upstream(index);
+                Ok(())
+            }
             Stage::Relay => {
-                self.flush_client_upstream(index)?;
+                self.flush_client_upstream(index);
                 self.finish_drain(index);
                 self.maybe_close_drained(index);
                 if self.slots[index].stage == Stage::Relay
@@ -2190,7 +2192,7 @@ impl Serving {
                 self.reschedule(index);
                 return Ok(());
             }
-            let outcome = classify_read(self.read_upstream(index, &mut scratch));
+            let outcome = classify_read(&self.read_upstream(index, &mut scratch));
             self.note_op(index, 0);
             match outcome {
                 ReadOutcome::Activity(activity) => {
@@ -2256,7 +2258,7 @@ impl Serving {
         }
     }
 
-    fn buffer_and_validate(&mut self, index: usize, bytes: &[u8]) -> Result<(), ServeError> {
+    fn buffer_and_validate(&mut self, index: usize, bytes: &[u8]) {
         if !bytes.is_empty() {
             self.append_client_bytes(index, bytes);
         }
@@ -2273,20 +2275,22 @@ impl Serving {
             }
         };
         match inspection {
-            Err(err) => self.reject_hello(index, HelloRejectReason::from_ch_error(&err)),
-            Ok(Inspect::NeedMore) => Ok(()),
+            Err(err) => {
+                self.reject_hello(index, HelloRejectReason::from_ch_error(&err));
+            }
+            Ok(Inspect::NeedMore) => {}
             Ok(Inspect::Complete { consumed }) => {
                 self.slots[index].hello_consumed = consumed;
-                self.hello_complete(index)
+                self.hello_complete(index);
             }
         }
     }
 
-    fn hello_complete(&mut self, index: usize) -> Result<(), ServeError> {
+    fn hello_complete(&mut self, index: usize) {
         let Some(approved) = self.slots[index].approved else {
             self.project_tripwire(index, Violation::MissingParseResult);
             self.close_slot(index);
-            return Ok(());
+            return;
         };
         let verdict = self.slots[index]
             .inspector
@@ -2295,12 +2299,13 @@ impl Serving {
         let accepted = match verdict {
             Some(Ok(accepted)) => accepted,
             Some(Err(err)) => {
-                return self.reject_hello(index, HelloRejectReason::from_ch_error(&err));
+                self.reject_hello(index, HelloRejectReason::from_ch_error(&err));
+                return;
             }
             None => {
                 self.project_tripwire(index, Violation::MissingParseResult);
                 self.close_slot(index);
-                return Ok(());
+                return;
             }
         };
         let ws = &mut self.slots[index];
@@ -2310,7 +2315,7 @@ impl Serving {
             .on_hello_validated(ValidatedHello::new(accepted, end));
         ws.stage = Stage::WritingHello;
         ws.fwd = ws.head_len - ws.buf_base;
-        self.flush_client_upstream(index)
+        self.flush_client_upstream(index);
     }
 
     /// Entry into the hello-inspection stage: inspect already-buffered bytes
@@ -2319,7 +2324,7 @@ impl Serving {
     /// pipelined before the CONNECT response completes is validated without
     /// waiting for a fresh readable edge.
     fn enter_validating_hello(&mut self, index: usize) -> Result<(), ServeError> {
-        self.buffer_and_validate(index, &[])?;
+        self.buffer_and_validate(index, &[]);
         if self.slots[index].stage == Stage::ValidatingHello {
             self.client_readable(index)?;
         }
@@ -2382,11 +2387,11 @@ impl Serving {
         (written, failed)
     }
 
-    fn flush_client_upstream(&mut self, index: usize) -> Result<(), ServeError> {
+    fn flush_client_upstream(&mut self, index: usize) {
         let (written, failed) = self.drain_to_upstream(index);
         if failed {
             self.close_slot(index);
-            return Ok(());
+            return;
         }
         let was_open = self.slots[index].gate.is_open();
         if written == 0 || was_open {
@@ -2394,7 +2399,7 @@ impl Serving {
             if self.visit_exhausted(index) {
                 self.reschedule(index);
             }
-            return Ok(());
+            return;
         }
         let outcome = self.slots[index].gate.upstream_write(written);
         if matches!(
@@ -2414,7 +2419,7 @@ impl Serving {
             let (written2, failed2) = self.drain_to_upstream(index);
             if failed2 {
                 self.close_slot(index);
-                return Ok(());
+                return;
             }
             if written2 > 0 {
                 self.slots[index].gate.upstream_write(written2);
@@ -2424,7 +2429,6 @@ impl Serving {
         if self.visit_exhausted(index) {
             self.reschedule(index);
         }
-        Ok(())
     }
 
     fn flush_down(&mut self, index: usize) {
@@ -2505,7 +2509,8 @@ impl Serving {
             let n = match result {
                 Ok(0) => {
                     self.note_op(index, 0);
-                    return self.observe_down_eof(index);
+                    self.observe_down_eof(index);
+                    return Ok(());
                 }
                 Ok(n) => n,
                 Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -2580,7 +2585,7 @@ impl Serving {
     /// drain deadline. The accepted up bytes already in `buf` keep draining to
     /// the upstream; the upstream write half-close happens only once that drain
     /// finishes ([`Self::finish_drain`]). Never destroys the slot (RF-003).
-    fn observe_up_eof(&mut self, index: usize) -> Result<(), ServeError> {
+    fn observe_up_eof(&mut self, index: usize) {
         {
             let ws = &mut self.slots[index];
             if matches!(ws.directional.up, SideEof::Open) {
@@ -2592,13 +2597,12 @@ impl Serving {
         }
         self.finish_drain(index);
         self.maybe_close_drained(index);
-        Ok(())
     }
 
     /// Record the upstream's orderly EOF on the down flow (mirror of
     /// [`Self::observe_up_eof`]); the down pending drains to the client and the
     /// client write half-close happens once that drain finishes.
-    fn observe_down_eof(&mut self, index: usize) -> Result<(), ServeError> {
+    fn observe_down_eof(&mut self, index: usize) {
         {
             let ws = &mut self.slots[index];
             if matches!(ws.directional.down, SideEof::Open) {
@@ -2610,7 +2614,6 @@ impl Serving {
         }
         self.finish_drain(index);
         self.maybe_close_drained(index);
-        Ok(())
     }
 
     /// Send a directional write half-close once that direction's accepted bytes

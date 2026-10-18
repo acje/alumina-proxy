@@ -618,7 +618,7 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
             b"x",
             u32::try_from(i).expect("capture detail index fits u32"),
             b"t",
-        ) || !push_fact_token(&mut w, &cap.detail.fact)
+        ) || !push_fact_token(&mut w, cap.detail.fact)
         {
             return None;
         }
@@ -627,7 +627,7 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
             b"x",
             u32::try_from(i).expect("capture detail index fits u32"),
             b"a",
-        ) || !push_effect_token(&mut w, &cap.detail.effect)
+        ) || !push_effect_token(&mut w, cap.detail.effect)
         {
             return None;
         }
@@ -690,8 +690,8 @@ fn push_indexed_token_prefix(w: &mut Entry<'_>, key: &[u8], index: u32, suffix: 
     w.push(suffix) && w.push(b"=")
 }
 
-fn push_fact_token(w: &mut Entry<'_>, fact: &CapturedFact) -> bool {
-    match *fact {
+fn push_fact_token(w: &mut Entry<'_>, fact: CapturedFact) -> bool {
+    match fact {
         CapturedFact::AnyIllegal(cause) => {
             if !w.push(b"a") {
                 return false;
@@ -713,8 +713,8 @@ fn push_fact_token(w: &mut Entry<'_>, fact: &CapturedFact) -> bool {
     }
 }
 
-fn push_effect_token(w: &mut Entry<'_>, effect: &Effect) -> bool {
-    match *effect {
+fn push_effect_token(w: &mut Entry<'_>, effect: Effect) -> bool {
+    match effect {
         Effect::BaselineOnly => w.push(b"none"),
         Effect::FlareOnly { scope } => push_scope_token(w, b"flr", scope),
         Effect::Block { scope } => push_scope_token(w, b"blk", scope),

@@ -622,14 +622,14 @@ pub fn parse_config_document(doc: &str) -> Result<Config, ConfigError> {
             span: None,
         });
     };
-    from_table(table)
+    from_table(&table)
 }
 
-fn from_table(table: toml::Table) -> Result<Config, ConfigError> {
-    let allowlist_names = require_string_list(&table, "allowlist")?;
-    let listen = require_string(&table, "listen")?;
-    let allowance = require_integer(&table, "startup_unresolved_allowance")?;
-    for (key, value) in &table {
+fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
+    let allowlist_names = require_string_list(table, "allowlist")?;
+    let listen = require_string(table, "listen")?;
+    let allowance = require_integer(table, "startup_unresolved_allowance")?;
+    for (key, value) in table {
         if !matches!(
             key.as_str(),
             "allowlist" | "listen" | "startup_unresolved_allowance" | "any_illegal" | "actions"

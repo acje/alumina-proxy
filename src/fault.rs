@@ -73,6 +73,7 @@ impl Script {
         }
     }
 
+    #[must_use]
     pub fn at(mut self, point: impl Into<String>, outcomes: Vec<Outcome>) -> Self {
         self.points.insert(point.into(), outcomes);
         self

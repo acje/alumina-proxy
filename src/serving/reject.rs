@@ -4,8 +4,8 @@ use crate::client_hello::HelloRejectReason;
 use crate::enforcement::policy::AnyIllegalCause;
 use crate::log::RejectReason;
 
-use super::ServeError;
-use super::{Refusal, Serving, Stage};
+use super::Refusal;
+use super::{Serving, Stage};
 
 impl Serving {
     pub(super) fn refuse(&mut self, index: usize, refusal: Refusal) {
@@ -43,16 +43,11 @@ impl Serving {
             .reject(secs, reason, client, hostname);
     }
 
-    pub(super) fn reject_hello(
-        &mut self,
-        index: usize,
-        reason: HelloRejectReason,
-    ) -> Result<(), ServeError> {
+    pub(super) fn reject_hello(&mut self, index: usize, reason: HelloRejectReason) {
         self.slots[index].gate.on_hello_rejected();
         self.any_illegal(index, AnyIllegalCause::TlsProfile(reason));
         self.emit_reject(index, RejectReason::TlsValidation);
         self.close_slot(index);
-        Ok(())
     }
 
     pub(super) fn close_slot(&mut self, index: usize) {
