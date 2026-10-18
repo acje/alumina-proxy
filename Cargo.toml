@@ -82,6 +82,7 @@ suspicious_assignment_formatting = "warn"
 match_overlapping_arm = "warn"
 mut_from_ref = "warn"
 not_unsafe_ptr_arg_deref = "warn"
+cast_slice_from_raw_parts = "warn"
 
 [lib]
 name = "alumina"
