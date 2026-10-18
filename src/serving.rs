@@ -696,11 +696,25 @@ pub struct Serving {
     /// Work-since-recheck counter (MEDIUM-2): the timer/DNS recheck rejoins
     /// the turn before the next visit would push the count past 256.
     progress: BatchProgress,
+    /// Cached earliest live deadline across the four sources [`Self::expire_sweep`]
+    /// enforces (setup, connect, idle, drain), recomputed fresh in
+    /// [`Self::poll_timeout`] from the slot-scan it already performs so the
+    /// per-poll O(512) sweep runs only once a deadline has actually elapsed
+    /// (perf-mission C16). `None` when no slot holds a deadline, so the
+    /// [`Self::run_once`] gate skips the sweep entirely for deadline-free
+    /// serving; the recheck backstop in [`Self::recheck_now`] still enforces
+    /// every deadline regardless of this field.
+    next_expiry: Option<Instant>,
     /// Test-only high-water of `work_since_recheck` observed at a timer/DNS
     /// recheck boundary, so owner-turn fixtures assert the canonical ≤256
     /// bound actually fires between hot visits rather than being inferred.
     #[cfg(test)]
     pub(crate) max_work_since_recheck: u16,
+    /// Test-only execution count of [`Self::expire_sweep`], so fixtures may
+    /// assert the C16 early-exit gate actually skips the O(512) deadline sweep
+    /// while every live deadline is still in the future.
+    #[cfg(test)]
+    pub(crate) sweeps: u64,
     shutdown: Shutdown,
     signal_rx: Option<UnixStream>,
     _signal_registration: Option<signal_hook::SigId>,
@@ -772,8 +786,11 @@ impl Serving {
             batch_gen: 0,
             in_batch: false,
             progress: BatchProgress::default(),
+            next_expiry: None,
             #[cfg(test)]
             max_work_since_recheck: 0,
+            #[cfg(test)]
+            sweeps: 0,
             shutdown: Shutdown::Serving,
             signal_rx: Some(signal_rx),
             _signal_registration: Some(signal_registration),
@@ -990,7 +1007,9 @@ impl Serving {
         {
             self.on_sigterm()?;
         }
-        self.expire_sweep(now);
+        if self.next_expiry.is_some_and(|deadline| now >= deadline) {
+            self.expire_sweep(now);
+        }
         self.batch_gen = self.batch_gen.wrapping_add(1);
         self.in_batch = true;
         let mut items = [(Token(0), Readiness::default()); POLL_EVENTS_CAP];
@@ -2671,7 +2690,7 @@ impl Serving {
         }
     }
 
-    fn poll_timeout(&self) -> Option<Duration> {
+    fn poll_timeout(&mut self) -> Option<Duration> {
         let mut earliest: Option<Instant> = None;
         for i in 0..self.slots.len() {
             let mut candidate = self.slots[i]
@@ -2696,6 +2715,7 @@ impl Serving {
                 earliest = Some(c);
             }
         }
+        self.next_expiry = earliest;
         if let Some(dns) = self.storage.dns().exchange_deadline()
             && earliest.is_none_or(|e| dns < e)
         {
@@ -2751,6 +2771,10 @@ impl Serving {
     /// established-tunnel idle deadline, and the once-started FIN-drain
     /// deadline. Never rewrites or splices a begun response (xz3f N5).
     fn expire_sweep(&mut self, now: Instant) {
+        #[cfg(test)]
+        {
+            self.sweeps = self.sweeps.saturating_add(1);
+        }
         for i in 0..self.slots.len() {
             let setup_expired = self.slots[i]
                 .handle

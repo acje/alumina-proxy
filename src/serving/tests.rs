@@ -676,6 +676,57 @@ fn setup_deadline_frees_silent_seats_with_504() {
 }
 
 #[test]
+fn future_deadline_only_skips_expire_sweep() {
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        let client = connect(port);
+        pump(serving, 1);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted into one setup seat"
+        );
+        assert_eq!(
+            serving.sweeps, 0,
+            "C16: the O(512) expiry sweep must be skipped while the only live deadline (setup +10 s) is still in the future"
+        );
+        pump(serving, 1);
+        assert_eq!(
+            serving.sweeps, 0,
+            "C16: the sweep must stay skipped with a live, unexpired deadline"
+        );
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the future-dated setup must still hold its seat"
+        );
+        drop(client);
+    });
+}
+
+#[test]
+fn expired_idle_deadline_still_closes_slot_through_gate() {
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        let client = connect(port);
+        pump(serving, 1);
+        assert_eq!(serving.storage().occupied(), 1, "one admitted setup");
+        serving.slots[0].idle_deadline = Some(Instant::now() - Duration::from_millis(1));
+        pump(serving, 1);
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "a deadline already elapsed must still be enforced by the C16-gated sweep"
+        );
+        assert!(
+            serving.sweeps >= 1,
+            "the C16 early-exit gate must still fire the sweep once the deadline has elapsed"
+        );
+        drop(client);
+    });
+}
+
+#[test]
 fn stale_event_for_a_reused_slot_index_is_dropped() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
