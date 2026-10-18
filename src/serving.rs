@@ -2021,7 +2021,7 @@ impl Serving {
         let now = Instant::now();
         let phase = self.storage.decide(slot, &request, now);
         match phase {
-            Err(_) => {
+            Err(_) | Ok(ConnectPhase::CandidatesExhausted) => {
                 self.refuse(index, Refusal::DialFailed);
                 Ok(())
             }
@@ -2032,10 +2032,6 @@ impl Serving {
             }
             Ok(ConnectPhase::NoBinding) => {
                 self.refuse(index, Refusal::NoResolvedAddresses);
-                Ok(())
-            }
-            Ok(ConnectPhase::CandidatesExhausted) => {
-                self.refuse(index, Refusal::DialFailed);
                 Ok(())
             }
             Ok(ConnectPhase::DeadlineExhausted) => {

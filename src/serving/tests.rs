@@ -1144,9 +1144,8 @@ fn relay_pending_tail_then_fresh_bytes_preserve_order_and_count() {
         let mut tmp = [0u8; 64];
         while got.len() < 21 {
             match sink_stream.read(&mut tmp) {
-                Ok(0) => break,
+                Ok(0) | Err(_) => break,
                 Ok(n) => got.extend_from_slice(&tmp[..n]),
-                Err(_) => break,
             }
         }
         assert_eq!(
@@ -3447,9 +3446,8 @@ fn expiry_never_reinjects_after_a_begun_response() {
             }
             let mut tmp = [0u8; 256];
             match client.read(&mut tmp) {
-                Ok(0) => break,
+                Ok(0) | Err(_) => break,
                 Ok(n) => tail.extend_from_slice(&tmp[..n]),
-                Err(_) => break,
             }
         }
         assert!(

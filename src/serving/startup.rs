@@ -76,8 +76,7 @@ impl Serving {
             }
             if let Some((ordinal, ex_family)) = self.storage.dns().active_identity() {
                 match self.storage.advance_dns()? {
-                    None => {}
-                    Some(TurnResult::Pending) => {}
+                    None | Some(TurnResult::Pending) => {}
                     Some(TurnResult::Published) => {
                         tallies.exchanges += 1;
                         let kind = self

@@ -1181,16 +1181,10 @@ impl LogStore {
                 (Kind::QueueHigh, Level::Error, used, cap)
             }
             (Dimension::Queue, Edge::Low { used, cap }) => (Kind::QueueLow, Level::Info, used, cap),
-            (Dimension::Slots, Edge::High { used, cap }) => {
+            (Dimension::Slots | Dimension::Setups, Edge::High { used, cap }) => {
                 (Kind::CapacityHigh, Level::Error, used, cap)
             }
-            (Dimension::Slots, Edge::Low { used, cap }) => {
-                (Kind::CapacityLow, Level::Info, used, cap)
-            }
-            (Dimension::Setups, Edge::High { used, cap }) => {
-                (Kind::CapacityHigh, Level::Error, used, cap)
-            }
-            (Dimension::Setups, Edge::Low { used, cap }) => {
+            (Dimension::Slots | Dimension::Setups, Edge::Low { used, cap }) => {
                 (Kind::CapacityLow, Level::Info, used, cap)
             }
         };

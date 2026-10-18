@@ -118,8 +118,7 @@ impl Enforcement {
                             Scope::Connection => {}
                         }
                     }
-                    Effect::Unknown { .. } => {}
-                    Effect::BaselineOnly => {}
+                    Effect::Unknown { .. } | Effect::BaselineOnly => {}
                 }
             }
             Violation::EvidenceInsufficient => {

@@ -109,10 +109,7 @@ fn respond_for(query: &[u8], step: &Step) -> Option<Vec<u8>> {
     msg.extend_from_slice(&tid.to_be_bytes());
     let (rcode, an, ns, answers, authority): (u16, u16, u16, Vec<Vec<u8>>, Vec<Vec<u8>>) =
         match step {
-            Step::PositiveA { ttl, octets } => {
-                (0, 1, 0, vec![record(qname, 1, *ttl, octets)], vec![])
-            }
-            Step::PositiveAMismatchedTid { ttl, octets } => {
+            Step::PositiveA { ttl, octets } | Step::PositiveAMismatchedTid { ttl, octets } => {
                 (0, 1, 0, vec![record(qname, 1, *ttl, octets)], vec![])
             }
             Step::PositiveAaaa { ttl, octets } => {

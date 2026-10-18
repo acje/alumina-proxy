@@ -722,9 +722,8 @@ pub(crate) fn select_peer(
         }
         (Some(a_peer), Some(aaaa_peer)) => {
             let (addr, family) = match previous {
-                None => a_peer,
+                None | Some(Family::Aaaa) => a_peer,
                 Some(Family::A) => aaaa_peer,
-                Some(Family::Aaaa) => a_peer,
             };
             Ok(PeerDecision::Peer { addr, family })
         }
