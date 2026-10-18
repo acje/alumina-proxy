@@ -89,6 +89,7 @@ out_of_bounds_indexing = "warn"
 bad_bit_mask = "warn"
 ineffective_bit_mask = "warn"
 char_indices_as_byte_indices = "warn"
+derive_ord_xor_partial_ord = "warn"
 
 [lib]
 name = "alumina"
