@@ -52,11 +52,11 @@ fn config_valid_minimal_parses_without_coercion() {
     let cfg = config::parse_config_document(VALID_CONFIG).expect("valid config");
     assert_eq!(cfg.allowlist().len(), 2);
     assert_eq!(
-        cfg.allowlist().get(0).map(|f| f.as_str()),
+        cfg.allowlist().get(0).map(alumina::config::Fqdn::as_str),
         Some("example.com")
     );
     assert_eq!(
-        cfg.allowlist().get(1).map(|f| f.as_str()),
+        cfg.allowlist().get(1).map(alumina::config::Fqdn::as_str),
         Some("sub.example.org")
     );
     assert_eq!(cfg.listen().port(), 8080);

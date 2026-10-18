@@ -941,7 +941,7 @@ mod tests {
     fn scheduler_paths_do_not_allocate_or_deallocate() {
         let (_, control) = run_phase(Phase::BackgroundRefresh, || 0usize);
         assert!(control.all_zero(), "baseline should be quiet: {control:?}");
-        let (_, failure_path) = run_phase(Phase::BackgroundRefresh, || {
+        let ((), failure_path) = run_phase(Phase::BackgroundRefresh, || {
             let mut schedules = Schedules::new(2).unwrap();
             for name in 0..2 {
                 schedules.overwrite_due_at(name, Family::A, 0).unwrap();
@@ -959,7 +959,7 @@ mod tests {
             failure_path.all_zero(),
             "failure path allocated: {failure_path:?}"
         );
-        let (_, success_path) = run_phase(Phase::BackgroundRefresh, || {
+        let ((), success_path) = run_phase(Phase::BackgroundRefresh, || {
             let mut schedules = Schedules::new(1).unwrap();
             schedules
                 .note_positive(0, Family::A, 1000, 60, true, 0)

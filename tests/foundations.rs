@@ -9,7 +9,7 @@ use alumina::fuzz::{
 #[test]
 #[cfg(feature = "alloc-witness")]
 fn alloc_witness_positive_and_negative_attribution() {
-    let (_, counted) = alloc::run_phase(Phase::Serving, || {
+    let ((), counted) = alloc::run_phase(Phase::Serving, || {
         let bytes = Box::new([1u8; 512]);
         std::hint::black_box(&bytes);
         drop(bytes);
@@ -32,7 +32,7 @@ fn alloc_witness_positive_and_negative_attribution() {
     let stray = vec![2u8; 128];
     std::hint::black_box(&stray);
 
-    let (_, unattributed) = alloc::run_phase(Phase::StartupDns, || {
+    let ((), unattributed) = alloc::run_phase(Phase::StartupDns, || {
         let x: u64 = 0;
         std::hint::black_box(x);
     });
@@ -46,7 +46,7 @@ fn alloc_witness_positive_and_negative_attribution() {
 #[test]
 #[cfg(feature = "alloc-witness")]
 fn alloc_witness_catches_realloc_in_named_phase() {
-    let (_, counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
+    let ((), counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
         let mut v = Vec::with_capacity(1);
         for i in 0u64..64 {
             v.push(i);
@@ -81,7 +81,7 @@ fn alloc_witness_attribution_is_isolated_across_threads() {
         worker.join().expect("worker joined");
     }
     for phase in Phase::ALL {
-        let (_, counts) = alloc::run_phase(phase, || {
+        let ((), counts) = alloc::run_phase(phase, || {
             let a: u64 = 0;
             std::hint::black_box(a);
         });
@@ -96,7 +96,7 @@ fn alloc_witness_attribution_is_isolated_across_threads() {
 #[cfg(feature = "alloc-witness")]
 fn empty_loop_green_across_all_named_phases() {
     for phase in Phase::ALL {
-        let (_, counts) = alloc::run_phase(phase, || {
+        let ((), counts) = alloc::run_phase(phase, || {
             let mut acc = 0u64;
             for i in 0..1000_u64 {
                 acc = acc.wrapping_add(i);

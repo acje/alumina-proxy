@@ -938,9 +938,9 @@ mod tests {
     #[test]
     fn storage_cache_secs_is_mounted_on_the_dns_epoch() {
         use std::time::Instant;
+        const DNS_EPOCH: u64 = 1_700_000_000;
         let mut storage = booted(1, 0);
         let origin = Instant::now();
-        const DNS_EPOCH: u64 = 1_700_000_000;
         storage.mount_clock(origin, DNS_EPOCH);
         let later = origin + Duration::from_secs(7);
         assert_eq!(
@@ -960,8 +960,8 @@ mod tests {
         use crate::connect::{ConnectParser, Feed};
         use crate::worker::ConnectPhase;
         use std::time::Instant;
-        let mut storage = booted(1, 0);
         const DNS_EPOCH: u64 = 1_700_000_000;
+        let mut storage = booted(1, 0);
         storage.mount_clock(Instant::now(), DNS_EPOCH);
         publish_a(&mut storage.cache, 0, DNS_EPOCH + 1, 1);
         let t0 = Instant::now();
@@ -1009,8 +1009,8 @@ mod tests {
         use crate::enforcement::action::FirstSlot;
         use crate::enforcement::policy::{AnyIllegalCause, Violation};
         use std::time::Instant;
-        let mut storage = booted(1, 0);
         const DNS_EPOCH: u64 = 1_700_000_000;
+        let mut storage = booted(1, 0);
         let origin = Instant::now();
         storage.mount_clock(origin, DNS_EPOCH);
 
@@ -1089,11 +1089,11 @@ mod tests {
         use crate::alloc::{Phase, run_phase};
         use crate::enforcement::action::FirstSlot;
         use crate::enforcement::policy::{AnyIllegalCause, Violation};
-        let mut storage = booted(1, 0);
         const DNS_EPOCH: u64 = 1_700_000_000;
+        let mut storage = booted(1, 0);
         storage.mount_clock(Instant::now(), DNS_EPOCH);
         let cause = AnyIllegalCause::HostNotAllowlisted;
-        let (_, counts) = run_phase(Phase::Serving, || {
+        let ((), counts) = run_phase(Phase::Serving, || {
             for _ in 0..256 {
                 storage
                     .enforcement_mut()
@@ -1104,7 +1104,7 @@ mod tests {
             counts.all_zero(),
             "the detection fold (facts + first-slot action) allocates nothing: {counts:?}"
         );
-        let (_, counts) = run_phase(Phase::Logging, || {
+        let ((), counts) = run_phase(Phase::Logging, || {
             for _ in 0..4 {
                 let now = Instant::now();
                 storage.report_monitor_if_due(now, false);
@@ -1124,8 +1124,8 @@ mod tests {
         use crate::enforcement::action::Scope;
         use crate::enforcement::monitor::{CapturedDetail, CapturedFact, SlotCapture};
         use crate::enforcement::policy::{AnyIllegalCause, Effect};
-        let mut storage = booted(1, 0);
         const DNS_EPOCH: u64 = 1_700_000_000;
+        let mut storage = booted(1, 0);
         storage.mount_clock(Instant::now(), DNS_EPOCH);
         let cause = AnyIllegalCause::HostNotAllowlisted;
         let effect = Effect::Block {
@@ -1148,7 +1148,7 @@ mod tests {
             crate::enforcement::monitor::CAPTURE_DETAIL_LEN,
             "the witness populates a nonempty correlated-detail ring"
         );
-        let (_, counts) = run_phase(Phase::Logging, || {
+        let ((), counts) = run_phase(Phase::Logging, || {
             for _ in 0..4 {
                 let now = Instant::now();
                 storage.report_monitor_if_due(now, false);

@@ -41,7 +41,7 @@ fn bind_accept_pair() -> (TcpListener, StdTcpStream, MioTcpStream) {
 
 #[test]
 fn boot_allocations_are_attributed_and_excluded() {
-    let (_, boot) = alloc::run_phase(Phase::StartupDns, || {
+    let ((), boot) = alloc::run_phase(Phase::StartupDns, || {
         let poll = Poll::new().expect("poll");
         let events = Events::with_capacity(8);
         drop(events);
@@ -58,7 +58,7 @@ fn boot_allocations_are_attributed_and_excluded() {
 
     let poll = Poll::new().expect("poll");
     let events = Events::with_capacity(8);
-    let (_, steady) = alloc::run_phase(Phase::Serving, || {
+    let ((), steady) = alloc::run_phase(Phase::Serving, || {
         let value: u64 = 7;
         black_box(value);
     });
@@ -73,7 +73,7 @@ fn boot_allocations_are_attributed_and_excluded() {
 #[test]
 fn events_drop_negative_control_catches_heap_free() {
     let events = Events::with_capacity(8);
-    let (_, phase) = alloc::run_phase(Phase::Shutdown, || {
+    let ((), phase) = alloc::run_phase(Phase::Shutdown, || {
         drop(events);
     });
     assert!(
@@ -85,7 +85,7 @@ fn events_drop_negative_control_catches_heap_free() {
 #[test]
 fn kernel_fd_close_is_not_heap_dealloc() {
     let (listener, peer, server) = bind_accept_pair();
-    let (_, shutdown) = alloc::run_phase(Phase::Shutdown, || {
+    let ((), shutdown) = alloc::run_phase(Phase::Shutdown, || {
         drop(server);
         drop(peer);
         drop(listener);
@@ -231,7 +231,7 @@ fn linux_epoll_operation_matrix() {
         serving
     );
 
-    let (_, shutdown) = alloc::run_phase(Phase::Shutdown, || {
+    let ((), shutdown) = alloc::run_phase(Phase::Shutdown, || {
         drop(listener);
         drop(listener2);
         drop(server);

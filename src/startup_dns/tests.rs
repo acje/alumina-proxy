@@ -1003,7 +1003,7 @@ fn startup_dns_phase_is_allocation_free_including_reconnect() {
     use crate::alloc::{self, Phase};
     use crate::serve::{ServeStorage, StartupDecision};
 
-    let (_, control) = alloc::run_phase(Phase::StartupDns, || {
+    let ((), control) = alloc::run_phase(Phase::StartupDns, || {
         let bytes = Box::new([0u8; 64]);
         std::hint::black_box(bytes);
     });

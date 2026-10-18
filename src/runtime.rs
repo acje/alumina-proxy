@@ -130,8 +130,7 @@ impl Preallocated {
         let status = self
             .serving
             .shutdown_exit()
-            .map(|exit| exit.status())
-            .unwrap_or(crate::log::ShutdownStatus::Drained);
+            .map_or(crate::log::ShutdownStatus::Drained, ShutdownExit::status);
         self.serving
             .storage_mut()
             .logs_mut()

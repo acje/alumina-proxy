@@ -276,7 +276,7 @@ fn numeric_addr_enum_corresponds() {
 #[cfg(feature = "alloc-witness")]
 fn eligibility_witness_positive_control_then_zero() {
     use alumina::alloc::{self, Phase};
-    let (_, positive) = alloc::run_phase(Phase::BackgroundRefresh, || {
+    let ((), positive) = alloc::run_phase(Phase::BackgroundRefresh, || {
         let bytes = Box::new([0u8; 64]);
         std::hint::black_box(bytes);
     });
@@ -285,7 +285,7 @@ fn eligibility_witness_positive_control_then_zero() {
         "counter must attribute a local alloc/dealloc: {positive:?}"
     );
 
-    let (_, counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
+    let ((), counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
         let boundary_v4: u64 = V4_RANGES
             .iter()
             .map(|r| {

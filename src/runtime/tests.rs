@@ -130,6 +130,9 @@ fn hot_relay_many_slots_body() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    const HOT_SLOTS: usize = 17;
+    const FIRST_HOT_INDEX: usize = 30;
+    const EXPIRED_INDEX: usize = 47;
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
     let listener =
@@ -145,9 +148,6 @@ fn hot_relay_many_slots_body() {
         .start_dns_exchange(responder_addr, 0, Family::A, exchange_deadline)
         .expect("start exchange");
 
-    const HOT_SLOTS: usize = 17;
-    const FIRST_HOT_INDEX: usize = 30;
-    const EXPIRED_INDEX: usize = 47;
     let per_slot = 96 * 1024;
     let stop = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::new();
@@ -497,7 +497,7 @@ fn spawn_responder_hold_final() -> (
     let (wrote_tx, wrote_rx) = std::sync::mpsc::channel();
     let handle = thread::spawn(move || {
         let (mut sock, _) = listener.accept().expect("accept transport");
-        let mut seen: std::collections::HashSet<Vec<u8>> = Default::default();
+        let mut seen = std::collections::HashSet::new();
         let mut held = false;
         while let Some(query) = read_query(&mut sock) {
             let Some(reply) = positive_response(&query) else {

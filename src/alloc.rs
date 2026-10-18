@@ -71,7 +71,7 @@ thread_local! {
 }
 
 fn measure(event: Event) {
-    let phase = CURRENT_PHASE.try_with(|cell| cell.get()).unwrap_or(None);
+    let phase = CURRENT_PHASE.try_with(Cell::get).unwrap_or(None);
     let Some(phase) = phase else {
         return;
     };
@@ -95,12 +95,12 @@ impl Drop for PhaseGuard {
 }
 
 pub fn run_phase<R>(phase: Phase, f: impl FnOnce() -> R) -> (R, Counts) {
-    let before = MEASURED.with(|cell| cell.get());
+    let before = MEASURED.with(Cell::get);
     let _guard = PhaseGuard {
         prev: CURRENT_PHASE.with(|cell| cell.replace(Some(phase))),
     };
     let value = f();
-    let after = MEASURED.with(|cell| cell.get());
+    let after = MEASURED.with(Cell::get);
     let p = phase.index();
     let counts = Counts {
         allocs: after[p][0] - before[p][0],
@@ -112,7 +112,7 @@ pub fn run_phase<R>(phase: Phase, f: impl FnOnce() -> R) -> (R, Counts) {
 
 #[must_use]
 pub fn active_phase() -> Option<Phase> {
-    CURRENT_PHASE.with(|cell| cell.get())
+    CURRENT_PHASE.with(Cell::get)
 }
 
 pub struct Counting;

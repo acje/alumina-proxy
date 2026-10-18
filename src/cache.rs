@@ -1112,7 +1112,7 @@ mod tests {
     #[cfg(feature = "alloc-witness")]
     fn cache_zero_heap_after_positive_control() {
         use crate::alloc::{self, Phase};
-        let (_, positive) = alloc::run_phase(Phase::BackgroundRefresh, || {
+        let ((), positive) = alloc::run_phase(Phase::BackgroundRefresh, || {
             let bytes = Box::new([0u8; 64]);
             std::hint::black_box(bytes);
         });
@@ -1126,7 +1126,7 @@ mod tests {
             size_of::<Entry>(),
             size_of::<Cache>()
         );
-        let (_, counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
+        let ((), counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
             let mut cache = Cache::new(32).unwrap();
             let name = cache.name_index(0).unwrap();
             let aaaa = cache.name_index(31).unwrap();
@@ -1206,7 +1206,7 @@ mod tests {
     #[cfg(feature = "alloc-witness")]
     fn cache_zero_heap_on_error_paths() {
         use crate::alloc::{self, Phase};
-        let (_, positive) = alloc::run_phase(Phase::BackgroundRefresh, || {
+        let ((), positive) = alloc::run_phase(Phase::BackgroundRefresh, || {
             let bytes = Box::new([0u8; 64]);
             std::hint::black_box(bytes);
         });
@@ -1215,7 +1215,7 @@ mod tests {
             "counter must attribute a local alloc/dealloc: {positive:?}"
         );
 
-        let (_, counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
+        let ((), counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
             let mut cache = Cache::new(1).unwrap();
             let local = cache.name_index(0).unwrap();
             let foreign = Cache::new(2).unwrap().name_index(1).unwrap();

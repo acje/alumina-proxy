@@ -1375,15 +1375,18 @@ fn write_bytes(fd: RawFd, bytes: &[u8]) -> io::Result<usize> {
 mod tests {
     use super::*;
 
+    use std::fmt::Write as _;
+
     use crate::config::ALLOWLIST_MAX;
     use crate::config::CONFIG_DOC_LIMIT;
 
     fn push_compact_group(doc: &mut String, count: usize) {
         let kinds = vec!["\"block\""; count].join(", ");
         let scopes = vec!["\"all\""; count].join(", ");
-        doc.push_str(&format!(
+        let _ = write!(
+            doc,
             "[any_illegal]\nscope = \"all\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
-        ));
+        );
     }
 
     const _: () = assert!(SLOT_BYTES > CONFIG_DOC_LIMIT + ALLOWLIST_MAX * 64 + 512);
@@ -1494,7 +1497,7 @@ mod tests {
         for &c in first.iter().take(ALLOWLIST_MAX) {
             let c = c as char;
             let name = format!("{c}.{d}.{e}");
-            doc.push_str(&format!("  \"{name}:443\",\n"));
+            let _ = writeln!(doc, "  \"{name}:443\",");
             names.push(name);
         }
         doc.push_str("]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n");
@@ -1961,7 +1964,7 @@ mod tests {
         assert!(control.all_zero(), "baseline should be quiet: {control:?}");
         let (mut store, _file) = file_logstore();
         let mut stdout_store = LogStore::new().expect("stdout sink store");
-        let (_, counts) = run_phase(Phase::Logging, || {
+        let ((), counts) = run_phase(Phase::Logging, || {
             store.startup_warning(1, "sub.example.org", Family::A);
             store.startup_final(
                 2,

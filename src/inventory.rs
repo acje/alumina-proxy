@@ -216,6 +216,6 @@ mod alloc_fault {
     }
 
     pub(super) fn armed() -> bool {
-        FAIL.with(|cell| cell.get())
+        FAIL.with(std::cell::Cell::get)
     }
 }

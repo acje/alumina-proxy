@@ -34,7 +34,10 @@ impl Serving {
             .client
             .as_ref()
             .and_then(|c| c.peer_addr().ok());
-        let hostname = self.slots[index].approved.as_ref().map(|h| h.as_str());
+        let hostname = self.slots[index]
+            .approved
+            .as_ref()
+            .map(crate::config::FixedHostname::as_str);
         self.storage
             .logs_mut()
             .reject(secs, reason, client, hostname);

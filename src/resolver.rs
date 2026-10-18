@@ -210,7 +210,9 @@ fn skip_inline_ws<R: Read>(sc: &mut Scanner<R>) -> Result<(), ResolverError> {
 
 fn select(token: &str) -> Result<Nameserver, ResolverError> {
     if token.is_empty() {
-        return Err(ResolverError::InvalidAddress { value: "".into() });
+        return Err(ResolverError::InvalidAddress {
+            value: String::new(),
+        });
     }
     if token.contains(['%', '@']) {
         return Err(ResolverError::ZonedAddress {

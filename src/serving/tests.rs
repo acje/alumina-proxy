@@ -3742,7 +3742,7 @@ fn shutdown_alloc_witness_body() {
         "the relay owns live client and upstream sockets before the signal"
     );
 
-    let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Shutdown, || {
+    let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Shutdown, || {
         runtime
             .serving_mut()
             .signal_wake_mut()
@@ -4932,7 +4932,7 @@ fn block_all_latch_closure_spends_zero_allocations() {
         evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
             .expect("head B");
 
-        let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
             pump(&mut serving, 30);
             assert!(
                 serving.storage().enforcement().block_all(),
@@ -4991,7 +4991,7 @@ fn block_domain_current_flow_close_spends_zero_allocations() {
         fabric_relay_slot(&mut serving, 1, b"sub.example.org", b"PENDING-DOWN-00");
 
         let token = upstream_token(serving.slots[0].slot_gen, 0);
-        let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
             serving
                 .dispatch_readiness(
                     token,
@@ -5032,7 +5032,7 @@ fn early_data_projection_spends_zero_allocations() {
         fabric_validated_early_data(&mut serving, Some(5));
         let token = upstream_token(serving.slots[0].slot_gen, 0);
 
-        let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
             serving
                 .dispatch_readiness(
                     token,
@@ -5082,7 +5082,7 @@ fn block_all_storm_sweeps_128_slots_alloc_free() {
             ws.approved = Some(approved);
             ws.stage = Stage::Dialing;
         }
-        let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
             let effect = serving.any_illegal(0, AnyIllegalCause::HostNotAllowlisted);
             assert!(
                 matches!(effect, Effect::Block { scope: Scope::All }),
@@ -6110,7 +6110,7 @@ fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
             (Family::Aaaa, NumericAddr::V6(Ipv6Addr::LOCALHOST), &v6),
         ];
         let mut seen = [None; crate::worker::MAX_UPSTREAM_ATTEMPTS];
-        let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
             for (round, (family, addr, listener)) in plan.into_iter().enumerate() {
                 serving
                     .dial(0, addr)
@@ -6413,7 +6413,7 @@ fn expire_sweep_dialing_expired_seam_records_retry_with_zero_allocations() {
             Instant::now() - Duration::from_secs(3),
             setup,
         ));
-        let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
             serving.expire_sweep(Instant::now());
             pump(&mut serving, 10);
         });

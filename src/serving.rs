@@ -1563,7 +1563,6 @@ impl Serving {
                 .poll
                 .registry()
                 .register(client, token, Interest::READABLE | Interest::WRITABLE)
-                .map(|_| ())
                 .map_err(Into::into),
             None => Ok(()),
         }
@@ -1576,7 +1575,6 @@ impl Serving {
                 .poll
                 .registry()
                 .register(up, token, Interest::READABLE | Interest::WRITABLE)
-                .map(|_| ())
                 .map_err(Into::into),
             None => Ok(()),
         }
@@ -1598,7 +1596,6 @@ impl Serving {
                 .poll
                 .registry()
                 .reregister(client, token, Interest::READABLE | Interest::WRITABLE)
-                .map(|_| ())
                 .map_err(Into::into),
             None => Ok(()),
         }
@@ -1611,7 +1608,6 @@ impl Serving {
                 .poll
                 .registry()
                 .reregister(up, token, Interest::READABLE | Interest::WRITABLE)
-                .map(|_| ())
                 .map_err(Into::into),
             None => Ok(()),
         }
@@ -1762,7 +1758,7 @@ impl Serving {
                         self.refuse(index, Refusal::BadRequest);
                     }
                     Stage::ValidatingHello => {
-                        self.reject_hello(index, HelloRejectReason::Profile)?
+                        self.reject_hello(index, HelloRejectReason::Profile)?;
                     }
                     _ => {}
                 }
@@ -2228,7 +2224,7 @@ impl Serving {
                         .as_ref()
                         .and_then(|u| u.peer_addr().ok());
                     let secs = self.storage.cache_secs(Instant::now());
-                    let hostname = approved.as_ref().map(|h| h.as_str());
+                    let hostname = approved.as_ref().map(FixedHostname::as_str);
                     self.storage
                         .logs_mut()
                         .early_activity(secs, hostname, peer, activity_kind);
@@ -2668,7 +2664,7 @@ impl Serving {
                 .handle
                 .as_ref()
                 .and_then(|h| self.storage.setup_deadline(h))
-                .map(|d| d.limit());
+                .map(Deadline::limit);
             if self.slots[i].stage == Stage::Dialing
                 && let Some(connect) = self.slots[i].connect_deadline
             {

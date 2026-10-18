@@ -956,8 +956,7 @@ pub fn parse_response(
             let terminal_data = ws.owners[..ws.owner_len]
                 .iter()
                 .find(|o| o.name.eq_bytes(terminal))
-                .map(|o| o.has_addr_data)
-                .unwrap_or(false);
+                .is_some_and(|o| o.has_addr_data);
             if terminal_data {
                 return Err(DnsError::TerminalWithoutData);
             }
@@ -1773,7 +1772,7 @@ mod tests {
         use crate::alloc::{self, Phase};
         let msg = direct_a("sub.example.org", 30, [93, 184, 216, 34], 120);
         let fq = fqdn("sub.example.org");
-        let (_, control) = alloc::run_phase(Phase::BackgroundRefresh, || {
+        let ((), control) = alloc::run_phase(Phase::BackgroundRefresh, || {
             let bytes = Box::new([0u8; 64]);
             std::hint::black_box(bytes);
         });
@@ -1808,7 +1807,7 @@ mod tests {
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&soa_record("example.org", 300, 60));
         let fq = fqdn("sub.example.org");
-        let (_, control) = alloc::run_phase(Phase::BackgroundRefresh, || {
+        let ((), control) = alloc::run_phase(Phase::BackgroundRefresh, || {
             let bytes = Box::new([0u8; 64]);
             std::hint::black_box(bytes);
         });

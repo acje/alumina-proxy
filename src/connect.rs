@@ -387,7 +387,7 @@ fn parse_target(target: &[u8]) -> Result<ConnectRequest, ConnectError> {
     };
     let host = &target[..colon];
     let port = &target[colon + 1..];
-    if port.is_empty() || !port.iter().all(|b| b.is_ascii_digit()) {
+    if port.is_empty() || !port.iter().all(u8::is_ascii_digit) {
         return Err(ConnectError::MalformedRequestLine {
             detail: "port is not numeric",
         });
@@ -426,10 +426,10 @@ fn parse_target(target: &[u8]) -> Result<ConnectRequest, ConnectError> {
 }
 
 fn trim_ascii(mut value: &[u8]) -> &[u8] {
-    while value.first().is_some_and(|b| b.is_ascii_whitespace()) {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
         value = &value[1..];
     }
-    while value.last().is_some_and(|b| b.is_ascii_whitespace()) {
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
         value = &value[..value.len() - 1];
     }
     value
