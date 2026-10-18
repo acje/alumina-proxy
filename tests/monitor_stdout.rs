@@ -130,7 +130,9 @@ fn drain_stdout(rd: &mut libc::c_int, scratch: &mut [u8], captured: &mut Vec<u8>
     loop {
         let n = unsafe { libc::read(*rd, scratch.as_mut_ptr().cast(), scratch.len()) };
         if n > 0 {
-            captured.extend_from_slice(&scratch[..n as usize]);
+            captured.extend_from_slice(
+                &scratch[..usize::try_from(n).expect("read returned a positive byte count")],
+            );
         } else {
             break;
         }

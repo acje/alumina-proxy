@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn stage_rejects_overflow_without_truncation() {
-        let addrs: Vec<NumericAddr> = (0..=16).map(|i| v4([10, 0, 0, i as u8])).collect();
+        let addrs: Vec<NumericAddr> = (0u8..=16).map(|i| v4([10, 0, 0, i])).collect();
         let err =
             StagedPositive::stage(NameIndex(0), Family::A, Generation::INITIAL, &addrs, 1, 60);
         assert_eq!(err, Err(CacheError::BindingCapacityExceeded));

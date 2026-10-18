@@ -626,8 +626,12 @@ fn from_table(table: toml::Table) -> Result<Config, ConfigError> {
         .ok_or_else(|| ConfigError::MissingField("actions".to_owned()))?;
     let allowlist = build_allowlist(allowlist_names)?;
     let listen = parse_listen(&listen)?;
-    if allowance < 0 || allowance as usize >= allowlist.len() {
-        return Err(ConfigError::AllowanceOutOfRange { value: allowance });
+    let allowance = u8::try_from(allowance)
+        .map_err(|_| ConfigError::AllowanceOutOfRange { value: allowance })?;
+    if allowance as usize >= allowlist.len() {
+        return Err(ConfigError::AllowanceOutOfRange {
+            value: allowance.into(),
+        });
     }
     let any_scope = parse_any_illegal(any_illegal)?;
     let domain_actions = parse_actions(actions, allowlist.len())?;
@@ -641,7 +645,7 @@ fn from_table(table: toml::Table) -> Result<Config, ConfigError> {
     Ok(Config {
         allowlist,
         listen,
-        startup_unresolved_allowance: allowance as u8,
+        startup_unresolved_allowance: allowance,
         control,
     })
 }

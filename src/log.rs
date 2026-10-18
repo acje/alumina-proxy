@@ -480,28 +480,28 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         (&b"facts_total"[..], monitor.facts_total()),
         (&b"actions_total"[..], monitor.actions_total()),
         (&b"refusals_total"[..], monitor.refusals_total()),
-        (&b"ofacts"[..], ofacts as u64),
-        (&b"oactions"[..], monitor.actions_overflow() as u64),
-        (&b"orefusals"[..], monitor.refusals_overflow() as u64),
-        (&b"report_drops"[..], monitor.report_drops() as u64),
+        (&b"ofacts"[..], u64::from(ofacts)),
+        (&b"oactions"[..], u64::from(monitor.actions_overflow())),
+        (&b"orefusals"[..], u64::from(monitor.refusals_overflow())),
+        (&b"report_drops"[..], u64::from(monitor.report_drops())),
         (
             &b"oreport_drops"[..],
-            monitor.report_drops_overflow() as u64,
+            u64::from(monitor.report_drops_overflow()),
         ),
-        (&b"capture_drops"[..], monitor.capture_drops() as u64),
+        (&b"capture_drops"[..], u64::from(monitor.capture_drops())),
         (
             &b"ocapture_drops"[..],
-            monitor.capture_drops_overflow() as u64,
+            u64::from(monitor.capture_drops_overflow()),
         ),
         (
             &b"s0"[..],
-            monitor.actions_first_slot_block(AnyIllegalScope::Connection) as u64,
+            u64::from(monitor.actions_first_slot_block(AnyIllegalScope::Connection)),
         ),
         (
             &b"s1"[..],
-            monitor.actions_first_slot_block(AnyIllegalScope::All) as u64,
+            u64::from(monitor.actions_first_slot_block(AnyIllegalScope::All)),
         ),
-        (&b"ba"[..], monitor.actions_block_all() as u64),
+        (&b"ba"[..], u64::from(monitor.actions_block_all())),
     ];
     for (key, value) in globals {
         if !push_u64(&mut w, key, value) {
@@ -510,13 +510,13 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     }
     for index in 0..AnyIllegalCause::KIND_COUNT {
         let value = monitor.facts_any_illegal_by_index(index);
-        if value > 0 && !push_indexed_u64(&mut w, b"c", index as u32, value as u64) {
+        if value > 0 && !push_indexed_u64(&mut w, b"c", index as u32, u64::from(value)) {
             return None;
         }
     }
     for index in 0..UnknownReason::COUNT {
         let value = monitor.facts_unknown_by_index(index);
-        if value > 0 && !push_indexed_u64(&mut w, b"unk", index as u32, value as u64) {
+        if value > 0 && !push_indexed_u64(&mut w, b"unk", index as u32, u64::from(value)) {
             return None;
         }
     }
@@ -528,16 +528,19 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         let blocks = monitor.actions_domain_block(ordinal);
         let flares = monitor.actions_flare(ordinal);
         let refusals = monitor.refusals_blocked_domain(ordinal);
-        if facts > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"f", facts as u64) {
+        if facts > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"f", u64::from(facts)) {
             return None;
         }
-        if blocks > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"b", blocks as u64) {
+        if blocks > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"b", u64::from(blocks))
+        {
             return None;
         }
-        if flares > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"l", flares as u64) {
+        if flares > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"l", u64::from(flares))
+        {
             return None;
         }
-        if refusals > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"r", refusals as u64)
+        if refusals > 0
+            && !push_indexed_key_u64(&mut w, b"d", index as u32, b"r", u64::from(refusals))
         {
             return None;
         }
@@ -1305,7 +1308,7 @@ fn write_bytes(fd: RawFd, bytes: &[u8]) -> io::Result<usize> {
     if n < 0 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(n as usize)
+        Ok(usize::try_from(n).expect("write returned a non-negative byte count"))
     }
 }
 

@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn saturating_counter_reports_wrapped_value_and_overflow() {
         let mut c = SaturatingCounter::new();
-        for _ in 0..u32::MAX as u64 {
+        for _ in 0..u64::from(u32::MAX) {
             c.bump();
         }
         assert_eq!(c.value(), u32::MAX);

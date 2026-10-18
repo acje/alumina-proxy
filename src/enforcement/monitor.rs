@@ -559,7 +559,7 @@ pub(crate) mod tests {
         m.note_fact_any_illegal(AnyIllegalCause::ConnectParse(ConnectHeadReason::TooLong));
         assert_eq!(
             m.facts_any_illegal_total(),
-            2 * u32::MAX as u64,
+            2 * u64::from(u32::MAX),
             "M1: per-element u64 widening sums two saturated u32 counters exactly"
         );
     }
@@ -794,7 +794,7 @@ pub(crate) mod tests {
             "a saturated counter never wraps"
         );
         assert!(
-            m.facts_total() >= u32::MAX as u64,
+            m.facts_total() >= u64::from(u32::MAX),
             "the total stays truthful under saturation, never wraps: {}",
             m.facts_total()
         );

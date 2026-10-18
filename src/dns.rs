@@ -1046,7 +1046,7 @@ mod tests {
         let mut m = vec![0u8; 12];
         m[0] = (tid >> 8) as u8;
         m[1] = tid as u8;
-        let mut flags = rcode as u16;
+        let mut flags = u16::from(rcode);
         if qr_flag {
             flags |= 0x8000;
         }

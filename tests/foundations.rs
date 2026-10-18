@@ -48,8 +48,8 @@ fn alloc_witness_positive_and_negative_attribution() {
 fn alloc_witness_catches_realloc_in_named_phase() {
     let (_, counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
         let mut v = Vec::with_capacity(1);
-        for i in 0..64 {
-            v.push(i as u64);
+        for i in 0u64..64 {
+            v.push(i);
         }
         let len = v.len();
         std::hint::black_box(len);

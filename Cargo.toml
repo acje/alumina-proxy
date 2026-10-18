@@ -16,6 +16,8 @@ description = "Alumina phase-1 foundations: F0 toolchain pin, F1/F2/F4 witness s
 [lints.clippy]
 uninlined_format_args = "warn"
 must_use_candidate = "warn"
+cast_lossless = "warn"
+cast_sign_loss = "warn"
 
 [lib]
 name = "alumina"
