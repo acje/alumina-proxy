@@ -289,6 +289,21 @@ cast_abs_to_unsigned = "warn"
 # lint guards future regressions. No runtime/alloc/spec change; the enabling
 # attribute is compile-time.
 cast_enum_truncation = "warn"
+# SM-23: enable the correctness/loop lint — `mut_range_bound`. Its firing
+# surface is a `for i in 0..n` loop whose bound `n` is a mutable variable
+# reassigned inside the loop body — the range is constructed once, so the
+# mutation never re-evaluates the bound and the loop keeps iterating over the
+# stale range, changing loop/slice-iteration semantics invisibly. A clippy
+# 1.99.0 positive control (`-F clippy::mut_range_bound`) on a planted
+# `bound += 1` probe fires `attempt to mutate range bound within loop` (exit
+# 101 on both matrices, proving the lint is armed; the gate fails where a site
+# exists) plus a range-bound-mutation scan of `src/` + `tests/` found zero
+# lint-proven sites on the pinned toolchain. A future site is fixed by
+# capturing the bound in an immutable local before the loop (surfacing any
+# stale-bound bug at compile time); a genuinely intended live-bound mutation
+# needs an explicit `while` loop, never a silent suppression. No runtime/alloc/
+# spec change; the enabling attribute is compile-time.
+mut_range_bound = "warn"
 
 [lib]
 name = "alumina"
