@@ -115,6 +115,18 @@ missing_spin_loop = "warn"
 # corrections; genuinely intentional sites carry a tight per-site
 # `#[expect(clippy::eq_op, reason = "...")]`. No runtime/alloc/spec change.
 eq_op = "warn"
+# SM-09: enable the correctness/bound lint — `impossible_comparisons`. Its
+# firing surface is an always-false comparison (`a == b` where the types can
+# never overlap — e.g. a `usize` against a bound it can never reach), which
+# usually exposes a dead length/bound guard hiding a wrong bound. A clippy
+# 1.99.0 positive control (`-F clippy::impossible_comparisons`) on both feature
+# matrices found zero sites on the pinned toolchain, so the lint guards
+# future regressions. Fixes correct the wrong bound or remove a proven-dead
+# guard; an `#[expect(clippy::impossible_comparisons, reason = "...")]` is
+# reserved for a dead guard that genuinely cannot be reasoned about (a
+# red flag to stop and report, not suppress). No runtime/alloc/spec change;
+# the attribute is compile-time.
+impossible_comparisons = "warn"
 
 [lib]
 name = "alumina"
