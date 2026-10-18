@@ -125,6 +125,7 @@ assigning_clones = "warn"
 cast_possible_wrap = "warn"
 checked_conversions = "warn"
 cloned_instead_of_copied = "warn"
+explicit_into_iter_loop = "warn"
 
 [lib]
 name = "alumina"
