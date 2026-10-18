@@ -138,6 +138,14 @@ impossible_comparisons = "warn"
 # the lint's `op=` firing surface), so the lint guards future regressions. No
 # runtime/alloc/spec change; the attribute is compile-time.
 assign_op_pattern = "warn"
+# SM-11: enable the clarity/correctness lint — `bool_comparison`. Its firing
+# surface is a literal boolean compared against `true`/`false` (`x == true`,
+# `x != false`) where the boolean variable reads directly. The idiomatic
+# rewrites are behaviour-preserving for literally-`bool` values: `x == true`
+# => `x`, `x == false` => `!x`, `x != true` => `!x`, `x != false` => `x`.
+# Sites live in gate/policy checks (gate.rs / eligibility.rs / enforcement)
+# complementing the enabled `nonminimal_bool`. No runtime/alloc/spec change.
+bool_comparison = "warn"
 
 [lib]
 name = "alumina"
