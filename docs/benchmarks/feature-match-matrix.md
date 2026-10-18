@@ -1,16 +1,16 @@
-# Alumina d3536a5 vs HAProxy 3.2.25 vs Envoy v1.39.4 — feature match matrix
+# Alumina 9b9f4de vs HAProxy 3.2.25 vs Envoy v1.39.4 — feature match matrix
 
 ## Candidates
 
 | Candidate | Evidence identity |
 | --- | --- |
-| **Alumina d3536a5** | Canonical spec [docs/alumina-proxy.md](../../docs/alumina-proxy.md) (sha256 `f94f5ae1…36f1`, incl. `rp2e` tripwire/action/monitoring/pacing (2026-10-14) + `alumina-9t6w` (2026-10-15) `<fqdn>:<port>` allowlist/CONNECT/dial + `alumina-tm6m` (2026-10-16) `512 / 128` tunnels/pending setups and `2 × 128 KiB` per-slot slab + `alumina-sechd` (2026-10-17) CONNECT/TLS identity/DNS-cache/scheduling/logging (L3..L18) + `alumina-skhc` (2026-10-17) CONNECT/configuration/destination-address hardening + `alumina-icdl` (2026-10-17) CONNECT Content-Length canonical-digit amendments); implementation `src/serving.rs`, `src/serving/{policy,reject,startup}.rs`, `src/client_hello.rs`, `src/connect.rs`, `src/config.rs`, `src/dns.rs`, `src/cache.rs`, `src/eligibility.rs`, `src/enforcement/{mod,action,monitor,policy,state}.rs`, `src/gate.rs`, `src/log.rs`, `src/preflight.rs`, `src/runtime.rs`, `src/worker.rs`; qualification owner [docs/qa-package/README.md](../../docs/qa-package/README.md) + [scripts/verify.sh](../../scripts/verify.sh); 100 Mbps timed result in [100mbps-comparison.md](100mbps-comparison.md) |
+| **Alumina 9b9f4de** | Canonical spec [docs/alumina-proxy.md](../../docs/alumina-proxy.md) (sha256 `f94f5ae1…36f1`, incl. `rp2e` tripwire/action/monitoring/pacing (2026-10-14) + `alumina-9t6w` (2026-10-15) `<fqdn>:<port>` allowlist/CONNECT/dial + `alumina-tm6m` (2026-10-16) `512 / 128` tunnels/pending setups and `2 × 128 KiB` per-slot slab + `alumina-sechd` (2026-10-17) CONNECT/TLS identity/DNS-cache/scheduling/logging (L3..L18) + `alumina-skhc` (2026-10-17) CONNECT/configuration/destination-address hardening + `alumina-icdl` (2026-10-17) CONNECT Content-Length canonical-digit amendments); implementation `src/serving.rs`, `src/serving/{policy,reject,startup}.rs`, `src/client_hello.rs`, `src/connect.rs`, `src/config.rs`, `src/dns.rs`, `src/cache.rs`, `src/eligibility.rs`, `src/enforcement/{mod,action,monitor,policy,state}.rs`, `src/gate.rs`, `src/log.rs`, `src/preflight.rs`, `src/runtime.rs`, `src/worker.rs`; qualification owner [docs/qa-package/README.md](../../docs/qa-package/README.md) + [scripts/verify.sh](../../scripts/verify.sh); 100 Mbps timed result in [100mbps-comparison.md](100mbps-comparison.md) |
 | **HAProxy** | Pinned **3.2.25** (LTS); haproxy.org 3.2 manual + sha256-verified tarball `d59a68d0…` (`alumina-722v`, `alumina-elyw`). Chosen comparable setup: TCP-mode near-direct TLS opaque relay — SNI allowlist, fixed backend, one configured thread, CONNECT stage skipped |
 | **Envoy** | Selected **envoyproxy/envoy:v1.39.4** (arm64 digest `ce82b213…`); official `terminate_http1_connect.yaml` CONNECT-terminate, raw TCP upstream, `--concurrency 1` (`alumina-elyw`). 100 Mbps timed result in [100mbps-comparison.md](100mbps-comparison.md) |
 
 ## Legend
 
-Alumina d3536a5 column tags:
+Alumina 9b9f4de column tags:
 
 | Tag | Meaning |
 | --- | --- |
@@ -28,7 +28,7 @@ Candidate columns use exactly one grade:
 
 ## Matrix
 
-| # | Feature (selected benchmark config) | Alumina d3536a5 | HAProxy 3.2.25 | Envoy v1.39.4 | Source / implementation witness |
+| # | Feature (selected benchmark config) | Alumina 9b9f4de | HAProxy 3.2.25 | Envoy v1.39.4 | Source / implementation witness |
 | --- | --- | --- | --- | --- | --- |
 | 1 | CONNECT wire entry: completed 200 before ClientHello | `R` `I` | different | ✓ matched (source) | Alumina: `src/serving.rs` (`SendingConnected` → `gate.on_response_ok()` → `Stage::ValidatingHello`); HAProxy: `http_ana.c:2138,2195`, `mux_h1.c:1812-1815` (native CONNECT awaits backend 2xx; benchmark skips CONNECT); Envoy: `upstream_request.cc:73-78` (synthesizes early 200 on TCP pool ready) |
 | 2 | Distinct RFC-aligned pre-200 CONNECT refusal wire contract — 400/403 empty body (`content-length: 0`) vs 502 (no resolved addresses / upstream connection failed), 503 (no capacity), 504 (setup deadline exceeded) static `text/plain; charset=utf-8` reason bodies | `R` `I` | unverified | unverified | Alumina: `src/serving.rs` (`policy.rs:16-34`, dispatch `serving.rs:197`) per `docs/alumina-proxy.md:43` |
