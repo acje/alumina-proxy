@@ -74,13 +74,8 @@ pub struct DomainOrdinal(u8);
 
 impl DomainOrdinal {
     fn mint(index: usize, count: usize) -> Option<DomainOrdinal> {
-        if index < count && count <= ALLOWLIST_MAX {
-            Some(DomainOrdinal(
-                u8::try_from(index).expect("ordinal bounded by ALLOWLIST_MAX"),
-            ))
-        } else {
-            None
-        }
+        (index < count && count <= ALLOWLIST_MAX)
+            .then(|| DomainOrdinal(u8::try_from(index).expect("ordinal bounded by ALLOWLIST_MAX")))
     }
 
     #[expect(
@@ -182,11 +177,7 @@ impl ControlTable {
     /// within this table's configured count (including an ordinal minted by a
     /// different, larger table). A filler entry is never reachable.
     pub fn at(&self, ordinal: DomainOrdinal) -> Option<&DomainAction> {
-        if ordinal.get() < self.count {
-            Some(&self.per_domain[ordinal.get()])
-        } else {
-            None
-        }
+        (ordinal.get() < self.count).then(|| &self.per_domain[ordinal.get()])
     }
 }
 

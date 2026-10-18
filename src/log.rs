@@ -1079,7 +1079,7 @@ impl LogStore {
                     && write_fmt_escaped(&mut w, args)
                     && w.push(b"\"")
                     && w.push(b"\n");
-                if fits { Some(w.len) } else { None }
+                fits.then_some(w.len)
             };
             match len {
                 Some(len) => self.commit_record(index, len),

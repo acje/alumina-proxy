@@ -94,9 +94,5 @@ fn main() {
 
 unsafe fn nix_pipe() -> Option<(libc::c_int, libc::c_int)> {
     let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } == 0 {
-        Some((fds[0], fds[1]))
-    } else {
-        None
-    }
+    (unsafe { libc::pipe(fds.as_mut_ptr()) } == 0).then(|| (fds[0], fds[1]))
 }
