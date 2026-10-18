@@ -1216,12 +1216,11 @@ fn stop_and_join_responder(
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let mut last_err = None;
     while !handle.is_finished() {
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "responder did not stop within the 2s teardown deadline; last unblock connect \
-                 error: {last_err:?}"
-            );
-        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "responder did not stop within the 2s teardown deadline; last unblock connect error: \
+             {last_err:?}"
+        );
         match std::net::TcpStream::connect(addr) {
             Ok(sock) => {
                 sock.shutdown(std::net::Shutdown::Both).ok();

@@ -52,6 +52,9 @@ nonminimal_bool = "warn"
 needless_continue = "warn"
 if_not_else = "warn"
 unnested_or_patterns = "warn"
+manual_assert = "warn"
+manual_assert_eq = "warn"
+assert_is_empty = "warn"
 
 [lib]
 name = "alumina"

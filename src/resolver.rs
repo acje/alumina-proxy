@@ -267,7 +267,7 @@ impl<R: Read> Scanner<R> {
     }
 
     fn fill(&mut self) -> Result<usize, ResolverError> {
-        debug_assert!(self.pos == self.len);
+        debug_assert_eq!(self.pos, self.len);
         self.pos = 0;
         self.len = 0;
         let n = loop {

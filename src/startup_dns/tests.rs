@@ -493,7 +493,7 @@ fn deadline_expiry_fails_exchange_without_publish_and_reconnects() {
         .unwrap();
     assert_eq!(report.exchanges, 3);
     assert_eq!(report.failed, 1);
-    assert!(bindings_of(&cache, 0, Family::A).is_empty());
+    assert_eq!(bindings_of(&cache, 0, Family::A), []);
     assert_eq!(
         bindings_of(&cache, 1, Family::A),
         vec![crate::eligibility::NumericAddr::V4(
@@ -539,7 +539,7 @@ fn resolve_publishes_positives_and_nodata_across_one_connection() {
             std::net::Ipv4Addr::new(93, 184, 216, 34)
         )]
     );
-    assert!(bindings_of(&cache, 0, Family::Aaaa).is_empty());
+    assert_eq!(bindings_of(&cache, 0, Family::Aaaa), []);
     assert_eq!(
         bindings_of(&cache, 1, Family::A),
         vec![crate::eligibility::NumericAddr::V4(
@@ -771,7 +771,7 @@ fn malformed_response_fails_exchange_and_connection_is_reused_next() {
         .unwrap();
     assert_eq!(report.exchanges, 3);
     assert_eq!(report.failed, 1);
-    assert!(bindings_of(&cache, 0, Family::A).is_empty());
+    assert_eq!(bindings_of(&cache, 0, Family::A), []);
     assert_eq!(
         bindings_of(&cache, 1, Family::A),
         vec![crate::eligibility::NumericAddr::V4(
@@ -812,7 +812,7 @@ fn stalled_responder_times_out_exchange_and_reconnects() {
         responder.connections() >= 2,
         "a stalled-then-closed exchange must reconnect on a fresh connection"
     );
-    assert!(bindings_of(&cache, 0, Family::A).is_empty());
+    assert_eq!(bindings_of(&cache, 0, Family::A), []);
     assert_eq!(
         bindings_of(&cache, 1, Family::A),
         vec![crate::eligibility::NumericAddr::V4(
@@ -1075,8 +1075,8 @@ fn nxdomain_evicts_for_the_name_via_cache() {
         .unwrap();
     assert_eq!(report.exchanges, 4);
     assert_eq!(report.resolved_names, 1);
-    assert!(bindings_of(&cache, 0, Family::A).is_empty());
-    assert!(bindings_of(&cache, 0, Family::Aaaa).is_empty());
+    assert_eq!(bindings_of(&cache, 0, Family::A), []);
+    assert_eq!(bindings_of(&cache, 0, Family::Aaaa), []);
     assert_eq!(
         bindings_of(&cache, 1, Family::A),
         vec![crate::eligibility::NumericAddr::V4(
@@ -1314,6 +1314,6 @@ fn cooperative_send_wouldblock_makes_owner_wait_instead_of_busy_looping() {
         Some(TurnResult::Published),
         "a valid response must publish after an awaited would-block send"
     );
-    assert!(!bindings_of(&cache, 0, Family::A).is_empty());
+    assert_ne!(bindings_of(&cache, 0, Family::A), []);
     drop(responder);
 }
