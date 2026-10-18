@@ -123,20 +123,20 @@ pub struct ValidatedHello {
 
 impl ValidatedHello {
     /// Records the validated hello end bound to a real validator witness.
-    pub(crate) fn new(_accepted: HelloAccepted, end: usize) -> ValidatedHello {
+    pub(crate) const fn new(_accepted: HelloAccepted, end: usize) -> ValidatedHello {
         ValidatedHello { end }
     }
 
     /// Test-only constructor carrying no validator witness, so it can never be
     /// reached outside the test build.
     #[cfg(test)]
-    pub(crate) fn test_new(end: usize) -> ValidatedHello {
+    pub(crate) const fn test_new(end: usize) -> ValidatedHello {
         ValidatedHello { end }
     }
 
     /// The exclusive end offset of the validated hello in the client stream.
     #[must_use]
-    pub fn end(self) -> usize {
+    pub const fn end(self) -> usize {
         self.end
     }
 }
@@ -144,7 +144,7 @@ impl ValidatedHello {
 impl TunnelGate {
     /// A closed gate at the start of CONNECT setup.
     #[must_use]
-    pub fn new() -> TunnelGate {
+    pub const fn new() -> TunnelGate {
         TunnelGate {
             phase: GatePhase::AwaitConnect,
             head_len: 0,
@@ -214,7 +214,7 @@ impl TunnelGate {
     /// the ledger: a terminated or barrier-A-closed gate reports
     /// [`UpstreamWrite::BlockedByBarrierA`] and records nothing (I10). This
     /// is the only transition that can open the gate (D3).
-    pub fn upstream_write(&mut self, advance: usize) -> UpstreamWrite {
+    pub const fn upstream_write(&mut self, advance: usize) -> UpstreamWrite {
         match self.phase {
             GatePhase::Terminated(_) => UpstreamWrite::BlockedByBarrierA,
             GatePhase::AwaitConnect
@@ -264,19 +264,19 @@ impl TunnelGate {
 
     /// The validated hello end in the client stream, if any.
     #[must_use]
-    pub fn hello_end(&self) -> Option<usize> {
+    pub const fn hello_end(&self) -> Option<usize> {
         self.hello_end
     }
 
     /// Cumulative client->upstream bytes successfully written.
     #[must_use]
-    pub fn upstream_committed(&self) -> usize {
+    pub const fn upstream_committed(&self) -> usize {
         self.upstream_committed
     }
 
     /// Phase of the gate.
     #[must_use]
-    pub fn phase(&self) -> GatePhase {
+    pub const fn phase(&self) -> GatePhase {
         self.phase
     }
 

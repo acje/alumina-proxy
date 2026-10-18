@@ -148,7 +148,7 @@ pub struct BootInventory {
 
 impl BootInventory {
     #[must_use]
-    pub fn phase1() -> BootInventory {
+    pub const fn phase1() -> BootInventory {
         BootInventory {
             traffic_storage_bytes: TRAFFIC_STORAGE_BYTES,
             serving_workspace_bytes: SERVING_WORKSPACE_BYTES,
@@ -165,34 +165,34 @@ impl BootInventory {
     /// [`Preallocated::preallocate`](crate::runtime::Preallocated::preallocate),
     /// and the DNS buffers at the DNS transport's own construction.
     #[must_use]
-    pub fn named_fixed_buffer_bytes(&self) -> usize {
+    pub const fn named_fixed_buffer_bytes(&self) -> usize {
         self.traffic_storage_bytes
             .saturating_add(self.serving_workspace_bytes)
             .saturating_add(self.dns_named_buffer_bytes)
     }
 
     #[must_use]
-    pub fn traffic_storage_bytes(&self) -> usize {
+    pub const fn traffic_storage_bytes(&self) -> usize {
         self.traffic_storage_bytes
     }
 
     #[must_use]
-    pub fn serving_workspace_bytes(&self) -> usize {
+    pub const fn serving_workspace_bytes(&self) -> usize {
         self.serving_workspace_bytes
     }
 
     #[must_use]
-    pub fn dns_named_buffer_bytes(&self) -> usize {
+    pub const fn dns_named_buffer_bytes(&self) -> usize {
         self.dns_named_buffer_bytes
     }
 
     #[must_use]
-    pub fn transient_scratch_bytes(&self) -> usize {
+    pub const fn transient_scratch_bytes(&self) -> usize {
         self.transient_config_buffer_bytes
     }
 
     #[must_use]
-    pub fn reserved_future_bytes(&self) -> usize {
+    pub const fn reserved_future_bytes(&self) -> usize {
         self.reserved_log_queue_bytes
     }
 }
