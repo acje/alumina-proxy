@@ -30,9 +30,9 @@
 
 | Attribute | Alumina 8dbbec8 (baseline) | Alumina 54a34ce (copy-only removal) | Alumina e3a9ff1 | Alumina d3536a5 |
 | --- | --- | --- | --- | --- |
-| Read / buffer mechanism | 4 KiB stack scratch bounce `CHUNK = 4096` + `append_client_bytes` memcpy into 512 KiB slab | 4 KiB direct-into-slab read `CHUNK = 4096` (copy-only removal; no stack bounce memcpy) | 32 KiB direct-into-slab read `READ_CHUNK = 32 KiB`, `MIN_BUF_ROOM = 4096`, half-visit read room reservation in `Stage::Relay` | same as e3a9ff1 (`src/serving.rs:123,128`) |
-| Poll batch & dispatch mechanism | 64-event `mio::Events`, sequential per-token dispatch | 64-event `mio::Events`, sequential per-token dispatch | 512-event `POLL_EVENTS_CAP` two-pass per-slot readiness coalescing (`CoalescedBatch`), duplicate-free app reschedule queue | 1024-event `POLL_EVENTS_CAP` (`src/serving.rs:117`) two-pass per-slot readiness coalescing (`CoalescedBatch`), duplicate-free app reschedule queue |
-| Syscall & visit-budget mechanics (`VISIT_OPS = 16` / `VISIT_BYTES = 64 KiB`) | 4 KiB read syscalls + interleaved client/upstream tokens exhaust the per-visit op budget → reschedules; memcpy bounce adds no read size, latency governed by syscall/visit granularity | 4 KiB read syscalls; per-4 KiB token interleave still exhausts `VISIT_OPS` → frequent reschedules; copy removal alone does not change granularity | 32 KiB reads amortize `read(2)`; two-pass per-slot coalescing amortizes `epoll_wait(2)`/`epoll_ctl(2)` across the visit budget — syscall/visit granularity, not user-space 4 KiB memcpy, governs latency | unchanged mechanics (`src/serving.rs:105-106`) |
+| Read / buffer mechanism | 4 KiB stack scratch bounce `CHUNK = 4096` + `append_client_bytes` memcpy into 512 KiB slab | 4 KiB direct-into-slab read `CHUNK = 4096` (copy-only removed) | 32 KiB direct-into-slab read `READ_CHUNK = 32 KiB`, `MIN_BUF_ROOM = 4096`, half-visit read room reservation in `Stage::Relay` | same as e3a9ff1 (`src/serving.rs:123,128`) |
+| Poll batch & dispatch mechanism | 64-event `mio::Events`, sequential per-token dispatch | 64-event `mio::Events`, sequential per-token dispatch | 512-event `POLL_EVENTS_CAP` two-pass per-slot coalescing (`CoalescedBatch`), dup-free app reschedule queue | 1024-event `POLL_EVENTS_CAP` (`src/serving.rs:117`), same two-pass coalescing |
+| Syscall & visit-budget mechanics (`VISIT_OPS = 16` / `VISIT_BYTES = 64 KiB`) | 4 KiB reads; interleaved client/upstream tokens exhaust `VISIT_OPS` → reschedules; memcpy bounce adds no read size | 4 KiB reads still exhaust `VISIT_OPS` → frequent reschedules; copy removal alone changes nothing | 32 KiB reads amortize `read(2)`; two-pass coalescing amortizes `epoll_wait(2)`/`epoll_ctl(2)` — syscall granularity governs latency | unchanged mechanics (`src/serving.rs:105-106`) |
 | Achieved payload / deficit | 99.996 Mbps / deficit 6 (offered_unsent 2 + backpressure 3 + drain 1) | 99.817 Mbps / deficit 335 (backpressure 333 + missed_at_end 2) | 99.999 Mbps / deficit 2 (backpressure 2) | 99.924 Mbps / deficit 139 (backpressure 139) |
 | `actual_send_to_echo` (p50 / p95 / p99 / max) | 23.95 / 40.85 / 42.15 / 82.6 ms | 23.95 / 40.95 / 42.35 / 92.5 ms | 2.95 / 3.35 / 3.55 / 9.05 ms | 2.85 / 3.85 / 4.35 / 23.19 ms |
 | `sched_to_echo` (p50 / p95 / p99 / max) | 24.55 / 41.45 / 42.85 / 83.7 ms | 24.55 / 41.55 / 43.05 / 94.5 ms | 3.35 / 3.95 / 4.05 / 9.55 ms | 3.15 / 4.25 / 4.65 / 23.48 ms |
@@ -57,21 +57,14 @@
 
 ## Candidate scope / identity
 
-| Attribute (shared) | Alumina d3536a5 | HAProxy 3.2.25 | Envoy 1.39.4 |
-| --- | --- | --- | --- |
-| Workload | Same fixed 100 decimal Mbps workload for all three (8 persistent connections, 4096 B payload frames + 12 B header, aggregate open-loop pacing, 5 s warmup / 60 s window / 5 s setup+drain) — see table above | same | same |
-| Harness image / placement | `9191d288…` net+PID ns, `flock-vm-root`, loopback alias | same | same |
-| Host | arm64 Apple-VM, 4 CPU / 14 GiB | same | same |
+Shared harness/host (all three): `9191d288…` net+PID ns on `flock-vm-root`, loopback alias; arm64 Apple-VM, 4 CPU / 14 GiB.
 
-| Attribute (per-candidate) | Alumina d3536a5 | HAProxy 3.2.25 | Envoy 1.39.4 |
+| Attribute | Alumina d3536a5 | HAProxy 3.2.25 | Envoy 1.39.4 |
 | --- | --- | --- | --- |
 | Route label / client mode | via-proxy (CONNECT) | direct-proxy (direct TLS/SNI, no CONNECT) | via-proxy (CONNECT-terminate) |
-| Binary commit | d3536a5 (fresh musl binary `04ddd305…`) | official pinned image 3.2.25 | official pinned image v1.39.4 |
-| Measurement HEAD | 8d28d10 (Rust code d3536a5; receipt `source_head` `8d28d10…`) | 031ee10 | 031ee10 |
-| Libc / build | `aarch64-unknown-linux-musl` | glibc (official image; libssl/libcrypto/liblua5.4/libpcre2/libz/libzstd) | BoringSSL RELEASE (libc/libm/libdl/librt/libpthread) |
-| User | uid 65534 | image default (no user flag) | uid 65534 (`--user 65534:65534`) |
-| Seam tool (`tool_sha256`) | `347a0b8b…` | `347a0b8b…` | `347a0b8b…` |
-| Supervisor | `seam_echo.sh` `d05abfcb…` (fail-closed `head` mode) | `qryg_runner.sh` `c6d4aab6…` + `harness_native.sh` `57b4acd0…` | `qryg_runner.sh` `c6d4aab6…` + `harness_native.sh` `57b4acd0…` |
-| Config | allowlist + listen + `[any_illegal]` `scope=connection` + `[actions]` `kind=[flare_only]` `scope=[connection]` (`config_sha256` `b00d4c32…`) | `haproxy.cfg` `35cf35df…` (TCP/SNI passthrough: `mode tcp`, `tcp-request content` on ClientHello, `use_backend` on SNI `example.com`, fixed backend `8.8.8.8:443`, `nbthread 1`, no CONNECT method) | `envoy_connect.yaml` `e6fb9ef7…` (CONNECT-terminate: HCM `connect_matcher` route to fixed backend `8.8.8.8:443`, route `timeout: 0s`, `--concurrency 1`, uid 65534) |
-| Candidate image / binary | freshly built `04ddd305…` (musl, this measurement; never a retained image) | image `d483b789…` / manifest `3947a542…`, binary `8c8791be…` | image `a084f595…` / manifest `ce82b213…`, binary `6b064069…` |
-| Raw + companion evidence | seam report `7f5339d5…` — [results/8d28d10-seam-head-timed-20261018T094907Z.json](results/8d28d10-seam-head-timed-20261018T094907Z.json) | seam `ffa5ee4a…` — [results/qryg-haproxy-timed-20261014T012232Z-66396.json](results/qryg-haproxy-timed-20261014T012232Z-66396.json) + native `96b341de…` — [results/qryg-haproxy-timed-20261014T012232Z-66396.native.json](results/qryg-haproxy-timed-20261014T012232Z-66396.native.json) | seam `770de863…` — [results/qryg-envoy-timed-20261014T012343Z-66851.json](results/qryg-envoy-timed-20261014T012343Z-66851.json) + native `5256d337…` — [results/qryg-envoy-timed-20261014T012343Z-66851.native.json](results/qryg-envoy-timed-20261014T012343Z-66851.native.json) |
+| Binary | fresh musl build @ commit d3536a5 (binary `04ddd305…`) | official pinned image 3.2.25 | official pinned image v1.39.4 |
+| Measurement HEAD | 8d28d10 (code d3536a5; receipt `source_head`) | 031ee10 | 031ee10 |
+| Libc / build | `aarch64-unknown-linux-musl` | glibc (libssl/libcrypto/liblua5.4/libpcre2/libz/libzstd) | BoringSSL RELEASE (libc/libm/libdl/librt/libpthread) |
+| User (uid) | 65534 | image default (no user flag) | 65534 (`--user 65534:65534`) |
+| Config | CONNECT allowlist + `[any_illegal]` `flare_only`; cfg `b00d4c32…` | TCP/SNI passthrough allowlist, `nbthread 1`, no CONNECT; cfg `35cf35df…` | CONNECT-terminate to fixed backend `8.8.8.8:443`, `--concurrency 1`; cfg `e6fb9ef7…` |
+| Evidence receipts | [seam-head](results/8d28d10-seam-head-timed-20261018T094907Z.json) | [seam](results/qryg-haproxy-timed-20261014T012232Z-66396.json) · [native](results/qryg-haproxy-timed-20261014T012232Z-66396.native.json) | [seam](results/qryg-envoy-timed-20261014T012343Z-66851.json) · [native](results/qryg-envoy-timed-20261014T012343Z-66851.native.json) |
