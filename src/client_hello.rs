@@ -54,13 +54,13 @@ impl ClientHello {
 
     /// The number of host_name entries offered in the server_name extension.
     #[must_use]
-    pub fn sni_entries(&self) -> u8 {
+    pub const fn sni_entries(&self) -> u8 {
         self.sni_entries
     }
 
     /// Whether the `encrypted_client_hello` (ECH) extension was present.
     #[must_use]
-    pub fn has_ech(&self) -> bool {
+    pub const fn has_ech(&self) -> bool {
         self.has_ech
     }
 }
@@ -185,7 +185,7 @@ impl HelloRejectReason {
     /// `InvalidServerName` kind; record/version/extension/compression and
     /// framing violations collapse to `Profile`.
     #[must_use]
-    pub fn from_ch_error(err: &ChError) -> HelloRejectReason {
+    pub const fn from_ch_error(err: &ChError) -> HelloRejectReason {
         match err {
             ChError::EchPresent => HelloRejectReason::EchPresent,
             ChError::ServerNameMismatch => HelloRejectReason::ServerNameMismatch,
@@ -214,7 +214,7 @@ impl HelloRejectReason {
     /// (offset from the CONNECT-head kinds by [`ConnectHeadReason::COUNT`] +
     /// the single `HostNotAllowlisted` kind).
     #[must_use]
-    pub fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         self as usize
     }
 
@@ -269,7 +269,7 @@ impl ChInspector {
         clippy::large_stack_arrays,
         reason = "designed serving-path two 64 KiB slot buffers; no runtime heap"
     )]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         ChInspector {
             buf: [0u8; MAX_CLIENT_HELLO],
             len: 0,
@@ -283,7 +283,7 @@ impl ChInspector {
 
     /// The parsed ClientHello, present once `feed` returned `Inspect::Complete`.
     #[must_use]
-    pub fn hello(&self) -> Option<&ClientHello> {
+    pub const fn hello(&self) -> Option<&ClientHello> {
         self.hello.as_ref()
     }
 
@@ -514,7 +514,7 @@ fn validate_versions(versions: &[u16]) -> Result<(), ChError> {
     Ok(())
 }
 
-fn is_grease(value: u16) -> bool {
+const fn is_grease(value: u16) -> bool {
     let hi = value >> 8;
     let lo = value & 0xff;
     hi == lo

@@ -204,7 +204,7 @@ impl Monitor {
     }
 
     #[cfg(test)]
-    pub(crate) fn facts_any_illegal(&self, cause: AnyIllegalCause) -> u32 {
+    pub(crate) const fn facts_any_illegal(&self, cause: AnyIllegalCause) -> u32 {
         self.facts.any_illegal[cause.kind_index()].value()
     }
 

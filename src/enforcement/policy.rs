@@ -10,7 +10,7 @@ pub enum AnyIllegalCause {
 }
 
 impl AnyIllegalCause {
-    pub fn kind_index(self) -> usize {
+    pub const fn kind_index(self) -> usize {
         match self {
             AnyIllegalCause::ConnectParse(reason) => reason.index(),
             AnyIllegalCause::HostNotAllowlisted => ConnectHeadReason::COUNT,
