@@ -139,6 +139,7 @@ bytes_count_to_len = "warn"
 double_comparisons = "warn"
 manual_split_once = "warn"
 needless_borrowed_reference = "warn"
+no_effect = "warn"
 
 [lib]
 name = "alumina"
