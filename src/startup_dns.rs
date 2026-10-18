@@ -1692,7 +1692,10 @@ impl StartupDns {
     /// the same wait without restarting the 90s or 2s deadlines (704q); any
     /// other owner replaces this driver body with a fold of the DNS readiness
     /// and [`Self::exchange_deadline`] into its own combined wait.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "startup-only blocking driver (2 callsites, startup_dns.rs:1385/1501); params span identity/state/deadline/logs with interleaved &mut cache/schedules/logs — a bundle struct would conceal their ownership"
+    )]
     fn exchange(
         &mut self,
         fqdn: &Fqdn,
