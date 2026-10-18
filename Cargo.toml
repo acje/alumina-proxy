@@ -93,6 +93,7 @@ derive_ord_xor_partial_ord = "warn"
 derived_hash_with_manual_eq = "warn"
 impl_hash_borrow_with_str_and_bytes = "warn"
 absurd_extreme_comparisons = "warn"
+mistyped_literal_suffixes = "warn"
 
 [lib]
 name = "alumina"
