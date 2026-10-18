@@ -196,52 +196,52 @@ impl ServeStorage {
     }
 
     /// The retained cache, read-only.
-    pub fn cache(&self) -> &Cache {
+    pub const fn cache(&self) -> &Cache {
         &self.cache
     }
 
     /// The retained parsed configuration, read-only.
-    pub(crate) fn config(&self) -> &Config {
+    pub(crate) const fn config(&self) -> &Config {
         &self.config
     }
 
     /// The retained refresh schedules, read-only.
-    pub fn schedules(&self) -> &Schedules {
+    pub const fn schedules(&self) -> &Schedules {
         &self.schedules
     }
 
     /// The retained refresh schedules, mutable for the owner's startup
     /// selection and backoff bookkeeping.
-    pub(crate) fn schedules_mut(&mut self) -> &mut Schedules {
+    pub(crate) const fn schedules_mut(&mut self) -> &mut Schedules {
         &mut self.schedules
     }
 
     /// The retained DNS transport with its fixed response workspace.
-    pub fn dns(&self) -> &StartupDns {
+    pub const fn dns(&self) -> &StartupDns {
         &self.dns
     }
 
     /// The retained DNS transport, mutable so the shared-readiness owner can
     /// run cooperative refresh turns on the single retained source.
-    pub(crate) fn dns_mut(&mut self) -> &mut StartupDns {
+    pub(crate) const fn dns_mut(&mut self) -> &mut StartupDns {
         &mut self.dns
     }
 
     /// The boot-owned log store, mutable for record emission and sink drains.
-    pub(crate) fn logs_mut(&mut self) -> &mut LogStore {
+    pub(crate) const fn logs_mut(&mut self) -> &mut LogStore {
         &mut self.logs
     }
 
     /// The boot-owned log store, shared for next-drain scheduling.
-    pub(crate) fn logs(&self) -> &LogStore {
+    pub(crate) const fn logs(&self) -> &LogStore {
         &self.logs
     }
 
-    pub(crate) fn enforcement(&self) -> &Enforcement {
+    pub(crate) const fn enforcement(&self) -> &Enforcement {
         &self.enforcement
     }
 
-    pub(crate) fn enforcement_mut(&mut self) -> &mut Enforcement {
+    pub(crate) const fn enforcement_mut(&mut self) -> &mut Enforcement {
         &mut self.enforcement
     }
 
