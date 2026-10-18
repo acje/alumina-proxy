@@ -1044,7 +1044,7 @@ fn both_ready_settlement_body() {
     );
 
     let fired = std::cell::Cell::new(false);
-    let held_for_hook = held_flag.clone();
+    let held_for_hook = held_flag;
     let release = release_tx;
     let wrote = wrote_rx;
     let hook = std::rc::Rc::new(move |serving: &Serving| {

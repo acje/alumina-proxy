@@ -283,7 +283,7 @@ fn f4_target_registration_is_unique_and_stores_hash() {
     }
 
     assert!(matches!(
-        ownership.register(ParserTarget::ConnectHeaders, seed.clone()),
+        ownership.register(ParserTarget::ConnectHeaders, seed),
         Err(RegisterError::DuplicateTarget(ParserTarget::ConnectHeaders))
     ));
 

@@ -74,6 +74,7 @@ derivable_impls = "warn"
 needless_pass_by_value = "warn"
 struct_excessive_bools = "warn"
 similar_names = "warn"
+redundant_clone = "warn"
 
 [lib]
 name = "alumina"

@@ -3335,7 +3335,7 @@ fn full_up_buffer_never_reads_into_zero_room_or_false_eofs() {
         stop_reader.store(true, Ordering::SeqCst);
         reader.join().expect("sink reader");
         let got = sink_got.lock().unwrap().clone();
-        let mut expected_tail = expected.clone();
+        let mut expected_tail = expected;
         expected_tail.extend_from_slice(b"more");
         assert_eq!(
             got, expected_tail,
