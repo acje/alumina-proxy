@@ -114,6 +114,7 @@ cmp_owned = "warn"
 vec_init_then_push = "warn"
 useless_vec = "warn"
 large_const_arrays = "warn"
+manual_memcpy = "warn"
 
 [lib]
 name = "alumina"
