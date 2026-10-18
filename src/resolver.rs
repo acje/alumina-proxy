@@ -15,12 +15,12 @@ pub struct Nameserver {
 
 impl Nameserver {
     #[must_use]
-    pub fn addr(&self) -> std::net::IpAddr {
+    pub const fn addr(&self) -> std::net::IpAddr {
         self.addr
     }
 
     #[must_use]
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         RESOLVER_PORT
     }
 }
@@ -38,7 +38,7 @@ pub enum ResolverError {
 
 impl ResolverError {
     #[must_use]
-    pub fn exit_status(&self) -> i32 {
+    pub const fn exit_status(&self) -> i32 {
         78
     }
 }
@@ -230,7 +230,7 @@ fn select(token: &str) -> Result<Nameserver, ResolverError> {
     Ok(Nameserver { addr })
 }
 
-fn is_unicast(addr: std::net::IpAddr) -> bool {
+const fn is_unicast(addr: std::net::IpAddr) -> bool {
     match addr {
         std::net::IpAddr::V4(ip) => {
             !ip.is_multicast() && !ip.is_broadcast() && !ip.is_unspecified()
@@ -248,7 +248,7 @@ struct Scanner<R: Read> {
 }
 
 impl<R: Read> Scanner<R> {
-    fn new(src: R, source_path: Option<String>) -> Self {
+    const fn new(src: R, source_path: Option<String>) -> Self {
         Scanner {
             src,
             buf: [0u8; 512],

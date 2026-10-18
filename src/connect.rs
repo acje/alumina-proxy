@@ -25,14 +25,14 @@ impl ConnectRequest {
 
     /// The validated destination port (1..=65535) from the CONNECT line.
     #[must_use]
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.port
     }
 
     /// The fixed-capacity validated hostname type, for gate validation that
     /// compares an SNI against the approved CONNECT host without allocation.
     #[must_use]
-    pub fn fixed_hostname(&self) -> &FixedHostname {
+    pub const fn fixed_hostname(&self) -> &FixedHostname {
         &self.hostname
     }
 }
@@ -109,7 +109,7 @@ impl ConnectHeadReason {
     /// Projects a [`ConnectError`] onto its finite discriminant, dropping the
     /// attacker-supplied payload (`got` width / length / detail string).
     #[must_use]
-    pub fn from_connect_error(err: &ConnectError) -> ConnectHeadReason {
+    pub const fn from_connect_error(err: &ConnectError) -> ConnectHeadReason {
         use ConnectError as E;
         match err {
             E::TooLong => ConnectHeadReason::TooLong,
@@ -128,7 +128,7 @@ impl ConnectHeadReason {
 
     /// The zero-based index into a fixed per-discriminant counter array.
     #[must_use]
-    pub fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         self as usize
     }
 
@@ -170,7 +170,7 @@ impl Default for ConnectParser {
 
 impl ConnectParser {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         ConnectParser {
             head: [0u8; CONNECT_LIMIT],
             head_len: 0,
@@ -181,7 +181,7 @@ impl ConnectParser {
     /// The parsed request or first policy violation, present once the head is
     /// delimited.
     #[must_use]
-    pub fn result(&self) -> Option<&Result<ConnectRequest, ConnectError>> {
+    pub const fn result(&self) -> Option<&Result<ConnectRequest, ConnectError>> {
         self.result.as_ref()
     }
 
@@ -298,7 +298,7 @@ struct Lines<'a> {
 }
 
 impl<'a> Lines<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    const fn new(buf: &'a [u8]) -> Self {
         Lines { buf, next: 0 }
     }
 
