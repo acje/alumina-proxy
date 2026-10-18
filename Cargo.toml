@@ -110,6 +110,7 @@ suspicious_else_formatting = "warn"
 suspicious_to_owned = "warn"
 unnecessary_to_owned = "warn"
 expect_fun_call = "warn"
+cmp_owned = "warn"
 
 [lib]
 name = "alumina"
