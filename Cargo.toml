@@ -232,6 +232,19 @@ modulo_one = "warn"
 # per-site `#[expect(clippy::min_max, reason = "...")]`.
 # No runtime/alloc/spec change; the attribute is compile-time.
 min_max = "warn"
+# SM-19: enable the correctness/scrub lint — `self_assignment`. Its firing
+# surface is a dead self-assignment (`x = x`) in reset/scrub/reuse logic,
+# which usually signals a dropped or renamed variable in a buffer reset that
+# would silently keep stale data. A clippy 1.99.0 positive control (`-F
+# clippy::self_assignment`) on both feature matrices plus a planted
+# `let mut x = 1; x = x;` probe (which fires `self-assignment of `x` to `x`` —
+# exit 101 on both matrices, proving the lint is armed; the gate fails where a
+# site exists) plus a self-assign scan of `src/` + `tests/` found zero
+# lint-proven sites on the pinned toolchain, so the lint guards future
+# regressions. A genuinely intentional self-assignment, should one arise,
+# carries a tight per-site `#[expect(clippy::self_assignment, reason =
+# "...")]`. No runtime/alloc/spec change; the attribute is compile-time.
+self_assignment = "warn"
 
 [lib]
 name = "alumina"
