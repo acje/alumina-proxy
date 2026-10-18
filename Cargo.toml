@@ -103,6 +103,7 @@ iterator_step_by_zero = "warn"
 zero_repeat_side_effects = "warn"
 unconditional_recursion = "warn"
 drop_non_drop = "warn"
+forget_non_drop = "warn"
 
 [lib]
 name = "alumina"
