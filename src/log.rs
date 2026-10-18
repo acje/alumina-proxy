@@ -810,6 +810,9 @@ struct SinkState {
     blocked: bool,
     #[cfg(test)]
     ops: usize,
+    /// Write-vector syscalls issued (test observation of the gathering gain).
+    #[cfg(test)]
+    syscalls: usize,
 }
 
 /// Failure to construct the boot-owned store.
@@ -920,6 +923,8 @@ impl LogStore {
                 blocked: false,
                 #[cfg(test)]
                 ops: 0,
+                #[cfg(test)]
+                syscalls: 0,
             },
             slots_wm: Watermark::new(),
             setups_wm: Watermark::new(),
@@ -988,6 +993,13 @@ impl LogStore {
     #[cfg(test)]
     pub(crate) const fn sink_ops(&self) -> usize {
         self.sink.ops
+    }
+
+    /// Total write-vector syscalls issued by the sink (test observation of
+    /// the gather: fewer syscalls than fragments when fragments coalesce).
+    #[cfg(test)]
+    pub(crate) const fn sink_syscalls(&self) -> usize {
+        self.sink.syscalls
     }
 
     /// Whether the sink latched failed after a non-WouldBlock write error
@@ -1210,10 +1222,11 @@ impl LogStore {
     }
 
     /// Drains the queue through the nonblocking stdout sink under the
-    /// per-turn work budget: at most [`SINK_MAX_OPS`] write calls or
-    /// [`SINK_MAX_BYTES`] bytes. A `WouldBlock` retains the partial cursor and
-    /// yields immediately; a write/close failure latches the sink failed so
-    /// no later drain spins or blocks.
+    /// per-turn work budget: at most [`SINK_MAX_OPS`] gathered fragments or
+    /// [`SINK_MAX_BYTES`] bytes, emitted in a single `writev` syscall per
+    /// turn. A `WouldBlock` retains the partial cursor and yields
+    /// immediately; a write/close failure latches the sink failed so no later
+    /// drain spins or blocks.
     pub(crate) fn drain_sink(&mut self) {
         if self.sink.failed {
             return;
@@ -1237,12 +1250,28 @@ impl LogStore {
                 self.advance_front();
                 continue;
             }
-            let chunk = (rec_len - off).min(SINK_MAX_BYTES - bytes_out);
+            let mut iovs = [libc::iovec {
+                iov_base: std::ptr::null_mut(),
+                iov_len: 0,
+            }; SINK_MAX_OPS];
+            let mut remain = SINK_MAX_BYTES - bytes_out;
+            let mut gathered = 0usize;
+            while gathered < self.count && gathered < SINK_MAX_OPS && remain > 0 {
+                let fi = (index + gathered) & QUEUE_MASK;
+                let start = if gathered == 0 { off } else { 0 };
+                let end = self.slots[fi].bytes;
+                let part = (end - start).min(remain);
+                let base = self.slots[fi].buf[start..start + part]
+                    .as_ptr()
+                    .cast_mut()
+                    .cast::<libc::c_void>();
+                iovs[gathered].iov_base = base;
+                iovs[gathered].iov_len = part;
+                gathered += 1;
+                remain -= part;
+            }
             let fd = self.sink_fd();
-            let written = {
-                let slot = &self.slots[index];
-                write_bytes(fd, &slot.buf[off..off + chunk])
-            };
+            let written = writev_bytes(fd, &iovs[..gathered]);
             match written {
                 Err(ref err)
                     if err.kind() == io::ErrorKind::WouldBlock
@@ -1267,25 +1296,45 @@ impl LogStore {
                     return;
                 }
                 Ok(n) => {
-                    ops += 1;
+                    ops += gathered;
                     #[cfg(test)]
                     {
-                        self.sink.ops += 1;
+                        self.sink.ops += gathered;
+                        self.sink.syscalls += 1;
                     }
                     bytes_out += n;
                     self.sink.blocked = false;
-                    let new_off = off + n;
-                    if new_off >= rec_len {
-                        self.advance_front();
-                    } else {
-                        self.cursor = Some(Cursor { off: new_off });
-                        if n < chunk {
-                            return;
-                        }
+                    if self.consume_gathered(index, off, gathered, n) {
+                        return;
                     }
                 }
             }
         }
+    }
+
+    /// Accounts `n` written bytes over the `gathered` fragments of a single
+    /// `writev`, advancing the queue front once per fully-emitted record so
+    /// watermark edges observe true per-record occupancy. Returns `true` when
+    /// the write stopped mid-record (a partial write): the turn must end with
+    /// the cursor retained for the drain to resume at the exact residue.
+    fn consume_gathered(
+        &mut self,
+        index: usize,
+        off: usize,
+        gathered: usize,
+        mut n: usize,
+    ) -> bool {
+        for k in 0..gathered {
+            let start = if k == 0 { off } else { 0 };
+            let remain = self.slots[(index + k) & QUEUE_MASK].bytes - start;
+            if n < remain {
+                self.cursor = Some(Cursor { off: start + n });
+                return true;
+            }
+            n -= remain;
+            self.advance_front();
+        }
+        false
     }
 
     fn advance_front(&mut self) {
@@ -1375,19 +1424,27 @@ fn set_fd_nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn write_bytes(fd: RawFd, bytes: &[u8]) -> io::Result<usize> {
-    // SAFETY: `bytes` is a live `&[u8]` borrow, so `bytes.as_ptr().cast()` is
-    // a valid readable region of exactly `bytes.len()` bytes for the duration
-    // of this call, and `libc::write` reads at most `len` bytes without
-    // retaining the pointer. `fd` is the sink descriptor (stdout, or a
-    // caller-owned pipe/file fd kept open for the `LogStore` lifetime) with no
-    // concurrent close on another thread; the `-1` return is checked and
-    // mapped to `last_os_error`.
-    let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+/// Writes `iovs` in a single nonblocking `writev` syscall. Returns the total
+/// number of bytes accepted, or the first error via `last_os_error` exactly
+/// as `write` would have.
+fn writev_bytes(fd: RawFd, iovs: &[libc::iovec]) -> io::Result<usize> {
+    let iovcnt = libc::c_int::try_from(iovs.len()).expect("iov count is at most SINK_MAX_OPS = 16");
+    // SAFETY: every `iov_base`/`iov_len` pair in `iovs` is built by
+    // `drain_sink` from a live `&mut [u8]` slab slice (`self.slots[..].buf`),
+    // so each base is a valid readable region of exactly `iov_len` bytes for
+    // the duration of this call, and `libc::writev` reads at most those
+    // lengths without retaining the pointers. `fd` is the sink descriptor
+    // (stdout, or a caller-owned pipe/file/socket fd kept open for the
+    // `LogStore` lifetime) with no concurrent close on another thread. The
+    // returned byte count never exceeds the gathered length, and the `-1`
+    // return is checked and mapped to `last_os_error`. `iovcnt` is positive
+    // (the caller gathers at least one fragment) and bounded by
+    // [`SINK_MAX_OPS`] (16), far below `IOV_MAX`.
+    let n = unsafe { libc::writev(fd, iovs.as_ptr(), iovcnt) };
     if n < 0 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(usize::try_from(n).expect("write returned a non-negative byte count"))
+        Ok(usize::try_from(n).expect("writev returned a non-negative byte count"))
     }
 }
 
@@ -2150,5 +2207,95 @@ mod tests {
             "queued non-blocked records are immediately runnable"
         );
         let _ = reader;
+    }
+
+    #[test]
+    fn logging_sink_gathers_multiple_fragments_in_one_writev() {
+        let (mut subject, mut subject_file) = file_logstore();
+        let (mut reference, mut reference_file) = file_logstore();
+        for i in 0..SINK_MAX_OPS {
+            let name = format!("host-{i}.example.org");
+            subject.startup_warning(1, &name, Family::A);
+            reference.startup_warning(1, &name, Family::A);
+        }
+        subject.drain_sink();
+        assert_eq!(
+            subject.sink_syscalls(),
+            1,
+            "one writev gathers the whole per-turn fragment budget"
+        );
+        assert_eq!(
+            subject.sink_ops(),
+            SINK_MAX_OPS,
+            "the per-turn op budget is spent in gathered fragments"
+        );
+        assert_eq!(subject.len(), 0, "the gathered turn drains the queue");
+        flush_all(&mut reference);
+        let expected = read_all(&mut reference_file);
+        let got = read_all(&mut subject_file);
+        assert_eq!(
+            got, expected,
+            "writev gather emits the byte-identical stream"
+        );
+    }
+
+    #[test]
+    fn logging_writev_partial_write_keeps_cursor_and_stream_identical() {
+        use std::io::Read as _;
+        let (mut reader, writer) = UnixStream::pair().expect("socketpair");
+        writer.set_nonblocking(true).expect("writer nonblocking");
+        reader.set_nonblocking(true).expect("reader nonblocking");
+        let mut subject = LogStore::with_fd(writer.as_raw_fd()).expect("pipe sink store");
+        let big = "p".repeat(4000);
+        for _ in 0..40 {
+            subject.startup_warning(1, &big, Family::A);
+        }
+        let expected = {
+            let (mut reference, mut file) = file_logstore();
+            for _ in 0..40 {
+                reference.startup_warning(1, &big, Family::A);
+            }
+            flush_all(&mut reference);
+            read_all(&mut file)
+        };
+        let mut got: Vec<u8> = Vec::new();
+        let mut first_turn_bytes = 0usize;
+        let mut turns = 0usize;
+        while subject.len() > 0 && turns < 8 * QUEUE_SLOTS {
+            subject.drain_sink();
+            turns += 1;
+            let mut chunk = [0u8; 4096];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => got.extend_from_slice(&chunk[..n]),
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(e) => panic!("read: {e}"),
+                }
+            }
+            if turns == 1 {
+                first_turn_bytes = got.len();
+            }
+        }
+        assert!(
+            turns > 1,
+            "the socket buffer must split the gather across turns"
+        );
+        assert!(
+            first_turn_bytes < expected.len(),
+            "the first writev is a partial write ({first_turn_bytes} < {})",
+            expected.len()
+        );
+        assert_eq!(
+            subject.dropped(),
+            0,
+            "a live stalled sink never drops records"
+        );
+        assert_eq!(
+            got, expected,
+            "partial writev turns never re-emit or skip bytes (byte-identical stream)"
+        );
+        let _ = reader;
+        let _ = writer;
     }
 }
