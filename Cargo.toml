@@ -183,6 +183,18 @@ comparison_to_empty = "warn"
 # a tight per-site `#[expect(clippy::identity_op, reason = "...")]`. No
 # runtime/alloc/spec change; the attribute is compile-time.
 identity_op = "warn"
+# SM-15: enable the correctness/scan lint — `never_loop`. Its firing surface
+# is a `loop` whose body can only ever execute once — an unconditional
+# `break`/`return` on the first iteration — which is usually a parsing/scan
+# bug where a loop written to walk a buffer never advances. A clippy 1.99.0
+# positive control (`-F clippy::never_loop`) on both feature matrices plus a
+# planted `loop { …; break; }` probe (which fires `never_loop`, proving the
+# lint is armed — the gate fails where a site exists) found zero lint-proven
+# sites on the pinned toolchain, so the lint guards future regressions. A
+# genuinely intentional once-only loop carries a tight per-site
+# `#[expect(clippy::never_loop, reason = "...")]`. No runtime/alloc/spec
+# change; the attribute is compile-time.
+never_loop = "warn"
 
 [lib]
 name = "alumina"
