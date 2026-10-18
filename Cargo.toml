@@ -80,6 +80,7 @@ precedence = "warn"
 range_minus_one = "warn"
 suspicious_assignment_formatting = "warn"
 match_overlapping_arm = "warn"
+mut_from_ref = "warn"
 
 [lib]
 name = "alumina"
