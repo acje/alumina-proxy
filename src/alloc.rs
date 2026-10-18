@@ -57,6 +57,7 @@ pub struct Counts {
 }
 
 impl Counts {
+    #[must_use]
     pub fn all_zero(self) -> bool {
         self.allocs == 0 && self.deallocs == 0 && self.reallocs == 0
     }
@@ -109,6 +110,7 @@ pub fn run_phase<R>(phase: Phase, f: impl FnOnce() -> R) -> (R, Counts) {
     (value, counts)
 }
 
+#[must_use]
 pub fn active_phase() -> Option<Phase> {
     CURRENT_PHASE.with(|cell| cell.get())
 }

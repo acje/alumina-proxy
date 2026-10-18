@@ -98,6 +98,7 @@ impl ParserTarget {
         ParserTarget::LogRecord,
     ];
 
+    #[must_use]
     pub fn owning_slice(self) -> u8 {
         match self {
             ParserTarget::ConnectHeaders => 3,
@@ -110,6 +111,7 @@ impl ParserTarget {
     /// Whether the target drives a real parser under the campaign rather than
     /// a scaffold. All four targets are wired to their real parser, so every
     /// target reports `driven` (alumina-sechd M3).
+    #[must_use]
     pub fn status(self) -> &'static str {
         "driven"
     }
@@ -118,6 +120,7 @@ impl ParserTarget {
 /// The checked-in corpus inputs for a target: representative inputs that
 /// complete the real parser, so every campaign reaches at least one deep parse
 /// independent of the generated space (docs/alumina-proxy.md:388-391).
+#[must_use]
 pub fn corpus(target: ParserTarget) -> &'static [&'static [u8]] {
     match target {
         ParserTarget::ConnectHeaders => CONNECT_CORPUS,
@@ -198,6 +201,7 @@ fn drive(target: ParserTarget, input: &[u8]) -> DriveOutcome {
 /// input's hash for exact reproduction (docs/alumina-proxy.md:388-391). A
 /// `Panicked` verdict is the campaign's crash signal; the parsers must never
 /// panic over the sampled space.
+#[must_use]
 pub fn drive_unwind(target: ParserTarget, input: &[u8]) -> DriveOutcome {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drive(target, input)))
         .unwrap_or(DriveOutcome::Panicked)
@@ -272,43 +276,52 @@ impl FuzzRun {
         }
     }
 
+    #[must_use]
     pub fn target(&self) -> ParserTarget {
         self.target
     }
 
     /// The number of checked-in corpus inputs driven in this campaign.
+    #[must_use]
     pub fn corpus_driven(&self) -> u64 {
         self.corpus_driven
     }
 
     /// The number of checked-in corpus inputs that completed the real parser.
+    #[must_use]
     pub fn corpus_complete(&self) -> u64 {
         self.corpus_complete
     }
 
     /// The number of generated inputs driven in this campaign.
+    #[must_use]
     pub fn generated_inputs(&self) -> u64 {
         self.generated_inputs
     }
 
+    #[must_use]
     pub fn generated_complete(&self) -> u64 {
         self.generated_complete
     }
 
+    #[must_use]
     pub fn generated_rejected(&self) -> u64 {
         self.generated_rejected
     }
 
+    #[must_use]
     pub fn generated_need_more(&self) -> u64 {
         self.generated_need_more
     }
 
     /// The hash of the last generated input, for exact crash reproduction.
+    #[must_use]
     pub fn last_input_hash(&self) -> Option<InputHash> {
         self.last_input_hash
     }
 
     /// Whether any driven input panicked its parser (campaign crash).
+    #[must_use]
     pub fn panicked(&self) -> bool {
         self.panicked
     }
@@ -320,6 +333,7 @@ impl FuzzRun {
 /// (docs/alumina-proxy.md:388-391). A panic aborts the campaign with the
 /// offending input's hash recorded so the input reproduces exactly. Never
 /// called on a production path; campaigns execute under `cargo test`.
+#[must_use]
 pub fn fuzz_target(target: ParserTarget, seed: Seed, iterations: u64, max_len: usize) -> FuzzRun {
     let mut rng = DeterministicGen::new(seed);
     let bound = max_len.max(1);
@@ -343,10 +357,12 @@ pub fn fuzz_target(target: ParserTarget, seed: Seed, iterations: u64, max_len: u
 pub struct Seed([u8; 32]);
 
 impl Seed {
+    #[must_use]
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Seed(bytes)
     }
 
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -358,6 +374,7 @@ pub struct InputHash(u64);
 impl InputHash {
     /// Lossless 64-bit FNV hex rendering (16 hex chars), for corpus and
     /// crash-input hashes that reproduce exactly across hosts.
+    #[must_use]
     pub fn hex(&self) -> String {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut out = String::with_capacity(16);
@@ -392,6 +409,7 @@ pub struct DeterministicGen {
 }
 
 impl DeterministicGen {
+    #[must_use]
     pub fn new(seed: Seed) -> Self {
         let state = fnv1a64_raw(seed.as_bytes().iter().copied());
         DeterministicGen { seed, state }
@@ -405,6 +423,7 @@ impl DeterministicGen {
         z ^ (z >> 31)
     }
 
+    #[must_use]
     pub fn seed(&self) -> &Seed {
         &self.seed
     }
@@ -437,6 +456,7 @@ pub struct CorpusOwnership {
 }
 
 impl CorpusOwnership {
+    #[must_use]
     pub fn new() -> Self {
         CorpusOwnership {
             records: Vec::new(),
@@ -462,10 +482,12 @@ impl CorpusOwnership {
         Ok(&mut self.records[index])
     }
 
+    #[must_use]
     pub fn records(&self) -> &[CorpusRecord] {
         &self.records
     }
 
+    #[must_use]
     pub fn find(&self, target: ParserTarget) -> Option<&CorpusRecord> {
         self.records.iter().find(|record| record.target == target)
     }
@@ -476,6 +498,7 @@ impl CorpusOwnership {
             .find(|record| record.target == target)
     }
 
+    #[must_use]
     pub fn contains(&self, target: ParserTarget) -> bool {
         self.records.iter().any(|record| record.target == target)
     }
@@ -488,10 +511,12 @@ impl Default for CorpusOwnership {
 }
 
 impl CorpusRecord {
+    #[must_use]
     pub fn target(&self) -> ParserTarget {
         self.target
     }
 
+    #[must_use]
     pub fn seed(&self) -> &Seed {
         &self.seed
     }
@@ -500,6 +525,7 @@ impl CorpusRecord {
         self.corpus_checked_in = value;
     }
 
+    #[must_use]
     pub fn corpus_is_checked_in(&self) -> bool {
         self.corpus_checked_in
     }
@@ -508,6 +534,7 @@ impl CorpusRecord {
         self.generated_inputs = self.generated_inputs.saturating_add(inputs);
     }
 
+    #[must_use]
     pub fn generated_inputs(&self) -> u64 {
         self.generated_inputs
     }
@@ -516,6 +543,7 @@ impl CorpusRecord {
         self.last_input_hash = Some(hash);
     }
 
+    #[must_use]
     pub fn last_input_hash(&self) -> Option<&InputHash> {
         self.last_input_hash.as_ref()
     }

@@ -22,6 +22,7 @@ pub struct Soa {
 }
 
 impl Soa {
+    #[must_use]
     pub fn new(ttl: u64, minimum: u64) -> Soa {
         Soa { ttl, minimum }
     }
@@ -33,6 +34,7 @@ impl Soa {
 
 /// Returns the normal refresh interval for an entry TTL, honoring the fixed
 /// 30/300-second bounds. The floor subsumes the zero-TTL-as-one-second rule.
+#[must_use]
 pub fn normal_refresh_interval(ttl: u64) -> u64 {
     ttl.clamp(REFRESH_MIN, REFRESH_MAX)
 }
@@ -40,6 +42,7 @@ pub fn normal_refresh_interval(ttl: u64) -> u64 {
 /// Returns the negative refresh interval for a validated negative answer's
 /// SOA, honoring the same fixed bounds after taking the earlier of its TTL and
 /// MINIMUM.
+#[must_use]
 pub fn negative_refresh_interval(soa: Soa) -> u64 {
     soa.min_ttl().clamp(REFRESH_MIN, REFRESH_MAX)
 }
@@ -83,11 +86,13 @@ pub struct DueToken {
 impl DueToken {
     /// The admitted name index of the selected exchange, matching
     /// `Cache::name_index` numbering for later cache integration.
+    #[must_use]
     pub fn name(&self) -> usize {
         self.name
     }
 
     /// The record family of the selected exchange.
+    #[must_use]
     pub fn family(&self) -> Family {
         self.family
     }
@@ -138,6 +143,7 @@ impl Schedules {
     }
 
     /// The number of admitted names.
+    #[must_use]
     pub fn name_count(&self) -> usize {
         usize::from(self.name_count)
     }
@@ -488,6 +494,7 @@ impl Schedules {
     /// nothing (the outstanding exchange's own deadline already bounds the wait
     /// and its outcome rewrites the due time). Returns `Some(now)` when work is
     /// already selectable this instant, and `None` when no slot is scheduled.
+    #[must_use]
     pub fn next_selectable_due(&self, now: u64) -> Option<u64> {
         let mut earliest: Option<u64> = None;
         let total = self.name_count() * 2;

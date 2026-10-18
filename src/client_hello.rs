@@ -41,21 +41,25 @@ pub struct ClientHello {
 
 impl ClientHello {
     /// The offered non-GREASE supported versions, filtered and ordered.
+    #[must_use]
     pub fn offered_versions(&self) -> &[u16] {
         &self.versions[..self.versions_len]
     }
 
     /// The first normalized SNI host_name offered.
+    #[must_use]
     pub fn server_name(&self) -> &[u8] {
         &self.sni[..self.sni_len]
     }
 
     /// The number of host_name entries offered in the server_name extension.
+    #[must_use]
     pub fn sni_entries(&self) -> u8 {
         self.sni_entries
     }
 
     /// Whether the `encrypted_client_hello` (ECH) extension was present.
+    #[must_use]
     pub fn has_ech(&self) -> bool {
         self.has_ech
     }
@@ -180,6 +184,7 @@ impl HelloRejectReason {
     /// malformed / duplicate / illegal-name cases all share the
     /// `InvalidServerName` kind; record/version/extension/compression and
     /// framing violations collapse to `Profile`.
+    #[must_use]
     pub fn from_ch_error(err: &ChError) -> HelloRejectReason {
         match err {
             ChError::EchPresent => HelloRejectReason::EchPresent,
@@ -208,6 +213,7 @@ impl HelloRejectReason {
     /// The zero-based index into a fixed per-discriminant counter array
     /// (offset from the CONNECT-head kinds by [`ConnectHeadReason::COUNT`] +
     /// the single `HostNotAllowlisted` kind).
+    #[must_use]
     pub fn index(self) -> usize {
         self as usize
     }
@@ -258,6 +264,7 @@ impl Default for ChInspector {
 }
 
 impl ChInspector {
+    #[must_use]
     pub fn new() -> Self {
         ChInspector {
             buf: [0u8; MAX_CLIENT_HELLO],
@@ -271,6 +278,7 @@ impl ChInspector {
     }
 
     /// The parsed ClientHello, present once `feed` returned `Inspect::Complete`.
+    #[must_use]
     pub fn hello(&self) -> Option<&ClientHello> {
         self.hello.as_ref()
     }

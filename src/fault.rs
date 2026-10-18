@@ -42,6 +42,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    #[must_use]
     pub fn category(&self) -> Category {
         match self {
             Outcome::PartialRead { .. } => Category::PartialRead,
@@ -77,6 +78,7 @@ impl Script {
         self
     }
 
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -99,6 +101,7 @@ pub struct Replayed<'a> {
 }
 
 impl Replay {
+    #[must_use]
     pub fn new(script: Script) -> Self {
         Replay {
             script,
@@ -106,6 +109,7 @@ impl Replay {
         }
     }
 
+    #[must_use]
     pub fn script_id(&self) -> &str {
         self.script.id()
     }
@@ -125,6 +129,7 @@ impl Replay {
         })
     }
 
+    #[must_use]
     pub fn into_script(self) -> Script {
         self.script
     }
@@ -137,6 +142,7 @@ pub struct Clock {
 }
 
 impl Clock {
+    #[must_use]
     pub fn new(ticks: Vec<u64>) -> Self {
         Clock { ticks, cursor: 0 }
     }

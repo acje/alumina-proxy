@@ -9,8 +9,13 @@ description = "Alumina phase-1 foundations: F0 toolchain pin, F1/F2/F4 witness s
 # SM-01: per-lint rollout proof — enable one pedantic lint and fix all its
 # sites. `uninlined_format_args` is pure formatting; args are inlined at every
 # site and no suppression is expected.
+# SM-02: enable the second pedantic lint — `must_use_candidate` — and resolve
+# every site with idiomatic `#[must_use]` (public API) or
+# `#[expect(clippy::must_use_candidate, reason = "...")]` (test-local/private,
+# value legitimately ignored). No runtime impact; attributes are compile-time.
 [lints.clippy]
 uninlined_format_args = "warn"
+must_use_candidate = "warn"
 
 [lib]
 name = "alumina"

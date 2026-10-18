@@ -38,6 +38,7 @@ pub enum PreflightError {
 }
 
 impl PreflightError {
+    #[must_use]
     pub fn exit_status(&self) -> i32 {
         78
     }

@@ -97,14 +97,17 @@ impl Default for BindingList {
 
 impl BindingList {
     /// The eligible candidate addresses.
+    #[must_use]
     pub fn as_slice(&self) -> &[NumericAddr] {
         &self.addrs[..usize::from(self.len)]
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         usize::from(self.len)
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

@@ -135,6 +135,7 @@ impl ValidatedHello {
     }
 
     /// The exclusive end offset of the validated hello in the client stream.
+    #[must_use]
     pub fn end(self) -> usize {
         self.end
     }
@@ -142,6 +143,7 @@ impl ValidatedHello {
 
 impl TunnelGate {
     /// A closed gate at the start of CONNECT setup.
+    #[must_use]
     pub fn new() -> TunnelGate {
         TunnelGate {
             phase: GatePhase::AwaitConnect,
@@ -255,21 +257,25 @@ impl TunnelGate {
 
     /// Whether the gate is open (both barriers) or the phase otherwise permits
     /// downstream forwarding.
+    #[must_use]
     pub fn is_open(&self) -> bool {
         self.phase == GatePhase::RelayActive
     }
 
     /// The validated hello end in the client stream, if any.
+    #[must_use]
     pub fn hello_end(&self) -> Option<usize> {
         self.hello_end
     }
 
     /// Cumulative client->upstream bytes successfully written.
+    #[must_use]
     pub fn upstream_committed(&self) -> usize {
         self.upstream_committed
     }
 
     /// Phase of the gate.
+    #[must_use]
     pub fn phase(&self) -> GatePhase {
         self.phase
     }

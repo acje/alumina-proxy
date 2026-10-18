@@ -14,10 +14,12 @@ pub struct Nameserver {
 }
 
 impl Nameserver {
+    #[must_use]
     pub fn addr(&self) -> std::net::IpAddr {
         self.addr
     }
 
+    #[must_use]
     pub fn port(&self) -> u16 {
         RESOLVER_PORT
     }
@@ -35,6 +37,7 @@ pub enum ResolverError {
 }
 
 impl ResolverError {
+    #[must_use]
     pub fn exit_status(&self) -> i32 {
         78
     }

@@ -63,11 +63,13 @@ impl Fqdn {
     /// The normalized bare `<fqdn>` (no port, no trailing dot): the key used
     /// for DNS cache entries, queries, and logs, so `NameIndex(u8)` stays
     /// keyed by the bare name.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.name
     }
 
     /// The validated upstream dial port for this allowlist entry (1..=65535).
+    #[must_use]
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -123,11 +125,13 @@ pub struct FixedHostname {
 
 impl FixedHostname {
     /// The normalized lowercase bytes, without a trailing dot.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
 
     /// The normalized name as a `&str`; always ASCII by construction.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(self.as_bytes()).expect("FixedHostname is ASCII")
     }
@@ -138,6 +142,7 @@ impl FixedHostname {
     /// `FQDN_MAX_LEN` bound is applied, so a 254-byte input consisting of a
     /// valid 253-byte name plus a trailing dot is accepted; any other 254-byte
     /// input is rejected without copying outside the fixed buffer.
+    #[must_use]
     pub fn normalize(input: &[u8]) -> Option<FixedHostname> {
         if input.is_empty() || input.len() > FQDN_MAX_LEN + 1 {
             return None;
@@ -326,14 +331,17 @@ mod fqdn_tests {
 pub struct Allowlist(Vec<Fqdn>);
 
 impl Allowlist {
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    #[must_use]
     pub fn get(&self, index: usize) -> Option<&Fqdn> {
         self.0.get(index)
     }
@@ -350,10 +358,12 @@ pub struct ListenAddr {
 }
 
 impl ListenAddr {
+    #[must_use]
     pub fn ip(&self) -> IpAddr {
         self.ip
     }
 
+    #[must_use]
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -368,6 +378,7 @@ pub struct Config {
 }
 
 impl Config {
+    #[must_use]
     pub fn allowlist(&self) -> &Allowlist {
         &self.allowlist
     }
@@ -383,14 +394,17 @@ impl Config {
         })
     }
 
+    #[must_use]
     pub fn listen(&self) -> &ListenAddr {
         &self.listen
     }
 
+    #[must_use]
     pub fn startup_unresolved_allowance(&self) -> u8 {
         self.startup_unresolved_allowance
     }
 
+    #[must_use]
     pub fn control(&self) -> &ControlTable {
         &self.control
     }
@@ -452,6 +466,7 @@ pub enum ConfigError {
 }
 
 impl ConfigError {
+    #[must_use]
     pub fn exit_status(&self) -> i32 {
         78
     }

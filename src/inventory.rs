@@ -55,6 +55,7 @@ pub struct SlotTraffic {
 
 impl SlotTraffic {
     /// Splits the retained pair into its two buffer halves for transfer.
+    #[must_use]
     pub fn into_parts(self) -> (Box<[u8]>, Box<[u8]>) {
         (self.up, self.down)
     }
@@ -99,21 +100,25 @@ impl TrafficStorage {
     }
 
     /// The exact initialized traffic bytes: 512 slots x 2 directions x 128 KiB.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.slots.len() * BUFFERS_PER_SLOT * BUFFER_BYTES
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
 
     /// Read view of the retained per-slot pairs, for accounting and tests.
+    #[must_use]
     pub fn slots(&self) -> &[SlotTraffic] {
         &self.slots
     }
 
     /// Consumes the store, yielding the per-slot pairs for transfer into the
     /// serving owner without a second allocation.
+    #[must_use]
     pub fn into_slots(self) -> Box<[SlotTraffic]> {
         self.slots
     }
@@ -138,6 +143,7 @@ pub struct BootInventory {
 }
 
 impl BootInventory {
+    #[must_use]
     pub fn phase1() -> BootInventory {
         BootInventory {
             traffic_storage_bytes: TRAFFIC_STORAGE_BYTES,
@@ -154,28 +160,34 @@ impl BootInventory {
     /// the traffic store initializes at boot, the serving workspaces at
     /// [`Preallocated::preallocate`](crate::runtime::Preallocated::preallocate),
     /// and the DNS buffers at the DNS transport's own construction.
+    #[must_use]
     pub fn named_fixed_buffer_bytes(&self) -> usize {
         self.traffic_storage_bytes
             .saturating_add(self.serving_workspace_bytes)
             .saturating_add(self.dns_named_buffer_bytes)
     }
 
+    #[must_use]
     pub fn traffic_storage_bytes(&self) -> usize {
         self.traffic_storage_bytes
     }
 
+    #[must_use]
     pub fn serving_workspace_bytes(&self) -> usize {
         self.serving_workspace_bytes
     }
 
+    #[must_use]
     pub fn dns_named_buffer_bytes(&self) -> usize {
         self.dns_named_buffer_bytes
     }
 
+    #[must_use]
     pub fn transient_scratch_bytes(&self) -> usize {
         self.transient_config_buffer_bytes
     }
 
+    #[must_use]
     pub fn reserved_future_bytes(&self) -> usize {
         self.reserved_log_queue_bytes
     }

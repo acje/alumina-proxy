@@ -877,12 +877,14 @@ impl Serving {
 
     /// The fixed token the retained DNS source is attached under on this
     /// registry.
+    #[must_use]
     pub const fn dns_token() -> Token {
         Token(DNS_LOCAL)
     }
 
     /// The fixed token the retained SIGTERM self-pipe read end is attached
     /// under on this registry.
+    #[must_use]
     pub const fn signal_token() -> Token {
         Token(SIGNAL_LOCAL)
     }

@@ -95,6 +95,7 @@ impl WorkerClock {
     /// plus whole seconds since the boot anchor. This is the only conversion
     /// from wall time to the cache clock, and it must agree with startup's
     /// `now0 + elapsed` scale.
+    #[must_use]
     pub fn cache_secs(&self, now: Instant) -> u64 {
         self.dns0
             .saturating_add(now.saturating_duration_since(self.epoch).as_secs())
@@ -115,6 +116,7 @@ pub struct AttemptCounts {
 }
 
 impl AttemptCounts {
+    #[must_use]
     pub const fn new() -> AttemptCounts {
         AttemptCounts { a: 0, aaaa: 0 }
     }
@@ -136,6 +138,7 @@ impl AttemptCounts {
     }
 
     /// Returns the counts advanced by one attempt in `family`.
+    #[must_use]
     pub const fn record(self, family: Family) -> AttemptCounts {
         match family {
             Family::A => AttemptCounts {
@@ -165,6 +168,7 @@ pub struct AttemptLedger {
 }
 
 impl AttemptLedger {
+    #[must_use]
     pub const fn new() -> AttemptLedger {
         AttemptLedger {
             counts: AttemptCounts::new(),
@@ -185,6 +189,7 @@ impl AttemptLedger {
     }
 
     /// The ledger advanced by one failed attempt in `family`.
+    #[must_use]
     pub const fn record(self, family: Family) -> AttemptLedger {
         AttemptLedger {
             counts: self.counts.record(family),
@@ -207,6 +212,7 @@ impl Deadline {
     /// The absolute setup deadline: 10 s after successful accept, never reset
     /// (docs/alumina-proxy.md:169,189). Saturates to the accept instant on clock
     /// overflow, leaving an unrepresentable deadline already expired.
+    #[must_use]
     pub fn setup(accepted: Instant) -> Deadline {
         match accepted.checked_add(Duration::from_secs(SETUP_DEADLINE_SECS)) {
             Some(limit) => Deadline { limit },
@@ -219,6 +225,7 @@ impl Deadline {
     /// the attempt it bounds, so an earlier attempt's expired deadline is never
     /// carried into this one and cannot be mistaken for the setup deadline
     /// (9pac M1).
+    #[must_use]
     pub fn connect_attempt(now: Instant, setup: Deadline) -> Deadline {
         let fresh = match now.checked_add(Duration::from_secs(CONNECT_DEADLINE_SECS)) {
             Some(fresh) => fresh,
@@ -233,10 +240,12 @@ impl Deadline {
         }
     }
 
+    #[must_use]
     pub fn limit(self) -> Instant {
         self.limit
     }
 
+    #[must_use]
     pub fn is_expired(self, now: Instant) -> bool {
         now >= self.limit
     }
@@ -287,6 +296,7 @@ impl ConnectPhase {
     /// authorized `Peer`. HTTP 503 is capacity-only and lives in
     /// [`AdmissionError`]; HTTP 400 malformed is parser-owned and never reaches
     /// the worker. Pinned by `refusal_statuses_follow_the_canonical_fixed_matrix`.
+    #[must_use]
     pub const fn status(self) -> u16 {
         match self {
             ConnectPhase::Forbidden => 403,
@@ -388,6 +398,7 @@ impl Worker {
     }
 
     /// The number of slots currently in setup (pending).
+    #[must_use]
     pub fn pending(&self) -> usize {
         self.slots
             .iter()
@@ -396,6 +407,7 @@ impl Worker {
     }
 
     /// The number of occupied slots (in setup or established).
+    #[must_use]
     pub fn occupied(&self) -> usize {
         self.slots
             .iter()

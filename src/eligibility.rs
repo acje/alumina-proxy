@@ -9,6 +9,7 @@ pub enum NumericAddr {
 
 impl NumericAddr {
     /// Returns whether this address is an eligible destination.
+    #[must_use]
     pub fn is_eligible(self) -> bool {
         match self {
             NumericAddr::V4(addr) => ipv4_is_eligible(addr),
@@ -51,6 +52,7 @@ const V6_EXCLUSIONS: &[(u128, u8)] = &[
 ];
 
 /// Returns whether an IPv4 address is an eligible destination.
+#[must_use]
 pub fn ipv4_is_eligible(addr: Ipv4Addr) -> bool {
     let a = u32::from(addr);
     !V4_EXCLUSIONS
@@ -63,6 +65,7 @@ pub fn ipv4_is_eligible(addr: Ipv4Addr) -> bool {
 /// Acceptance requires `2000::/3` membership and exclusion of `2001::/23`,
 /// `2001:db8::/32`, `2002::/16`, and `3fff::/20`; IPv4-embedded forms
 /// (mapped, compatible, NAT64, 6to4, Teredo) fall outside that set.
+#[must_use]
 pub fn ipv6_is_eligible(addr: Ipv6Addr) -> bool {
     let a = u128::from(addr);
     (a >> 125) == 0b001

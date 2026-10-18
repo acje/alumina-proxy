@@ -85,26 +85,31 @@ impl Entry {
         binding_len: 0,
     };
 
+    #[must_use]
     pub fn generation(&self) -> Generation {
         self.generation
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.binding_len == 0
     }
 
     /// The currently authorized eligible bindings.
+    #[must_use]
     pub fn bindings(&self) -> &[NumericAddr] {
         &self.bindings[..usize::from(self.binding_len)]
     }
 
     /// The freshness and retirement deadlines, present exactly when non-empty.
+    #[must_use]
     pub fn deadlines(&self) -> (Option<u64>, Option<u64>) {
         (self.freshness_deadline, self.retirement_deadline)
     }
 
     /// Computes freshness at `now`; a valid instance yields the same result no
     /// matter how delayed timer processing was.
+    #[must_use]
     pub fn state(&self, now: u64) -> EntryState {
         match self.retirement_deadline {
             None => EntryState::Empty,
@@ -248,6 +253,7 @@ impl Cache {
     }
 
     /// The number of admitted names.
+    #[must_use]
     pub fn name_count(&self) -> usize {
         usize::from(self.name_count)
     }
