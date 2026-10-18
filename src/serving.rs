@@ -1099,15 +1099,9 @@ impl Serving {
                 coalesced.seen += 1;
             }
             if upstream {
-                acc.upstream = Some(match acc.upstream {
-                    Some(prior) => prior.merge(*ready),
-                    None => *ready,
-                });
+                acc.upstream = Some(acc.upstream.map_or(*ready, |prior| prior.merge(*ready)));
             } else {
-                acc.client = Some(match acc.client {
-                    Some(prior) => prior.merge(*ready),
-                    None => *ready,
-                });
+                acc.client = Some(acc.client.map_or(*ready, |prior| prior.merge(*ready)));
             }
         }
         while let Some(index) = coalesced.next() {
@@ -2185,9 +2179,10 @@ impl Serving {
     }
 
     fn upstream_connectedness(&self, index: usize) -> ConnectState {
-        match self.slots[index].upstream.as_ref() {
-            None => ConnectState::Failed,
-            Some(up) => match up.take_error() {
+        self.slots[index]
+            .upstream
+            .as_ref()
+            .map_or(ConnectState::Failed, |up| match up.take_error() {
                 Ok(None) => match up.peer_addr() {
                     Ok(_) => ConnectState::Connected,
                     Err(ref err) if err.kind() == io::ErrorKind::NotConnected => {
@@ -2196,8 +2191,7 @@ impl Serving {
                     Err(_) => ConnectState::Failed,
                 },
                 Ok(Some(_)) | Err(_) => ConnectState::Failed,
-            },
-        }
+            })
     }
 
     fn observe_upstream_read(&mut self, index: usize) -> Result<(), ServeError> {
@@ -2225,10 +2219,12 @@ impl Serving {
                     if activity == Activity::Data {
                         let violation = if validated {
                             match approved {
-                                Some(host) => match self.storage.ordinal_for(&host) {
-                                    Some(ordinal) => Violation::EarlyUpstreamData { ordinal },
-                                    None => Violation::Unattributed,
-                                },
+                                Some(host) => self
+                                    .storage
+                                    .ordinal_for(&host)
+                                    .map_or(Violation::Unattributed, |ordinal| {
+                                        Violation::EarlyUpstreamData { ordinal }
+                                    }),
                                 None => Violation::Unattributed,
                             }
                         } else {
@@ -2267,10 +2263,10 @@ impl Serving {
         if !self.slots[index].test_reads.is_empty() {
             return self.slots[index].test_reads.pop().expect("read injected");
         }
-        match self.slots[index].upstream.as_mut() {
-            Some(up) => up.read(buf),
-            None => Err(io::Error::from(io::ErrorKind::WouldBlock)),
-        }
+        self.slots[index].upstream.as_mut().map_or_else(
+            || Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            |up| up.read(buf),
+        )
     }
 
     fn buffer_and_validate(&mut self, index: usize, bytes: &[u8]) {

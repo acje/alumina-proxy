@@ -64,11 +64,11 @@ pub fn decide(table: &ControlTable, latch: &mut FirstSlot, violation: Violation)
             },
             (true, AnyIllegalScope::All) => Effect::Block { scope: Scope::All },
         },
-        Violation::EarlyUpstreamData { ordinal } => match table.at(ordinal) {
-            None => Effect::Unknown {
+        Violation::EarlyUpstreamData { ordinal } => table.at(ordinal).map_or(
+            Effect::Unknown {
                 reason: UnknownReason::UnboundOrdinal,
             },
-            Some(action) => match action.kind() {
+            |action| match action.kind() {
                 ActionKind::FlareOnly => Effect::FlareOnly {
                     scope: action.scope(),
                 },
@@ -76,7 +76,7 @@ pub fn decide(table: &ControlTable, latch: &mut FirstSlot, violation: Violation)
                     scope: action.scope(),
                 },
             },
-        },
+        ),
         Violation::EvidenceInsufficient => Effect::Unknown {
             reason: UnknownReason::NotYetValidated,
         },

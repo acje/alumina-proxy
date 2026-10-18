@@ -1149,14 +1149,11 @@ impl LogStore {
         }
         let index = self.write_index();
         let len = encode_monitor(&mut self.slots[index].buf, secs, monitor);
-        match len {
-            Some(len) => {
-                self.commit_record(index, len);
-                self.note_queue_usage();
-                true
-            }
-            None => false,
-        }
+        len.is_some_and(|len| {
+            self.commit_record(index, len);
+            self.note_queue_usage();
+            true
+        })
     }
 
     /// Evaluates the 80%/70% capacity thresholds for tunnel slots and pending

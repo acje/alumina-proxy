@@ -944,13 +944,12 @@ pub fn parse_response(
                     ttl: earliest,
                 });
             }
-            match soa {
-                Some(soa) => Ok(Outcome::NoData {
+            soa.map_or(Err(DnsError::EmptyNoerrorWithoutSoa), |soa| {
+                Ok(Outcome::NoData {
                     family,
                     soa: Some(soa),
-                }),
-                None => Err(DnsError::EmptyNoerrorWithoutSoa),
-            }
+                })
+            })
         }
         RCODE_NXDOMAIN => {
             let terminal_data = ws.owners[..ws.owner_len]

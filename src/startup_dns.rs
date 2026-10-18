@@ -734,13 +734,12 @@ impl StartupDns {
         self.filled = 0;
         self.written = 0;
         self.msglen = None;
-        match deregister_error {
-            None => Ok(()),
-            Some(kind) => Err(StartupDnsError::Transport {
+        deregister_error.map_or(Ok(()), |kind| {
+            Err(StartupDnsError::Transport {
                 kind,
                 detail: "deregister",
-            }),
-        }
+            })
+        })
     }
 
     fn next_token(&mut self) -> Result<Token, StartupDnsError> {
@@ -1240,10 +1239,7 @@ impl StartupDns {
             self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
             return Ok(RecvStep::Failed);
         }
-        let want = match self.msglen {
-            Some(len) => len + 2,
-            None => 2,
-        };
+        let want = self.msglen.map_or(2, |len| len + 2);
         if self.filled < want
             && let Some(stream) = self.stream.as_mut()
         {
@@ -1541,10 +1537,7 @@ impl StartupDns {
                     let log_wait = logs
                         .next_drain(now_i)
                         .map(|retry| retry.saturating_duration_since(now_i));
-                    let wait = match log_wait {
-                        Some(log_wait) => dns_wait.min(log_wait),
-                        None => dns_wait,
-                    };
+                    let wait = log_wait.map_or(dns_wait, |log_wait| dns_wait.min(log_wait));
                     if wait.is_zero() {
                         continue;
                     }
@@ -1716,10 +1709,9 @@ impl StartupDns {
                 TurnResult::Pending => {
                     logs.drain_sink();
                     let now = Instant::now();
-                    let wake = match logs.next_drain(now) {
-                        Some(retry) => deadline.min(retry),
-                        None => deadline,
-                    };
+                    let wake = logs
+                        .next_drain(now)
+                        .map_or(deadline, |retry| deadline.min(retry));
                     self.wait_dns_readiness(wake)?;
                 }
                 TurnResult::Published => {

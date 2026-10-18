@@ -214,10 +214,9 @@ impl Deadline {
     /// overflow, leaving an unrepresentable deadline already expired.
     #[must_use]
     pub fn setup(accepted: Instant) -> Deadline {
-        match accepted.checked_add(Duration::from_secs(SETUP_DEADLINE_SECS)) {
-            Some(limit) => Deadline { limit },
-            None => Deadline { limit: accepted },
-        }
+        accepted
+            .checked_add(Duration::from_secs(SETUP_DEADLINE_SECS))
+            .map_or(Deadline { limit: accepted }, |limit| Deadline { limit })
     }
 
     /// A fresh per-attempt upstream connect deadline: 2 s from `now`, clipped
@@ -227,10 +226,9 @@ impl Deadline {
     /// (9pac M1).
     #[must_use]
     pub fn connect_attempt(now: Instant, setup: Deadline) -> Deadline {
-        let fresh = match now.checked_add(Duration::from_secs(CONNECT_DEADLINE_SECS)) {
-            Some(fresh) => fresh,
-            None => now,
-        };
+        let fresh = now
+            .checked_add(Duration::from_secs(CONNECT_DEADLINE_SECS))
+            .unwrap_or(now);
         Deadline {
             limit: if fresh < setup.limit {
                 fresh

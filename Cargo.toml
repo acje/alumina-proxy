@@ -76,6 +76,7 @@ struct_excessive_bools = "warn"
 similar_names = "warn"
 redundant_clone = "warn"
 if_then_some_else_none = "warn"
+option_if_let_else = "warn"
 
 [lib]
 name = "alumina"
