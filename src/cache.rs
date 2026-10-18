@@ -313,9 +313,9 @@ impl Cache {
     ///
     /// # Panics
     ///
-    /// Panics only if `name` is not admitted by this cache, from the
-    /// fixed-size entry indexing that `admit` guards (a caller-contract
-    /// violation).
+    /// This function does not panic. Names not admitted by this cache are
+    /// rejected by `admit` with `Err(NameOutOfRange)` (listed in `# Errors`)
+    /// before any fixed-size entry indexing occurs.
     pub fn publish_positive(&mut self, staged: &StagedPositive) -> Result<(), CacheError> {
         self.admit(staged.name)?;
         let entry = self.entry_mut(staged.name, staged.family);
