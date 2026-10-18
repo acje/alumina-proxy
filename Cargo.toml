@@ -97,6 +97,15 @@ unused_io_amount = "warn"
 # loop is made to yield/progress explicitly; nonblocking mio semantics are
 # preserved with no blocking or allocation introduced.
 empty_loop = "warn"
+# SM-07: enable the liveness/energy lint — `missing_spin_loop`. Its firing
+# surface is a busy-wait loop lacking a pause/yield hint on a hot
+# serving/poll path. A clippy 1.99.0 positive control (`-F
+# clippy::missing_spin_loop`) and a scan of the serving/runtime loops found
+# zero sites on the pinned toolchain, so the lint guards future regressions.
+# The idiomatic fix for any new site is an explicit `std::hint::spin_loop()`
+# inside a body that is already a pure spin (nonblocking); never a blocking
+# wait, an allocation, or a control-flow/spec change.
+missing_spin_loop = "warn"
 
 [lib]
 name = "alumina"
