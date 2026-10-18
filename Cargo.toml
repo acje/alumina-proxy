@@ -87,6 +87,7 @@ cast_slice_different_sizes = "warn"
 uninit_assumed_init = "warn"
 out_of_bounds_indexing = "warn"
 bad_bit_mask = "warn"
+ineffective_bit_mask = "warn"
 
 [lib]
 name = "alumina"
