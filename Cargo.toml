@@ -84,6 +84,7 @@ mut_from_ref = "warn"
 not_unsafe_ptr_arg_deref = "warn"
 cast_slice_from_raw_parts = "warn"
 cast_slice_different_sizes = "warn"
+uninit_assumed_init = "warn"
 
 [lib]
 name = "alumina"
