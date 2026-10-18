@@ -307,7 +307,7 @@ impl ServeStorage {
 
     /// Whole-record log drops so far, saturating at `u64::MAX`: the
     /// documented dropped-record metric (docs/alumina-proxy.md:193).
-    pub fn log_dropped(&self) -> u64 {
+    pub const fn log_dropped(&self) -> u64 {
         self.logs.dropped()
     }
 

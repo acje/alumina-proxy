@@ -74,7 +74,7 @@ pub(crate) enum RejectReason {
 }
 
 impl RejectReason {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             RejectReason::Capacity => "capacity",
             RejectReason::BadRequest => "bad_request",
@@ -96,7 +96,7 @@ pub(crate) enum ActivityKind {
 }
 
 impl ActivityKind {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             ActivityKind::Data => "data",
             ActivityKind::Eof => "eof",
@@ -115,7 +115,7 @@ pub(crate) enum Dimension {
 }
 
 impl Dimension {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Dimension::Slots => "slots",
             Dimension::Setups => "setups",
@@ -125,7 +125,7 @@ impl Dimension {
 }
 
 impl Level {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Level::Info => "info",
             Level::Warn => "warn",
@@ -151,7 +151,7 @@ enum Kind {
 }
 
 impl Kind {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Kind::StartupWarning => "startup_warning",
             Kind::StartupFinal => "startup_final",
@@ -178,7 +178,7 @@ pub(crate) enum StartupStatus {
 }
 
 impl StartupStatus {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             StartupStatus::Full => "full",
             StartupStatus::Degraded => "degraded",
@@ -200,7 +200,7 @@ pub(crate) enum ShutdownStatus {
 }
 
 impl ShutdownStatus {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             ShutdownStatus::Drained => "drained",
             ShutdownStatus::Forced => "forced",
@@ -226,7 +226,7 @@ pub(crate) struct Field<'a> {
 }
 
 impl<'a> Field<'a> {
-    fn new(key: &'static str, val: Val<'a>) -> Self {
+    const fn new(key: &'static str, val: Val<'a>) -> Self {
         Field { key, val }
     }
 }
@@ -746,7 +746,7 @@ struct Slot {
 }
 
 impl Slot {
-    fn empty() -> Slot {
+    const fn empty() -> Slot {
         Slot {
             buf: [0; SLOT_BYTES],
             bytes: 0,
@@ -769,7 +769,7 @@ struct Watermark {
 }
 
 impl Watermark {
-    fn new() -> Watermark {
+    const fn new() -> Watermark {
         Watermark {
             crossed_high: false,
         }
@@ -855,7 +855,7 @@ pub(crate) struct StartupUnresolved<'a> {
 }
 
 impl StartupUnresolved<'_> {
-    fn outcome_token(&self) -> &'static str {
+    const fn outcome_token(&self) -> &'static str {
         match self.outcome {
             NameOutcome::Resolved => "resolved",
             NameOutcome::Negative => "negative",
@@ -934,31 +934,31 @@ impl LogStore {
     }
 
     /// Whole-record drops so far; saturates at `u64::MAX`.
-    pub(crate) fn dropped(&self) -> u64 {
+    pub(crate) const fn dropped(&self) -> u64 {
         self.dropped
     }
 
     /// Records the current monotonic second so next capacity-edge record
     /// carries real time (review M3).
-    pub(crate) fn set_now(&mut self, secs: u64) {
+    pub(crate) const fn set_now(&mut self, secs: u64) {
         self.secs = secs;
     }
 
     /// Whether the drop counter has been saturated (the overflow state).
     #[cfg(test)]
-    pub(crate) fn dropped_overflow(&self) -> bool {
+    pub(crate) const fn dropped_overflow(&self) -> bool {
         self.dropped_overflow
     }
 
     /// Queued (not yet flushed) record count.
     #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.count
     }
 
     /// Whether the queue holds `QUEUE_SLOTS` records.
     #[cfg(test)]
-    pub(crate) fn is_full(&self) -> bool {
+    pub(crate) const fn is_full(&self) -> bool {
         self.count >= QUEUE_SLOTS
     }
 
@@ -980,20 +980,20 @@ impl LogStore {
     /// Total write calls made by the sink (test observation of the per-turn
     /// op budget).
     #[cfg(test)]
-    pub(crate) fn sink_ops(&self) -> usize {
+    pub(crate) const fn sink_ops(&self) -> usize {
         self.sink.ops
     }
 
     /// Whether the sink latched failed after a non-WouldBlock write error
     /// (e.g. the stdout pipe closed).
     #[cfg(test)]
-    pub(crate) fn sink_has_failed(&self) -> bool {
+    pub(crate) const fn sink_has_failed(&self) -> bool {
         self.sink.failed
     }
 
     /// Marks the drop counter saturated as a test hook for the overflow flag.
     #[cfg(test)]
-    pub(crate) fn saturate_dropped_for_test(&mut self) {
+    pub(crate) const fn saturate_dropped_for_test(&mut self) {
         self.dropped = u64::MAX;
         self.dropped_overflow = true;
     }
@@ -1291,11 +1291,11 @@ impl LogStore {
         }
     }
 
-    fn write_index(&self) -> usize {
+    const fn write_index(&self) -> usize {
         (self.front + self.count) & QUEUE_MASK
     }
 
-    fn sink_fd(&self) -> RawFd {
+    const fn sink_fd(&self) -> RawFd {
         match self.sink.io {
             SinkIo::Stdout => 1,
             #[cfg(test)]
@@ -1321,7 +1321,7 @@ impl LogStore {
         self.count += 1;
     }
 
-    fn drop_one(&mut self) {
+    const fn drop_one(&mut self) {
         self.dropped = self.dropped.saturating_add(1);
         if self.dropped == u64::MAX {
             self.dropped_overflow = true;
@@ -1331,7 +1331,7 @@ impl LogStore {
 
 /// Evaluates the 80%/70% threshold on a single watermark and latches the
 /// transition. Returns the edge to emit, or `None` when no transition occurred.
-fn note_usage(wm: &mut Watermark, used: usize, cap: usize) -> Option<Edge> {
+const fn note_usage(wm: &mut Watermark, used: usize, cap: usize) -> Option<Edge> {
     let used = used as u64;
     let cap = cap as u64;
     let exceeds_high = used.saturating_mul(100) > HIGH_PCT_NUMBER.saturating_mul(cap);
