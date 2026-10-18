@@ -90,6 +90,7 @@ bad_bit_mask = "warn"
 ineffective_bit_mask = "warn"
 char_indices_as_byte_indices = "warn"
 derive_ord_xor_partial_ord = "warn"
+derived_hash_with_manual_eq = "warn"
 
 [lib]
 name = "alumina"
