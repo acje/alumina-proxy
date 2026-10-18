@@ -3,8 +3,9 @@
 > **Honest context.** This page documents the new e2-micro workload surface
 > (steady 1 Gbit/s + connection-churn storms at 150/s and 50/s), the baseline
 > measured at HEAD `dc54638` (harness commits `117a224`/`b1de21c`/`dc54638`,
-> proxy release binary `b441a5ae…`), the R1 optimized result (commit `b3b1ebc`)
-> and one tried-and-reverted negative result (G8 read-pacing group). e2-micro
+> proxy release binary `b441a5ae…`), the R1 optimized result (commit `b3b1ebc`),
+> a tried-and-reverted negative result (G8 read-pacing group), and the WS-A
+> R2–R4 follow-up (tried/blocked, none retained; R5/R6 not executed). e2-micro
 > equivalence is modeled by **workload parameters only** — never by capping the
 > shared harness container's CPU/memory, because the client, backend and DNS
 > responder run inside the same container and a cap would confound client
@@ -196,6 +197,47 @@ Verdict from the receipts:
 Because CPU was neutral-to-worse and the tail signal did not improve under the
 hoped-for read-size amortization, the group was reverted and no commit exists —
 the receipts above are the honest record of a negative result.
+
+## WS-A follow-up (R2–R9): parser/micro-opt seams are gate-insensitive — closed out at proxy-headroom
+
+The WS-A follow-on seams (epic `alumina-eryh`, R2–R9) are results, not shipped
+optimizations: every R2–R4 candidate was tried and none retained, and R5/R6 were
+never executed. Numbers below are recovered only from the receipt set
+`.ooda/benchmarks/c5800c6-seam-head-e2microrstorm150-timed-*.json` (6 timed
+receipts at `source_head c5800c6`, each seam an uncommitted diff, `dirty 3`) and
+the fleet-opportunity bead `alumina-tpia`. All 6 receipts are `valid=True`,
+`workload_fulfilled=True`, 9000/9000 planned→established, 0 protocol errors,
+0 missing-byte errors, `setup_failures {}`.
+
+### R2/R3/R4 — tried and reverted / blocked (no seam landed)
+
+| Seam | Verdict | Receipt-cited outcome |
+| --- | --- | --- |
+| R2 — getpeername removal | TRIED + REVERTED — neutral | storm150 setup p50 pin-locked 3750 µs, p99 4850–5150 µs noise, CPU mean ~0.048 cores flat, RSS +32 KB (209 352 vs 209 320 KB) on the R2 head runs |
+| R3 — slot-reset cursor-only (per-reset memset skip) | TRIED + REVERTED — neutral | identical storm150 setup p50/p95 3750/4550 µs, CPU flat; ~1.22 GB memset skipped across the session moved nothing |
+| R4 — ClientHello single-copy | BLOCKED — no measured result | true single-copy needs a new dual-parse-site invariant with consumed-math coupling; trial reverted to HEAD (no change landed) |
+
+R5 (allowlist ordinal) and R6 (CONNECT head-parse fold) were **NOT EXECUTED**;
+they are halted and deferred to the re-instrumented microbenchmark epic
+`alumina-tpia`.
+
+### Empirical finding — the storm150 gate cannot resolve parser/micro-opt seams
+
+Across the head receipt set, storm150 setup latency is pin-dominated: **p50
+3750 µs in every receipt**, p95 4550 µs flat, p99 only 4850–5150 µs (±~200 µs
+noise) and max 10.3–22.5 ms (±~10 ms) — far larger than any claimed R2–R6 gain.
+End-to-end latency gates are **insensitive to instruction-count wins**: parser/
+read-path micro-optimizations (cursor math, single-copy, memsets, digit folds)
+are invisible to this gate, so future response-time claims need a
+machine-instruction-count instrument (`alumina-tpia`).
+
+### Proxy-headroom conclusion
+
+Across R1..R4 the proxy used **~0.057 cores (storm150)** / **~0.31 cores
+(1gbps)** of an e2-micro 2-CPU VM — large headroom under the 2-vCPU budget.
+Only R1 (`b3b1ebc`, ~2% CPU) was kept; every follow-on parser/micro-opt
+candidate (R2/R3/R4) was neutral-or-worse and is being closed out (D1). WS-A
+halts at this proxy-headroom conclusion rather than a new optimization.
 
 ## Workload & measurement parameters
 
