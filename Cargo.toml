@@ -81,6 +81,7 @@ range_minus_one = "warn"
 suspicious_assignment_formatting = "warn"
 match_overlapping_arm = "warn"
 mut_from_ref = "warn"
+not_unsafe_ptr_arg_deref = "warn"
 
 [lib]
 name = "alumina"
