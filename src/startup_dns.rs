@@ -1294,11 +1294,10 @@ impl StartupDns {
                     &outcome,
                 )?;
                 return Ok(RecvStep::Published);
-            } else {
-                self.close_connection()?;
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
-                return Ok(RecvStep::Failed);
             }
+            self.close_connection()?;
+            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
+            return Ok(RecvStep::Failed);
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
