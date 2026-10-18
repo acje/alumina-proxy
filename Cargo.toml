@@ -172,6 +172,17 @@ len_zero = "warn"
 # Zero lint-proven sites: the lint guards future regressions. No runtime/
 # alloc/spec change; the attribute is compile-time.
 comparison_to_empty = "warn"
+# SM-14: enable the clarity/correctness lint — `identity_op`. Its firing
+# surface is an identity operation (`x + 0`, `x * 1`, `x | 0`, `x << 0`,
+# `x & all-ones`, ...) that evaluates to its operand — dead framing-math
+# no-ops that obscure intent. A clippy 1.99.0 positive control (`-F
+# clippy::identity_op`) on both feature matrices plus a planted `x + 0`
+# probe (which fires `identity_op`, proving the lint is armed) found zero
+# lint-proven sites on the pinned toolchain, so the lint guards future
+# regressions. A genuinely intentional identity, should one arise, carries
+# a tight per-site `#[expect(clippy::identity_op, reason = "...")]`. No
+# runtime/alloc/spec change; the attribute is compile-time.
+identity_op = "warn"
 
 [lib]
 name = "alumina"
