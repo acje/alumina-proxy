@@ -269,7 +269,10 @@ impl<R: Read> Scanner<R> {
     }
 
     fn fill(&mut self) -> Result<usize, ResolverError> {
-        debug_assert_eq!(self.pos, self.len);
+        debug_assert_eq!(
+            self.pos, self.len,
+            "fill requires the current buffer to be fully consumed"
+        );
         self.pos = 0;
         self.len = 0;
         let n = loop {
