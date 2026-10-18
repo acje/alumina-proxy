@@ -304,6 +304,22 @@ cast_enum_truncation = "warn"
 # needs an explicit `while` loop, never a silent suppression. No runtime/alloc/
 # spec change; the enabling attribute is compile-time.
 mut_range_bound = "warn"
+# SM-24: enable the correctness/termination lint — `infinite_iter`. Its firing
+# surface is a provably-infinite iterator consumed to its end with no breaking
+# condition (`std::iter::repeat`/`iterate` chains never advancing, or other
+# non-terminating loops) — an infinite iteration that stalls the single fixed
+# serving owner. A clippy 1.99.0 positive control (`-F clippy::infinite_iter`)
+# on both feature matrices plus a planted `std::iter::repeat(7).collect()`
+# probe (which fires `infinite iteration detected` — exit 101 on both matrices,
+# proving the lint is armed; the gate fails where a site exists) plus an
+# infinite-iteration scan of `src/` + `tests/` found zero lint-proven sites on
+# the pinned toolchain (`str::repeat(n)` / `std::iter::repeat_n(x, count)`
+# sites are provably bounded and outside the firing surface), so the lint
+# guards future regressions. A genuinely intentional infinite driver loop,
+# should one arise, is a spec decision — STOP and report, never silently
+# suppress. No runtime/alloc/spec change; the enabling attribute is
+# compile-time.
+infinite_iter = "warn"
 
 [lib]
 name = "alumina"
