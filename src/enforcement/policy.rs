@@ -31,7 +31,7 @@ pub enum UnknownReason {
 }
 
 impl UnknownReason {
-    pub fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         self as usize
     }
 

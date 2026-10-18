@@ -549,7 +549,7 @@ struct SlotWorkspace {
 }
 
 impl SlotWorkspace {
-    fn with_traffic(up: Box<[u8]>, down: Box<[u8]>) -> SlotWorkspace {
+    const fn with_traffic(up: Box<[u8]>, down: Box<[u8]>) -> SlotWorkspace {
         SlotWorkspace {
             handle: None,
             tunnel: None,
@@ -1889,7 +1889,7 @@ impl Serving {
         }
     }
 
-    fn block_all_latched(&self) -> bool {
+    const fn block_all_latched(&self) -> bool {
         self.storage.enforcement().block_all()
     }
 

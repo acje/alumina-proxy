@@ -16,7 +16,7 @@ impl SaturatingCounter {
         }
     }
 
-    pub fn bump(&mut self) {
+    pub const fn bump(&mut self) {
         if self.value == u32::MAX {
             self.overflow = true;
         } else {
@@ -33,7 +33,7 @@ impl SaturatingCounter {
     }
 
     #[cfg(test)]
-    pub fn saturate_for_test(&mut self) {
+    pub const fn saturate_for_test(&mut self) {
         self.value = u32::MAX;
         self.overflow = true;
     }
@@ -62,15 +62,15 @@ impl Enforcement {
         }
     }
 
-    pub fn control(&self) -> ControlTable {
+    pub const fn control(&self) -> ControlTable {
         self.control
     }
 
-    pub fn block_all(&self) -> bool {
+    pub const fn block_all(&self) -> bool {
         self.block_all
     }
 
-    pub fn is_blocked(&self, ordinal: DomainOrdinal) -> bool {
+    pub const fn is_blocked(&self, ordinal: DomainOrdinal) -> bool {
         (self.blocked >> ordinal.get()) & 1 == 1
     }
 
@@ -136,19 +136,19 @@ impl Enforcement {
         effect
     }
 
-    pub fn note_domain_block(&mut self, ordinal: DomainOrdinal) {
+    pub const fn note_domain_block(&mut self, ordinal: DomainOrdinal) {
         self.monitor.note_refusal_blocked_domain(ordinal);
     }
 
-    pub(crate) fn note_consumed_capture(&mut self, capture: SlotCapture) {
+    pub(crate) const fn note_consumed_capture(&mut self, capture: SlotCapture) {
         self.monitor.note_consumed_capture(capture);
     }
 
-    pub(crate) fn note_suppressed_detail(&mut self) {
+    pub(crate) const fn note_suppressed_detail(&mut self) {
         self.monitor.note_suppressed_detail();
     }
 
-    pub(crate) fn monitor(&self) -> &Monitor {
+    pub(crate) const fn monitor(&self) -> &Monitor {
         &self.monitor
     }
 
@@ -165,12 +165,12 @@ impl Enforcement {
     }
 
     #[cfg(test)]
-    pub fn counters(&self) -> &Monitor {
+    pub const fn counters(&self) -> &Monitor {
         &self.monitor
     }
 
     #[cfg(test)]
-    pub(crate) fn test_blocked(&self, ordinal: DomainOrdinal) -> bool {
+    pub(crate) const fn test_blocked(&self, ordinal: DomainOrdinal) -> bool {
         self.is_blocked(ordinal)
     }
 }

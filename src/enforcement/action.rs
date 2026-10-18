@@ -47,19 +47,19 @@ pub struct DomainAction {
 
 impl DomainAction {
     /// Build a domain action from a kind and scope.
-    pub fn new(kind: ActionKind, scope: Scope) -> DomainAction {
+    pub const fn new(kind: ActionKind, scope: Scope) -> DomainAction {
         DomainAction { kind, scope }
     }
 
     /// The action kind.
-    pub fn kind(self) -> ActionKind {
+    pub const fn kind(self) -> ActionKind {
         self.kind
     }
 
     /// The action scope: enforcement scope for `Block`, reporting scope for
     /// `FlareOnly`. An implicit Flare for an applied `Block` inherits that
     /// Block's scope.
-    pub fn scope(self) -> Scope {
+    pub const fn scope(self) -> Scope {
         self.scope
     }
 }
@@ -91,7 +91,7 @@ impl DomainOrdinal {
     }
 
     /// The 0-based ordinal value, always below the allowlist bound.
-    pub fn get(self) -> usize {
+    pub const fn get(self) -> usize {
         self.0 as usize
     }
 }
@@ -107,7 +107,7 @@ pub enum FirstSlot {
 
 impl FirstSlot {
     /// A fresh per-connection latch, armed for the first AnyIllegal.
-    pub fn new() -> FirstSlot {
+    pub const fn new() -> FirstSlot {
         FirstSlot::Armed
     }
 
@@ -158,12 +158,12 @@ impl ControlTable {
     }
 
     /// The AnyIllegal first-slot scope.
-    pub fn any_illegal(&self) -> AnyIllegalScope {
+    pub const fn any_illegal(&self) -> AnyIllegalScope {
         self.any_illegal
     }
 
     /// Number of configured domain entries.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.count
     }
 

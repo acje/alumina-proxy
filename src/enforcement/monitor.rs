@@ -67,7 +67,7 @@ pub struct SlotCapture {
 }
 
 impl SlotCapture {
-    pub(crate) fn fresh(slot: usize, generation: u64) -> SlotCapture {
+    pub(crate) const fn fresh(slot: usize, generation: u64) -> SlotCapture {
         SlotCapture {
             slot,
             generation,
@@ -98,52 +98,52 @@ impl Monitor {
         }
     }
 
-    pub(crate) fn note_fact_any_illegal(&mut self, cause: AnyIllegalCause) {
+    pub(crate) const fn note_fact_any_illegal(&mut self, cause: AnyIllegalCause) {
         self.facts.any_illegal[cause.kind_index()].bump();
         self.dirty = true;
     }
 
-    pub(crate) fn note_fact_early_data(&mut self, ordinal: DomainOrdinal) {
+    pub(crate) const fn note_fact_early_data(&mut self, ordinal: DomainOrdinal) {
         self.facts.early_data[ordinal.get()].bump();
         self.dirty = true;
     }
 
-    pub(crate) fn note_fact_unknown(&mut self, reason: UnknownReason) {
+    pub(crate) const fn note_fact_unknown(&mut self, reason: UnknownReason) {
         self.facts.unknown[reason.index()].bump();
         self.dirty = true;
     }
 
-    pub(crate) fn note_action_first_slot_block(&mut self, scope: AnyIllegalScope) {
+    pub(crate) const fn note_action_first_slot_block(&mut self, scope: AnyIllegalScope) {
         self.actions.first_slot_block[scope as usize].bump();
         self.dirty = true;
     }
 
-    pub(crate) fn note_action_domain_block(&mut self, ordinal: DomainOrdinal) {
+    pub(crate) const fn note_action_domain_block(&mut self, ordinal: DomainOrdinal) {
         self.actions.domain_block[ordinal.get()].bump();
         self.dirty = true;
     }
 
-    pub(crate) fn note_action_flare(&mut self, ordinal: DomainOrdinal) {
+    pub(crate) const fn note_action_flare(&mut self, ordinal: DomainOrdinal) {
         self.actions.flare[ordinal.get()].bump();
         self.dirty = true;
     }
 
-    pub(crate) fn note_block_all(&mut self) {
+    pub(crate) const fn note_block_all(&mut self) {
         self.actions.block_all.bump();
         self.dirty = true;
     }
 
-    pub(crate) fn note_refusal_blocked_domain(&mut self, ordinal: DomainOrdinal) {
+    pub(crate) const fn note_refusal_blocked_domain(&mut self, ordinal: DomainOrdinal) {
         self.refusals.blocked_domain[ordinal.get()].bump();
         self.dirty = true;
     }
 
-    pub(crate) fn note_report_drop(&mut self) {
+    pub(crate) const fn note_report_drop(&mut self) {
         self.report_drops.bump();
         self.dirty = true;
     }
 
-    pub(crate) fn note_consumed_capture(&mut self, capture: SlotCapture) {
+    pub(crate) const fn note_consumed_capture(&mut self, capture: SlotCapture) {
         let Some(detail) = capture.detail else {
             return;
         };
@@ -164,7 +164,7 @@ impl Monitor {
         self.dirty = true;
     }
 
-    pub(crate) fn note_suppressed_detail(&mut self) {
+    pub(crate) const fn note_suppressed_detail(&mut self) {
         self.capture_drops.bump();
         self.dirty = true;
     }
@@ -199,7 +199,7 @@ impl Monitor {
     }
 
     #[cfg(test)]
-    pub(crate) fn last_report_secs(&self) -> Option<u64> {
+    pub(crate) const fn last_report_secs(&self) -> Option<u64> {
         self.last_report_secs
     }
 
@@ -216,20 +216,20 @@ impl Monitor {
             .sum()
     }
 
-    pub(crate) fn facts_early_data(&self, ordinal: DomainOrdinal) -> u32 {
+    pub(crate) const fn facts_early_data(&self, ordinal: DomainOrdinal) -> u32 {
         self.facts.early_data[ordinal.get()].value()
     }
 
     #[cfg(test)]
-    pub(crate) fn facts_unknown(&self, reason: UnknownReason) -> u32 {
+    pub(crate) const fn facts_unknown(&self, reason: UnknownReason) -> u32 {
         self.facts.unknown[reason.index()].value()
     }
 
-    pub(crate) fn facts_any_illegal_by_index(&self, index: usize) -> u32 {
+    pub(crate) const fn facts_any_illegal_by_index(&self, index: usize) -> u32 {
         self.facts.any_illegal[index].value()
     }
 
-    pub(crate) fn facts_unknown_by_index(&self, index: usize) -> u32 {
+    pub(crate) const fn facts_unknown_by_index(&self, index: usize) -> u32 {
         self.facts.unknown[index].value()
     }
 
@@ -252,19 +252,19 @@ impl Monitor {
             + self.unknown_total()
     }
 
-    pub(crate) fn actions_block_all(&self) -> u32 {
+    pub(crate) const fn actions_block_all(&self) -> u32 {
         self.actions.block_all.value()
     }
 
-    pub(crate) fn actions_domain_block(&self, ordinal: DomainOrdinal) -> u32 {
+    pub(crate) const fn actions_domain_block(&self, ordinal: DomainOrdinal) -> u32 {
         self.actions.domain_block[ordinal.get()].value()
     }
 
-    pub(crate) fn refusals_blocked_domain(&self, ordinal: DomainOrdinal) -> u32 {
+    pub(crate) const fn refusals_blocked_domain(&self, ordinal: DomainOrdinal) -> u32 {
         self.refusals.blocked_domain[ordinal.get()].value()
     }
 
-    pub(crate) fn actions_first_slot_block(&self, scope: AnyIllegalScope) -> u32 {
+    pub(crate) const fn actions_first_slot_block(&self, scope: AnyIllegalScope) -> u32 {
         self.actions.first_slot_block[scope as usize].value()
     }
 
@@ -288,7 +288,7 @@ impl Monitor {
                 .sum::<u64>()
     }
 
-    pub(crate) fn actions_flare(&self, ordinal: DomainOrdinal) -> u32 {
+    pub(crate) const fn actions_flare(&self, ordinal: DomainOrdinal) -> u32 {
         self.actions.flare[ordinal.get()].value()
     }
 
@@ -300,26 +300,26 @@ impl Monitor {
             .sum()
     }
 
-    pub(crate) fn capture_detail_len(&self) -> usize {
+    pub(crate) const fn capture_detail_len(&self) -> usize {
         self.capture_len
     }
 
-    pub(crate) fn capture_detail(&self, i: usize) -> Option<ConsumedCapture> {
+    pub(crate) const fn capture_detail(&self, i: usize) -> Option<ConsumedCapture> {
         if i >= self.capture_len {
             return None;
         }
         self.captures[(self.capture_head + i) % CAPTURE_DETAIL_LEN]
     }
 
-    pub(crate) fn capture_drops(&self) -> u32 {
+    pub(crate) const fn capture_drops(&self) -> u32 {
         self.capture_drops.value()
     }
 
-    pub(crate) fn capture_drops_overflow(&self) -> bool {
+    pub(crate) const fn capture_drops_overflow(&self) -> bool {
         self.capture_drops.overflow()
     }
 
-    pub(crate) fn report_drops(&self) -> u32 {
+    pub(crate) const fn report_drops(&self) -> u32 {
         self.report_drops.value()
     }
 
@@ -346,12 +346,12 @@ impl Monitor {
         self.refusals.blocked_domain.iter().any(|c| c.overflow())
     }
 
-    pub(crate) fn report_drops_overflow(&self) -> bool {
+    pub(crate) const fn report_drops_overflow(&self) -> bool {
         self.report_drops.overflow()
     }
 
     #[cfg(test)]
-    pub(crate) fn saturate_facts_any_illegal_for_test(&mut self, cause: AnyIllegalCause) {
+    pub(crate) const fn saturate_facts_any_illegal_for_test(&mut self, cause: AnyIllegalCause) {
         self.facts.any_illegal[cause.kind_index()].saturate_for_test();
         self.dirty = true;
     }
