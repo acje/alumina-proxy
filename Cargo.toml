@@ -118,6 +118,7 @@ manual_memcpy = "warn"
 map_entry = "warn"
 manual_retain = "warn"
 double_ended_iterator_last = "warn"
+large_enum_variant = "warn"
 
 [lib]
 name = "alumina"
