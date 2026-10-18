@@ -135,6 +135,7 @@ ptr_as_ptr = "warn"
 same_length_and_capacity = "warn"
 zero_sized_map_values = "warn"
 bind_instead_of_map = "warn"
+bytes_count_to_len = "warn"
 
 [lib]
 name = "alumina"
