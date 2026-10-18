@@ -195,6 +195,18 @@ identity_op = "warn"
 # `#[expect(clippy::never_loop, reason = "...")]`. No runtime/alloc/spec
 # change; the attribute is compile-time.
 never_loop = "warn"
+# SM-16: enable the correctness/arithmetic lint — `erasing_op`. Its firing
+# surface is a binary op that always erases to zero (`x * 0`, `x & 0`,
+# `x << 64`, ...) — dead math in counters/masks that hides the intended
+# operation. A clippy 1.99.0 positive control (`-F clippy::erasing_op`) on
+# both feature matrices plus a planted `x * 0` probe (which fires
+# `erasing_op`, proving the lint is armed — the gate fails where a site
+# exists) found zero lint-proven sites on the pinned toolchain, so the lint
+# guards future regressions. A genuinely intentional erasing/type- or
+# mask-load-bearing op carries a tight per-site
+# `#[expect(clippy::erasing_op, reason = "...")]`. No runtime/alloc/spec
+# change; the attribute is compile-time.
+erasing_op = "warn"
 
 [lib]
 name = "alumina"
