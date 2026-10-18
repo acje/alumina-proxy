@@ -140,6 +140,7 @@ double_comparisons = "warn"
 manual_split_once = "warn"
 needless_borrowed_reference = "warn"
 no_effect = "warn"
+almost_complete_range = "warn"
 
 [lib]
 name = "alumina"
