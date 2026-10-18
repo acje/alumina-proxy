@@ -219,6 +219,19 @@ erasing_op = "warn"
 # carries a tight per-site `#[expect(clippy::modulo_one, reason = "...")]`.
 # No runtime/alloc/spec change; the attribute is compile-time.
 modulo_one = "warn"
+# SM-18: enable the correctness/clamp lint — `min_max`. Its firing
+# surface is a min/max clamp pair whose result is provably constant —
+# e.g. swapped clamp bounds `x.min(10).max(20)` (always `20`) or
+# `x.max(20).min(10)` (always `10`) — usually a swapped bound in
+# buffer/size clamp logic. A clippy 1.99.0 positive control (`-F
+# clippy::min_max`) on both feature matrices plus a planted constant-
+# bound clamp probe (which fires `min_max` — the gate fails with a
+# nonzero exit where a site exists, proven on both matrices) found zero
+# lint-proven sites on the pinned toolchain, so the lint guards future
+# regressions. A genuinely intentional constant clamp carries a tight
+# per-site `#[expect(clippy::min_max, reason = "...")]`.
+# No runtime/alloc/spec change; the attribute is compile-time.
+min_max = "warn"
 
 [lib]
 name = "alumina"
