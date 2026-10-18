@@ -112,6 +112,7 @@ unnecessary_to_owned = "warn"
 expect_fun_call = "warn"
 cmp_owned = "warn"
 vec_init_then_push = "warn"
+useless_vec = "warn"
 
 [lib]
 name = "alumina"
