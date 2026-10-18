@@ -117,6 +117,7 @@ large_const_arrays = "warn"
 manual_memcpy = "warn"
 map_entry = "warn"
 manual_retain = "warn"
+double_ended_iterator_last = "warn"
 
 [lib]
 name = "alumina"
