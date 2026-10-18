@@ -377,6 +377,14 @@ impl DirectionalEof {
     }
 }
 
+/// Consolidates one poll batch's per-slot readiness flags into a single
+/// Copy value. Kept as named booleans (rather than a packed bitfield) so the
+/// hot poll path stays auditable one flag at a time; refactoring to a bitfield
+/// would be a behavior-sensitive performance change out of scope for a lint pass.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "per-slot readiness flag register joins one poll batch into a Copy value; named booleans keep the hot path auditable, a bitfield refactor is behavior-sensitive and out of scope"
+)]
 #[derive(Clone, Copy, Default)]
 struct Readiness {
     readable: bool,
@@ -744,7 +752,14 @@ impl Serving {
                 SlotWorkspace::with_traffic(up, down)
             })
             .collect();
-        let (signal_rx, _signal_registration, _test_wake) = Self::create_signal_source()?;
+        #[cfg_attr(
+            test,
+            expect(
+                clippy::used_underscore_binding,
+                reason = "test-only wake pipe stored in the cfg(test)-restricted Serving field; the underscore keeps the tuple element unused-clean in production builds"
+            )
+        )]
+        let (signal_rx, signal_registration, _test_wake) = Self::create_signal_source()?;
         let mut serving = Serving {
             poll,
             storage,
@@ -761,7 +776,7 @@ impl Serving {
             max_work_since_recheck: 0,
             shutdown: Shutdown::Serving,
             signal_rx: Some(signal_rx),
-            _signal_registration: Some(_signal_registration),
+            _signal_registration: Some(signal_registration),
             signal_read_error: None,
             #[cfg(test)]
             test_signal_wake: _test_wake,

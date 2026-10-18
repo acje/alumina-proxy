@@ -26,7 +26,7 @@ fn main() {
     }
     let dup = unsafe { libc::dup2(wr, 1) };
     assert_eq!(dup, 1, "stdout redirected onto the witness pipe");
-    let _keep_write_end = wr;
+    let _ = wr;
     let mut rd = rd;
 
     let bind = "127.0.0.1:0".parse().expect("valid bind address");

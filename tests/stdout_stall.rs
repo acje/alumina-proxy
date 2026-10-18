@@ -22,8 +22,8 @@ fn main() {
     unsafe {
         libc::fcntl(wr, libc::F_SETPIPE_SZ, 4096);
     }
-    let _keep_read_end = rd;
-    let _keep_write_end = wr;
+    let _ = rd;
+    let _ = wr;
 
     let bind = "127.0.0.1:0".parse().expect("valid bind address");
     let listener = MioListener::bind(bind).expect("bind serving listener");

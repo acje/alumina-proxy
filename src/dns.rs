@@ -776,13 +776,13 @@ pub fn parse_response(
         return Err(DnsError::Truncated);
     }
     let qdcount = usize::from(reader.u16()?);
-    let ancount = usize::from(reader.u16()?);
-    let nscount = usize::from(reader.u16()?);
-    let arcount = usize::from(reader.u16()?);
+    let answer_count = usize::from(reader.u16()?);
+    let authority_count = usize::from(reader.u16()?);
+    let additional_count = usize::from(reader.u16()?);
     if qdcount != 1 {
         return Err(DnsError::QuestionCount { got: qdcount });
     }
-    let total_rr = ancount + nscount + arcount;
+    let total_rr = answer_count + authority_count + additional_count;
     if total_rr > MAX_TOTAL_RR {
         return Err(DnsError::ExcessiveRecords {
             total: total_rr,
@@ -800,7 +800,7 @@ pub fn parse_response(
         return Err(DnsError::QuestionMismatch);
     }
 
-    for _ in 0..ancount {
+    for _ in 0..answer_count {
         let (owner, ty, class, ttl) = read_rr(msg, &mut reader)?;
         let rdlen = usize::from(reader.u16()?);
         let rd_start = reader.pos;
@@ -874,7 +874,7 @@ pub fn parse_response(
         reader.skip(rdlen)?;
     }
 
-    for _ in 0..nscount {
+    for _ in 0..authority_count {
         let (owner, ty, class, ttl) = read_rr(msg, &mut reader)?;
         let rdlen = usize::from(reader.u16()?);
         let rd_start = reader.pos;
@@ -895,7 +895,7 @@ pub fn parse_response(
         reader.skip(rdlen)?;
     }
 
-    for _ in 0..arcount {
+    for _ in 0..additional_count {
         let (_, ty, _, _) = read_rr(msg, &mut reader)?;
         let rdlen = usize::from(reader.u16()?);
         if ty == TYPE_DNAME {

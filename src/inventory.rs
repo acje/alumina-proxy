@@ -133,6 +133,10 @@ fn buffer_bytes() -> Result<Box<[u8]>, StorageUnavailable> {
     Ok(bytes.into_boxed_slice())
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "the shared `_bytes` postfix documents that every field is a byte-quantity and backs the public `*_bytes()` accessors used in the boot inventory report (tests/boot.rs, main.rs); dropping it would diverge field/accessor naming and the byte-unit signal in the fixed-profile sizing identifiers"
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BootInventory {
     traffic_storage_bytes: usize,
