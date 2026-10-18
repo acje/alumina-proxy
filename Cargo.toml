@@ -385,6 +385,26 @@ ifs_same_cond = "warn"
 # STOP-and-report, never a silent suppression. No runtime/alloc/spec change;
 # the enabling attribute is compile-time.
 precedence = "warn"
+# SM-29: enable the correctness/clarity lint — `range_minus_one`. Its firing
+# surface is an inclusive range whose upper bound is a literal subtraction of
+# one (`x..=(y - 1)`), where the off-by-one inclusive form hides the true
+# exclusive bound — a mis-read source in framing/extent math where an
+# inclusive `x..=(y-1)` silently shifts a framing length or copy extent by
+# one. The idiomatic rewrite is the exclusive range `x..y`
+# (behavior-preserving: `x..=(y - 1)` and `x..y` enumerate identical
+# elements). A clippy 1.99.0 positive control (`-F clippy::range_minus_one`)
+# on a planted `0..=(n - 1)` probe fires "an exclusive range would be more
+# readable" (exit 101, proving the lint is armed; the gate fails where a site
+# exists) and the forced in-tree run on both feature matrices found zero
+# lint-proven sites on the pinned toolchain — the candidate
+# `0..=buf.len() - END_OF_HEAD.len()` (src/connect.rs:222) subtracts a
+# non-literal expression, outside the lint's literal-1 firing surface — so
+# the lint guards future regressions. A future site is fixed behavior-
+# preserving with the exclusive form; a genuinely tight inclusive bound
+# carries a tight per-site `#[expect(clippy::range_minus_one, reason =
+# "...")]`. No runtime/alloc/spec change; the enabling attribute is
+# compile-time.
+range_minus_one = "warn"
 
 [lib]
 name = "alumina"
