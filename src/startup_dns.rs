@@ -274,7 +274,7 @@ pub enum FailureReason {
 }
 
 impl FailureReason {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             FailureReason::Connect => "connect",
             FailureReason::Send => "send",
@@ -293,7 +293,7 @@ pub enum NotAttemptedReason {
 }
 
 impl NotAttemptedReason {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             NotAttemptedReason::WindowClosed => "window_closed",
         }
@@ -326,7 +326,7 @@ impl Latest {
         };
     }
 
-    fn to_outcome(self) -> NameOutcome {
+    const fn to_outcome(self) -> NameOutcome {
         match self {
             Latest::Resolved => NameOutcome::Resolved,
             Latest::Negative => NameOutcome::Negative,
@@ -406,7 +406,7 @@ pub(crate) struct WindowLedger {
 }
 
 impl WindowLedger {
-    pub(crate) fn new(names: usize) -> WindowLedger {
+    pub(crate) const fn new(names: usize) -> WindowLedger {
         WindowLedger {
             resolved: [false; ALLOWLIST_MAX],
             attempted: [false; ALLOWLIST_MAX * 2],
@@ -415,7 +415,7 @@ impl WindowLedger {
         }
     }
 
-    pub(crate) fn names(&self) -> usize {
+    pub(crate) const fn names(&self) -> usize {
         self.names
     }
 
@@ -423,7 +423,7 @@ impl WindowLedger {
         &self.resolved[..self.names]
     }
 
-    pub(crate) fn is_resolved(&self, ordinal: usize) -> bool {
+    pub(crate) const fn is_resolved(&self, ordinal: usize) -> bool {
         self.resolved[ordinal]
     }
 
@@ -431,7 +431,7 @@ impl WindowLedger {
         self.resolved[..self.names].iter().all(|&r| r)
     }
 
-    pub(crate) fn track_attempt(&mut self, ordinal: usize, family: Family) {
+    pub(crate) const fn track_attempt(&mut self, ordinal: usize, family: Family) {
         self.attempted[ordinal * 2 + family_index(family)] = true;
     }
 
@@ -450,7 +450,7 @@ impl WindowLedger {
     /// Overlays the "usable name" binding check: a name counts as resolved only
     /// when a published positive answer actually left at least one eligible
     /// binding, exactly as the private driver computes it.
-    pub(crate) fn resolve(&mut self, ordinal: usize, has: bool) {
+    pub(crate) const fn resolve(&mut self, ordinal: usize, has: bool) {
         self.resolved[ordinal] |= has;
     }
 
@@ -642,7 +642,7 @@ impl StartupDns {
     /// the single elapsed base startup receipts were written on. The owning
     /// storage re-anchors its serving clock to this origin so cache seconds
     /// continue seamlessly from startup into serving (one anchor, 1cws M2r).
-    pub(crate) fn window_start(&self) -> Instant {
+    pub(crate) const fn window_start(&self) -> Instant {
         self.start
     }
 
@@ -686,14 +686,14 @@ impl StartupDns {
     /// a shared owner records a validated negative or no-eligible answer
     /// distinctly from a resolved positive (never inferred from the cache
     /// afterwards). `None` when nothing has published.
-    pub(crate) fn take_published_kind(&mut self) -> Option<PublishedKind> {
+    pub(crate) const fn take_published_kind(&mut self) -> Option<PublishedKind> {
         self.last_published.take()
     }
 
     /// The failure reason of the most recently failed startup exchange, so a
     /// shared owner records the exact counted reason instead of collapsing
     /// every non-published conclusion into one class.
-    pub(crate) fn take_failed_reason(&mut self) -> Option<FailureReason> {
+    pub(crate) const fn take_failed_reason(&mut self) -> Option<FailureReason> {
         self.last_failed.take()
     }
 
@@ -897,7 +897,7 @@ impl StartupDns {
 
     /// Whether an exchange is currently in progress, so a shared owner can
     /// decide whether DNS work is due without treating idle as an error.
-    pub(crate) fn has_active_exchange(&self) -> bool {
+    pub(crate) const fn has_active_exchange(&self) -> bool {
         self.active.is_some()
     }
 
@@ -918,11 +918,11 @@ impl StartupDns {
     /// Repoints the retained transport peer. Startup configures it through
     /// resolution; a refresh owner repoints it by policy before starting an
     /// exchange.
-    pub(crate) fn set_peer(&mut self, addr: SocketAddr) {
+    pub(crate) const fn set_peer(&mut self, addr: SocketAddr) {
         self.addr = addr;
     }
 
-    pub(crate) fn peer(&self) -> SocketAddr {
+    pub(crate) const fn peer(&self) -> SocketAddr {
         self.addr
     }
 
@@ -1023,7 +1023,7 @@ impl StartupDns {
     }
 
     #[cfg(test)]
-    fn arm_write(&mut self, force: WriteForce) {
+    const fn arm_write(&mut self, force: WriteForce) {
         self.force_write = Some(force);
     }
 
@@ -1040,7 +1040,7 @@ impl StartupDns {
     /// instead of blocking on a stale edge; a would-block observed there
     /// transitions the exchange to AwaitWritable and arms this wait rather
     /// than spinning on an assumed write window.
-    pub(crate) fn needs_wait(&self) -> bool {
+    pub(crate) const fn needs_wait(&self) -> bool {
         let Some(ex) = self.active.as_ref() else {
             return false;
         };
@@ -1745,7 +1745,7 @@ impl StartupDns {
 }
 
 /// The fixed per-name, per-family slot index used by the attempt ledger.
-fn family_index(family: Family) -> usize {
+const fn family_index(family: Family) -> usize {
     match family {
         Family::A => 0,
         Family::Aaaa => 1,

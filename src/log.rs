@@ -865,7 +865,7 @@ impl StartupUnresolved<'_> {
         }
     }
 
-    fn reason_token(&self) -> Option<&'static str> {
+    const fn reason_token(&self) -> Option<&'static str> {
         match self.outcome {
             NameOutcome::Failed(reason) => Some(reason.as_str()),
             NameOutcome::NotAttempted(reason) => Some(reason.as_str()),
