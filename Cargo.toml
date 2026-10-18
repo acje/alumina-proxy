@@ -320,6 +320,21 @@ mut_range_bound = "warn"
 # suppress. No runtime/alloc/spec change; the enabling attribute is
 # compile-time.
 infinite_iter = "warn"
+# SM-25: enable the correctness/termination lint — `while_immutable_condition`.
+# Its firing surface is a `while` loop whose condition reads only values never
+# changed in the body (an offset/counter never reassigned) — a non-progressing
+# loop that stalls the single fixed serving owner. A clippy 1.99.0 positive
+# control (`-F clippy::while_immutable_condition`) on both feature matrices
+# plus a planted non-progressing `while at < n` probe (which fires "variables
+# in the condition are not mutated in the loop body" — exit 101, proving the
+# lint is armed; the gate fails where a site exists) plus a while-loop scan of
+# `src/` + `tests/` found zero lint-proven sites on the pinned toolchain —
+# every `while` site mutates its condition variable in the body — so the lint
+# guards future regressions. A future site is fixed by making the condition
+# depend on a mutating value or converting to the correct loop (behavior-
+# preserving). No runtime/alloc/spec change; the enabling attribute is
+# compile-time.
+while_immutable_condition = "warn"
 
 [lib]
 name = "alumina"
