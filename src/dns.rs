@@ -113,7 +113,7 @@ impl BindingList {
     }
 
     fn push(&mut self, addr: NumericAddr) -> Result<(), DnsError> {
-        if self.len >= MAX_ADDRESSES as u8 {
+        if usize::from(self.len) >= MAX_ADDRESSES {
             return Err(DnsError::CandidatesExceeded {
                 limit: MAX_ADDRESSES,
             });
@@ -133,7 +133,7 @@ impl BindingList {
         }
         let mut out = BindingList::default();
         out.addrs[..addrs.len()].copy_from_slice(addrs);
-        out.len = addrs.len() as u8;
+        out.len = u8::try_from(addrs.len()).expect("candidate count bounded by MAX_ADDRESSES");
         Ok(out)
     }
 }
@@ -397,7 +397,7 @@ fn write_qname(buf: &mut [u8], mut pos: usize, name: &str) -> Result<usize, DnsE
             if pos + 1 + label_len > buf.len() {
                 return Err(DnsError::BufferExhausted);
             }
-            buf[pos] = label_len as u8;
+            buf[pos] = u8::try_from(label_len).expect("dns label at most 63 bytes");
             buf[pos + 1..pos + 1 + label_len]
                 .copy_from_slice(&bytes[label_start..label_start + label_len]);
             pos += 1 + label_len;
@@ -412,7 +412,7 @@ fn write_qname(buf: &mut [u8], mut pos: usize, name: &str) -> Result<usize, DnsE
         if pos + 1 + tail > buf.len() {
             return Err(DnsError::BufferExhausted);
         }
-        buf[pos] = tail as u8;
+        buf[pos] = u8::try_from(tail).expect("dns label at most 63 bytes");
         buf[pos + 1..pos + 1 + tail].copy_from_slice(&bytes[label_start..]);
         pos += 1 + tail;
     }
@@ -443,10 +443,9 @@ pub fn build_query(
     if pos + 4 > buf.len() {
         return Err(DnsError::BufferExhausted);
     }
-    buf[pos] = (family_qtype(family) >> 8) as u8;
-    buf[pos + 1] = family_qtype(family) as u8;
+    buf[pos..pos + 2].copy_from_slice(&family_qtype(family).to_be_bytes());
     buf[pos + 2] = 0;
-    buf[pos + 3] = CLASS_IN as u8;
+    buf[pos + 3] = u8::try_from(CLASS_IN).expect("DNS class IN fits the u8 wire field");
     Ok(pos + 4)
 }
 
@@ -1045,28 +1044,28 @@ mod tests {
     fn header(tid: u16, qr_flag: bool, rcode: u8, qd: u16, an: u16, ns: u16, ar: u16) -> Vec<u8> {
         let mut m = vec![0u8; 12];
         m[0] = (tid >> 8) as u8;
-        m[1] = tid as u8;
+        m[1] = u8::try_from(tid & 0xff).expect("dns header field low byte");
         let mut flags = u16::from(rcode);
         if qr_flag {
             flags |= 0x8000;
         }
         m[2] = (flags >> 8) as u8;
-        m[3] = flags as u8;
+        m[3] = u8::try_from(flags & 0xff).expect("dns header field low byte");
         m[4] = (qd >> 8) as u8;
-        m[5] = qd as u8;
+        m[5] = u8::try_from(qd & 0xff).expect("dns header field low byte");
         m[6] = (an >> 8) as u8;
-        m[7] = an as u8;
+        m[7] = u8::try_from(an & 0xff).expect("dns header field low byte");
         m[8] = (ns >> 8) as u8;
-        m[9] = ns as u8;
+        m[9] = u8::try_from(ns & 0xff).expect("dns header field low byte");
         m[10] = (ar >> 8) as u8;
-        m[11] = ar as u8;
+        m[11] = u8::try_from(ar & 0xff).expect("dns header field low byte");
         m
     }
 
     fn qname_bytes(name: &str) -> Vec<u8> {
         let mut out = Vec::new();
         for label in name.split('.') {
-            out.push(label.len() as u8);
+            out.push(u8::try_from(label.len()).expect("dns label at most 63 bytes"));
             out.extend_from_slice(label.as_bytes());
         }
         out.push(0);
@@ -1099,7 +1098,11 @@ mod tests {
         m.extend_from_slice(&1u16.to_be_bytes());
         m.extend_from_slice(&ttl.to_be_bytes());
         let target_bytes = qname_bytes(target);
-        m.extend_from_slice(&(target_bytes.len() as u16).to_be_bytes());
+        m.extend_from_slice(
+            &u16::try_from(target_bytes.len())
+                .expect("qname wire length fits u16")
+                .to_be_bytes(),
+        );
         m.extend_from_slice(&target_bytes);
         m
     }
@@ -1112,7 +1115,11 @@ mod tests {
         m.extend_from_slice(&6u16.to_be_bytes());
         m.extend_from_slice(&1u16.to_be_bytes());
         m.extend_from_slice(&ttl.to_be_bytes());
-        m.extend_from_slice(&(rdata_len as u16).to_be_bytes());
+        m.extend_from_slice(
+            &u16::try_from(rdata_len)
+                .expect("soa rdata fits u16")
+                .to_be_bytes(),
+        );
         m.extend_from_slice(&mname);
         m.extend_from_slice(&rname);
         let mut fields = Vec::new();
@@ -1547,7 +1554,15 @@ mod tests {
 
     #[test]
     fn rejects_over_record_count_bound() {
-        let mut msg = header(21, true, 0, 1, (MAX_TOTAL_RR + 1) as u16, 0, 0);
+        let mut msg = header(
+            21,
+            true,
+            0,
+            1,
+            u16::try_from(MAX_TOTAL_RR + 1).expect("record count boundary fits u16"),
+            0,
+            0,
+        );
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());

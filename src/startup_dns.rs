@@ -383,7 +383,10 @@ impl StartupReport {
     /// none has been captured yet.
     pub(crate) fn record_first_failure(&mut self, ordinal: usize, family: Family) {
         if self.first_failure.is_none() {
-            self.first_failure = Some((ordinal as u16, family));
+            self.first_failure = Some((
+                u16::try_from(ordinal).expect("name ordinal bounded by ALLOWLIST_MAX"),
+                family,
+            ));
         }
     }
 }
@@ -466,16 +469,22 @@ impl WindowLedger {
         failed: u32,
         first_failure: Option<(u16, Family)>,
     ) -> StartupReport {
-        let attempted_count = self.attempted[..self.names * 2]
-            .iter()
-            .filter(|&&t| t)
-            .count() as u32;
-        let resolved_names = self.resolved[..self.names].iter().filter(|&&r| r).count() as u32;
+        let attempted_count = u32::try_from(
+            self.attempted[..self.names * 2]
+                .iter()
+                .filter(|&&t| t)
+                .count(),
+        )
+        .expect("attempted count bounded by ALLOWLIST_MAX * 2");
+        let resolved_names =
+            u32::try_from(self.resolved[..self.names].iter().filter(|&&r| r).count())
+                .expect("resolved count bounded by ALLOWLIST_MAX");
         let mut report = StartupReport {
             exchanges,
             failed,
             cancelled: 0,
-            not_attempted: (self.names * 2) as u32 - attempted_count,
+            not_attempted: u32::try_from(self.names * 2).expect("names bounded by ALLOWLIST_MAX")
+                - attempted_count,
             resolved_names,
             outcomes: [NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed); ALLOWLIST_MAX],
             first_failure,
@@ -1400,7 +1409,8 @@ impl StartupDns {
                 }
             }
         }
-        report.resolved_names = resolved[..names].iter().filter(|&&r| r).count() as u32;
+        report.resolved_names = u32::try_from(resolved[..names].iter().filter(|&&r| r).count())
+            .expect("resolved count bounded by ALLOWLIST_MAX");
         for ordinal in 0..names {
             report.outcomes[ordinal] = if resolved[ordinal] {
                 NameOutcome::Resolved
@@ -1539,9 +1549,12 @@ impl StartupDns {
             }
         }
         self.close_connection()?;
-        let attempted_count = attempted[..names * 2].iter().filter(|&&t| t).count() as u32;
-        report.not_attempted = (names * 2) as u32 - attempted_count;
-        report.resolved_names = resolved[..names].iter().filter(|&&r| r).count() as u32;
+        let attempted_count = u32::try_from(attempted[..names * 2].iter().filter(|&&t| t).count())
+            .expect("attempted count bounded by ALLOWLIST_MAX * 2");
+        report.not_attempted =
+            u32::try_from(names * 2).expect("names bounded by ALLOWLIST_MAX") - attempted_count;
+        report.resolved_names = u32::try_from(resolved[..names].iter().filter(|&&r| r).count())
+            .expect("resolved count bounded by ALLOWLIST_MAX");
         for ordinal in 0..names {
             report.outcomes[ordinal] = if resolved[ordinal] {
                 NameOutcome::Resolved
@@ -1586,8 +1599,8 @@ impl StartupDns {
         let tid = self.fresh_tid()?;
         let qlen = dns::build_query(fqdn, family, tid, &mut self.query_buf[2..])?;
         let total = qlen + 2;
-        self.query_buf[0] = (qlen as u16 >> 8) as u8;
-        self.query_buf[1] = qlen as u8;
+        let wire_len = u16::try_from(qlen).expect("dns query length fits u16 prefix");
+        self.query_buf[..2].copy_from_slice(&wire_len.to_be_bytes());
         self.written = 0;
         self.filled = 0;
         self.msglen = None;

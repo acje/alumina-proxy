@@ -67,7 +67,7 @@ impl Drop for Responder {
 fn qname_bytes(name: &str) -> Vec<u8> {
     let mut out = Vec::new();
     for label in name.split('.') {
-        out.push(label.len() as u8);
+        out.push(u8::try_from(label.len()).expect("dns label at most 63 bytes"));
         out.extend_from_slice(label.as_bytes());
     }
     out.push(0);
@@ -92,7 +92,11 @@ fn record(owner: &[u8], ty: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
     rec.extend_from_slice(&ty.to_be_bytes());
     rec.extend_from_slice(&1u16.to_be_bytes());
     rec.extend_from_slice(&ttl.to_be_bytes());
-    rec.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+    rec.extend_from_slice(
+        &u16::try_from(rdata.len())
+            .expect("rdata fits u16 wire length")
+            .to_be_bytes(),
+    );
     rec.extend_from_slice(rdata);
     rec
 }
@@ -172,7 +176,11 @@ fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
                             break;
                         }
                         let mut out = Vec::with_capacity(bytes.len() + 2);
-                        out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+                        out.extend_from_slice(
+                            &u16::try_from(bytes.len())
+                                .expect("reply fits u16 wire length")
+                                .to_be_bytes(),
+                        );
                         out.extend_from_slice(&bytes);
                         if sock.write_all(&out).is_err() {
                             break;
@@ -189,7 +197,11 @@ fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
                         };
                         let msg = positive_a_message(&q, ttl, &octets);
                         let mut out = Vec::with_capacity(msg.len() + 2);
-                        out.extend_from_slice(&(msg.len() as u16).to_be_bytes());
+                        out.extend_from_slice(
+                            &u16::try_from(msg.len())
+                                .expect("reply fits u16 wire length")
+                                .to_be_bytes(),
+                        );
                         out.extend_from_slice(&msg);
                         let mut at = 0;
                         while at < out.len() {
@@ -213,10 +225,15 @@ fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
                                 let mismatched =
                                     u16::from_be_bytes([bytes[0], bytes[1]]).wrapping_add(1);
                                 bytes[0] = (mismatched >> 8) as u8;
-                                bytes[1] = mismatched as u8;
+                                bytes[1] =
+                                    u8::try_from(mismatched & 0xff).expect("dns tid low byte");
                             }
                             let mut out = Vec::with_capacity(bytes.len() + 2);
-                            out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+                            out.extend_from_slice(
+                                &u16::try_from(bytes.len())
+                                    .expect("reply fits u16 wire length")
+                                    .to_be_bytes(),
+                            );
                             out.extend_from_slice(&bytes);
                             if sock.write_all(&out).is_err() {
                                 break;

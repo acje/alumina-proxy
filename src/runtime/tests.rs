@@ -162,7 +162,10 @@ fn hot_relay_many_slots_body() {
             .test_setup_relay(FIRST_HOT_INDEX + i, up, client)
             .expect("install relay");
 
-        let pattern = crate::serving::test_offset_pattern(per_slot, 30 + i as u32);
+        let pattern = crate::serving::test_offset_pattern(
+            per_slot,
+            30 + u32::try_from(i).expect("hot-slot index fits u32"),
+        );
         peer_stream.write_all(&pattern).expect("preload pattern");
         holds.push(peer_stream);
 
@@ -284,7 +287,8 @@ fn hot_relay_many_slots_body() {
     );
     for i in 0..HOT_SLOTS {
         assert!(
-            (1..=HOT_SLOTS as i32).contains(&second_visit_turn[i]),
+            (1..=i32::try_from(HOT_SLOTS).expect("HOT_SLOTS fits i32"))
+                .contains(&second_visit_turn[i]),
             "hot slot {i} must reach its second owner visit within one full round-robin pass \
              of the competing hot slots ({HOT_SLOTS} batches; one visit per slot per batch, \
              and 96KiB needs two visits under the 64KiB cap), so deferring the second visit \
@@ -296,7 +300,10 @@ fn hot_relay_many_slots_body() {
             per_slot,
             "hot relay {i} must complete under DNS + backlog load"
         );
-        let pattern = crate::serving::test_offset_pattern(per_slot, 30 + i as u32);
+        let pattern = crate::serving::test_offset_pattern(
+            per_slot,
+            30 + u32::try_from(i).expect("hot-slot index fits u32"),
+        );
         assert_eq!(
             &tails[i][..],
             &pattern[..],
@@ -334,7 +341,11 @@ fn record(owner: &[u8], ty: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
     rec.extend_from_slice(&ty.to_be_bytes());
     rec.extend_from_slice(&1u16.to_be_bytes());
     rec.extend_from_slice(&ttl.to_be_bytes());
-    rec.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+    rec.extend_from_slice(
+        &u16::try_from(rdata.len())
+            .expect("rdata fits u16 wire length")
+            .to_be_bytes(),
+    );
     rec.extend_from_slice(rdata);
     rec
 }
@@ -369,7 +380,11 @@ fn positive_response(msg: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn write_response(sock: &mut TcpStream, reply: &[u8]) -> io::Result<()> {
-    sock.write_all(&(reply.len() as u16).to_be_bytes())?;
+    sock.write_all(
+        &u16::try_from(reply.len())
+            .expect("dns reply fits u16 length prefix")
+            .to_be_bytes(),
+    )?;
     sock.write_all(reply)
 }
 

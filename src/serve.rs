@@ -633,7 +633,7 @@ impl ServeStorage {
         for (ordinal, name) in allowlist.iter().enumerate() {
             if report.outcomes[ordinal] != NameOutcome::Resolved {
                 embedded[unresolved_count] = StartupUnresolved {
-                    ordinal: ordinal as u32,
+                    ordinal: u32::try_from(ordinal).expect("allowlist ordinal fits u32"),
                     name: name.as_str(),
                     outcome: report.outcomes[ordinal],
                 };
@@ -1248,7 +1248,11 @@ mod startup_integration {
 
     fn write_message(sock: &mut TcpStream, msg: &[u8]) -> std::io::Result<()> {
         let mut out = Vec::with_capacity(msg.len() + 2);
-        out.extend_from_slice(&(msg.len() as u16).to_be_bytes());
+        out.extend_from_slice(
+            &u16::try_from(msg.len())
+                .expect("dns message fits u16 length prefix")
+                .to_be_bytes(),
+        );
         out.extend_from_slice(msg);
         sock.write_all(&out)?;
         sock.flush()
@@ -1310,7 +1314,11 @@ mod startup_integration {
         msg.extend_from_slice(&qtype.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&300u32.to_be_bytes());
-        msg.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        msg.extend_from_slice(
+            &u16::try_from(rdata.len())
+                .expect("rdata fits u16 wire length")
+                .to_be_bytes(),
+        );
         msg.extend_from_slice(rdata);
         Some(msg)
     }
