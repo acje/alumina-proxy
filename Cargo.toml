@@ -142,6 +142,7 @@ needless_borrowed_reference = "warn"
 no_effect = "warn"
 almost_complete_range = "warn"
 by_ref_peekable_peek = "warn"
+multi_assignments = "warn"
 
 [lib]
 name = "alumina"
