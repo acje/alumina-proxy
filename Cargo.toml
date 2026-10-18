@@ -100,6 +100,7 @@ size_of_in_element_count = "warn"
 manual_saturating_arithmetic = "warn"
 inverted_saturating_sub = "warn"
 iterator_step_by_zero = "warn"
+zero_repeat_side_effects = "warn"
 
 [lib]
 name = "alumina"
