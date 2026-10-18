@@ -113,6 +113,13 @@ pub fn check(facts: KernelFacts) -> Result<(), PreflightError> {
 }
 
 #[cfg(target_os = "linux")]
+/// Reads kernel facts from `/proc/self/status`.
+///
+/// # Errors
+///
+/// Returns `StatusUnreadable` when `/proc/self/status` cannot be read, and
+/// `StatusMalformed` when a required `Uid`, `CapEff`, `CapPrm`, `CapAmb`, or
+/// `NoNewPrivs` field is missing or unparsable.
 pub fn read_kernel_facts() -> Result<KernelFacts, PreflightError> {
     let text = std::fs::read_to_string("/proc/self/status").map_err(|source| {
         PreflightError::StatusUnreadable {
