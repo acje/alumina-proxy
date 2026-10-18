@@ -23,7 +23,7 @@ const BODY_504: &[u8] =
     b"HTTP/1.1 504 Gateway Timeout\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 23\r\n\r\nsetup deadline expired\n";
 
 impl Refusal {
-    pub(super) fn body(self) -> &'static [u8] {
+    pub(super) const fn body(self) -> &'static [u8] {
         match self {
             Refusal::BadRequest => BODY_400,
             Refusal::Forbidden => BODY_403,
@@ -33,7 +33,7 @@ impl Refusal {
         }
     }
 
-    pub(super) fn reason(self) -> RejectReason {
+    pub(super) const fn reason(self) -> RejectReason {
         match self {
             Refusal::BadRequest => RejectReason::BadRequest,
             Refusal::Forbidden => RejectReason::Forbidden,

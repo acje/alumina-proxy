@@ -24,7 +24,7 @@ pub struct Soa {
 
 impl Soa {
     #[must_use]
-    pub fn new(ttl: u64, minimum: u64) -> Soa {
+    pub const fn new(ttl: u64, minimum: u64) -> Soa {
         Soa { ttl, minimum }
     }
 
@@ -88,18 +88,18 @@ impl DueToken {
     /// The admitted name index of the selected exchange, matching
     /// `Cache::name_index` numbering for later cache integration.
     #[must_use]
-    pub fn name(&self) -> usize {
+    pub const fn name(&self) -> usize {
         self.name
     }
 
     /// The record family of the selected exchange.
     #[must_use]
-    pub fn family(&self) -> Family {
+    pub const fn family(&self) -> Family {
         self.family
     }
 }
 
-fn family_slot(family: Family) -> usize {
+const fn family_slot(family: Family) -> usize {
     match family {
         Family::A => 0,
         Family::Aaaa => 1,
@@ -149,11 +149,11 @@ impl Schedules {
         usize::from(self.name_count)
     }
 
-    fn slot(&self, name: usize, family: Family) -> &Slot {
+    const fn slot(&self, name: usize, family: Family) -> &Slot {
         &self.slots[name][family_slot(family)]
     }
 
-    fn slot_mut(&mut self, name: usize, family: Family) -> &mut Slot {
+    const fn slot_mut(&mut self, name: usize, family: Family) -> &mut Slot {
         &mut self.slots[name][family_slot(family)]
     }
 
@@ -272,7 +272,12 @@ impl Schedules {
 
     /// Commits a prepared single-family delta; never fails after
     /// [`Self::prepare_positive`] succeeded.
-    pub(crate) fn commit_positive(&mut self, name: usize, family: Family, prepared: PreparedDue) {
+    pub(crate) const fn commit_positive(
+        &mut self,
+        name: usize,
+        family: Family,
+        prepared: PreparedDue,
+    ) {
         self.commit_slot(name, family, prepared);
     }
 
@@ -431,14 +436,19 @@ impl Schedules {
 
     /// Commits a prepared single-family delta; never fails after
     /// [`Self::prepare_nodata`] succeeded.
-    pub(crate) fn commit_nodata(&mut self, name: usize, family: Family, prepared: PreparedDue) {
+    pub(crate) const fn commit_nodata(
+        &mut self,
+        name: usize,
+        family: Family,
+        prepared: PreparedDue,
+    ) {
         self.commit_slot(name, family, prepared);
     }
 
     /// Non-fallible commit of a [`PreparedDue`] onto its slot, clearing the
     /// in-flight marker; reserved for values returned by a successful
     /// `prepare_*`.
-    fn commit_slot(&mut self, name: usize, family: Family, prepared: PreparedDue) {
+    const fn commit_slot(&mut self, name: usize, family: Family, prepared: PreparedDue) {
         let slot = self.slot_mut(name, family);
         slot.due = Some(prepared.due);
         slot.backoff = prepared.backoff;

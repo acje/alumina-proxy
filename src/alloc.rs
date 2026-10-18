@@ -21,7 +21,7 @@ impl Phase {
         Phase::Shutdown,
     ];
 
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
             Phase::StartupDns => 0,
             Phase::Serving => 1,
@@ -40,7 +40,7 @@ pub enum Event {
 }
 
 impl Event {
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
             Event::Alloc => 0,
             Event::Dealloc => 1,
@@ -58,7 +58,7 @@ pub struct Counts {
 
 impl Counts {
     #[must_use]
-    pub fn all_zero(self) -> bool {
+    pub const fn all_zero(self) -> bool {
         self.allocs == 0 && self.deallocs == 0 && self.reallocs == 0
     }
 }

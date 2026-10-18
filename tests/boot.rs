@@ -510,7 +510,7 @@ fn resolver_scanner_retention_bounded_independent_of_input_size() {
     );
 }
 
-fn good_facts() -> KernelFacts {
+const fn good_facts() -> KernelFacts {
     KernelFacts {
         ruid: 1000,
         euid: 1000,

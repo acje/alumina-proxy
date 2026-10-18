@@ -24,7 +24,7 @@ pub enum Family {
 impl Family {
     pub const ALL: [Family; 2] = [Family::A, Family::Aaaa];
 
-    fn index(self) -> usize {
+    const fn index(self) -> usize {
         match self {
             Family::A => 0,
             Family::Aaaa => 1,
@@ -86,12 +86,12 @@ impl Entry {
     };
 
     #[must_use]
-    pub fn generation(&self) -> Generation {
+    pub const fn generation(&self) -> Generation {
         self.generation
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.binding_len == 0
     }
 
@@ -103,14 +103,14 @@ impl Entry {
 
     /// The freshness and retirement deadlines, present exactly when non-empty.
     #[must_use]
-    pub fn deadlines(&self) -> (Option<u64>, Option<u64>) {
+    pub const fn deadlines(&self) -> (Option<u64>, Option<u64>) {
         (self.freshness_deadline, self.retirement_deadline)
     }
 
     /// Computes freshness at `now`; a valid instance yields the same result no
     /// matter how delayed timer processing was.
     #[must_use]
-    pub fn state(&self, now: u64) -> EntryState {
+    pub const fn state(&self, now: u64) -> EntryState {
         match self.retirement_deadline {
             None => EntryState::Empty,
             Some(retirement) if now >= retirement => EntryState::Retired,
@@ -122,7 +122,7 @@ impl Entry {
     }
 }
 
-fn empty_with_generation(generation: Generation) -> Entry {
+const fn empty_with_generation(generation: Generation) -> Entry {
     Entry {
         generation,
         ..Entry::EMPTY

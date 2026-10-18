@@ -171,7 +171,7 @@ impl Preallocated {
     }
 
     /// The serving engine, for host observation of pre-attach readiness state.
-    pub fn serving(&self) -> &Serving {
+    pub const fn serving(&self) -> &Serving {
         &self.serving
     }
 }
@@ -212,7 +212,7 @@ impl Runtime {
     }
 
     /// The serving engine, for host observation.
-    pub fn serving(&self) -> &Serving {
+    pub const fn serving(&self) -> &Serving {
         &self.serving
     }
 
@@ -226,7 +226,7 @@ impl Runtime {
     }
 
     /// The token the retained DNS source is attached under on the single poll.
-    pub fn dns_token(&self) -> Token {
+    pub const fn dns_token(&self) -> Token {
         self.dns_token
     }
 

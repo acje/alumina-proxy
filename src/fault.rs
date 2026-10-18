@@ -43,7 +43,7 @@ pub enum Outcome {
 
 impl Outcome {
     #[must_use]
-    pub fn category(&self) -> Category {
+    pub const fn category(&self) -> Category {
         match self {
             Outcome::PartialRead { .. } => Category::PartialRead,
             Outcome::PartialWrite { .. } => Category::PartialWrite,
@@ -103,7 +103,7 @@ pub struct Replayed<'a> {
 
 impl Replay {
     #[must_use]
-    pub fn new(script: Script) -> Self {
+    pub const fn new(script: Script) -> Self {
         Replay {
             script,
             points: BTreeMap::new(),
@@ -144,7 +144,7 @@ pub struct Clock {
 
 impl Clock {
     #[must_use]
-    pub fn new(ticks: Vec<u64>) -> Self {
+    pub const fn new(ticks: Vec<u64>) -> Self {
         Clock { ticks, cursor: 0 }
     }
 
