@@ -39,7 +39,7 @@ pub enum PreflightError {
 
 impl PreflightError {
     #[must_use]
-    pub fn exit_status(&self) -> i32 {
+    pub const fn exit_status(&self) -> i32 {
         78
     }
 }
@@ -93,7 +93,7 @@ impl fmt::Display for PreflightError {
 /// or filesystem UID is zero, `NonEmptyEffective`, `NonEmptyPermitted`, or
 /// `NonEmptyAmbient` when the matching capability set is non-empty, and
 /// `MissingNoNewPrivs` when the process lacks the no_new_privs flag.
-pub fn check(facts: KernelFacts) -> Result<(), PreflightError> {
+pub const fn check(facts: KernelFacts) -> Result<(), PreflightError> {
     if facts.ruid == 0 || facts.euid == 0 || facts.suid == 0 || facts.fsuid == 0 {
         return Err(PreflightError::Root);
     }
@@ -135,7 +135,7 @@ pub fn read_kernel_facts() -> Result<KernelFacts, PreflightError> {
 /// # Errors
 ///
 /// Always returns `NotLinux` on non-Linux hosts.
-pub fn read_kernel_facts() -> Result<KernelFacts, PreflightError> {
+pub const fn read_kernel_facts() -> Result<KernelFacts, PreflightError> {
     Err(PreflightError::NotLinux)
 }
 

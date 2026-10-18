@@ -17,7 +17,7 @@ pub enum BootError {
 
 impl BootError {
     #[must_use]
-    pub fn exit_status(&self) -> i32 {
+    pub const fn exit_status(&self) -> i32 {
         EX_CONFIG
     }
 }

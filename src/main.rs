@@ -137,4 +137,4 @@ fn emit_kernel_facts() {
 }
 
 #[cfg(not(feature = "fixture-facts"))]
-fn emit_kernel_facts() {}
+const fn emit_kernel_facts() {}
