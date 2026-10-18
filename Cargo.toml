@@ -132,6 +132,7 @@ mut_mut = "warn"
 naive_bytecount = "warn"
 option_as_ref_cloned = "warn"
 ptr_as_ptr = "warn"
+same_length_and_capacity = "warn"
 
 [lib]
 name = "alumina"
