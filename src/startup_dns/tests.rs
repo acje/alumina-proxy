@@ -156,9 +156,8 @@ fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
     let handle = thread::spawn(move || {
         let scripts = conn_scripts.into_iter();
         for conn_steps in scripts {
-            let (mut sock, _) = match listener.accept() {
-                Ok(x) => x,
-                Err(_) => break,
+            let Ok((mut sock, _)) = listener.accept() else {
+                break;
             };
             connections_thread.fetch_add(1, Ordering::Relaxed);
             for step in conn_steps {

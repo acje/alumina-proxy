@@ -26,6 +26,14 @@ description = "Alumina phase-1 foundations: F0 toolchain pin, F1/F2/F4 witness s
 # "designed ...-resident fixed-profile buffer; no runtime heap")]`; the 11
 # test-only staging buffers carry `reason = "test staging buffer, not runtime
 # path"`. Buffers stay stack-resident; no runtime heap and no surface change.
+# SM-05: enable the control-flow pedantic lints — `manual_let_else`,
+# `match_same_arms`, `match_wildcard_for_single_variants`, `single_match_else`,
+# `nonminimal_bool`, `needless_continue`, `if_not_else`, `unnested_or_patterns`,
+# and the assert cluster (`manual_assert`, `manual_assert_eq`,
+# `assert_is_empty`) — resolved at every site with idiomatic,
+# behaviour-preserving rewrites on both feature matrices. Suppression stays
+# per-site `#[expect(..., reason = "...")]` only where no idiomatic rewrite
+# exists. No runtime/alloc/surface change; attributes are compile-time.
 [lints.clippy]
 uninlined_format_args = "warn"
 must_use_candidate = "warn"
@@ -36,6 +44,7 @@ missing_errors_doc = "warn"
 missing_panics_doc = "warn"
 too_many_lines = "warn"
 large_stack_arrays = "warn"
+manual_let_else = "warn"
 
 [lib]
 name = "alumina"

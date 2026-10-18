@@ -86,9 +86,8 @@ fn main() {
                             ));
                             std::process::exit(EX_SOFTWARE);
                         };
-                        let runtime = match owner.attach(listener) {
-                            Ok(runtime) => runtime,
-                            Err(_) => std::process::exit(EX_SOFTWARE),
+                        let Ok(runtime) = owner.attach(listener) else {
+                            std::process::exit(EX_SOFTWARE);
                         };
                         match runtime.serve() {
                             Err(_) => std::process::exit(EX_SOFTWARE),

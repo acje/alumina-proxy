@@ -2115,9 +2115,12 @@ fn interleaved_a_b_a_mixed_readwrite_timer_preserves_shared_budgets() {
                 },
             )
             .expect("B client-readable batch token");
-        let b_ops_after_visit = match serving.visit {
-            VisitState::Live { ops, .. } => ops,
-            _ => unreachable!("B's visit is live after its first token"),
+        let VisitState::Live {
+            ops: b_ops_after_visit,
+            ..
+        } = serving.visit
+        else {
+            unreachable!("B's visit is live after its first token");
         };
         serving
             .dispatch_readiness(

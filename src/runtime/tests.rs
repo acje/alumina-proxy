@@ -401,9 +401,8 @@ fn spawn_responder_keep_alive() -> (SocketAddr, thread::JoinHandle<()>) {
     let addr = listener.local_addr().expect("responder addr");
     let handle = thread::spawn(move || {
         loop {
-            let (mut sock, _) = match listener.accept() {
-                Ok(x) => x,
-                Err(_) => break,
+            let Ok((mut sock, _)) = listener.accept() else {
+                break;
             };
             while let Some(q) = read_query(&mut sock) {
                 if let Some(reply) = positive_response(&q)
@@ -422,9 +421,8 @@ fn spawn_responder_close_after_answer() -> (SocketAddr, thread::JoinHandle<()>) 
     let addr = listener.local_addr().expect("responder addr");
     let handle = thread::spawn(move || {
         loop {
-            let (mut sock, _) = match listener.accept() {
-                Ok(x) => x,
-                Err(_) => break,
+            let Ok((mut sock, _)) = listener.accept() else {
+                break;
             };
             if let Some(q) = read_query(&mut sock)
                 && let Some(reply) = positive_response(&q)
@@ -448,9 +446,8 @@ fn spawn_responder_first_session_only() -> (SocketAddr, thread::JoinHandle<()>) 
     let handle = thread::spawn(move || {
         let mut sessions = 0usize;
         loop {
-            let (mut sock, _) = match listener.accept() {
-                Ok(x) => x,
-                Err(_) => break,
+            let Ok((mut sock, _)) = listener.accept() else {
+                break;
             };
             if sessions == 0 {
                 while let Some(q) = read_query(&mut sock) {
@@ -1130,9 +1127,8 @@ fn spawn_supervised_responder(
         let mut on_session = on_session;
         let mut session = 0usize;
         loop {
-            let (mut sock, _) = match listener.accept() {
-                Ok(conn) => conn,
-                Err(_) => break,
+            let Ok((mut sock, _)) = listener.accept() else {
+                break;
             };
             session += 1;
             if stop_for_thread.load(std::sync::atomic::Ordering::SeqCst) {

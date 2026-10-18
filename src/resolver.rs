@@ -176,13 +176,10 @@ fn parse_streaming<R: Read>(
                     value: String::from_utf8_lossy(&tok[..tok_len]).into_owned(),
                 });
             }
-            let text = match std::str::from_utf8(&tok[..tok_len]) {
-                Ok(text) => text,
-                Err(_) => {
-                    return Err(ResolverError::InvalidAddress {
-                        value: format!("<non-utf8 {tok_len} bytes>"),
-                    });
-                }
+            let Ok(text) = std::str::from_utf8(&tok[..tok_len]) else {
+                return Err(ResolverError::InvalidAddress {
+                    value: format!("<non-utf8 {tok_len} bytes>"),
+                });
             };
             let ns = select(text)?;
             skip_inline_ws(&mut sc)?;

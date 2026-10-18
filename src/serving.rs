@@ -2291,13 +2291,10 @@ impl Serving {
     }
 
     fn hello_complete(&mut self, index: usize) -> Result<(), ServeError> {
-        let approved = match self.slots[index].approved {
-            Some(approved) => approved,
-            None => {
-                self.project_tripwire(index, Violation::MissingParseResult);
-                self.close_slot(index);
-                return Ok(());
-            }
+        let Some(approved) = self.slots[index].approved else {
+            self.project_tripwire(index, Violation::MissingParseResult);
+            self.close_slot(index);
+            return Ok(());
         };
         let verdict = self.slots[index]
             .inspector
