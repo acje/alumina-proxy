@@ -115,6 +115,7 @@ vec_init_then_push = "warn"
 useless_vec = "warn"
 large_const_arrays = "warn"
 manual_memcpy = "warn"
+map_entry = "warn"
 
 [lib]
 name = "alumina"
