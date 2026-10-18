@@ -129,6 +129,7 @@ explicit_into_iter_loop = "warn"
 filter_map_next = "warn"
 manual_is_power_of_two = "warn"
 mut_mut = "warn"
+naive_bytecount = "warn"
 
 [lib]
 name = "alumina"
