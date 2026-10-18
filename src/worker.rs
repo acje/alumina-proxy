@@ -371,17 +371,38 @@ pub enum AdmissionError {
 pub struct Worker {
     slots: [SlotState; MAX_TUNNELS],
     clock: WorkerClock,
+    occupied_count: usize,
+    pending_count: usize,
+    free_heap: [u16; MAX_TUNNELS],
+    free_count: usize,
 }
 
 impl Worker {
     /// Constructs the empty slot table with the owning storage's clock
-    /// authority. All state is preallocated (a fixed array); nothing is
-    /// allocated per connection. Crate-internal: the single constructor site is
-    /// the storage that owns cache, schedules, and this worker.
+    /// authority. All state is preallocated (fixed arrays and counters); the
+    /// free-index min-heap is initialised with every slot index exactly once,
+    /// so admit never needs a slot scan. An ascending array is a valid binary
+    /// min-heap, so no heapify pass is required. Crate-internal: the single
+    /// constructor site is the storage that owns cache, schedules, and this
+    /// worker.
     pub(crate) const fn boot(clock: WorkerClock) -> Worker {
+        let mut free_heap = [0; MAX_TUNNELS];
+        let mut index = 0;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the fixed 512-slot budget fits a u16 slot index, so the cast never truncates"
+        )]
+        while index < MAX_TUNNELS {
+            free_heap[index] = index as u16;
+            index += 1;
+        }
         Worker {
             slots: [SlotState::Free; MAX_TUNNELS],
             clock,
+            occupied_count: 0,
+            pending_count: 0,
+            free_heap,
+            free_count: MAX_TUNNELS,
         }
     }
 
@@ -397,22 +418,18 @@ impl Worker {
         self.clock
     }
 
-    /// The number of slots currently in setup (pending).
+    /// The number of slots currently in setup (pending), read O(1) from the
+    /// cached counter kept in lockstep with every slot transition.
     #[must_use]
-    pub fn pending(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|s| matches!(s, SlotState::InSetup { .. }))
-            .count()
+    pub const fn pending(&self) -> usize {
+        self.pending_count
     }
 
-    /// The number of occupied slots (in setup or established).
+    /// The number of occupied slots (in setup or established), read O(1) from
+    /// the cached counter kept in lockstep with every slot transition.
     #[must_use]
-    pub fn occupied(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|s| !matches!(s, SlotState::Free))
-            .count()
+    pub const fn occupied(&self) -> usize {
+        self.occupied_count
     }
 
     /// Admits a new setup into a free slot, capturing the absolute setup
@@ -427,28 +444,53 @@ impl Worker {
     /// `PendingCapacity` at [`MAX_PENDING_SETUPS`] pending setups; both are
     /// HTTP 503 + close (docs/alumina-proxy.md:193).
     pub(crate) fn admit(&mut self, now: Instant) -> Result<SlotIndex, AdmissionError> {
-        if self.occupied() >= MAX_TUNNELS {
+        if self.occupied_count >= MAX_TUNNELS {
             return Err(AdmissionError::SlotCapacity);
         }
-        if self.pending() >= MAX_PENDING_SETUPS {
+        if self.pending_count >= MAX_PENDING_SETUPS {
             return Err(AdmissionError::PendingCapacity);
         }
-        let Some((index, free_slot)) = self
-            .slots
-            .iter_mut()
-            .enumerate()
-            .find(|(_, s)| matches!(s, SlotState::Free))
-        else {
-            return Err(AdmissionError::SlotCapacity);
-        };
-        let Ok(index) = u16::try_from(index) else {
-            return Err(AdmissionError::SlotCapacity);
-        };
-        *free_slot = SlotState::InSetup {
+        let index = self.take_min_free();
+        self.slots[index as usize] = SlotState::InSetup {
             setup_deadline: Deadline::setup(now),
             attempts: AttemptLedger::new(),
         };
+        self.occupied_count += 1;
+        self.pending_count += 1;
+        #[cfg(debug_assertions)]
+        self.check_counter_lockstep();
         Ok(SlotIndex(index))
+    }
+
+    fn take_min_free(&mut self) -> u16 {
+        let min = self.free_heap[0];
+        self.free_count -= 1;
+        self.free_heap[0] = self.free_heap[self.free_count];
+        self.sift_down(0);
+        min
+    }
+
+    #[expect(
+        clippy::missing_const_for_fn,
+        reason = "retained mutable free-slot min-heap; constness is not load-bearing on the runtime serving path"
+    )]
+    fn sift_down(&mut self, mut position: usize) {
+        loop {
+            let left = position * 2 + 1;
+            if left >= self.free_count {
+                break;
+            }
+            let right = left + 1;
+            let mut smallest = left;
+            if right < self.free_count && self.free_heap[right] < self.free_heap[left] {
+                smallest = right;
+            }
+            if self.free_heap[smallest] >= self.free_heap[position] {
+                break;
+            }
+            self.free_heap.swap(position, smallest);
+            position = smallest;
+        }
     }
 
     /// The one owned decision for an in-setup tunnel: authorization and peer
@@ -525,9 +567,12 @@ impl Worker {
         clippy::needless_pass_by_value,
         reason = "by value encodes the consume-once linear-handle discipline (the setup handle is consumed, converting it into exactly one established handle)"
     )]
-    pub(crate) const fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
+    pub(crate) fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
         if let SlotState::InSetup { setup_deadline, .. } = self.slots[slot.index()] {
             self.slots[slot.index()] = SlotState::Established { setup_deadline };
+            self.pending_count -= 1;
+            #[cfg(debug_assertions)]
+            self.check_counter_lockstep();
         }
         TunnelIndex(slot.0)
     }
@@ -540,8 +585,13 @@ impl Worker {
         clippy::needless_pass_by_value,
         reason = "by value encodes the consume-once linear-handle discipline (preventing double release)"
     )]
-    pub(crate) const fn release(&mut self, slot: SlotIndex) {
+    pub(crate) fn release(&mut self, slot: SlotIndex) {
         self.slots[slot.index()] = SlotState::Free;
+        self.push_free(slot.0);
+        self.pending_count -= 1;
+        self.occupied_count -= 1;
+        #[cfg(debug_assertions)]
+        self.check_counter_lockstep();
     }
 
     /// Frees an established tunnel for reuse, consuming the established handle.
@@ -551,8 +601,90 @@ impl Worker {
         clippy::needless_pass_by_value,
         reason = "by value encodes the consume-once linear-handle discipline (preventing reuse after reset)"
     )]
-    pub(crate) const fn release_tunnel(&mut self, tunnel: TunnelIndex) {
+    pub(crate) fn release_tunnel(&mut self, tunnel: TunnelIndex) {
         self.slots[tunnel.index()] = SlotState::Free;
+        self.push_free(tunnel.0);
+        self.occupied_count -= 1;
+        #[cfg(debug_assertions)]
+        self.check_counter_lockstep();
+    }
+
+    #[expect(
+        clippy::missing_const_for_fn,
+        reason = "retained mutable free-slot min-heap; constness is not load-bearing on the runtime serving path"
+    )]
+    fn push_free(&mut self, index: u16) {
+        let mut position = self.free_count;
+        self.free_heap[position] = index;
+        self.free_count += 1;
+        while position > 0 {
+            let parent = (position - 1) / 2;
+            if self.free_heap[parent] <= self.free_heap[position] {
+                break;
+            }
+            self.free_heap.swap(parent, position);
+            position = parent;
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn check_counter_lockstep(&self) {
+        let occupied = self
+            .slots
+            .iter()
+            .filter(|s| !matches!(s, SlotState::Free))
+            .count();
+        let pending = self
+            .slots
+            .iter()
+            .filter(|s| matches!(s, SlotState::InSetup { .. }))
+            .count();
+        debug_assert_eq!(
+            self.occupied_count, occupied,
+            "occupied counter drifted from the slot table"
+        );
+        debug_assert_eq!(
+            self.pending_count, pending,
+            "pending counter drifted from the slot table"
+        );
+        debug_assert_eq!(
+            self.free_count,
+            MAX_TUNNELS - occupied,
+            "free count drifted from the occupied seats in the slot table"
+        );
+        self.check_free_heap_valid();
+    }
+
+    #[cfg(debug_assertions)]
+    fn check_free_heap_valid(&self) {
+        let mut seen = [false; MAX_TUNNELS];
+        for &entry in &self.free_heap[..self.free_count] {
+            debug_assert!(
+                matches!(self.slots[entry as usize], SlotState::Free),
+                "free heap names a non-free slot {entry}"
+            );
+            debug_assert!(
+                !seen[entry as usize],
+                "free heap lists slot {entry} more than once"
+            );
+            seen[entry as usize] = true;
+        }
+        let mut position = 0;
+        while position * 2 + 1 < self.free_count {
+            let left = position * 2 + 1;
+            debug_assert!(
+                self.free_heap[position] <= self.free_heap[left],
+                "min-heap disorder at parent {position} vs left {left}"
+            );
+            let right = left + 1;
+            if right < self.free_count {
+                debug_assert!(
+                    self.free_heap[position] <= self.free_heap[right],
+                    "min-heap disorder at parent {position} vs right {right}"
+                );
+            }
+            position += 1;
+        }
     }
 
     /// The absolute setup deadline of the granted in-setup slot, or `None`
@@ -851,6 +983,32 @@ mod tests {
 
     fn setup_at(anchor: Instant) -> Deadline {
         Deadline::setup(anchor)
+    }
+
+    fn assert_counters_match_rescan(worker: &Worker) {
+        let occupied = worker
+            .slots
+            .iter()
+            .filter(|s| !matches!(s, SlotState::Free))
+            .count();
+        let pending = worker
+            .slots
+            .iter()
+            .filter(|s| matches!(s, SlotState::InSetup { .. }))
+            .count();
+        assert_eq!(
+            worker.occupied_count, occupied,
+            "cached occupied diverges from a truthful rescanned count"
+        );
+        assert_eq!(
+            worker.pending_count, pending,
+            "cached pending diverges from a truthful rescanned count"
+        );
+        assert_eq!(
+            worker.free_count,
+            MAX_TUNNELS - occupied,
+            "cached free count diverges from the free seats in the slot table"
+        );
     }
 
     fn publish(
@@ -1213,6 +1371,77 @@ mod tests {
         assert_eq!(worker.pending(), 0);
         worker.release_tunnel(tunnel);
         assert_eq!(worker.occupied(), 0);
+    }
+
+    #[test]
+    fn cached_occupancy_counters_track_the_slot_table_across_a_lifecycle_churn() {
+        let t0 = anchor();
+        let mut worker = Worker::boot(clock(t0));
+        let mut tunnels = Vec::new();
+        for _ in 0..MAX_TUNNELS {
+            let slot = worker.admit(t0).expect("admitted to a free slot");
+            tunnels.push(worker.finish_setup(slot));
+        }
+        for tunnel in tunnels {
+            worker.release_tunnel(tunnel);
+        }
+        for _ in 0..MAX_PENDING_SETUPS {
+            let slot = worker.admit(t0).expect("admitted after full teardown");
+            worker.release(slot);
+        }
+        assert_counters_match_rescan(&worker);
+    }
+
+    #[test]
+    fn free_list_names_each_free_slot_exactly_once_through_a_full_churn() {
+        let t0 = anchor();
+        let mut worker = Worker::boot(clock(t0));
+        assert_eq!(
+            worker.free_count, MAX_TUNNELS,
+            "all 512 slots are free at boot"
+        );
+        let mut seen = vec![0usize; MAX_TUNNELS];
+        for &idx in &worker.free_heap[..worker.free_count] {
+            let free = matches!(worker.slots[idx as usize], SlotState::Free);
+            assert!(free, "free list names a non-free slot {idx}");
+            seen[idx as usize] += 1;
+        }
+        assert!(
+            seen.iter().all(|&c| c == 1),
+            "each free slot appears on the free list exactly once"
+        );
+        let mut tunnels = Vec::new();
+        for _ in 0..MAX_TUNNELS {
+            let slot = worker.admit(t0).expect("admitted to a free slot");
+            tunnels.push(worker.finish_setup(slot));
+        }
+        assert_eq!(worker.free_count, 0, "free list empty at full occupancy");
+        for tunnel in tunnels {
+            worker.release_tunnel(tunnel);
+        }
+        assert_eq!(
+            worker.free_count, MAX_TUNNELS,
+            "free list refills after full teardown"
+        );
+        assert_counters_match_rescan(&worker);
+    }
+
+    #[test]
+    fn admit_reuses_the_lowest_index_free_slot() {
+        let t0 = anchor();
+        let mut worker = Worker::boot(clock(t0));
+        let a = worker.admit(t0).expect("admitted");
+        assert_eq!(SlotIndex::index(&a), 0, "first admit takes slot 0");
+        let b = worker.admit(t0).expect("admitted");
+        assert_eq!(SlotIndex::index(&b), 1, "second admit takes slot 1");
+        worker.release(a);
+        let c = worker.admit(t0).expect("re-admitted");
+        assert_eq!(
+            SlotIndex::index(&c),
+            0,
+            "the freed lowest free slot is reused by the next admit"
+        );
+        let _ = b;
     }
 
     #[test]

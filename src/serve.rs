@@ -458,17 +458,17 @@ impl ServeStorage {
 
     /// Graduates an admitted slot to established work once the successful
     /// CONNECT response completed, returning the established handle.
-    pub(crate) const fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
+    pub(crate) fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
         self.worker.finish_setup(slot)
     }
 
     /// Releases an in-setup slot, consuming its handle.
-    pub(crate) const fn release(&mut self, slot: SlotIndex) {
+    pub(crate) fn release(&mut self, slot: SlotIndex) {
         self.worker.release(slot);
     }
 
     /// Releases an established tunnel, consuming its handle.
-    pub(crate) const fn release_tunnel(&mut self, tunnel: TunnelIndex) {
+    pub(crate) fn release_tunnel(&mut self, tunnel: TunnelIndex) {
         self.worker.release_tunnel(tunnel);
     }
 
@@ -484,12 +484,12 @@ impl ServeStorage {
     }
 
     /// Counts currently in setup, from the retained worker's slot states.
-    pub(crate) fn pending(&self) -> usize {
+    pub(crate) const fn pending(&self) -> usize {
         self.worker.pending()
     }
 
     /// Counts currently occupied, from the retained worker's slot states.
-    pub(crate) fn occupied(&self) -> usize {
+    pub(crate) const fn occupied(&self) -> usize {
         self.worker.occupied()
     }
 
