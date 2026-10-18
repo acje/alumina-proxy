@@ -122,6 +122,7 @@ large_enum_variant = "warn"
 sliced_string_as_bytes = "warn"
 get_first = "warn"
 assigning_clones = "warn"
+cast_possible_wrap = "warn"
 
 [lib]
 name = "alumina"
