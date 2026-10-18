@@ -727,6 +727,230 @@ fn expired_idle_deadline_still_closes_slot_through_gate() {
 }
 
 #[test]
+/// C50 lockstep: the per-slot deadline-presence bitmap and its O(1) emptiness
+/// gate must track every armed deadline source (setup snapshot, connect, idle,
+/// drain) through `sync_live_deadline`, so a fold-relevant deadline can never
+/// be skipped on the C50 poll-timeout fold regardless of which source arms or
+/// clears it. Also proves the highest-index slot reaches the final bitmap word.
+fn c50_live_deadline_bitmap_tracks_slot_four_sources_in_lockstep() {
+    use crate::worker::Deadline;
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        assert!(
+            serving.live_deadline.is_empty(),
+            "a fresh serving must carry no live deadline bits"
+        );
+        assert!(
+            !serving.live_deadline.get(0),
+            "a free slot must not be marked live"
+        );
+        let now = Instant::now();
+        let setup = Deadline::setup(now);
+        serving.slots[0].setup_deadline = Some(setup.limit());
+        serving.sync_live_deadline(0);
+        assert!(
+            serving.live_deadline.get(0) && !serving.live_deadline.is_empty(),
+            "the C15 setup snapshot must mark the slot live"
+        );
+        serving.slots[0].connect_deadline = Some(Deadline::connect_attempt(
+            now + Duration::from_secs(5),
+            setup,
+        ));
+        serving.sync_live_deadline(0);
+        assert!(
+            serving.live_deadline.get(0),
+            "the connect deadline must keep the bit live"
+        );
+        serving.slots[0].idle_deadline = Some(now + Duration::from_secs(7));
+        serving.slots[0].drain_deadline = Some(now + Duration::from_secs(3));
+        serving.sync_live_deadline(0);
+        assert!(
+            serving.live_deadline.get(0),
+            "idle/drain arms must keep the bit live"
+        );
+        // Each source can disappear one at a time: only clearing the last one
+        // drops the bit. The connect deadline is the conservatively-sticky one
+        // (cleared only on reset), mirroring its fold guard.
+        serving.slots[0].setup_deadline = None;
+        serving.slots[0].idle_deadline = None;
+        serving.slots[0].drain_deadline = None;
+        serving.sync_live_deadline(0);
+        assert!(
+            serving.live_deadline.get(0),
+            "the remaining connect deadline must keep the slot live"
+        );
+        serving.slots[0].connect_deadline = None;
+        serving.sync_live_deadline(0);
+        assert!(
+            !serving.live_deadline.get(0) && serving.live_deadline.is_empty(),
+            "clearing the last source must clear the bit and restore emptiness"
+        );
+        // The final slot exercises the last bitmap word (511 in word 7).
+        serving.slots[MAX_TUNNELS - 1].idle_deadline = Some(now + Duration::from_secs(9));
+        serving.sync_live_deadline(MAX_TUNNELS - 1);
+        assert!(
+            serving.live_deadline.get(MAX_TUNNELS - 1)
+                && serving.live_deadline.iter_live().eq([MAX_TUNNELS - 1]),
+            "bit {} must be reachable through the final word",
+            MAX_TUNNELS - 1
+        );
+        serving.slots[MAX_TUNNELS - 1].idle_deadline = None;
+        serving.sync_live_deadline(MAX_TUNNELS - 1);
+        assert!(
+            serving.live_deadline.is_empty(),
+            "cleanup must restore emptiness"
+        );
+    });
+}
+
+#[test]
+/// S1: the poll-timeout fold over the C50-live slot must be the exact minimum
+/// across every armed deadline source — the C15 setup snapshot, the
+/// connect (Dialing-guarded), idle, and drain — mirroring the four
+/// `expire_sweep` arms (docs/alumina-proxy.md:192). The slot stays live in the
+/// bitmap while multi-armed, so no armed deadline can silently fall out of the
+/// C16/C50 poll fold.
+fn s1_fold_min_is_exact_min_over_all_four_arm_sources() {
+    use crate::worker::Deadline;
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        let _client = connect(port);
+        pump(serving, 1);
+        assert_eq!(serving.storage().occupied(), 1, "one admitted setup");
+        let now = Instant::now();
+        let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
+        let setup = serving
+            .storage()
+            .setup_deadline(handle)
+            .expect("admitted setup deadline");
+        let setup_limit = setup.limit();
+        let connect_limit = now + Duration::from_secs(6);
+        let idle_limit = now + Duration::from_secs(9);
+        let drain_limit = now + Duration::from_secs(3);
+        serving.slots[0].stage = Stage::Dialing;
+        serving.slots[0].connect_deadline = Some(Deadline::connect_attempt(connect_limit, setup));
+        serving.slots[0].idle_deadline = Some(idle_limit);
+        serving.slots[0].drain_deadline = Some(drain_limit);
+        serving.sync_live_deadline(0);
+        serving.poll_timeout();
+        let expected = [setup_limit, connect_limit, idle_limit, drain_limit]
+            .into_iter()
+            .min()
+            .expect("min over four armed sources");
+        assert_eq!(
+            serving.next_expiry,
+            Some(expected),
+            "the fold must be the exact minimum over setup, connect, idle and drain"
+        );
+        assert!(
+            serving.live_deadline.get(0),
+            "a multi-armed slot must be marked live in the C50 bitmap"
+        );
+        // Shedding the connect source must not change the fold: setup+idle+drain
+        // still produce the same minimum.
+        serving.slots[0].connect_deadline = None;
+        serving.slots[0].stage = Stage::ReadingConnect;
+        serving.sync_live_deadline(0);
+        serving.poll_timeout();
+        assert_eq!(
+            serving.next_expiry,
+            Some(expected),
+            "dropping the connect source (now the setup snapshot, idle and drain remain) \
+             must not change the exact minimum fold"
+        );
+    });
+}
+
+#[test]
+/// The C50 bit for an admitted setup must couple with the C16 gate so an
+/// elapsed drain deadline still closes the slot through `run_once`, proving
+/// the drain arm is folded (and enforced) off the lockstep bitmap, not lost.
+fn drain_deadline_expired_still_closes_slot_through_gate() {
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        let client = connect(port);
+        pump(serving, 1);
+        assert_eq!(serving.storage().occupied(), 1, "one admitted setup");
+        serving.slots[0].drain_deadline = Some(Instant::now() - Duration::from_millis(1));
+        serving.sync_live_deadline(0);
+        pump(serving, 1);
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "an elapsed drain deadline must still be enforced by the C16-gated sweep"
+        );
+        assert!(
+            serving.sweeps >= 1,
+            "the C16 early-exit gate must still fire the sweep once the drain deadline has elapsed"
+        );
+        drop(client);
+    });
+}
+
+#[test]
+/// The connect deadline, folded only while the slot is Dialing, must also run
+/// its retry enforcement through the real `run_once` gate (C16 + C50 coupling)
+/// — not only via direct `expire_sweep` — so the connect arm is proven present
+/// in the poll fold from an admitted, bitmap-live slot.
+fn connect_deadline_expired_still_retries_through_gate() {
+    use crate::cache::Family;
+    use crate::connect::Feed;
+    use crate::eligibility::NumericAddr;
+    use std::net::Ipv4Addr;
+    let port = ephemeral_port();
+    let upstream_port = ephemeral_port();
+    let cfg = config_pair(port, upstream_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        serving.storage_mut().publish_test_addr(
+            0,
+            NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])),
+            Family::A,
+        );
+        let mut client = connect(port);
+        pump(serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted"
+        );
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match serving.slots[0]
+            .parser
+            .feed(head.as_bytes())
+            .expect("head feed")
+        {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
+        let setup = serving
+            .storage()
+            .setup_deadline(handle)
+            .expect("setup deadline");
+        serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+        serving.slots[0].approved_port = upstream_port;
+        serving.slots[0].stage = Stage::Dialing;
+        serving.slots[0].connect_family = Some(Family::A);
+        serving.slots[0].connect_deadline = Some(crate::worker::Deadline::connect_attempt(
+            Instant::now() - Duration::from_secs(3),
+            setup,
+        ));
+        serving.sync_live_deadline(0);
+        pump(serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the expired-dial retry must re-decide to NoBinding and release the seat"
+        );
+        let body = read_all(&mut client);
+        assert!(
+            body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
+            "the expired-dial retry must end in a pre-200 502, got {body:?}"
+        );
+    });
+}
+
+#[test]
 fn stale_event_for_a_reused_slot_index_is_dropped() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -2205,6 +2429,7 @@ fn interleaved_a_b_a_mixed_readwrite_timer_preserves_shared_budgets() {
             pumps += 1;
         }
         serving.slots[0].idle_deadline = Some(Instant::now() - Duration::from_millis(1));
+        serving.sync_live_deadline(0);
         serving
             .run_once(Some(Duration::from_millis(2)))
             .expect("sweep poll");

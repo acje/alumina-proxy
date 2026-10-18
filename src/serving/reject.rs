@@ -60,6 +60,7 @@ impl Serving {
         ws.upstream.take();
         let capture = std::mem::take(&mut ws.capture);
         ws.reset();
+        self.sync_live_deadline(index);
         self.storage
             .enforcement_mut()
             .note_consumed_capture(capture);

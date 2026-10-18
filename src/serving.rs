@@ -533,6 +533,14 @@ struct SlotWorkspace {
     directional: DirectionalEof,
     drain_deadline: Option<Instant>,
     idle_deadline: Option<Instant>,
+    /// C15 snapshot of the absolute per-setup deadline
+    /// (docs/alumina-proxy.md:192), fixed at admit and immutable until release:
+    /// `Some` exactly while the slot holds its worker setup handle (pre-gate),
+    /// so the [`Serving::poll_timeout`] slot fold reads a local field instead
+    /// of a storage Vec access per occupied slot. Cleared when the handle is
+    /// taken at gate open and on slot release; mirrors
+    /// `ServeStorage::setup_deadline` for the handle-bearing window.
+    setup_deadline: Option<Instant>,
     /// The family of the in-flight upstream dial, when a decision granted a
     /// [`ConnectPhase::Peer`] peer for this slot. Tracked so a failed
     /// establishment records on the exact family attempted and retries through
@@ -580,6 +588,7 @@ impl SlotWorkspace {
             directional: DirectionalEof::relay(),
             drain_deadline: None,
             idle_deadline: None,
+            setup_deadline: None,
             connect_family: None,
             connect_deadline: None,
             #[cfg(test)]
@@ -640,8 +649,22 @@ impl SlotWorkspace {
         self.directional = DirectionalEof::relay();
         self.drain_deadline = None;
         self.idle_deadline = None;
+        self.setup_deadline = None;
         self.connect_family = None;
         self.connect_deadline = None;
+    }
+
+    /// Whether this slot currently feeds any deadline into
+    /// [`Serving::poll_timeout`]: the C15 setup snapshot, the connect deadline
+    /// (kept live conservatively beyond the `Dialing`-only fold guard so a
+    /// post-dial slot never loses its bit early), the idle deadline, or the
+    /// drain deadline. This is the per-slot predicate the C50
+    /// [`Serving::sync_live_deadline`] re-derives the presence bitmap from.
+    const fn has_live_deadline(&self) -> bool {
+        self.setup_deadline.is_some()
+            || self.connect_deadline.is_some()
+            || self.idle_deadline.is_some()
+            || self.drain_deadline.is_some()
     }
 }
 
@@ -676,6 +699,73 @@ impl std::fmt::Display for ServeError {
 
 impl std::error::Error for ServeError {}
 
+/// Word count of the fixed per-slot deadline-presence bitmap covering the
+/// retained [`MAX_TUNNELS`] slot workspace list (C50).
+const DEADLINE_SLOT_WORDS: usize = MAX_TUNNELS / 64;
+
+/// Fixed per-slot presence bitmap: bit `i` set when slot `i` currently holds
+/// at least one armed deadline source folded by [`Serving::poll_timeout`]
+/// (the C15 setup snapshot, connect, idle, or drain). The C50 O(1) gate that
+/// lets the per-poll slot fold iterate only deadline-bearing slots instead of
+/// all [`MAX_TUNNELS`]. Re-derived in lockstep at every slot-lifecycle
+/// deadline write/clear via [`Serving::sync_live_deadline`]; a stale-clear
+/// bit can at worst postpone one sweep to the next [`Serving::recheck_now`]
+/// backstop, never postpone a real deadline beyond the bounded recheck window.
+#[derive(Clone, Copy)]
+struct DeadlineSlots([u64; DEADLINE_SLOT_WORDS]);
+
+impl DeadlineSlots {
+    const fn empty() -> DeadlineSlots {
+        DeadlineSlots([0; DEADLINE_SLOT_WORDS])
+    }
+
+    const fn is_empty(self) -> bool {
+        let mut i = 0;
+        while i < DEADLINE_SLOT_WORDS {
+            if self.0[i] != 0 {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    fn set(&mut self, index: usize) {
+        assert!(index < MAX_TUNNELS, "deadline bitmap slot out of range");
+        let (word, bit) = (index >> 6, index & 63);
+        self.0[word] |= 1u64 << bit;
+    }
+
+    fn clear(&mut self, index: usize) {
+        assert!(index < MAX_TUNNELS, "deadline bitmap slot out of range");
+        let (word, bit) = (index >> 6, index & 63);
+        self.0[word] &= !(1u64 << bit);
+    }
+
+    #[cfg(test)]
+    fn get(&self, index: usize) -> bool {
+        assert!(index < MAX_TUNNELS, "deadline bitmap slot out of range");
+        let (word, bit) = (index >> 6, index & 63);
+        self.0[word] & (1u64 << bit) != 0
+    }
+
+    /// Yields the indices of every set bit, lowest first, without allocation,
+    /// for the C50 poll-timeout fold over only deadline-bearing slots.
+    fn iter_live(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.iter().enumerate().flat_map(|(word_idx, &word)| {
+            let mut remaining = word;
+            std::iter::from_fn(move || {
+                if remaining == 0 {
+                    return None;
+                }
+                let bit = remaining.trailing_zeros() as usize;
+                remaining &= remaining - 1;
+                Some(word_idx * 64 + bit)
+            })
+        })
+    }
+}
+
 pub struct Serving {
     poll: Poll,
     storage: ServeStorage,
@@ -705,6 +795,11 @@ pub struct Serving {
     /// serving; the recheck backstop in [`Self::recheck_now`] still enforces
     /// every deadline regardless of this field.
     next_expiry: Option<Instant>,
+    /// C50 per-slot deadline-presence bitmap maintained in lockstep with every
+    /// deadline write/clear (admit, gate open, dial, slot release), so
+    /// [`Self::poll_timeout`] folds only deadline-bearing slots. `is_empty`
+    /// is the O(1) early-exit that skips the whole 512-slot scan.
+    live_deadline: DeadlineSlots,
     /// Test-only high-water of `work_since_recheck` observed at a timer/DNS
     /// recheck boundary, so owner-turn fixtures assert the canonical ≤256
     /// bound actually fires between hot visits rather than being inferred.
@@ -787,6 +882,7 @@ impl Serving {
             in_batch: false,
             progress: BatchProgress::default(),
             next_expiry: None,
+            live_deadline: DeadlineSlots::empty(),
             #[cfg(test)]
             max_work_since_recheck: 0,
             #[cfg(test)]
@@ -1498,6 +1594,7 @@ impl Serving {
     #[cfg(all(test, feature = "alloc-witness"))]
     pub(crate) fn test_mark_idle_expired(&mut self, index: usize) {
         self.slots[index].idle_deadline = Some(Instant::now() - Duration::from_millis(1));
+        self.sync_live_deadline(index);
     }
 
     /// Test-only visibility into whether a seeded slot was swept closed.
@@ -1557,14 +1654,18 @@ impl Serving {
             }
             Ok(slot) => {
                 let index = ServeStorage::slot_index(&slot);
+                let setup_deadline = self.storage.setup_deadline(&slot).map(Deadline::limit);
                 let ws = &mut self.slots[index];
                 ws.slot_gen = ws.slot_gen.wrapping_add(1);
                 ws.capture = SlotCapture::fresh(index, ws.slot_gen);
+                ws.setup_deadline = setup_deadline;
                 ws.handle = Some(slot);
                 ws.client = Some(stream);
                 ws.stage = Stage::ReadingConnect;
                 if self.register_client(index).is_err() {
                     self.close_slot(index);
+                } else {
+                    self.sync_live_deadline(index);
                 }
                 self.note_occupancy(now);
             }
@@ -2441,11 +2542,13 @@ impl Serving {
                 if let Some(slot) = slot {
                     let tunnel = self.storage.finish_setup(slot);
                     self.slots[index].tunnel = Some(tunnel);
+                    self.slots[index].setup_deadline = None;
                     self.note_occupancy(Instant::now());
                 }
             }
             self.slots[index].stage = Stage::Relay;
             self.slots[index].idle_deadline = Some(Instant::now() + IDLE_SECS);
+            self.sync_live_deadline(index);
             let (written2, failed2) = self.drain_to_upstream(index);
             if failed2 {
                 self.close_slot(index);
@@ -2690,29 +2793,38 @@ impl Serving {
         }
     }
 
+    /// Re-derives the C50 presence bit for `index` from the slot's current
+    /// deadline sources, keeping the bitmap in lockstep after every
+    /// slot-lifecycle deadline write/clear (admit, gate open, dial, release).
+    fn sync_live_deadline(&mut self, index: usize) {
+        if self.slots[index].has_live_deadline() {
+            self.live_deadline.set(index);
+        } else {
+            self.live_deadline.clear(index);
+        }
+    }
+
     fn poll_timeout(&mut self) -> Option<Duration> {
         let mut earliest: Option<Instant> = None;
-        for i in 0..self.slots.len() {
-            let mut candidate = self.slots[i]
-                .handle
-                .as_ref()
-                .and_then(|h| self.storage.setup_deadline(h))
-                .map(Deadline::limit);
-            if self.slots[i].stage == Stage::Dialing
-                && let Some(connect) = self.slots[i].connect_deadline
-            {
-                candidate = Some(candidate.map_or(connect.limit(), |c| c.min(connect.limit())));
-            }
-            if let Some(idle) = self.slots[i].idle_deadline {
-                candidate = Some(candidate.map_or(idle, |c| c.min(idle)));
-            }
-            if let Some(drain) = self.slots[i].drain_deadline {
-                candidate = Some(candidate.map_or(drain, |c| c.min(drain)));
-            }
-            if let Some(c) = candidate
-                && earliest.is_none_or(|e| c < e)
-            {
-                earliest = Some(c);
+        if !self.live_deadline.is_empty() {
+            for i in self.live_deadline.iter_live() {
+                let mut candidate = self.slots[i].setup_deadline;
+                if self.slots[i].stage == Stage::Dialing
+                    && let Some(connect) = self.slots[i].connect_deadline
+                {
+                    candidate = Some(candidate.map_or(connect.limit(), |c| c.min(connect.limit())));
+                }
+                if let Some(idle) = self.slots[i].idle_deadline {
+                    candidate = Some(candidate.map_or(idle, |c| c.min(idle)));
+                }
+                if let Some(drain) = self.slots[i].drain_deadline {
+                    candidate = Some(candidate.map_or(drain, |c| c.min(drain)));
+                }
+                if let Some(c) = candidate
+                    && earliest.is_none_or(|e| c < e)
+                {
+                    earliest = Some(c);
+                }
             }
         }
         self.next_expiry = earliest;
