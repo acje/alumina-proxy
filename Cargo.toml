@@ -368,6 +368,23 @@ redundant_comparisons = "warn"
 # folding the dead branch into the first. No runtime/alloc/spec change; the
 # enabling attribute is compile-time.
 ifs_same_cond = "warn"
+# SM-28: enable the correctness/readability lint — `precedence`. Its firing
+# surface is a mixed arithmetic/bitwise/shift expression whose grouping relies
+# on implicit Rust operator precedence (`a << b + c`, `x & y == z`, `u | v * w`)
+# — a classic mis-read source in protocol/wire byte math where a reader must
+# derive grouping from a precedence table instead of reading explicit
+# parentheses. A clippy 1.99.0 positive control (`-F clippy::precedence`) on a
+# planted mixed-shift/add probe fires "operator precedence might not be
+# obvious" (exit 101 on the default matrix, proving the lint is armed; the gate
+# fails where a site exists) and the forced run on both feature matrices found
+# zero lint-proven sites on the pinned toolchain — every current mixed-op site
+# already carries explicit grouping parens — so the lint guards future
+# regressions. A future site is fixed behavior-preserving by adding explicit
+# parentheses around the genuinely-intended sub-expression (never by re-working
+# evaluation order); a genuinely ambiguous spec-governed expression is a
+# STOP-and-report, never a silent suppression. No runtime/alloc/spec change;
+# the enabling attribute is compile-time.
+precedence = "warn"
 
 [lib]
 name = "alumina"
