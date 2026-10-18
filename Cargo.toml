@@ -353,6 +353,21 @@ while_immutable_condition = "warn"
 # reason = "...")]`. No runtime/alloc/spec change; the enabling attribute is
 # compile-time.
 redundant_comparisons = "warn"
+# SM-27: enable the correctness/boolean lint — `ifs_same_cond`. Its firing
+# surface is an `if … else if` chain (or consecutive `if`s) in which a later
+# branch repeats an earlier branch's condition — the later branch is
+# unreachable (the condition was already checked and fell through), a
+# copied-condition bug in a gate/policy chain that silently deadens a policy
+# action. A clippy 1.99.0 positive control (`-F clippy::ifs_same_cond`) on a
+# planted duplicate-condition `else if` probe fires "these `if` branches have
+# the same condition" — exit 101 on both feature matrices, proving the lint
+# is armed; the gate fails where a site exists. The audit found zero
+# lint-proven sites on the pinned toolchain (both matrices exit 0 with
+# `-D warnings`), so the lint guards future regressions. A future site is
+# fixed behavior-preserving by correcting the intended second condition or
+# folding the dead branch into the first. No runtime/alloc/spec change; the
+# enabling attribute is compile-time.
+ifs_same_cond = "warn"
 
 [lib]
 name = "alumina"
