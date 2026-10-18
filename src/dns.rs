@@ -50,7 +50,10 @@ impl Default for DnsName {
 
 impl DnsName {
     fn from_exact(source: &[u8]) -> DnsName {
-        debug_assert!(source.len() <= NAME_CAP);
+        debug_assert!(
+            source.len() <= NAME_CAP,
+            "DNS name source must fit the fixed name buffer"
+        );
         let mut out = DnsName::default();
         out.bytes[..source.len()].copy_from_slice(source);
         out.len = source.len();
