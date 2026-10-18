@@ -151,7 +151,10 @@ impl BindingList {
 /// A validated DNS outcome, ready for cache and schedule application.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "no-heap fixed-profile; boxing the large variant would add a post-boot allocation; lint cannot be satisfied idiomatically here"
+)]
 pub enum Outcome {
     /// Validated positive answer with eligible candidates and the earliest
     /// supporting TTL across the rooted CNAME chain.
@@ -590,7 +593,10 @@ fn read_rr(msg: &[u8], reader: &mut Reader) -> Result<(DnsName, u16, u16, u32), 
     Ok((owner, ty, class, ttl))
 }
 
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "no-heap fixed-profile; boxing the large variant would add a post-boot allocation; lint cannot be satisfied idiomatically here"
+)]
 enum Rdata {
     A(Ipv4Addr),
     Aaaa(Ipv6Addr),
