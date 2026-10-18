@@ -99,7 +99,7 @@ impl ParserTarget {
     ];
 
     #[must_use]
-    pub fn owning_slice(self) -> u8 {
+    pub const fn owning_slice(self) -> u8 {
         match self {
             ParserTarget::ConnectHeaders => 3,
             ParserTarget::ClientHello => 4,
@@ -112,7 +112,7 @@ impl ParserTarget {
     /// a scaffold. All four targets are wired to their real parser, so every
     /// target reports `driven` (alumina-sechd M3).
     #[must_use]
-    pub fn status(self) -> &'static str {
+    pub const fn status(self) -> &'static str {
         "driven"
     }
 }
@@ -121,7 +121,7 @@ impl ParserTarget {
 /// complete the real parser, so every campaign reaches at least one deep parse
 /// independent of the generated space (docs/alumina-proxy.md:388-391).
 #[must_use]
-pub fn corpus(target: ParserTarget) -> &'static [&'static [u8]] {
+pub const fn corpus(target: ParserTarget) -> &'static [&'static [u8]] {
     match target {
         ParserTarget::ConnectHeaders => CONNECT_CORPUS,
         ParserTarget::ClientHello => CLIENT_HELLO_CORPUS,
@@ -225,7 +225,7 @@ pub struct FuzzRun {
 }
 
 impl FuzzRun {
-    fn new(target: ParserTarget) -> Self {
+    const fn new(target: ParserTarget) -> Self {
         FuzzRun {
             target,
             corpus_driven: 0,
@@ -243,7 +243,7 @@ impl FuzzRun {
     /// Folds one input verdict into the campaign counters. `generated` selects
     /// the corpus or generated bucket; `hash` updates the last-input hash when
     /// the input was generated.
-    fn fold(&mut self, generated: bool, outcome: DriveOutcome, hash: Option<InputHash>) {
+    const fn fold(&mut self, generated: bool, outcome: DriveOutcome, hash: Option<InputHash>) {
         if generated {
             self.generated_inputs += 1;
             if let Some(hash) = hash {
@@ -277,52 +277,52 @@ impl FuzzRun {
     }
 
     #[must_use]
-    pub fn target(&self) -> ParserTarget {
+    pub const fn target(&self) -> ParserTarget {
         self.target
     }
 
     /// The number of checked-in corpus inputs driven in this campaign.
     #[must_use]
-    pub fn corpus_driven(&self) -> u64 {
+    pub const fn corpus_driven(&self) -> u64 {
         self.corpus_driven
     }
 
     /// The number of checked-in corpus inputs that completed the real parser.
     #[must_use]
-    pub fn corpus_complete(&self) -> u64 {
+    pub const fn corpus_complete(&self) -> u64 {
         self.corpus_complete
     }
 
     /// The number of generated inputs driven in this campaign.
     #[must_use]
-    pub fn generated_inputs(&self) -> u64 {
+    pub const fn generated_inputs(&self) -> u64 {
         self.generated_inputs
     }
 
     #[must_use]
-    pub fn generated_complete(&self) -> u64 {
+    pub const fn generated_complete(&self) -> u64 {
         self.generated_complete
     }
 
     #[must_use]
-    pub fn generated_rejected(&self) -> u64 {
+    pub const fn generated_rejected(&self) -> u64 {
         self.generated_rejected
     }
 
     #[must_use]
-    pub fn generated_need_more(&self) -> u64 {
+    pub const fn generated_need_more(&self) -> u64 {
         self.generated_need_more
     }
 
     /// The hash of the last generated input, for exact crash reproduction.
     #[must_use]
-    pub fn last_input_hash(&self) -> Option<InputHash> {
+    pub const fn last_input_hash(&self) -> Option<InputHash> {
         self.last_input_hash
     }
 
     /// Whether any driven input panicked its parser (campaign crash).
     #[must_use]
-    pub fn panicked(&self) -> bool {
+    pub const fn panicked(&self) -> bool {
         self.panicked
     }
 }
@@ -364,12 +364,12 @@ pub struct Seed([u8; 32]);
 
 impl Seed {
     #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Seed(bytes)
     }
 
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -421,7 +421,7 @@ impl DeterministicGen {
         DeterministicGen { seed, state }
     }
 
-    fn next_u64(&mut self) -> u64 {
+    const fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -430,7 +430,7 @@ impl DeterministicGen {
     }
 
     #[must_use]
-    pub fn seed(&self) -> &Seed {
+    pub const fn seed(&self) -> &Seed {
         &self.seed
     }
 
@@ -463,7 +463,7 @@ pub struct CorpusOwnership {
 
 impl CorpusOwnership {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         CorpusOwnership {
             records: Vec::new(),
         }
@@ -523,39 +523,39 @@ impl Default for CorpusOwnership {
 
 impl CorpusRecord {
     #[must_use]
-    pub fn target(&self) -> ParserTarget {
+    pub const fn target(&self) -> ParserTarget {
         self.target
     }
 
     #[must_use]
-    pub fn seed(&self) -> &Seed {
+    pub const fn seed(&self) -> &Seed {
         &self.seed
     }
 
-    pub fn set_corpus_checked_in(&mut self, value: bool) {
+    pub const fn set_corpus_checked_in(&mut self, value: bool) {
         self.corpus_checked_in = value;
     }
 
     #[must_use]
-    pub fn corpus_is_checked_in(&self) -> bool {
+    pub const fn corpus_is_checked_in(&self) -> bool {
         self.corpus_checked_in
     }
 
-    pub fn add_generated(&mut self, inputs: u64) {
+    pub const fn add_generated(&mut self, inputs: u64) {
         self.generated_inputs = self.generated_inputs.saturating_add(inputs);
     }
 
     #[must_use]
-    pub fn generated_inputs(&self) -> u64 {
+    pub const fn generated_inputs(&self) -> u64 {
         self.generated_inputs
     }
 
-    pub fn set_last_input_hash(&mut self, hash: InputHash) {
+    pub const fn set_last_input_hash(&mut self, hash: InputHash) {
         self.last_input_hash = Some(hash);
     }
 
     #[must_use]
-    pub fn last_input_hash(&self) -> Option<&InputHash> {
+    pub const fn last_input_hash(&self) -> Option<&InputHash> {
         self.last_input_hash.as_ref()
     }
 }
