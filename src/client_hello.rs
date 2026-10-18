@@ -642,7 +642,8 @@ mod tests {
         ech: bool,
         comp: u8,
     ) -> Vec<u8> {
-        let mut versions_data = vec![(versions.len() * 2) as u8];
+        let mut versions_data =
+            vec![u8::try_from(versions.len() * 2).expect("versions data length fits u8")];
         for v in versions {
             versions_data.extend_from_slice(&v.to_be_bytes());
         }
@@ -650,18 +651,34 @@ mod tests {
         let mut names_data = Vec::new();
         for name in snis {
             names_data.push(0u8);
-            names_data.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            names_data.extend_from_slice(
+                &u16::try_from(name.len())
+                    .expect("sni name fits u16 wire length")
+                    .to_be_bytes(),
+            );
             names_data.extend_from_slice(name.as_bytes());
         }
-        snis_data.extend_from_slice(&(names_data.len() as u16).to_be_bytes());
+        snis_data.extend_from_slice(
+            &u16::try_from(names_data.len())
+                .expect("sni names block fits u16")
+                .to_be_bytes(),
+        );
         snis_data.extend_from_slice(&names_data);
 
         let mut exts = Vec::new();
         exts.extend_from_slice(&SUPPORTED_VERSIONS.to_be_bytes());
-        exts.extend_from_slice(&(versions_data.len() as u16).to_be_bytes());
+        exts.extend_from_slice(
+            &u16::try_from(versions_data.len())
+                .expect("versions data fits u16")
+                .to_be_bytes(),
+        );
         exts.extend_from_slice(&versions_data);
         exts.extend_from_slice(&SERVER_NAME.to_be_bytes());
-        exts.extend_from_slice(&(snis_data.len() as u16).to_be_bytes());
+        exts.extend_from_slice(
+            &u16::try_from(snis_data.len())
+                .expect("sni data fits u16")
+                .to_be_bytes(),
+        );
         exts.extend_from_slice(&snis_data);
         if ech {
             exts.extend_from_slice(&ENCRYPTED_CLIENT_HELLO.to_be_bytes());
@@ -676,17 +693,25 @@ mod tests {
         body.extend_from_slice(&[0x13, 0x01, 0x13, 0x02]);
         body.push(1);
         body.push(comp);
-        body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+        body.extend_from_slice(
+            &u16::try_from(exts.len())
+                .expect("extensions data fits u16")
+                .to_be_bytes(),
+        );
         body.extend_from_slice(&exts);
 
         let mut handshake = vec![HANDSHAKE_CLIENT_HELLO];
-        let hl = body.len() as u32;
-        handshake.extend_from_slice(&[(hl >> 16) as u8, (hl >> 8) as u8, hl as u8]);
+        let hl = u32::try_from(body.len()).expect("client hello body fits u32");
+        handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
         handshake.extend_from_slice(&body);
 
         let mut record = vec![CONTENT_HANDSHAKE];
         record.extend_from_slice(&0x0301u16.to_be_bytes());
-        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(
+            &u16::try_from(handshake.len())
+                .expect("handshake fits u16 wire length")
+                .to_be_bytes(),
+        );
         record.extend_from_slice(&handshake);
         record
     }
@@ -694,7 +719,11 @@ mod tests {
     fn record(payload: &[u8]) -> Vec<u8> {
         let mut record = vec![CONTENT_HANDSHAKE];
         record.extend_from_slice(&0x0301u16.to_be_bytes());
-        record.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        record.extend_from_slice(
+            &u16::try_from(payload.len())
+                .expect("record payload fits u16 wire length")
+                .to_be_bytes(),
+        );
         record.extend_from_slice(payload);
         record
     }
@@ -715,11 +744,19 @@ mod tests {
         let mut names_data = Vec::new();
         for (ty, name) in names {
             names_data.push(*ty);
-            names_data.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            names_data.extend_from_slice(
+                &u16::try_from(name.len())
+                    .expect("sni name fits u16 wire length")
+                    .to_be_bytes(),
+            );
             names_data.extend_from_slice(name);
         }
         let mut ext = Vec::new();
-        ext.extend_from_slice(&(names_data.len() as u16).to_be_bytes());
+        ext.extend_from_slice(
+            &u16::try_from(names_data.len())
+                .expect("sni names block fits u16")
+                .to_be_bytes(),
+        );
         ext.extend_from_slice(&names_data);
         ext
     }
@@ -736,14 +773,22 @@ mod tests {
         let mut blob = Vec::new();
         for (ty, data) in exts {
             blob.extend_from_slice(&ty.to_be_bytes());
-            blob.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            blob.extend_from_slice(
+                &u16::try_from(data.len())
+                    .expect("extension data fits u16")
+                    .to_be_bytes(),
+            );
             blob.extend_from_slice(data);
         }
-        body.extend_from_slice(&(blob.len() as u16).to_be_bytes());
+        body.extend_from_slice(
+            &u16::try_from(blob.len())
+                .expect("extensions blob fits u16")
+                .to_be_bytes(),
+        );
         body.extend_from_slice(&blob);
         let mut handshake = vec![HANDSHAKE_CLIENT_HELLO];
-        let hl = body.len() as u32;
-        handshake.extend_from_slice(&[(hl >> 16) as u8, (hl >> 8) as u8, hl as u8]);
+        let hl = u32::try_from(body.len()).expect("client hello body fits u32");
+        handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
         handshake.extend_from_slice(&body);
         record(&handshake)
     }
@@ -839,8 +884,8 @@ mod tests {
         body.push(0);
         body.extend_from_slice(&no_ext);
         let mut handshake = vec![HANDSHAKE_CLIENT_HELLO];
-        let hl = body.len() as u32;
-        handshake.extend_from_slice(&[(hl >> 16) as u8, (hl >> 8) as u8, hl as u8]);
+        let hl = u32::try_from(body.len()).expect("client hello body fits u32");
+        handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
         handshake.extend_from_slice(&body);
         let record = record(&handshake);
         assert_eq!(parse_one(&record), Err(ChError::MissingSupportedVersions));
@@ -858,8 +903,8 @@ mod tests {
         let mut multi = vec![HANDSHAKE_CLIENT_HELLO];
         let handshake = &msg[5..];
         let body = &handshake[4..];
-        let hl = body.len() as u32;
-        multi.extend_from_slice(&[(hl >> 16) as u8, (hl >> 8) as u8, hl as u8]);
+        let hl = u32::try_from(body.len()).expect("client hello body fits u32");
+        multi.extend_from_slice(&hl.to_be_bytes()[1..]);
         multi.extend_from_slice(&body[..41]);
         multi.push(2);
         multi.push(0);
@@ -880,12 +925,16 @@ mod tests {
         body.push(1);
         body.push(0);
         let sv = [0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04];
-        body.extend_from_slice(&(sv.len() as u16).to_be_bytes());
+        body.extend_from_slice(
+            &u16::try_from(sv.len())
+                .expect("supported versions data fits u16")
+                .to_be_bytes(),
+        );
         body.extend_from_slice(&sv);
         body.extend_from_slice(&[0xab; 5]);
         let mut handshake = vec![HANDSHAKE_CLIENT_HELLO];
-        let hl = body.len() as u32;
-        handshake.extend_from_slice(&[(hl >> 16) as u8, (hl >> 8) as u8, hl as u8]);
+        let hl = u32::try_from(body.len()).expect("client hello body fits u32");
+        handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
         handshake.extend_from_slice(&body);
         let record = record(&handshake);
         assert!(matches!(
@@ -957,12 +1006,16 @@ mod tests {
             exts.extend_from_slice(&0xfe00u16.to_be_bytes());
             exts.extend_from_slice(&0u16.to_be_bytes());
         }
-        body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
+        body.extend_from_slice(
+            &u16::try_from(exts.len())
+                .expect("extensions data fits u16")
+                .to_be_bytes(),
+        );
         body.extend_from_slice(&exts);
 
         let mut handshake = vec![HANDSHAKE_CLIENT_HELLO];
-        let hl = body.len() as u32;
-        handshake.extend_from_slice(&[(hl >> 16) as u8, (hl >> 8) as u8, hl as u8]);
+        let hl = u32::try_from(body.len()).expect("client hello body fits u32");
+        handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
         handshake.extend_from_slice(&body);
         let record = record(&handshake);
         assert_eq!(
@@ -1013,7 +1066,11 @@ mod tests {
     fn rejects_record_payload_over_limit() {
         let big = vec![0xabu8; RECORD_PAYLOAD_LIMIT + 1];
         let mut record = vec![CONTENT_HANDSHAKE, 0x03, 0x01];
-        record.extend_from_slice(&(big.len() as u16).to_be_bytes());
+        record.extend_from_slice(
+            &u16::try_from(big.len())
+                .expect("oversized payload fits u16")
+                .to_be_bytes(),
+        );
         record.extend_from_slice(&big);
         assert_eq!(
             parse_one(&record),
@@ -1040,7 +1097,11 @@ mod tests {
         for payload in [first, vec![0u8; 16384], vec![0u8; 16384], vec![0u8; 16364]] {
             wire.push(CONTENT_HANDSHAKE);
             wire.extend_from_slice(&0x0301u16.to_be_bytes());
-            wire.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+            wire.extend_from_slice(
+                &u16::try_from(payload.len())
+                    .expect("record payload fits u16 wire length")
+                    .to_be_bytes(),
+            );
             wire.extend_from_slice(&payload);
         }
         assert_eq!(
