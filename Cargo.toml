@@ -121,6 +121,7 @@ double_ended_iterator_last = "warn"
 large_enum_variant = "warn"
 sliced_string_as_bytes = "warn"
 get_first = "warn"
+assigning_clones = "warn"
 
 [lib]
 name = "alumina"
