@@ -924,10 +924,10 @@ pub fn parse_response(
     let soa = classify_soa(terminal, ws.soa.as_ref())?;
 
     let mut bindings = BindingList::default();
-    if let Some(owner) = ws.owners[..ws.owner_len]
+    let terminal_owner = ws.owners[..ws.owner_len]
         .iter()
-        .find(|o| o.name.eq_bytes(terminal))
-    {
+        .find(|o| o.name.eq_bytes(terminal));
+    if let Some(owner) = terminal_owner {
         for (addr, _) in &owner.addrs[..usize::from(owner.addr_len)] {
             bindings.push(*addr)?;
         }
@@ -937,12 +937,10 @@ pub fn parse_response(
         RCODE_NOERROR => {
             if !bindings.is_empty() {
                 let mut earliest = chain_ttl;
-                for (_, addr_ttl) in ws.owners[..ws.owner_len]
-                    .iter()
-                    .filter(|o| o.name.eq_bytes(terminal))
-                    .flat_map(|o| o.addrs[..usize::from(o.addr_len)].iter())
-                {
-                    earliest = earliest.min(u64::from(*addr_ttl));
+                if let Some(owner) = terminal_owner {
+                    for (_, addr_ttl) in &owner.addrs[..usize::from(owner.addr_len)] {
+                        earliest = earliest.min(u64::from(*addr_ttl));
+                    }
                 }
                 if earliest == u64::MAX {
                     earliest = 1;
@@ -961,10 +959,7 @@ pub fn parse_response(
             })
         }
         RCODE_NXDOMAIN => {
-            let terminal_data = ws.owners[..ws.owner_len]
-                .iter()
-                .find(|o| o.name.eq_bytes(terminal))
-                .is_some_and(|o| o.has_addr_data);
+            let terminal_data = terminal_owner.is_some_and(|o| o.has_addr_data);
             if terminal_data {
                 return Err(DnsError::TerminalWithoutData);
             }
