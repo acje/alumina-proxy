@@ -99,6 +99,7 @@ nonsensical_open_options = "warn"
 size_of_in_element_count = "warn"
 manual_saturating_arithmetic = "warn"
 inverted_saturating_sub = "warn"
+iterator_step_by_zero = "warn"
 
 [lib]
 name = "alumina"
