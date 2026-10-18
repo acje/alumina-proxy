@@ -12,8 +12,8 @@
 //! per admitted connection (`serving.rs`), refusal effects and tripwire
 //! verdicts emit through `serving/reject.rs`, and the runtime loop drives
 //! deadline-based monitoring projection (`runtime.rs`). The detection sites
-//! that feed this seam are `serving/reject.rs::reject_hello` (AnyIllegal)
-//! and the early-upstream-data branch of `serving.rs` (EarlyUpstreamData),
+//! that feed this seam are `serving/reject.rs::reject_hello` (`AnyIllegal`)
+//! and the early-upstream-data branch of `serving.rs` (`EarlyUpstreamData`),
 //! and mandatory baseline denial is retained independently of any
 //! supplementary effect this seam produces.
 

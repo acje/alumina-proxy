@@ -208,7 +208,7 @@ pub(crate) enum ExchangeStep {
     /// proceed without waiting; the next turn attempts another nonblocking
     /// write.
     SendReady,
-    /// The last nonblocking write refused the socket (WouldBlock); the
+    /// The last nonblocking write refused the socket (`WouldBlock`); the
     /// backpressure is recorded in the type and the owner must wait for a
     /// writable edge before another send attempt. No kernel or peer send-buffer
     /// capacity is assumed.
@@ -246,8 +246,8 @@ enum SendStep {
     /// Some or all of the query remains unsent and the send can proceed without
     /// waiting; the exchange stays able to retry next turn.
     Waiting,
-    /// The socket refused the write (WouldBlock); the exchange is held in
-    /// AwaitWritable and the owner waits for a writable edge before retrying.
+    /// The socket refused the write (`WouldBlock`); the exchange is held in
+    /// `AwaitWritable` and the owner waits for a writable edge before retrying.
     Blocked,
     /// The query is fully written; advance moves to the receiving stage next
     /// turn (the readiness interest switches to reads).
@@ -502,7 +502,7 @@ impl WindowLedger {
 
 /// A tightly scoped test hook that substitutes the outcome of the next
 /// nonblocking send attempt, so a deterministically forced send backpressure
-/// (a real WouldBlock) can be exercised without depending on any kernel or
+/// (a real `WouldBlock`) can be exercised without depending on any kernel or
 /// peer send-buffer capacity.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy)]
@@ -867,7 +867,7 @@ impl StartupDns {
     }
 
     /// Re-arms the writable interest when a would-block send moves the
-    /// exchange to AwaitWritable. Re-arming after `EAGAIN` is the standard
+    /// exchange to `AwaitWritable`. Re-arming after `EAGAIN` is the standard
     /// event-loop idiom: it makes the owner's subsequent poll deterministically
     /// wait on the writable edge even if an earlier writable event was consumed
     /// by the completed connect. Drops the readable interest because no
@@ -1034,11 +1034,11 @@ impl StartupDns {
 
     /// Whether the owner must wait for network readiness before advancing the
     /// exchange again. Connecting needs the connect-completion edge;
-    /// AwaitWritable needs a writable edge after a real would-block send;
-    /// Receiving needs response data. SendReady never does — the next turn's
+    /// `AwaitWritable` needs a writable edge after a real would-block send;
+    /// Receiving needs response data. `SendReady` never does — the next turn's
     /// nonblocking write attempt proceeds on its own, so the owner yields
     /// instead of blocking on a stale edge; a would-block observed there
-    /// transitions the exchange to AwaitWritable and arms this wait rather
+    /// transitions the exchange to `AwaitWritable` and arms this wait rather
     /// than spinning on an assumed write window.
     pub(crate) const fn needs_wait(&self) -> bool {
         let Some(ex) = self.active.as_ref() else {
@@ -1059,7 +1059,7 @@ impl StartupDns {
     /// at the deadline. A turn that needs no readiness (a sendable exchange
     /// whose next write proceeds on its own) yields the owner immediately
     /// instead of blocking on a stale edge; a would-block send has moved the
-    /// exchange to AwaitWritable, so this wait polls for the writable edge.
+    /// exchange to `AwaitWritable`, so this wait polls for the writable edge.
     pub(crate) fn wait_dns_readiness(&mut self, until: Instant) -> Result<bool, StartupDnsError> {
         if !self.needs_wait() {
             return Ok(false);
@@ -1126,7 +1126,7 @@ impl StartupDns {
     /// deadline is checked before yielding so a completed write is honoured
     /// even at the boundary (faithful to the original `send_query` loop). A
     /// would-block is reported as `Blocked` so the stage moves to
-    /// AwaitWritable; any other partial progress stays sendable.
+    /// `AwaitWritable`; any other partial progress stays sendable.
     fn step_send(
         &mut self,
         ex: &mut ActiveExchange,

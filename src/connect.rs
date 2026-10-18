@@ -145,7 +145,7 @@ pub enum Feed {
     /// the byte stream the head consumed, including the CRLFCRLF delimiter.
     /// The parsed request or first policy violation is available via
     /// [`ConnectParser::result`]. Bytes beyond `head_len` (for example an
-    /// early ClientHello) belong to the tunnel gate and must not be forwarded
+    /// early `ClientHello`) belong to the tunnel gate and must not be forwarded
     /// before the gate passes.
     Complete { head_len: usize },
 }
@@ -153,7 +153,7 @@ pub enum Feed {
 /// Incremental CONNECT request-head parser with a fixed 8 KiB storage. Parsing
 /// is independent of TCP read boundaries and of bytes coalesced after the
 /// delimiter: the first CRLFCRLF sequence closes the head, the parser retains
-/// only head bytes, and a ClientHello arriving in the same read is left to the
+/// only head bytes, and a `ClientHello` arriving in the same read is left to the
 /// caller via `head_len`.
 #[derive(Clone, Debug)]
 pub struct ConnectParser {

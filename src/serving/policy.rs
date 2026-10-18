@@ -3,7 +3,7 @@ use crate::log::RejectReason;
 /// A typed refusal to serve a connection: the single source of truth mapping
 /// forward to both the fixed HTTP body and the fixed `RejectReason` log
 /// vocabulary. The refuse path never reverse-infers a reason from a byte
-/// match, so a new refusal class cannot silently default to BadRequest.
+/// match, so a new refusal class cannot silently default to `BadRequest`.
 #[derive(Clone, Copy)]
 pub(super) enum Refusal {
     BadRequest,

@@ -39,7 +39,7 @@ pub(crate) const SLOT_BYTES: usize = 8 * 1024;
 /// whichever is exhausted first (docs/alumina-proxy.md:178,194,146).
 pub(crate) const SINK_MAX_OPS: usize = 16;
 pub(crate) const SINK_MAX_BYTES: usize = 64 * 1024;
-/// The bounded retry deadline after a WouldBlock: the sink cannot accept more
+/// The bounded retry deadline after a `WouldBlock`: the sink cannot accept more
 /// right now, so the owner wakes to try again on this cadence instead of
 /// busy-spinning (704q N4/T3: a stalled stdout sink never delays traffic, DNS,
 /// or deadlines).
@@ -887,7 +887,7 @@ impl LogStore {
     }
 
     /// Test construction over a caller-owned descriptor: a real file (never
-    /// WouldBlock at this volume) or a nonblocking pipe writer (WouldBlock
+    /// `WouldBlock` at this volume) or a nonblocking pipe writer (`WouldBlock`
     /// once full). The caller keeps the descriptor alive for the store's
     /// lifetime; the store never owns or closes it.
     #[cfg(test)]
@@ -1205,7 +1205,7 @@ impl LogStore {
 
     /// Drains the queue through the nonblocking stdout sink under the
     /// per-turn work budget: at most [`SINK_MAX_OPS`] write calls or
-    /// [`SINK_MAX_BYTES`] bytes. A WouldBlock retains the partial cursor and
+    /// [`SINK_MAX_BYTES`] bytes. A `WouldBlock` retains the partial cursor and
     /// yields immediately; a write/close failure latches the sink failed so
     /// no later drain spins or blocks.
     pub(crate) fn drain_sink(&mut self) {

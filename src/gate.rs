@@ -4,7 +4,7 @@
 //! per-slot workspace, so the gate is a small fixed-offset state machine with
 //! no sockets and no I/O, deterministic and unit-testable.
 //!
-//! Barrier A (client->upstream): no client bytes, including ClientHello, are
+//! Barrier A (client->upstream): no client bytes, including `ClientHello`, are
 //! forwarded before complete validation with exactly-one SNI normalized-equal
 //! to the approved CONNECT hostname, no ECH, TLS1.3 profile ([`crate::client_hello::validate`]
 //! supplies the verdict; the gate tracks the hello boundary in the stream).
@@ -14,7 +14,7 @@
 //!
 //! The gate opens atomically in the same transition whose successful
 //! client->upstream write accounting reaches the end of the validated
-//! ClientHello (H), before any subsequent upstream read (D3). A single
+//! `ClientHello` (H), before any subsequent upstream read (D3). A single
 //! successful write may cross H and include coalesced trailing bytes (X);
 //! those X bytes are relay-from-open and already forwarded by that write.
 //! Ordered progress is kept by monotonic committed offsets (D5): a partial
@@ -30,7 +30,7 @@ use crate::client_hello::HelloAccepted;
 /// happened to the gate as a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamWrite {
-    /// Barrier A closed: the ClientHello is not yet fully validated, so no
+    /// Barrier A closed: the `ClientHello` is not yet fully validated, so no
     /// tunnel bytes may be written upstream.
     BlockedByBarrierA,
     /// Validated but barrier A/B transition pending: exactly the validated
@@ -48,7 +48,7 @@ pub enum UpstreamWrite {
 }
 
 /// Actual upstream activity observed while barrier B is closed (D4): only
-/// observation terminates setup; WouldBlock or readiness alone is not
+/// observation terminates setup; `WouldBlock` or readiness alone is not
 /// activity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activity {
@@ -61,7 +61,7 @@ pub enum Activity {
 /// forwarding in both directions from the moment they fire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminateReason {
-    /// ClientHello validation failed barrier A (profile, ECH, SNI mismatch,
+    /// `ClientHello` validation failed barrier A (profile, ECH, SNI mismatch,
     /// or framing error).
     ClientHelloRejected,
     /// Actual upstream data/EOF/reset observed while barrier B was closed.
@@ -78,8 +78,8 @@ pub enum GatePhase {
     /// Connected; the upstream CONNECT response is being parsed (barrier B
     /// closed).
     AwaitResponse,
-    /// The successful CONNECT response completed (SENT_200); the client
-    /// ClientHello is being validated (barrier A closed, barrier B closed).
+    /// The successful CONNECT response completed (`SENT_200`); the client
+    /// `ClientHello` is being validated (barrier A closed, barrier B closed).
     Validating,
     /// Both barriers open; ordered relay.
     RelayActive,
@@ -95,10 +95,10 @@ pub struct TunnelGate {
     /// Number of client-stream bytes consumed by the CONNECT head (never
     /// forwarded; the proxy handshake). Tunnel bytes start here.
     head_len: usize,
-    /// Hello start in the client stream (== head_len when the hello is
+    /// Hello start in the client stream (== `head_len` when the hello is
     /// contiguous after the head).
     hello_start: usize,
-    /// H: exclusive end of the fully validated ClientHello in the client
+    /// H: exclusive end of the fully validated `ClientHello` in the client
     /// stream, present once validation passes.
     hello_end: Option<usize>,
     /// Cumulative tunnel bytes successfully written upstream (barrier A
@@ -111,7 +111,7 @@ pub struct TunnelGate {
     downstream_committed: usize,
 }
 
-/// A capability record that the complete ClientHello validated against the
+/// A capability record that the complete `ClientHello` validated against the
 /// approved hostname: the exclusive end offset H of the validated hello in the
 /// client stream. Mintable only with a [`HelloAccepted`] witness, which only
 /// [`crate::client_hello::validate`] can produce, so a gate can never be told
@@ -182,7 +182,7 @@ impl TunnelGate {
         }
     }
 
-    /// The successful CONNECT response completed (SENT_200). ClientHello
+    /// The successful CONNECT response completed (`SENT_200`). `ClientHello`
     /// inspection may begin; both barriers stay closed.
     pub fn on_response_ok(&mut self) {
         if self.phase == GatePhase::AwaitResponse {
@@ -190,7 +190,7 @@ impl TunnelGate {
         }
     }
 
-    /// The client ClientHello was fully validated (a [`ValidatedHello`]
+    /// The client `ClientHello` was fully validated (a [`ValidatedHello`]
     /// capability from the serving validation path). Barrier A now releases
     /// exactly the validated hello; the gate is still closed.
     pub fn on_hello_validated(&mut self, hello: ValidatedHello) {
@@ -200,7 +200,7 @@ impl TunnelGate {
         self.hello_end = Some(hello.end());
     }
 
-    /// ClientHello validation failed barrier A: setup terminates, no
+    /// `ClientHello` validation failed barrier A: setup terminates, no
     /// forwarding in either direction.
     pub fn on_hello_rejected(&mut self) {
         self.terminate(TerminateReason::ClientHelloRejected);

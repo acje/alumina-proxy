@@ -4296,9 +4296,9 @@ fn port_mismatch_on_domain_blocked_ordinal_is_host_not_allowlisted() {
 /// A non-443 CONNECT on an allowlisted `<fqdn>:<port>` entry must be
 /// authorized and dial the entry's own port — never the 443 default — and
 /// Pair-authorization is exact `(hostname, port)`: against an unpopulated
-/// cache a mismatched `:443` CONNECT is 403 (HostNotAllowlisted) while the
+/// cache a mismatched `:443` CONNECT is 403 (`HostNotAllowlisted`) while the
 /// entry's own `{dial_port}` passes pair-authorization and reaches the
-/// NoBinding 502. The pair-authorized slot then dials its entry port directly
+/// `NoBinding` 502. The pair-authorized slot then dials its entry port directly
 /// into a deterministic in-process loopback listener, and `close_slot`
 /// resets `approved_port` back to the 443 default (alumina-9t6w B2).
 /// `Serving::dial` itself does not re-check `V4_EXCLUSIONS` (only the DNS

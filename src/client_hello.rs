@@ -2,13 +2,13 @@ use std::fmt;
 
 use crate::config::{FQDN_MAX_LEN, FixedHostname};
 
-/// Maximum inspected ClientHello size including TLS record framing.
+/// Maximum inspected `ClientHello` size including TLS record framing.
 pub const MAX_CLIENT_HELLO: usize = 64 * 1024;
 
 /// Maximum plaintext payload per TLS record during inspection.
 pub const RECORD_PAYLOAD_LIMIT: usize = 16 * 1024;
 
-/// Maximum number of offered supported_versions entries retained.
+/// Maximum number of offered `supported_versions` entries retained.
 const MAX_VERSIONS: usize = 32;
 
 /// Maximum number of distinct extensions tracked for duplicate rejection.
@@ -27,7 +27,7 @@ const TLS13: u16 = 0x0304;
 const TLS12: u16 = 0x0303;
 const TLS10: u16 = 0x0301;
 
-/// A parsed and framed ClientHello, before profile validation. All fields are
+/// A parsed and framed `ClientHello`, before profile validation. All fields are
 /// fixed-capacity so the gate allocates nothing on the serving path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientHello {
@@ -46,13 +46,13 @@ impl ClientHello {
         &self.versions[..self.versions_len]
     }
 
-    /// The first normalized SNI host_name offered.
+    /// The first normalized SNI `host_name` offered.
     #[must_use]
     pub fn server_name(&self) -> &[u8] {
         &self.sni[..self.sni_len]
     }
 
-    /// The number of host_name entries offered in the server_name extension.
+    /// The number of `host_name` entries offered in the `server_name` extension.
     #[must_use]
     pub const fn sni_entries(&self) -> u8 {
         self.sni_entries
@@ -165,7 +165,7 @@ impl fmt::Display for ChError {
     }
 }
 
-/// The payload-less finite discriminant of a ClientHello rejection: it covers
+/// The payload-less finite discriminant of a `ClientHello` rejection: it covers
 /// the enumerated identity/profile catalog — ECH, SNI mismatch, missing-or-
 /// malformed SNI, and the TLS-profile/framing rejections — keyed only by
 /// variant identity, never by an attacker-supplied extension id or detail
@@ -225,19 +225,19 @@ impl HelloRejectReason {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Inspect {
-    /// The full ClientHello handshake message is not yet buffered.
+    /// The full `ClientHello` handshake message is not yet buffered.
     NeedMore,
-    /// The ClientHello is framed, parsed, and fully captured. `consumed` is the
-    /// number of fed bytes that ended the ClientHello message, so a forwarding
+    /// The `ClientHello` is framed, parsed, and fully captured. `consumed` is the
+    /// number of fed bytes that ended the `ClientHello` message, so a forwarding
     /// gate can forward exactly those bytes upstream while retaining the rest.
     /// The parsed message is available via [`ChInspector::hello`].
     Complete { consumed: usize },
 }
 
 /// Incremental TLS record/handshake inspector that preserves all fed bytes and
-/// produces a `ClientHello` once the complete initial ClientHello message is
+/// produces a `ClientHello` once the complete initial `ClientHello` message is
 /// available across one or more consecutive handshake records. It rejects
-/// SSLv2 framing, non-handshake records seen before the ClientHello completes,
+/// `SSLv2` framing, non-handshake records seen before the `ClientHello` completes,
 /// zero-length handshake records, record payloads over 16 KiB, and an
 /// inspection total over 64 KiB.
 ///
@@ -281,7 +281,7 @@ impl ChInspector {
         }
     }
 
-    /// The parsed ClientHello, present once `feed` returned `Inspect::Complete`.
+    /// The parsed `ClientHello`, present once `feed` returned `Inspect::Complete`.
     #[must_use]
     pub const fn hello(&self) -> Option<&ClientHello> {
         self.hello.as_ref()
@@ -292,7 +292,7 @@ impl ChInspector {
     /// # Errors
     ///
     /// Returns `TooLarge` when the fed bytes exceed the remaining inspection
-    /// capacity before a complete ClientHello was reached, and the framing or
+    /// capacity before a complete `ClientHello` was reached, and the framing or
     /// profile errors above at the earliest decidable byte count.
     pub fn feed(&mut self, data: &[u8]) -> Result<Inspect, ChError> {
         if self.hello.is_some() {
@@ -323,7 +323,7 @@ impl ChInspector {
 
     /// Continues flattening fully-buffered leading handshake records into the
     /// persistent scratch, copying each record payload exactly once. Returns
-    /// `Some((msg_len, consumed))` once the complete ClientHello handshake
+    /// `Some((msg_len, consumed))` once the complete `ClientHello` handshake
     /// message (4-byte header plus body) is captured, with the stream byte
     /// count consumed to the end of that message.
     fn scan_available(&mut self) -> Result<Option<(usize, usize)>, ChError> {

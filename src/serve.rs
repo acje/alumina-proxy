@@ -608,7 +608,7 @@ impl ServeStorage {
     /// drains it once. The single final result record carries every unresolved
     /// name embedded inline (docs/alumina-proxy.md:193); the final result is never fanned
     /// out into per-name records (corrected T2). The first-failure warning is
-    /// NOT replayed here: the window seam (startup_dns.rs resolve_window)
+    /// NOT replayed here: the window seam (`startup_dns.rs` `resolve_window`)
     /// enqueues exactly one warning at the first counted exchange failure
     /// inside the window, so emitting again at end-of-window would duplicate it
     /// (no end-window replay, docs/alumina-proxy.md:67).

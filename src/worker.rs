@@ -5,7 +5,7 @@
 //!
 //! This is the decision substrate of the single-owner worker (oracle gap G1,
 //! G6): it owns no sockets and performs no I/O, so every path is deterministic
-//! and unit-testable. The mio event loop, the ClientHello two-barrier gate,
+//! and unit-testable. The mio event loop, the `ClientHello` two-barrier gate,
 //! and the byte-conserving relay are later increments and make no serving
 //! claim here; the boot-owned traffic buffers this core will hand out live in
 //! [`crate::inventory::TrafficStorage`].
@@ -66,7 +66,7 @@ pub type TrafficBuffer = [u8; BUFFER_BYTES];
 /// setup/connect deadlines plus the DNS whole-second epoch (`dns0`) whose
 /// scale the cache is written on. Cache seconds are mounted on `dns0`, so a
 /// serving evaluation is comparable against the startup receipts' own scale
-/// (startup_dns.rs `now0 + elapsed`) instead of a fresh zero anchor that keeps
+/// (`startup_dns.rs` `now0 + elapsed`) instead of a fresh zero anchor that keeps
 /// every entry permanently fresh (1cws M2r; w6xo). Constructed only by the
 /// storage that owns the cache and worker (crate-internal), so no caller can
 /// pair a free clock with a decision.
@@ -908,7 +908,7 @@ mod tests {
     #[test]
     /// Authorization requires the exact configured `<fqdn>:<port>` pair: the
     /// same allowlisted hostname at a different CONNECT port is a pair miss
-    /// (HostNotAllowlisted forbid), even with a usable cache binding.
+    /// (`HostNotAllowlisted` forbid), even with a usable cache binding.
     fn same_host_different_port_is_forbidden_even_with_usable_cache() {
         let mut cache = cache_with(2);
         let n = name(&cache, 0);

@@ -1,6 +1,6 @@
 //! The in-repo deterministic fuzz harness: one checked-in corpus plus a
 //! generated-input campaign per parser target, driving the **real** parsers —
-//! CONNECT request-head, ClientHello, DNS-wire, and log-record encoding —
+//! CONNECT request-head, `ClientHello`, DNS-wire, and log-record encoding —
 //! instead of a scaffold (docs/alumina-proxy.md:388-391, alumina-sechd M3/L17).
 //! Campaigns are test-augmented (`cargo test`); the harness is never called on
 //! a production path, so it adds no post-boot allocation or runtime surface.
@@ -21,21 +21,21 @@ const CONNECT_CORPUS: &[&[u8]] = &[
     b"CONNECT sub.example.org:443 HTTP/1.1\r\nHost: sub.example.org:443\r\n\r\n",
 ];
 
-/// A valid TLS 1.3 ClientHello to `sub.example.org`: one 0x0301 record wrapping
+/// A valid TLS 1.3 `ClientHello` to `sub.example.org`: one 0x0301 record wrapping
 /// a 0x0303 client-version hello offering 0x1301/0x1302 with a single SNI and a
 /// supported-versions extension. Wire-format layout, byte by byte:
 ///
 /// - `0x16 0x03 0x01 0x00 0x50` — record header, payload 80
-/// - `0x01 0x00 0x00 0x4c` — handshake ClientHello, body 76
+/// - `0x01 0x00 0x00 0x4c` — handshake `ClientHello`, body 76
 /// - `0x03 0x03` — client version TLS 1.2 wire value
 /// - 32 bytes of `0x00` — random 32 bytes
 /// - `0x00` — session id length
-/// - `0x00 0x04 0x13 0x01 0x13 0x02` — cipher suites TLS_AES_128/256_GCM
+/// - `0x00 0x04 0x13 0x01 0x13 0x02` — cipher suites `TLS_AES_128/256_GCM`
 /// - `0x01 0x00` — compression methods: 1 byte, null
 /// - `0x00 0x1f` — extensions length 31
-/// - `0x00 0x2b 0x00 0x03 0x02 0x03 0x04` — supported_versions: TLS 1.3
-/// - `0x00 0x00 0x00 0x14` — server_name extension, data length 20
-/// - `0x00 0x12 0x00 0x00 0x0f "sub.example.org"` — one host_name entry,
+/// - `0x00 0x2b 0x00 0x03 0x02 0x03 0x04` — `supported_versions`: TLS 1.3
+/// - `0x00 0x00 0x00 0x14` — `server_name` extension, data length 20
+/// - `0x00 0x12 0x00 0x00 0x0f "sub.example.org"` — one `host_name` entry,
 ///   "sub.example.org"
 const CLIENT_HELLO_CORPUS: &[&[u8]] = &[&[
     0x16, 0x03, 0x01, 0x00, 0x50, 0x01, 0x00, 0x00, 0x4c, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,

@@ -1,7 +1,7 @@
 //! Linux startup privilege preflight: require every real/effective/saved/
 //! filesystem UID to be non-root, empty effective, permitted and ambient
 //! capability sets, and `no_new_privs`; any unmet prerequisite fails as
-//! EX_CONFIG (78).
+//! `EX_CONFIG` (78).
 //!
 //! Binding constraints (oracle `alumina-b1x` C10, T-privilege; `docs/alumina-proxy.md:58,
 //! :150, :235`). A single zero UID among the four is rejected: a root saved or
@@ -92,7 +92,7 @@ impl fmt::Display for PreflightError {
 /// Returns the first failed prerequisite: `Root` when any real/effective/saved
 /// or filesystem UID is zero, `NonEmptyEffective`, `NonEmptyPermitted`, or
 /// `NonEmptyAmbient` when the matching capability set is non-empty, and
-/// `MissingNoNewPrivs` when the process lacks the no_new_privs flag.
+/// `MissingNoNewPrivs` when the process lacks the `no_new_privs` flag.
 pub const fn check(facts: KernelFacts) -> Result<(), PreflightError> {
     if facts.ruid == 0 || facts.euid == 0 || facts.suid == 0 || facts.fsuid == 0 {
         return Err(PreflightError::Root);

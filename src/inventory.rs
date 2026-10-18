@@ -13,7 +13,7 @@ pub const TRAFFIC_STORAGE_BYTES: usize = TUNNEL_SLOTS * BUFFERS_PER_SLOT * BUFFE
 pub const CONFIG_DOC_BUFFER_BYTES: usize = 4096;
 
 /// The retained per-slot serving metadata: the fixed CONNECT parser head and
-/// the two 64 KiB ClientHello inspector buffers, allocated once per tunnel
+/// the two 64 KiB `ClientHello` inspector buffers, allocated once per tunnel
 /// slot for the process lifetime and reused across connections.
 pub const SLOT_WORKSPACE_BYTES: usize = CONNECT_LIMIT + (MAX_CLIENT_HELLO * 2);
 

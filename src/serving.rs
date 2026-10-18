@@ -7,12 +7,12 @@
 //! deadline, writes the canonical fixed refusal bodies for every
 //! non-authorizing phase, and on an authorized [`ConnectPhase::Peer`] dials
 //! the decided eligible destination, sends the fixed `200 Connection
-//! established` response to the client, validates the client TLS ClientHello
+//! established` response to the client, validates the client TLS `ClientHello`
 //! against the approved hostname before forwarding, then relays in both
 //! directions through bounded per-direction pending buffers without dropping
 //! bytes or allocating per event.
 //!
-//! Barrier A (client->upstream) stays closed until the complete ClientHello
+//! Barrier A (client->upstream) stays closed until the complete `ClientHello`
 //! passes [`crate::client_hello::validate`] against the approved CONNECT
 //! hostname; the gate opens in the same successful write that crosses the
 //! validated hello end. Barrier B (upstream->client) stays closed until the
@@ -67,7 +67,7 @@ use self::policy::Refusal;
 const LISTENER: Token = Token(0);
 
 /// Boot-fixed per-slot client->upstream byte store: the CONNECT head plus any
-/// coalesced tunnel bytes up to the ClientHello inspection cap, reused as a
+/// coalesced tunnel bytes up to the `ClientHello` inspection cap, reused as a
 /// recycling relay pending buffer. Allocated once before the postboot phase and
 /// reused across connections. The mandated directional profile is two 128 KiB
 /// buffers per tunnel (docs/alumina-proxy.md:161-164,:183; RF-008): 512 slots x 256 KiB =
@@ -100,7 +100,7 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// The canonical complete-visit I/O budget (docs/alumina-proxy.md:146): at
 /// most 64 KiB of I/O or 16 I/O operations per connection visit, whichever
 /// comes first, combined across both directions and every arm of one visit.
-/// A WouldBlock or spurious-readiness attempt counts as an I/O operation
+/// A `WouldBlock` or spurious-readiness attempt counts as an I/O operation
 /// (:226; oracle alumina-8d7z §4), so a stalled arm still consumes budget.
 const VISIT_OPS: u16 = 16;
 const VISIT_BYTES: u32 = 64 * 1024;
@@ -137,7 +137,7 @@ const CHUNK: usize = 4096;
 const UPSTREAM_BASE: usize = MAX_TUNNELS + 1;
 
 /// The external DNS refresh source token: the first local id past the
-/// listener (0), client (1..=MAX_TUNNELS) and upstream (`UPSTREAM_BASE..`)
+/// listener (0), client (`1..=MAX_TUNNELS`) and upstream (`UPSTREAM_BASE..`)
 /// ranges, so a single poll carrying the attached DNS transport can never
 /// collide with a connection token. Dispatched as a benign readiness flag,
 /// never a slot.
@@ -149,7 +149,7 @@ const DNS_LOCAL: usize = UPSTREAM_BASE + MAX_TUNNELS;
 /// loop (oracle b3nx B18).
 const SIGNAL_LOCAL: usize = DNS_LOCAL + 1;
 
-/// Token layout: low 11 bits = local id (1..=MAX_TUNNELS client,
+/// Token layout: low 11 bits = local id (`1..=MAX_TUNNELS` client,
 /// `UPSTREAM_BASE..` upstream, 0 = listener), high bits = slot generation so a
 /// stale event for a reused slot index is dropped before touching a socket.
 /// The local id space also carries the reserved readiness sources `DNS_LOCAL`
@@ -265,7 +265,7 @@ impl VisitState {
     /// Records one attempted read/write syscall and the bytes it committed
     /// (0 for WouldBlock/Interrupted/failure, whose attempts still count as
     /// I/O operations). Saturates so the budget can never wrap; the byte
-    /// counter is carried as `u32` via a checked cast (io_room already keeps
+    /// counter is carried as `u32` via a checked cast (`io_room` already keeps
     /// a single syscall within 64 KiB, so this never clamps in practice).
     fn note(self, attempted: usize) -> VisitState {
         let bytes = u32::try_from(attempted).unwrap_or(u32::MAX);
@@ -723,7 +723,7 @@ impl Serving {
     /// allocation and without registering the startup listener yet.
     ///
     /// This is the storage-init phase: the poll, the 512 slot workspaces
-    /// (CONNECT parser, ClientHello inspector, gate, cursors) and the event
+    /// (CONNECT parser, `ClientHello` inspector, gate, cursors) and the event
     /// buffer all exist here, so main can call it before the startup DNS
     /// window opens ([`Self::attach_listener`] registers the listener that
     /// later opens).
@@ -2331,7 +2331,7 @@ impl Serving {
 
     /// Entry into the hello-inspection stage: inspect already-buffered bytes
     /// first (a same-segment pipelined hello), then drain whatever the client
-    /// already sent while readiness pointed elsewhere, so a ClientHello
+    /// already sent while readiness pointed elsewhere, so a `ClientHello`
     /// pipelined before the CONNECT response completes is validated without
     /// waiting for a fresh readable edge.
     fn enter_validating_hello(&mut self, index: usize) -> Result<(), ServeError> {

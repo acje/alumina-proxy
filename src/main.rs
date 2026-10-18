@@ -4,9 +4,9 @@
 //! continues the same owner into the shared-readiness runtime: the serving
 //! workspaces are preallocated before the boot-owned startup DNS window, the
 //! canonical readiness rule runs (the listener opens for a serving decision;
-//! an unresolved count beyond the allowance exits EX_TEMPFAIL 75), and a
+//! an unresolved count beyond the allowance exits `EX_TEMPFAIL` 75), and a
 //! serving decision attaches the startup listener and enters the serving loop
-//! for the process lifetime. A boot or startup failure exits EX_CONFIG (78)
+//! for the process lifetime. A boot or startup failure exits `EX_CONFIG` (78)
 //! with a diagnostic naming the field/source.
 
 use alumina::boot::{EX_CONFIG, run_boot};

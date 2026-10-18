@@ -14,8 +14,8 @@ pub enum Scope {
     All = 2,
 }
 
-/// The legal scope of the AnyIllegal first-slot `Block`. `Domain` is invalid
-/// configuration for the AnyIllegal action and is therefore not representable
+/// The legal scope of the `AnyIllegal` first-slot `Block`. `Domain` is invalid
+/// configuration for the `AnyIllegal` action and is therefore not representable
 /// here (docs/alumina-proxy.md tripwire amendment).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -106,12 +106,12 @@ pub enum FirstSlot {
 }
 
 impl FirstSlot {
-    /// A fresh per-connection latch, armed for the first AnyIllegal.
+    /// A fresh per-connection latch, armed for the first `AnyIllegal`.
     pub const fn new() -> FirstSlot {
         FirstSlot::Armed
     }
 
-    /// Whether this is the first AnyIllegal on the connection; consumes the
+    /// Whether this is the first `AnyIllegal` on the connection; consumes the
     /// latch exactly once.
     pub fn take_if_armed(&mut self) -> bool {
         if *self == FirstSlot::Armed {
@@ -123,7 +123,7 @@ impl FirstSlot {
     }
 }
 
-/// Boot-fixed per-ordinal domain-action table plus the AnyIllegal special
+/// Boot-fixed per-ordinal domain-action table plus the `AnyIllegal` special
 /// scope. Storage is a fixed `[DomainAction; ALLOWLIST_MAX]` with the exact
 /// configured count; construction rejects an empty or over-limit set, `at` is
 /// checked against that count, and ordinals are minted only from the table, so
@@ -157,7 +157,7 @@ impl ControlTable {
         })
     }
 
-    /// The AnyIllegal first-slot scope.
+    /// The `AnyIllegal` first-slot scope.
     pub const fn any_illegal(&self) -> AnyIllegalScope {
         self.any_illegal
     }
