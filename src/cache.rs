@@ -154,7 +154,6 @@ impl StagedPositive {
     /// Returns `BindingCapacityExceeded` when `bindings` exceeds
     /// `MAX_ADDRESSES` (never truncating), or `FamilyMismatch` when a binding
     /// does not match `family`.
-    #[allow(dead_code)]
     pub(crate) fn stage(
         name: NameIndex,
         family: Family,
