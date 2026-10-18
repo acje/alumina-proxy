@@ -862,6 +862,14 @@ pub struct Serving {
     /// while every live deadline is still in the future.
     #[cfg(test)]
     pub(crate) sweeps: u64,
+    /// Test-only tally of client-side re-arms issued by [`Self::reschedule`],
+    /// so fixtures assert a budget-exhausted visit re-registers only the busy
+    /// direction (perf-mission C14).
+    #[cfg(test)]
+    pub(crate) reschedule_client_arms: u64,
+    /// Test-only tally of upstream-side re-arms issued by [`Self::reschedule`].
+    #[cfg(test)]
+    pub(crate) reschedule_upstream_arms: u64,
     shutdown: Shutdown,
     signal_rx: Option<UnixStream>,
     _signal_registration: Option<signal_hook::SigId>,
@@ -876,6 +884,18 @@ pub struct Serving {
 
 #[cfg(test)]
 type PrePollHook = Rc<dyn Fn(&Serving)>;
+
+/// The direction whose `EPOLL_CTL_MOD` a [`Serving::reschedule`] re-arm issues
+/// on a budget-exhausted or re-queued visit: `Client` and `Upstream` name the
+/// one busy side, `Both` the two sides serving pending work together. Making
+/// the choice a typed sum keeps "re-arm nothing on a visit that still holds
+/// pending work" unrepresentable (docs/alumina-proxy.md:146; perf-mission C14).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RescheduleArm {
+    Client,
+    Upstream,
+    Both,
+}
 
 impl Serving {
     /// Builds the loop's retained serving workspaces over boot-completed
@@ -939,6 +959,10 @@ impl Serving {
             max_work_since_recheck: 0,
             #[cfg(test)]
             sweeps: 0,
+            #[cfg(test)]
+            reschedule_client_arms: 0,
+            #[cfg(test)]
+            reschedule_upstream_arms: 0,
             shutdown: Shutdown::Serving,
             signal_rx: Some(signal_rx),
             _signal_registration: Some(signal_registration),
@@ -1378,7 +1402,14 @@ impl Serving {
                 VisitState::Live { slot, .. } if slot == index
             );
             if !live_here || self.visit.exhausted() {
-                self.reschedule(index);
+                self.reschedule(
+                    index,
+                    if upstream {
+                        RescheduleArm::Upstream
+                    } else {
+                        RescheduleArm::Client
+                    },
+                );
                 return Ok(());
             }
         }
@@ -1870,17 +1901,66 @@ impl Serving {
 
     /// Re-arms poll interest on a budget-exhausted or re-queued slot so its
     /// unfinished work reschedules without waiting for a fresh readiness edge
-    /// (docs/alumina-proxy.md:146). A re-registration failure leaves the slot
-    /// without interest and is unclosable-only-once: the client re-arm runs
-    /// first and, on error, closes and returns; only then is the upstream arm
-    /// attempted, so a first-arm failure never double-closes via the second.
-    fn reschedule(&mut self, index: usize) {
-        if self.reregister_client(index).is_err() {
-            self.close_slot(index);
-            return;
+    /// (docs/alumina-proxy.md:146). Re-registers only the side(s) named by the
+    /// arm: a direction still holding pending/readable work gets its
+    /// `EPOLL_CTL_MOD`, while the untouched, satisfied side keeps its existing
+    /// registration, so a later readiness transition still raises a fresh edge
+    /// (perf-mission C14). A re-registration failure leaves the slot without
+    /// interest and is unclosable-only-once: a `Both` re-arm registers the
+    /// client first and, on error, closes and returns before the upstream
+    /// register is attempted, so a first-arm failure never double-closes via
+    /// the second.
+    fn reschedule(&mut self, index: usize, arm: RescheduleArm) {
+        #[cfg(test)]
+        {
+            self.reschedule_client_arms =
+                self.reschedule_client_arms
+                    .saturating_add(u64::from(matches!(
+                        arm,
+                        RescheduleArm::Client | RescheduleArm::Both
+                    )));
+            self.reschedule_upstream_arms =
+                self.reschedule_upstream_arms
+                    .saturating_add(u64::from(matches!(
+                        arm,
+                        RescheduleArm::Upstream | RescheduleArm::Both
+                    )));
         }
-        if self.reregister_upstream(index).is_err() {
-            self.close_slot(index);
+        match arm {
+            RescheduleArm::Client => {
+                if self.reregister_client(index).is_err() {
+                    self.close_slot(index);
+                }
+            }
+            RescheduleArm::Upstream => {
+                if self.reregister_upstream(index).is_err() {
+                    self.close_slot(index);
+                }
+            }
+            RescheduleArm::Both => {
+                if self.reregister_client(index).is_err() {
+                    self.close_slot(index);
+                    return;
+                }
+                if self.reregister_upstream(index).is_err() {
+                    self.close_slot(index);
+                }
+            }
+        }
+    }
+
+    /// The re-arm for a client-driven visit: the client interest is always
+    /// re-registered because its edge was consumed this visit; the upstream
+    /// interest is additionally re-registered while buffered client bytes still
+    /// await forwarding, since a partial flush can leave a still-writable
+    /// upstream edge consumed without an automatic `WouldBlock` re-arm
+    /// (perf-mission C14). A drained buffer (`fwd >= buf_len`) means only the
+    /// client carries pending work.
+    fn client_visit_reschedule_arm(&self, index: usize) -> RescheduleArm {
+        if self.slots[index].fwd < self.slots[index].buf_len {
+            RescheduleArm::Both
+        } else {
+            RescheduleArm::Client
         }
     }
 
@@ -1894,7 +1974,7 @@ impl Serving {
         }
         loop {
             if self.visit_exhausted(index) {
-                self.reschedule(index);
+                self.reschedule(index, self.client_visit_reschedule_arm(index));
                 return Ok(());
             }
             let stage = self.slots[index].stage;
@@ -1928,16 +2008,19 @@ impl Serving {
             if stage == Stage::Relay && self.slots[index].fwd < self.slots[index].buf_len {
                 self.flush_client_upstream(index);
                 if self.slots[index].fwd < self.slots[index].buf_len {
+                    if self.visit_exhausted(index) {
+                        self.reschedule(index, RescheduleArm::Client);
+                    }
                     return Ok(());
                 }
                 if self.visit_exhausted(index) {
-                    self.reschedule(index);
+                    self.reschedule(index, RescheduleArm::Client);
                     return Ok(());
                 }
             }
             let room = self.read_room(index, HOLD_CAP, self.slots[index].buf_len);
             if room == 0 {
-                self.reschedule(index);
+                self.reschedule(index, RescheduleArm::Client);
                 return Ok(());
             }
             let result = {
@@ -1977,7 +2060,7 @@ impl Serving {
                 _ => return Ok(()),
             }
             if self.visit_exhausted(index) {
-                self.reschedule(index);
+                self.reschedule(index, self.client_visit_reschedule_arm(index));
                 return Ok(());
             }
             if !matches!(
@@ -2352,7 +2435,7 @@ impl Serving {
         let mut scratch = [0u8; CHUNK];
         loop {
             if self.visit_exhausted(index) {
-                self.reschedule(index);
+                self.reschedule(index, RescheduleArm::Upstream);
                 return Ok(());
             }
             let outcome = classify_read(&self.read_upstream(index, &mut scratch));
@@ -2562,7 +2645,7 @@ impl Serving {
         if written == 0 || was_open {
             self.slots[index].relay_cursor_reset();
             if self.visit_exhausted(index) {
-                self.reschedule(index);
+                self.reschedule(index, RescheduleArm::Upstream);
             }
             return;
         }
@@ -2594,7 +2677,7 @@ impl Serving {
         }
         self.slots[index].relay_cursor_reset();
         if self.visit_exhausted(index) {
-            self.reschedule(index);
+            self.reschedule(index, RescheduleArm::Upstream);
         }
     }
 
@@ -2642,7 +2725,7 @@ impl Serving {
             return;
         }
         if self.visit_exhausted(index) {
-            self.reschedule(index);
+            self.reschedule(index, RescheduleArm::Client);
             return;
         }
         let ws = &mut self.slots[index];
@@ -2655,7 +2738,7 @@ impl Serving {
     fn relay_upstream_to_client(&mut self, index: usize) -> Result<(), ServeError> {
         loop {
             if self.visit_exhausted(index) {
-                self.reschedule(index);
+                self.reschedule(index, RescheduleArm::Upstream);
                 return Ok(());
             }
             if self.slots[index].down_len + MIN_BUF_ROOM > DOWN_CAP {
@@ -2663,7 +2746,7 @@ impl Serving {
             }
             let room = self.read_room(index, DOWN_CAP, self.slots[index].down_len);
             if room == 0 {
-                self.reschedule(index);
+                self.reschedule(index, RescheduleArm::Upstream);
                 return Ok(());
             }
             let result = {
@@ -2694,7 +2777,7 @@ impl Serving {
             self.slots[index].down_len += n;
             self.flush_down(index);
             if self.visit_exhausted(index) {
-                self.reschedule(index);
+                self.reschedule(index, RescheduleArm::Upstream);
                 return Ok(());
             }
             if self.slots[index].down_len > 0 {

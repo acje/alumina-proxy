@@ -2640,6 +2640,89 @@ fn one_relay_visit_never_exceeds_the_combined_io_budget() {
 }
 
 #[test]
+fn reschedule_rearms_only_the_busy_upstream_after_a_writable_visit_exhausts() {
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+        let sink_addr = sink.local_addr().expect("sink addr");
+        let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+        let sink_stream = sink.accept().expect("accept sink side").0;
+        let _ = sink_stream.set_read_timeout(Some(Duration::from_millis(50)));
+
+        let index = 0;
+        {
+            let ws = &mut serving.slots[index];
+            ws.upstream = Some(up);
+            ws.stage = Stage::Relay;
+            ws.head_len = 0;
+            ws.buf_base = 0;
+            ws.buf_len = 128 * 1024;
+            ws.fwd = 0;
+            ws.buf[..128 * 1024].copy_from_slice(&test_offset_pattern(128 * 1024, 12));
+        }
+        open_relay(serving, index);
+        serving.register_upstream(index).expect("register up");
+
+        let client_arms_before = serving.reschedule_client_arms;
+        let upstream_arms_before = serving.reschedule_upstream_arms;
+
+        let token = upstream_token(serving.slots[index].slot_gen, index);
+        serving
+            .dispatch_readiness(
+                token,
+                Readiness {
+                    writable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("one writable relay visit");
+
+        let moved = serving.slots[index].buf_base + serving.slots[index].fwd;
+        assert!(
+            moved > 0 && moved <= 64 * 1024,
+            "one connection visit must forward a bounded non-zero slice, forwarded {moved}"
+        );
+
+        assert!(
+            serving.reschedule_upstream_arms > upstream_arms_before,
+            "the busy upstream interest must be re-armed when the visit exhausts mid-forward"
+        );
+        assert_eq!(
+            serving.reschedule_client_arms, client_arms_before,
+            "perf-mission C14: a writable-atom visit that never touches the client must not \
+             re-register the client interest (docs/alumina-proxy.md:146)"
+        );
+
+        serving.close_slot(index);
+    });
+}
+
+#[test]
+fn client_visit_reschedule_arm_tracks_the_pending_flush_direction() {
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        let index = 0;
+        serving.slots[index].buf_len = 1024;
+        serving.slots[index].fwd = 0;
+        assert!(
+            matches!(
+                serving.client_visit_reschedule_arm(index),
+                RescheduleArm::Both
+            ),
+            "unforwarded client bytes keep both the client and the upstream flush armed"
+        );
+        serving.slots[index].fwd = 1024;
+        assert!(
+            matches!(
+                serving.client_visit_reschedule_arm(index),
+                RescheduleArm::Client
+            ),
+            "a drained buffer leaves only the client interest armed for the relay read"
+        );
+    });
+}
+
+#[test]
 fn preloaded_hold_drains_across_budget_splits_with_quiescent_sink_relying_on_rearm() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
