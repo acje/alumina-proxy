@@ -79,6 +79,7 @@ ifs_same_cond = "warn"
 precedence = "warn"
 range_minus_one = "warn"
 suspicious_assignment_formatting = "warn"
+match_overlapping_arm = "warn"
 
 [lib]
 name = "alumina"
