@@ -427,6 +427,11 @@ impl Readiness {
 struct SlotCoalesce {
     /// First-arrival order across slots; `u32::MAX` marks an unseen slot.
     order: u32,
+    /// The index of the next slot in the first-arrival dispatch chain;
+    /// [`CoalescedBatch::NONE`] marks the chain tail. Each freshly folded slot
+    /// is appended exactly once, so the Pass 2 chain walk selects the same
+    /// slot the O(`MAX_TUNNELS`) min-scan did, in O(1) per pop.
+    next: usize,
     /// The slot generation recorded when the slot was first folded in this
     /// batch, so a mid-batch reuse (via `accept_all` between two tokens for
     /// the same index) drops the stale-generation token.
@@ -444,6 +449,7 @@ impl SlotCoalesce {
     const fn unseen() -> SlotCoalesce {
         SlotCoalesce {
             order: Self::UNSEEN,
+            next: CoalescedBatch::NONE,
             slot_gen: 0,
             client_first: false,
             client: None,
@@ -461,38 +467,84 @@ impl SlotCoalesce {
 /// first-arrival order (a slot's client and upstream tokens merge even when
 /// other slots' tokens interleave), and Pass 2 re-dispatches each slot
 /// contiguously within one visit — no false `!live_here` reschedules and no
-/// wasted `epoll_ctl(EPOLL_CTL_MOD)` re-arms.
+/// wasted `epoll_ctl(EPOLL_CTL_MOD)` re-arms. Pass 1 additionally chains every
+/// freshly seen slot in arrival order, and Pass 2 pops the chain head, so the
+/// dispatch order is identical to the list-selection it replaces but costs
+/// O(seen) total instead of O(seen * `MAX_TUNNELS`) min-scans.
 #[derive(Clone, Copy)]
 struct CoalescedBatch {
     slots: [SlotCoalesce; MAX_TUNNELS],
+    /// Total freshly folded slots in this batch (also the order counter).
     seen: usize,
+    /// The first un-dispatched slot index in the arrival-order chain;
+    /// [`CoalescedBatch::NONE`] once every seen slot is consumed.
+    head: usize,
+    /// The most recently appended slot index in the arrival-order chain;
+    /// [`CoalescedBatch::NONE`] while the chain is empty.
+    tail: usize,
 }
 
 impl CoalescedBatch {
+    const NONE: usize = usize::MAX;
+
     const fn new() -> CoalescedBatch {
         CoalescedBatch {
             slots: [SlotCoalesce::unseen(); MAX_TUNNELS],
             seen: 0,
+            head: Self::NONE,
+            tail: Self::NONE,
         }
     }
 
-    /// The index of the next slot to dispatch: the unseen slot with the
-    /// earliest first-arrival order (`None` when every seen slot is consumed).
-    fn next(&mut self) -> Option<usize> {
-        let mut best = None;
-        let mut best_order = u32::MAX;
-        for (index, slot) in self.slots.iter().enumerate() {
-            if slot.seen() && slot.order < best_order {
-                best_order = slot.order;
-                best = Some(index);
-            }
+    /// Folds one validated `(Token, Readiness)` into the batch: the first
+    /// folded token for a slot records its arrival order, slot generation, and
+    /// client-first direction, then appends the slot to the arrival-order
+    /// chain exactly once. Every later token for the same slot and generation
+    /// merges readiness without re-chaining; a token folded at a different
+    /// generation (a mid-batch slot reuse) is dropped.
+    fn fold(&mut self, index: usize, event_gen: u64, upstream: bool, ready: Readiness) {
+        let acc = &mut self.slots[index];
+        if acc.seen() && acc.slot_gen != event_gen {
+            return;
         }
-        if let Some(index) = best {
-            self.slots[index].order = SlotCoalesce::UNSEEN;
-            Some(index)
+        let fresh = !acc.seen();
+        if fresh {
+            acc.order = u32::try_from(self.seen).expect("coalesced order fits u32");
+            acc.slot_gen = event_gen;
+            acc.client_first = !upstream;
+        }
+        if upstream {
+            acc.upstream = Some(acc.upstream.map_or(ready, |prior| prior.merge(ready)));
         } else {
-            None
+            acc.client = Some(acc.client.map_or(ready, |prior| prior.merge(ready)));
         }
+        if fresh {
+            if self.tail == Self::NONE {
+                self.head = index;
+            } else {
+                self.slots[self.tail].next = index;
+            }
+            self.tail = index;
+            self.seen += 1;
+        }
+    }
+
+    /// The index of the next slot to dispatch: the head of the arrival-order
+    /// chain, i.e. the seen slot with the earliest first-arrival order (`None`
+    /// when every seen slot is consumed). Pops in O(1); the popped slot is
+    /// marked unseen again, exactly as the former min-scan did, so a fresh
+    /// batch never re-dispatches a consumed slot.
+    const fn next(&mut self) -> Option<usize> {
+        if self.head == Self::NONE {
+            return None;
+        }
+        let index = self.head;
+        self.head = self.slots[index].next;
+        self.slots[index].order = SlotCoalesce::UNSEEN;
+        if self.head == Self::NONE {
+            self.tail = Self::NONE;
+        }
+        Some(index)
     }
 }
 
@@ -1161,10 +1213,6 @@ impl Serving {
     /// # Errors
     ///
     /// Returns a serve error when a dispatched arm errors.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "long batch dispatch covering stalled-DNS pacing, timeout, and relay handoffs"
-    )]
     fn dispatch_coalesced_batch(
         &mut self,
         tokens: &[(Token, Readiness)],
@@ -1203,21 +1251,7 @@ impl Serving {
             if event_gen != self.slots[index].slot_gen {
                 continue;
             }
-            let acc = &mut coalesced.slots[index];
-            if acc.seen() && acc.slot_gen != event_gen {
-                continue;
-            }
-            if !acc.seen() {
-                acc.order = u32::try_from(coalesced.seen).expect("coalesced order fits u32");
-                acc.slot_gen = event_gen;
-                acc.client_first = !upstream;
-                coalesced.seen += 1;
-            }
-            if upstream {
-                acc.upstream = Some(acc.upstream.map_or(*ready, |prior| prior.merge(*ready)));
-            } else {
-                acc.client = Some(acc.client.map_or(*ready, |prior| prior.merge(*ready)));
-            }
+            coalesced.fold(index, event_gen, upstream, *ready);
         }
         while let Some(index) = coalesced.next() {
             if self.recheck_due() {

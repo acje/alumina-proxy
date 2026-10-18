@@ -6066,6 +6066,81 @@ fn coalesced_batch_ignores_stale_tokens_for_closed_slot() {
 }
 
 #[test]
+/// The arrival-order chain folded by Pass 1 (`fold`) and popped by Pass 2
+/// (`next`) must dispatch slots in exact first-arrival order regardless of
+/// slot index, each seen slot exactly once, then stay exhausted: the chain
+/// walk replaces the former per-dispatch O(`MAX_TUNNELS`) min-scan with
+/// identical selection semantics (C1 arrival-order index).
+fn coalesced_batch_chain_dispatches_in_first_arrival_order_ignoring_slot_index() {
+    let mut batch = CoalescedBatch::new();
+    let ready = Readiness {
+        readable: true,
+        ..Readiness::none()
+    };
+    assert_eq!(batch.next(), None, "a fresh batch has nobody to dispatch");
+    for index in [71usize, 3, 58, 71, 200, 3] {
+        batch.fold(index, 7, true, ready);
+    }
+    for (i, expected) in [71usize, 3, 58, 200].into_iter().enumerate() {
+        assert_eq!(
+            batch.next(),
+            Some(expected),
+            "dispatch order {i} must be first-arrival, not slot-index"
+        );
+    }
+    assert_eq!(
+        batch.next(),
+        None,
+        "every seen slot dispatches exactly once, then the chain is exhausted"
+    );
+    assert_eq!(batch.next(), None, "the chain stays exhausted");
+}
+
+#[test]
+/// A freshly folded slot is unseen, a folded slot is seen, and the pop that
+/// dispatches it returns it to the unseen state; a fresh batch carries no
+/// chain links or folded readiness across batches (UNSEEN/seen invariant).
+fn coalesced_batch_pop_marks_slot_unseen_and_fresh_batch_is_clean() {
+    let mut batch = CoalescedBatch::new();
+    let ready = Readiness {
+        readable: true,
+        ..Readiness::none()
+    };
+    assert!(
+        batch.slots.iter().all(|slot| !slot.seen()),
+        "a fresh batch must fold no slot"
+    );
+    batch.fold(0, 1, false, ready);
+    batch.fold(1, 1, false, ready);
+    assert!(
+        batch.slots[0].seen() && batch.slots[1].seen(),
+        "a folded slot must be seen for the rest of its batch"
+    );
+    batch.next().expect("slot 0 pops first");
+    assert!(
+        !batch.slots[0].seen(),
+        "a dispatched slot returns to the unseen state"
+    );
+    batch.next().expect("slot 1 pops second");
+    assert!(
+        !batch.slots[1].seen(),
+        "the second dispatched slot is unseen again"
+    );
+    assert_eq!(batch.next(), None, "the batch is fully consumed");
+
+    let mut fresh = CoalescedBatch::new();
+    assert_eq!(
+        fresh.next(),
+        None,
+        "a fresh batch starts with an empty, clean chain"
+    );
+    assert!(
+        fresh.slots.iter().all(|slot| !slot.seen()),
+        "no folded readiness leaks into a fresh batch"
+    );
+}
+
+#[test]
 /// An allowlisted CONNECT against an unpopulated DNS cache must flow through
 /// the real `run_once`/`run_decision` path to a 502 refusal pinned to the
 /// exact no-resolved-addresses wire body, and release the admitted slot.
