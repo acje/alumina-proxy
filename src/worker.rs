@@ -86,7 +86,10 @@ impl WorkerClock {
     }
 
     /// The precise monotonic boot anchor, shared by all precise deadlines.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "designed WorkerClock boot-anchor accessor; no consumer yet"
+    )]
     pub(crate) const fn epoch(self) -> Instant {
         self.epoch
     }
@@ -328,7 +331,6 @@ impl SlotIndex {
 pub struct TunnelIndex(u16);
 
 impl TunnelIndex {
-    #[allow(dead_code)]
     pub(crate) const fn index(&self) -> usize {
         self.0 as usize
     }
@@ -519,7 +521,6 @@ impl Worker {
     /// re-graduate this tunnel. A no-op when the slot is not in setup (the
     /// grant flow guarantees that), so a misplaced call can never corrupt a
     /// different slot.
-    #[allow(dead_code)]
     #[expect(
         clippy::needless_pass_by_value,
         reason = "by value encodes the consume-once linear-handle discipline (the setup handle is consumed, converting it into exactly one established handle)"
@@ -544,7 +545,6 @@ impl Worker {
     }
 
     /// Frees an established tunnel for reuse, consuming the established handle.
-    #[allow(dead_code)]
     /// Consumes the established handle, which must not be re-graduated or
     /// double-released after a tunnel reset. Callers reap via a fresh handle.
     #[expect(
@@ -567,7 +567,13 @@ impl Worker {
 
     /// The absolute setup deadline of an established tunnel's slot, or `None`
     /// when the slot is free.
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "designed established-tunnel deadline accessor; exercised in worker tests (worker.rs:1206), no production consumer yet"
+        )
+    )]
     pub(crate) const fn tunnel_setup_deadline(&self, tunnel: &TunnelIndex) -> Option<Deadline> {
         match self.slots[tunnel.index()] {
             SlotState::InSetup { setup_deadline, .. }
@@ -580,12 +586,6 @@ impl Worker {
     /// event processor to key its per-slot socket/parser/buffer state.
     pub(crate) const fn slot_index(slot: &SlotIndex) -> usize {
         slot.index()
-    }
-
-    /// The occupied slot index for the established handle.
-    #[allow(dead_code)]
-    pub(crate) const fn tunnel_index(tunnel: &TunnelIndex) -> usize {
-        tunnel.index()
     }
 }
 
@@ -637,7 +637,10 @@ impl<'a> WorkerView<'a> {
     }
 
     /// The single clock authority bound to this config/cache pair.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "designed WorkerView clock accessor; referenced by rustdoc worker.rs:666, no consumer yet"
+    )]
     pub(crate) const fn clock(&self) -> WorkerClock {
         self.clock
     }
