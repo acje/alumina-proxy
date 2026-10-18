@@ -123,6 +123,7 @@ sliced_string_as_bytes = "warn"
 get_first = "warn"
 assigning_clones = "warn"
 cast_possible_wrap = "warn"
+checked_conversions = "warn"
 
 [lib]
 name = "alumina"
