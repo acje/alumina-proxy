@@ -113,6 +113,7 @@ expect_fun_call = "warn"
 cmp_owned = "warn"
 vec_init_then_push = "warn"
 useless_vec = "warn"
+large_const_arrays = "warn"
 
 [lib]
 name = "alumina"
