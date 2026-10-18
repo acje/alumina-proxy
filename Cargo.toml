@@ -275,6 +275,20 @@ const_is_empty = "warn"
 # magnitude is sign-agnostic). No runtime/alloc/spec change; the enabling
 # attribute is compile-time.
 cast_abs_to_unsigned = "warn"
+# SM-22: enable the correctness/cast lint — `cast_enum_truncation`. Its
+# firing surface is casting a state enum to an integer type too small to
+# hold all variant discriminants (`Foo::… as u8` where the enum needs a
+# wider discriminant) — silently packing variants away so a later read-back
+# yields a wrong/aliased discriminant. The idiomatic fix realigns the repr
+# width to the discriminant set or adds a checked conversion at the packing
+# boundary; a genuinely narrow field takes a checked `try_from`, never a
+# truncating cast. A clippy 1.99.0 positive control (`-F
+# clippy::cast_enum_truncation`) on a planted many-variant enum cast proves
+# the lint is armed (the gate fails where a site exists); the tree carries
+# zero lint-proven sites on the pinned toolchain after the audit, so the
+# lint guards future regressions. No runtime/alloc/spec change; the enabling
+# attribute is compile-time.
+cast_enum_truncation = "warn"
 
 [lib]
 name = "alumina"
