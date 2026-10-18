@@ -692,6 +692,10 @@ pub struct ResponseWorkspace {
 }
 
 impl Default for ResponseWorkspace {
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "designed response-parse workspace fixed-profile buffer; no runtime heap"
+    )]
     fn default() -> Self {
         ResponseWorkspace {
             owners: [Owner::empty(); MAX_TOTAL_RR],

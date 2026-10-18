@@ -122,6 +122,10 @@ fn hot_relay_turns_compose_with_bounded_stalled_dns() {
     clippy::too_many_lines,
     reason = "long alloc-witness hot-relay multi-slot composition body"
 )]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
+)]
 fn hot_relay_many_slots_body() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};

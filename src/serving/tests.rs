@@ -1162,6 +1162,10 @@ fn relay_pending_tail_then_fresh_bytes_preserve_order_and_count() {
     clippy::too_many_lines,
     reason = "long multi-phase compaction assertion"
 )]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
+)]
 fn forced_compaction_preserves_absolute_cursor_and_retained_suffix() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -1732,6 +1736,10 @@ fn batch_progress_rechecks_timers_before_the_visit_that_would_cross() {
     clippy::too_many_lines,
     reason = "long staged batch/coalescing assertion"
 )]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
+)]
 fn one_batch_two_tokens_one_slot_share_a_single_complete_visit() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -2008,6 +2016,10 @@ fn listener_yield_at_recheck_rearms_for_queued_clients_without_new_connects() {
     clippy::too_many_lines,
     reason = "long interleaved budget-split behaviour assertion"
 )]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
+)]
 fn interleaved_a_b_a_mixed_readwrite_timer_preserves_shared_budgets() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -2190,6 +2202,10 @@ fn interleaved_a_b_a_mixed_readwrite_timer_preserves_shared_budgets() {
 }
 
 #[test]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
+)]
 fn retained_edge_reschedules_through_run_once_with_silent_peer() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -2417,6 +2433,10 @@ fn preloaded_hold_drains_across_budget_splits_with_quiescent_sink_relying_on_rea
 }
 
 #[test]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
+)]
 fn preloaded_hold_drains_across_budget_splits_byte_exact_with_consuming_sink() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -2514,6 +2534,10 @@ fn preloaded_hold_drains_across_budget_splits_byte_exact_with_consuming_sink() {
 #[expect(
     clippy::too_many_lines,
     reason = "long read-direction overflow-drain assertion"
+)]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
 )]
 fn read_direction_held_peer_drains_across_budget_splits_without_new_edges() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2755,6 +2779,10 @@ fn client_read_visit_shares_combined_read_write_budget() {
 }
 
 #[test]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
+)]
 fn four_mib_up_stream_survives_budget_split_visits_byte_conserved() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -2850,6 +2878,10 @@ fn four_mib_up_stream_survives_budget_split_visits_byte_conserved() {
 }
 
 #[test]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
+)]
 fn four_mib_down_stream_survives_budget_split_visits_byte_conserved() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -3202,6 +3234,10 @@ fn second_gateopening_drain_shares_the_single_visit_budget() {
 #[expect(
     clippy::too_many_lines,
     reason = "long full-buffer/eof probe assertion"
+)]
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "test staging buffer, not runtime path"
 )]
 fn full_up_buffer_never_reads_into_zero_room_or_false_eofs() {
     use std::sync::atomic::{AtomicBool, Ordering};

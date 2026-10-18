@@ -265,6 +265,10 @@ impl Default for ChInspector {
 
 impl ChInspector {
     #[must_use]
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "designed serving-path two 64 KiB slot buffers; no runtime heap"
+    )]
     pub fn new() -> Self {
         ChInspector {
             buf: [0u8; MAX_CLIENT_HELLO],

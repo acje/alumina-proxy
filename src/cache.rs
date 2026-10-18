@@ -228,6 +228,10 @@ impl Cache {
     ///
     /// Returns `NameOutOfRange` when `name_count` is zero or exceeds
     /// `ALLOWLIST_MAX`.
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "designed cache-storage fixed-profile buffer; no runtime heap"
+    )]
     pub fn new(name_count: usize) -> Result<Cache, CacheError> {
         if name_count == 0 || name_count > ALLOWLIST_MAX {
             return Err(CacheError::NameOutOfRange);
@@ -458,6 +462,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "test staging buffer, not runtime path"
+    )]
     fn cache_new_rejects_out_of_range_name_count() {
         assert_eq!(Cache::new(0), Err(CacheError::NameOutOfRange));
         assert_eq!(

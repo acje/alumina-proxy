@@ -589,6 +589,10 @@ impl StartupDns {
     /// # Errors
     ///
     /// Returns `Transport` when the poll registry cannot be created.
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "designed DNS-recv fixed-profile buffer; no runtime heap"
+    )]
     pub fn new() -> Result<StartupDns, StartupDnsError> {
         let poll = Poll::new().map_err(|e| StartupDnsError::Transport {
             kind: e.kind(),

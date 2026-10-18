@@ -19,11 +19,13 @@ description = "Alumina phase-1 foundations: F0 toolchain pin, F1/F2/F4 witness s
 # coherent long encoders/drivers with tight per-fn
 # `#[expect(..., reason = "...")]`. No runtime impact; no allocation and no
 # runtime-surface change.
-# `large_stack_arrays` is intentionally NOT enabled yet: its five non-test sites
-# are the designed boot/slot-resident buffer definitions (Cache::new entries,
-# ChInspector buf+scratch, ResponseWorkspace::default owners, StartupDns
-# recv_buf), which per SM-04 contract may neither be suppressed nor heap-replaced;
-# deferred to moltke adjudication (SM-04 back-brief).
+# SM-04a (moltke ruling a): `large_stack_arrays` is enabled; its five
+# design-intentional runtime sites (Cache::new entries, ChInspector buf+scratch,
+# the designed 2x64 KiB serving-path buffers, ResponseWorkspace::default owners,
+# StartupDns recv_buf) carry tight per-constructor `#[expect(..., reason =
+# "designed ...-resident fixed-profile buffer; no runtime heap")]`; the 11
+# test-only staging buffers carry `reason = "test staging buffer, not runtime
+# path"`. Buffers stay stack-resident; no runtime heap and no surface change.
 [lints.clippy]
 uninlined_format_args = "warn"
 must_use_candidate = "warn"
@@ -33,6 +35,7 @@ cast_possible_truncation = "warn"
 missing_errors_doc = "warn"
 missing_panics_doc = "warn"
 too_many_lines = "warn"
+large_stack_arrays = "warn"
 
 [lib]
 name = "alumina"
