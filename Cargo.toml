@@ -108,6 +108,7 @@ infallible_try_from = "warn"
 possible_missing_else = "warn"
 suspicious_else_formatting = "warn"
 suspicious_to_owned = "warn"
+unnecessary_to_owned = "warn"
 
 [lib]
 name = "alumina"
