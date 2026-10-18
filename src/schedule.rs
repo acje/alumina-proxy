@@ -122,6 +122,7 @@ pub struct Schedules {
     name_count: u8,
     next_scan: u8,
     slots: [[Slot; 2]; ALLOWLIST_MAX],
+    next_due: Option<u64>,
 }
 
 impl Schedules {
@@ -140,6 +141,7 @@ impl Schedules {
             name_count,
             next_scan: 0,
             slots: [[UNDUE; 2]; ALLOWLIST_MAX],
+            next_due: None,
         })
     }
 
@@ -155,6 +157,32 @@ impl Schedules {
 
     const fn slot_mut(&mut self, name: usize, family: Family) -> &mut Slot {
         &mut self.slots[name][family_slot(family)]
+    }
+
+    fn earliest_selectable_at(&self) -> Option<u64> {
+        let mut earliest: Option<u64> = None;
+        let total = self.name_count() * 2;
+        for linear in 0..total {
+            let name = linear >> 1;
+            let family = match linear & 1 == 0 {
+                true => Family::A,
+                false => Family::Aaaa,
+            };
+            let slot = self.slot(name, family);
+            if slot.pending {
+                continue;
+            }
+            let Some(due) = slot.due else {
+                continue;
+            };
+            let selectable_at = due.max(slot.not_before);
+            earliest = Some(earliest.map_or(selectable_at, |e| e.min(selectable_at)));
+        }
+        earliest
+    }
+
+    fn recompute_next_due(&mut self) {
+        self.next_due = self.earliest_selectable_at();
     }
 
     fn admit(&self, name: usize) -> Result<(), ScheduleError> {
@@ -191,6 +219,7 @@ impl Schedules {
         let slot = self.slot_mut(name, family);
         slot.due = Some(due);
         slot.pending = false;
+        self.recompute_next_due();
         Ok(())
     }
 
@@ -205,6 +234,7 @@ impl Schedules {
     pub fn release_selection(&mut self, name: usize, family: Family) -> Result<(), ScheduleError> {
         self.admit(name)?;
         self.slot_mut(name, family).pending = false;
+        self.recompute_next_due();
         Ok(())
     }
 
@@ -272,12 +302,7 @@ impl Schedules {
 
     /// Commits a prepared single-family delta; never fails after
     /// [`Self::prepare_positive`] succeeded.
-    pub(crate) const fn commit_positive(
-        &mut self,
-        name: usize,
-        family: Family,
-        prepared: PreparedDue,
-    ) {
+    pub(crate) fn commit_positive(&mut self, name: usize, family: Family, prepared: PreparedDue) {
         self.commit_slot(name, family, prepared);
     }
 
@@ -303,6 +328,7 @@ impl Schedules {
         slot.due = Some(new_due);
         slot.backoff = advance_backoff(stage);
         slot.pending = false;
+        self.recompute_next_due();
         Ok(())
     }
 
@@ -436,23 +462,19 @@ impl Schedules {
 
     /// Commits a prepared single-family delta; never fails after
     /// [`Self::prepare_nodata`] succeeded.
-    pub(crate) const fn commit_nodata(
-        &mut self,
-        name: usize,
-        family: Family,
-        prepared: PreparedDue,
-    ) {
+    pub(crate) fn commit_nodata(&mut self, name: usize, family: Family, prepared: PreparedDue) {
         self.commit_slot(name, family, prepared);
     }
 
     /// Non-fallible commit of a [`PreparedDue`] onto its slot, clearing the
     /// in-flight marker; reserved for values returned by a successful
     /// `prepare_*`.
-    const fn commit_slot(&mut self, name: usize, family: Family, prepared: PreparedDue) {
+    fn commit_slot(&mut self, name: usize, family: Family, prepared: PreparedDue) {
         let slot = self.slot_mut(name, family);
         slot.due = Some(prepared.due);
         slot.backoff = prepared.backoff;
         slot.pending = false;
+        self.recompute_next_due();
     }
 
     /// Selects at most one due exchange, scanning in fixed rotating
@@ -478,10 +500,10 @@ impl Schedules {
         let total = self.name_count() * 2;
         for step in 0..total {
             let linear = (usize::from(self.next_scan) + step) % total;
-            let name = linear / 2;
-            let family = match linear % 2 {
-                0 => Family::A,
-                _ => Family::Aaaa,
+            let name = linear >> 1;
+            let family = match linear & 1 == 0 {
+                true => Family::A,
+                false => Family::Aaaa,
             };
             let slot = self.slot(name, family);
             if slot.pending || slot.not_before > now {
@@ -499,6 +521,7 @@ impl Schedules {
             slot.not_before = not_before;
             self.next_scan =
                 u8::try_from((linear + 1) % total).expect("scan index bounded by slot count");
+            self.recompute_next_due();
             return Ok(Some(DueToken { name, family }));
         }
         Ok(None)
@@ -512,26 +535,8 @@ impl Schedules {
     /// and its outcome rewrites the due time). Returns `Some(now)` when work is
     /// already selectable this instant, and `None` when no slot is scheduled.
     #[must_use]
-    pub fn next_selectable_due(&self, now: u64) -> Option<u64> {
-        let mut earliest: Option<u64> = None;
-        let total = self.name_count() * 2;
-        for linear in 0..total {
-            let name = linear / 2;
-            let family = match linear % 2 {
-                0 => Family::A,
-                _ => Family::Aaaa,
-            };
-            let slot = self.slot(name, family);
-            if slot.pending {
-                continue;
-            }
-            let Some(due) = slot.due else {
-                continue;
-            };
-            let selectable_at = due.max(slot.not_before);
-            earliest = Some(earliest.map_or(selectable_at, |e| e.min(selectable_at)));
-        }
-        match earliest {
+    pub const fn next_selectable_due(&self, now: u64) -> Option<u64> {
+        match self.next_due {
             Some(e) if e <= now => Some(now),
             other => other,
         }
@@ -717,6 +722,75 @@ mod tests {
             Some(1007),
             "once the guard elapses the slot is selectable now"
         );
+    }
+
+    fn oracle_next_due(schedules: &Schedules) -> Option<u64> {
+        let mut earliest: Option<u64> = None;
+        let total = schedules.name_count() * 2;
+        for linear in 0..total {
+            let name = linear >> 1;
+            let family = match linear & 1 == 0 {
+                true => Family::A,
+                false => Family::Aaaa,
+            };
+            let slot = schedules.slot(name, family);
+            if slot.pending {
+                continue;
+            }
+            let Some(due) = slot.due else {
+                continue;
+            };
+            let selectable_at = due.max(slot.not_before);
+            earliest = Some(earliest.map_or(selectable_at, |e| e.min(selectable_at)));
+        }
+        earliest
+    }
+
+    #[test]
+    fn cached_next_due_matches_oracle_through_all_mutations() {
+        let mut schedules = Schedules::new(3).unwrap();
+        let check = |s: &Schedules| {
+            let oracle = oracle_next_due(s);
+            assert_eq!(s.next_due, oracle, "cache must equal a fresh oracle scan");
+            let public = s.next_selectable_due(1000);
+            assert_eq!(
+                public,
+                match oracle {
+                    Some(e) if e <= 1000 => Some(1000),
+                    other => other,
+                },
+                "public wake must equal the same scan clamped at `now`"
+            );
+        };
+        check(&schedules);
+
+        schedules.overwrite_due_at(0, Family::A, 1000).unwrap();
+        check(&schedules);
+        schedules.overwrite_due_at(0, Family::Aaaa, 1020).unwrap();
+        check(&schedules);
+        let token = schedules.select_due(1000).unwrap().unwrap();
+        assert_eq!((token.name(), token.family()), (0, Family::A));
+        check(&schedules);
+        schedules.note_exchange_failure(0, Family::A, 1000).unwrap();
+        check(&schedules);
+        schedules.release_selection(0, Family::A).unwrap();
+        check(&schedules);
+        schedules
+            .note_positive(0, Family::A, 1000, 60, true, 1000)
+            .unwrap();
+        check(&schedules);
+
+        schedules.overwrite_due_at(1, Family::A, 2000).unwrap();
+        check(&schedules);
+        schedules.note_nxdomain(1, None, 0, 1000).unwrap();
+        check(&schedules);
+        schedules.note_nodata(1, Family::A, None, 0, 1500).unwrap();
+        check(&schedules);
+
+        schedules.overwrite_due_at(2, Family::Aaaa, 500).unwrap();
+        check(&schedules);
+        schedules.overwrite_due_at(2, Family::Aaaa, 3000).unwrap();
+        check(&schedules);
     }
 
     #[test]

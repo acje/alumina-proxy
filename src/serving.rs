@@ -2741,10 +2741,11 @@ impl Serving {
                 self.reschedule(index, RescheduleArm::Upstream);
                 return Ok(());
             }
-            if self.slots[index].down_len + MIN_BUF_ROOM > DOWN_CAP {
+            let down_len = self.slots[index].down_len;
+            if down_len + MIN_BUF_ROOM > DOWN_CAP {
                 return Ok(());
             }
-            let room = self.read_room(index, DOWN_CAP, self.slots[index].down_len);
+            let room = self.read_room(index, DOWN_CAP, down_len);
             if room == 0 {
                 self.reschedule(index, RescheduleArm::Upstream);
                 return Ok(());
