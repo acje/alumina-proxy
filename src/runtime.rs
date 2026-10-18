@@ -221,7 +221,7 @@ impl Runtime {
     /// shutdown through [`Self::turn`] (the production path) rather than a
     /// detached helper.
     #[cfg(all(test, feature = "alloc-witness"))]
-    pub(crate) fn serving_mut(&mut self) -> &mut Serving {
+    pub(crate) const fn serving_mut(&mut self) -> &mut Serving {
         &mut self.serving
     }
 
