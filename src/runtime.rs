@@ -48,7 +48,7 @@ impl Preallocated {
     /// signal-observation path (a real self-pipe readable edge) without a
     /// process-wide raise.
     #[cfg(test)]
-    pub(crate) fn wake_signal_test(&mut self) -> Option<&mut std::os::unix::net::UnixStream> {
+    pub(crate) const fn wake_signal_test(&mut self) -> Option<&mut std::os::unix::net::UnixStream> {
         self.serving.signal_wake_mut()
     }
 
@@ -231,7 +231,7 @@ impl Runtime {
     }
 
     /// The owner's shutdown phase, for host observation of the lifecycle.
-    pub fn shutdown(&self) -> Shutdown {
+    pub const fn shutdown(&self) -> Shutdown {
         self.serving.shutdown()
     }
 
@@ -347,7 +347,7 @@ impl Runtime {
     /// DNS work is due without a freshness event when the outstanding exchange
     /// can proceed on its own (the next write attempts without waiting) and
     /// must not be starved by a quiet traffic set.
-    fn dns_sendable_without_wait(&self) -> bool {
+    const fn dns_sendable_without_wait(&self) -> bool {
         self.serving.storage().dns().has_active_exchange()
             && !self.serving.storage().dns().needs_wait()
     }

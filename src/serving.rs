@@ -178,7 +178,7 @@ pub(crate) enum ShutdownExit {
 }
 
 impl ShutdownExit {
-    pub(crate) fn code(self) -> i32 {
+    pub(crate) const fn code(self) -> i32 {
         match self {
             ShutdownExit::Drained => 0,
             ShutdownExit::Forced => 70,
@@ -187,7 +187,7 @@ impl ShutdownExit {
 
     /// The typed drain outcome carried by the single shutdown record, so a
     /// deadline-forced closure is never silently lost to the exit that follows.
-    pub(crate) fn status(self) -> crate::log::ShutdownStatus {
+    pub(crate) const fn status(self) -> crate::log::ShutdownStatus {
         match self {
             ShutdownExit::Drained => crate::log::ShutdownStatus::Drained,
             ShutdownExit::Forced => crate::log::ShutdownStatus::Forced,
@@ -247,7 +247,7 @@ impl VisitState {
         }
     }
 
-    fn exhausted(self) -> bool {
+    const fn exhausted(self) -> bool {
         match self {
             VisitState::Live { ops, bytes, .. } => ops >= VISIT_OPS || bytes >= VISIT_BYTES,
             VisitState::Idle => false,
@@ -255,7 +255,7 @@ impl VisitState {
     }
 
     #[cfg(test)]
-    fn ops(self) -> u16 {
+    const fn ops(self) -> u16 {
         match self {
             VisitState::Live { ops, .. } => ops,
             VisitState::Idle => 0,
@@ -301,13 +301,13 @@ impl BatchProgress {
     /// would carry cumulative work past [`TIMER_RECHECK_EVERY`]. Checked
     /// *before* dispatching, so the sweep never lands after work has already
     /// crossed 256.
-    fn due(self) -> bool {
+    const fn due(self) -> bool {
         self.work_since_recheck as usize + 1 + VISIT_OPS as usize > TIMER_RECHECK_EVERY
     }
 
     /// Notes one ready-slot visit plus its I/O operations (saturating, so the
     /// count can never wrap).
-    fn accrue(&mut self, ops: u16) {
+    const fn accrue(&mut self, ops: u16) {
         self.work_since_recheck = self
             .work_since_recheck
             .saturating_add(1)
@@ -398,7 +398,7 @@ impl Readiness {
     /// Merges two readiness observations of the same socket in one poll batch:
     /// the union of the two, so a readable and a writable token for a slot
     /// coalesce into one contiguous visit arm without losing either interest.
-    fn merge(self, other: Readiness) -> Readiness {
+    const fn merge(self, other: Readiness) -> Readiness {
         Readiness {
             readable: self.readable || other.readable,
             writable: self.writable || other.writable,
@@ -451,7 +451,7 @@ impl SlotCoalesce {
         }
     }
 
-    fn seen(&self) -> bool {
+    const fn seen(&self) -> bool {
         self.order != Self::UNSEEN
     }
 }
@@ -469,7 +469,7 @@ struct CoalescedBatch {
 }
 
 impl CoalescedBatch {
-    fn new() -> CoalescedBatch {
+    const fn new() -> CoalescedBatch {
         CoalescedBatch {
             slots: [SlotCoalesce::unseen(); MAX_TUNNELS],
             seen: 0,
@@ -875,12 +875,12 @@ impl Serving {
     }
 
     /// The retained storage, for host tests inspecting slot occupancy.
-    pub fn storage(&self) -> &ServeStorage {
+    pub const fn storage(&self) -> &ServeStorage {
         &self.storage
     }
 
     /// The retained storage, mutable so the owner drives shared DNS turns.
-    pub(crate) fn storage_mut(&mut self) -> &mut ServeStorage {
+    pub(crate) const fn storage_mut(&mut self) -> &mut ServeStorage {
         &mut self.storage
     }
 
@@ -905,19 +905,19 @@ impl Serving {
     }
 
     /// The owner's shutdown phase, for host tests inspecting lifecycle state.
-    pub fn shutdown(&self) -> Shutdown {
+    pub const fn shutdown(&self) -> Shutdown {
         self.shutdown
     }
 
     /// Whether the owner has entered shutdown: admission is stopped, pending
     /// setups are closed and established tunnels drain under the fixed grace.
-    pub(crate) fn is_shutdown(&self) -> bool {
+    pub(crate) const fn is_shutdown(&self) -> bool {
         matches!(self.shutdown, Shutdown::Draining { .. })
     }
 
     /// Whether a DNS freshness event was observed since the last query, so the
     /// shared owner decides when to advance the cooperative exchange.
-    pub fn take_dns_event(&mut self) -> bool {
+    pub const fn take_dns_event(&mut self) -> bool {
         let seen = self.dns_event;
         self.dns_event = false;
         seen
@@ -1280,7 +1280,7 @@ impl Serving {
     /// handler write would, so host tests drive the actual signal-observation
     /// path without a process-wide raise.
     #[cfg(test)]
-    pub(crate) fn signal_wake_mut(&mut self) -> Option<&mut UnixStream> {
+    pub(crate) const fn signal_wake_mut(&mut self) -> Option<&mut UnixStream> {
         self.test_signal_wake.as_mut()
     }
 
@@ -1354,7 +1354,7 @@ impl Serving {
     /// The first real (non-benign) error observed draining the SIGTERM
     /// self-pipe, for host tests proving the drain names read errors exactly.
     #[cfg(test)]
-    fn signal_read_error(&self) -> Option<io::ErrorKind> {
+    const fn signal_read_error(&self) -> Option<io::ErrorKind> {
         self.signal_read_error
     }
 
@@ -1438,7 +1438,7 @@ impl Serving {
     /// Test-only seam: rewrites an already-draining shutdown deadline so the
     /// forced-closure decision can be exercised without waiting the grace.
     #[cfg(test)]
-    pub(crate) fn set_shutdown_deadline(&mut self, deadline: Instant) {
+    pub(crate) const fn set_shutdown_deadline(&mut self, deadline: Instant) {
         if let Shutdown::Draining { deadline: stored } = &mut self.shutdown {
             *stored = deadline;
         }
@@ -1629,7 +1629,7 @@ impl Serving {
     }
 
     /// Whether `index`'s visit is live and has consumed its complete budget.
-    fn visit_exhausted(&self, index: usize) -> bool {
+    const fn visit_exhausted(&self, index: usize) -> bool {
         matches!(
             self.visit,
             VisitState::Live { slot, .. } if slot == index && self.visit.exhausted()
@@ -1690,7 +1690,7 @@ impl Serving {
     /// [`TIMER_RECHECK_EVERY`] units, where one visit adds at most
     /// `1 + VISIT_OPS` units. Checked *before* dispatching, so the sweep never
     /// lands after work has already crossed 256.
-    fn recheck_due(&self) -> bool {
+    const fn recheck_due(&self) -> bool {
         self.progress.due()
     }
 
@@ -1710,7 +1710,7 @@ impl Serving {
     /// work-since-recheck total (MEDIUM-2). Called on the seal of a visit —
     /// when a different slot opens its own, or at end of batch — so each slot
     /// counts exactly once per poll batch.
-    fn note_visit(&mut self, ops: u16) {
+    const fn note_visit(&mut self, ops: u16) {
         self.progress.accrue(ops);
     }
 
@@ -2819,7 +2819,7 @@ fn client_token(generation: u64, index: usize) -> Token {
     Token(shifted_generation(generation) | (index + 1))
 }
 
-fn captured_fact(violation: Violation) -> Option<CapturedFact> {
+const fn captured_fact(violation: Violation) -> Option<CapturedFact> {
     match violation {
         Violation::EarlyUpstreamData { ordinal } => Some(CapturedFact::EarlyData(ordinal)),
         Violation::EvidenceInsufficient => {
