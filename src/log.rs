@@ -51,8 +51,14 @@ const QUEUE_MASK: usize = QUEUE_SLOTS - 1;
 const HIGH_PCT_NUMBER: u64 = 80;
 const LOW_PCT_NUMBER: u64 = 70;
 
-const _: () = assert!(QUEUE_SLOTS * SLOT_BYTES == inventory::LOG_QUEUE_BYTES);
-const _: () = assert!(QUEUE_SLOTS.is_power_of_two());
+const _: () = assert!(
+    QUEUE_SLOTS * SLOT_BYTES == inventory::LOG_QUEUE_BYTES,
+    "log ring geometry must match the inventory log queue bytes"
+);
+const _: () = assert!(
+    QUEUE_SLOTS.is_power_of_two(),
+    "log slot count must be a power of two for ring-mask indexing"
+);
 
 /// The severity vocabulary carried by every record.
 #[derive(Clone, Copy, PartialEq, Eq)]
