@@ -104,6 +104,7 @@ zero_repeat_side_effects = "warn"
 unconditional_recursion = "warn"
 drop_non_drop = "warn"
 forget_non_drop = "warn"
+infallible_try_from = "warn"
 
 [lib]
 name = "alumina"
