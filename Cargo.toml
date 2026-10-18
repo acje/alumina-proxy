@@ -95,6 +95,7 @@ impl_hash_borrow_with_str_and_bytes = "warn"
 absurd_extreme_comparisons = "warn"
 mistyped_literal_suffixes = "warn"
 non_octal_unix_permissions = "warn"
+nonsensical_open_options = "warn"
 
 [lib]
 name = "alumina"
