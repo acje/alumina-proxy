@@ -36,12 +36,11 @@ does not duplicate them).
 (`DOCSLINK_ROOTS` in `scripts/verify.sh`): `README.md`, `docs/alumina-proxy.md`,
 `docs/architecture.md`, `docs/build-plan.md`, `docs/traceability.md`,
 `docs/verification.md`, `docs/qa-package/README.md`. The full retained Markdown
-corpus — all **14** docs, including `docs/repository-layout-review.md` and
-`docs/tripwire-architecture-review.md` — is checked with the explicit nonempty
+corpus — all **12** docs — is checked with the explicit nonempty
 argv command:
 
 ```
-node scripts/docs_check/check.mjs README.md AGENTS.md alumina-refinement.md docs/alumina-proxy.md docs/architecture.md docs/build-plan.md docs/traceability.md docs/harness-evaluation.md docs/repository-layout-review.md docs/tripwire-architecture-review.md docs/benchmarks/100mbps-comparison.md docs/benchmarks/feature-match-matrix.md docs/verification.md docs/qa-package/README.md
+node scripts/docs_check/check.mjs README.md AGENTS.md alumina-refinement.md docs/alumina-proxy.md docs/architecture.md docs/build-plan.md docs/traceability.md docs/harness-evaluation.md docs/benchmarks/100mbps-comparison.md docs/benchmarks/feature-match-matrix.md docs/verification.md docs/qa-package/README.md
 ```
 
 Selector host context / prerequisites (incl. `mid` Linux-only fail-closed and

@@ -35,8 +35,6 @@ bounded stdout monitoring (`docs/alumina-proxy.md:238-315`, rp2e amendment).
 | [docs/verification.md](docs/verification.md) | Verification instructions, command set + offline link checker |
 | [docs/benchmarks/100mbps-comparison.md](docs/benchmarks/100mbps-comparison.md) | 100 Mbps matched comparison — Alumina 8dbbec8 vs HAProxy 3.2.25 vs Envoy 1.39.4 (tables-only; workload parameters + durable receipts) |
 | [docs/benchmarks/feature-match-matrix.md](docs/benchmarks/feature-match-matrix.md) | Feature match matrix across the three benchmark candidates |
-| [docs/repository-layout-review.md](docs/repository-layout-review.md) | Advisory repository layout review (Layout A recommendation, dated at 59ad255) |
-| [docs/tripwire-architecture-review.md](docs/tripwire-architecture-review.md) | Advisory post-Layout-A architecture review (tripwire/action domain) |
 
 ## Runtime surface and fixed inputs
 
