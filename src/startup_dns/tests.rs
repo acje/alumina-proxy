@@ -859,7 +859,9 @@ fn cooperative_silent_peer_yields_pending_before_deadline() {
                 failures += 1;
                 break;
             }
-            other => panic!("a silent peer must conclude as a counted failure, got {other:?}"),
+            other @ TurnResult::Published => {
+                panic!("a silent peer must conclude as a counted failure, got {other:?}")
+            }
         }
     }
     assert_eq!(

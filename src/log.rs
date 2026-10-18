@@ -1221,14 +1221,13 @@ impl LogStore {
             if ops >= SINK_MAX_OPS || bytes_out >= SINK_MAX_BYTES {
                 return;
             }
-            let (index, off) = match self.cursor {
-                Some(cursor) => (self.front, cursor.off),
-                None => {
-                    if self.count == 0 {
-                        return;
-                    }
-                    (self.front, 0)
+            let (index, off) = if let Some(cursor) = self.cursor {
+                (self.front, cursor.off)
+            } else {
+                if self.count == 0 {
+                    return;
                 }
+                (self.front, 0)
             };
             let rec_len = self.slots[index].bytes;
             if off >= rec_len {

@@ -3204,7 +3204,9 @@ fn second_gateopening_drain_shares_the_single_visit_budget() {
             .expect("one gate-crossing upstream-writable token");
         let consumed = match serving.visit {
             VisitState::Live { ops, bytes, .. } => (ops, bytes),
-            _ => unreachable!("the gate-crossing visit stays live until end of batch"),
+            VisitState::Idle => {
+                unreachable!("the gate-crossing visit stays live until end of batch")
+            }
         };
         let fwd_after = serving.slots[index].fwd;
         let gate_open = serving.slots[index].gate.is_open();

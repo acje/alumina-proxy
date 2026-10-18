@@ -307,16 +307,13 @@ impl<'a> Lines<'a> {
             return None;
         }
         let rest = &self.buf[self.next..];
-        match rest.windows(2).position(|w| w == b"\r\n") {
-            Some(crlf) => {
-                let line = &rest[..crlf];
-                self.next += crlf + 2;
-                Some(line)
-            }
-            None => {
-                self.next = self.buf.len() + 1;
-                Some(rest)
-            }
+        if let Some(crlf) = rest.windows(2).position(|w| w == b"\r\n") {
+            let line = &rest[..crlf];
+            self.next += crlf + 2;
+            Some(line)
+        } else {
+            self.next = self.buf.len() + 1;
+            Some(rest)
         }
     }
 }

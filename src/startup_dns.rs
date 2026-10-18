@@ -1281,30 +1281,27 @@ impl StartupDns {
                 dns::parse_response(&mut self.workspace, fqdn, ex.family, ex.tid, message);
             self.msglen = None;
             self.filled = 0;
-            match outcome {
-                Ok(outcome) => {
-                    self.last_published = Some(classify_published(&outcome));
-                    let name_index = cache
-                        .name_index(ex.ordinal)
-                        .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
-                    let generation = cache.entry(name_index, ex.family)?.generation();
-                    let receipt = self.now_u64();
-                    dns::apply_outcome(
-                        cache,
-                        schedules,
-                        ex.ordinal,
-                        generation,
-                        receipt,
-                        self.now_u64(),
-                        outcome,
-                    )?;
-                    return Ok(RecvStep::Published);
-                }
-                Err(_) => {
-                    self.close_connection()?;
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
-                    return Ok(RecvStep::Failed);
-                }
+            if let Ok(outcome) = outcome {
+                self.last_published = Some(classify_published(&outcome));
+                let name_index = cache
+                    .name_index(ex.ordinal)
+                    .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
+                let generation = cache.entry(name_index, ex.family)?.generation();
+                let receipt = self.now_u64();
+                dns::apply_outcome(
+                    cache,
+                    schedules,
+                    ex.ordinal,
+                    generation,
+                    receipt,
+                    self.now_u64(),
+                    outcome,
+                )?;
+                return Ok(RecvStep::Published);
+            } else {
+                self.close_connection()?;
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
+                return Ok(RecvStep::Failed);
             }
         }
         if Instant::now() >= ex.deadline {
