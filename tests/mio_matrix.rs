@@ -98,16 +98,19 @@ fn kernel_fd_close_is_not_heap_dealloc() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential epoll register/reregister/deregister and poll matrix stays monolithically alloc-phase-guarded"
+)]
 fn linux_epoll_operation_matrix() {
-    let (_, positive) = alloc::run_phase(Phase::Serving, || {
+    let ((), positive) = alloc::run_phase(Phase::Serving, || {
         let block = Box::new([0u8; 128]);
         black_box(&block);
         drop(block);
     });
     assert!(
         positive.allocs > 0 && positive.deallocs > 0,
-        "positive allocator control must precede measured ops: {:?}",
-        positive
+        "positive allocator control must precede measured ops: {positive:?}",
     );
 
     let mut poll = Poll::new().expect("poll");
@@ -115,7 +118,7 @@ fn linux_epoll_operation_matrix() {
     let (listener, mut peer, mut server) = bind_accept_pair();
     let (listener2, peer2, mut server2) = bind_accept_pair();
 
-    let (_, serving) =
+    let ((), serving) =
         alloc::run_phase(Phase::Serving, || {
             poll.registry()
                 .register(&mut server, Token(2), Interest::WRITABLE)
@@ -227,8 +230,7 @@ fn linux_epoll_operation_matrix() {
 
     assert!(
         serving.all_zero(),
-        "pinned mio serving ops must be allocation-free: {:?}",
-        serving
+        "pinned mio serving ops must be allocation-free: {serving:?}",
     );
 
     let ((), shutdown) = alloc::run_phase(Phase::Shutdown, || {
@@ -239,8 +241,7 @@ fn linux_epoll_operation_matrix() {
     });
     assert!(
         shutdown.all_zero(),
-        "shutdown fd drops must free no Rust heap: {:?}",
-        shutdown
+        "shutdown fd drops must free no Rust heap: {shutdown:?}",
     );
 
     std::mem::forget(poll);
@@ -248,6 +249,10 @@ fn linux_epoll_operation_matrix() {
 }
 
 #[cfg(target_os = "linux")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "outbound connect/send-buffer saturation/drain/refused matrix kept as one alloc-phase-guarded sequence"
+)]
 fn exercise_outbound_connect_matrix(
     poll: &mut Poll,
     events: &mut Events,
@@ -452,8 +457,7 @@ fn linux_outbound_connect_matrix_startupdns() {
     });
     assert!(
         startup.all_zero(),
-        "StartupDns outbound mio ops must be allocation-free: {:?}",
-        startup
+        "StartupDns outbound mio ops must be allocation-free: {startup:?}",
     );
     std::mem::forget(poll);
     std::mem::forget(events);
@@ -470,8 +474,7 @@ fn linux_outbound_connect_matrix_backgroundrefresh() {
     });
     assert!(
         refresh.all_zero(),
-        "BackgroundRefresh outbound mio ops must be allocation-free: {:?}",
-        refresh
+        "BackgroundRefresh outbound mio ops must be allocation-free: {refresh:?}",
     );
     std::mem::forget(poll);
     std::mem::forget(events);
