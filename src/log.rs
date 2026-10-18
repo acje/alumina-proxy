@@ -510,13 +510,27 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     }
     for index in 0..AnyIllegalCause::KIND_COUNT {
         let value = monitor.facts_any_illegal_by_index(index);
-        if value > 0 && !push_indexed_u64(&mut w, b"c", index as u32, u64::from(value)) {
+        if value > 0
+            && !push_indexed_u64(
+                &mut w,
+                b"c",
+                u32::try_from(index).expect("cause index fits u32"),
+                u64::from(value),
+            )
+        {
             return None;
         }
     }
     for index in 0..UnknownReason::COUNT {
         let value = monitor.facts_unknown_by_index(index);
-        if value > 0 && !push_indexed_u64(&mut w, b"unk", index as u32, u64::from(value)) {
+        if value > 0
+            && !push_indexed_u64(
+                &mut w,
+                b"unk",
+                u32::try_from(index).expect("unknown cause index fits u32"),
+                u64::from(value),
+            )
+        {
             return None;
         }
     }
@@ -528,19 +542,47 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         let blocks = monitor.actions_domain_block(ordinal);
         let flares = monitor.actions_flare(ordinal);
         let refusals = monitor.refusals_blocked_domain(ordinal);
-        if facts > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"f", u64::from(facts)) {
-            return None;
-        }
-        if blocks > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"b", u64::from(blocks))
+        if facts > 0
+            && !push_indexed_key_u64(
+                &mut w,
+                b"d",
+                u32::try_from(index).expect("allowlist ordinal fits u32"),
+                b"f",
+                u64::from(facts),
+            )
         {
             return None;
         }
-        if flares > 0 && !push_indexed_key_u64(&mut w, b"d", index as u32, b"l", u64::from(flares))
+        if blocks > 0
+            && !push_indexed_key_u64(
+                &mut w,
+                b"d",
+                u32::try_from(index).expect("allowlist ordinal fits u32"),
+                b"b",
+                u64::from(blocks),
+            )
+        {
+            return None;
+        }
+        if flares > 0
+            && !push_indexed_key_u64(
+                &mut w,
+                b"d",
+                u32::try_from(index).expect("allowlist ordinal fits u32"),
+                b"l",
+                u64::from(flares),
+            )
         {
             return None;
         }
         if refusals > 0
-            && !push_indexed_key_u64(&mut w, b"d", index as u32, b"r", u64::from(refusals))
+            && !push_indexed_key_u64(
+                &mut w,
+                b"d",
+                u32::try_from(index).expect("allowlist ordinal fits u32"),
+                b"r",
+                u64::from(refusals),
+            )
         {
             return None;
         }
@@ -549,19 +591,39 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         let Some(cap) = monitor.capture_detail(i) else {
             break;
         };
-        if !push_indexed_key_u64(&mut w, b"x", i as u32, b"s", cap.slot as u64) {
+        if !push_indexed_key_u64(
+            &mut w,
+            b"x",
+            u32::try_from(i).expect("capture detail index fits u32"),
+            b"s",
+            cap.slot as u64,
+        ) {
             return None;
         }
-        if !push_indexed_key_u64(&mut w, b"x", i as u32, b"g", cap.generation) {
+        if !push_indexed_key_u64(
+            &mut w,
+            b"x",
+            u32::try_from(i).expect("capture detail index fits u32"),
+            b"g",
+            cap.generation,
+        ) {
             return None;
         }
-        if !push_indexed_token_prefix(&mut w, b"x", i as u32, b"t")
-            || !push_fact_token(&mut w, &cap.detail.fact)
+        if !push_indexed_token_prefix(
+            &mut w,
+            b"x",
+            u32::try_from(i).expect("capture detail index fits u32"),
+            b"t",
+        ) || !push_fact_token(&mut w, &cap.detail.fact)
         {
             return None;
         }
-        if !push_indexed_token_prefix(&mut w, b"x", i as u32, b"a")
-            || !push_effect_token(&mut w, &cap.detail.effect)
+        if !push_indexed_token_prefix(
+            &mut w,
+            b"x",
+            u32::try_from(i).expect("capture detail index fits u32"),
+            b"a",
+        ) || !push_effect_token(&mut w, &cap.detail.effect)
         {
             return None;
         }
@@ -1451,7 +1513,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, n)| StartupUnresolved {
-                ordinal: i as u32,
+                ordinal: u32::try_from(i).expect("allowlist ordinal fits u32"),
                 name: n,
                 outcome: NameOutcome::Failed(FailureReason::Timeout),
             })

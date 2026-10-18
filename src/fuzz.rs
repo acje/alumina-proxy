@@ -181,7 +181,7 @@ fn drive(target: ParserTarget, input: &[u8]) -> DriveOutcome {
             let mut wire = [0u8; DNS_MSG_LIMIT];
             wire[..take].copy_from_slice(&input[..take]);
             wire[0] = (DNS_TID >> 8) as u8;
-            wire[1] = DNS_TID as u8;
+            wire[1] = u8::try_from(DNS_TID & 0xff).expect("dns tid low byte");
             match parse_response(&mut ws, &dns_context(), Family::A, DNS_TID, &wire[..take]) {
                 Ok(_) => DriveOutcome::Complete,
                 Err(_) => DriveOutcome::Rejected,
@@ -342,7 +342,8 @@ pub fn fuzz_target(target: ParserTarget, seed: Seed, iterations: u64, max_len: u
         run.fold(false, drive_unwind(target, input), None);
     }
     for _ in 0..iterations {
-        let len = 1 + (rng.next_u64() as usize) % bound;
+        let len = 1 + usize::try_from(rng.next_u64() % (bound as u64))
+            .expect("bounded fuzz length fits usize");
         let input = rng.bytes(len);
         let hash = fnv1a64(input.iter().copied());
         run.fold(true, drive_unwind(target, &input), Some(hash));
@@ -430,7 +431,7 @@ impl DeterministicGen {
 
     /// The next `len` deterministic bytes derived from this generator's stream.
     pub fn bytes(&mut self, len: usize) -> Vec<u8> {
-        (0..len).map(|_| (self.next_u64() >> 24) as u8).collect()
+        (0..len).map(|_| self.next_u64().to_be_bytes()[4]).collect()
     }
 }
 

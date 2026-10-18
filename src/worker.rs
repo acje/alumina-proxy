@@ -1623,7 +1623,10 @@ mod tests {
             counts.all_zero(),
             "serving decision path allocated: {counts:?}"
         );
-        assert_eq!(outcome, (MAX_UPSTREAM_ATTEMPTS + 1) as u8);
+        assert_eq!(
+            outcome,
+            u8::try_from(MAX_UPSTREAM_ATTEMPTS + 1).expect("upstream attempt boundary fits u8")
+        );
         let (select, select_counts) = run_phase(Phase::Serving, || {
             select_peer(&cache, n, clock.cache_secs(now), AttemptCounts::new(), None).unwrap()
         });

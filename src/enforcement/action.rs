@@ -75,12 +75,18 @@ pub struct DomainOrdinal(u8);
 impl DomainOrdinal {
     fn mint(index: usize, count: usize) -> Option<DomainOrdinal> {
         if index < count && count <= ALLOWLIST_MAX {
-            Some(DomainOrdinal(index as u8))
+            Some(DomainOrdinal(
+                u8::try_from(index).expect("ordinal bounded by ALLOWLIST_MAX"),
+            ))
         } else {
             None
         }
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "index below ALLOWLIST_MAX fits u8"
+    )]
     pub(crate) const fn from_index(index: usize) -> Option<DomainOrdinal> {
         if index < ALLOWLIST_MAX {
             Some(DomainOrdinal(index as u8))

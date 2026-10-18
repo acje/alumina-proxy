@@ -181,7 +181,8 @@ impl StagedPositive {
             family,
             generation,
             bindings: slots,
-            binding_len: bindings.len() as u8,
+            binding_len: u8::try_from(bindings.len())
+                .expect("binding count bounded by MAX_ADDRESSES"),
             receipt,
             ttl,
         })
@@ -342,7 +343,8 @@ impl Cache {
                 freshness_deadline: Some(freshness),
                 retirement_deadline: Some(retirement),
                 bindings: eligible,
-                binding_len: eligible_len as u8,
+                binding_len: u8::try_from(eligible_len)
+                    .expect("eligible count bounded by MAX_ADDRESSES"),
             }
         };
         *entry = new_entry;
@@ -1154,7 +1156,9 @@ mod tests {
                     let entry = read(&cache, n, f);
                     sink = sink
                         .wrapping_add(u128::from(
-                            entry.state(5000 + u64::from(i as u8)) == EntryState::Fresh,
+                            entry.state(
+                                5000 + u64::from(u8::try_from(i).expect("name ordinal fits u8")),
+                            ) == EntryState::Fresh,
                         ))
                         .wrapping_add(u128::from(entry.generation().0))
                         .wrapping_add(entry.bindings().len() as u128);

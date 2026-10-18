@@ -18,6 +18,7 @@ uninlined_format_args = "warn"
 must_use_candidate = "warn"
 cast_lossless = "warn"
 cast_sign_loss = "warn"
+cast_possible_truncation = "warn"
 
 [lib]
 name = "alumina"

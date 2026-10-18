@@ -720,7 +720,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             m.capture_drops(),
-            overflow as u32,
+            u32::try_from(overflow).expect("test overflow counter fits u32"),
             "every capture past the window is honest counted detail loss"
         );
         assert_eq!(

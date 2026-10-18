@@ -11,6 +11,7 @@ pub const REFRESH_MAX: u64 = 300;
 /// a validated positive answer with cacheable bindings resets the type.
 pub const BACKOFF_STAGES: [u64; 6] = [1, 2, 4, 8, 16, 30];
 
+#[expect(clippy::cast_possible_truncation, reason = "six backoff stages fit u8")]
 const LAST_BACKOFF_STAGE: u8 = (BACKOFF_STAGES.len() - 1) as u8;
 
 /// The SOA TTL and MINIMUM of a validated negative answer, used to schedule
@@ -481,7 +482,8 @@ impl Schedules {
             let slot = self.slot_mut(name, family);
             slot.pending = true;
             slot.not_before = not_before;
-            self.next_scan = ((linear + 1) % total) as u8;
+            self.next_scan =
+                u8::try_from((linear + 1) % total).expect("scan index bounded by slot count");
             return Ok(Some(DueToken { name, family }));
         }
         Ok(None)
