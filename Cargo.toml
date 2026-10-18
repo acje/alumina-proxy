@@ -335,6 +335,24 @@ infinite_iter = "warn"
 # preserving). No runtime/alloc/spec change; the enabling attribute is
 # compile-time.
 while_immutable_condition = "warn"
+# SM-26: enable the correctness/boolean-domain lint — `redundant_comparisons`.
+# Its firing surface is an ineffective double comparison of the same operand
+# against two constants where one bound strictly dominates the other
+# (`x < a && x < b` with a >= b, `x > a && x > b` with a <= b, and the
+# `>=`/`<=` disjunction analogues) — a dead redundant bound that hides the
+# real logic and reads as a possible bound switch. A clippy 1.99.0 positive
+# control (`-F clippy::redundant_comparisons`) on a planted `x < 10 && x < 5`
+# probe fires "left-hand side of `&&` operator has no effect" (exit 101 —
+# proving the lint is armed; the gate fails where a site exists) plus an
+# in-tree forced-lint run (`-F clippy::redundant_comparisons` on both feature
+# matrices) found zero lint-proven sites on the pinned toolchain, so the
+# lint guards future regressions. The idiomatic fix removes the redundant
+# bound (behavior-preserving: the kept bound already implies the removed one
+# — `x < 10 && x < 5` becomes `x < 5`); a genuinely intentional layered
+# clamp carries a tight per-site `#[expect(clippy::redundant_comparisons,
+# reason = "...")]`. No runtime/alloc/spec change; the enabling attribute is
+# compile-time.
+redundant_comparisons = "warn"
 
 [lib]
 name = "alumina"
