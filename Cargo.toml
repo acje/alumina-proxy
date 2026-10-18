@@ -105,6 +105,7 @@ unconditional_recursion = "warn"
 drop_non_drop = "warn"
 forget_non_drop = "warn"
 infallible_try_from = "warn"
+possible_missing_else = "warn"
 
 [lib]
 name = "alumina"
