@@ -279,7 +279,11 @@ fn exercise_outbound_connect_matrix(
         "completed outbound connect carries no pending error"
     );
     let client_addr = client.local_addr().expect("client local addr");
-    assert_eq!(client.peer_addr().expect("client peer_addr"), server_addr);
+    assert_eq!(
+        client.peer_addr().expect("client peer_addr"),
+        server_addr,
+        "connecting client's peer is the acceptor's bound address"
+    );
 
     let mut server = accept_ready(&listener);
     assert_eq!(
