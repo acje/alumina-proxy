@@ -156,7 +156,10 @@ const SIGNAL_LOCAL: usize = DNS_LOCAL + 1;
 /// and `SIGNAL_LOCAL`, both below `LOCAL_MASK`.
 const LOCAL_MASK: usize = 0x7ff;
 const GEN_SHIFT: u32 = 11;
-const _: () = assert!(SIGNAL_LOCAL <= LOCAL_MASK);
+const _: () = assert!(
+    SIGNAL_LOCAL <= LOCAL_MASK,
+    "the reserved signal source must fit the local-id mask"
+);
 
 /// The owner's shutdown phase. `Serving` is ordinary operation; once the
 /// first SIGTERM is observed the owner stops admission, closes pending
@@ -2081,7 +2084,10 @@ impl Serving {
         let ws = &mut self.slots[index];
         if ws.buf_len + bytes.len() > HOLD_CAP {
             ws.compact();
-            debug_assert!(ws.buf_len + bytes.len() <= HOLD_CAP);
+            debug_assert!(
+                ws.buf_len + bytes.len() <= HOLD_CAP,
+                "compaction must free enough room for the incoming client bytes"
+            );
         }
         ws.buf[ws.buf_len..ws.buf_len + bytes.len()].copy_from_slice(bytes);
         ws.buf_len += bytes.len();
