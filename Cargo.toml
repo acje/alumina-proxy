@@ -130,6 +130,7 @@ filter_map_next = "warn"
 manual_is_power_of_two = "warn"
 mut_mut = "warn"
 naive_bytecount = "warn"
+option_as_ref_cloned = "warn"
 
 [lib]
 name = "alumina"
