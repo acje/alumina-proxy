@@ -146,6 +146,19 @@ assign_op_pattern = "warn"
 # Sites live in gate/policy checks (gate.rs / eligibility.rs / enforcement)
 # complementing the enabled `nonminimal_bool`. No runtime/alloc/spec change.
 bool_comparison = "warn"
+# SM-12: enable the clarity/correctness lint — `len_zero`. Its firing
+# surface is a length-vs-zero comparison (`x.len() == 0`, `x.len() != 0`,
+# `x.len() > 0`, `x.len() < 1`) on a type with `is_empty()` available; the
+# idiomatic rewrites are `.is_empty()` / `!.is_empty()`, complementing the
+# already-enabled `assert_is_empty`. A clippy 1.99.0 positive control
+# (`-F clippy::len_zero`) on a `Vec`/slice probe confirmed the lint fires
+# on `== 0`, `!= 0` and `> 0`; the only `.len()`-to-zero sites in
+# `src/` + `tests/` are `LogStore` predicates — a fixed-slot queue type
+# with `len()` but no `is_empty()` (adding one would be a runtime-surface
+# change), so they are outside the lint's firing surface. Zero
+# lint-proven sites on the pinned toolchain: the lint guards future
+# regressions. No runtime/alloc/spec change; the attribute is compile-time.
+len_zero = "warn"
 
 [lib]
 name = "alumina"
