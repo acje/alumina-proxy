@@ -12,13 +12,26 @@ use alumina::serve::ServeStorage;
 const BODY_403: &str = "403 Forbidden";
 
 fn main() {
+    // SAFETY: `nix_pipe` (below) returns a freshly created pipe's read/write
+    // ends written through a stack `[i32; 2]` after a successful `pipe(2)`, or
+    // `None`; the `expect` asserts success, so `rd`/`wr` are valid, open pipe
+    // fds owned by this single-threaded test until the process exits.
     let (rd, wr) = unsafe { nix_pipe().expect("pipe") };
+    // SAFETY: `wr` is a valid, open pipe fd created just above, and `dup2`
+    // atomically redirects this process's stdout (fd 1) onto it. This
+    // single-threaded harness does not use fd 1 between this call and the
+    // service loop, and the result is asserted to be `1`.
     let dup = unsafe { libc::dup2(wr, 1) };
     assert_eq!(
         dup, 1,
         "stdout redirected onto the never-drained stall pipe"
     );
     #[cfg(target_os = "linux")]
+    // SAFETY: `wr` is still the valid, open pipe write end created by
+    // `nix_pipe`; `fcntl(F_SETPIPE_SZ, 4096)` takes only an integer size
+    // argument on Linux (dereferences no pointers), and its `-1` failure
+    // return is intentionally unchecked — pipe-size shrink is best-effort and
+    // the stall assertion below does not depend on it.
     unsafe {
         libc::fcntl(wr, libc::F_SETPIPE_SZ, 4096);
     }
@@ -92,7 +105,16 @@ fn main() {
     );
 }
 
+// SAFETY: wraps `pipe(2)` for this test harness: on success both returned fds
+// are valid, open pipe ends owned exclusively by the caller (no aliasing and
+// no concurrent close before the harness exits them); on failure `None` is
+// returned and no fds are consumed. The helper dereferences no memory other
+// than the caller's stack `fds` array, written by `pipe(2)` only on success.
 unsafe fn nix_pipe() -> Option<(libc::c_int, libc::c_int)> {
     let mut fds = [0i32; 2];
+    // SAFETY: `fds.as_mut_ptr()` points to a writable `[i32; 2]` that lives
+    // for the whole call; `pipe(2)` writes exactly two ints on success and
+    // touches nothing else, and failure (`-1`, `errno`) is handled by
+    // returning `None` rather than reading `fds`.
     (unsafe { libc::pipe(fds.as_mut_ptr()) } == 0).then(|| (fds[0], fds[1]))
 }

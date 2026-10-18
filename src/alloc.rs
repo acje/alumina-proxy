@@ -117,19 +117,56 @@ pub fn active_phase() -> Option<Phase> {
 
 pub struct Counting;
 
+// SAFETY: `Counting` is a zero-sized marker allocator — it holds no pointers,
+// no layout state, and no interior mutable state of its own. Every operation
+// forwards to the process `System` global allocator (which upholds the
+// `GlobalAlloc` contract), so the trait obligations — `alloc` returns a slot
+// aligned and sized for `layout` or dangling/zero, and `dealloc`/`realloc`
+// receive exactly a pointer previously returned by this allocator with its
+// matching layout — are discharged by `System`, never by this type. Under
+// `alloc-witness` this is installed as a `#[global_allocator]`; being
+// zero-sized it is automatically `Sync`, so there is no shared mutable state
+// to race.
 unsafe impl GlobalAlloc for Counting {
+    // SAFETY: `layout` is forwarded unchanged to `System::alloc`, which is
+    // sound for any caller-supplied `Layout` under the `GlobalAlloc` contract;
+    // the returned pointer (or dangling/zero on OOM) is exactly what `System`
+    // guarantees, and `measure` touches only thread-local counters, never the
+    // returned pointer.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         measure(Event::Alloc);
+        // SAFETY: `System::alloc` requires only a `Layout`; forwarding the
+        // caller's `layout` as-is introduces no assumption beyond the trait
+        // contract, so this call is sound.
         unsafe { System.alloc(layout) }
     }
 
+    // SAFETY: the caller (global-allocator machinery, or test code honouring
+    // the trait contract) passes a `ptr` previously returned by this
+    // allocator's `alloc`/`realloc` with the same `layout`. Because every
+    // pointer this allocator hands out came from `System`, forwarding the
+    // `(ptr, layout)` pair back to `System::dealloc` is sound; `measure`
+    // touches only thread-local counters, never `ptr`.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         measure(Event::Dealloc);
+        // SAFETY: `System::dealloc` requires a `(ptr, layout)` pair satisfying
+        // the `GlobalAlloc` contract; the caller supplies exactly that (a
+        // pointer from a prior `System`-backed alloc with its original
+        // layout), so the transitive precondition holds.
         unsafe { System.dealloc(ptr, layout) }
     }
 
+    // SAFETY: `ptr`/`layout` are the `GlobalAlloc::realloc` inputs — a
+    // previously returned pointer with its original layout, or dangling (in
+    // which case `realloc` behaves as `alloc`) — and `new_size` is an arbitrary
+    // caller-chosen size; forwarding them to `System::realloc` discharges the
+    // contract, and `measure` touches only thread-local counters, never `ptr`.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         measure(Event::Realloc);
+        // SAFETY: `System::realloc` implements the `GlobalAlloc` realloc
+        // contract (shrink, grow, or move the block as needed) for the
+        // `(ptr, layout, new_size)` triple supplied by the caller, so this
+        // forwarding call is sound under those same preconditions.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }

@@ -1348,10 +1348,20 @@ const fn note_usage(wm: &mut Watermark, used: usize, cap: usize) -> Option<Edge>
 }
 
 fn set_fd_nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fcntl(F_GETFL)` reads only the descriptor status flags of a
+    // valid open fd and dereferences no pointers. The sole production caller
+    // (`prepare_stdout`) invokes this once post-boot on fd 1 — the binary's
+    // own stdout — and tests call it on a caller-owned pipe fd they keep
+    // open; no other thread closes the fd concurrently with this call.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: same valid-open-fd invariant as the `F_GETFL` call above (the
+    // `flags < 0` check confirms the fd is open and its flags were just read).
+    // On this platform `fcntl(F_SETFL, flags | O_NONBLOCK)` takes only scalar
+    // arguments and dereferences no pointers, so passing the preserved flags
+    // with `O_NONBLOCK` added is sound.
     let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -1360,6 +1370,13 @@ fn set_fd_nonblocking(fd: RawFd) -> io::Result<()> {
 }
 
 fn write_bytes(fd: RawFd, bytes: &[u8]) -> io::Result<usize> {
+    // SAFETY: `bytes` is a live `&[u8]` borrow, so `bytes.as_ptr().cast()` is
+    // a valid readable region of exactly `bytes.len()` bytes for the duration
+    // of this call, and `libc::write` reads at most `len` bytes without
+    // retaining the pointer. `fd` is the sink descriptor (stdout, or a
+    // caller-owned pipe/file fd kept open for the `LogStore` lifetime) with no
+    // concurrent close on another thread; the `-1` return is checked and
+    // mapped to `last_os_error`.
     let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
     if n < 0 {
         Err(io::Error::last_os_error())

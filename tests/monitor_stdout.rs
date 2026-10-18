@@ -18,12 +18,24 @@ const MAX_MONITOR_RECORDS: usize = 32;
     reason = "long stdout-stall monitor test driver"
 )]
 fn main() {
+    // SAFETY: `nix_pipe` (below) returns a freshly created pipe's read/write
+    // ends written through a stack `[i32; 2]` after a successful `pipe(2)`, or
+    // `None`; the `expect` asserts success, so `rd`/`wr` are valid, open pipe
+    // fds owned by this single-threaded test until the process exits.
     let (rd, wr) = unsafe { nix_pipe().expect("pipe") };
+    // SAFETY: `rd` is the valid, open pipe read end from `nix_pipe`.
+    // `fcntl(F_GETFL)` dereferences no pointers and returns the descriptor
+    // flags (asserted `>= 0`); `fcntl(F_SETFL, flags | O_NONBLOCK)` then sets
+    // a single bit on that same verified-open fd using scalar arguments only.
     unsafe {
         let flags = libc::fcntl(rd, libc::F_GETFL);
         assert!(flags >= 0, "read end flags");
         assert_eq!(libc::fcntl(rd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
     }
+    // SAFETY: `wr` is a valid, open pipe fd created just above, and `dup2`
+    // atomically redirects this process's stdout (fd 1) onto it. This
+    // single-threaded harness does not use fd 1 between this call and the
+    // service loop, and the result is asserted to be `1`.
     let dup = unsafe { libc::dup2(wr, 1) };
     assert_eq!(dup, 1, "stdout redirected onto the witness pipe");
     let _ = wr;
@@ -132,6 +144,11 @@ fn main() {
 
 fn drain_stdout(rd: &mut libc::c_int, scratch: &mut [u8], captured: &mut Vec<u8>) {
     loop {
+        // SAFETY: `*rd` is the valid, open pipe read end redirected to stdout
+        // and never closed by another thread; `scratch.as_mut_ptr().cast()` is
+        // a writable region of exactly `scratch.len()` bytes for the duration
+        // of the call; `libc::read` writes at most `len` bytes, and a `-1`
+        // return ends the drain loop before the buffer contents are read.
         let n = unsafe { libc::read(*rd, scratch.as_mut_ptr().cast(), scratch.len()) };
         if n > 0 {
             captured.extend_from_slice(
@@ -153,7 +170,16 @@ fn field_u64(line: &str, key: &str) -> u64 {
     rest[..end].parse().expect("numeric field")
 }
 
+// SAFETY: wraps `pipe(2)` for this test harness: on success both returned fds
+// are valid, open pipe ends owned exclusively by the caller (no aliasing and
+// no concurrent close before the harness exits them); on failure `None` is
+// returned and no fds are consumed. The helper dereferences no memory other
+// than the caller's stack `fds` array, written by `pipe(2)` only on success.
 unsafe fn nix_pipe() -> Option<(libc::c_int, libc::c_int)> {
     let mut fds = [0i32; 2];
+    // SAFETY: `fds.as_mut_ptr()` points to a writable `[i32; 2]` that lives
+    // for the whole call; `pipe(2)` writes exactly two ints on success and
+    // touches nothing else, and failure (`-1`, `errno`) is handled by
+    // returning `None` rather than reading `fds`.
     (unsafe { libc::pipe(fds.as_mut_ptr()) } == 0).then(|| (fds[0], fds[1]))
 }

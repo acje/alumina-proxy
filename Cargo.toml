@@ -43,6 +43,10 @@ cast_possible_truncation = "warn"
 missing_errors_doc = "warn"
 missing_panics_doc = "warn"
 doc_markdown = "warn"
+# undocumented_unsafe_blocks: every `unsafe` node in the binary's unsafe
+# surface (src/alloc.rs + src/log.rs) carries a `// SAFETY:` contract; no
+# suppression attributes.
+undocumented_unsafe_blocks = "warn"
 too_many_lines = "warn"
 large_stack_arrays = "warn"
 manual_let_else = "warn"
