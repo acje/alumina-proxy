@@ -30,7 +30,11 @@ fn main() {
     unsafe {
         let flags = libc::fcntl(rd, libc::F_GETFL);
         assert!(flags >= 0, "read end flags");
-        assert_eq!(libc::fcntl(rd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
+        assert_eq!(
+            libc::fcntl(rd, libc::F_SETFL, flags | libc::O_NONBLOCK),
+            0,
+            "read end set non-blocking"
+        );
     }
     // SAFETY: `wr` is a valid, open pipe fd created just above, and `dup2`
     // atomically redirects this process's stdout (fd 1) onto it. This
