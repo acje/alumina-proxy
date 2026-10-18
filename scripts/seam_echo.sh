@@ -3,11 +3,15 @@
 # seam against the retained native binaries (AS-IS first) or proxyless, inside
 # the pinned harness container, foreground, supervised, disposable.
 #
-# Usage: seam_echo.sh <proxyless|as-is|to-be|head> <smoke|timed>
+# Usage: seam_echo.sh <proxyless|as-is|to-be|head> <smoke|timed> \
+#                     [e2micro1gbps|e2microrstorm150|e2microrstorm50]
 # Fixed workload contract (alumina-gjq4): 8 conns, 4096 B frame + 12 B header
 # counted separately, open-loop 100 decimal Mbps client payload, 5 s warmup /
-# 60 s measure (smoke overrides to 2 s / 0 s), setup/drain 5 s each. No extra
-# client args are forwarded (A2).
+# 60 s measure (smoke overrides to 2 s / 0 s), setup/drain 5 s each. An
+# optional 3rd positional workload selector (alumina-eryh) forwards the e2-micro
+# profile client flags (1gbps steady or 150/50 per-second connection storm) and
+# labels the receipt; empty = the legacy fixed contract with no extra client
+# args forwarded.
 #
 # Topology mirrors scripts/e2e_relay.sh and the reviewed bench supervisor:
 # native Linux via rootful podman flock-vm-root, --network none, loopback
@@ -40,10 +44,38 @@ ROOT="$(pwd)"
 MODE="${1:?usage: seam_echo.sh <proxyless|as-is|to-be|head> <smoke|timed>}"
 KIND="${2:?usage: seam_echo.sh <proxyless|as-is|to-be|head> <smoke|timed>}"
 shift 2
-if [ "$#" -gt 0 ]; then
-    echo "SEAM-BLOCKED: additional args unsupported (fixed workload contract)" >&2
+# Optional workload selector (3rd positional): empty = the legacy fixed 100 Mbps
+# contract (backward compatible); e2micro1gbps / e2microrstorm150 /
+# e2microrstorm50 select the e2-micro profiles (alumina-eryh) and forward the
+# matching client flags via WORKLOAD_ARGS. Reject everything else and reject a
+# second extra arg.
+WORKLOAD_LABEL="${1:-}"
+if [ "$#" -gt 1 ]; then
+    echo "SEAM-BLOCKED: at most one workload selector (e2micro1gbps|e2microrstorm150|e2microrstorm50)" >&2
     exit 2
 fi
+WORKLOAD_ARGS=""
+BENCH_WORKLOAD=""
+case "$WORKLOAD_LABEL" in
+    "")
+        # legacy fixed contract: no workload-specific flags forwarded
+        ;;
+    e2micro1gbps)
+        WORKLOAD_ARGS="--workload steady --conns 32 --target-mbps 1000 --outstanding-cap 2048"
+        BENCH_WORKLOAD="$WORKLOAD_LABEL"
+        ;;
+    e2microrstorm150)
+        WORKLOAD_ARGS="--workload storm --arrival-rate 150 --session-frames-min 4 --session-frames-max 16"
+        BENCH_WORKLOAD="$WORKLOAD_LABEL"
+        ;;
+    e2microrstorm50)
+        WORKLOAD_ARGS="--workload storm --arrival-rate 50 --session-frames-min 4 --session-frames-max 16"
+        BENCH_WORKLOAD="$WORKLOAD_LABEL"
+        ;;
+    *)
+        echo "SEAM-BLOCKED: workload must be e2micro1gbps, e2microrstorm150 or e2microrstorm50 (empty = fixed 100 Mbps contract)" >&2
+        exit 2 ;;
+esac
 case "$KIND" in smoke|timed) ;; *) echo "SEAM-BLOCKED: kind must be smoke or timed" >&2; exit 2 ;; esac
 
 CONN="${PODMAN_ROOT_CONNECTION:-flock-vm-root}"
@@ -67,7 +99,7 @@ case "$MODE" in
 esac
 OUTDIR="$ROOT/.ooda/benchmarks"
 TS="$(date +%Y%m%dT%H%M%SZ)"
-STAMP="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)-seam-$MODE-$KIND-$TS"
+STAMP="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)-seam-$MODE-${WORKLOAD_LABEL:+${WORKLOAD_LABEL}-}$KIND-$TS"
 
 command -v podman >/dev/null 2>&1 || { echo "SEAM-BLOCKED: podman required" >&2; exit 1; }
 podman --connection "$CONN" info >/dev/null 2>&1 || {
@@ -82,7 +114,7 @@ parent=$(podman --connection "$CONN" image inspect "$E2E_IMAGE_ID" --format '{{.
     echo "SEAM-BLOCKED: harness image parent mismatch (got $parent, want $BASE_ID)" >&2
     exit 1
 }
-echo "SEAM-HARNESS-IMAGE: $E2E_IMAGE (id $E2E_IMAGE_ID, conn $CONN, mode $MODE, kind $KIND)"
+echo "SEAM-HARNESS-IMAGE: $E2E_IMAGE (id $E2E_IMAGE_ID, conn $CONN, mode $MODE, kind $KIND, workload ${WORKLOAD_LABEL:-fixed100})"
 
 BENCH_SOURCE_HEAD="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 BENCH_DIRTY_COUNT="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
@@ -279,6 +311,7 @@ python3 /app/scripts/seam_echo.py --role client --mode "$CLIENT_MODE" \
     --conns 8 --target-mbps 100 \
     --seconds "$SECONDS" --warmup "$WARMUP" \
     --backend-pid "$SRV" $ALUARGS \
+    $WORKLOAD_ARGS \
     --json-out "$REPORT" --kind "$KIND" 2>/tmp/client.log || driver_rc=$?
 sed 's/^/  client> /' /tmp/client.log 2>/dev/null || true
 
@@ -356,6 +389,9 @@ podman --connection "$CONN" run --rm --name "$CN" --pull=never --timeout 300 \
     -e BENCH_RUST_TARGET="$BENCH_RUST_TARGET" \
     -e BENCH_BINARY_SHA256="$BENCH_BINARY_SHA256" \
     -e BENCH_IMAGE_ID="$E2E_IMAGE_ID" \
+    -e WORKLOAD_ARGS="$WORKLOAD_ARGS" \
+    -e WORKLOAD_LABEL="$WORKLOAD_LABEL" \
+    -e BENCH_WORKLOAD="$BENCH_WORKLOAD" \
     -e CANDIDATE_REL="$CANDIDATE_REL" \
     "$E2E_IMAGE_ID" sh -c "$stage
 $run" || rcc=$?
