@@ -1418,13 +1418,18 @@ class ClientRun:
 
 def _e2micro_model_note():
     return (" E2-MICRO MODEL (alumina-eryh): e2-micro equivalence is modeled by "
-            "WORKLOAD PARAMETERS (rate + connection churn) only; no container "
-            "cgroup CPU/memory cap is applied because the shared harness "
-            "container also runs the client, backend and DNS responder -- "
-            "capping it would starve the measurement generator and be mis-read "
-            "as proxy deficit. Harness host: 4 CPU / 14 GiB loopback VM. "
-            "e2-micro target: 2 shared vCPU / 1 GB. Measured proxy RSS ~204 MiB "
-            "is the relevant honest fit-to-1GB fact.")
+            "WORKLOAD PARAMETERS only. Current profiles: e2micro1gbps = steady, "
+            "32 persistent conns, 1000 Mbps open-loop client payload with a "
+            "2048-frame outstanding cap (smoke achieved ~999.9 Mbps); "
+            "e2microrstorm150 / e2microrstorm50 = 150 / 50 HTTP CONNECT+TLS1.3 "
+            "sessions per second, each a 4-16 frame bounded burst, live-concurrent "
+            "peak guarded at 300 (both far below the proxy's fixed 512-tunnel "
+            "pool). No container cgroup CPU/memory cap is applied because the "
+            "shared harness container also runs the client, backend and DNS "
+            "responder -- capping it would starve the measurement generator and "
+            "be mis-read as proxy deficit. Harness host: 4 CPU / 14 GiB loopback "
+            "VM. e2-micro target: 2 shared vCPU / 1 GB. Measured proxy RSS "
+            "~204 MiB is the relevant honest fit-to-1GB fact.")
 
 
 def e2micro_model_block():
@@ -1511,7 +1516,9 @@ class StormRun:
             math.ceil(args.arrival_rate * args.seconds))
         self.next_arrival = 0
         self.established = 0
-        self.deferred_slots = 0   # arrivals gated at finalize by the live-cap ceiling
+        self.started_arrivals = 0   # dial threads launched; arrivals never started
+                                    # because the live-cap ceiling was hit are
+                                    # accounted as deferred at report time
         self.setup_failures = {}
         self.sessions_completed = 0
         self.session_errors = 0
@@ -1595,10 +1602,11 @@ class StormRun:
                 return
             live = len(self.sessions) + self._live_dials
             if live >= self.args.peak_conns:
-                self.deferred_slots += 1
-                return          # cap is a scheduling ceiling, not a loss
+                return          # cap is a scheduling ceiling, not a loss; the
+                                # skipped arrival is counted as deferred at report
             sid = self.sid
             self.sid += 1
+            self.started_arrivals += 1
             self._live_dials += 1
             threading.Thread(target=self._storm_setup_worker,
                              args=(sid, due), daemon=True).start()
@@ -1636,7 +1644,6 @@ class StormRun:
             except (KeyError, ValueError, OSError):
                 self._session_fail(sess, "operational", "register failed", now)
                 self._session_done(sess)
-        self._track_peaks()
 
     def _track_peaks(self):
         n = len(self.sessions)
@@ -1784,6 +1791,7 @@ class StormRun:
             now = _mono()
             self._drain_ready(now)
             self._admit_arrivals(now)
+            self._track_peaks()     # peak high-water sampled over the window
             if not self._warmup_boundary and now >= self.warmup_end:
                 self.sampler.sample(boundary="start")
                 self._warmup_boundary = True
@@ -1852,7 +1860,7 @@ class StormRun:
             if sess.pending == "send":
                 mask = selectors.EVENT_WRITE if sess.want == "w" else selectors.EVENT_READ
             else:
-                mask = selectors.EVENT_READ
+                mask = selectors.EVENT_READ if sess.want == "r" else selectors.EVENT_WRITE
             try:
                 self.sel.modify(sess.tls, mask, sess)
             except (KeyError, ValueError, OSError):
@@ -1885,8 +1893,15 @@ class StormRun:
         attempted = self.established + sum(self.setup_failures.values())
         planned = self.planned_arrivals
         valid = not bool(self.failures)
-        # doomed arrivals: planned but neither established nor failed-or-deferred
-        unaccounted = max(0, planned - attempted - getattr(self, "deferred_slots", 0))
+        # accounting identity: established + deferred + failed + unaccounted
+        # ==== arrivals_planned. deferred = cap-blocked arrivals never started;
+        # unaccounted = started dials that never resolved. Both computed from
+        # counters, never from a per-tick estimate, so pool pressure cannot
+        # inflate deferred or deflate unaccounted.
+        started = self.started_arrivals
+        deferred = max(0, planned - started)
+        resolved = self.established + sum(self.setup_failures.values())
+        unaccounted = max(0, started - resolved)
         fulfilled = (planned > 0 and self.established == planned and
                      not self.session_errors and not self.failures)
         report = {
@@ -1918,7 +1933,7 @@ class StormRun:
                 "connections_established": self.established,
                 "arrivals_attempted": attempted,
                 "setup_failures": dict(sorted(self.setup_failures.items())),
-                "deferred_unstarted": getattr(self, "deferred_slots", 0),
+                "deferred_unstarted": deferred,
                 "unaccounted": unaccounted,
                 "sessions_completed": self.sessions_completed,
                 "session_errors": self.session_errors,
@@ -2943,6 +2958,59 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     check("w-storm-session-frame-bounds",
           sess.nframes == nframes and len(sess.to_send) == nframes * FRAME_SIZE,
           "nframes=%d sent_bytes=%d" % (sess.nframes, len(sess.to_send)))
+
+    # RETRO REGRESSION (review WS-B): a session in recv+want==w MUST get WRITE
+    # interest registered by _sync_interest so a TLS write-wait under recv
+    # cannot stall to session_errors/timeout. Mirrors the steady _interest
+    # recv/want-==-w branch; fails deterministically on the pre-fix code which
+    # always pinned recv to EVENT_READ.
+    pa, pb = socket.socketpair()
+    try:
+        srw = StormRun(sw)
+        rbase = _mono()
+        srw.origin = rbase
+        srw.warmup_end = rbase
+        srw.window_end = rbase + 2.0
+        srw.drain_end = srw.window_end + DRAIN_DEADLINE
+        sessw = _StormSession(0, pa, rbase, rbase, 4)
+        sessw.pending = "recv"
+        sessw.want = "w"
+        srw.sel.register(pa, selectors.EVENT_WRITE, sessw)
+        srw.sessions.append(sessw)
+        srw._sync_interest()
+        mw = srw.sel.get_key(pa).events
+        check("w-storm-recv-want-w-gets-write-interest",
+              bool(mw & selectors.EVENT_WRITE),
+              "events=%r" % mw)
+    finally:
+        pb.close()
+        try:
+            srw.sel.unregister(pa)
+        except (KeyError, ValueError):
+            pass
+        pa.close()
+    # accounting identity: established + deferred + failed + unaccounted ====
+    # arrivals_planned, where deferred = cap-blocked arrivals never started and
+    # unaccounted = started-but-never-resolved. 200 started / 100 cap-deferred;
+    # 150 established + 40 failed resolved, 10 dials still in flight.
+    sa = StormRun(sw)
+    ra = _mono()
+    sa.origin = ra
+    sa.warmup_end = ra
+    sa.window_end = ra + 2.0
+    sa.drain_end = sa.window_end + DRAIN_DEADLINE
+    sa.started_arrivals = 200
+    sa.established = 150
+    sa.setup_failures = {"connect-refused": 40}
+    sa_report = sa.report()
+    check("w-storm-accounting-identity",
+          sa_report["storm"]["deferred_unstarted"] == 100 and
+          sa_report["storm"]["unaccounted"] == 10,
+          "planned=%d est=%d deferred=%r unacc=%r failed=%r" % (
+              sa.planned_arrivals, sa.established,
+              sa_report["storm"]["deferred_unstarted"],
+              sa_report["storm"]["unaccounted"],
+              sa_report["storm"]["setup_failures"]))
 
     ok = all(c[1] for c in checks)
     for name, passed, detail in checks:
