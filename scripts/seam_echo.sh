@@ -3,7 +3,7 @@
 # seam against the retained native binaries (AS-IS first) or proxyless, inside
 # the pinned harness container, foreground, supervised, disposable.
 #
-# Usage: seam_echo.sh <proxyless|as-is|to-be> <smoke|timed>
+# Usage: seam_echo.sh <proxyless|as-is|to-be|head> <smoke|timed>
 # Fixed workload contract (alumina-gjq4): 8 conns, 4096 B frame + 12 B header
 # counted separately, open-loop 100 decimal Mbps client payload, 5 s warmup /
 # 60 s measure (smoke overrides to 2 s / 0 s), setup/drain 5 s each. No extra
@@ -23,6 +23,13 @@
 #   to-be:     client -> CONNECT via the retained TO-BE candidate binary
 #              (sha256 8a9f1f5b..., reused, never rebuilt) -> backend; the
 #              same config/topology/order as as-is, AS-IS listed first.
+#   head:      client -> CONNECT via a freshly built current-HEAD musl binary
+#              placed at .ooda/alumina-head/baseline/alumina-musl; its sha256
+#              is supplied in HEAD_CANDIDATE_SHA and verified by the same sha
+#              gate as as-is/to-be, so head fails closed (SEAM-BLOCKED) when
+#              HEAD_CANDIDATE_SHA is unset/empty or the binary does not match.
+#              There is no measured-by-default fallback: an unverified binary
+#              can never be measured.
 #
 # Session exit 0 -> client valid + all children reaped cleanly
 #              3 -> measurement invalid (honest, reported in JSON)
@@ -30,8 +37,8 @@
 set -eu
 
 ROOT="$(pwd)"
-MODE="${1:?usage: seam_echo.sh <proxyless|as-is|to-be> <smoke|timed>}"
-KIND="${2:?usage: seam_echo.sh <proxyless|as-is|to-be> <smoke|timed>}"
+MODE="${1:?usage: seam_echo.sh <proxyless|as-is|to-be|head> <smoke|timed>}"
+KIND="${2:?usage: seam_echo.sh <proxyless|as-is|to-be|head> <smoke|timed>}"
 shift 2
 if [ "$#" -gt 0 ]; then
     echo "SEAM-BLOCKED: additional args unsupported (fixed workload contract)" >&2
@@ -48,13 +55,15 @@ ASIS_REL="alumina-vdpi.2/baseline/alumina-musl"
 ASIS_SHA="170fae6c1dbfce1907bb2b2ec02599808c4d9404b243ccd24b8834490d3ab72f"
 TOBE_REL="alumina-vdpi/tobe/baseline/alumina-musl"
 TOBE_SHA="8a9f1f5b288abc1ec649e9a98302caa8e088d1f5e55c432950a59167d869dec8"
-# One case both rejects unknown modes and maps every legal mode to its retained
-# candidate (empty for proxyless). AS-IS is listed before TO-BE.
+# One case both rejects unknown modes and maps every legal mode to its
+# candidate (empty for proxyless). AS-IS is listed before TO-BE; head reads
+# its env-pinned path + sha and fails closed when HEAD_CANDIDATE_SHA is unset.
 case "$MODE" in
     as-is)     CANDIDATE_REL="$ASIS_REL"; CANDIDATE_SHA="$ASIS_SHA" ;;
     to-be)     CANDIDATE_REL="$TOBE_REL"; CANDIDATE_SHA="$TOBE_SHA" ;;
+    head)      CANDIDATE_REL="${HEAD_CANDIDATE_REL:-alumina-head/baseline/alumina-musl}"; CANDIDATE_SHA="${HEAD_CANDIDATE_SHA:-}" ;;
     proxyless) CANDIDATE_REL=""; CANDIDATE_SHA="" ;;
-    *) echo "SEAM-BLOCKED: mode must be proxyless, as-is or to-be" >&2; exit 2 ;;
+    *) echo "SEAM-BLOCKED: mode must be proxyless, as-is, to-be or head" >&2; exit 2 ;;
 esac
 OUTDIR="$ROOT/.ooda/benchmarks"
 TS="$(date +%Y%m%dT%H%M%SZ)"
