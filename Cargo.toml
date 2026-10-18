@@ -145,6 +145,7 @@ by_ref_peekable_peek = "warn"
 multi_assignments = "warn"
 redundant_allocation = "warn"
 declare_interior_mutable_const = "warn"
+missing_assert_message = "warn"
 
 [lib]
 name = "alumina"
