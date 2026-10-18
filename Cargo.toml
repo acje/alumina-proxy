@@ -405,6 +405,23 @@ precedence = "warn"
 # "...")]`. No runtime/alloc/spec change; the enabling attribute is
 # compile-time.
 range_minus_one = "warn"
+# SM-30: enable the correctness/readability lint —
+# `suspicious_assignment_formatting`. Its firing surface is an assignment whose
+# RHS-unary operator abuts the `=` with no space (`a =* b`, `a =! b`, `a =- b`),
+# which reads as a compound/relational assignment operator (`a *= b`, `a != b`,
+# `a -= b`) though it is a plain `=` assignment of a deref/not/neg —
+# a typo-prone mis-read in policy/gate/arithmetic logic. A clippy 1.99.0
+# positive control (`-F clippy::suspicious_assignment_formatting`) on a planted
+# `n =- b` probe fires "this looks like you are trying to use `.. -= ..`, but
+# you really are doing `.. = (- ..)`" (exit 101 on both feature matrices,
+# proving the lint is armed — the gate fails where a site exists) plus a
+# `=op`-abutting-operator scan of `src/` + `tests/` found zero
+# lint-proven sites on the pinned toolchain, so the lint guards future
+# regressions. A future site is fixed behavior-preserving by restoring explicit
+# spacing (`a = *b`, `a = !b`, `a = -b`); a genuinely intended compound
+# assignment is written as one (`a *= b`), never as a spacing disguise.
+# No runtime/alloc/spec change; the enabling attribute is compile-time.
+suspicious_assignment_formatting = "warn"
 
 [lib]
 name = "alumina"
