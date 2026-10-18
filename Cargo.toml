@@ -91,6 +91,12 @@ if_then_some_else_none = "warn"
 option_if_let_else = "warn"
 missing_const_for_fn = "warn"
 unused_io_amount = "warn"
+# SM-06: enable the liveness/correctness lint — `empty_loop`. Its firing
+# surface is a bare `loop {}` with an empty body in the serving/runtime path —
+# a busy-wait that stalls the single serving owner and burns CPU. The serving
+# loop is made to yield/progress explicitly; nonblocking mio semantics are
+# preserved with no blocking or allocation introduced.
+empty_loop = "warn"
 
 [lib]
 name = "alumina"
