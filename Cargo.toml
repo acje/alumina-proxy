@@ -106,6 +106,15 @@ empty_loop = "warn"
 # inside a body that is already a pure spin (nonblocking); never a blocking
 # wait, an allocation, or a control-flow/spec change.
 missing_spin_loop = "warn"
+# SM-08: enable the correctness/typo lint — `eq_op`. Its firing surface is a
+# self-comparison or self-operation (`a == a`, `a & a`, `a - a`, ...), which
+# is almost always a typo'd second operand. A clippy 1.99.0 positive control
+# (`-F clippy::eq_op`) on both feature matrices and a self-op scan of the
+# dispatch/eligibility/serving logic found zero sites on the pinned toolchain,
+# so the lint guards future regressions. Fixes are trivial idiomatic operand
+# corrections; genuinely intentional sites carry a tight per-site
+# `#[expect(clippy::eq_op, reason = "...")]`. No runtime/alloc/spec change.
+eq_op = "warn"
 
 [lib]
 name = "alumina"
