@@ -223,31 +223,46 @@ fn hello_wire(sni: &[u8], ech_only: bool) -> Vec<u8> {
         let list_len = 3 + sni.len();
         ext.extend_from_slice(&[0x00, 0x00]);
         let len = 2 + list_len;
-        ext.push((len >> 8) as u8);
-        ext.push((len & 0xff) as u8);
-        ext.push((list_len >> 8) as u8);
-        ext.push((list_len & 0xff) as u8);
+        ext.extend_from_slice(
+            &u16::try_from(len)
+                .expect("server name extension length fits u16")
+                .to_be_bytes(),
+        );
+        ext.extend_from_slice(
+            &u16::try_from(list_len)
+                .expect("server name list length fits u16")
+                .to_be_bytes(),
+        );
         ext.push(0x00);
-        ext.push((sni.len() >> 8) as u8);
-        ext.push((sni.len() & 0xff) as u8);
+        ext.extend_from_slice(
+            &u16::try_from(sni.len())
+                .expect("sni name length fits u16")
+                .to_be_bytes(),
+        );
         ext.extend_from_slice(sni);
     }
-    body.push((ext.len() >> 8) as u8);
-    body.push((ext.len() & 0xff) as u8);
+    body.extend_from_slice(
+        &u16::try_from(ext.len())
+            .expect("extensions length fits u16")
+            .to_be_bytes(),
+    );
     body.extend_from_slice(&ext);
 
-    let mut hs = vec![
-        0x01,
-        (body.len() >> 16) as u8,
-        (body.len() >> 8) as u8,
-        (body.len() & 0xff) as u8,
-    ];
+    let mut hs = vec![0x01];
+    hs.extend_from_slice(
+        &u32::try_from(body.len())
+            .expect("client hello body fits u32")
+            .to_be_bytes()[1..],
+    );
     hs.extend_from_slice(&body);
 
     let mut record = Vec::new();
     record.extend_from_slice(&[0x16, 0x03, 0x03]);
-    record.push((hs.len() >> 8) as u8);
-    record.push((hs.len() & 0xff) as u8);
+    record.extend_from_slice(
+        &u16::try_from(hs.len())
+            .expect("handshake length fits u16")
+            .to_be_bytes(),
+    );
     record.extend_from_slice(&hs);
     record
 }
@@ -260,22 +275,28 @@ fn hello_wire_no_sni() -> Vec<u8> {
     body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
     body.extend_from_slice(&[0x01, 0x00]);
     let ext = [0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04];
-    body.push((ext.len() >> 8) as u8);
-    body.push((ext.len() & 0xff) as u8);
+    body.extend_from_slice(
+        &u16::try_from(ext.len())
+            .expect("extensions length fits u16")
+            .to_be_bytes(),
+    );
     body.extend_from_slice(&ext);
 
-    let mut hs = vec![
-        0x01,
-        (body.len() >> 16) as u8,
-        (body.len() >> 8) as u8,
-        (body.len() & 0xff) as u8,
-    ];
+    let mut hs = vec![0x01];
+    hs.extend_from_slice(
+        &u32::try_from(body.len())
+            .expect("client hello body fits u32")
+            .to_be_bytes()[1..],
+    );
     hs.extend_from_slice(&body);
 
     let mut record = Vec::new();
     record.extend_from_slice(&[0x16, 0x03, 0x03]);
-    record.push((hs.len() >> 8) as u8);
-    record.push((hs.len() & 0xff) as u8);
+    record.extend_from_slice(
+        &u16::try_from(hs.len())
+            .expect("handshake length fits u16")
+            .to_be_bytes(),
+    );
     record.extend_from_slice(&hs);
     record
 }
@@ -667,7 +688,9 @@ fn stale_event_for_a_reused_slot_index_is_dropped() {
         assert_eq!(serving.storage().occupied(), 1);
         let current = serving.slots[0].slot_gen;
         let stale_gen = current.wrapping_sub(1);
-        let stale = Token(((stale_gen as usize) << GEN_SHIFT) | 1);
+        let stale = Token(
+            (usize::try_from(stale_gen).expect("slot generation fits usize") << GEN_SHIFT) | 1,
+        );
         serving
             .dispatch_readiness(
                 stale,
@@ -6361,12 +6384,14 @@ fn saturated_generation_tokens_fail_closed_without_panic() {
     let generation = 5u64;
     assert_eq!(
         client_token(generation, idx).0,
-        ((generation as usize) << GEN_SHIFT) | (idx + 1),
+        ((usize::try_from(generation).expect("test generation fits usize") << GEN_SHIFT)
+            | (idx + 1)),
         "ordinary in-range generations must round-trip exactly unchanged"
     );
     assert_eq!(
         upstream_token(generation, idx).0,
-        ((generation as usize) << GEN_SHIFT) | (UPSTREAM_BASE + idx),
+        ((usize::try_from(generation).expect("test generation fits usize") << GEN_SHIFT)
+            | (UPSTREAM_BASE + idx)),
         "ordinary in-range generations must round-trip exactly unchanged"
     );
 }

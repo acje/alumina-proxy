@@ -1074,7 +1074,7 @@ impl Serving {
                 continue;
             }
             if !acc.seen() {
-                acc.order = coalesced.seen as u32;
+                acc.order = u32::try_from(coalesced.seen).expect("coalesced order fits u32");
                 acc.slot_gen = event_gen;
                 acc.client_first = !upstream;
                 coalesced.seen += 1;
@@ -2794,6 +2794,10 @@ impl Serving {
 /// token's local id stays decodable while its generation matches no live slot
 /// — a stale drop, never a false live match and never a wrap into the local
 /// id range.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "token packing takes the generation's low bits on 32-bit targets"
+)]
 fn shifted_generation(generation: u64) -> usize {
     (generation as usize)
         .checked_shl(GEN_SHIFT)
@@ -2841,8 +2845,11 @@ fn write_all_bounded(stream: &mut TcpStream, body: &[u8]) {
 pub(crate) fn test_offset_pattern(len: usize, seed: u32) -> Vec<u8> {
     (0..len)
         .map(|i| {
-            let salt = (i as u32).wrapping_mul(2_654_435_761).wrapping_add(seed);
-            salt as u8
+            let salt = u32::try_from(i)
+                .expect("slot byte-offset fits u32")
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(seed);
+            u8::try_from(salt & 0xff).expect("pattern salt low byte")
         })
         .collect()
 }

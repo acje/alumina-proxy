@@ -98,7 +98,10 @@ impl Serving {
                     Some(TurnResult::Failed) => {
                         tallies.failed += 1;
                         if tallies.first_failure.is_none() {
-                            tallies.first_failure = Some((ordinal as u16, ex_family));
+                            tallies.first_failure = Some((
+                                u16::try_from(ordinal).expect("ordinal bounded by ALLOWLIST_MAX"),
+                                ex_family,
+                            ));
                             let now = self.storage.dns().now_u64();
                             self.storage.startup_warning_first(now, ordinal, ex_family);
                         }
