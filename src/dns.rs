@@ -61,7 +61,7 @@ impl DnsName {
         &self.bytes[..self.len]
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
@@ -69,7 +69,7 @@ impl DnsName {
         self.len == other.len() && &self.bytes[..self.len] == other
     }
 
-    fn push(&mut self, byte: u8) -> Result<(), DnsError> {
+    const fn push(&mut self, byte: u8) -> Result<(), DnsError> {
         if self.len >= MAX_NAME_BYTES {
             return Err(DnsError::NameTooLong);
         }
@@ -108,7 +108,7 @@ impl BindingList {
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
@@ -365,14 +365,14 @@ pub fn apply_outcome(
     Ok(())
 }
 
-fn map_schedule(err: crate::schedule::ScheduleError) -> CacheError {
+const fn map_schedule(err: crate::schedule::ScheduleError) -> CacheError {
     match err {
         crate::schedule::ScheduleError::NameOutOfRange => CacheError::NameOutOfRange,
         crate::schedule::ScheduleError::DeadlineOverflow => CacheError::DeadlineOverflow,
     }
 }
 
-fn family_qtype(family: Family) -> u16 {
+const fn family_qtype(family: Family) -> u16 {
     match family {
         Family::A => TYPE_A,
         Family::Aaaa => TYPE_AAAA,
@@ -470,11 +470,11 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    const fn new(data: &'a [u8]) -> Self {
         Reader { data, pos: 0 }
     }
 
-    fn remaining(&self) -> usize {
+    const fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.pos)
     }
 
@@ -500,7 +500,7 @@ impl<'a> Reader<'a> {
         Ok((u32::from(hi) << 16) | u32::from(lo))
     }
 
-    fn skip(&mut self, n: usize) -> Result<(), DnsError> {
+    const fn skip(&mut self, n: usize) -> Result<(), DnsError> {
         if self.remaining() < n {
             return Err(DnsError::MessageTooLong);
         }
