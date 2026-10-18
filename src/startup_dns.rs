@@ -1079,7 +1079,7 @@ impl StartupDns {
             };
             match self.poll.poll(&mut self.events, Some(timeout)) {
                 Ok(()) => break,
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(err) => {
                     return Err(StartupDnsError::Transport {
                         kind: err.kind(),

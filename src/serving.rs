@@ -964,7 +964,7 @@ impl Serving {
             };
             match self.poll.poll(&mut batch, effective) {
                 Ok(()) => break,
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(err) => return Err(err.into()),
             }
         }

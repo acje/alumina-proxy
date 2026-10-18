@@ -184,7 +184,7 @@ fn parse_streaming<R: Read>(
             let ns = select(text)?;
             skip_inline_ws(&mut sc)?;
             match sc.peek()? {
-                None | Some(b'\n') | Some(b'#') => return Ok(ns),
+                None | Some(b'\n' | b'#') => return Ok(ns),
                 _ => {
                     return Err(ResolverError::MalformedDirective {
                         detail: "more than one address token on the nameserver line".into(),
@@ -273,7 +273,7 @@ impl<R: Read> Scanner<R> {
         let n = loop {
             match self.src.read(&mut self.buf) {
                 Ok(n) => break n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(self.unreadable(e)),
             }
         };
@@ -319,14 +319,14 @@ mod tests {
 
     impl Read for InterruptedOnce {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if !self.interrupted {
-                self.interrupted = true;
-                Err(io::Error::from(ErrorKind::Interrupted))
-            } else {
+            if self.interrupted {
                 let n = self.data.len().min(buf.len());
                 buf[..n].copy_from_slice(&self.data[..n]);
                 self.data = &self.data[n..];
                 Ok(n)
+            } else {
+                self.interrupted = true;
+                Err(io::Error::from(ErrorKind::Interrupted))
             }
         }
     }

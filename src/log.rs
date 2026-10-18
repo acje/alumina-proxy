@@ -391,7 +391,7 @@ fn write_fields(w: &mut Entry<'_>, fields: &[Field<'_>]) -> bool {
                     return false;
                 }
             }
-            Val::OptStr(None) | Val::OptAddr(None) => continue,
+            Val::OptStr(None) | Val::OptAddr(None) => {}
         }
     }
     true
@@ -655,7 +655,7 @@ fn push_indexed_u64(w: &mut Entry<'_>, key: &[u8], index: u32, value: u64) -> bo
     if !w.push(b"=") {
         return false;
     }
-    if !fmt::Write::write_fmt(w, format_args!("{value}")).is_ok() {
+    if fmt::Write::write_fmt(w, format_args!("{value}")).is_err() {
         return false;
     }
     true

@@ -2722,12 +2722,12 @@ fn client_read_visit_shares_combined_read_write_budget() {
 
         let token = client_token(serving.slots[index].slot_gen, index);
         let avail_start = Instant::now();
-        while !serving.slots[index]
+        while serving.slots[index]
             .client
             .as_ref()
             .expect("client present")
             .peek(&mut [0u8; 1])
-            .is_ok()
+            .is_err()
         {
             assert!(
                 avail_start.elapsed() < Duration::from_secs(2),
