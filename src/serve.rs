@@ -162,7 +162,7 @@ impl ServeStorage {
     /// [`crate::worker::WorkerView`] bound to this storage's own config, cache,
     /// and clock authority, so no code can pair an unrelated config or clock
     /// with this cache (1cws M4r/M2r; destination-binding, docs/alumina-proxy.md:145).
-    pub fn work_view(&self) -> WorkerView<'_> {
+    pub const fn work_view(&self) -> WorkerView<'_> {
         WorkerView::new(&self.config, &self.cache, self.worker.clock())
     }
 
@@ -189,7 +189,7 @@ impl ServeStorage {
     /// origin and DNS epoch a startup window (or a test) establishes. Called
     /// by [`Self::run_startup_within`] after `resolve_window` so serving
     /// keeps the window's own elapsed base.
-    pub(crate) fn mount_clock(&mut self, origin: Instant, now0: u64) {
+    pub(crate) const fn mount_clock(&mut self, origin: Instant, now0: u64) {
         self.origin = origin;
         self.now0 = now0;
         self.worker.set_clock(WorkerClock::new(origin, now0));
@@ -448,7 +448,7 @@ impl ServeStorage {
 
     /// Records one failed attempt on the granted in-setup slot, advancing its
     /// slot-carried attempt ledger. See [`crate::worker::Worker::record_attempt`].
-    pub(crate) fn record_attempt(
+    pub(crate) const fn record_attempt(
         &mut self,
         slot: &SlotIndex,
         family: Family,
@@ -458,28 +458,28 @@ impl ServeStorage {
 
     /// Graduates an admitted slot to established work once the successful
     /// CONNECT response completed, returning the established handle.
-    pub(crate) fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
+    pub(crate) const fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
         self.worker.finish_setup(slot)
     }
 
     /// Releases an in-setup slot, consuming its handle.
-    pub(crate) fn release(&mut self, slot: SlotIndex) {
+    pub(crate) const fn release(&mut self, slot: SlotIndex) {
         self.worker.release(slot);
     }
 
     /// Releases an established tunnel, consuming its handle.
-    pub(crate) fn release_tunnel(&mut self, tunnel: TunnelIndex) {
+    pub(crate) const fn release_tunnel(&mut self, tunnel: TunnelIndex) {
         self.worker.release_tunnel(tunnel);
     }
 
     /// The absolute setup deadline of an admitted slot.
-    pub(crate) fn setup_deadline(&self, slot: &SlotIndex) -> Option<Deadline> {
+    pub(crate) const fn setup_deadline(&self, slot: &SlotIndex) -> Option<Deadline> {
         self.worker.setup_deadline(slot)
     }
 
     /// The fixed slot index underlying an admitted handle, for the actual
     /// event processor to key its per-slot state.
-    pub(crate) fn slot_index(slot: &SlotIndex) -> usize {
+    pub(crate) const fn slot_index(slot: &SlotIndex) -> usize {
         Worker::slot_index(slot)
     }
 

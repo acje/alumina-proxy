@@ -239,7 +239,7 @@ impl Deadline {
     }
 
     #[must_use]
-    pub fn limit(self) -> Instant {
+    pub const fn limit(self) -> Instant {
         self.limit
     }
 
@@ -376,7 +376,7 @@ impl Worker {
     /// authority. All state is preallocated (a fixed array); nothing is
     /// allocated per connection. Crate-internal: the single constructor site is
     /// the storage that owns cache, schedules, and this worker.
-    pub(crate) fn boot(clock: WorkerClock) -> Worker {
+    pub(crate) const fn boot(clock: WorkerClock) -> Worker {
         Worker {
             slots: [SlotState::Free; MAX_TUNNELS],
             clock,
@@ -386,12 +386,12 @@ impl Worker {
     /// Re-anchors this worker's clock to the one authority after the startup
     /// DNS window mounts `now0` and its exact elapsed origin. Crate-internal:
     /// called once by the owning storage after `resolve_window`.
-    pub(crate) fn set_clock(&mut self, clock: WorkerClock) {
+    pub(crate) const fn set_clock(&mut self, clock: WorkerClock) {
         self.clock = clock;
     }
 
     /// The single clock authority for this worker's decisions.
-    pub(crate) fn clock(&self) -> WorkerClock {
+    pub(crate) const fn clock(&self) -> WorkerClock {
         self.clock
     }
 
@@ -490,7 +490,7 @@ impl Worker {
     ///
     /// Returns `NotInSetup` when the handle no longer names a live setup, so
     /// an established or released tunnel can never grow its counters.
-    pub(crate) fn record_attempt(
+    pub(crate) const fn record_attempt(
         &mut self,
         slot: &SlotIndex,
         family: Family,
@@ -506,7 +506,7 @@ impl Worker {
 
     /// The attempt ledger of the granted in-setup slot, or `None` when the
     /// slot is not in setup.
-    pub(crate) fn attempt_ledger(&self, slot: &SlotIndex) -> Option<AttemptLedger> {
+    pub(crate) const fn attempt_ledger(&self, slot: &SlotIndex) -> Option<AttemptLedger> {
         match self.slots[slot.index()] {
             SlotState::InSetup { attempts, .. } => Some(attempts),
             _ => None,
@@ -524,7 +524,7 @@ impl Worker {
         clippy::needless_pass_by_value,
         reason = "by value encodes the consume-once linear-handle discipline (the setup handle is consumed, converting it into exactly one established handle)"
     )]
-    pub(crate) fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
+    pub(crate) const fn finish_setup(&mut self, slot: SlotIndex) -> TunnelIndex {
         if let SlotState::InSetup { setup_deadline, .. } = self.slots[slot.index()] {
             self.slots[slot.index()] = SlotState::Established { setup_deadline };
         }
@@ -539,7 +539,7 @@ impl Worker {
         clippy::needless_pass_by_value,
         reason = "by value encodes the consume-once linear-handle discipline (preventing double release)"
     )]
-    pub(crate) fn release(&mut self, slot: SlotIndex) {
+    pub(crate) const fn release(&mut self, slot: SlotIndex) {
         self.slots[slot.index()] = SlotState::Free;
     }
 
@@ -551,13 +551,13 @@ impl Worker {
         clippy::needless_pass_by_value,
         reason = "by value encodes the consume-once linear-handle discipline (preventing reuse after reset)"
     )]
-    pub(crate) fn release_tunnel(&mut self, tunnel: TunnelIndex) {
+    pub(crate) const fn release_tunnel(&mut self, tunnel: TunnelIndex) {
         self.slots[tunnel.index()] = SlotState::Free;
     }
 
     /// The absolute setup deadline of the granted in-setup slot, or `None`
     /// when the slot is free.
-    pub(crate) fn setup_deadline(&self, slot: &SlotIndex) -> Option<Deadline> {
+    pub(crate) const fn setup_deadline(&self, slot: &SlotIndex) -> Option<Deadline> {
         match self.slots[slot.index()] {
             SlotState::InSetup { setup_deadline, .. }
             | SlotState::Established { setup_deadline } => Some(setup_deadline),
@@ -568,7 +568,7 @@ impl Worker {
     /// The absolute setup deadline of an established tunnel's slot, or `None`
     /// when the slot is free.
     #[allow(dead_code)]
-    pub(crate) fn tunnel_setup_deadline(&self, tunnel: &TunnelIndex) -> Option<Deadline> {
+    pub(crate) const fn tunnel_setup_deadline(&self, tunnel: &TunnelIndex) -> Option<Deadline> {
         match self.slots[tunnel.index()] {
             SlotState::InSetup { setup_deadline, .. }
             | SlotState::Established { setup_deadline } => Some(setup_deadline),
@@ -578,13 +578,13 @@ impl Worker {
 
     /// The occupied slot index for the granted in-setup handle, for the actual
     /// event processor to key its per-slot socket/parser/buffer state.
-    pub(crate) fn slot_index(slot: &SlotIndex) -> usize {
+    pub(crate) const fn slot_index(slot: &SlotIndex) -> usize {
         slot.index()
     }
 
     /// The occupied slot index for the established handle.
     #[allow(dead_code)]
-    pub(crate) fn tunnel_index(tunnel: &TunnelIndex) -> usize {
+    pub(crate) const fn tunnel_index(tunnel: &TunnelIndex) -> usize {
         tunnel.index()
     }
 }
@@ -624,7 +624,11 @@ impl<'a> WorkerView<'a> {
     /// production caller is the owning storage, which passes its own aligned
     /// fields ([`crate::serve::ServeStorage::work_view`]); the worker's unit
     /// tests use it to pin decision behaviour over known in-cache state.
-    pub(crate) fn new(config: &'a Config, cache: &'a Cache, clock: WorkerClock) -> WorkerView<'a> {
+    pub(crate) const fn new(
+        config: &'a Config,
+        cache: &'a Cache,
+        clock: WorkerClock,
+    ) -> WorkerView<'a> {
         WorkerView {
             config,
             cache,
