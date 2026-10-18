@@ -70,7 +70,7 @@ impl Fqdn {
 
     /// The validated upstream dial port for this allowlist entry (1..=65535).
     #[must_use]
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.port
     }
 }
@@ -337,12 +337,12 @@ pub struct Allowlist(Vec<Fqdn>);
 
 impl Allowlist {
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -364,12 +364,12 @@ pub struct ListenAddr {
 
 impl ListenAddr {
     #[must_use]
-    pub fn ip(&self) -> IpAddr {
+    pub const fn ip(&self) -> IpAddr {
         self.ip
     }
 
     #[must_use]
-    pub fn port(&self) -> u16 {
+    pub const fn port(&self) -> u16 {
         self.port
     }
 }
@@ -384,7 +384,7 @@ pub struct Config {
 
 impl Config {
     #[must_use]
-    pub fn allowlist(&self) -> &Allowlist {
+    pub const fn allowlist(&self) -> &Allowlist {
         &self.allowlist
     }
 
@@ -400,17 +400,17 @@ impl Config {
     }
 
     #[must_use]
-    pub fn listen(&self) -> &ListenAddr {
+    pub const fn listen(&self) -> &ListenAddr {
         &self.listen
     }
 
     #[must_use]
-    pub fn startup_unresolved_allowance(&self) -> u8 {
+    pub const fn startup_unresolved_allowance(&self) -> u8 {
         self.startup_unresolved_allowance
     }
 
     #[must_use]
-    pub fn control(&self) -> &ControlTable {
+    pub const fn control(&self) -> &ControlTable {
         &self.control
     }
 }
@@ -472,7 +472,7 @@ pub enum ConfigError {
 
 impl ConfigError {
     #[must_use]
-    pub fn exit_status(&self) -> i32 {
+    pub const fn exit_status(&self) -> i32 {
         78
     }
 }
@@ -810,7 +810,7 @@ fn require_string_list(table: &toml::Table, key: &str) -> Result<Vec<String>, Co
     }
 }
 
-fn value_kind(value: &toml::Value) -> &'static str {
+const fn value_kind(value: &toml::Value) -> &'static str {
     match value {
         toml::Value::String(_) => "string",
         toml::Value::Integer(_) => "integer",
