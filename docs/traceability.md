@@ -78,6 +78,7 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | Concurrent tunnels (incl. setup) / pending | 512 / 128 | Slice 3 | artifact (not 640) |
 | Traffic buffers per tunnel | 2 × 128 KiB | Slice 3/5 | artifact |
 | Total traffic storage | 128 MiB (512×2×128 KiB) | §6 | artifact |
+| Retained serving workspace (per-slot CONNECT head + 2×64 KiB ClientHello inspector) | 512 × 136 KiB = 68 MiB | §6 | artifact |
 | CONNECT headers | 8 KiB | Slice 3 | artifact |
 | Buffered TLS pre-auth | ≤64 KiB | Slice 4 | artifact |
 | DNS message / total RRs | 16 KiB / 128 | Slice 2 | artifact |
@@ -98,8 +99,9 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | Idle / drain / shutdown | 300 / 5 / 8 s | Slice 5 | artifact |
 
 Notes 183–185: 128 MiB decomposition; buffer reuse without discarding;
-outside-budget accounting (DNS storage, metadata, stacks, executable, kernel
-buffers); throughput conditional per-direction — encoded in arch §6 / Slice 7.
+outside-budget accounting (retained serving workspace 512 × 136 KiB = 68 MiB,
+DNS storage, metadata, stacks, executable, kernel buffers); throughput
+conditional per-direction — encoded in arch §6 / Slice 7.
 
 ## 4. Verification-requirement matrix (all `docs/alumina-proxy.md:225-236`)
 

@@ -160,6 +160,7 @@ These are fixed build-time limits, not optional TOML settings or measured capaci
 | Concurrent tunnels, including setup / pending setups | 512 / 128 |
 | Traffic buffers per tunnel slot | Two 128 KiB buffers, one per direction |
 | Total preallocated tunnel traffic storage | 128 MiB |
+| Retained serving workspace (per-slot CONNECT head + two 64 KiB ClientHello inspector buffers) | 512 × 136 KiB = 68 MiB |
 | CONNECT headers | 8 KiB |
 | Buffered TLS bytes before authorization, including record framing | 64 KiB |
 | TLS plaintext record payload during inspection | 16 KiB |
@@ -183,7 +184,7 @@ These are fixed build-time limits, not optional TOML settings or measured capaci
 | Startup resolution window | 90 seconds, absolute; includes DNS TCP establishment |
 | Relay idle deadline / EOF drain deadline / shutdown grace period | 300 seconds / 5 seconds / 8 seconds |
 
-Preallocate 512 tunnel slots with two 128 KiB directional buffers each: `512 * 2 * 128 KiB = 128 MiB`. Reuse these buffers across CONNECT parsing, ClientHello inspection, and relay without discarding coalesced tunnel bytes. The separate CONNECT and ClientHello limits still apply; larger relay buffers do not permit larger setup messages. DNS storage, connection metadata, stacks, executable memory, and kernel socket buffers are outside this traffic-storage budget and must be accounted for separately when sizing the container.
+Preallocate 512 tunnel slots with two 128 KiB directional buffers each: `512 * 2 * 128 KiB = 128 MiB`. Reuse these buffers across CONNECT parsing, ClientHello inspection, and relay without discarding coalesced tunnel bytes. The separate CONNECT and ClientHello limits still apply; larger relay buffers do not permit larger setup messages. DNS storage, the retained serving workspace (512 × 136 KiB = 68 MiB of per-slot CONNECT head plus two 64 KiB ClientHello inspector buffers), connection metadata, stacks, executable memory, and kernel socket buffers are outside this traffic-storage budget and must be accounted for separately when sizing the container.
 
 The first-iteration target is 1-10 Gbps aggregate relayed payload throughput across both directions, subject to CPU speed, workload, and network limits. At these rates, 128 MiB represents approximately 1.07 seconds to 107 milliseconds of aggregate payload, not a throughput guarantee. Storage is partitioned by tunnel and direction and cannot all absorb a burst on one connection; a 128 KiB directional buffer represents approximately 1.05 milliseconds at 1 Gbps or 0.10 milliseconds at 10 Gbps. Use socket backpressure rather than buffer growth. Benchmark sustained relay and bursts separately; application buffer capacity is not a substitute for TCP window sizing or a measured CPU budget.
 
@@ -425,6 +426,39 @@ The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slo
 | This amendment published | Current revision |
 | CONNECT Accept/Reject: canonical-digit `Content-Length`; literal `Content-Length: 0` is the only accepted value | Implemented (this increment) |
 | Leading-zero `Content-Length` rejected fail-closed, consistent with the CONNECT target-port canonical-digit rule | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## Memory accounting — retained serving workspace — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-mema`, 2026-10-18). It corrects the memory accounting so the documentation is consistent with the structure currently used in code. The Initial resource profile and the traffic-storage budget note (`:161`-`:186`) are amended to record the **retained serving workspace** — a fixed, boot-time allocation that the code has always made but the prior accounting omitted. It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile limits, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding.
+
+### Amended surface
+
+The retained serving workspace is a fixed per-slot allocation, made once at boot for the process lifetime and reused across connections, **outside** the 128 MiB tunnel-traffic-storage budget:
+
+| Structure | Count | Unit size | Bound total |
+| --- | --- | --- | --- |
+| Per-slot CONNECT parser head | 512 | 8 KiB | 4096 KiB |
+| Per-slot ClientHello inspector buffers (`buf` + `scratch`) | 512 × 2 | 64 KiB | 65 536 KiB |
+| **Retained serving workspace total** | 512 slots | 136 KiB | **68 MiB** |
+
+This is the `SLOT_WORKSPACE_BYTES` / `SERVING_WORKSPACE_BYTES` accounting in `src/inventory.rs:18-21` and the two `[u8; 64 KiB]` buffers (`buf`, `scratch`) in each `ChInspector` at `src/client_hello.rs:251,255`, preallocated for all 512 slots at boot (`src/serving.rs:926-938`). It is included in the boot inventory's named-fixed-buffer lower bound (`BootInventory::named_fixed_buffer_bytes` = 128 MiB traffic + 68 MiB serving workspace + DNS named buffers ≈ 196 MiB), consistent with the observed ~204 MiB VmRSS in `docs/benchmarks/e2micro-workload.md`.
+
+The DNS transport's fixed 512-byte query buffer (`QUERY_BUF_LEN`, `src/startup_dns.rs:37`) is likewise a retained named buffer and is accounted with the DNS named buffers.
+
+This amendment is a **clarification of the existing fixed profile, not a change to any limit**: the serving workspace was already allocated and retained by the code; the prior resource table understated the retained footprint by ~68 MiB. No profile row is loosened or altered.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Initial resource profile: retained serving workspace row added (`:162`) | Implemented (this increment) |
+| Traffic-storage budget note: serving workspace added to the outside-budget list (`:186`) | Implemented (this increment) |
+| DNS 512-byte query buffer accounted with DNS named buffers | Implemented (this increment) |
 
 ### Explicitly unchanged (non-negotiable)
 

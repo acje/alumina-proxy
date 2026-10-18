@@ -15,8 +15,10 @@ specification, not feature growth.
   `2 × 128 KiB` per-slot slab amendment, the `alumina-sechd` (2026-10-17)
   security-hardening CONNECT/TLS identity/DNS-cache/scheduling/logging
   amendment, the `alumina-skhc` (2026-10-17) CONNECT/configuration/
-  destination-address hardening amendment, and the `alumina-icdl`
-  (2026-10-17) CONNECT Content-Length canonical-digit amendment, all
+  destination-address hardening amendment, the `alumina-icdl`
+  (2026-10-17) CONNECT Content-Length canonical-digit amendment, and the
+  `alumina-mema` (2026-10-18) memory-accounting retained-serving-workspace
+  amendment, all
   recorded in the document; no further amendment authority is implied.
 - Status is a scoped local testQA candidate — not production-qualified;
   serving-qualification gates stay open (`docs/build-plan.md` owns them).

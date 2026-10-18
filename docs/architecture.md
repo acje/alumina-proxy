@@ -125,6 +125,7 @@ with construction-and-reuse proof as a future gate.
 | Allocation | Size | Citations |
 |---|---|---|
 | Tunnel traffic buffers | 512 × 2 × 128 KiB = 128 MiB | `:160-162,183` |
+| Retained serving workspace (per-slot CONNECT head + 2×64 KiB ClientHello inspector) | 512 × 136 KiB = 68 MiB | `:162,186` |
 | Config document buffer | 4096 B (reject oversized) | `:54,158` |
 | CONNECT / TLS pre-auth | ≤8 KiB / ≤64 KiB | `:163-164` |
 | DNS message/records staging | 16 KiB / 128 RRs | `:165` |
@@ -135,8 +136,9 @@ with construction-and-reuse proof as a future gate.
 | Stacks | Bounded worst-case (no recursion); numeric a **design artifact** | `:143,165,183` |
 | mio Poll/Events | Preallocated at boot; op matrix pinned | `:147,206,230` |
 
-**Outside the 128 MiB budget** (separately accounted): DNS storage, metadata,
-stacks, executable, kernel socket buffers (T3; traceability U7).
+**Outside the 128 MiB budget** (separately accounted): the retained serving
+workspace (512 × 136 KiB = 68 MiB), DNS storage, metadata, stacks, executable,
+kernel socket buffers (T3; traceability U7).
 **Dependency seam (T2/G4):** `mio`+epoll mandated (`:147`); pin version,
 enumerate operations, gate each on source review + allocator instrumentation
 (build-plan F3) — mio steady-state alloc-freedom is not assumed.
