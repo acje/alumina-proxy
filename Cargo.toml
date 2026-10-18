@@ -259,6 +259,22 @@ self_assignment = "warn"
 # check (behavior-preserving); a runtime `.is_empty()` call needs no change.
 # No runtime/alloc/spec change; the enabling attribute is compile-time.
 const_is_empty = "warn"
+# SM-21: enable the correctness/arithmetic lint — `cast_abs_to_unsigned`.
+# Its firing surface is the result of `abs()` (which returns a signed
+# magnitude) cast to an unsigned type — silently discarding the sign so a
+# negative magnitude wraps to a huge bogus value (e.g. a length delta far
+# past any valid buffer). The idiomatic, sign-safe primitive is
+# `unsigned_abs()`. A clippy 1.99.0 positive control (`-F
+# clippy::cast_abs_to_unsigned`) on a planted `x.abs() as u64` probe (which
+# fires `casting the result of i64::abs() to u64` — exit 101, proving the
+# lint is armed; the gate fails where a site exists) plus an abs-to-unsigned
+# cast scan of `src/` + `tests/` found zero
+# lint-proven sites on the pinned toolchain, so the lint guards future
+# regressions. A genuinely intentional magnitude-as-unsigned site, should
+# one arise, is fixed with `unsigned_abs()` (behavior-preserving: a true
+# magnitude is sign-agnostic). No runtime/alloc/spec change; the enabling
+# attribute is compile-time.
+cast_abs_to_unsigned = "warn"
 
 [lib]
 name = "alumina"
