@@ -3794,27 +3794,24 @@ fn shutdown_alloc_witness_body() {
     drop(pending_client);
 }
 
-#[test]
-#[allow(clippy::assertions_on_constants)]
-fn directional_buffer_profile_matches_the_128_mib_mandate() {
-    assert_eq!(
-        HOLD_CAP,
-        128 * 1024,
-        "client->upstream buffer must be 128 KiB"
-    );
-    assert_eq!(
-        DOWN_CAP,
-        128 * 1024,
-        "upstream->client buffer must be 128 KiB"
-    );
-    assert_eq!(MAX_TUNNELS, 512, "the fixed tunnel budget is 512 slots");
-    assert!(MAX_PENDING_SETUPS <= 128, "at most 128 pending setups");
-    assert_eq!(
-        (HOLD_CAP + DOWN_CAP) * MAX_TUNNELS,
-        128 * 1024 * 1024,
-        "two 128 KiB buffers per tunnel across 512 slots is the 128 MiB traffic profile"
-    );
-}
+/// Compile-time pin of the fixed serving buffer profile (alumina-tm6m): each
+/// tunnel carries two reused 128 KiB buffers across the 512-slot budget, and
+/// pending setups stay within the 128-slot cap. These are true compile-time
+/// guards, not runtime assertions over a constant.
+const _: () = assert!(
+    HOLD_CAP == 128 * 1024,
+    "client->upstream buffer must be 128 KiB"
+);
+const _: () = assert!(
+    DOWN_CAP == 128 * 1024,
+    "upstream->client buffer must be 128 KiB"
+);
+const _: () = assert!(MAX_TUNNELS == 512, "the fixed tunnel budget is 512 slots");
+const _: () = assert!(MAX_PENDING_SETUPS <= 128, "at most 128 pending setups");
+const _: () = assert!(
+    (HOLD_CAP + DOWN_CAP) * MAX_TUNNELS == 128 * 1024 * 1024,
+    "two 128 KiB buffers per tunnel across 512 slots is the 128 MiB traffic profile"
+);
 
 fn serve_on_cfg(port: u16, cfg: &crate::config::Config) -> Serving {
     let storage = ServeStorage::boot(cfg).expect("boot storage");
