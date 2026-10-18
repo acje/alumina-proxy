@@ -101,6 +101,7 @@ manual_saturating_arithmetic = "warn"
 inverted_saturating_sub = "warn"
 iterator_step_by_zero = "warn"
 zero_repeat_side_effects = "warn"
+unconditional_recursion = "warn"
 
 [lib]
 name = "alumina"
