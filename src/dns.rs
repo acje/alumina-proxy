@@ -893,6 +893,19 @@ pub fn parse_response(
         if ty == TYPE_DNAME {
             return Err(DnsError::DnameUnsupported);
         }
+        match ty {
+            TYPE_A if rdlen != 4 => {
+                return Err(DnsError::BadRdataLength { ty, got: rdlen, expected: 4 })
+            }
+            TYPE_AAAA if rdlen != 16 => {
+                return Err(DnsError::BadRdataLength {
+                    ty,
+                    got: rdlen,
+                    expected: 16,
+                })
+            }
+            _ => {}
+        }
         if ty == TYPE_SOA
             && let Rdata::Soa { minimum } = parse_rdata(msg, rd_start, rdlen, ty)?
         {
@@ -909,6 +922,19 @@ pub fn parse_response(
         let rdlen = usize::from(reader.u16()?);
         if ty == TYPE_DNAME {
             return Err(DnsError::DnameUnsupported);
+        }
+        match ty {
+            TYPE_A if rdlen != 4 => {
+                return Err(DnsError::BadRdataLength { ty, got: rdlen, expected: 4 })
+            }
+            TYPE_AAAA if rdlen != 16 => {
+                return Err(DnsError::BadRdataLength {
+                    ty,
+                    got: rdlen,
+                    expected: 16,
+                })
+            }
+            _ => {}
         }
         reader.skip(rdlen)?;
     }
@@ -1164,6 +1190,20 @@ mod tests {
         m
     }
 
+    fn raw_record(owner: &str, ty: u16, class: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
+        let mut m = qname_bytes(owner);
+        m.extend_from_slice(&ty.to_be_bytes());
+        m.extend_from_slice(&class.to_be_bytes());
+        m.extend_from_slice(&ttl.to_be_bytes());
+        m.extend_from_slice(
+            &u16::try_from(rdata.len())
+                .expect("rdata length fits u16")
+                .to_be_bytes(),
+        );
+        m.extend_from_slice(rdata);
+        m
+    }
+
     fn parse_response_ws(
         name: &str,
         family: Family,
@@ -1398,6 +1438,82 @@ mod tests {
                 expected: 4
             })
         );
+    }
+
+    #[test]
+    fn rejects_malformed_a_rdlen_in_authority() {
+        let mut msg = header(0x1249, true, 0, 1, 1, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [93, 184, 216, 34], 120));
+        msg.extend_from_slice(&raw_record("example.org", 1, 1, 60, &[1, 2, 3]));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x1249, &msg),
+            Err(DnsError::BadRdataLength {
+                ty: 1,
+                got: 3,
+                expected: 4
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_aaaa_rdlen_in_additional() {
+        let mut msg = header(0x124a, true, 0, 1, 1, 0, 1);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [93, 184, 216, 34], 120));
+        msg.extend_from_slice(&raw_record("example.org", 28, 1, 0, &[1u8; 4]));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x124a, &msg),
+            Err(DnsError::BadRdataLength {
+                ty: 28,
+                got: 4,
+                expected: 16
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_opt_record_in_additional() {
+        let mut msg = header(0x124b, true, 0, 1, 1, 0, 1);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [93, 184, 216, 34], 120));
+        msg.extend_from_slice(&raw_record("example.org", 41, 1, 0, &[0u8; 11]));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x124b, &msg).expect("parse");
+        match out {
+            Outcome::Positive { bindings, .. } => {
+                assert_eq!(
+                    bindings.as_slice(),
+                    &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+                );
+            }
+            other => panic!("expected positive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepts_unknown_type_in_authority() {
+        let mut msg = header(0x124c, true, 0, 1, 1, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [93, 184, 216, 34], 120));
+        msg.extend_from_slice(&raw_record("example.org", 99, 1, 60, &[10, 11, 12, 13]));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x124c, &msg).expect("parse");
+        match out {
+            Outcome::Positive { bindings, .. } => {
+                assert_eq!(
+                    bindings.as_slice(),
+                    &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+                );
+            }
+            other => panic!("expected positive, got {other:?}"),
+        }
     }
 
     #[test]
