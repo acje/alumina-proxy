@@ -17,6 +17,9 @@ per-vector detail sections, and their rows remain with their original scores.
 On the same date vectors 14, 19, and 35 were **implemented** via the
 `alumina-hrdn2` hardening increment (`docs/alumina-proxy.md`); they are likewise
 marked **DONE** below, with rows remaining at their original scores.
+On the same date vectors 11, 21, 22, and 32 were **implemented** via the
+`alumina-hrdn3` hardening increment (`docs/alumina-proxy.md`); they are likewise
+marked **DONE** below, with rows remaining at their original scores.
 Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), 7 (AD-bit / DO-bit handling),
 and 8 (multi-resolver cross-validation) are **deferred** (marked **DEFERRED**):
 high architectural risk for high-but-costly security value, retained for
@@ -41,19 +44,19 @@ Generated from `scores.jsonl` (200 score lines; 21 scored vectors shown).
 
 | Rank | # | Vector | Overall | Eff | Plaus | Risk |
 |---|---|---|---|---|---|---|
-| 1 | 11 | Bailiwick enforcement on CNAME targets | 7.88 | 7.88 | 7.88 | 3.12 |
-| 2 | 21 | Anomaly logging / tripwire on DNS | 7.69 | 7.75 | 7.62 | 3.38 |
+| 1 | 11 | **DONE** Bailiwick enforcement on CNAME targets — implemented (2026-10-19) | 7.88 | 7.88 | 7.88 | 3.12 |
+| 2 | 21 | **DONE** Anomaly logging / tripwire on DNS — implemented (2026-10-19) | 7.69 | 7.75 | 7.62 | 3.38 |
 | 3 | 14 | **DONE** TTL floor (min-TTL) — implemented (2026-10-19) | 7.62 | 5.88 | 9.38 | 2.00 |
 | 4 | 34 | **DONE** ClientHello handshake-length field bound — implemented (2026-10-19) | 7.50 | 5.50 | 9.50 | 1.12 |
 | 5 | 19 | **DONE** Resolver health probing / degraded signaling — implemented (2026-10-19) | 7.44 | 6.50 | 8.38 | 2.38 |
-| 6 | 32 | CNAME-chain pinning to known-good zones | 7.44 | 7.38 | 7.50 | 3.00 |
+| 6 | 32 | **DONE** CNAME-chain pinning to known-good zones — implemented (2026-10-19) | 7.44 | 7.38 | 7.50 | 3.00 |
 | 7 | 17 | Authoritative-freshness bound | 7.25 | 7.00 | 7.50 | 3.25 |
 | 8 | 9 | 0x20 case randomization | 7.19 | 6.75 | 7.62 | 2.88 |
 | 9 | 24 | Startup-DNS trust-boundary hardening | 7.12 | 7.12 | 7.12 | 2.75 |
 | 10 | 33 | **DONE** Wrong-family records tolerated-vs-rejected pin — implemented (2026-10-19) | 6.81 | 4.38 | 9.25 | 1.38 |
 | 11 | 36 | **DONE** Non-CONNECT method / request-target form rejection — implemented (2026-10-19) | 6.81 | 4.12 | 9.50 | 1.12 |
 | 12 | 7 | **DEFERRED** AD-bit / DO-bit handling | 6.56 | 6.62 | 6.50 | 4.50 |
-| 13 | 22 | Resolver identity / response-source verification | 6.50 | 5.38 | 7.62 | 2.75 |
+| 13 | 22 | **DONE** Resolver identity / response-source verification — implemented (2026-10-19) | 6.50 | 5.38 | 7.62 | 2.75 |
 | 14 | 35 | **DONE** CONNECT header-line count bound — implemented (2026-10-19) | 6.50 | 3.62 | 9.38 | 1.25 |
 | 15 | 18 | Multi-resolver failover | 6.38 | 5.50 | 7.25 | 4.38 |
 | 16 | 23 | Cross-resolver divergence reporting | 6.12 | 4.88 | 7.38 | 4.50 |
@@ -65,9 +68,14 @@ Generated from `scores.jsonl` (200 score lines; 21 scored vectors shown).
 
 ## Per-vector detail (all 8 scores, eff/plaus/risk)
 
-### Rank 1 — Vector 11: Bailiwick enforcement on CNAME targets
+### Rank 1 — Vector 11: Bailiwick enforcement on CNAME targets — **DONE**
 
 Overall **7.88** · Eff **7.88** · Plaus **7.88** · Risk **3.12**
+
+**Status:** **DONE** — implemented (2026-10-19, `alumina-hrdn3`) — a followed
+CNAME link must land inside an allowlist bailiwick zone (parent domain for
+>2-label names, the apex itself for 2-label names) or the exchange fails with
+`BailiwickViolation` (`BailiwickZones`, `src/dns.rs:769-816`, gate at `:1142`).
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -80,9 +88,16 @@ Overall **7.88** · Eff **7.88** · Plaus **7.88** · Risk **3.12**
 | linus | 9 | 8 | 3 |
 | linus | 9 | 7 | 4 |
 
-### Rank 2 — Vector 21: Anomaly logging / tripwire on DNS
+### Rank 2 — Vector 21: Anomaly logging / tripwire on DNS — **DONE**
 
 Overall **7.69** · Eff **7.75** · Plaus **7.62** · Risk **3.38**
+
+**Status:** **DONE** — implemented (2026-10-19, `alumina-hrdn3`) — a typed
+`DnsAnomalyKind` surface (`BailiwickViolation`/`ResolverPeerMismatch`/`ExtremeTtl`,
+incl. >96 h extreme-TTL detection) drains via `drain_dns_anomalies` into
+saturating rp2e counters surfaced as zero-suppressed `bv=`/`rpm=`/`xttl=`
+monitor keys (`src/enforcement/monitor.rs`, `src/startup_dns.rs`, `src/serve.rs`,
+`src/log.rs`).
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -158,9 +173,14 @@ transitions and surfaced as the zero-suppressed `rd=` monitor key
 | general | 6 | 8 | 2 |
 | linus | 8 | 9 | 2 |
 
-### Rank 6 — Vector 32: CNAME-chain pinning to known-good zones
+### Rank 6 — Vector 32: CNAME-chain pinning to known-good zones — **DONE**
 
 Overall **7.44** · Eff **7.38** · Plaus **7.50** · Risk **3.00**
+
+**Status:** **DONE** — implemented (2026-10-19, `alumina-hrdn3`) — the
+"known-good zones" pinning is realized by the same `BailiwickZones` gate as
+vector 11: a followed link outside every allowlist zone fails the exchange with
+`BailiwickViolation` (`src/dns.rs:769-816`, `:1142`).
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -269,9 +289,14 @@ Overall **6.56** · Eff **6.62** · Plaus **6.50** · Risk **4.50**
 | general | 5 | 6 | 4 |
 | general | 6 | 8 | 3 |
 
-### Rank 13 — Vector 22: Resolver identity / response-source verification
+### Rank 13 — Vector 22: Resolver identity / response-source verification — **DONE**
 
 Overall **6.50** · Eff **5.38** · Plaus **7.62** · Risk **2.75**
+
+**Status:** **DONE** — implemented (2026-10-19, `alumina-hrdn3`) — a completed
+connect landing on a peer other than the configured nameserver fails the
+exchange (`FailureReason::Connect`) and counts a `ResolverPeerMismatch` anomaly
+(`peer_matches`/`step_connect`, `src/startup_dns.rs:1010`, `:1216-1223`).
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|

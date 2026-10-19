@@ -23,6 +23,12 @@ each row below is marked **DONE** with its pinned semantics and code location.
 On the same date vectors 14, 19, and 35 were **implemented** via the
 `alumina-hrdn2` hardening increment (recorded in `docs/alumina-proxy.md`) and
 each row below is marked **DONE** with its pinned semantics and code location.
+On the same date vectors 11, 21, 22, and 32 were **implemented** via the
+`alumina-hrdn3` hardening increment (recorded in `docs/alumina-proxy.md`) —
+CNAME bailiwick enforcement + known-good-zone pinning (11/32), the typed DNS
+anomaly fact surface incl. extreme-TTL detection (21), and the resolver peer
+assertion (22) — and each row below is marked **DONE** with its pinned
+semantics and code location.
 Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), 7 (AD-bit / DO-bit handling),
 and 8 (multi-resolver cross-validation) are **deferred** (marked **DEFERRED**
 below): high architectural risk for high-but-costly security value, retained
@@ -74,7 +80,7 @@ identifiers; gaps are intentional.
 |---|---|---|---|---|---|
 | 9 | **0x20 case randomization** | Off-path spoofing (correct response must echo randomized case) | Low–medium | Medium (wire change; question-match impact) | **Top research priority** — study impact on lowercase normalization + question-match validation |
 | 10 | **EDNS0 / larger-buffer negotiation** | Truncation | Low | Low value (TCP-only avoids truncation) | Low priority |
-| 11 | **Bailiwick enforcement on CNAME targets** | CNAME chaining into attacker zones | Medium | Medium (narrow amendment) | **Top research priority** — restrict CNAME targets to allowlisted/known zones; measure breakage |
+| 11 | **DONE** **Bailiwick enforcement on CNAME targets** *(implemented, 2026-10-19)* | CNAME chaining into attacker zones | Medium | Medium (narrow amendment) | **Implemented by `alumina-hrdn3`** (2026-10-19): promoted out of candidate research; a followed CNAME link must land inside an allowlist bailiwick zone (parent domain for >2-label names, the apex itself for 2-label names) or the exchange fails with `BailiwickViolation` (`BailiwickZones`, `src/dns.rs:769-816`, gate at `:1142`) |
 | 12 | **Source-port randomization** | Off-path spoofing | N/A | N/A (TCP only; TID already CSPRNG) | Not applicable |
 | 33 | **DONE** **Wrong-family records in a positive answer: tolerated vs. rejected** *(implemented & pinned, 2026-10-19)* | Ambiguity in `:71` — a wrong-family record (e.g., AAAA in an A query's answer section) is tolerated-and-ignored (never a candidate) and never marks its terminal owner as carrying address data; coexist with a CNAME at its owner still fails `CnameCoexist` | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; wrong-family records are truly ignored (`src/dns.rs:824-830,847-853`), and NXDOMAIN at an opposite-family-only terminal is a clean `NxDomain`, never `TerminalWithoutData` |
 
@@ -96,8 +102,8 @@ identifiers; gaps are intentional.
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 21 | **Anomaly logging / tripwire on suspicious DNS** | Detect unexpected TTLs, bailiwick violations, CNAME anomalies, resolver identity changes; feed rp2e enforcement | Medium–high | Medium (log-vocabulary amendment) | **Top research priority** — which anomalies are signal vs noise for a server |
-| 22 | **Resolver identity / response-source verification** | Confirm responses originate from the configured resolver | Low | Low (TCP peer is the resolver, so partially inherent) | Low priority |
+| 21 | **DONE** **Anomaly logging / tripwire on suspicious DNS** *(implemented, 2026-10-19)* | Detect unexpected TTLs, bailiwick violations, CNAME anomalies, resolver identity changes; feed rp2e enforcement | Medium–high | Medium (log-vocabulary amendment) | **Implemented by `alumina-hrdn3`** (2026-10-19): promoted out of candidate research; a typed `DnsAnomalyKind` surface (`BailiwickViolation`/`ResolverPeerMismatch`/`ExtremeTtl`, >96 h extreme-TTL detection via `EXTREME_TTL_THRESHOLD`) drains via `drain_dns_anomalies` into saturating rp2e counters surfaced as zero-suppressed `bv=`/`rpm=`/`xttl=` monitor keys (`src/enforcement/monitor.rs`, `src/startup_dns.rs`, `src/serve.rs`, `src/log.rs`) |
+| 22 | **DONE** **Resolver identity / response-source verification** *(implemented, 2026-10-19)* | Confirm responses originate from the configured resolver | Low | Low (TCP peer is the resolver, so partially inherent) | **Implemented by `alumina-hrdn3`** (2026-10-19): promoted out of candidate research; a completed connect landing on a peer other than the configured nameserver fails the exchange (`FailureReason::Connect`) and counts a `ResolverPeerMismatch` anomaly (`peer_matches`/`step_connect`, `src/startup_dns.rs:1010`, `:1216-1223`) |
 | 23 | **Cross-resolver divergence reporting** | Detect resolver disagreement | Low | Low (only meaningful with multi-resolver) | Low priority unless vector 8 |
 | 24 | **Startup-DNS trust-boundary hardening** | Encrypted/authenticated resolver config (currently plaintext `resolv.conf`) | Low–medium | Medium | Study |
 
@@ -120,7 +126,7 @@ identifiers; gaps are intentional.
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
 | 30 | **Upstream certificate validation** | Fake/malicious upstream | N/A — non-decrypting invariant IV-3 | N/A | Deployment/operator vector only (operator-owned CONNECT+TLS check, `docs/alumina-proxy.md:122`) |
-| 32 | **CNAME-chain pinning to known-good zones** | Chaining into attacker zones | Medium | Medium | Overlaps vector 11 |
+| 32 | **DONE** **CNAME-chain pinning to known-good zones** *(implemented, 2026-10-19)* | Chaining into attacker zones | Medium | Medium | **Implemented by `alumina-hrdn3`** (2026-10-19): promoted out of candidate research; the "known-good zones" pinning is realized by the same `BailiwickZones` gate as vector 11 — a followed link outside every allowlist zone fails the exchange with `BailiwickViolation` (`src/dns.rs:769-816`, `:1142`) |
 
 ## 3. Ranked research priorities
 
