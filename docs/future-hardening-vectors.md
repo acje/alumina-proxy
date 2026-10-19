@@ -14,8 +14,10 @@ and the open serving-qualification gates (F1–F4, BOUNDARY, E2E —
 removed from the candidate register as **fully covered** — each is implemented
 and verified in the current codebase (see §1 Baseline DNS posture and
 `docs/future-hardening-vectors-scorecard.md`). Vectors 2 (DoH), 3 (DNSCrypt),
-4 (DoQ), and 25 (QNAME minimization) were additionally pruned as
-**low-plausibility / high-risk research discards** (see scorecard). On the same
+4 (DoQ), 9 (0x20 case randomization), and 25 (QNAME minimization) were
+additionally pruned as **low-plausibility / high-risk research discards** (see
+scorecard); vector 9 is strictly dominated by the TCP + CSPRNG-TID transport and
+adds zero value under the future DoT path. On the same
 date vectors 33, 34, and 36 were **promoted out of candidate research as
 implemented and pinned**: their formerly ambiguous behavior was sharpened in the
 `alumina-hrdn` hardening increment (recorded in `docs/alumina-proxy.md`) and
@@ -78,7 +80,6 @@ identifiers; gaps are intentional.
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 9 | **0x20 case randomization** | Off-path spoofing (correct response must echo randomized case) | Low–medium | Medium (wire change; question-match impact) | **Top research priority** — study impact on lowercase normalization + question-match validation |
 | 10 | **EDNS0 / larger-buffer negotiation** | Truncation | Low | Low value (TCP-only avoids truncation) | Low priority |
 | 11 | **DONE** **Bailiwick enforcement on CNAME targets** *(implemented, 2026-10-19)* | CNAME chaining into attacker zones | Medium | Medium (narrow amendment) | **Implemented by `alumina-hrdn3`** (2026-10-19): promoted out of candidate research; a followed CNAME link must land inside an allowlist bailiwick zone (parent domain for >2-label names, the apex itself for 2-label names) or the exchange fails with `BailiwickViolation` (`BailiwickZones`, `src/dns.rs:769-816`, gate at `:1142`) |
 | 12 | **Source-port randomization** | Off-path spoofing | N/A | N/A (TCP only; TID already CSPRNG) | Not applicable |
@@ -136,10 +137,9 @@ Ranked by **value-to-Alumina ÷ cost-and-doctrine-fit**:
 |---|---|---|---|---|
 | 1 | **DNSSEC validation (B6/B7)** | Directly defeats the "fake DNS record" threat even against a *compromised* resolver — the strongest hardening | Low | Feasibility study: minimal validating stub (crypto, memory, deadline) |
 | 2 | **Bailiwick on CNAME targets (C11)** | Closes the documented cross-suffix-CNAME accepted limitation; cheap, spec-adjacent | Medium | Study: restrict CNAME targets to allowlisted/known zones; measure breakage |
-| 3 | **0x20 case randomization (C9)** | Cheap off-path poisoning defense; well-understood | Medium | Study: impact on lowercase normalization + question-match validation |
-| 4 | **Anomaly detection/tripwire on DNS (F21)** | Fits existing incident + rp2e enforcement machinery | Medium | Study: which anomalies are signal vs noise for a server |
-| 5 | **DoT (A1)** | The consumer-facing recommendation; explicit non-goal, high cost | Low | Defer unless user authorizes amendment |
-| 6 | **Multi-resolver cross-validation (B8)** | High value but violates 1-conn/1-query + no-fallback doctrine | Low | Defer; document as a design-revision candidate |
+| 3 | **Anomaly detection/tripwire on DNS (F21)** | Fits existing incident + rp2e enforcement machinery | Medium | Study: which anomalies are signal vs noise for a server |
+| 4 | **DoT (A1)** | The consumer-facing recommendation; explicit non-goal, high cost | Low | Defer unless user authorizes amendment |
+| 5 | **Multi-resolver cross-validation (B8)** | High value but violates 1-conn/1-query + no-fallback doctrine | Low | Defer; document as a design-revision candidate |
 
 ## 4. Risks / abort conditions
 
@@ -149,5 +149,5 @@ Ranked by **value-to-Alumina ÷ cost-and-doctrine-fit**:
 
 ## 5. Open questions (blocking, medium+ risk)
 
-1. Which vectors to dispatch for research first — recommendation: the top-4 (DNSSEC feasibility, CNAME bailiwick, 0x20, DNS anomaly tripwire).
+1. Which vectors to dispatch for research first — recommendation: DNSSEC feasibility, CNAME bailiwick, DNS anomaly tripwire.
 2. Whether a spec amendment is on the table at all (e.g., DoT or DNSSEC), or whether this research strictly informs a future decision while staying within the fixed spec for now.
