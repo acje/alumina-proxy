@@ -33,6 +33,7 @@ bounded stdout monitoring (`docs/alumina-proxy.md:238-315`, rp2e amendment).
 | [docs/harness-evaluation.md](docs/harness-evaluation.md) | Measured harness fitness (dated, scoped) |
 | [docs/qa-package/README.md](docs/qa-package/README.md) | Local testQA run/validation instructions |
 | [docs/verification.md](docs/verification.md) | Verification instructions, command set + offline link checker |
+| [docs/future-hardening-vectors.md](docs/future-hardening-vectors.md) | Non-canonical TLS & DNS hardening research register — possible code/spec enhancements |
 | [docs/benchmarks/100mbps-comparison.md](docs/benchmarks/100mbps-comparison.md) | 100 Mbps matched comparison — Alumina 8dbbec8 vs HAProxy 3.2.25 vs Envoy 1.39.4 (tables-only; workload parameters + durable receipts) |
 | [docs/benchmarks/feature-match-matrix.md](docs/benchmarks/feature-match-matrix.md) | Feature match matrix across the three benchmark candidates |
 
