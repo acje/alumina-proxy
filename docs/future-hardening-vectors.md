@@ -10,6 +10,18 @@ user authorization** (`AGENTS.md`: "no further amendment authority is implied"),
 and the open serving-qualification gates (F1–F4, BOUNDARY, E2E —
 `docs/build-plan.md`) should close before any hardening feature lands.
 
+**Pruned (2026-10-19):** vectors 13, 15, 16, 20, 26, 27, 28, 29, 31 were
+removed from the candidate register as **fully covered** — each is implemented
+and verified in the current codebase (see §1 Baseline DNS posture and
+`docs/future-hardening-vectors-scorecard.md`). Vectors 2 (DoH), 4 (DoQ), and
+25 (QNAME minimization) were additionally pruned as **low-plausibility /
+high-risk research discards** (see scorecard). On the same date vectors 33, 34,
+and 36 were **promoted out of candidate research as implemented and pinned**:
+their formerly ambiguous behavior was sharpened in the `alumina-hrdn` hardening
+increment (recorded in `docs/alumina-proxy.md`) and each row below is marked ✅
+with its pinned semantics and code location. Vector numbers are retained as
+stable identifiers; gaps are intentional.
+
 ## 1. Baseline DNS posture (already implemented)
 
 | Control | Status | Evidence |
@@ -38,9 +50,7 @@ and the open serving-qualification gates (F1–F4, BOUNDARY, E2E —
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
 | 1 | **DNS-over-TLS (DoT)** | On-path injection of fake responses | High (new TLS client dep, cert handling, resource profile) | Low — explicit non-goal | Feasibility study; defer unless user authorizes amendment |
-| 2 | **DNS-over-HTTPS (DoH)** | Same via 443; bootstrap/CA complexity | High | Low — non-goal | Feasibility study; defer |
 | 3 | **DNSCrypt** | Authenticated channel (less standard) | Medium | Low | Low priority |
-| 4 | **DNS-over-QUIC (DoQ)** | Low-latency encrypted DNS | High | Low — Alumina is TCP-only by design | Low priority |
 | 5 | **Resolver certificate pinning / TOFU** | CA-compromise resistance | Medium | Low (prerequisite for DoT) | Study as part of DoT |
 
 ### B. Data authenticity (end-to-end; defends against a *compromised* resolver)
@@ -59,16 +69,13 @@ and the open serving-qualification gates (F1–F4, BOUNDARY, E2E —
 | 10 | **EDNS0 / larger-buffer negotiation** | Truncation | Low | Low value (TCP-only avoids truncation) | Low priority |
 | 11 | **Bailiwick enforcement on CNAME targets** | CNAME chaining into attacker zones | Medium | Medium (narrow amendment) | **Top research priority** — restrict CNAME targets to allowlisted/known zones; measure breakage |
 | 12 | **Source-port randomization** | Off-path spoofing | N/A | N/A (TCP only; TID already CSPRNG) | Not applicable |
-| 13 | **Strict answer-section-only acceptance** | Poisoning via authority/additional | Done | — | Covered |
-| 33 | **Wrong-family records in a positive answer: tolerated vs. rejected** | Ambiguity in `:71` — a wrong-family record (e.g., AAAA in an A query's answer section) is currently tolerated-and-ignored (never a candidate) unless it coexists with a CNAME at its owner (which fails, `CnameCoexist`); the spec does not state this explicitly | Low | Medium (clarity pin) | Pin the tolerated-and-ignored behavior in the spec to match `src/dns.rs:824-829,848-855`, or decide fail-closed; avoids a spec/code drift like the F6 case |
+| 33 | ✅ **Wrong-family records in a positive answer: tolerated vs. rejected** *(implemented & pinned, 2026-10-19)* | Ambiguity in `:71` — a wrong-family record (e.g., AAAA in an A query's answer section) is tolerated-and-ignored (never a candidate) and never marks its terminal owner as carrying address data; coexist with a CNAME at its owner still fails `CnameCoexist` | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; wrong-family records are truly ignored (`src/dns.rs:824-830,847-853`), and NXDOMAIN at an opposite-family-only terminal is a clean `NxDomain`, never `TerminalWithoutData` |
 
 ### D. Cache & TTL policy hardening
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
 | 14 | **TTL floor (min-TTL)** | Reject/raise implausibly low TTLs | Low | Low — contradicts `:74` (deliberate zero-TTL-steering support) | Study the tradeoff; low value for a server |
-| 15 | **TTL cap** | Long-lived poisoned/stale records | Done (L12, 86400 s) | — | Covered |
-| 16 | **Stale-answer / RFC 8767 served-stale** | Availability vs freshness | Done (72 h) | — | Covered |
 | 17 | **Authoritative-freshness bound** | Resolver returning stale data as fresh | Medium | Medium (deployment-side) | Study deployment-enforced upstream stale bound (`docs/alumina-proxy.md:130`) |
 
 ### E. Availability & resilience (DNS DoS / resolver failure)
@@ -77,7 +84,6 @@ and the open serving-qualification gates (F1–F4, BOUNDARY, E2E —
 |---|---|---|---|---|---|
 | 18 | **Multi-resolver failover** | Resolver outage | Medium | Low — contradicts no-fallback doctrine | Defer; document as design-revision candidate |
 | 19 | **Resolver health probing / degraded signaling** | Early detection of SERVFAIL/timeout storms | Low | Medium | Low priority (incidents already cover this) |
-| 20 | **Query pacing / rate limiting** | Query flooding / monopolization | Done (1 query/sec/name) | — | Covered |
 
 ### F. Detection & observability of tampering
 
@@ -92,26 +98,21 @@ and the open serving-qualification gates (F1–F4, BOUNDARY, E2E —
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 25 | **QNAME minimization (RFC 7816)** | Reduce name leakage to resolvers; reduce poisoning surface | Medium | Medium | Low priority (single-resolver full-FQDN queries limit value) |
-| 26 | **Query-name normalization / IDN** | Homograph/IDN confusion | Done (A-label only) | — | Covered |
+| *(pruned: 25 QNAME minimization)* | | | | | |
 
 ### H. Protocol / feature-surface hardening
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 27 | **DNAME rejection** | Synthesized CNAME abuse | Done | — | Covered |
-| 28 | **Additional/authority-section strictness** | Poisoning via non-answer sections | Done (never candidates) | — | Covered |
-| 29 | **Message-size / record-count caps** | Oversized/amplified responses | Done (16 KiB / 128 RR) | — | Covered |
-| 34 | **ClientHello handshake-length field bound** | The 3-byte handshake `length` is bounded only indirectly via the 64 KiB buffered-TLS cap (`:165`) and 16 KiB record-payload cap (`:166`); not stated explicitly | Low | Medium (clarity pin) | Add explicit bound: a ClientHello whose handshake `length` exceeds the buffered-TLS bound is rejected as malformed framing |
+| 34 | ✅ **ClientHello handshake-length field bound** *(implemented & pinned, 2026-10-19)* | The 3-byte handshake `length` is bounded only indirectly via the 64 KiB buffered-TLS cap (`:165`) and 16 KiB record-payload cap (`:166`); now stated explicitly | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; a ClientHello handshake message whose `4 + length` exceeds 16 KiB is rejected with a distinct `HandshakeTooLarge` discriminant (`src/client_hello.rs:MAX_HANDSHAKE_LEN`, `scan_available`) |
 | 35 | **CONNECT header-line count bound** | CONNECT headers capped at 8 KiB (`:164`) but no explicit max header-line count | Low | Medium (clarity pin) | Add explicit header-count bound to the resource profile |
-| 36 | **Non-CONNECT method / request-target form rejection** | Spec says "plaintext HTTP/1.1 CONNECT" but does not explicitly enumerate rejecting other methods or non-authority-form request-targets (rejected indirectly via hostname authorization) | Low | Medium (clarity pin) | Add explicit "reject any method other than CONNECT" and "reject request-target not in authority-form" |
+| 36 | ✅ **Non-CONNECT method / request-target form rejection** *(implemented & pinned, 2026-10-19)* | Spec says "plaintext HTTP/1.1 CONNECT" but does not explicitly enumerate rejecting other methods or non-authority-form request-targets (rejected indirectly via hostname authorization) | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; a method other than byte-exact `CONNECT`, a version other than `HTTP/1.1`, and a non-authority-form request-target each carry distinct finite discriminants (`src/connect.rs` `MethodNotConnect`/`UnsupportedVersion`/`TargetNotAuthorityForm`) feeding the rp2e tripwire surface |
 
 ### I. Application-layer / post-resolution hardening (beyond DNS itself)
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
 | 30 | **Upstream certificate validation** | Fake/malicious upstream | N/A — non-decrypting invariant IV-3 | N/A | Deployment/operator vector only (operator-owned CONNECT+TLS check, `docs/alumina-proxy.md:122`) |
-| 31 | **DNS-rebinding defense** | Attacker-controlled IP rotation | Done (fixed peer + per-attempt revalidation) | — | Covered |
 | 32 | **CNAME-chain pinning to known-good zones** | Chaining into attacker zones | Medium | Medium | Overlaps vector 11 |
 
 ## 3. Ranked research priorities
@@ -124,17 +125,16 @@ Ranked by **value-to-Alumina ÷ cost-and-doctrine-fit**:
 | 2 | **Bailiwick on CNAME targets (C11)** | Closes the documented cross-suffix-CNAME accepted limitation; cheap, spec-adjacent | Medium | Study: restrict CNAME targets to allowlisted/known zones; measure breakage |
 | 3 | **0x20 case randomization (C9)** | Cheap off-path poisoning defense; well-understood | Medium | Study: impact on lowercase normalization + question-match validation |
 | 4 | **Anomaly detection/tripwire on DNS (F21)** | Fits existing incident + rp2e enforcement machinery | Medium | Study: which anomalies are signal vs noise for a server |
-| 5 | **DoT/DoH (A1/A2)** | The consumer-facing recommendation; explicit non-goal, high cost | Low | Defer unless user authorizes amendment |
+| 5 | **DoT (A1)** | The consumer-facing recommendation; explicit non-goal, high cost | Low | Defer unless user authorizes amendment |
 | 6 | **Multi-resolver cross-validation (B8)** | High value but violates 1-conn/1-query + no-fallback doctrine | Low | Defer; document as a design-revision candidate |
-| 7 | **QNAME minimization (G25)** | Limited value for single-resolver full-FQDN queries | Low | Low priority |
 
 ## 4. Risks / abort conditions
 
 - **Any vector reaching implementation is a spec amendment requiring explicit user authorization** (doctrine). Abort any such work without it.
-- **DNSSEC / DoT / DoH add crypto dependencies** that risk breaking the zero-allocation and fixed-resource-profile invariants (`docs/alumina-proxy.md:206-207`); research must explicitly scope memory + deadline feasibility before any design.
+- **DNSSEC / DoT add crypto dependencies** that risk breaking the zero-allocation and fixed-resource-profile invariants (`docs/alumina-proxy.md:206-207`); research must explicitly scope memory + deadline feasibility before any design.
 - **The open serving-qualification gates** (F1–F4, BOUNDARY, E2E — `docs/build-plan.md`) should close before any hardening feature lands.
 
 ## 5. Open questions (blocking, medium+ risk)
 
 1. Which vectors to dispatch for research first — recommendation: the top-4 (DNSSEC feasibility, CNAME bailiwick, 0x20, DNS anomaly tripwire).
-2. Whether a spec amendment is on the table at all (e.g., DoT/DoH or DNSSEC), or whether this research strictly informs a future decision while staying within the fixed spec for now.
+2. Whether a spec amendment is on the table at all (e.g., DoT or DNSSEC), or whether this research strictly informs a future decision while staying within the fixed spec for now.
