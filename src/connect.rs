@@ -41,7 +41,9 @@ impl ConnectRequest {
 #[non_exhaustive]
 pub enum ConnectError {
     TooLong,
-    NotHttp,
+    MethodNotConnect,
+    UnsupportedVersion,
+    TargetNotAuthorityForm,
     MalformedRequestLine { detail: &'static str },
     BareLineFeed,
     BareCarriageReturn,
@@ -57,7 +59,13 @@ impl fmt::Display for ConnectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConnectError::TooLong => write!(f, "CONNECT request-head exceeds 8 KiB"),
-            ConnectError::NotHttp => write!(f, "CONNECT request line is not exactly three tokens"),
+            ConnectError::MethodNotConnect => write!(f, "CONNECT request method is not CONNECT"),
+            ConnectError::UnsupportedVersion => {
+                write!(f, "CONNECT request version is not HTTP/1.1")
+            }
+            ConnectError::TargetNotAuthorityForm => {
+                write!(f, "CONNECT target is not authority-form host:port")
+            }
             ConnectError::MalformedRequestLine { detail } => {
                 write!(f, "CONNECT request line malformed: {detail}")
             }
@@ -93,7 +101,9 @@ impl fmt::Display for ConnectError {
 #[repr(u8)]
 pub enum ConnectHeadReason {
     TooLong,
-    NotHttp,
+    MethodNotConnect,
+    UnsupportedVersion,
+    TargetNotAuthorityForm,
     MalformedRequestLine,
     BareLineFeed,
     BareCarriageReturn,
@@ -113,7 +123,9 @@ impl ConnectHeadReason {
         use ConnectError as E;
         match err {
             E::TooLong => ConnectHeadReason::TooLong,
-            E::NotHttp => ConnectHeadReason::NotHttp,
+            E::MethodNotConnect => ConnectHeadReason::MethodNotConnect,
+            E::UnsupportedVersion => ConnectHeadReason::UnsupportedVersion,
+            E::TargetNotAuthorityForm => ConnectHeadReason::TargetNotAuthorityForm,
             E::MalformedRequestLine { .. } => ConnectHeadReason::MalformedRequestLine,
             E::BareLineFeed => ConnectHeadReason::BareLineFeed,
             E::BareCarriageReturn => ConnectHeadReason::BareCarriageReturn,
@@ -133,7 +145,7 @@ impl ConnectHeadReason {
     }
 
     /// The number of finite CONNECT-head discriminants.
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 13;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,22 +331,26 @@ impl<'a> Lines<'a> {
 }
 
 fn parse_request_line(line: &[u8]) -> Result<ConnectRequest, ConnectError> {
-    let method_end = line
-        .iter()
-        .position(|&b| b == b' ')
-        .ok_or(ConnectError::NotHttp)?;
+    let method_end =
+        line.iter()
+            .position(|&b| b == b' ')
+            .ok_or(ConnectError::MalformedRequestLine {
+                detail: "not exactly three tokens",
+            })?;
     if &line[..method_end] != b"CONNECT" {
-        return Err(ConnectError::NotHttp);
+        return Err(ConnectError::MethodNotConnect);
     }
     let after_method = method_end + 1;
     let target_end = line[after_method..]
         .iter()
         .position(|&b| b == b' ')
         .map(|p| after_method + p)
-        .ok_or(ConnectError::NotHttp)?;
+        .ok_or(ConnectError::MalformedRequestLine {
+            detail: "not exactly three tokens",
+        })?;
     let version = &line[target_end + 1..];
     if version != HTTP_11 {
-        return Err(ConnectError::NotHttp);
+        return Err(ConnectError::UnsupportedVersion);
     }
     parse_target(&line[after_method..target_end])
 }
@@ -380,10 +396,14 @@ fn parse_content_length(value: &[u8]) -> Option<u64> {
 }
 
 fn parse_target(target: &[u8]) -> Result<ConnectRequest, ConnectError> {
+    if target.starts_with(b"/")
+        || target.starts_with(b"*")
+        || target.windows(3).any(|w| w == b"://")
+    {
+        return Err(ConnectError::TargetNotAuthorityForm);
+    }
     let Some(colon) = target.iter().rposition(|&b| b == b':') else {
-        return Err(ConnectError::MalformedRequestLine {
-            detail: "target lacks a port",
-        });
+        return Err(ConnectError::TargetNotAuthorityForm);
     };
     let host = &target[..colon];
     let port = &target[colon + 1..];
@@ -571,19 +591,102 @@ mod tests {
     #[test]
     fn rejects_http2_version() {
         let head = "CONNECT sub.example.org:443 HTTP/2.0\r\n\r\n";
-        assert_eq!(parse_full(head.as_bytes()), Err(ConnectError::NotHttp));
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::UnsupportedVersion)
+        );
     }
 
     #[test]
     fn rejects_http_1_0_connect() {
         let head = b"CONNECT sub.example.org:443 HTTP/1.0\r\n\r\n";
-        assert_eq!(parse_full(head), Err(ConnectError::NotHttp));
+        assert_eq!(parse_full(head), Err(ConnectError::UnsupportedVersion));
     }
 
     #[test]
     fn rejects_bare_http_version_prefix() {
         let head = "CONNECT sub.example.org:443 HTTP/\r\n\r\n";
-        assert_eq!(parse_full(head.as_bytes()), Err(ConnectError::NotHttp));
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::UnsupportedVersion)
+        );
+    }
+
+    #[test]
+    fn rejects_non_connect_method() {
+        let head = "GET sub.example.org:443 HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::MethodNotConnect)
+        );
+    }
+
+    #[test]
+    fn rejects_lowercase_connect_method() {
+        let head = "connect sub.example.org:443 HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::MethodNotConnect),
+            "the CONNECT method match must be byte-exact"
+        );
+    }
+
+    #[test]
+    fn rejects_single_token_request_line() {
+        let head = "CONNECT\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::MalformedRequestLine {
+                detail: "not exactly three tokens",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_two_token_request_line() {
+        let head = "CONNECT sub.example.org:443\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::MalformedRequestLine {
+                detail: "not exactly three tokens",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_origin_form_target() {
+        let head = "CONNECT /index.html HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::TargetNotAuthorityForm)
+        );
+    }
+
+    #[test]
+    fn rejects_asterisk_form_target() {
+        let head = "CONNECT * HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::TargetNotAuthorityForm)
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_form_target() {
+        let head = "CONNECT http://sub.example.org:443 HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::TargetNotAuthorityForm)
+        );
+    }
+
+    #[test]
+    fn rejects_target_without_port() {
+        let head = "CONNECT sub.example.org HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::TargetNotAuthorityForm)
+        );
     }
 
     #[test]

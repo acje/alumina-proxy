@@ -826,7 +826,6 @@ pub fn parse_response(
                             if ws.owners[idx].cname.is_some() {
                                 return Err(DnsError::CnameCoexist);
                             }
-                            ws.owners[idx].has_addr_data = true;
                             reader.skip(rdlen)?;
                             continue;
                         }
@@ -850,7 +849,6 @@ pub fn parse_response(
                             if ws.owners[idx].cname.is_some() {
                                 return Err(DnsError::CnameCoexist);
                             }
-                            ws.owners[idx].has_addr_data = true;
                             reader.skip(rdlen)?;
                             continue;
                         }
@@ -1847,7 +1845,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_coexist_opposite_family_address_then_cname() {
+    fn ignored_opposite_family_aaaa_then_cname_yields_empty_noerror_without_soa() {
         let mut msg = header(0x124e, true, 0, 1, 2, 0, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&1u16.to_be_bytes());
@@ -1862,7 +1860,7 @@ mod tests {
         msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
         assert_eq!(
             parse_response_ws("sub.example.org", Family::A, 0x124e, &msg),
-            Err(DnsError::CnameCoexist)
+            Err(DnsError::EmptyNoerrorWithoutSoa)
         );
     }
 
@@ -1881,7 +1879,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_coexist_opposite_family_address_then_cname_when_querying_aaaa() {
+    fn ignored_opposite_family_a_then_cname_when_querying_aaaa_yields_empty_noerror_without_soa() {
         let mut msg = header(0x1250, true, 0, 1, 2, 0, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&28u16.to_be_bytes());
@@ -1890,7 +1888,7 @@ mod tests {
         msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
         assert_eq!(
             parse_response_ws("sub.example.org", Family::Aaaa, 0x1250, &msg),
-            Err(DnsError::CnameCoexist)
+            Err(DnsError::EmptyNoerrorWithoutSoa)
         );
     }
 
@@ -1937,8 +1935,8 @@ mod tests {
     }
 
     #[test]
-    fn nxdomain_with_terminal_aaaa_data_rejected_when_querying_a() {
-        let mut msg = header(0x1246, true, 3, 1, 1, 0, 0);
+    fn nxdomain_with_opposite_family_aaaa_at_terminal_is_clean_nxdomain() {
+        let mut msg = header(0x1252, true, 3, 1, 1, 0, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
@@ -1949,22 +1947,26 @@ mod tests {
             ],
             60,
         ));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1252, &msg).expect("parse");
         assert_eq!(
-            parse_response_ws("sub.example.org", Family::A, 0x1246, &msg),
-            Err(DnsError::TerminalWithoutData)
+            out,
+            Outcome::NxDomain { soa: None },
+            "an NXDOMAIN carrying a wrong-family AAAA at the terminal owner is a clean NxDomain, never TerminalWithoutData"
         );
     }
 
     #[test]
-    fn nxdomain_with_terminal_a_data_rejected_when_querying_aaaa() {
-        let mut msg = header(0x1247, true, 3, 1, 1, 0, 0);
+    fn nxdomain_with_opposite_family_a_at_terminal_is_clean_nxdomain() {
+        let mut msg = header(0x1253, true, 3, 1, 1, 0, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&28u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&a_record("sub.example.org", [10, 0, 0, 1], 60));
+        let out = parse_response_ws("sub.example.org", Family::Aaaa, 0x1253, &msg).expect("parse");
         assert_eq!(
-            parse_response_ws("sub.example.org", Family::Aaaa, 0x1247, &msg),
-            Err(DnsError::TerminalWithoutData)
+            out,
+            Outcome::NxDomain { soa: None },
+            "an NXDOMAIN carrying a wrong-family A at the terminal owner is a clean NxDomain, never TerminalWithoutData"
         );
     }
 

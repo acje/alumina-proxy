@@ -8,6 +8,9 @@ pub const MAX_CLIENT_HELLO: usize = 64 * 1024;
 /// Maximum plaintext payload per TLS record during inspection.
 pub const RECORD_PAYLOAD_LIMIT: usize = 16 * 1024;
 
+/// Maximum `ClientHello` handshake message length (4-byte header plus body).
+pub const MAX_HANDSHAKE_LEN: usize = 16 * 1024;
+
 /// Maximum number of offered `supported_versions` entries retained.
 const MAX_VERSIONS: usize = 32;
 
@@ -74,6 +77,7 @@ pub struct HelloAccepted {
 #[non_exhaustive]
 pub enum ChError {
     TooLarge,
+    HandshakeTooLarge { got: usize },
     RecordTooLarge { got: usize },
     ZeroLengthRecord,
     NotHandshake { content_type: u8 },
@@ -99,6 +103,12 @@ impl fmt::Display for ChError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ChError::TooLarge => write!(f, "ClientHello exceeds 64 KiB inspection bound"),
+            ChError::HandshakeTooLarge { got } => {
+                write!(
+                    f,
+                    "ClientHello handshake message length {got} exceeds 16 KiB"
+                )
+            }
             ChError::RecordTooLarge { got } => {
                 write!(f, "TLS record payload {got} exceeds 16 KiB")
             }
@@ -191,6 +201,7 @@ impl HelloRejectReason {
             ChError::ServerNameMismatch => HelloRejectReason::ServerNameMismatch,
             ChError::InvalidServerName { .. } => HelloRejectReason::InvalidServerName,
             ChError::TooLarge
+            | ChError::HandshakeTooLarge { .. }
             | ChError::RecordTooLarge { .. }
             | ChError::ZeroLengthRecord
             | ChError::NotHandshake { .. }
@@ -238,8 +249,8 @@ pub enum Inspect {
 /// produces a `ClientHello` once the complete initial `ClientHello` message is
 /// available across one or more consecutive handshake records. It rejects
 /// `SSLv2` framing, non-handshake records seen before the `ClientHello` completes,
-/// zero-length handshake records, record payloads over 16 KiB, and an
-/// inspection total over 64 KiB.
+/// zero-length handshake records, record payloads over 16 KiB, a `ClientHello`
+/// handshake message over 16 KiB, and an inspection total over 64 KiB.
 ///
 /// The inspector retains its scan position and flattened-message scratch
 /// across feeds, so each record payload is copied exactly once regardless of
@@ -292,8 +303,9 @@ impl ChInspector {
     /// # Errors
     ///
     /// Returns `TooLarge` when the fed bytes exceed the remaining inspection
-    /// capacity before a complete `ClientHello` was reached, and the framing or
-    /// profile errors above at the earliest decidable byte count.
+    /// capacity before a complete `ClientHello` was reached, `HandshakeTooLarge`
+    /// when the `ClientHello` handshake message length exceeds 16 KiB, and the
+    /// framing or profile errors above at the earliest decidable byte count.
     pub fn feed(&mut self, data: &[u8]) -> Result<Inspect, ChError> {
         if self.hello.is_some() {
             return Ok(Inspect::Complete {
@@ -379,8 +391,8 @@ impl ChInspector {
                     | (usize::from(self.scratch[2]) << 8)
                     | usize::from(self.scratch[3]);
                 let need = 4 + msg_len;
-                if need > MAX_CLIENT_HELLO {
-                    return Err(ChError::TooLarge);
+                if need > MAX_HANDSHAKE_LEN {
+                    return Err(ChError::HandshakeTooLarge { got: need });
                 }
                 if self.flat >= need {
                     let consumed = self.scan_pos + need - self.flat;
@@ -1085,6 +1097,37 @@ mod tests {
     }
 
     #[test]
+    fn rejects_handshake_length_claim_over_bound() {
+        let claimed = 0x0000_ffff_u32;
+        let mut payload = vec![HANDSHAKE_CLIENT_HELLO];
+        payload.extend_from_slice(&claimed.to_be_bytes()[1..]);
+        payload.extend_from_slice(&[0xabu8; 28]);
+        let wire = record(&payload);
+        assert_eq!(
+            parse_one(&wire),
+            Err(ChError::HandshakeTooLarge {
+                got: 4 + claimed as usize,
+            }),
+            "a ClientHello whose 3-byte handshake length claims more than 16 KiB must be rejected"
+        );
+    }
+
+    #[test]
+    fn handshake_claim_exactly_at_bound_is_not_length_rejected() {
+        let claimed =
+            u32::try_from(MAX_HANDSHAKE_LEN - 4).expect("16 KiB handshake bound fits u32");
+        let mut payload = vec![HANDSHAKE_CLIENT_HELLO];
+        payload.extend_from_slice(&claimed.to_be_bytes()[1..]);
+        payload.extend_from_slice(&[0xabu8; 28]);
+        let mut inspector = ChInspector::new();
+        assert_eq!(
+            inspector.feed(&record(&payload)),
+            Ok(Inspect::NeedMore),
+            "a handshake claiming exactly the 16 KiB cap is incomplete, not length-rejected"
+        );
+    }
+
+    #[test]
     fn rejects_zero_length_handshake_record_between_fragments() {
         let msg = hello_msg(TLS12, &[TLS13], &["sub.example.org"], false);
         let mut split = record(&msg[5..5 + 12]);
@@ -1117,7 +1160,7 @@ mod tests {
         let result = inspector.feed(&wire);
         assert_eq!(
             result,
-            Err(ChError::TooLarge),
+            Err(ChError::HandshakeTooLarge { got: 65536 }),
             "full buffer without a complete hello must not panic"
         );
     }

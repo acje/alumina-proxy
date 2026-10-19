@@ -1843,12 +1843,12 @@ mod tests {
             "level=info kind=monitor secs=7 facts_total=4 actions_total=3 refusals_total=0 \
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
              ocapture_drops=0 s0=1 s1=0 ba=0 \
-             c11=2 unk3=1 d0f=1 d0b=1 d0l=1\n",
+             c13=2 unk3=1 d0f=1 d0b=1 d0l=1\n",
             "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
         );
         assert!(
-            text.contains(" c11=2"),
-            "the AnyIllegal cause index 11 (HostNotAllowlisted) carries its fold: {text}"
+            text.contains(" c13=2"),
+            "the AnyIllegal cause index 13 (HostNotAllowlisted) carries its fold: {text}"
         );
         assert!(
             text.contains("unk3=1"),
@@ -1934,7 +1934,7 @@ mod tests {
             "H1': both slots share the equal per-slot generation: {text}"
         );
         assert!(
-            text.contains("x0t=a11") && text.contains("x1t=a11"),
+            text.contains("x0t=a13") && text.contains("x1t=a13"),
             "H1': both captures emit their typed fact: {text}"
         );
         assert!(

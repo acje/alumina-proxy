@@ -385,7 +385,9 @@ mod tests {
         let mut seen = [false; AnyIllegalCause::KIND_COUNT];
         let kinds = [
             AnyIllegalCause::ConnectParse(ConnectHeadReason::TooLong),
-            AnyIllegalCause::ConnectParse(ConnectHeadReason::NotHttp),
+            AnyIllegalCause::ConnectParse(ConnectHeadReason::MethodNotConnect),
+            AnyIllegalCause::ConnectParse(ConnectHeadReason::UnsupportedVersion),
+            AnyIllegalCause::ConnectParse(ConnectHeadReason::TargetNotAuthorityForm),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::MalformedRequestLine),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::BareLineFeed),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::BareCarriageReturn),
@@ -426,8 +428,8 @@ mod tests {
         assert_eq!(UnknownReason::Unattributed.index(), 3);
         assert_eq!(
             AnyIllegalCause::KIND_COUNT,
-            11 + 1 + 4,
-            "11 CONNECT-head + HostNotAllowlisted + 4 hello-reject discriminants"
+            13 + 1 + 4,
+            "13 CONNECT-head + HostNotAllowlisted + 4 hello-reject discriminants"
         );
     }
 
