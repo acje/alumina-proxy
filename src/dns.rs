@@ -895,14 +895,18 @@ pub fn parse_response(
         }
         match ty {
             TYPE_A if rdlen != 4 => {
-                return Err(DnsError::BadRdataLength { ty, got: rdlen, expected: 4 })
+                return Err(DnsError::BadRdataLength {
+                    ty,
+                    got: rdlen,
+                    expected: 4,
+                });
             }
             TYPE_AAAA if rdlen != 16 => {
                 return Err(DnsError::BadRdataLength {
                     ty,
                     got: rdlen,
                     expected: 16,
-                })
+                });
             }
             _ => {}
         }
@@ -925,14 +929,18 @@ pub fn parse_response(
         }
         match ty {
             TYPE_A if rdlen != 4 => {
-                return Err(DnsError::BadRdataLength { ty, got: rdlen, expected: 4 })
+                return Err(DnsError::BadRdataLength {
+                    ty,
+                    got: rdlen,
+                    expected: 4,
+                });
             }
             TYPE_AAAA if rdlen != 16 => {
                 return Err(DnsError::BadRdataLength {
                     ty,
                     got: rdlen,
                     expected: 16,
-                })
+                });
             }
             _ => {}
         }
