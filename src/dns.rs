@@ -823,6 +823,9 @@ pub fn parse_response(
                     Rdata::A(ip) => {
                         if family != Family::A {
                             let idx = ensure_owner(ws, &owner)?;
+                            if ws.owners[idx].cname.is_some() {
+                                return Err(DnsError::CnameCoexist);
+                            }
                             ws.owners[idx].has_addr_data = true;
                             reader.skip(rdlen)?;
                             continue;
@@ -844,6 +847,9 @@ pub fn parse_response(
                     Rdata::Aaaa(ip) => {
                         if family != Family::Aaaa {
                             let idx = ensure_owner(ws, &owner)?;
+                            if ws.owners[idx].cname.is_some() {
+                                return Err(DnsError::CnameCoexist);
+                            }
                             ws.owners[idx].has_addr_data = true;
                             reader.skip(rdlen)?;
                             continue;
@@ -868,7 +874,7 @@ pub fn parse_response(
                             if !existing.eq_bytes(target.as_slice()) {
                                 return Err(DnsError::ConflictingCname);
                             }
-                        } else if ws.owners[idx].addr_len != 0 {
+                        } else if ws.owners[idx].has_addr_data {
                             return Err(DnsError::CnameCoexist);
                         } else {
                             ws.owners[idx].cname = Some((target, ttl));
@@ -1818,6 +1824,92 @@ mod tests {
             parse_response_ws("sub.example.org", Family::A, 25, &msg),
             Err(DnsError::CnameCoexist)
         );
+    }
+
+    #[test]
+    fn rejects_coexist_cname_then_opposite_family_address() {
+        let mut msg = header(0x124d, true, 0, 1, 2, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
+        msg.extend_from_slice(&aaaa_record(
+            "sub.example.org",
+            [
+                0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+            ],
+            60,
+        ));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x124d, &msg),
+            Err(DnsError::CnameCoexist)
+        );
+    }
+
+    #[test]
+    fn rejects_coexist_opposite_family_address_then_cname() {
+        let mut msg = header(0x124e, true, 0, 1, 2, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&aaaa_record(
+            "sub.example.org",
+            [
+                0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+            ],
+            60,
+        ));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x124e, &msg),
+            Err(DnsError::CnameCoexist)
+        );
+    }
+
+    #[test]
+    fn rejects_coexist_cname_then_opposite_family_address_when_querying_aaaa() {
+        let mut msg = header(0x124f, true, 0, 1, 2, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&28u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
+        msg.extend_from_slice(&a_record("sub.example.org", [1, 2, 3, 4], 60));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::Aaaa, 0x124f, &msg),
+            Err(DnsError::CnameCoexist)
+        );
+    }
+
+    #[test]
+    fn rejects_coexist_opposite_family_address_then_cname_when_querying_aaaa() {
+        let mut msg = header(0x1250, true, 0, 1, 2, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&28u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [1, 2, 3, 4], 60));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::Aaaa, 0x1250, &msg),
+            Err(DnsError::CnameCoexist)
+        );
+    }
+
+    #[test]
+    fn accepts_lone_opposite_family_address_without_cname() {
+        let mut msg = header(0x1251, true, 0, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&aaaa_record(
+            "sub.example.org",
+            [
+                0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+            ],
+            60,
+        ));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1251, &msg);
+        assert_ne!(out, Err(DnsError::CnameCoexist));
+        assert_eq!(out, Err(DnsError::EmptyNoerrorWithoutSoa));
     }
 
     #[test]
