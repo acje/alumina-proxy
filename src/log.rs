@@ -485,7 +485,8 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     }
     let ofacts = monitor.facts_any_illegal_overflow()
         || monitor.facts_early_data_overflow()
-        || monitor.facts_unknown_overflow();
+        || monitor.facts_unknown_overflow()
+        || monitor.facts_resolver_degraded_overflow();
     let globals: [(&[u8], u64); 13] = [
         (&b"facts_total"[..], monitor.facts_total()),
         (&b"actions_total"[..], monitor.actions_total()),
@@ -517,6 +518,10 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         if !push_u64(&mut w, key, value) {
             return None;
         }
+    }
+    let resolver_degraded = monitor.facts_resolver_degraded();
+    if resolver_degraded > 0 && !push_u64(&mut w, b"rd", u64::from(resolver_degraded)) {
+        return None;
     }
     for index in 0..AnyIllegalCause::KIND_COUNT {
         let value = monitor.facts_any_illegal_by_index(index);
@@ -1829,6 +1834,7 @@ mod tests {
         m.note_fact_any_illegal(crate::enforcement::policy::AnyIllegalCause::HostNotAllowlisted);
         m.note_fact_any_illegal(crate::enforcement::policy::AnyIllegalCause::HostNotAllowlisted);
         m.note_fact_unknown(UnknownReason::Unattributed);
+        m.note_fact_resolver_degraded();
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         m.note_fact_early_data(ordinal);
         m.note_action_first_slot_block(AnyIllegalScope::Connection);
@@ -1840,15 +1846,23 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert_eq!(
             text,
-            "level=info kind=monitor secs=7 facts_total=4 actions_total=3 refusals_total=0 \
+            "level=info kind=monitor secs=7 facts_total=5 actions_total=3 refusals_total=0 \
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
-             ocapture_drops=0 s0=1 s1=0 ba=0 \
-             c13=2 unk3=1 d0f=1 d0b=1 d0l=1\n",
+             ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 \
+             c14=2 unk3=1 d0f=1 d0b=1 d0l=1\n",
             "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
         );
         assert!(
-            text.contains(" c13=2"),
-            "the AnyIllegal cause index 13 (HostNotAllowlisted) carries its fold: {text}"
+            text.contains(" rd=1"),
+            "the resolver-degraded fact key carries its fold: {text}"
+        );
+        assert!(
+            !text.contains("rd=0"),
+            "a zero resolver-degraded fold stays suppressed: {text}"
+        );
+        assert!(
+            text.contains(" c14=2"),
+            "the AnyIllegal cause index 14 (HostNotAllowlisted) carries its fold: {text}"
         );
         assert!(
             text.contains("unk3=1"),
@@ -1934,7 +1948,7 @@ mod tests {
             "H1': both slots share the equal per-slot generation: {text}"
         );
         assert!(
-            text.contains("x0t=a13") && text.contains("x1t=a13"),
+            text.contains("x0t=a14") && text.contains("x1t=a14"),
             "H1': both captures emit their typed fact: {text}"
         );
         assert!(

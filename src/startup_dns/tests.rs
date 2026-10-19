@@ -1317,3 +1317,227 @@ fn cooperative_send_wouldblock_makes_owner_wait_instead_of_busy_looping() {
     assert_ne!(bindings_of(&cache, 0, Family::A), []);
     drop(responder);
 }
+
+/// Drives one cooperative exchange on the transport through `wait_dns_readiness`
+/// waits until it concludes, returning the terminal turn (never `Pending`).
+fn run_exchange_to_terminal(
+    transport: &mut StartupDns,
+    fqdn: &crate::config::Fqdn,
+    cache: &mut Cache,
+    schedules: &mut Schedules,
+    deadline: Instant,
+) -> TurnResult {
+    loop {
+        match transport
+            .advance_exchange(fqdn, cache, schedules)
+            .expect("exchange turn")
+        {
+            TurnResult::Pending => {
+                let _ = transport.wait_dns_readiness(deadline).expect("dns wait");
+            }
+            terminal => return terminal,
+        }
+    }
+}
+
+/// Starts one exchange with a fresh short deadline and drives it to its
+/// terminal turn, asserting it concludes as `expect`.
+fn run_exchange_expecting(
+    transport: &mut StartupDns,
+    fqdn: &crate::config::Fqdn,
+    cache: &mut Cache,
+    schedules: &mut Schedules,
+    expect: &TurnResult,
+) {
+    // A fresh deadline per exchange keeps every exchange dialing: the
+    // responder scripts rely on one accepted connection per exchange.
+    let deadline = Instant::now() + Duration::from_millis(200);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline)
+        .unwrap();
+    let terminal = run_exchange_to_terminal(transport, fqdn, cache, schedules, deadline);
+    assert_eq!(
+        terminal, *expect,
+        "the exchange must conclude as {expect:?}, got {terminal:?}"
+    );
+}
+
+#[test]
+fn resolver_enters_degraded_once_after_three_consecutive_failures() {
+    let cfg = config();
+    let responder = spawn_responder(vec![
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+    ]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    for _ in 0..3 {
+        // A fresh deadline per exchange keeps every exchange dialing: the
+        // responder scripts rely on one accepted connection per exchange.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        transport
+            .start_exchange(fqdn, Family::A, 0, deadline)
+            .unwrap();
+        assert_eq!(
+            run_exchange_to_terminal(&mut transport, fqdn, &mut cache, &mut schedules, deadline),
+            TurnResult::Failed,
+            "each stalled exchange concludes as a counted failure"
+        );
+    }
+    assert!(
+        transport.resolver_degraded_for_test(),
+        "the third consecutive failure relocates the resolver into degraded mode"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        1,
+        "the enter crossing is emitted exactly once, never once per failure"
+    );
+    drop(responder);
+}
+
+#[test]
+fn resolver_failure_below_threshold_emits_no_transition_and_stays_healthy() {
+    let cfg = config();
+    let responder = spawn_responder(vec![
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+    ]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    for _ in 0..2 {
+        run_exchange_expecting(
+            &mut transport,
+            fqdn,
+            &mut cache,
+            &mut schedules,
+            &TurnResult::Failed,
+        );
+    }
+    assert!(
+        !transport.resolver_degraded_for_test(),
+        "two consecutive failures are below the degraded threshold"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        0,
+        "a below-threshold run never emits a resolver-degraded fact"
+    );
+    drop(responder);
+}
+
+#[test]
+fn resolver_stays_degraded_without_reemitting_on_further_failures() {
+    let cfg = config();
+    let responder = spawn_responder(vec![
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+    ]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    for _ in 0..4 {
+        run_exchange_expecting(
+            &mut transport,
+            fqdn,
+            &mut cache,
+            &mut schedules,
+            &TurnResult::Failed,
+        );
+    }
+    assert!(
+        transport.resolver_degraded_for_test(),
+        "the fourth consecutive failure keeps the resolver degraded"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        1,
+        "the fourth consecutive failure must not re-emit the degraded fact"
+    );
+    drop(responder);
+}
+
+#[test]
+fn successful_exchange_recovers_and_emits_exit_crossing_once() {
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+    let dead_port = probe.local_addr().expect("probe addr").port();
+    drop(probe);
+    let cfg = config();
+    let responder = spawn_responder(vec![vec![Step::PositiveA {
+        ttl: 120,
+        octets: [93, 184, 216, 34],
+    }]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(dead_port);
+    transport.now0 = 1_000_000;
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    for _ in 0..3 {
+        run_exchange_expecting(
+            &mut transport,
+            fqdn,
+            &mut cache,
+            &mut schedules,
+            &TurnResult::Failed,
+        );
+    }
+    assert!(
+        transport.resolver_degraded_for_test(),
+        "three consecutive connect-refused failures relocate the resolver into degraded mode"
+    );
+    transport.addr = ns(responder.port());
+    run_exchange_expecting(
+        &mut transport,
+        fqdn,
+        &mut cache,
+        &mut schedules,
+        &TurnResult::Published,
+    );
+    assert!(
+        !transport.resolver_degraded_for_test(),
+        "a successful publication must leave degraded mode"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        vec![crate::eligibility::NumericAddr::V4(
+            std::net::Ipv4Addr::new(93, 184, 216, 34)
+        )],
+        "the successful publication must publish the recovered answer"
+    );
+    transport.addr = ns(dead_port);
+    for _ in 0..2 {
+        run_exchange_expecting(
+            &mut transport,
+            fqdn,
+            &mut cache,
+            &mut schedules,
+            &TurnResult::Failed,
+        );
+    }
+    assert!(
+        !transport.resolver_degraded_for_test(),
+        "post-recovery failures restart the consecutive count from zero and \
+         two never re-enter degraded mode"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        2,
+        "exactly one enter and one exit crossing across the whole recovery arc"
+    );
+    drop(responder);
+}

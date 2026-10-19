@@ -7,6 +7,11 @@ use crate::config::{Allowlist, FixedHostname};
 /// that may arrive in the same read as the delimiter.
 pub const CONNECT_LIMIT: usize = 8 * 1024;
 
+/// Maximum number of header lines a CONNECT head may carry. Every line yielded
+/// after the request line counts toward the bound, so a head may carry at most
+/// `MAX_HEADER_LINES` header fields.
+pub const MAX_HEADER_LINES: usize = 16;
+
 const END_OF_HEAD: &[u8] = b"\r\n\r\n";
 const HTTP_11: &[u8] = b"HTTP/1.1";
 
@@ -53,6 +58,7 @@ pub enum ConnectError {
     TransferEncoding,
     NonzeroContentLength { got: u64 },
     DuplicateContentLength,
+    TooManyHeaderLines,
 }
 
 impl fmt::Display for ConnectError {
@@ -88,6 +94,10 @@ impl fmt::Display for ConnectError {
                 write!(f, "CONNECT Content-Length {got} rejected; only 0")
             }
             ConnectError::DuplicateContentLength => write!(f, "CONNECT duplicate Content-Length"),
+            ConnectError::TooManyHeaderLines => write!(
+                f,
+                "CONNECT request carries more than {MAX_HEADER_LINES} header lines"
+            ),
         }
     }
 }
@@ -113,6 +123,7 @@ pub enum ConnectHeadReason {
     TransferEncoding,
     NonzeroContentLength,
     DuplicateContentLength,
+    TooManyHeaderLines,
 }
 
 impl ConnectHeadReason {
@@ -135,6 +146,7 @@ impl ConnectHeadReason {
             E::TransferEncoding => ConnectHeadReason::TransferEncoding,
             E::NonzeroContentLength { .. } => ConnectHeadReason::NonzeroContentLength,
             E::DuplicateContentLength => ConnectHeadReason::DuplicateContentLength,
+            E::TooManyHeaderLines => ConnectHeadReason::TooManyHeaderLines,
         }
     }
 
@@ -145,7 +157,7 @@ impl ConnectHeadReason {
     }
 
     /// The number of finite CONNECT-head discriminants.
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 14;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,7 +264,12 @@ fn parse_request(head: &[u8]) -> Result<ConnectRequest, ConnectError> {
     })?;
     let request = parse_request_line(request_line)?;
     let mut content_length: Option<u64> = None;
+    let mut header_lines = 0usize;
     while let Some(line) = lines.next() {
+        header_lines += 1;
+        if header_lines > MAX_HEADER_LINES {
+            return Err(ConnectError::TooManyHeaderLines);
+        }
         if line.is_empty() {
             continue;
         }
@@ -794,6 +811,34 @@ mod tests {
             }
             Feed::Incomplete => panic!("trailing bytes must not count toward the head bound"),
         }
+    }
+
+    fn head_with_header_fields(n: usize) -> Vec<u8> {
+        let mut head = Vec::with_capacity(64 + n * 10);
+        head.extend_from_slice(b"CONNECT sub.example.org:443 HTTP/1.1\r\n");
+        for _ in 0..n {
+            head.extend_from_slice(b"X-Hdr: v\r\n");
+        }
+        head.extend_from_slice(b"\r\n");
+        head
+    }
+
+    #[test]
+    fn rejects_header_line_count_above_bound() {
+        let head = head_with_header_fields(MAX_HEADER_LINES + 1);
+        assert_eq!(
+            parse_full(&head),
+            Err(ConnectError::TooManyHeaderLines),
+            "each header field yields one line after the request line, so \
+             {MAX_HEADER_LINES} + 1 fields exceed the {MAX_HEADER_LINES}-line bound"
+        );
+    }
+
+    #[test]
+    fn allows_header_line_count_at_bound() {
+        let head = head_with_header_fields(MAX_HEADER_LINES);
+        let req = parse_full(&head).expect("16 header fields yield 16 lines, the bound");
+        assert_eq!(req.hostname(), "sub.example.org");
     }
 
     #[test]

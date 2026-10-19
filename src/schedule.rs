@@ -1,11 +1,14 @@
 use crate::cache::Family;
 use crate::config::ALLOWLIST_MAX;
 
-/// Lower bound of the normal and negative refresh intervals, in seconds.
-pub const REFRESH_MIN: u64 = 30;
+/// Lower bound of the normal refresh interval, in seconds.
+pub const REFRESH_MIN: u64 = 5;
 
 /// Upper bound of the normal and negative refresh intervals, in seconds.
-pub const REFRESH_MAX: u64 = 300;
+pub const REFRESH_MAX: u64 = 900;
+
+/// Lower bound of the negative refresh interval, in seconds.
+pub const NEGATIVE_REFRESH_MIN: u64 = 30;
 
 /// The bounded retry backoff ladder, in seconds. The final stage repeats until
 /// a validated positive answer with cacheable bindings resets the type.
@@ -34,18 +37,18 @@ impl Soa {
 }
 
 /// Returns the normal refresh interval for an entry TTL, honoring the fixed
-/// 30/300-second bounds. The floor subsumes the zero-TTL-as-one-second rule.
+/// 5/900-second bounds. The floor subsumes the zero-TTL-as-one-second rule.
 #[must_use]
 pub fn normal_refresh_interval(ttl: u64) -> u64 {
     ttl.clamp(REFRESH_MIN, REFRESH_MAX)
 }
 
 /// Returns the negative refresh interval for a validated negative answer's
-/// SOA, honoring the same fixed bounds after taking the earlier of its TTL and
-/// MINIMUM.
+/// SOA, honoring its own 30/900-second bounds after taking the earlier of its
+/// TTL and MINIMUM.
 #[must_use]
 pub fn negative_refresh_interval(soa: Soa) -> u64 {
-    soa.min_ttl().clamp(REFRESH_MIN, REFRESH_MAX)
+    soa.min_ttl().clamp(NEGATIVE_REFRESH_MIN, REFRESH_MAX)
 }
 
 fn advance_backoff(stage: u8) -> u8 {
@@ -672,6 +675,30 @@ mod tests {
     }
 
     #[test]
+    fn start_rate_guard_holds_within_a_five_second_refresh_cadence() {
+        let mut schedules = Schedules::new(1).unwrap();
+        schedules.overwrite_due_at(0, Family::A, 1000).unwrap();
+        let token = schedules.select_due(1000).unwrap().unwrap();
+        assert_eq!((token.name(), token.family()), (0, Family::A));
+        schedules.overwrite_due_at(0, Family::A, 1005).unwrap();
+        schedules.release_selection(0, Family::A).unwrap();
+        assert_eq!(
+            schedules.select_due(1000).unwrap(),
+            None,
+            "even at a 5-second fast cadence the one-query-per-second slot guard \
+             blocks a same-instant reselect"
+        );
+        assert_eq!(
+            schedules
+                .select_due(1005)
+                .unwrap()
+                .map(|t| (t.name(), t.family())),
+            Some((0, Family::A)),
+            "once the guard and the 5-second due elapse the same slot is reusable"
+        );
+    }
+
+    #[test]
     fn next_selectable_due_guides_the_owner_wake() {
         let mut schedules = Schedules::new(2).unwrap();
         assert_eq!(
@@ -826,14 +853,14 @@ mod tests {
     #[test]
     fn normal_refresh_interval_honors_bounds() {
         let vectors = [
-            (0u64, 30u64),
-            (1, 30),
-            (29, 30),
-            (30, 30),
-            (31, 31),
-            (299, 299),
-            (300, 300),
-            (301, 300),
+            (0u64, 5u64),
+            (4, 5),
+            (5, 5),
+            (6, 6),
+            (50, 50),
+            (899, 899),
+            (900, 900),
+            (901, 900),
         ];
         for (ttl, expect) in vectors {
             assert_eq!(normal_refresh_interval(ttl), expect, "ttl={ttl}");
@@ -844,13 +871,14 @@ mod tests {
     fn negative_refresh_interval_honors_soa_and_bounds() {
         let cases = [
             (Soa::new(1, 1), 30u64),
+            (Soa::new(4, 1000), 30),
             (Soa::new(29, 1000), 30),
             (Soa::new(30, 30), 30),
             (Soa::new(50, 10), 30),
             (Soa::new(31, 1000), 31),
-            (Soa::new(299, 1000), 299),
-            (Soa::new(1000, 300), 300),
-            (Soa::new(301, 301), 300),
+            (Soa::new(899, 1000), 899),
+            (Soa::new(1000, 900), 900),
+            (Soa::new(901, 901), 900),
         ];
         for (soa, expect) in cases {
             assert_eq!(negative_refresh_interval(soa), expect, "soa={soa:?}");

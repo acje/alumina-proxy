@@ -397,6 +397,7 @@ mod tests {
             AnyIllegalCause::ConnectParse(ConnectHeadReason::TransferEncoding),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::NonzeroContentLength),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::DuplicateContentLength),
+            AnyIllegalCause::ConnectParse(ConnectHeadReason::TooManyHeaderLines),
             AnyIllegalCause::HostNotAllowlisted,
             AnyIllegalCause::TlsProfile(HelloRejectReason::EchPresent),
             AnyIllegalCause::TlsProfile(HelloRejectReason::ServerNameMismatch),
@@ -428,8 +429,8 @@ mod tests {
         assert_eq!(UnknownReason::Unattributed.index(), 3);
         assert_eq!(
             AnyIllegalCause::KIND_COUNT,
-            13 + 1 + 4,
-            "13 CONNECT-head + HostNotAllowlisted + 4 hello-reject discriminants"
+            14 + 1 + 4,
+            "14 CONNECT-head + HostNotAllowlisted + 4 hello-reject discriminants"
         );
     }
 

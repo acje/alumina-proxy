@@ -148,6 +148,10 @@ impl Enforcement {
         self.monitor.note_suppressed_detail();
     }
 
+    pub(crate) const fn note_fact_resolver_degraded(&mut self) {
+        self.monitor.note_fact_resolver_degraded();
+    }
+
     pub(crate) const fn monitor(&self) -> &Monitor {
         &self.monitor
     }

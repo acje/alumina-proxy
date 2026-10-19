@@ -378,7 +378,19 @@ impl ServeStorage {
         let result = self
             .dns
             .advance_exchange(fqdn, &mut self.cache, &mut self.schedules)?;
+        self.drain_resolver_transitions();
         Ok(Some(result))
+    }
+
+    /// Folds any degraded-mode enter/exit crossings the DNS transport
+    /// accumulated back into the enforcement monitor as distinct `rd` facts,
+    /// one per crossing. The transport drains to zero, so a later drain never
+    /// double-counts an earlier crossing.
+    fn drain_resolver_transitions(&mut self) {
+        let transitions = self.dns.take_resolver_transitions();
+        for _ in 0..transitions {
+            self.enforcement.note_fact_resolver_degraded();
+        }
     }
 
     /// Emits the single per-window `startup_warning` for the first counted
@@ -570,6 +582,7 @@ impl ServeStorage {
             },
             &mut self.logs,
         )?;
+        self.drain_resolver_transitions();
         self.settle_startup(now0, report, decision_seconds, false)
     }
 

@@ -527,6 +527,49 @@ enum Registration {
     },
 }
 
+/// Passive resolver degradation state advanced at the two exchange choke
+/// points: every counted failure and every successful publication. `Healthy`
+/// carries only 0..`DEGRADED_AFTER` consecutive failures, because the failure
+/// transition relocates the state to `Degraded` at the threshold — a value can
+/// never claim health while holding three consecutive failures, so the
+/// degraded boundary is structural rather than checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolverDegradation {
+    Healthy { consecutive: usize },
+    Degraded,
+}
+
+impl Default for ResolverDegradation {
+    fn default() -> Self {
+        ResolverDegradation::Healthy { consecutive: 0 }
+    }
+}
+
+/// The number of consecutive failed exchanges that relocate the resolver state
+/// into passive degraded mode before any successful exchange resets it.
+const DEGRADED_AFTER: usize = 3;
+
+impl ResolverDegradation {
+    const fn note_failure(self) -> ResolverDegradation {
+        match self {
+            ResolverDegradation::Degraded => ResolverDegradation::Degraded,
+            ResolverDegradation::Healthy { consecutive } => {
+                if consecutive + 1 >= DEGRADED_AFTER {
+                    ResolverDegradation::Degraded
+                } else {
+                    ResolverDegradation::Healthy {
+                        consecutive: consecutive + 1,
+                    }
+                }
+            }
+        }
+    }
+
+    const fn note_success() -> ResolverDegradation {
+        ResolverDegradation::Healthy { consecutive: 0 }
+    }
+}
+
 /// A boot-owned reusable DNS transport. Constructed once before the
 /// startup-window phase so the exchange loop performs no heap allocation or
 /// deallocation: the poll registry, fixed query/recv buffers, and the response
@@ -562,6 +605,14 @@ pub struct StartupDns {
     /// The failure reason of the most recently failed step, read out by the
     /// blocking driver when the exchange concludes.
     last_failed: Option<FailureReason>,
+    /// The passive degradation state advanced at the failure and success choke
+    /// points; the transition counter below records only entered/exited
+    /// crossings, never the individual failures or resets that precede them.
+    degradation: ResolverDegradation,
+    /// The number of degraded-mode enter and exit crossings awaiting drain by
+    /// the owning `ServeStorage` into the monitor's `rd` fact fold. Transitions
+    /// accumulate across a startup window and are drained once after it closes.
+    resolver_transitions: usize,
     #[cfg(test)]
     poll_ticks: u64,
     #[cfg(test)]
@@ -619,6 +670,8 @@ impl StartupDns {
             window_open: false,
             last_published: None,
             last_failed: None,
+            degradation: ResolverDegradation::default(),
+            resolver_transitions: 0,
             #[cfg(test)]
             poll_ticks: 0,
             #[cfg(test)]
@@ -644,6 +697,18 @@ impl StartupDns {
     /// continue seamlessly from startup into serving (one anchor, 1cws M2r).
     pub(crate) const fn window_start(&self) -> Instant {
         self.start
+    }
+
+    /// Drains the accumulated degraded-mode enter and exit crossings for the
+    /// owning storage to fold into the monitor's `rd` fact, resetting the
+    /// pending count to zero for the next window or serving turn.
+    pub(crate) fn take_resolver_transitions(&mut self) -> usize {
+        std::mem::take(&mut self.resolver_transitions)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn resolver_degraded_for_test(&self) -> bool {
+        matches!(self.degradation, ResolverDegradation::Degraded)
     }
 
     /// Starts a startup window on the retained transport without owning the
@@ -1669,6 +1734,7 @@ impl StartupDns {
                 }
                 RecvStep::Published => {
                     self.active = None;
+                    self.record_resolver_success();
                     if !self.window_open {
                         self.conclude_shared_transport()?;
                     }
@@ -1732,6 +1798,29 @@ impl StartupDns {
         }
     }
 
+    /// Advances the degradation state at the single recognized failure choke
+    /// point, recording exactly one enter crossing when healthy resolves cross
+    /// the threshold. Further failures while already degraded record nothing.
+    fn record_resolver_failure(&mut self) {
+        let was_degraded = self.degradation == ResolverDegradation::Degraded;
+        self.degradation = self.degradation.note_failure();
+        if !was_degraded && self.degradation == ResolverDegradation::Degraded {
+            self.resolver_transitions += 1;
+        }
+    }
+
+    /// Advances the degradation state at the single recognized success choke
+    /// point, recording exactly one exit crossing when a degraded resolver
+    /// publishes a valid outcome. A healthy resolver that publishes simply
+    /// restarts its consecutive-failure count without emitting a crossing.
+    fn record_resolver_success(&mut self) {
+        let was_degraded = self.degradation == ResolverDegradation::Degraded;
+        self.degradation = ResolverDegradation::note_success();
+        if was_degraded {
+            self.resolver_transitions += 1;
+        }
+    }
+
     fn note_failure(
         &mut self,
         ordinal: usize,
@@ -1740,6 +1829,7 @@ impl StartupDns {
         reason: FailureReason,
     ) -> Result<(), StartupDnsError> {
         self.last_failed = Some(reason);
+        self.record_resolver_failure();
         let now = self.now_u64();
         schedules.note_exchange_failure(ordinal, family, now)?;
         Ok(())

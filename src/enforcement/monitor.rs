@@ -10,6 +10,7 @@ pub struct FactCounters {
     pub(crate) any_illegal: [SaturatingCounter; AnyIllegalCause::KIND_COUNT],
     pub(crate) early_data: [SaturatingCounter; ALLOWLIST_MAX],
     pub(crate) unknown: [SaturatingCounter; UnknownReason::COUNT],
+    pub(crate) resolver_degraded: SaturatingCounter,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -110,6 +111,11 @@ impl Monitor {
 
     pub(crate) const fn note_fact_unknown(&mut self, reason: UnknownReason) {
         self.facts.unknown[reason.index()].bump();
+        self.dirty = true;
+    }
+
+    pub(crate) const fn note_fact_resolver_degraded(&mut self) {
+        self.facts.resolver_degraded.bump();
         self.dirty = true;
     }
 
@@ -233,6 +239,14 @@ impl Monitor {
         self.facts.unknown[index].value()
     }
 
+    pub(crate) const fn facts_resolver_degraded(&self) -> u32 {
+        self.facts.resolver_degraded.value()
+    }
+
+    pub(crate) const fn facts_resolver_degraded_overflow(&self) -> bool {
+        self.facts.resolver_degraded.overflow()
+    }
+
     pub(crate) fn unknown_total(&self) -> u64 {
         self.facts
             .unknown
@@ -250,6 +264,7 @@ impl Monitor {
                 .map(|c| u64::from(c.value()))
                 .sum::<u64>()
             + self.unknown_total()
+            + u64::from(self.facts.resolver_degraded.value())
     }
 
     pub(crate) const fn actions_block_all(&self) -> u32 {
@@ -367,6 +382,7 @@ impl Monitor {
         for c in &mut self.facts.unknown {
             c.saturate_for_test();
         }
+        self.facts.resolver_degraded.saturate_for_test();
         for c in &mut self.actions.first_slot_block {
             c.saturate_for_test();
         }
