@@ -11,6 +11,40 @@ pub struct FactCounters {
     pub(crate) early_data: [SaturatingCounter; ALLOWLIST_MAX],
     pub(crate) unknown: [SaturatingCounter; UnknownReason::COUNT],
     pub(crate) resolver_degraded: SaturatingCounter,
+    pub(crate) dns_anomaly: [SaturatingCounter; DnsAnomalyKind::COUNT],
+}
+
+/// The typed DNS anomaly surface folded into the monitor alongside the
+/// resolver-degraded state: every variant is a per-exchange detection noted on
+/// the transport, drained by the serving storage into one counter per kind, and
+/// zero-suppressed in the monitor record (`bv`, `rpm`, `xttl`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DnsAnomalyKind {
+    /// A followed CNAME link target escaped every allowlist bailiwick zone.
+    BailiwickViolation,
+    /// The completed nonblocking connect landed on a peer other than the
+    /// configured nameserver (vec-22).
+    ResolverPeerMismatch,
+    /// A published answer carried a resource-record TTL above the extreme
+    /// threshold (96 h).
+    ExtremeTtl,
+}
+
+impl DnsAnomalyKind {
+    pub(crate) const COUNT: usize = 3;
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub(crate) const fn from_index(index: usize) -> Option<DnsAnomalyKind> {
+        match index {
+            0 => Some(DnsAnomalyKind::BailiwickViolation),
+            1 => Some(DnsAnomalyKind::ResolverPeerMismatch),
+            2 => Some(DnsAnomalyKind::ExtremeTtl),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -116,6 +150,11 @@ impl Monitor {
 
     pub(crate) const fn note_fact_resolver_degraded(&mut self) {
         self.facts.resolver_degraded.bump();
+        self.dirty = true;
+    }
+
+    pub(crate) const fn note_fact_dns_anomaly(&mut self, kind: DnsAnomalyKind) {
+        self.facts.dns_anomaly[kind.index()].bump();
         self.dirty = true;
     }
 
@@ -247,6 +286,14 @@ impl Monitor {
         self.facts.resolver_degraded.overflow()
     }
 
+    pub(crate) const fn facts_dns_anomaly(&self, kind: DnsAnomalyKind) -> u32 {
+        self.facts.dns_anomaly[kind.index()].value()
+    }
+
+    pub(crate) fn facts_dns_anomaly_overflow(&self) -> bool {
+        self.facts.dns_anomaly.iter().any(|c| c.overflow())
+    }
+
     pub(crate) fn unknown_total(&self) -> u64 {
         self.facts
             .unknown
@@ -265,6 +312,12 @@ impl Monitor {
                 .sum::<u64>()
             + self.unknown_total()
             + u64::from(self.facts.resolver_degraded.value())
+            + self
+                .facts
+                .dns_anomaly
+                .iter()
+                .map(|c| u64::from(c.value()))
+                .sum::<u64>()
     }
 
     pub(crate) const fn actions_block_all(&self) -> u32 {
@@ -383,6 +436,9 @@ impl Monitor {
             c.saturate_for_test();
         }
         self.facts.resolver_degraded.saturate_for_test();
+        for c in &mut self.facts.dns_anomaly {
+            c.saturate_for_test();
+        }
         for c in &mut self.actions.first_slot_block {
             c.saturate_for_test();
         }
@@ -472,6 +528,35 @@ pub(crate) mod tests {
             !m.report_due(8),
             "after a successful re-emission the aggregate is clean again"
         );
+    }
+
+    #[test]
+    fn each_dns_anomaly_kind_fires_its_own_index() {
+        let mut m = Monitor::new();
+        m.note_fact_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
+        m.note_fact_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
+        m.note_fact_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+        assert_eq!(m.facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation), 1);
+        assert_eq!(m.facts_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch), 1);
+        assert_eq!(m.facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl), 1);
+    }
+
+    #[test]
+    fn dns_anomalies_fold_into_facts_total_and_saturate() {
+        let mut m = Monitor::new();
+        assert_eq!(m.facts_total(), 0, "no anomaly means no fold");
+        m.note_fact_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
+        m.note_fact_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
+        m.note_fact_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+        assert_eq!(
+            m.facts_total(),
+            3,
+            "every dns-anomaly fact folds into the aggregate"
+        );
+        assert!(!m.facts_dns_anomaly_overflow());
+        m.saturate_all_for_test();
+        assert_eq!(m.facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl), u32::MAX);
+        assert!(m.facts_dns_anomaly_overflow());
     }
 
     #[test]

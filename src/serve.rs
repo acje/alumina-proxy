@@ -11,6 +11,7 @@ use crate::cache::{Cache, CacheError, EntryState, Family, NameIndex};
 use crate::config::{Config, FixedHostname};
 use crate::connect::ConnectRequest;
 use crate::enforcement::action::DomainOrdinal;
+use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::enforcement::state::Enforcement;
 use crate::log::LogStore;
 use crate::schedule::Schedules;
@@ -379,6 +380,7 @@ impl ServeStorage {
             .dns
             .advance_exchange(fqdn, &mut self.cache, &mut self.schedules)?;
         self.drain_resolver_transitions();
+        self.drain_dns_anomalies();
         Ok(Some(result))
     }
 
@@ -390,6 +392,21 @@ impl ServeStorage {
         let transitions = self.dns.take_resolver_transitions();
         for _ in 0..transitions {
             self.enforcement.note_fact_resolver_degraded();
+        }
+    }
+
+    /// Folds every accumulated DNS anomaly the transport noted into the
+    /// monitor anomaly surface, one fact per detection. The transport drains to
+    /// zero, so a later drain never double-counts an earlier detection.
+    fn drain_dns_anomalies(&mut self) {
+        let anomalies = self.dns.take_dns_anomalies();
+        for (index, count) in anomalies.iter().copied().enumerate() {
+            let Some(kind) = DnsAnomalyKind::from_index(index) else {
+                continue;
+            };
+            for _ in 0..count {
+                self.enforcement.note_fact_dns_anomaly(kind);
+            }
         }
     }
 
@@ -583,6 +600,7 @@ impl ServeStorage {
             &mut self.logs,
         )?;
         self.drain_resolver_transitions();
+        self.drain_dns_anomalies();
         self.settle_startup(now0, report, decision_seconds, false)
     }
 

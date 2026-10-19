@@ -2,7 +2,7 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::cache::{Cache, CacheError, Family, Generation, MAX_ADDRESSES, StagedPositive};
-use crate::config::Fqdn;
+use crate::config::{ALLOWLIST_MAX, Allowlist, Fqdn};
 use crate::eligibility::NumericAddr;
 use crate::schedule::{Schedules, Soa};
 
@@ -16,6 +16,13 @@ pub const MAX_CNAME_LINKS: usize = 8;
 /// bounded before any per-record work so a peer header cannot drive
 /// allocation.
 pub const MAX_TOTAL_RR: usize = 128;
+
+/// A resource-record TTL above this bound is treated as an extreme-TTL DNS
+/// anomaly: 96 hours. Published addresses with such a TTL still validate and
+/// serve, but the exchange is surfaced on the monitoring anomaly surface so a
+/// pathological or hostile upstream cannot pin cache entries for months
+/// unnoticed.
+pub const EXTREME_TTL_THRESHOLD: u32 = 345_600;
 
 const TYPE_A: u16 = 1;
 const TYPE_AAAA: u16 = 28;
@@ -237,6 +244,7 @@ pub enum DnsError {
     },
     NonCoveringSoa,
     EmptyNoerrorWithoutSoa,
+    BailiwickViolation,
     Cache(CacheError),
 }
 
@@ -301,6 +309,9 @@ impl fmt::Display for DnsError {
                 f,
                 "DNS empty NOERROR answer without covering SOA is not NODATA"
             ),
+            DnsError::BailiwickViolation => {
+                write!(f, "DNS CNAME chain leaves the allowlist bailiwick zone")
+            }
             DnsError::Cache(err) => write!(f, "DNS cache refused: {err:?}"),
         }
     }
@@ -698,6 +709,7 @@ pub struct ResponseWorkspace {
     owners: [Owner; MAX_TOTAL_RR],
     owner_len: usize,
     soa: Option<(DnsName, u32, u32)>,
+    extreme_ttl: bool,
 }
 
 impl Default for ResponseWorkspace {
@@ -710,7 +722,17 @@ impl Default for ResponseWorkspace {
             owners: [Owner::empty(); MAX_TOTAL_RR],
             owner_len: 0,
             soa: None,
+            extreme_ttl: false,
         }
+    }
+}
+
+impl ResponseWorkspace {
+    /// Whether the most recent parse observed an answer-section record with a
+    /// TTL above [`EXTREME_TTL_THRESHOLD`], surfaced on the monitoring
+    /// anomaly surface without disturbing the validated outcome.
+    pub(crate) const fn extreme_ttl(&self) -> bool {
+        self.extreme_ttl
     }
 }
 
@@ -737,6 +759,75 @@ fn ensure_owner(ws: &mut ResponseWorkspace, name: &DnsName) -> Result<usize, Dns
     Ok(ws.owner_len - 1)
 }
 
+/// The fixed-capacity allowlist-derived bailiwick zone set consulted while
+/// rooting a CNAME chain: every followed link target must stay inside one of
+/// these zones. Built once from the allowlist (or, by the wire-parser fuzz
+/// target, from a single query context), it performs no heap allocation:
+/// `ALLOWLIST_MAX` fixed `DnsName` slots mirror the `ResponseWorkspace`
+/// fixed-profile pattern.
+#[derive(Clone, Debug)]
+pub struct BailiwickZones {
+    zones: [DnsName; ALLOWLIST_MAX],
+    len: usize,
+}
+
+impl Default for BailiwickZones {
+    fn default() -> Self {
+        BailiwickZones {
+            zones: [DnsName::default(); ALLOWLIST_MAX],
+            len: 0,
+        }
+    }
+}
+
+impl BailiwickZones {
+    /// Derives the deduplicated per-allowlist zone set: a hostname with more
+    /// than two labels contributes its parent domain; a two-label apex
+    /// contributes itself.
+    pub(crate) fn from_allowlist(allowlist: &Allowlist) -> BailiwickZones {
+        let mut zones = [DnsName::default(); ALLOWLIST_MAX];
+        let mut len = 0;
+        for fqdn in allowlist.iter() {
+            let zone = zone_of(fqdn.as_str().as_bytes());
+            if !zones[..len].iter().any(|z| z.eq_bytes(zone)) {
+                zones[len] = DnsName::from_exact(zone);
+                len += 1;
+            }
+        }
+        BailiwickZones { zones, len }
+    }
+
+    /// A single-zone set covering one allowlist hostname's bailiwick, used by
+    /// the wire-parser fuzz target that holds no allowlist.
+    pub(crate) fn single(fqdn: &Fqdn) -> BailiwickZones {
+        let mut zones = [DnsName::default(); ALLOWLIST_MAX];
+        let zone = zone_of(fqdn.as_str().as_bytes());
+        zones[0] = DnsName::from_exact(zone);
+        BailiwickZones { zones, len: 1 }
+    }
+
+    /// Whether `name` is inside one of the zones — exactly equal to a zone or
+    /// a label-boundary subdomain of it.
+    pub(crate) fn covers(&self, name: &[u8]) -> bool {
+        self.zones[..self.len]
+            .iter()
+            .any(|z| soa_covers(name, z.as_slice()))
+    }
+}
+
+/// The bailiwick zone of one allowlist hostname: a name with more than two
+/// labels contributes its parent domain (drop the leftmost label); a two-label
+/// apex contributes itself.
+fn zone_of(name: &[u8]) -> &[u8] {
+    let labels = name.split(|&b| b == b'.').count();
+    if labels > 2
+        && let Some(dot) = name.iter().position(|&b| b == b'.')
+    {
+        return &name[dot + 1..];
+    }
+    name
+}
+
 /// Parses and validates a DNS response against the exact outstanding query,
 /// returning a classified outcome. The caller supplies a reusable
 /// [`ResponseWorkspace`]; the parse path performs no heap allocation or
@@ -752,6 +843,7 @@ fn ensure_owner(ws: &mut ResponseWorkspace, name: &DnsName) -> Result<usize, Dns
 )]
 pub fn parse_response(
     ws: &mut ResponseWorkspace,
+    zones: &BailiwickZones,
     fqdn: &Fqdn,
     family: Family,
     tid: u16,
@@ -762,6 +854,7 @@ pub fn parse_response(
     }
     ws.owner_len = 0;
     ws.soa = None;
+    ws.extreme_ttl = false;
     let mut reader = Reader::new(msg);
     let got_tid = reader.u16()?;
     if got_tid != tid {
@@ -815,6 +908,9 @@ pub fn parse_response(
         let rd_start = reader.pos;
         if class != CLASS_IN {
             return Err(DnsError::BadClass { got: class });
+        }
+        if matches!(ty, TYPE_A | TYPE_AAAA | TYPE_CNAME) && ttl > EXTREME_TTL_THRESHOLD {
+            ws.extreme_ttl = true;
         }
         match ty {
             TYPE_A | TYPE_AAAA | TYPE_CNAME | TYPE_SOA => {
@@ -956,7 +1052,7 @@ pub fn parse_response(
     }
 
     let root = DnsName::from_exact(fqdn.as_str().as_bytes());
-    let (chain, chain_ttl) = root_chain(&root, ws)?;
+    let (chain, chain_ttl) = root_chain(&root, zones, ws)?;
     let terminal = chain.terminal.as_slice();
 
     let mut bindings = BindingList::default();
@@ -1011,7 +1107,11 @@ struct Chain {
     terminal: DnsName,
 }
 
-fn root_chain(root: &DnsName, ws: &ResponseWorkspace) -> Result<(Chain, u64), DnsError> {
+fn root_chain(
+    root: &DnsName,
+    zones: &BailiwickZones,
+    ws: &ResponseWorkspace,
+) -> Result<(Chain, u64), DnsError> {
     let mut current = *root;
     let mut links = 0usize;
     let mut cname_ttl = u64::MAX;
@@ -1037,6 +1137,9 @@ fn root_chain(root: &DnsName, ws: &ResponseWorkspace) -> Result<(Chain, u64), Dn
         };
         if target.eq_bytes(root.as_slice()) {
             return Err(DnsError::CnameLoop);
+        }
+        if !zones.covers(target.as_slice()) {
+            return Err(DnsError::BailiwickViolation);
         }
         cname_ttl = cname_ttl.min(u64::from(*ttl));
         links += 1;
@@ -1223,7 +1326,8 @@ mod tests {
         msg: &[u8],
     ) -> Result<Outcome, DnsError> {
         let mut ws = ResponseWorkspace::default();
-        parse_response(&mut ws, &fqdn(name), family, tid, msg)
+        let zones = BailiwickZones::from_allowlist(config().allowlist());
+        parse_response(&mut ws, &zones, &fqdn(name), family, tid, msg)
     }
 
     #[test]
@@ -1299,8 +1403,8 @@ mod tests {
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
-        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
-        msg.extend_from_slice(&a_record("edge.test", [203, 0, 113, 7], 40));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
+        msg.extend_from_slice(&a_record("edge.example.org", [203, 0, 113, 7], 40));
         let out = parse_response_ws("sub.example.org", Family::A, 9, &msg).expect("parse");
         match out {
             Outcome::Positive { bindings, ttl, .. } => {
@@ -1320,12 +1424,140 @@ mod tests {
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
-        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 100));
-        msg.extend_from_slice(&cname_record("edge.test", "sub.example.org", 100));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 100));
+        msg.extend_from_slice(&cname_record("edge.example.org", "sub.example.org", 100));
         assert_eq!(
             parse_response_ws("sub.example.org", Family::A, 10, &msg),
             Err(DnsError::CnameLoop)
         );
+    }
+
+    #[test]
+    fn rejects_cross_zone_cname_target() {
+        let mut msg = header(0x1260, true, 0, 1, 2, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
+        msg.extend_from_slice(&a_record("edge.test", [203, 0, 113, 7], 40));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x1260, &msg),
+            Err(DnsError::BailiwickViolation)
+        );
+    }
+
+    #[test]
+    fn rejects_chain_with_foreign_zone_link() {
+        let mut msg = header(0x1261, true, 0, 1, 3, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
+        msg.extend_from_slice(&cname_record("edge.example.org", "evil.test", 200));
+        msg.extend_from_slice(&a_record("evil.test", [203, 0, 113, 7], 40));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x1261, &msg),
+            Err(DnsError::BailiwickViolation)
+        );
+    }
+
+    #[test]
+    fn accepts_same_zone_cname() {
+        let mut msg = header(0x1262, true, 0, 1, 2, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
+        msg.extend_from_slice(&a_record("edge.example.org", [203, 0, 113, 7], 40));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1262, &msg).expect("parse");
+        match out {
+            Outcome::Positive { bindings, ttl, .. } => {
+                assert_eq!(
+                    bindings.as_slice(),
+                    &[NumericAddr::V4(Ipv4Addr::new(203, 0, 113, 7))]
+                );
+                assert_eq!(ttl, 40);
+            }
+            other => panic!("expected positive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepts_apex_allowlist_subdomain_target() {
+        let mut msg = header(0x1263, true, 0, 1, 2, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "deep.other.test", 200));
+        msg.extend_from_slice(&a_record("deep.other.test", [203, 0, 113, 7], 40));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1263, &msg).expect("parse");
+        match out {
+            Outcome::Positive { bindings, ttl, .. } => {
+                assert_eq!(
+                    bindings.as_slice(),
+                    &[NumericAddr::V4(Ipv4Addr::new(203, 0, 113, 7))]
+                );
+                assert_eq!(ttl, 40);
+            }
+            other => panic!("expected positive, got {other:?}"),
+        }
+    }
+
+    fn parse_with_flag(
+        name: &str,
+        family: Family,
+        tid: u16,
+        msg: &[u8],
+    ) -> (Result<Outcome, DnsError>, bool) {
+        let mut ws = ResponseWorkspace::default();
+        let zones = BailiwickZones::from_allowlist(config().allowlist());
+        let outcome = parse_response(&mut ws, &zones, &fqdn(name), family, tid, msg);
+        (outcome, ws.extreme_ttl())
+    }
+
+    #[test]
+    fn extreme_ttl_accepted_positive_flags() {
+        let msg = direct_a("sub.example.org", 0x1300, [1, 2, 3, 4], 400_000);
+        let (outcome, flag) = parse_with_flag("sub.example.org", Family::A, 0x1300, &msg);
+        assert!(
+            outcome.is_ok(),
+            "a high-TTL positive still validates: {outcome:?}"
+        );
+        assert!(flag, "a TTL above the extreme threshold flags the exchange");
+    }
+
+    #[test]
+    fn wrong_family_high_ttl_flags() {
+        let mut msg = header(0x1301, true, 0, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&28u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [1, 2, 3, 4], 400_000));
+        let (_, flag) = parse_with_flag("sub.example.org", Family::Aaaa, 0x1301, &msg);
+        assert!(
+            flag,
+            "a wrong-family high-TTL record is still inspected and flags the exchange"
+        );
+    }
+
+    #[test]
+    fn normal_ttl_does_not_flag() {
+        let msg = direct_a("sub.example.org", 0x1302, [1, 2, 3, 4], 120);
+        let (outcome, flag) = parse_with_flag("sub.example.org", Family::A, 0x1302, &msg);
+        assert!(outcome.is_ok());
+        assert!(!flag, "a bounded TTL never flags the exchange");
+    }
+
+    #[test]
+    fn extreme_ttl_at_threshold_does_not_flag() {
+        let msg = direct_a(
+            "sub.example.org",
+            0x1303,
+            [1, 2, 3, 4],
+            EXTREME_TTL_THRESHOLD,
+        );
+        let (_, flag) = parse_with_flag("sub.example.org", Family::A, 0x1303, &msg);
+        assert!(!flag, "exactly the threshold is not extreme");
     }
 
     #[test]
@@ -1755,8 +1987,8 @@ mod tests {
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
-        msg.extend_from_slice(&cname_record("Sub.Example.Org", "Edge.Test", 200));
-        msg.extend_from_slice(&a_record("edge.test", [203, 0, 113, 7], 40));
+        msg.extend_from_slice(&cname_record("Sub.Example.Org", "Edge.Example.Org", 200));
+        msg.extend_from_slice(&a_record("edge.example.org", [203, 0, 113, 7], 40));
         let out = parse_response_ws("sub.example.org", Family::A, 22, &msg).expect("parse");
         match out {
             Outcome::Positive { bindings, ttl, .. } => {
@@ -1857,7 +2089,7 @@ mod tests {
             ],
             60,
         ));
-        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
         assert_eq!(
             parse_response_ws("sub.example.org", Family::A, 0x124e, &msg),
             Err(DnsError::EmptyNoerrorWithoutSoa)
@@ -1885,7 +2117,7 @@ mod tests {
         msg.extend_from_slice(&28u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&a_record("sub.example.org", [1, 2, 3, 4], 60));
-        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
         assert_eq!(
             parse_response_ws("sub.example.org", Family::Aaaa, 0x1250, &msg),
             Err(DnsError::EmptyNoerrorWithoutSoa)
@@ -2030,7 +2262,8 @@ mod tests {
         );
         let (out, counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
             let mut ws = ResponseWorkspace::default();
-            parse_response(&mut ws, &fq, Family::A, 30, &msg).expect("parse")
+            let zones = BailiwickZones::single(&fq);
+            parse_response(&mut ws, &zones, &fq, Family::A, 30, &msg).expect("parse")
         });
         assert!(
             counts.all_zero(),
@@ -2060,7 +2293,8 @@ mod tests {
 
         let (out, counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
             let mut ws = ResponseWorkspace::default();
-            parse_response(&mut ws, &fq, Family::A, 31, &msg).expect("parse")
+            let zones = BailiwickZones::single(&fq);
+            parse_response(&mut ws, &zones, &fq, Family::A, 31, &msg).expect("parse")
         });
         assert!(
             counts.all_zero(),

@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::parse_config_document;
+use crate::enforcement::monitor::DnsAnomalyKind;
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -355,6 +356,89 @@ fn storage_failure_escapes_resolve_as_err_not_a_counted_failure() {
     assert!(
         matches!(err, StartupDnsError::Dns(dns::DnsError::Cache(_))),
         "storage refusal surfaces as Dns(Cache): {err:?}"
+    );
+}
+
+#[test]
+fn extreme_ttl_positive_is_counted_as_a_dns_anomaly() {
+    let cfg = config();
+    let responder = spawn_responder(vec![vec![
+        Step::PositiveA {
+            ttl: dns::EXTREME_TTL_THRESHOLD + 1,
+            octets: [93, 184, 216, 34],
+        },
+        Step::NodataWithSoa { ttl: 300, min: 60 },
+        Step::PositiveA {
+            ttl: 300,
+            octets: [1, 1, 1, 1],
+        },
+        Step::NodataWithSoa { ttl: 300, min: 60 },
+    ]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    let anomalies = transport.take_dns_anomalies();
+    assert_eq!(anomalies[DnsAnomalyKind::ExtremeTtl.index()], 1);
+    assert_eq!(anomalies[DnsAnomalyKind::BailiwickViolation.index()], 0);
+    assert_eq!(anomalies[DnsAnomalyKind::ResolverPeerMismatch.index()], 0);
+    assert_eq!(
+        transport.take_dns_anomalies(),
+        [0, 0, 0],
+        "a drained anomaly is never double-counted"
+    );
+}
+
+#[test]
+fn connected_peer_mismatch_fails_connect_and_counts_the_anomaly() {
+    let cfg = config();
+    let responder = spawn_responder(vec![
+        vec![Step::Close],
+        vec![
+            Step::PositiveAaaa {
+                ttl: 300,
+                octets: [0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            },
+            Step::PositiveA {
+                ttl: 300,
+                octets: [1, 1, 1, 1],
+            },
+            Step::NodataWithSoa { ttl: 300, min: 60 },
+        ],
+    ]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.force_peer_mismatch = true;
+    transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    let anomalies = transport.take_dns_anomalies();
+    assert!(
+        anomalies[DnsAnomalyKind::ResolverPeerMismatch.index()] >= 1,
+        "every completed connect to a non-matching peer is flagged; got {}",
+        anomalies[DnsAnomalyKind::ResolverPeerMismatch.index()]
+    );
+    assert_eq!(anomalies[DnsAnomalyKind::BailiwickViolation.index()], 0);
+    assert_eq!(anomalies[DnsAnomalyKind::ExtremeTtl.index()], 0);
+    assert_eq!(
+        transport.take_dns_anomalies(),
+        [0, 0, 0],
+        "a drained anomaly is never double-counted"
     );
 }
 

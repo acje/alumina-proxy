@@ -1,5 +1,5 @@
 use super::action::{AnyIllegalScope, ControlTable, DomainOrdinal, FirstSlot, Scope};
-use super::monitor::{Monitor, SlotCapture};
+use super::monitor::{DnsAnomalyKind, Monitor, SlotCapture};
 use super::policy::{Effect, UnknownReason, Violation, decide as pure_decide};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +152,10 @@ impl Enforcement {
         self.monitor.note_fact_resolver_degraded();
     }
 
+    pub(crate) const fn note_fact_dns_anomaly(&mut self, kind: DnsAnomalyKind) {
+        self.monitor.note_fact_dns_anomaly(kind);
+    }
+
     pub(crate) const fn monitor(&self) -> &Monitor {
         &self.monitor
     }
@@ -185,6 +189,7 @@ mod tests {
     use crate::client_hello::HelloRejectReason;
     use crate::connect::ConnectHeadReason;
     use crate::enforcement::action::{ActionKind, AnyIllegalScope, DomainAction};
+    use crate::enforcement::monitor::DnsAnomalyKind;
     use crate::enforcement::policy::{AnyIllegalCause, UnknownReason};
 
     fn table(any_illegal: AnyIllegalScope, actions: &[(ActionKind, Scope)]) -> ControlTable {
@@ -206,6 +211,26 @@ mod tests {
         c.bump();
         assert_eq!(c.value(), u32::MAX);
         assert!(c.overflow());
+    }
+
+    #[test]
+    fn note_fact_dns_anomaly_passes_through_to_the_monitor() {
+        let t = table(
+            AnyIllegalScope::Connection,
+            &[(ActionKind::FlareOnly, Scope::Connection)],
+        );
+        let mut en = Enforcement::new(t);
+        en.note_fact_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
+        assert_eq!(
+            en.counters()
+                .facts_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch),
+            1
+        );
+        assert_eq!(
+            en.counters()
+                .facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation),
+            0
+        );
     }
 
     #[test]

@@ -28,7 +28,8 @@ use mio::{Events, Interest, Poll, Registry, Token};
 
 use crate::cache::{Cache, CacheError, Family};
 use crate::config::{ALLOWLIST_MAX, Config, Fqdn};
-use crate::dns::{self, DNS_MSG_LIMIT, DnsError, ResponseWorkspace};
+use crate::dns::{self, BailiwickZones, DNS_MSG_LIMIT, DnsError, ResponseWorkspace};
+use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::log;
 use crate::schedule::{ScheduleError, Schedules};
 
@@ -581,6 +582,7 @@ pub struct StartupDns {
     query_buf: [u8; QUERY_BUF_LEN],
     recv_buf: [u8; RECV_BUF_LEN],
     workspace: ResponseWorkspace,
+    bailiwick: BailiwickZones,
     written: usize,
     filled: usize,
     msglen: Option<usize>,
@@ -613,10 +615,17 @@ pub struct StartupDns {
     /// the owning `ServeStorage` into the monitor's `rd` fact fold. Transitions
     /// accumulate across a startup window and are drained once after it closes.
     resolver_transitions: usize,
+    /// The per-kind DNS anomaly counts (`bv`, `rpm`, `xttl`) awaiting drain by
+    /// the owning `ServeStorage` into the monitor anomaly surface. They
+    /// accumulate across the resolved set and are taken exactly once so a later
+    /// drain never double-counts a detection.
+    dns_anomalies: [u32; DnsAnomalyKind::COUNT],
     #[cfg(test)]
     poll_ticks: u64,
     #[cfg(test)]
     force_write: Option<WriteForce>,
+    #[cfg(test)]
+    force_peer_mismatch: bool,
 }
 
 /// The borrowed startup-window resolution context fed to
@@ -657,6 +666,7 @@ impl StartupDns {
             query_buf: [0; QUERY_BUF_LEN],
             recv_buf: [0; RECV_BUF_LEN],
             workspace: ResponseWorkspace::default(),
+            bailiwick: BailiwickZones::default(),
             written: 0,
             filled: 0,
             msglen: None,
@@ -672,10 +682,13 @@ impl StartupDns {
             last_failed: None,
             degradation: ResolverDegradation::default(),
             resolver_transitions: 0,
+            dns_anomalies: [0; DnsAnomalyKind::COUNT],
             #[cfg(test)]
             poll_ticks: 0,
             #[cfg(test)]
             force_write: None,
+            #[cfg(test)]
+            force_peer_mismatch: false,
         })
     }
 
@@ -991,6 +1004,31 @@ impl StartupDns {
         self.addr
     }
 
+    /// Whether a completed nonblocking connect landed on the configured
+    /// transport peer. Under test the seam can force a mismatch so the
+    /// resolver-peer-anomaly branch is exercised end to end (vec-22).
+    fn peer_matches(&self, peer: SocketAddr) -> bool {
+        #[cfg(test)]
+        {
+            if self.force_peer_mismatch {
+                return false;
+            }
+        }
+        peer == self.peer()
+    }
+
+    /// Records a DNS anomaly by kind on the retained transport, saturating so
+    /// a pathological upstream can never wrap the drain.
+    pub(crate) const fn note_dns_anomaly(&mut self, kind: DnsAnomalyKind) {
+        self.dns_anomalies[kind.index()] = self.dns_anomalies[kind.index()].saturating_add(1);
+    }
+
+    /// Drains every accumulated DNS anomaly into a fixed slice, leaving the
+    /// retained transport clean so the next drain never double-counts.
+    pub(crate) fn take_dns_anomalies(&mut self) -> [u32; DnsAnomalyKind::COUNT] {
+        std::mem::take(&mut self.dns_anomalies)
+    }
+
     /// Registers the retained transport with an external single-poll owner so
     /// DNS freshness joins traffic readiness in one wait. The private poll is
     /// bypassed from here on: the shared registry is the source's only
@@ -1175,8 +1213,14 @@ impl StartupDns {
                 self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
                 return Ok(ConnectStep::Failed);
             }
-            if stream.peer_addr().is_ok() {
-                return Ok(ConnectStep::Transition);
+            if let Ok(peer) = stream.peer_addr() {
+                if self.peer_matches(peer) {
+                    return Ok(ConnectStep::Transition);
+                }
+                self.close_connection()?;
+                self.note_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+                return Ok(ConnectStep::Failed);
             }
         }
         if Instant::now() >= ex.deadline {
@@ -1338,31 +1382,47 @@ impl StartupDns {
             && self.filled >= len + 2
         {
             let message = &self.recv_buf[2..2 + len];
-            let outcome =
-                dns::parse_response(&mut self.workspace, fqdn, ex.family, ex.tid, message);
+            let outcome = dns::parse_response(
+                &mut self.workspace,
+                &self.bailiwick,
+                fqdn,
+                ex.family,
+                ex.tid,
+                message,
+            );
             self.msglen = None;
             self.filled = 0;
-            if let Ok(outcome) = outcome {
-                self.last_published = Some(classify_published(&outcome));
-                let name_index = cache
-                    .name_index(ex.ordinal)
-                    .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
-                let generation = cache.entry(name_index, ex.family)?.generation();
-                let receipt = self.now_u64();
-                dns::apply_outcome(
-                    cache,
-                    schedules,
-                    ex.ordinal,
-                    generation,
-                    receipt,
-                    self.now_u64(),
-                    &outcome,
-                )?;
-                return Ok(RecvStep::Published);
+            match outcome {
+                Ok(outcome) => {
+                    self.last_published = Some(classify_published(&outcome));
+                    let name_index = cache
+                        .name_index(ex.ordinal)
+                        .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
+                    let generation = cache.entry(name_index, ex.family)?.generation();
+                    let receipt = self.now_u64();
+                    dns::apply_outcome(
+                        cache,
+                        schedules,
+                        ex.ordinal,
+                        generation,
+                        receipt,
+                        self.now_u64(),
+                        &outcome,
+                    )?;
+                    if self.workspace.extreme_ttl() {
+                        self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+                    }
+                    return Ok(RecvStep::Published);
+                }
+                Err(err) => {
+                    if matches!(err, DnsError::BailiwickViolation) {
+                        self.note_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
+                    }
+                    self.close_connection()?;
+                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
+                    return Ok(RecvStep::Failed);
+                }
             }
-            self.close_connection()?;
-            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
-            return Ok(RecvStep::Failed);
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
@@ -1429,6 +1489,7 @@ impl StartupDns {
             .ok_or(StartupDnsError::DeadlineOverflow)?;
         self.addr = nameserver;
         let allowlist = config.allowlist();
+        self.bailiwick = BailiwickZones::from_allowlist(allowlist);
         let names = allowlist.len();
         let mut report = StartupReport::default();
         let mut resolved = [false; ALLOWLIST_MAX];
@@ -1524,6 +1585,7 @@ impl StartupDns {
             .ok_or(StartupDnsError::DeadlineOverflow)?;
         self.addr = nameserver;
         let allowlist = config.allowlist();
+        self.bailiwick = BailiwickZones::from_allowlist(allowlist);
         let names = allowlist.len();
         let mut report = StartupReport::default();
         let mut resolved = [false; ALLOWLIST_MAX];

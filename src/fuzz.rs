@@ -9,7 +9,7 @@ use crate::cache::Family;
 use crate::client_hello::{ChInspector, Inspect};
 use crate::config::Fqdn;
 use crate::connect::{ConnectParser, Feed};
-use crate::dns::{DNS_MSG_LIMIT, ResponseWorkspace, parse_response};
+use crate::dns::{BailiwickZones, DNS_MSG_LIMIT, ResponseWorkspace, parse_response};
 
 /// The fixed transaction id every DNS-wire input is anchored on: the corpus
 /// message answers `(sub.example.org, A, tid 0x0ded)`.
@@ -182,7 +182,15 @@ fn drive(target: ParserTarget, input: &[u8]) -> DriveOutcome {
             wire[..take].copy_from_slice(&input[..take]);
             wire[0] = (DNS_TID >> 8) as u8;
             wire[1] = u8::try_from(DNS_TID & 0xff).expect("dns tid low byte");
-            match parse_response(&mut ws, &dns_context(), Family::A, DNS_TID, &wire[..take]) {
+            let fq = dns_context();
+            match parse_response(
+                &mut ws,
+                &BailiwickZones::single(&fq),
+                &fq,
+                Family::A,
+                DNS_TID,
+                &wire[..take],
+            ) {
                 Ok(_) => DriveOutcome::Complete,
                 Err(_) => DriveOutcome::Rejected,
             }

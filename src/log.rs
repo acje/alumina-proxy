@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use crate::cache::Family;
 use crate::enforcement::action::{AnyIllegalScope, DomainOrdinal, Scope};
-use crate::enforcement::monitor::{CapturedFact, Monitor};
+use crate::enforcement::monitor::{CapturedFact, DnsAnomalyKind, Monitor};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason};
 use crate::inventory;
 use crate::startup_dns::NameOutcome;
@@ -486,7 +486,8 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     let ofacts = monitor.facts_any_illegal_overflow()
         || monitor.facts_early_data_overflow()
         || monitor.facts_unknown_overflow()
-        || monitor.facts_resolver_degraded_overflow();
+        || monitor.facts_resolver_degraded_overflow()
+        || monitor.facts_dns_anomaly_overflow();
     let globals: [(&[u8], u64); 13] = [
         (&b"facts_total"[..], monitor.facts_total()),
         (&b"actions_total"[..], monitor.actions_total()),
@@ -521,6 +522,18 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     }
     let resolver_degraded = monitor.facts_resolver_degraded();
     if resolver_degraded > 0 && !push_u64(&mut w, b"rd", u64::from(resolver_degraded)) {
+        return None;
+    }
+    let bailiwick_violation = monitor.facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
+    if bailiwick_violation > 0 && !push_u64(&mut w, b"bv", u64::from(bailiwick_violation)) {
+        return None;
+    }
+    let resolver_peer_mismatch = monitor.facts_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
+    if resolver_peer_mismatch > 0 && !push_u64(&mut w, b"rpm", u64::from(resolver_peer_mismatch)) {
+        return None;
+    }
+    let extreme_ttl = monitor.facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+    if extreme_ttl > 0 && !push_u64(&mut w, b"xttl", u64::from(extreme_ttl)) {
         return None;
     }
     for index in 0..AnyIllegalCause::KIND_COUNT {
@@ -1828,13 +1841,14 @@ mod tests {
     #[test]
     fn logging_monitor_summary_exact_grammar_and_zero_suppression() {
         use crate::enforcement::action::{AnyIllegalScope, DomainOrdinal};
-        use crate::enforcement::monitor::Monitor;
+        use crate::enforcement::monitor::{DnsAnomalyKind, Monitor};
         use crate::enforcement::policy::UnknownReason;
         let mut m = Monitor::new();
         m.note_fact_any_illegal(crate::enforcement::policy::AnyIllegalCause::HostNotAllowlisted);
         m.note_fact_any_illegal(crate::enforcement::policy::AnyIllegalCause::HostNotAllowlisted);
         m.note_fact_unknown(UnknownReason::Unattributed);
         m.note_fact_resolver_degraded();
+        m.note_fact_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         m.note_fact_early_data(ordinal);
         m.note_action_first_slot_block(AnyIllegalScope::Connection);
@@ -1846,9 +1860,9 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert_eq!(
             text,
-            "level=info kind=monitor secs=7 facts_total=5 actions_total=3 refusals_total=0 \
+            "level=info kind=monitor secs=7 facts_total=6 actions_total=3 refusals_total=0 \
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
-             ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 \
+             ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 bv=1 \
              c14=2 unk3=1 d0f=1 d0b=1 d0l=1\n",
             "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
         );
@@ -1859,6 +1873,22 @@ mod tests {
         assert!(
             !text.contains("rd=0"),
             "a zero resolver-degraded fold stays suppressed: {text}"
+        );
+        assert!(
+            text.contains(" rd=1 bv=1"),
+            "the dns-anomaly `bv` key follows the resolver-degraded fold: {text}"
+        );
+        assert!(
+            text.contains(" bv=1"),
+            "the bailiwick-violation anomaly key carries its fold: {text}"
+        );
+        assert!(
+            !text.contains("rpm="),
+            "a zero ResolverPeerMismatch fold stays suppressed: {text}"
+        );
+        assert!(
+            !text.contains("xttl="),
+            "a zero ExtremeTtl fold stays suppressed: {text}"
         );
         assert!(
             text.contains(" c14=2"),
