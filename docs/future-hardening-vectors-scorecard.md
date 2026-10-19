@@ -17,9 +17,11 @@ per-vector detail sections, and their rows remain with their original scores.
 On the same date vectors 14, 19, and 35 were **implemented** via the
 `alumina-hrdn2` hardening increment (`docs/alumina-proxy.md`); they are likewise
 marked **DONE** below, with rows remaining at their original scores.
-Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), and 8 (multi-resolver
-cross-validation) are **deferred** (marked **DEFERRED**): high architectural risk
-for high-but-costly security value, retained for research only.
+Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), 7 (AD-bit / DO-bit handling),
+and 8 (multi-resolver cross-validation) are **deferred** (marked **DEFERRED**):
+high architectural risk for high-but-costly security value, retained for
+research only. Vector 7 defers as a dependent of 6 — the AD/DO bits are only
+meaningful with authenticated data.
 
 **Method:** 8 independent deep-analysis scores per vector = 4 `linus` (Rust-specialist)
 + 4 `general` raters. Every rater read the actual source before scoring. Scores are 1–10.
@@ -50,7 +52,7 @@ Generated from `scores.jsonl` (200 score lines; 21 scored vectors shown).
 | 9 | 24 | Startup-DNS trust-boundary hardening | 7.12 | 7.12 | 7.12 | 2.75 |
 | 10 | 33 | **DONE** Wrong-family records tolerated-vs-rejected pin — implemented (2026-10-19) | 6.81 | 4.38 | 9.25 | 1.38 |
 | 11 | 36 | **DONE** Non-CONNECT method / request-target form rejection — implemented (2026-10-19) | 6.81 | 4.12 | 9.50 | 1.12 |
-| 12 | 7 | AD-bit / DO-bit handling | 6.56 | 6.62 | 6.50 | 4.50 |
+| 12 | 7 | **DEFERRED** AD-bit / DO-bit handling | 6.56 | 6.62 | 6.50 | 4.50 |
 | 13 | 22 | Resolver identity / response-source verification | 6.50 | 5.38 | 7.62 | 2.75 |
 | 14 | 35 | **DONE** CONNECT header-line count bound — implemented (2026-10-19) | 6.50 | 3.62 | 9.38 | 1.25 |
 | 15 | 18 | Multi-resolver failover | 6.38 | 5.50 | 7.25 | 4.38 |
@@ -250,9 +252,11 @@ Overall **6.81** · Eff **4.12** · Plaus **9.50** · Risk **1.12**
 | linus | 7 | 10 | 1 |
 | linus | 4 | 10 | 1 |
 
-### Rank 12 — Vector 7: AD-bit / DO-bit handling
+### Rank 12 — Vector 7: AD-bit / DO-bit handling — **DEFERRED**
 
 Overall **6.56** · Eff **6.62** · Plaus **6.50** · Risk **4.50**
+
+**Status:** **DEFERRED** — dependent on DNSSEC (v6): the AD/DO bits are only meaningful with authenticated data; retained as part of the DNSSEC feasibility study.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|

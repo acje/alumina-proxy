@@ -23,10 +23,12 @@ each row below is marked **DONE** with its pinned semantics and code location.
 On the same date vectors 14, 19, and 35 were **implemented** via the
 `alumina-hrdn2` hardening increment (recorded in `docs/alumina-proxy.md`) and
 each row below is marked **DONE** with its pinned semantics and code location.
-Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), and 8 (multi-resolver
-cross-validation) are **deferred** (marked **DEFERRED** below): high
-architectural risk for high-but-costly security value, retained for research
-only. Vector numbers are retained as stable identifiers; gaps are intentional.
+Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), 7 (AD-bit / DO-bit handling),
+and 8 (multi-resolver cross-validation) are **deferred** (marked **DEFERRED**
+below): high architectural risk for high-but-costly security value, retained
+for research only. Vector 7 defers as a dependent of 6 — the AD/DO bits are
+only meaningful with authenticated data. Vector numbers are retained as stable
+identifiers; gaps are intentional.
 
 ## 1. Baseline DNS posture (already implemented)
 
@@ -63,7 +65,7 @@ only. Vector numbers are retained as stable identifiers; gaps are intentional.
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
 | 6 | **DEFERRED** **DNSSEC validation** | Forged records even from a malicious/poisoned resolver — strongest fit to the "fake DNS record" threat | High (new crypto, new dependency, resource profile) | Low | **Top research priority** — feasibility study for a zero-alloc fixed-profile validating stub |
-| 7 | **AD-bit / DO-bit handling** | Require authenticated data; treat unauthenticated answers as lower-trust | Medium | Low | Study as part of DNSSEC |
+| 7 | **DEFERRED** **AD-bit / DO-bit handling** | Require authenticated data; treat unauthenticated answers as lower-trust | Medium | Low | **Deferred** — dependent on DNSSEC (v6): the AD/DO bits are only meaningful with authenticated data; retained as part of the DNSSEC feasibility study |
 | 8 | **DEFERRED** **Multi-resolver cross-validation / split-horizon detection** | Detect a single compromised resolver | High | Low — violates 1-conn/1-query + no-fallback doctrine | Defer; document as a design-revision candidate |
 
 ### C. Response-format hardening (off-path / cache-poisoning resistance)
