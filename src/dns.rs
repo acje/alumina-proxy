@@ -921,8 +921,6 @@ pub fn parse_response(
     let (chain, chain_ttl) = root_chain(&root, ws)?;
     let terminal = chain.terminal.as_slice();
 
-    let soa = classify_soa(terminal, ws.soa.as_ref())?;
-
     let mut bindings = BindingList::default();
     let terminal_owner = ws.owners[..ws.owner_len]
         .iter()
@@ -951,6 +949,7 @@ pub fn parse_response(
                     ttl: earliest,
                 });
             }
+            let soa = classify_soa(terminal, ws.soa.as_ref())?;
             soa.map_or(Err(DnsError::EmptyNoerrorWithoutSoa), |soa| {
                 Ok(Outcome::NoData {
                     family,
@@ -959,6 +958,7 @@ pub fn parse_response(
             })
         }
         RCODE_NXDOMAIN => {
+            let soa = classify_soa(terminal, ws.soa.as_ref())?;
             let terminal_data = terminal_owner.is_some_and(|o| o.has_addr_data);
             if terminal_data {
                 return Err(DnsError::TerminalWithoutData);
@@ -1344,6 +1344,27 @@ mod tests {
             parse_response_ws("sub.example.org", Family::A, 15, &msg),
             Err(DnsError::NonCoveringSoa)
         );
+    }
+
+    #[test]
+    fn positive_accepts_non_covering_authority_soa() {
+        let mut msg = header(0x1248, true, 0, 1, 1, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [93, 184, 216, 34], 120));
+        msg.extend_from_slice(&soa_record("other.example.net", 300, 60));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1248, &msg).expect("parse");
+        match out {
+            Outcome::Positive { bindings, ttl, .. } => {
+                assert_eq!(
+                    bindings.as_slice(),
+                    &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+                );
+                assert_eq!(ttl, 120);
+            }
+            other => panic!("expected positive, got {other:?}"),
+        }
     }
 
     #[test]
