@@ -1625,3 +1625,260 @@ fn successful_exchange_recovers_and_emits_exit_crossing_once() {
     );
     drop(responder);
 }
+
+/// Builds a configured resolver set from numeric address strings for the pure
+/// failover/failback state-machine tests (loopback dialing is impossible:
+/// `Nameserver` fixes the port at 53, and the relay would reach a real host).
+fn resolver_set_of(addrs: &[&str]) -> ResolverSet {
+    let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+    for (slot, addr) in addrs.iter().enumerate() {
+        entries[slot] = crate::resolver::select(addr).expect("ns");
+    }
+    ResolverSet::from_slice(&entries[..addrs.len()]).expect("resolver count fits")
+}
+
+/// A transport seated onto a configured resolver set with the primary active,
+/// as [`StartupDns::begin_window`] leaves it.
+fn seeded_transport(set: ResolverSet) -> StartupDns {
+    let mut transport = StartupDns::new().unwrap();
+    transport.resolvers = Some(set);
+    transport.active_resolver = ActiveResolver::primary(set.len());
+    transport.now0 = 1_000_000;
+    transport
+}
+
+#[test]
+fn failover_relocates_to_next_healthy_after_threshold_and_arms_failback() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    transport.on_exchange_failed(now);
+    transport.on_exchange_failed(now);
+    assert_eq!(
+        transport.active_resolver.index(),
+        0,
+        "two failures stay below the degraded threshold; no relocation"
+    );
+    assert!(
+        transport.failback_due.is_none(),
+        "no failback grace is armed while the active resolver is the primary"
+    );
+    transport.on_exchange_failed(now);
+    assert_eq!(
+        transport.active_resolver.index(),
+        1,
+        "the third consecutive failure relocates the transport onto the backup"
+    );
+    assert_eq!(transport.peer().ip().to_string(), "8.8.8.8");
+    assert_eq!(transport.failback_due, Some(now + FAILBACK_AFTER_SECS));
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        1,
+        "exactly one degraded enter crossing is emitted for the primary"
+    );
+    assert!(
+        !transport.resolver_degraded_for_test(),
+        "the relocated-to backup is the healthy active resolver"
+    );
+}
+
+#[test]
+fn single_resolver_fails_closed_keeping_the_injected_peer() {
+    let set = resolver_set_of(&["1.1.1.1"]);
+    let mut transport = seeded_transport(set);
+    transport.set_peer_for_test(ns(53453));
+    let now = 1_000_000u64;
+    for _ in 0..5 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(transport.active_resolver.index(), 0);
+    assert_eq!(
+        transport.peer(),
+        ns(53453),
+        "a single-resolver set never relocates or clobbers the injected peer"
+    );
+    assert!(transport.failback_due.is_none());
+    assert!(transport.resolver_degraded_for_test());
+}
+
+#[test]
+fn failback_probes_primary_after_grace_and_success_recovers_it() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(transport.active_resolver.index(), 1);
+    let due = transport.failback_due.expect("failback armed on backup");
+    assert!(due > now);
+    // The failback grace elapses; the next exchange probes the primary again.
+    transport.now0 = due;
+    transport
+        .maybe_begin_failback()
+        .expect("failback probe begins");
+    assert_eq!(
+        transport.active_resolver.index(),
+        0,
+        "the probe dials the primary again"
+    );
+    assert_eq!(transport.peer().ip().to_string(), "1.1.1.1");
+    assert_eq!(
+        transport.failback_source,
+        Some(ActiveResolver::at(1, 2)),
+        "the backup is remembered so a failed probe re-seats onto it"
+    );
+    assert!(transport.failback_due.is_none());
+    // The probe succeeds: the primary recovers and the probe is settled.
+    transport.on_exchange_succeeded();
+    assert_eq!(transport.active_resolver.index(), 0);
+    assert!(transport.failback_source.is_none());
+    assert!(transport.failback_due.is_none());
+    assert!(!transport.resolver_degraded_for_test());
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        2,
+        "one enter crossing on degradation and one exit crossing on recovery"
+    );
+}
+
+#[test]
+fn failed_failback_probe_reseats_onto_backup_and_rearms_timer() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    let due = transport.failback_due.expect("failback armed");
+    transport.now0 = due;
+    transport
+        .maybe_begin_failback()
+        .expect("failback probe begins");
+    assert_eq!(transport.active_resolver.index(), 0);
+    assert!(transport.failback_source.is_some());
+    // The probe against the primary fails: the transport re-seats onto the
+    // backup and re-arms the grace instead of cascading into a second failover
+    // candidate search.
+    transport.on_exchange_failed(due);
+    assert_eq!(
+        transport.active_resolver.index(),
+        1,
+        "a failed probe re-seats onto the backup it came from"
+    );
+    assert_eq!(transport.peer().ip().to_string(), "8.8.8.8");
+    assert!(transport.failback_source.is_none());
+    assert_eq!(
+        transport.failback_due,
+        Some(due + FAILBACK_AFTER_SECS),
+        "the failed probe re-arms the failback timer"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        1,
+        "only the original primary enter crossing; the backup never degraded"
+    );
+}
+
+#[test]
+fn backup_success_keeps_the_failback_probe_armed() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    let due = transport.failback_due.expect("failback armed");
+    // The backup succeeds; the primary is still probed at the next due
+    // exchange because the failback grace stays armed on a non-primary.
+    transport.on_exchange_succeeded();
+    assert_eq!(transport.active_resolver.index(), 1);
+    assert_eq!(transport.failback_due, Some(due));
+    assert!(transport.failback_source.is_none());
+}
+
+#[test]
+fn three_resolvers_relocate_in_order_then_fail_closed_on_exhaustion() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(transport.active_resolver.index(), 1, "primary -> backup 1");
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(transport.active_resolver.index(), 2, "backup 1 -> backup 2");
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(
+        transport.active_resolver.index(),
+        2,
+        "every resolver degraded; the transport fails closed on the last active"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        3,
+        "one enter crossing per degraded resolver"
+    );
+}
+
+#[test]
+fn next_healthy_wraps_within_the_set() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.degradations[0] = ResolverDegradation::Degraded;
+    assert_eq!(
+        transport.next_healthy_after_active(ActiveResolver::at(2, 3)),
+        Some(ActiveResolver::at(1, 3)),
+        "the scan wraps past the degraded primary back to the first healthy backup"
+    );
+
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.degradations[2] = ResolverDegradation::Degraded;
+    assert_eq!(
+        transport.next_healthy_after_active(ActiveResolver::at(2, 3)),
+        Some(ActiveResolver::at(0, 3)),
+        "a wrap around the set edge prefers a healthy primary"
+    );
+
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.degradations = [ResolverDegradation::Degraded; MAX_RESOLVERS];
+    assert_eq!(
+        transport.next_healthy_after_active(ActiveResolver::at(1, 3)),
+        None,
+        "every candidate degraded yields no relocation"
+    );
+
+    let set = resolver_set_of(&["1.1.1.1"]);
+    let transport = seeded_transport(set);
+    assert_eq!(
+        transport.next_healthy_after_active(ActiveResolver::primary(1)),
+        None,
+        "a single-resolver set never relocates"
+    );
+}
+
+#[test]
+fn peer_matches_validates_the_active_resolver_only() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    let primary = SocketAddr::new("1.1.1.1".parse::<IpAddr>().expect("ip"), 53);
+    let backup = SocketAddr::new("8.8.8.8".parse::<IpAddr>().expect("ip"), 53);
+    assert!(
+        transport.peer_matches(backup),
+        "the connected peer matching the active backup resolver validates"
+    );
+    assert!(
+        !transport.peer_matches(primary),
+        "the inactive primary resolver no longer validates after failover"
+    );
+}

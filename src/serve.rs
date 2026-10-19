@@ -420,7 +420,7 @@ impl ServeStorage {
     }
 
     /// Starts a cooperative DNS exchange on the retained transport for the
-    /// named allowlist entry, repointing the shared owner's peer first. The
+    /// named allowlist entry, dialing the currently active resolver. The
     /// exchange draws a fresh transaction id and records its deadline without
     /// waiting for network readiness; subsequent [`Self::advance_dns`] turns
     /// conclude it.
@@ -431,12 +431,10 @@ impl ServeStorage {
     /// `Cache` when the ordinal is outside the allowlist.
     pub(crate) fn start_dns_exchange(
         &mut self,
-        nameserver: SocketAddr,
         ordinal: usize,
         family: Family,
         deadline: Instant,
     ) -> Result<(), StartupDnsError> {
-        self.dns.set_peer(nameserver);
         let fqdn = self
             .config
             .allowlist()

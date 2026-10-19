@@ -31,6 +31,7 @@ use crate::config::{ALLOWLIST_MAX, Config, Fqdn};
 use crate::dns::{self, BailiwickZones, DNS_MSG_LIMIT, DnsError, ResponseWorkspace};
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::log;
+use crate::resolver::{MAX_RESOLVERS, ResolverSet};
 use crate::schedule::{ScheduleError, Schedules};
 
 pub const EXCHANGE_DEADLINE_SECS: u64 = 2;
@@ -550,6 +551,12 @@ impl Default for ResolverDegradation {
 /// into passive degraded mode before any successful exchange resets it.
 const DEGRADED_AFTER: usize = 3;
 
+/// The whole-second span Alumina spends on a non-primary resolver before the
+/// next exchange probes the primary again (bounded failback recovery). One
+/// failed probe re-degrades the primary and re-arms the timer; a successful
+/// probe recovers the primary as the active resolver.
+pub const FAILBACK_AFTER_SECS: u64 = 900;
+
 impl ResolverDegradation {
     const fn note_failure(self) -> ResolverDegradation {
         match self {
@@ -568,6 +575,42 @@ impl ResolverDegradation {
 
     const fn note_success() -> ResolverDegradation {
         ResolverDegradation::Healthy { consecutive: 0 }
+    }
+}
+
+/// Which resolver of the configured [`ResolverSet`] the transport currently
+/// points at. The index and the set length travel together as one value, so an
+/// out-of-range active resolver is unrepresentable: construction starts at the
+/// primary and every failover transition advances within `0..set_len` by the
+/// state machine, never by an unbounded caller-supplied index. A length below
+/// the index is a build-time impossibility (`ResolverSet` never holds zero
+/// entries, `src/resolver.rs:89`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActiveResolver {
+    index: usize,
+    set_len: usize,
+}
+
+impl ActiveResolver {
+    const fn at(index: usize, set_len: usize) -> ActiveResolver {
+        ActiveResolver { index, set_len }
+    }
+
+    /// The primary resolver is index 0 of the set.
+    const fn primary(set_len: usize) -> ActiveResolver {
+        ActiveResolver { index: 0, set_len }
+    }
+
+    const fn index(&self) -> usize {
+        self.index
+    }
+
+    const fn set_len(&self) -> usize {
+        self.set_len
+    }
+
+    const fn is_primary(&self) -> bool {
+        self.index == 0
     }
 }
 
@@ -607,10 +650,33 @@ pub struct StartupDns {
     /// The failure reason of the most recently failed step, read out by the
     /// blocking driver when the exchange concludes.
     last_failed: Option<FailureReason>,
-    /// The passive degradation state advanced at the failure and success choke
-    /// points; the transition counter below records only entered/exited
-    /// crossings, never the individual failures or resets that precede them.
-    degradation: ResolverDegradation,
+    /// The configured resolver set owned for failover/failback decisions,
+    /// installed at window begin from the config. `None` before any window
+    /// (and in loopback tests that seed only a peer) and then treated as a
+    /// one-entry set, so the state machine degrades gracefully without a
+    /// configured set to consult.
+    resolvers: Option<ResolverSet>,
+    /// Which resolver of the set the transport currently points at. The index
+    /// and the set length travel together, so an out-of-range active resolver
+    /// is unrepresentable; the state machine seats it to the primary at window
+    /// begin and relocates it only via [`Self::on_exchange_failed`] and
+    /// [`Self::maybe_begin_failback`].
+    active_resolver: ActiveResolver,
+    /// The passive per-resolver degradation state advanced at the two exchange
+    /// choke points, indexed by resolver within the set; the transition
+    /// counter below records only entered/exited crossings, never the
+    /// individual failures or resets that precede them.
+    degradations: [ResolverDegradation; MAX_RESOLVERS],
+    /// The whole-second (`now0`-scale) time at which the next exchange must
+    /// probe the primary again, armed when the active resolver is not the
+    /// primary and cleared when the primary recovers. `None` while no probe is
+    /// scheduled.
+    failback_due: Option<u64>,
+    /// The resolver the transport was on when a failback probe began, kept so
+    /// a failed probe re-seats onto that backup instead of cascading into
+    /// another failover while the primary is being probed. `None` while no
+    /// failback probe is in flight.
+    failback_source: Option<ActiveResolver>,
     /// The number of degraded-mode enter and exit crossings awaiting drain by
     /// the owning `ServeStorage` into the monitor's `rd` fact fold. Transitions
     /// accumulate across a startup window and are drained once after it closes.
@@ -680,7 +746,11 @@ impl StartupDns {
             window_open: false,
             last_published: None,
             last_failed: None,
-            degradation: ResolverDegradation::default(),
+            resolvers: None,
+            active_resolver: ActiveResolver::primary(1),
+            degradations: [ResolverDegradation::default(); MAX_RESOLVERS],
+            failback_due: None,
+            failback_source: None,
             resolver_transitions: 0,
             dns_anomalies: [0; DnsAnomalyKind::COUNT],
             #[cfg(test)]
@@ -720,19 +790,22 @@ impl StartupDns {
     }
 
     #[cfg(test)]
-    pub(crate) const fn resolver_degraded_for_test(&self) -> bool {
-        matches!(self.degradation, ResolverDegradation::Degraded)
+    pub(crate) fn resolver_degraded_for_test(&self) -> bool {
+        self.degradations[self.active_resolver.index()] == ResolverDegradation::Degraded
     }
 
     /// Starts a startup window on the retained transport without owning the
-    /// wait: it anchors the DNS epoch and monotonic origin, pins the
-    /// nameserver peer, and returns the absolute window deadline. From here
-    /// the shared owner drives selection and cooperative exchanges over the
-    /// serving poll and reports through [`Self::finalize_window`]; the private
-    /// driver uses the same anchor inside [`Self::resolve_window`].
+    /// wait: it anchors the DNS epoch and monotonic origin, seats the failover
+    /// state machine onto the configured resolver set with the primary active,
+    /// pins the nameserver peer seed, and returns the absolute window
+    /// deadline. From here the shared owner drives selection and cooperative
+    /// exchanges over the serving poll and reports through
+    /// [`Self::finalize_window`]; the private driver uses the same anchor
+    /// inside [`Self::resolve_window`].
     pub(crate) fn begin_window(
         &mut self,
         nameserver: SocketAddr,
+        resolvers: ResolverSet,
         now0: u64,
         window: Duration,
     ) -> Result<Instant, StartupDnsError> {
@@ -743,6 +816,8 @@ impl StartupDns {
             .checked_add(window)
             .ok_or(StartupDnsError::DeadlineOverflow)?;
         self.addr = nameserver;
+        self.resolvers = Some(resolvers);
+        self.active_resolver = ActiveResolver::primary(resolvers.len());
         self.window_open = true;
         Ok(deadline)
     }
@@ -993,15 +1068,20 @@ impl StartupDns {
         self.active.as_ref().map(|ex| ex.step)
     }
 
-    /// Repoints the retained transport peer. Startup configures it through
-    /// resolution; a refresh owner repoints it by policy before starting an
-    /// exchange.
-    pub(crate) const fn set_peer(&mut self, addr: SocketAddr) {
-        self.addr = addr;
-    }
-
+    /// The transport peer the next exchange dials: the active resolver's
+    /// address, seeded at window begin and relocated by failover and failback.
     pub(crate) const fn peer(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Test-only peer seed for the loopback injection seam: the serving tests
+    /// that short-circuit the startup window point the transport at a local
+    /// responder directly, since the configured resolver set always dials
+    /// port 53. Mirrors the pre-window single-resolver state, where the peer
+    /// is the caller's injected address and no configured set is consulted.
+    #[cfg(test)]
+    pub(crate) const fn set_peer_for_test(&mut self, addr: SocketAddr) {
+        self.addr = addr;
     }
 
     /// Whether a completed nonblocking connect landed on the configured
@@ -1488,6 +1568,8 @@ impl StartupDns {
             .checked_add(Duration::from_secs(STARTUP_WINDOW_SECS))
             .ok_or(StartupDnsError::DeadlineOverflow)?;
         self.addr = nameserver;
+        self.resolvers = Some(*config.resolver_set());
+        self.active_resolver = ActiveResolver::primary(config.resolver_set().len());
         let allowlist = config.allowlist();
         self.bailiwick = BailiwickZones::from_allowlist(allowlist);
         let names = allowlist.len();
@@ -1584,6 +1666,8 @@ impl StartupDns {
             .checked_add(window)
             .ok_or(StartupDnsError::DeadlineOverflow)?;
         self.addr = nameserver;
+        self.resolvers = Some(*config.resolver_set());
+        self.active_resolver = ActiveResolver::primary(config.resolver_set().len());
         let allowlist = config.allowlist();
         self.bailiwick = BailiwickZones::from_allowlist(allowlist);
         let names = allowlist.len();
@@ -1715,6 +1799,7 @@ impl StartupDns {
         if self.active.is_some() {
             return Err(StartupDnsError::ExchangeActive);
         }
+        self.maybe_begin_failback()?;
         let connect_err = if self.stream.is_none() {
             self.begin_connect(self.addr)?
         } else {
@@ -1796,7 +1881,7 @@ impl StartupDns {
                 }
                 RecvStep::Published => {
                     self.active = None;
-                    self.record_resolver_success();
+                    self.on_exchange_succeeded();
                     if !self.window_open {
                         self.conclude_shared_transport()?;
                     }
@@ -1860,26 +1945,112 @@ impl StartupDns {
         }
     }
 
-    /// Advances the degradation state at the single recognized failure choke
-    /// point, recording exactly one enter crossing when healthy resolves cross
-    /// the threshold. Further failures while already degraded record nothing.
-    fn record_resolver_failure(&mut self) {
-        let was_degraded = self.degradation == ResolverDegradation::Degraded;
-        self.degradation = self.degradation.note_failure();
-        if !was_degraded && self.degradation == ResolverDegradation::Degraded {
-            self.resolver_transitions += 1;
+    /// Seats the transport peer to whichever resolver the active index names,
+    /// so the next exchange dials the relocated resolver. A transport without
+    /// a configured set keeps its seeded peer (the pre-window and loopback
+    /// cases), where the active index stays the primary and the peer is the
+    /// caller's injected address.
+    const fn repoint_to_active(&mut self) {
+        let Some(set) = self.resolvers else {
+            return;
+        };
+        if let Some(resolver) = set.get(self.active_resolver.index()) {
+            self.addr = SocketAddr::new(resolver.addr(), resolver.port());
         }
     }
 
-    /// Advances the degradation state at the single recognized success choke
+    /// The next resolver after the active one, wrapping within the set, that is
+    /// not passively degraded. `None` when the set is single-resolver or every
+    /// candidate resolver is degraded, in which case the transport stays on the
+    /// active resolver and fails closed.
+    fn next_healthy_after_active(&self, active: ActiveResolver) -> Option<ActiveResolver> {
+        if active.set_len() == 1 {
+            return None;
+        }
+        for step in 1..=active.set_len() {
+            let index = (active.index() + step) % active.set_len();
+            if self.degradations[index] != ResolverDegradation::Degraded {
+                return Some(ActiveResolver::at(index, active.set_len()));
+            }
+        }
+        None
+    }
+
+    /// Probes the primary again when the active resolver is not the primary and
+    /// the failback grace has elapsed: the transport is closed so the next
+    /// exchange dials the primary, with the departed resolver kept as
+    /// [`Self::failback_source`] so a failed probe re-seats onto it. Called at
+    /// the top of [`Self::start_exchange`] so the probe is the next exchange,
+    /// never a background or timer-owned action.
+    fn maybe_begin_failback(&mut self) -> Result<(), StartupDnsError> {
+        if self.active_resolver.is_primary() || self.failback_source.is_some() {
+            return Ok(());
+        }
+        let Some(due) = self.failback_due else {
+            return Ok(());
+        };
+        if self.now_u64() < due {
+            return Ok(());
+        }
+        self.close_connection()?;
+        self.failback_source = Some(self.active_resolver);
+        self.active_resolver = ActiveResolver::primary(self.active_resolver.set_len());
+        self.failback_due = None;
+        self.repoint_to_active();
+        Ok(())
+    }
+
+    /// Advances the failover/failback state machine at the single recognized
+    /// failure choke point. Every counted failure degrades the active resolver,
+    /// recording exactly one enter crossing when healthy resolves cross the
+    /// threshold. A degraded active resolver relocates to the next healthy
+    /// resolver in the set, or stays put when no candidate exists (all-degraded
+    /// fail-closed); relocation to a non-primary arms the failback grace so the
+    /// primary is probed again. While a failback probe is in flight, a failed
+    /// probe re-seats onto the backup it came from instead of cascading into
+    /// another failover.
+    fn on_exchange_failed(&mut self, now: u64) {
+        let active = self.active_resolver;
+        let active_index = active.index();
+        let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
+        self.degradations[active_index] = self.degradations[active_index].note_failure();
+        if !was_degraded && self.degradations[active_index] == ResolverDegradation::Degraded {
+            self.resolver_transitions += 1;
+        }
+        if let Some(source) = self.failback_source {
+            self.active_resolver = source;
+            self.failback_source = None;
+            self.failback_due = Some(now.saturating_add(FAILBACK_AFTER_SECS));
+            self.repoint_to_active();
+            return;
+        }
+        if self.degradations[active_index] == ResolverDegradation::Degraded
+            && let Some(next) = self.next_healthy_after_active(active)
+        {
+            self.active_resolver = next;
+            if !next.is_primary() {
+                self.failback_due = Some(now.saturating_add(FAILBACK_AFTER_SECS));
+            }
+            self.repoint_to_active();
+        }
+    }
+
+    /// Advances the resolver state at the single recognized success choke
     /// point, recording exactly one exit crossing when a degraded resolver
-    /// publishes a valid outcome. A healthy resolver that publishes simply
-    /// restarts its consecutive-failure count without emitting a crossing.
-    fn record_resolver_success(&mut self) {
-        let was_degraded = self.degradation == ResolverDegradation::Degraded;
-        self.degradation = ResolverDegradation::note_success();
+    /// publishes a valid outcome: the active resolver recovers to healthy, and
+    /// a successful failback probe against the primary is settled so no further
+    /// probe is armed. A success on a non-primary leaves the failback grace
+    /// armed, so the primary is still probed on the next due exchange.
+    fn on_exchange_succeeded(&mut self) {
+        let active_index = self.active_resolver.index();
+        let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
+        self.degradations[active_index] = ResolverDegradation::note_success();
         if was_degraded {
             self.resolver_transitions += 1;
+        }
+        if self.failback_source.is_some() {
+            self.failback_source = None;
+            self.failback_due = None;
         }
     }
 
@@ -1891,8 +2062,8 @@ impl StartupDns {
         reason: FailureReason,
     ) -> Result<(), StartupDnsError> {
         self.last_failed = Some(reason);
-        self.record_resolver_failure();
         let now = self.now_u64();
+        self.on_exchange_failed(now);
         schedules.note_exchange_failure(ordinal, family, now)?;
         Ok(())
     }

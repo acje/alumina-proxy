@@ -73,7 +73,12 @@ fn falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(responder_addr, 0, Family::A, exchange_deadline)
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
 
     let client = connect(port);
@@ -145,7 +150,12 @@ fn hot_relay_many_slots_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(responder_addr, 0, Family::A, exchange_deadline)
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
 
     let per_slot = 96 * 1024;
@@ -555,7 +565,12 @@ fn idle_falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(responder_addr, 0, Family::A, exchange_deadline)
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
 
     let mut published = false;
@@ -619,12 +634,12 @@ fn reconnect_falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(
-            responder_addr,
-            0,
-            Family::A,
-            Instant::now() + Duration::from_secs(10),
-        )
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, Instant::now() + Duration::from_secs(10))
         .expect("start exchange A");
     let mut first = false;
     for _ in 0..200 {
@@ -644,12 +659,12 @@ fn reconnect_falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(
-            responder_addr,
-            0,
-            Family::Aaaa,
-            Instant::now() + Duration::from_secs(10),
-        )
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::Aaaa, Instant::now() + Duration::from_secs(10))
         .expect("start exchange Aaaa");
     let mut second = false;
     for _ in 0..200 {
@@ -797,7 +812,12 @@ fn shutdown_falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(responder_addr, 0, Family::A, exchange_deadline)
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
     assert!(
         runtime.serving().storage().dns().has_active_exchange(),
@@ -899,7 +919,12 @@ fn selfpipe_receiving_cancellation_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(responder_addr, 0, Family::A, exchange_deadline)
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
 
     let mut saw_receiving = false;

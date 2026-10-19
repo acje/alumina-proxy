@@ -286,11 +286,10 @@ impl Runtime {
         else {
             return Ok(());
         };
-        let nameserver = self.serving.storage().dns().peer();
         let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
         self.serving
             .storage_mut()
-            .start_dns_exchange(nameserver, selected.name(), selected.family(), deadline)
+            .start_dns_exchange(selected.name(), selected.family(), deadline)
             .map_err(ServeError::from)?;
         Ok(())
     }

@@ -47,10 +47,11 @@ impl Serving {
                 detail: "shared",
             })
         })?;
+        let resolvers = *self.storage.config().resolver_set();
         let window_deadline = self
             .storage
             .dns_mut()
-            .begin_window(nameserver, now0, window)?;
+            .begin_window(nameserver, resolvers, now0, window)?;
         let names = self.storage.config().allowlist().len();
         for ordinal in 0..names {
             for family in Family::ALL {
@@ -138,8 +139,7 @@ impl Serving {
                     let deadline =
                         Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS).min(remaining);
                     ledger.track_attempt(ordinal, family);
-                    self.storage
-                        .start_dns_exchange(nameserver, ordinal, family, deadline)?;
+                    self.storage.start_dns_exchange(ordinal, family, deadline)?;
                     continue;
                 }
             }
