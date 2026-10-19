@@ -14,6 +14,9 @@ research discards (2026-10-19). Since scoring (2026-10-19), vectors 33, 34, and
 36 were **implemented and pinned** via the `alumina-hrdn` hardening increment
 (`docs/alumina-proxy.md`); they are marked **DONE** in the ranked table and
 per-vector detail sections, and their rows remain with their original scores.
+On the same date vectors 14, 19, and 35 were **implemented** via the
+`alumina-hrdn2` hardening increment (`docs/alumina-proxy.md`); they are likewise
+marked **DONE** below, with rows remaining at their original scores.
 Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), and 8 (multi-resolver
 cross-validation) are **deferred** (marked **DEFERRED**): high architectural risk
 for high-but-costly security value, retained for research only.
@@ -38,9 +41,9 @@ Generated from `scores.jsonl` (200 score lines; 21 scored vectors shown).
 |---|---|---|---|---|---|---|
 | 1 | 11 | Bailiwick enforcement on CNAME targets | 7.88 | 7.88 | 7.88 | 3.12 |
 | 2 | 21 | Anomaly logging / tripwire on DNS | 7.69 | 7.75 | 7.62 | 3.38 |
-| 3 | 14 | TTL floor (min-TTL) | 7.62 | 5.88 | 9.38 | 2.00 |
+| 3 | 14 | **DONE** TTL floor (min-TTL) — implemented (2026-10-19) | 7.62 | 5.88 | 9.38 | 2.00 |
 | 4 | 34 | **DONE** ClientHello handshake-length field bound — implemented (2026-10-19) | 7.50 | 5.50 | 9.50 | 1.12 |
-| 5 | 19 | Resolver health probing / degraded signaling | 7.44 | 6.50 | 8.38 | 2.38 |
+| 5 | 19 | **DONE** Resolver health probing / degraded signaling — implemented (2026-10-19) | 7.44 | 6.50 | 8.38 | 2.38 |
 | 6 | 32 | CNAME-chain pinning to known-good zones | 7.44 | 7.38 | 7.50 | 3.00 |
 | 7 | 17 | Authoritative-freshness bound | 7.25 | 7.00 | 7.50 | 3.25 |
 | 8 | 9 | 0x20 case randomization | 7.19 | 6.75 | 7.62 | 2.88 |
@@ -49,7 +52,7 @@ Generated from `scores.jsonl` (200 score lines; 21 scored vectors shown).
 | 11 | 36 | **DONE** Non-CONNECT method / request-target form rejection — implemented (2026-10-19) | 6.81 | 4.12 | 9.50 | 1.12 |
 | 12 | 7 | AD-bit / DO-bit handling | 6.56 | 6.62 | 6.50 | 4.50 |
 | 13 | 22 | Resolver identity / response-source verification | 6.50 | 5.38 | 7.62 | 2.75 |
-| 14 | 35 | CONNECT header-line count bound | 6.50 | 3.62 | 9.38 | 1.25 |
+| 14 | 35 | **DONE** CONNECT header-line count bound — implemented (2026-10-19) | 6.50 | 3.62 | 9.38 | 1.25 |
 | 15 | 18 | Multi-resolver failover | 6.38 | 5.50 | 7.25 | 4.38 |
 | 16 | 23 | Cross-resolver divergence reporting | 6.12 | 4.88 | 7.38 | 4.50 |
 | 17 | 5 | **DEFERRED** Resolver cert pinning / TOFU | 6.06 | 7.25 | 4.88 | 6.75 |
@@ -90,9 +93,17 @@ Overall **7.69** · Eff **7.75** · Plaus **7.62** · Risk **3.38**
 | linus | 9 | 7 | 4 |
 | linus | 9 | 8 | 4 |
 
-### Rank 3 — Vector 14: TTL floor (min-TTL)
+### Rank 3 — Vector 14: TTL floor (min-TTL) — **DONE**
 
 Overall **7.62** · Eff **5.88** · Plaus **9.38** · Risk **2.00**
+
+**Status:** **DONE** — implemented (2026-10-19, `alumina-hrdn2`) — refresh
+intervals widened: `normal_refresh_interval` clamps to
+`[REFRESH_MIN=5, REFRESH_MAX=900]` and `negative_refresh_interval` to
+`[NEGATIVE_REFRESH_MIN=30, REFRESH_MAX]` (`src/schedule.rs`), distinct from the
+per-record TTL clamp (`src/cache.rs`; `docs/alumina-proxy.md:74` low-TTL
+steering untouched); the 1 query/sec/slot rate guard still covers a 5 s polling
+cadence.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -122,9 +133,17 @@ Overall **7.50** · Eff **5.50** · Plaus **9.50** · Risk **1.12**
 | linus | 8 | 10 | 1 |
 | linus | 8 | 10 | 1 |
 
-### Rank 5 — Vector 19: Resolver health probing / degraded signaling
+### Rank 5 — Vector 19: Resolver health probing / degraded signaling — **DONE**
 
 Overall **7.44** · Eff **6.50** · Plaus **8.38** · Risk **2.38**
+
+**Status:** **DONE** — implemented (2026-10-19, `alumina-hrdn2`) — passive
+degraded signaling in `StartupDns`: ≥3 consecutive failed exchanges
+(`DEGRADED_AFTER=3`) enter `Degraded`, any successful exchange (a valid negative
+included) recovers; `ResolverDegraded` monitor fact emitted only on enter/exit
+transitions and surfaced as the zero-suppressed `rd=` monitor key
+(`src/startup_dns.rs`, `src/enforcement/monitor.rs`, `src/enforcement/state.rs`,
+`src/log.rs`).
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -261,9 +280,15 @@ Overall **6.50** · Eff **5.38** · Plaus **7.62** · Risk **2.75**
 | linus | 8 | 7 | 3 |
 | linus | 8 | 7 | 4 |
 
-### Rank 14 — Vector 35: CONNECT header-line count bound
+### Rank 14 — Vector 35: CONNECT header-line count bound — **DONE**
 
 Overall **6.50** · Eff **3.62** · Plaus **9.38** · Risk **1.25**
+
+**Status:** **DONE** — implemented (2026-10-19, `alumina-hrdn2`) — CONNECT head
+header-line count capped at `MAX_HEADER_LINES=16`; a count >16 rejects with a
+distinct `TooManyHeaderLines` (`ConnectError` + `ConnectHeadReason`,
+`src/connect.rs`), rippling `ConnectHeadReason::COUNT` 13→14 and
+`AnyIllegalCause::KIND_COUNT` 18→19 on the rp2e tripwire surface.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|

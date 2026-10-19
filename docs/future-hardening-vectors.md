@@ -20,6 +20,9 @@ date vectors 33, 34, and 36 were **promoted out of candidate research as
 implemented and pinned**: their formerly ambiguous behavior was sharpened in the
 `alumina-hrdn` hardening increment (recorded in `docs/alumina-proxy.md`) and
 each row below is marked **DONE** with its pinned semantics and code location.
+On the same date vectors 14, 19, and 35 were **implemented** via the
+`alumina-hrdn2` hardening increment (recorded in `docs/alumina-proxy.md`) and
+each row below is marked **DONE** with its pinned semantics and code location.
 Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), and 8 (multi-resolver
 cross-validation) are **deferred** (marked **DEFERRED** below): high
 architectural risk for high-but-costly security value, retained for research
@@ -77,7 +80,7 @@ only. Vector numbers are retained as stable identifiers; gaps are intentional.
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 14 | **TTL floor (min-TTL)** | Reject/raise implausibly low TTLs | Low | Low — contradicts `:74` (deliberate zero-TTL-steering support) | Study the tradeoff; low value for a server |
+| 14 | **DONE** **TTL floor (min-TTL)** *(widened refresh band, implemented 2026-10-19)* | Reject/raise implausibly low TTLs | Low | Low — contradicts `:74` (deliberate zero-TTL-steering support) | **Widened by `alumina-hrdn2`** (2026-10-19): promoted out of candidate research; the refresh band is widened to `REFRESH_MIN=5` / `REFRESH_MAX=900` with `NEGATIVE_REFRESH_MIN=30`, and normal/negative refresh intervals clamp into those bands (`src/schedule.rs`) — per-record low-TTL steering per `:74` is untouched (`src/cache.rs`) |
 | 17 | **Authoritative-freshness bound** | Resolver returning stale data as fresh | Medium | Medium (deployment-side) | Study deployment-enforced upstream stale bound (`docs/alumina-proxy.md:130`) |
 
 ### E. Availability & resilience (DNS DoS / resolver failure)
@@ -85,7 +88,7 @@ only. Vector numbers are retained as stable identifiers; gaps are intentional.
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
 | 18 | **Multi-resolver failover** | Resolver outage | Medium | Low — contradicts no-fallback doctrine | Defer; document as design-revision candidate |
-| 19 | **Resolver health probing / degraded signaling** | Early detection of SERVFAIL/timeout storms | Low | Medium | Low priority (incidents already cover this) |
+| 19 | **DONE** **Resolver health probing / degraded signaling** *(implemented, 2026-10-19)* | Early detection of SERVFAIL/timeout storms | Low | Medium | **Implemented by `alumina-hrdn2`** (2026-10-19): promoted out of candidate research; passive degraded signaling in `StartupDns` — ≥3 consecutive failed exchanges (`DEGRADED_AFTER=3`) enter `Degraded`, any successful exchange (a valid negative included) recovers; `ResolverDegraded` monitor fact emitted only on enter/exit transitions and surfaced as the zero-suppressed `rd=` monitor key (`src/startup_dns.rs`, `src/enforcement/monitor.rs`, `src/enforcement/state.rs`, `src/log.rs`) |
 
 ### F. Detection & observability of tampering
 
@@ -107,7 +110,7 @@ only. Vector numbers are retained as stable identifiers; gaps are intentional.
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
 | 34 | **DONE** **ClientHello handshake-length field bound** *(implemented & pinned, 2026-10-19)* | The 3-byte handshake `length` is bounded only indirectly via the 64 KiB buffered-TLS cap (`:165`) and 16 KiB record-payload cap (`:166`); now stated explicitly | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; a ClientHello handshake message whose `4 + length` exceeds 16 KiB is rejected with a distinct `HandshakeTooLarge` discriminant (`src/client_hello.rs:MAX_HANDSHAKE_LEN`, `scan_available`) |
-| 35 | **CONNECT header-line count bound** | CONNECT headers capped at 8 KiB (`:164`) but no explicit max header-line count | Low | Medium (clarity pin) | Add explicit header-count bound to the resource profile |
+| 35 | **DONE** **CONNECT header-line count bound** *(implemented, 2026-10-19)* | CONNECT headers capped at 8 KiB (`:164`) but no explicit max header-line count | Low | Medium (clarity pin) | **Implemented by `alumina-hrdn2`** (2026-10-19): promoted out of candidate research; an explicit `MAX_HEADER_LINES=16` bound rejects a CONNECT head with a header-line count >16 via a distinct `TooManyHeaderLines` (`ConnectError` + `ConnectHeadReason`, `src/connect.rs`), rippling `ConnectHeadReason::COUNT` 13→14 and `AnyIllegalCause::KIND_COUNT` 18→19 on the rp2e tripwire surface |
 | 36 | **DONE** **Non-CONNECT method / request-target form rejection** *(implemented & pinned, 2026-10-19)* | Spec says "plaintext HTTP/1.1 CONNECT" but does not explicitly enumerate rejecting other methods or non-authority-form request-targets (rejected indirectly via hostname authorization) | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; a method other than byte-exact `CONNECT`, a version other than `HTTP/1.1`, and a non-authority-form request-target each carry distinct finite discriminants (`src/connect.rs` `MethodNotConnect`/`UnsupportedVersion`/`TargetNotAuthorityForm`) feeding the rp2e tripwire surface |
 
 ### I. Application-layer / post-resolution hardening (beyond DNS itself)
