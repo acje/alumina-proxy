@@ -12,8 +12,8 @@ implementation only.
 4 (DoQ), 25 (QNAME minimization) as low-plausibility/high-risk research discards
 (2026-10-19). Since scoring (2026-10-19), vectors 33, 34, and 36 were
 **implemented and pinned** via the `alumina-hrdn` hardening increment
-(`docs/alumina-proxy.md`); their rows remain in the ranked table with their
-original scores and are marked implemented in the per-vector detail sections.
+(`docs/alumina-proxy.md`); they are marked **DONE** in the ranked table and
+per-vector detail sections, and their rows remain with their original scores.
 
 **Method:** 8 independent deep-analysis scores per vector = 4 `linus` (Rust-specialist)
 + 4 `general` raters. Every rater read the actual source before scoring. Scores are 1–10.
@@ -36,14 +36,14 @@ Generated from `scores.jsonl` (200 score lines; 22 scored vectors shown).
 | 1 | 11 | Bailiwick enforcement on CNAME targets | 7.88 | 7.88 | 7.88 | 3.12 |
 | 2 | 21 | Anomaly logging / tripwire on DNS | 7.69 | 7.75 | 7.62 | 3.38 |
 | 3 | 14 | TTL floor (min-TTL) | 7.62 | 5.88 | 9.38 | 2.00 |
-| 4 | 34 | ClientHello handshake-length field bound — implemented (2026-10-19) | 7.50 | 5.50 | 9.50 | 1.12 |
+| 4 | 34 | **DONE** ClientHello handshake-length field bound — implemented (2026-10-19) | 7.50 | 5.50 | 9.50 | 1.12 |
 | 5 | 19 | Resolver health probing / degraded signaling | 7.44 | 6.50 | 8.38 | 2.38 |
 | 6 | 32 | CNAME-chain pinning to known-good zones | 7.44 | 7.38 | 7.50 | 3.00 |
 | 7 | 17 | Authoritative-freshness bound | 7.25 | 7.00 | 7.50 | 3.25 |
 | 8 | 9 | 0x20 case randomization | 7.19 | 6.75 | 7.62 | 2.88 |
 | 9 | 24 | Startup-DNS trust-boundary hardening | 7.12 | 7.12 | 7.12 | 2.75 |
-| 10 | 33 | Wrong-family records tolerated-vs-rejected pin — implemented (2026-10-19) | 6.81 | 4.38 | 9.25 | 1.38 |
-| 11 | 36 | Non-CONNECT method / request-target form rejection — implemented (2026-10-19) | 6.81 | 4.12 | 9.50 | 1.12 |
+| 10 | 33 | **DONE** Wrong-family records tolerated-vs-rejected pin — implemented (2026-10-19) | 6.81 | 4.38 | 9.25 | 1.38 |
+| 11 | 36 | **DONE** Non-CONNECT method / request-target form rejection — implemented (2026-10-19) | 6.81 | 4.12 | 9.50 | 1.12 |
 | 12 | 7 | AD-bit / DO-bit handling | 6.56 | 6.62 | 6.50 | 4.50 |
 | 13 | 22 | Resolver identity / response-source verification | 6.50 | 5.38 | 7.62 | 2.75 |
 | 14 | 35 | CONNECT header-line count bound | 6.50 | 3.62 | 9.38 | 1.25 |
@@ -103,11 +103,11 @@ Overall **7.62** · Eff **5.88** · Plaus **9.38** · Risk **2.00**
 | general | 4 | 9 | 2 |
 | linus | 7 | 10 | 2 |
 
-### Rank 4 — Vector 34: ClientHello handshake-length field bound
+### Rank 4 — Vector 34: ClientHello handshake-length field bound — **DONE**
 
 Overall **7.50** · Eff **5.50** · Plaus **9.50** · Risk **1.12**
 
-**Status:** implemented & pinned (2026-10-19, `alumina-hrdn`) — a ClientHello handshake message whose `4 + length` exceeds 16 KiB (`MAX_HANDSHAKE_LEN`) is rejected with a distinct `HandshakeTooLarge` discriminant.
+**Status:** **DONE** — implemented & pinned (2026-10-19, `alumina-hrdn`) — a ClientHello handshake message whose `4 + length` exceeds 16 KiB (`MAX_HANDSHAKE_LEN`) is rejected with a distinct `HandshakeTooLarge` discriminant.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -195,11 +195,11 @@ Overall **7.12** · Eff **7.12** · Plaus **7.12** · Risk **2.75**
 | linus | 8 | 7 | 3 |
 | linus | 8 | 7 | 4 |
 
-### Rank 10 — Vector 33: Wrong-family records tolerated-vs-rejected pin
+### Rank 10 — Vector 33: Wrong-family records tolerated-vs-rejected pin — **DONE**
 
 Overall **6.81** · Eff **4.38** · Plaus **9.25** · Risk **1.38**
 
-**Status:** implemented & pinned (2026-10-19, `alumina-hrdn`) — a wrong-family record is truly ignored (never marks its terminal owner as carrying address data; `src/dns.rs:824-830,847-853`); NXDOMAIN at an opposite-family-only terminal is a clean `NxDomain`, never `TerminalWithoutData`.
+**Status:** **DONE** — implemented & pinned (2026-10-19, `alumina-hrdn`) — a wrong-family record is truly ignored (never marks its terminal owner as carrying address data; `src/dns.rs:824-830,847-853`); NXDOMAIN at an opposite-family-only terminal is a clean `NxDomain`, never `TerminalWithoutData`.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -212,11 +212,11 @@ Overall **6.81** · Eff **4.38** · Plaus **9.25** · Risk **1.38**
 | linus | 4 | 9 | 2 |
 | linus | 4 | 9 | 2 |
 
-### Rank 11 — Vector 36: Non-CONNECT method / request-target form rejection
+### Rank 11 — Vector 36: Non-CONNECT method / request-target form rejection — **DONE**
 
 Overall **6.81** · Eff **4.12** · Plaus **9.50** · Risk **1.12**
 
-**Status:** implemented & pinned (2026-10-19, `alumina-hrdn`) — the former `NotHttp` catch-all is split into distinct `MethodNotConnect` / `UnsupportedVersion` / `TargetNotAuthorityForm` finite discriminants feeding the rp2e tripwire surface (`ConnectHeadReason::COUNT` 11→13).
+**Status:** **DONE** — implemented & pinned (2026-10-19, `alumina-hrdn`) — the former `NotHttp` catch-all is split into distinct `MethodNotConnect` / `UnsupportedVersion` / `TargetNotAuthorityForm` finite discriminants feeding the rp2e tripwire surface (`ConnectHeadReason::COUNT` 11→13).
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|

@@ -18,8 +18,8 @@ and verified in the current codebase (see §1 Baseline DNS posture and
 high-risk research discards** (see scorecard). On the same date vectors 33, 34,
 and 36 were **promoted out of candidate research as implemented and pinned**:
 their formerly ambiguous behavior was sharpened in the `alumina-hrdn` hardening
-increment (recorded in `docs/alumina-proxy.md`) and each row below is marked ✅
-with its pinned semantics and code location. Vector numbers are retained as
+increment (recorded in `docs/alumina-proxy.md`) and each row below is marked
+**DONE** with its pinned semantics and code location. Vector numbers are retained as
 stable identifiers; gaps are intentional.
 
 ## 1. Baseline DNS posture (already implemented)
@@ -69,7 +69,7 @@ stable identifiers; gaps are intentional.
 | 10 | **EDNS0 / larger-buffer negotiation** | Truncation | Low | Low value (TCP-only avoids truncation) | Low priority |
 | 11 | **Bailiwick enforcement on CNAME targets** | CNAME chaining into attacker zones | Medium | Medium (narrow amendment) | **Top research priority** — restrict CNAME targets to allowlisted/known zones; measure breakage |
 | 12 | **Source-port randomization** | Off-path spoofing | N/A | N/A (TCP only; TID already CSPRNG) | Not applicable |
-| 33 | ✅ **Wrong-family records in a positive answer: tolerated vs. rejected** *(implemented & pinned, 2026-10-19)* | Ambiguity in `:71` — a wrong-family record (e.g., AAAA in an A query's answer section) is tolerated-and-ignored (never a candidate) and never marks its terminal owner as carrying address data; coexist with a CNAME at its owner still fails `CnameCoexist` | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; wrong-family records are truly ignored (`src/dns.rs:824-830,847-853`), and NXDOMAIN at an opposite-family-only terminal is a clean `NxDomain`, never `TerminalWithoutData` |
+| 33 | **DONE** **Wrong-family records in a positive answer: tolerated vs. rejected** *(implemented & pinned, 2026-10-19)* | Ambiguity in `:71` — a wrong-family record (e.g., AAAA in an A query's answer section) is tolerated-and-ignored (never a candidate) and never marks its terminal owner as carrying address data; coexist with a CNAME at its owner still fails `CnameCoexist` | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; wrong-family records are truly ignored (`src/dns.rs:824-830,847-853`), and NXDOMAIN at an opposite-family-only terminal is a clean `NxDomain`, never `TerminalWithoutData` |
 
 ### D. Cache & TTL policy hardening
 
@@ -104,9 +104,9 @@ stable identifiers; gaps are intentional.
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 34 | ✅ **ClientHello handshake-length field bound** *(implemented & pinned, 2026-10-19)* | The 3-byte handshake `length` is bounded only indirectly via the 64 KiB buffered-TLS cap (`:165`) and 16 KiB record-payload cap (`:166`); now stated explicitly | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; a ClientHello handshake message whose `4 + length` exceeds 16 KiB is rejected with a distinct `HandshakeTooLarge` discriminant (`src/client_hello.rs:MAX_HANDSHAKE_LEN`, `scan_available`) |
+| 34 | **DONE** **ClientHello handshake-length field bound** *(implemented & pinned, 2026-10-19)* | The 3-byte handshake `length` is bounded only indirectly via the 64 KiB buffered-TLS cap (`:165`) and 16 KiB record-payload cap (`:166`); now stated explicitly | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; a ClientHello handshake message whose `4 + length` exceeds 16 KiB is rejected with a distinct `HandshakeTooLarge` discriminant (`src/client_hello.rs:MAX_HANDSHAKE_LEN`, `scan_available`) |
 | 35 | **CONNECT header-line count bound** | CONNECT headers capped at 8 KiB (`:164`) but no explicit max header-line count | Low | Medium (clarity pin) | Add explicit header-count bound to the resource profile |
-| 36 | ✅ **Non-CONNECT method / request-target form rejection** *(implemented & pinned, 2026-10-19)* | Spec says "plaintext HTTP/1.1 CONNECT" but does not explicitly enumerate rejecting other methods or non-authority-form request-targets (rejected indirectly via hostname authorization) | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; a method other than byte-exact `CONNECT`, a version other than `HTTP/1.1`, and a non-authority-form request-target each carry distinct finite discriminants (`src/connect.rs` `MethodNotConnect`/`UnsupportedVersion`/`TargetNotAuthorityForm`) feeding the rp2e tripwire surface |
+| 36 | **DONE** **Non-CONNECT method / request-target form rejection** *(implemented & pinned, 2026-10-19)* | Spec says "plaintext HTTP/1.1 CONNECT" but does not explicitly enumerate rejecting other methods or non-authority-form request-targets (rejected indirectly via hostname authorization) | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; a method other than byte-exact `CONNECT`, a version other than `HTTP/1.1`, and a non-authority-form request-target each carry distinct finite discriminants (`src/connect.rs` `MethodNotConnect`/`UnsupportedVersion`/`TargetNotAuthorityForm`) feeding the rp2e tripwire surface |
 
 ### I. Application-layer / post-resolution hardening (beyond DNS itself)
 
