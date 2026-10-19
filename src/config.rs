@@ -5,11 +5,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::Range;
 
 use crate::enforcement::action::{ActionKind, AnyIllegalScope, ControlTable, DomainAction, Scope};
+use crate::resolver::{self, ResolverSet};
 
 pub const CONFIG_DOC_LIMIT: usize = 4096;
 pub const ALLOWLIST_MIN: usize = 1;
 pub const ALLOWLIST_MAX: usize = 32;
 pub const FQDN_MAX_LEN: usize = 253;
+pub const MAX_RESOLVERS: usize = resolver::MAX_RESOLVERS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fqdn {
@@ -380,6 +382,7 @@ pub struct Config {
     listen: ListenAddr,
     startup_unresolved_allowance: u8,
     control: ControlTable,
+    resolver: ResolverSet,
 }
 
 impl Config {
@@ -412,6 +415,14 @@ impl Config {
     #[must_use]
     pub const fn control(&self) -> &ControlTable {
         &self.control
+    }
+
+    /// The validated repository resolver set (1..=`MAX_RESOLVERS` entries; index
+    /// 0 is the primary). Sourced from the config document, never from a
+    /// platform resolver file.
+    #[must_use]
+    pub const fn resolver_set(&self) -> &ResolverSet {
+        &self.resolver
     }
 }
 
@@ -467,6 +478,13 @@ pub enum ConfigError {
         got_kind: usize,
         got_scope: usize,
         expected: usize,
+    },
+    ResolverCountOutOfRange {
+        got: usize,
+    },
+    InvalidResolver {
+        index: usize,
+        value: String,
     },
 }
 
@@ -560,6 +578,15 @@ impl fmt::Display for ConfigError {
                 f,
                 "config [actions] kind/scope lengths {got_kind}/{got_scope} must equal allowlist length {expected}"
             ),
+            ConfigError::ResolverCountOutOfRange { got } => write!(
+                f,
+                "config resolver array has {got} entries (1..={MAX_RESOLVERS} required)"
+            ),
+            ConfigError::InvalidResolver { index, value } => write!(
+                f,
+                "config resolver[{0}] value {value:?} invalid: expected a numeric unicast IPv4/IPv6 address, port 53, no zone identifier",
+                index + 1
+            ),
         }
     }
 }
@@ -632,7 +659,12 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
     for (key, value) in table {
         if !matches!(
             key.as_str(),
-            "allowlist" | "listen" | "startup_unresolved_allowance" | "any_illegal" | "actions"
+            "allowlist"
+                | "listen"
+                | "startup_unresolved_allowance"
+                | "resolver"
+                | "any_illegal"
+                | "actions"
         ) {
             return Err(match value {
                 toml::Value::Table(_) => ConfigError::UnknownTable(key.clone()),
@@ -664,11 +696,32 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
             expected: ALLOWLIST_MAX,
         });
     };
+    let resolver = build_resolver_set(table)?;
     Ok(Config {
         allowlist,
         listen,
         startup_unresolved_allowance: allowance,
         control,
+        resolver,
+    })
+}
+
+fn build_resolver_set(table: &toml::Table) -> Result<ResolverSet, ConfigError> {
+    let values = require_string_list(table, "resolver")?;
+    if values.is_empty() || values.len() > MAX_RESOLVERS {
+        return Err(ConfigError::ResolverCountOutOfRange { got: values.len() });
+    }
+    let mut nameservers = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        nameservers.push(
+            resolver::select(value).map_err(|_| ConfigError::InvalidResolver {
+                index,
+                value: value.clone(),
+            })?,
+        );
+    }
+    resolver::ResolverSet::from_slice(&nameservers).ok_or(ConfigError::ResolverCountOutOfRange {
+        got: nameservers.len(),
     })
 }
 
@@ -905,7 +958,7 @@ mod enforcement_config_tests {
 
     fn base(names: &str) -> String {
         format!(
-            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n"
+            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n"
         )
     }
 
@@ -1086,7 +1139,7 @@ mod enforcement_config_tests {
         let kinds = vec!["\"block\""; 32].join(", ");
         let scopes = vec!["\"domain\""; 32].join(", ");
         let doc = format!(
-            "allowlist = [{list}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"all\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
+            "allowlist = [{list}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"all\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
         );
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,
@@ -1114,7 +1167,7 @@ mod enforcement_config_tests {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"{any_scope}\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
+            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"{any_scope}\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
         )
     }
 
@@ -1148,31 +1201,179 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_measured_total_is_4061() {
+    fn compact_32_hundred_byte_names_measured_total_is_4084() {
         let doc = full_group_document(32, "all", "block", "domain");
-        assert_eq!(doc.len(), 4061, "compact 32-name measured total");
+        assert_eq!(
+            doc.len(),
+            4084,
+            "compact 32-name measured total with resolver key"
+        );
         let cfg = parse_config_document(&doc).expect("fits and parses");
         assert_eq!(cfg.allowlist().len(), 32);
         assert_eq!(cfg.control().len(), 32);
     }
 
     #[test]
-    fn flare_connection_32_hundred_byte_names_measured_total_is_4356() {
+    fn flare_connection_32_hundred_byte_names_measured_total_is_4379() {
         let doc = full_group_document(32, "connection", "flare_only", "connection");
-        assert_eq!(doc.len(), 4356, "longer 32-name measured total");
+        assert_eq!(
+            doc.len(),
+            4379,
+            "longer 32-name measured total with resolver key"
+        );
         let err = parse_config_document(&doc).expect_err("oversized doc must be rejected");
         assert!(
-            matches!(&err, ConfigError::OversizedDocument { got, limit } if *limit == CONFIG_DOC_LIMIT && *got == 4356),
-            "expected OversizedDocument for 4356 bytes, got {err:?}"
+            matches!(&err, ConfigError::OversizedDocument { got, limit } if *limit == CONFIG_DOC_LIMIT && *got == 4379),
+            "expected OversizedDocument for 4379 bytes, got {err:?}"
         );
     }
 
     #[test]
-    fn flare_connection_29_hundred_byte_names_measured_total_is_3960() {
+    fn flare_connection_29_hundred_byte_names_measured_total_is_3983() {
         let doc = full_group_document(29, "connection", "flare_only", "connection");
-        assert_eq!(doc.len(), 3960, "29-name longer spelling measured total");
+        assert_eq!(
+            doc.len(),
+            3983,
+            "29-name longer spelling measured total with resolver key"
+        );
         let cfg = parse_config_document(&doc).expect("fits and parses");
         assert_eq!(cfg.allowlist().len(), 29);
         assert_eq!(cfg.control().len(), 29);
+    }
+}
+
+#[cfg(test)]
+mod resolver_config_tests {
+    use super::*;
+
+    fn doc(resolver: &str, names: &str) -> String {
+        format!(
+            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n",
+            names = if names.is_empty() {
+                "\"a.example:443\""
+            } else {
+                names
+            }
+        )
+    }
+
+    fn valid_doc(resolver: &str) -> String {
+        doc(resolver, "")
+    }
+
+    #[test]
+    fn resolver_key_is_mandatory() {
+        let d = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+        let err = parse_config_document(d).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::MissingField(f) if f == "resolver"),
+            "expected MissingField(resolver), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolver_primary_and_count_from_config() {
+        let cfg = parse_config_document(&valid_doc(
+            "[\"1.1.1.1\", \"8.8.8.8\", \"1.0.0.1\", \"8.8.4.4\"]",
+        ))
+        .expect("four resolvers valid");
+        assert_eq!(cfg.resolver_set().len(), 4);
+        assert_eq!(cfg.resolver_set().primary().addr().to_string(), "1.1.1.1");
+        assert_eq!(
+            cfg.resolver_set()
+                .get(3)
+                .expect("index 3")
+                .addr()
+                .to_string(),
+            "8.8.4.4"
+        );
+        assert_eq!(cfg.resolver_set().primary().port(), 53);
+        let single =
+            parse_config_document(&valid_doc("[\"1.1.1.1\"]")).expect("one resolver valid");
+        assert_eq!(single.resolver_set().len(), 1);
+        assert_eq!(
+            single.resolver_set().primary().addr().to_string(),
+            "1.1.1.1"
+        );
+    }
+
+    #[test]
+    fn resolver_ipv6_unicast_accepted() {
+        let cfg = parse_config_document(&valid_doc("[\"2606:4700:4700::1111\"]"))
+            .expect("ipv6 unicast resolver valid");
+        assert_eq!(
+            cfg.resolver_set().primary().addr().to_string(),
+            "2606:4700:4700::1111"
+        );
+        assert_eq!(cfg.resolver_set().primary().port(), 53);
+    }
+
+    #[test]
+    fn resolver_count_out_of_range_rejected() {
+        let empty = parse_config_document(&valid_doc("[]")).unwrap_err();
+        assert!(
+            matches!(empty, ConfigError::ResolverCountOutOfRange { got: 0 }),
+            "empty resolver must be ResolverCountOutOfRange, got {empty:?}"
+        );
+        let five = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"1.0.0.1\", \"8.8.4.4\", \"9.9.9.9\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+        let too_many = parse_config_document(five).unwrap_err();
+        assert!(
+            matches!(too_many, ConfigError::ResolverCountOutOfRange { got: 5 }),
+            "five resolvers must be ResolverCountOutOfRange, got {too_many:?}"
+        );
+    }
+
+    #[test]
+    fn resolver_address_validation_from_config() {
+        for (wrong, value) in [
+            ("non-numeric", "not-an-address"),
+            ("broadcast", "255.255.255.255"),
+            ("multicast", "224.0.0.1"),
+            ("unspecified", "0.0.0.0"),
+            ("ipv6-multicast", "ff02::1"),
+            ("zoned", "fe80::1%eth0"),
+        ] {
+            let cfg_doc = valid_doc(&format!("[\"{value}\"]"));
+            let err = parse_config_document(&cfg_doc)
+                .expect_err(&format!("resolver {wrong} must be rejected"));
+            assert!(
+                matches!(&err, ConfigError::InvalidResolver { index, value: v } if *index == 0 && v == value),
+                "resolver {wrong} must be InvalidResolver{{index:0}}, got {err:?}"
+            );
+            assert_eq!(err.exit_status(), 78, "InvalidResolver must exit 78");
+        }
+    }
+
+    #[test]
+    fn resolver_wrong_type_rejected() {
+        let d = valid_doc("42");
+        let err = parse_config_document(&d).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::WrongType(_)),
+            "integer resolver must be WrongType, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolver_key_respected_in_compact_fit_form() {
+        let mut names = Vec::with_capacity(32);
+        for i in 0..32usize {
+            names.push(format!("\"{i}.{}.{}:443\"", "a".repeat(48), "b".repeat(43)));
+        }
+        let kinds = std::iter::repeat_n("\"block\"", 32)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let scopes = std::iter::repeat_n("\"domain\"", 32)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let compact = format!(
+            "allowlist = [{}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"1.0.0.1\", \"8.8.4.4\"]\n[any_illegal]\nscope = \"all\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n",
+            names.join(", ")
+        );
+        assert!(
+            compact.len() <= CONFIG_DOC_LIMIT,
+            "compact 32-name fit form with resolver must still be documented; measured {}",
+            compact.len()
+        );
     }
 }

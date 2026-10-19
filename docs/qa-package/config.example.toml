@@ -3,6 +3,10 @@ allowlist = ["api.github.com:443", "example.com:443", "www.example.net:443"]
 # 0.0.0.0:<port> for a dedicated VPC appliance (hard RCE egress confinement).
 listen = "127.0.0.1:5353"
 startup_unresolved_allowance = 0
+# Validated resolver set: 1..=4 numeric unicast IPv4/IPv6 addresses, port 53,
+# no zone identifiers (docs/alumina-proxy.md:62/alumina-hrdn4 amendment);
+# loopback keeps this QA example never-dialing-external.
+resolver = ["127.0.0.1"]
 # Mandatory index-aligned tripwire action tables (docs/alumina-proxy.md:265-281):
 # [any_illegal] scope is the AnyIllegal first-slot Block scope ("connection"|"all");
 # [actions] kind/scope are one literal per allowlist entry, in allowlist order.

@@ -4,10 +4,11 @@
 Runs entirely inside one podman container (harness image = pinned rust base +
 openssl/python3/setpriv/ip, --network none, NNP enabled, no-new-privileges)
 after the production static binary is mounted at /app. The driver stages
-/work/config.toml + /work/resolv.conf, starts an in-container DNS-over-TCP
-responder on 127.0.0.1:53, and the outer shell wrapper launches the actual
-binary (dropped to uid 65534 via setpriv). The driver drives real TCP clients
-through the proxy and asserts the observed wire behaviour.
+/work/config.toml (resolver set sourced from config to the in-container
+responder), starts an in-container DNS-over-TCP responder on 127.0.0.1:53,
+and the outer shell wrapper launches the actual binary (dropped to uid 65534
+via setpriv). The driver drives real TCP clients through the proxy and
+asserts the observed wire behaviour.
 
 Topology -- all upstream addresses are global-unicast IPv4 (so the crate's
 martian/SSRF eligibility guard admits them) bound on lo inside the --network

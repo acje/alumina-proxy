@@ -39,15 +39,16 @@ bounded stdout monitoring (`docs/alumina-proxy.md:238-315`, rp2e amendment).
 
 ## Runtime surface and fixed inputs
 
-- `./config.toml` (≤ 4096 B, mandatory keys, no defaults) and `./resolv.conf`
-  (first nameserver, numeric unicast, port 53); no CLI args, no env overrides;
-  one listening socket; **SIGTERM the only handled lifecycle signal**
-  (`docs/alumina-proxy.md:149`).
+- `./config.toml` (≤ 4096 B, mandatory keys, no defaults) carries the validated
+  resolver set (1..=4 numeric unicast IPs, port 53); no `resolv.conf` read, no
+  CLI args, no env overrides; one listening socket; **SIGTERM the only handled
+  lifecycle signal** (`docs/alumina-proxy.md:149`).
 - Privilege preflight (non-root, empty caps, `no_new_privs`): unmet → EX_CONFIG
   78; unresolved beyond allowance → EX_TEMPFAIL 75.
 - Example config: `docs/qa-package/config.example.toml` (≤ 4096 B) shows the
-  mandatory `[any_illegal]` + index-aligned `[actions]` tripwire tables with
-  `<fqdn>:<port>` allowlist entries — a real-world HTTPS target
+  `resolver` entry plus the mandatory `[any_illegal]` + index-aligned
+  `[actions]` tripwire tables with `<fqdn>:<port>` allowlist entries — a
+  real-world HTTPS target
   (`api.github.com:443`) and illustrative domains (`example.com:443`,
   `www.example.net:443`); illustrative only, executed by no gate.
 
@@ -122,8 +123,8 @@ tripwire state by crashing its own container.
 
 ### 2. Minimal `FROM scratch` container image
 
-Matches `docs/alumina-proxy.md:118` — three files in the root filesystem
-(`/alumina`, `/config.toml`, `/resolv.conf`), zero shell or OS utilities:
+Matches `docs/alumina-proxy.md:118` — two files in the root filesystem
+(`/alumina`, `/config.toml`), zero shell or OS utilities:
 
 ```dockerfile
 FROM --platform=linux/amd64 rust:1.99.0-alpine AS builder
@@ -138,7 +139,6 @@ FROM scratch
 WORKDIR /
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/alumina /alumina
 COPY config.toml /config.toml
-COPY resolv.conf /resolv.conf
 USER 65534:65534
 EXPOSE 5353
 ENTRYPOINT ["/alumina"]
@@ -148,18 +148,13 @@ ENTRYPOINT ["/alumina"]
 
 - **Container-Optimized OS host invocation (`--network host`):** use the
   idiomatic `#cloud-config` (`metadata.user-data`) with a declarative systemd
-  unit (`alumina-proxy.service`) instead of imperative shell. The unit writes a
-  TCP-capable resolver file, configures the registry credential helper, opens
-  the narrow VPC ingress rule, pins the image by digest, and runs the container
-  with the hardened profile:
+  unit (`alumina-proxy.service`) instead of imperative shell. The resolver is
+  declared in `config.toml` at image build; the unit configures the registry
+  credential helper, opens the narrow VPC ingress rule, pins the image by
+  digest, and runs the container with the hardened profile:
   ```yaml
   #cloud-config
   write_files:
-    - path: /var/lib/docker/alumina-resolv.conf
-      permissions: "0644"
-      owner: root
-      content: |
-        nameserver <tcp-dns-resolver-ip>
     - path: /etc/systemd/system/alumina-proxy.service
       permissions: "0644"
       owner: root
@@ -176,7 +171,7 @@ ENTRYPOINT ["/alumina"]
         ExecStartPre=/sbin/iptables -w -I INPUT -p tcp -s <vpc-subnet-cidr> --dport 5353 -j ACCEPT
         ExecStartPre=-/usr/bin/docker rm -f alumina-proxy
         ExecStartPre=/usr/bin/docker pull <registry-host>/<project>/<repo>/alumina-proxy@sha256:<digest>
-        ExecStart=/usr/bin/docker run --rm --name alumina-proxy --network host --log-driver=gcplogs --workdir / --read-only -v /var/lib/docker/alumina-resolv.conf:/resolv.conf:ro --tmpfs /tmp:size=64m --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges <registry-host>/<project>/<repo>/alumina-proxy@sha256:<digest>
+        ExecStart=/usr/bin/docker run --rm --name alumina-proxy --network host --log-driver=gcplogs --workdir / --read-only --tmpfs /tmp:size=64m --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges <registry-host>/<project>/<repo>/alumina-proxy@sha256:<digest>
         ExecStop=-/usr/bin/docker stop -t 8 alumina-proxy
         Restart=always
         RestartSec=2s
@@ -192,15 +187,14 @@ ENTRYPOINT ["/alumina"]
   satisfy `src/preflight.rs` (`UID != 0`, `CapEff == CapPrm == CapAmb == 0`,
   `no_new_privs == 1`); `--network host` binds `0.0.0.0:5353` directly on the
   internal VPC interface without bridge NAT overhead; `--read-only` plus the
-  `--tmpfs /tmp:size=64m` scratch mount and the `:ro` resolver bind keep the
-  root filesystem immutable at runtime.
-- **TCP-capable DNS resolver (`alumina-resolv.conf` → `/resolv.conf`):** Alumina
+  `--tmpfs /tmp:size=64m` scratch mount keep the root filesystem immutable at
+  runtime.
+- **TCP-capable DNS resolver (via the config `resolver` entry):** Alumina
   performs DNS over TCP exclusively (`docs/alumina-proxy.md:68`). Where a cloud
   provider's link-local metadata DNS (`169.254.169.254:53`) answers UDP only for
-  external records, `write_files` provisions the resolver file with a
-  TCP-capable recursive resolver reachable over a narrow `tcp:53` firewall rule,
-  and the unit mounts it read-only into the container
-  (`-v /var/lib/docker/alumina-resolv.conf:/resolv.conf:ro`).
+  external records, the `resolver` entry in `config.toml` (baked into the
+  image) is set to a TCP-capable recursive resolver reachable over a narrow
+  `tcp:53` firewall rule; no platform resolver file is read.
 - **Client TLS 1.3 requirement:** Client HTTPS stacks using `HTTPS_PROXY` must
   offer TLS 1.3 (`0x0304`) as their minimum protocol version so `ClientHello`
   `supported_versions` does not advertise TLS 1.2 (`0x0303`), which Alumina

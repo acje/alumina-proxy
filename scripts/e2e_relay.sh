@@ -125,12 +125,12 @@ printf '%s\n' \
     'allowlist = ["example.com:443", "echo.example.org:443", "down.example.org:443", "neg.example.org:443"]' \
     'listen = "127.0.0.1:8080"' \
     'startup_unresolved_allowance = 0' \
+    'resolver = ["127.0.0.1"]' \
     '[any_illegal]' \
     'scope = "connection"' \
     '[actions]' \
     'kind = ["flare_only", "flare_only", "flare_only", "flare_only"]' \
     'scope = ["connection", "connection", "connection", "connection"]' > /work/config.toml
-printf '%s\n' 'nameserver 127.0.0.1' > /work/resolv.conf
 chown -R 65534:65534 /work
 SNIP
 )

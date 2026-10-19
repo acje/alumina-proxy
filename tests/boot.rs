@@ -40,6 +40,7 @@ const VALID_CONFIG: &str = r#"
 allowlist = ["example.com:443", "sub.example.org.:443"]
 listen = "0.0.0.0:8080"
 startup_unresolved_allowance = 1
+resolver = ["1.1.1.1"]
 [any_illegal]
 scope = "connection"
 [actions]
@@ -105,6 +106,10 @@ fn config_all_mandatory_fields_fail_when_missing() {
         (
             "startup_unresolved_allowance",
             "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\n",
+        ),
+        (
+            "resolver",
+            "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n",
         ),
     ] {
         assert!(
@@ -275,7 +280,7 @@ fn config_allowlist_requires_fqdn_port_else_invalid_fqdn_exit78() {
         );
         assert_eq!(err.exit_status(), 78, "InvalidFqdn must exit 78");
     }
-    let ok_doc = "allowlist = [\"a.example:1\", \"b.example:65535\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
+    let ok_doc = "allowlist = [\"a.example:1\", \"b.example:65535\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
     let cfg = config::parse_config_document(ok_doc).expect("ports 1 and 65535 are valid");
     assert_eq!(cfg.allowlist().len(), 2);
     assert_eq!(cfg.allowlist().get(0).unwrap().port(), 1);
@@ -294,7 +299,7 @@ fn config_allowance_out_of_range_fails() {
         config::parse_config_document(negative),
         Err(ConfigError::AllowanceOutOfRange { .. })
     ));
-    let zero_ok = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+    let zero_ok = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
     assert!(config::parse_config_document(zero_ok).is_ok());
 }
 
@@ -318,7 +323,7 @@ fn config_listen_variants() {
             "listen {name} must be rejected"
         );
     }
-    let ipv6_ok = "allowlist = [\"a.example:443\"]\nlisten = \"[2001:db8::1]:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+    let ipv6_ok = "allowlist = [\"a.example:443\"]\nlisten = \"[2001:db8::1]:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
     let cfg = config::parse_config_document(ipv6_ok).expect("bracketed IPv6 listen");
     assert_eq!(cfg.listen().port(), 8080);
     assert_eq!(cfg.listen().ip().to_string(), "2001:db8::1");
@@ -331,7 +336,7 @@ fn config_allowlist_32_max_fits_document_bound() {
         names.push(format!("\"{i}.example.com:443\""));
     }
     let doc = format!(
-        "allowlist = [{}]\n# trailing comment padding\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n",
+        "allowlist = [{}]\n# trailing comment padding\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n",
         names.join(","),
         kinds = std::iter::repeat_n("\"flare_only\"", 32)
             .collect::<Vec<_>>()
@@ -366,42 +371,65 @@ fn config_non_utf8_document_fails_with_dedicated_encoding_error() {
     );
 }
 
-#[test]
-fn resolver_first_nameserver_numeric_unicast_no_zone_port53() {
-    let ns = resolver::parse_resolver_config("nameserver 1.1.1.1\n").expect("ipv4");
-    assert_eq!(ns.addr().to_string(), "1.1.1.1");
-    assert_eq!(ns.port(), 53);
-
-    let ns6 = resolver::parse_resolver_config("nameserver 2606:4700:4700::1111\n").expect("ipv6");
-    assert_eq!(ns6.addr().to_string(), "2606:4700:4700::1111");
-    assert_eq!(ns6.port(), 53);
+fn resolver_doc(resolver_key: &str) -> String {
+    format!(
+        "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n{resolver_key}[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+    )
 }
 
 #[test]
-fn resolver_selects_first_declared_not_later() {
-    let doc =
-        "# comment\nsearch example.org\noptions ndots:2\nnameserver 9.9.9.9\nnameserver 8.8.8.8\n";
-    let ns = resolver::parse_resolver_config(doc).expect("first nameserver");
-    assert_eq!(ns.addr().to_string(), "9.9.9.9", "first nameserver only");
+fn resolver_from_config_primary_and_count() {
+    let cfg =
+        config::parse_config_document(&resolver_doc("resolver = [\"1.1.1.1\", \"8.8.8.8\"]\n"))
+            .expect("two resolvers valid");
+    assert_eq!(cfg.resolver_set().len(), 2);
+    assert_eq!(
+        cfg.resolver_set().primary().addr().to_string(),
+        "1.1.1.1",
+        "primary is index 0"
+    );
+    assert_eq!(cfg.resolver_set().primary().port(), resolver::RESOLVER_PORT);
+    assert_eq!(
+        cfg.resolver_set()
+            .get(1)
+            .expect("index 1")
+            .addr()
+            .to_string(),
+        "8.8.8.8"
+    );
+    assert!(cfg.resolver_set().get(2).is_none());
 }
 
 #[test]
 fn resolver_invalid_first_cannot_skip_to_later() {
-    let doc = "nameserver not-an-address\nnameserver 8.8.8.8\n";
-    assert!(resolver::parse_resolver_config(doc).is_err());
-    let doc = "nameserver 224.0.0.1\nnameserver 8.8.8.8\n";
-    assert!(resolver::parse_resolver_config(doc).is_err());
+    for bad in ["not-an-address", "224.0.0.1"] {
+        let doc = resolver_doc(&format!("resolver = [\"{bad}\", \"8.8.8.8\"]\n"));
+        let err = config::parse_config_document(&doc).expect_err(&format!("{bad} first must fail"));
+        assert!(
+            matches!(&err, ConfigError::InvalidResolver { index, .. } if *index == 0),
+            "{bad} first must be InvalidResolver at index 0, got {err:?}"
+        );
+    }
 }
 
 #[test]
-fn resolver_missing_and_unreadable_fail() {
-    assert!(resolver::parse_resolver_config("").is_err());
-    assert!(resolver::parse_resolver_config("search example.org\noptions ndots:2\n").is_err());
-    let dir = TempDir::new("missing-resolv");
-    assert!(
-        resolver::read_resolver_config_file(&dir.path().join("resolv.conf").to_string_lossy())
-            .is_err()
-    );
+fn resolver_missing_empty_and_oversize_rejected() {
+    let no_key = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+    assert!(matches!(
+        config::parse_config_document(no_key),
+        Err(ConfigError::MissingField(f)) if f == "resolver"
+    ));
+    assert!(matches!(
+        config::parse_config_document(&resolver_doc("resolver = []\n")),
+        Err(ConfigError::ResolverCountOutOfRange { got: 0 })
+    ));
+    let over = std::iter::repeat_n("\"1.1.1.1\"", resolver::MAX_RESOLVERS + 1)
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(matches!(
+        config::parse_config_document(&resolver_doc(&format!("resolver = [{over}]\n"))),
+        Err(ConfigError::ResolverCountOutOfRange { got }) if got == resolver::MAX_RESOLVERS + 1
+    ));
 }
 
 #[test]
@@ -414,100 +442,26 @@ fn resolver_rejects_non_unicast_and_zoned_addresses() {
         ("ipv6-unspecified", "::"),
         ("zone-id", "fe80::1%eth0"),
     ] {
+        let doc = resolver_doc(&format!("resolver = [\"{addr}\"]\n"));
+        let err =
+            config::parse_config_document(&doc).expect_err(&format!("{case} must be rejected"));
         assert!(
-            resolver::parse_resolver_config(&format!("nameserver {addr}\n")).is_err(),
-            "{case} must be rejected: {addr}"
+            matches!(&err, ConfigError::InvalidResolver { index, value } if *index == 0 && value == addr),
+            "{case} must be InvalidResolver, got {err:?}"
         );
     }
 }
 
 #[test]
-fn resolver_overlong_invalid_address_rejected_without_arbitrary_line_cap() {
-    let mut line = String::from("nameserver ");
-    line.push_str(&"1.".repeat(300));
-    line.push('\n');
-    assert!(matches!(
-        resolver::parse_resolver_config(&line),
-        Err(resolver::ResolverError::InvalidAddress { .. })
-    ));
-}
-
-#[test]
-fn resolver_tab_first_then_space_second_selects_first() {
-    let doc = "nameserver\t9.9.9.9\nnameserver 8.8.8.8\n";
-    let ns = resolver::parse_resolver_config(doc).expect("tab-delimited first nameserver");
-    assert_eq!(ns.addr().to_string(), "9.9.9.9");
-}
-
-#[test]
-fn resolver_bare_first_declaration_fails() {
-    let bare = "nameserver\nnameserver 8.8.8.8\n";
-    assert!(matches!(
-        resolver::parse_resolver_config(bare),
-        Err(resolver::ResolverError::BareNameserver)
-    ));
-    let comment = "nameserver # nothing here\nnameserver 8.8.8.8\n";
-    assert!(matches!(
-        resolver::parse_resolver_config(comment),
-        Err(resolver::ResolverError::BareNameserver)
-    ));
-}
-
-#[test]
-fn resolver_long_valid_first_padding_accepted() {
-    let huge_ws = " ".repeat(150_000);
-    let huge_comment = "#".repeat(60_000);
-    let doc = format!("nameserver{huge_ws}1.1.1.1  {huge_comment}\n");
-    let ns = resolver::parse_resolver_config(&doc).expect("huge nameserver-line padding accepted");
-    assert_eq!(ns.addr().to_string(), "1.1.1.1");
-}
-
-#[test]
-fn resolver_ignored_huge_newline_free_directive_streamed() {
-    let huge = format!("search {}\nnameserver 1.1.1.1\n", "aaaa. ".repeat(150_000));
-    let ns = resolver::parse_resolver_config(&huge).expect("huge ignored line then nameserver");
-    assert_eq!(ns.addr().to_string(), "1.1.1.1");
-    let only_huge = format!("options {}\n", "aaaa".repeat(150_000));
-    assert!(matches!(
-        resolver::parse_resolver_config(&only_huge),
-        Err(resolver::ResolverError::MissingNameserver)
-    ));
-}
-
-#[test]
-#[cfg(feature = "alloc-witness")]
-fn resolver_scanner_retention_bounded_independent_of_input_size() {
-    use alumina::alloc::{self, Phase};
-    let expect_zero = |doc: &str| {
-        let (r, counts) =
-            alloc::run_phase(Phase::StartupDns, || resolver::parse_resolver_config(doc));
-        let ns = r.expect("parse");
-        assert_eq!(ns.addr().to_string(), "1.1.1.1");
-        counts
-    };
-    let small = expect_zero("nameserver 1.1.1.1\n");
-    let huge_ignored = expect_zero(&format!(
-        "search {}\nnameserver 1.1.1.1\n",
-        "aaaa. ".repeat(100_000)
-    ));
-    let huge_padding = expect_zero(&format!(
-        "nameserver{}1.1.1.1  {}\n",
-        " ".repeat(100_000),
-        "#".repeat(50_000)
-    ));
-    assert!(small.all_zero(), "small parse must not allocate: {small:?}");
-    assert!(
-        huge_ignored.all_zero(),
-        "huge ignored line must be streamed without allocation: {huge_ignored:?}"
-    );
-    assert!(
-        huge_padding.all_zero(),
-        "huge padding must be skipped without allocation: {huge_padding:?}"
-    );
+fn resolver_ipv6_unicast_accepted_from_config() {
+    let cfg =
+        config::parse_config_document(&resolver_doc("resolver = [\"2606:4700:4700::1111\"]\n"))
+            .expect("unicast IPv6 resolver");
     assert_eq!(
-        small, huge_ignored,
-        "retention must not scale with input size"
+        cfg.resolver_set().primary().addr().to_string(),
+        "2606:4700:4700::1111"
     );
+    assert_eq!(cfg.resolver_set().primary().port(), 53);
 }
 
 const fn good_facts() -> KernelFacts {

@@ -754,7 +754,7 @@ mod tests {
             _ => panic!("test allowlist helper supports 1..=3 names"),
         };
         let doc = format!(
-            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = {allowance}\n{}\n",
+            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n{}\n",
             group(count)
         );
         crate::config::parse_config_document(&doc).expect("valid test config")
@@ -1254,7 +1254,7 @@ mod startup_integration {
         let kinds = vec!["\"flare_only\""; count].join(", ");
         let scopes = vec!["\"connection\""; count].join(", ");
         let doc = format!(
-            "allowlist = [{names}]\nlisten = \"127.0.0.1:{listen_port}\"\nstartup_unresolved_allowance = {allowance}\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
+            "allowlist = [{names}]\nlisten = \"127.0.0.1:{listen_port}\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
         );
         parse_config_document(&doc).expect("valid test config")
     }

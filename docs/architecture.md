@@ -161,8 +161,9 @@ stop accepting, 8 s grace, drain, exit without deallocating; `panic="abort"`;
 
 Alumina is responsible for the egress it provides (`:99-101`); VPC isolation is
 deployment-scoped. Runtime prerequisites (`:118,150`): minimal `FROM scratch`
-container holding only `/alumina` (statically linked musl binary),
-`/config.toml`, and `/resolv.conf`; non-root (`65534:65534`), empty caps
+container holding only `/alumina` (statically linked musl binary) and
+`/config.toml` (validated allowlist + resolver set); non-root (`65534:65534`),
+empty caps
 (`--cap-drop ALL`), `no_new_privs` (`--security-opt no-new-privileges`),
 read-only rootfs (`--read-only`), no writable/secret volumes, and a dedicated
 appliance identity holding no application secrets or credentials. Confinement

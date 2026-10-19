@@ -4,7 +4,8 @@
 Runs inside one podman container (harness image = pinned rust base +
 python3/setpriv/ip, --network none, NNP, no-new-privileges) after the release
 static binary from the exact candidate is mounted at /app. The driver stages
-/work/config.toml + /work/resolv.conf, owns a DNS-over-TCP responder on
+/work/config.toml (resolver set sourced from config to the in-container
+responder), owns a DNS-over-TCP responder on
 127.0.0.1:53, launches the ACTUAL binary per case (dropped to uid 65534 via
 setpriv, `cd /work && exec alumina`), sends real SIGTERM, and observes each
 supervised child exit code and timing. Every case binary is spawned and reaped

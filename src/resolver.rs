@@ -1,21 +1,18 @@
 use std::fmt;
-use std::fs::File;
-use std::io::{self, Read};
+use std::net::IpAddr;
 
 pub const RESOLVER_PORT: u16 = 53;
 
-const KEYWORD_LIMIT: usize = 32;
-
-const ADDR_TOKEN_LIMIT: usize = 64;
+pub const MAX_RESOLVERS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Nameserver {
-    addr: std::net::IpAddr,
+    addr: IpAddr,
 }
 
 impl Nameserver {
     #[must_use]
-    pub const fn addr(&self) -> std::net::IpAddr {
+    pub const fn addr(&self) -> IpAddr {
         self.addr
     }
 
@@ -27,42 +24,19 @@ impl Nameserver {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ResolverError {
-    Unreadable { path: String, source: String },
-    BareNameserver,
-    MalformedDirective { detail: String },
     InvalidAddress { value: String },
-    MissingNameserver,
     NonUnicastAddress { value: String },
     ZonedAddress { value: String },
-}
-
-impl ResolverError {
-    #[must_use]
-    pub const fn exit_status(&self) -> i32 {
-        78
-    }
 }
 
 impl fmt::Display for ResolverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ResolverError::Unreadable { path, source } => {
-                write!(f, "resolver config unreadable: {path}: {source}")
-            }
-            ResolverError::BareNameserver => {
-                write!(f, "resolver 'nameserver' directive has no address")
-            }
-            ResolverError::MalformedDirective { detail } => {
-                write!(f, "resolver malformed nameserver declaration: {detail}")
-            }
             ResolverError::InvalidAddress { value } => {
                 write!(
                     f,
                     "resolver nameserver {value:?} is not a numeric IP address"
                 )
-            }
-            ResolverError::MissingNameserver => {
-                write!(f, "resolver config has no nameserver entry")
             }
             ResolverError::NonUnicastAddress { value } => {
                 write!(
@@ -80,135 +54,9 @@ impl fmt::Display for ResolverError {
     }
 }
 
-/// Reads and parses the resolver configuration file at `path`.
-///
-/// # Errors
-///
-/// Returns `Unreadable` when the file cannot be opened, and the parse and
-/// address-validation errors of [`parse_resolver_config`].
-pub fn read_resolver_config_file(path: &str) -> Result<Nameserver, ResolverError> {
-    let file = File::open(path).map_err(|source| ResolverError::Unreadable {
-        path: path.to_owned(),
-        source: source.to_string(),
-    })?;
-    parse_streaming(file, Some(path.to_owned()))
-}
-
-/// Parses a resolver configuration document from `text`.
-///
-/// # Errors
-///
-/// Returns `MissingNameserver` when no nameserver directive appears, and the
-/// address-validation errors of `ResolverError` for a malformed address.
-pub fn parse_resolver_config(text: &str) -> Result<Nameserver, ResolverError> {
-    parse_streaming(text.as_bytes(), None)
-}
-
-fn parse_streaming<R: Read>(
-    reader: R,
-    source_path: Option<String>,
-) -> Result<Nameserver, ResolverError> {
-    let mut sc = Scanner::new(reader, source_path);
-
-    loop {
-        loop {
-            skip_inline_ws(&mut sc)?;
-            match sc.peek()? {
-                None => return Err(ResolverError::MissingNameserver),
-                Some(b'\n') => {
-                    sc.next()?;
-                }
-                Some(b'#') => {
-                    sc.skip_to_eol()?;
-                }
-                _ => break,
-            }
-        }
-
-        let mut kw = [0u8; KEYWORD_LIMIT];
-        let mut kw_len = 0usize;
-        let mut overlong = false;
-        loop {
-            match sc.peek()? {
-                None | Some(b' ' | b'\t' | b'\r' | b'\n' | b'#') => break,
-                Some(_) => {
-                    let b = sc.next()?.expect("peeked byte");
-                    if kw_len < KEYWORD_LIMIT {
-                        kw[kw_len] = b;
-                        kw_len += 1;
-                    } else {
-                        overlong = true;
-                    }
-                }
-            }
-        }
-        if overlong {
-            sc.skip_to_eol()?;
-            continue;
-        }
-
-        if kw[..kw_len] == *b"nameserver" {
-            skip_inline_ws(&mut sc)?;
-            let mut tok = [0u8; ADDR_TOKEN_LIMIT];
-            let mut tok_len = 0usize;
-            let mut overlong = false;
-            loop {
-                match sc.peek()? {
-                    None | Some(b' ' | b'\t' | b'\r' | b'\n' | b'#') => break,
-                    Some(_) => {
-                        let b = sc.next()?.expect("peeked byte");
-                        if !overlong {
-                            if tok_len >= ADDR_TOKEN_LIMIT {
-                                overlong = true;
-                            } else {
-                                tok[tok_len] = b;
-                                tok_len += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            if tok_len == 0 {
-                return Err(ResolverError::BareNameserver);
-            }
-            if overlong {
-                return Err(ResolverError::InvalidAddress {
-                    value: String::from_utf8_lossy(&tok[..tok_len]).into_owned(),
-                });
-            }
-            let Ok(text) = std::str::from_utf8(&tok[..tok_len]) else {
-                return Err(ResolverError::InvalidAddress {
-                    value: format!("<non-utf8 {tok_len} bytes>"),
-                });
-            };
-            let ns = select(text)?;
-            skip_inline_ws(&mut sc)?;
-            match sc.peek()? {
-                None | Some(b'\n' | b'#') => return Ok(ns),
-                _ => {
-                    return Err(ResolverError::MalformedDirective {
-                        detail: "more than one address token on the nameserver line".into(),
-                    });
-                }
-            }
-        }
-
-        sc.skip_to_eol()?;
-    }
-}
-
-fn skip_inline_ws<R: Read>(sc: &mut Scanner<R>) -> Result<(), ResolverError> {
-    loop {
-        match sc.peek()? {
-            Some(b' ' | b'\t' | b'\r') => {
-                sc.next()?;
-            }
-            _ => return Ok(()),
-        }
-    }
-}
-
-fn select(token: &str) -> Result<Nameserver, ResolverError> {
+/// Validates one configured resolver address: a numeric unicast IPv4 or IPv6
+/// address, port fixed at 53, with no zone identifier.
+pub(crate) fn select(token: &str) -> Result<Nameserver, ResolverError> {
     if token.is_empty() {
         return Err(ResolverError::InvalidAddress {
             value: String::new(),
@@ -219,7 +67,7 @@ fn select(token: &str) -> Result<Nameserver, ResolverError> {
             value: token.to_owned(),
         });
     }
-    let addr: std::net::IpAddr = token.parse().map_err(|_| ResolverError::InvalidAddress {
+    let addr: IpAddr = token.parse().map_err(|_| ResolverError::InvalidAddress {
         value: token.to_owned(),
     })?;
     if !is_unicast(addr) {
@@ -230,84 +78,66 @@ fn select(token: &str) -> Result<Nameserver, ResolverError> {
     Ok(Nameserver { addr })
 }
 
-const fn is_unicast(addr: std::net::IpAddr) -> bool {
+const fn is_unicast(addr: IpAddr) -> bool {
     match addr {
-        std::net::IpAddr::V4(ip) => {
-            !ip.is_multicast() && !ip.is_broadcast() && !ip.is_unspecified()
-        }
-        std::net::IpAddr::V6(ip) => !ip.is_multicast() && !ip.is_unspecified(),
+        IpAddr::V4(ip) => !ip.is_multicast() && !ip.is_broadcast() && !ip.is_unspecified(),
+        IpAddr::V6(ip) => !ip.is_multicast() && !ip.is_unspecified(),
     }
 }
 
-struct Scanner<R: Read> {
-    src: R,
-    buf: [u8; 512],
-    pos: usize,
+/// The validated resolver set from configuration: a fixed `MAX_RESOLVERS`
+/// array holding the declared resolvers. Construction goes through
+/// [`ResolverSet::from_slice`], which refuses empty and over-capacity inputs,
+/// so index 0 (the primary) and `len() >= 1` are structural facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolverSet {
+    entries: [Nameserver; MAX_RESOLVERS],
     len: usize,
-    source_path: Option<String>,
 }
 
-impl<R: Read> Scanner<R> {
-    const fn new(src: R, source_path: Option<String>) -> Self {
-        Scanner {
-            src,
-            buf: [0u8; 512],
-            pos: 0,
-            len: 0,
-            source_path,
+impl ResolverSet {
+    /// Builds a set from `entries` (1..=`MAX_RESOLVERS`); `None` when empty or
+    /// over capacity. The sole construction route, guarding the non-empty
+    /// invariant at the config boundary.
+    pub(crate) fn from_slice(entries: &[Nameserver]) -> Option<ResolverSet> {
+        let count = entries.len();
+        if count == 0 || count > MAX_RESOLVERS {
+            return None;
         }
+        let mut arr = [entries[0]; MAX_RESOLVERS];
+        arr[..count].copy_from_slice(entries);
+        Some(ResolverSet {
+            entries: arr,
+            len: count,
+        })
     }
 
-    fn unreadable(&self, source: &io::Error) -> ResolverError {
-        ResolverError::Unreadable {
-            path: self
-                .source_path
-                .clone()
-                .unwrap_or_else(|| "<stream>".to_owned()),
-            source: source.to_string(),
-        }
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
     }
 
-    fn fill(&mut self) -> Result<usize, ResolverError> {
-        debug_assert_eq!(
-            self.pos, self.len,
-            "fill requires the current buffer to be fully consumed"
-        );
-        self.pos = 0;
-        self.len = 0;
-        let n = loop {
-            match self.src.read(&mut self.buf) {
-                Ok(n) => break n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => return Err(self.unreadable(&e)),
-            }
-        };
-        self.len = n;
-        Ok(n)
+    /// A set is never empty by construction: an empty slice is refused at
+    /// [`ResolverSet::from_slice`]. `is_empty` therefore returns `false` and
+    /// is present for the standard `len`/`is_empty` accessor pairing.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
-    fn next(&mut self) -> Result<Option<u8>, ResolverError> {
-        if self.pos >= self.len && self.fill()? == 0 {
-            return Ok(None);
-        }
-        let b = self.buf[self.pos];
-        self.pos += 1;
-        Ok(Some(b))
+    /// The primary resolver (index 0). Infallible: a zero-count set is
+    /// unrepresentable.
+    #[must_use]
+    pub const fn primary(&self) -> &Nameserver {
+        &self.entries[0]
     }
 
-    fn peek(&mut self) -> Result<Option<u8>, ResolverError> {
-        if self.pos >= self.len && self.fill()? == 0 {
-            return Ok(None);
-        }
-        Ok(Some(self.buf[self.pos]))
-    }
-
-    fn skip_to_eol(&mut self) -> Result<(), ResolverError> {
-        loop {
-            match self.next()? {
-                None | Some(b'\n') => return Ok(()),
-                Some(_) => {}
-            }
+    #[must_use]
+    pub const fn get(&self, index: usize) -> Option<&Nameserver> {
+        if index < self.len {
+            Some(&self.entries[index])
+        } else {
+            None
         }
     }
 }
@@ -315,34 +145,72 @@ impl<R: Read> Scanner<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::ErrorKind;
 
-    struct InterruptedOnce {
-        data: &'static [u8],
-        interrupted: bool,
+    #[test]
+    fn select_accepts_numeric_unicast_v4_and_v6_at_port53() {
+        let v4 = select("1.1.1.1").expect("unicast v4");
+        assert_eq!(v4.addr(), "1.1.1.1".parse::<IpAddr>().expect("parse"));
+        assert_eq!(v4.port(), 53);
+        let v6 = select("2606:4700:4700::1111").expect("unicast v6");
+        assert_eq!(
+            v6.addr(),
+            "2606:4700:4700::1111".parse::<IpAddr>().expect("parse")
+        );
+        assert_eq!(v6.port(), 53);
     }
 
-    impl Read for InterruptedOnce {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if self.interrupted {
-                let n = self.data.len().min(buf.len());
-                buf[..n].copy_from_slice(&self.data[..n]);
-                self.data = &self.data[n..];
-                Ok(n)
-            } else {
-                self.interrupted = true;
-                Err(io::Error::from(ErrorKind::Interrupted))
-            }
+    #[test]
+    fn select_rejects_non_numeric_zoned_and_non_unicast() {
+        assert!(matches!(
+            select("not-an-address"),
+            Err(ResolverError::InvalidAddress { .. })
+        ));
+        assert!(matches!(
+            select(""),
+            Err(ResolverError::InvalidAddress { .. })
+        ));
+        assert!(matches!(
+            select("fe80::1%eth0"),
+            Err(ResolverError::ZonedAddress { .. })
+        ));
+        for addr in ["255.255.255.255", "0.0.0.0", "224.0.0.1", "ff02::1", "::"] {
+            assert!(
+                matches!(select(addr), Err(ResolverError::NonUnicastAddress { .. })),
+                "{addr} must be rejected as non-unicast"
+            );
         }
     }
 
     #[test]
-    fn interrupted_read_is_retried_not_unreadable() {
-        let reader = InterruptedOnce {
-            data: b"nameserver 1.1.1.1\n",
-            interrupted: false,
-        };
-        let ns = parse_streaming(reader, None).expect("interrupted read must be retried");
-        assert_eq!(ns.addr().to_string(), "1.1.1.1");
+    fn resolver_set_guards_zero_and_overflow_count() {
+        assert!(ResolverSet::from_slice(&[]).is_none());
+        let four = [
+            select("1.1.1.1").expect("ns"),
+            select("8.8.8.8").expect("ns"),
+            select("1.0.0.1").expect("ns"),
+            select("8.8.4.4").expect("ns"),
+        ];
+        assert_eq!(ResolverSet::from_slice(&four).expect("4 fits").len(), 4);
+        let five = [
+            select("1.1.1.1").expect("ns"),
+            select("8.8.8.8").expect("ns"),
+            select("1.0.0.1").expect("ns"),
+            select("8.8.4.4").expect("ns"),
+            select("9.9.9.9").expect("ns"),
+        ];
+        assert!(ResolverSet::from_slice(&five).is_none());
+    }
+
+    #[test]
+    fn resolver_set_primary_and_indexed_access() {
+        let entries = [
+            select("1.1.1.1").expect("ns"),
+            select("8.8.8.8").expect("ns"),
+        ];
+        let set = ResolverSet::from_slice(&entries).expect("2 fits");
+        assert_eq!(set.len(), 2);
+        assert_eq!(set.primary().addr().to_string(), "1.1.1.1");
+        assert_eq!(set.get(1).expect("index 1").addr().to_string(), "8.8.8.8");
+        assert!(set.get(2).is_none());
     }
 }

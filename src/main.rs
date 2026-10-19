@@ -1,6 +1,7 @@
-//! Alumina binary: fixed documented config/resolver inputs, no CLI or
+//! Alumina binary: fixed documented config inputs, no CLI or
 //! environment policy overrides. Runs the boot harness (privilege check,
-//! config + resolver reads, 128 MiB traffic store + serving workspaces), then
+//! config read incl. the validated resolver set, 128 MiB traffic store +
+//! serving workspaces), then
 //! continues the same owner into the shared-readiness runtime: the serving
 //! workspaces are preallocated before the boot-owned startup DNS window, the
 //! canonical readiness rule runs (the listener opens for a serving decision;
@@ -13,10 +14,9 @@ use alumina::boot::{EX_CONFIG, run_boot};
 use alumina::runtime::Preallocated;
 use alumina::serve::{ServeStorage, StartupDecision};
 
-/// Fixed documented input paths, relative to the working directory. No CLI
+/// Fixed documented input path, relative to the working directory. No CLI
 /// arguments or environment variables are read as policy (see README).
 const CONFIG_PATH: &str = "config.toml";
-const RESOLVER_PATH: &str = "resolv.conf";
 const EX_TEMPFAIL: i32 = 75;
 const EX_SOFTWARE: i32 = 70;
 
@@ -26,7 +26,7 @@ const PROCESS_EPOCH_SECS: u64 = 0;
 
 fn main() {
     emit_kernel_facts();
-    match run_boot(CONFIG_PATH, RESOLVER_PATH) {
+    match run_boot(CONFIG_PATH) {
         Ok(report) => {
             println!(
                 "inventory named fixed buffers (lower bound): {} (traffic {} + serving workspace {} + dns named buffers {})",
@@ -45,8 +45,8 @@ fn main() {
             );
             println!(
                 "resolver first nameserver: {} port {}",
-                report.nameserver.addr(),
-                report.nameserver.port()
+                report.config.resolver_set().primary().addr(),
+                report.config.resolver_set().primary().port()
             );
             println!(
                 "allowlist entries: {} allowance: {} listen: {}:{}",
@@ -75,8 +75,10 @@ fn main() {
                 ));
                 std::process::exit(EX_CONFIG);
             }
-            let nameserver =
-                std::net::SocketAddr::new(report.nameserver.addr(), report.nameserver.port());
+            let nameserver = std::net::SocketAddr::new(
+                report.config.resolver_set().primary().addr(),
+                report.config.resolver_set().primary().port(),
+            );
             match owner.run_startup(nameserver, PROCESS_EPOCH_SECS) {
                 Ok(outcome) => match outcome.decision {
                     StartupDecision::Serve(_mode) => {

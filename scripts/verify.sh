@@ -300,14 +300,13 @@ boot_fixtures() {
     fi
 
     # write the fixed documented inputs into a disposable container /work dir
-    # (cwd-relative contract: main.rs reads config.toml + resolv.conf from the
-    # working directory), then drop privileges inside that dir.
+    # (cwd-relative contract: main.rs reads config.toml, incl. the resolver
+    # set, from the working directory), then drop privileges inside that dir.
     stage() {
         printf '%s\n' \
             'set -eu' \
             'mkdir -p /work' \
-            "printf '%s\\n' 'allowlist = [\"example.com:443\"]' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' '[any_illegal]' 'scope = \"connection\"' '[actions]' 'kind = [\"flare_only\"]' 'scope = [\"connection\"]' > /work/config.toml" \
-            "printf '%s\\n' 'nameserver 127.0.0.1' > /work/resolv.conf" \
+            "printf '%s\\n' 'allowlist = [\"example.com:443\"]' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' 'resolver = [\"127.0.0.1\"]' '[any_illegal]' 'scope = \"connection\"' '[actions]' 'kind = [\"flare_only\"]' 'scope = [\"connection\"]' > /work/config.toml" \
             'chown -R 65534:65534 /work' \
             'apk add --no-cache util-linux >/dev/null 2>&1 || true'
         true

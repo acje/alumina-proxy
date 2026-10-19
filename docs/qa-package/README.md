@@ -22,7 +22,6 @@ production-qualified or externally-deployed system (qualification gates in
 | File | Purpose |
 |---|---|
 | `config.example.toml` | Example runtime configuration (fixed documented inputs, no secrets) |
-| `resolv.example.conf` | Example resolver input (deterministic local loopback; never leaves the host) |
 | `validate.sh` | Identity capture + local isolated smoke (positive/negative) + docs + deny/audit; hard-0 gate |
 
 ## Artifact / source identity
@@ -123,13 +122,13 @@ claim), and this repo never provisions VMs, connections or images.
 ## Example inputs are illustrative — never executed by any gate
 
 `config.example.toml` (allowlist `["api.github.com:443", "example.com:443",
-"www.example.net:443"]`) and
-`resolv.example.conf` document a fixed, non-secret configuration shape; they
-are **illustrative only and executed by nothing**.
-The fixture runner stages its own fixed inputs; `validate.sh` never reads the
-examples. Specifying them as runnable inputs, or relabelling the fixture gate's
-inputs as the examples, would be a false claim. The resolver example is
-loopback-only, so nothing in this package ever dials an external host.
+"www.example.net:443"]`, resolver `["127.0.0.1"]`) documents a fixed,
+non-secret configuration shape; it is **illustrative only and executed by
+nothing**. The fixture runner stages its own fixed inputs; `validate.sh` never
+reads the example. Specifying it as a runnable input, or relabelling the
+fixture gate's inputs as the example, would be a false claim. The example
+resolver is loopback-only, so nothing in this package ever dials an external
+host.
 
 ## Protocol compatibility (workloads dialed through Alumina)
 

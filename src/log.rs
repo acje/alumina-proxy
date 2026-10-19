@@ -1595,7 +1595,7 @@ mod tests {
             let _ = writeln!(doc, "  \"{name}:443\",");
             names.push(name);
         }
-        doc.push_str("]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n");
+        doc.push_str("]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n");
         push_compact_group(&mut doc, ALLOWLIST_MAX);
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,

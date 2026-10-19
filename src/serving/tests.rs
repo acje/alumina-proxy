@@ -9,7 +9,7 @@ const RETAINED_OFFSET: usize = 137;
 
 fn config(port: u16) -> crate::config::Config {
     let doc = format!(
-        "allowlist = [\"sub.example.org:443\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+        "allowlist = [\"sub.example.org:443\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
     );
     crate::config::parse_config_document(&doc).expect("valid test config")
 }
@@ -4182,7 +4182,7 @@ fn serve_on_cfg(port: u16, cfg: &crate::config::Config) -> Serving {
 
 fn cfg_doc1(port: u16, any_scope: &str, kind: &str, action_scope: &str) -> crate::config::Config {
     let doc = format!(
-        "allowlist = [\"sub.example.org:443\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"{any_scope}\"\n[actions]\nkind = [\"{kind}\"]\nscope = [\"{action_scope}\"]\n"
+        "allowlist = [\"sub.example.org:443\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"{any_scope}\"\n[actions]\nkind = [\"{kind}\"]\nscope = [\"{action_scope}\"]\n"
     );
     crate::config::parse_config_document(&doc).expect("valid enforcement test config")
 }
@@ -4672,7 +4672,7 @@ fn non443_connect_dials_the_entry_port_then_resets_approved_port_on_close_slot()
         "the loopback listener port must be non-443 for this regression"
     );
     let cfg_doc = format!(
-        "allowlist = [\"sub.example.org:{dial_port}\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+        "allowlist = [\"sub.example.org:{dial_port}\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
     );
     let cfg = crate::config::parse_config_document(&cfg_doc).expect("valid non-443 config");
     with_serving_stack_cfg(port, cfg, move |serving| {
@@ -4824,6 +4824,7 @@ fn block_domain_does_not_touch_unrelated_current_flow() {
         "allowlist = [\"sub.example.org:443\", \"trusted-other.example.net:443\"]\n\
          listen = \"127.0.0.1:{port}\"\n\
          startup_unresolved_allowance = 0\n\
+         resolver = [\"1.1.1.1\"]\n\
          [any_illegal]\n\
          scope = \"connection\"\n\
          [actions]\n\
@@ -6254,7 +6255,7 @@ fn allowlisted_unresolved_connect_refusal_is_wire_pinned_through_run_once() {
 /// controllable (possibly closed) upstream port.
 fn config_pair(port: u16, upstream_port: u16) -> crate::config::Config {
     let doc = format!(
-        "allowlist = [\"sub.example.org:{upstream_port}\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+        "allowlist = [\"sub.example.org:{upstream_port}\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
     );
     crate::config::parse_config_document(&doc).expect("valid retry test config")
 }

@@ -3,14 +3,12 @@ use std::fmt;
 use crate::config::{self, Config, ConfigError};
 use crate::inventory::{self, BootInventory, StorageUnavailable, TrafficStorage};
 use crate::preflight::{self, KernelFacts, PreflightError};
-use crate::resolver::{self, Nameserver, ResolverError};
 
 pub const EX_CONFIG: i32 = 78;
 
 #[derive(Debug)]
 pub enum BootError {
     Config(ConfigError),
-    Resolver(ResolverError),
     Preflight(PreflightError),
     Storage(StorageUnavailable),
 }
@@ -26,7 +24,6 @@ impl fmt::Display for BootError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BootError::Config(err) => write!(f, "{err}"),
-            BootError::Resolver(err) => write!(f, "{err}"),
             BootError::Preflight(err) => write!(f, "{err}"),
             BootError::Storage(err) => write!(f, "{err}"),
         }
@@ -36,39 +33,31 @@ impl fmt::Display for BootError {
 #[derive(Debug)]
 pub struct BootReport {
     pub config: Config,
-    pub nameserver: Nameserver,
     pub storage: TrafficStorage,
     pub inventory: BootInventory,
 }
 
-/// Runs the complete boot sequence: kernel preflight, configuration load,
-/// resolver parse, and traffic-storage allocation.
+/// Runs the complete boot sequence: kernel preflight, configuration load, and
+/// traffic-storage allocation. The resolver set is read from the validated
+/// config document; no separate platform resolver file is read.
 ///
 /// # Errors
 ///
 /// Returns `Preflight` when a hosting prerequisite fails, `Config` when the
-/// configuration document is unreadable or invalid, `Resolver` when the
-/// resolver file is unreadable or invalid, or `Storage` when traffic storage
-/// cannot be allocated.
-pub fn run_boot(config_path: &str, resolver_path: &str) -> Result<BootReport, BootError> {
+/// configuration document is unreadable, invalid, or carries an invalid
+/// resolver set, or `Storage` when traffic storage cannot be allocated.
+pub fn run_boot(config_path: &str) -> Result<BootReport, BootError> {
     let facts = preflight::read_kernel_facts().map_err(BootError::Preflight)?;
-    run_boot_with_facts(config_path, resolver_path, facts)
+    run_boot_with_facts(config_path, facts)
 }
 
-fn run_boot_with_facts(
-    config_path: &str,
-    resolver_path: &str,
-    facts: KernelFacts,
-) -> Result<BootReport, BootError> {
+fn run_boot_with_facts(config_path: &str, facts: KernelFacts) -> Result<BootReport, BootError> {
     preflight::check(facts).map_err(BootError::Preflight)?;
     let config = config::load_config_document(config_path).map_err(BootError::Config)?;
-    let nameserver =
-        resolver::read_resolver_config_file(resolver_path).map_err(BootError::Resolver)?;
     let storage = TrafficStorage::allocate().map_err(BootError::Storage)?;
     let inventory = inventory::BootInventory::phase1();
     Ok(BootReport {
         config,
-        nameserver,
         storage,
         inventory,
     })
@@ -123,28 +112,25 @@ mod tests {
         }
     }
 
-    const VALID_CONFIG: &str = "allowlist = [\"example.com:443\", \"sub.example.org.:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
+    const VALID_CONFIG: &str = "allowlist = [\"example.com:443\", \"sub.example.org.:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
 
     #[test]
     fn boot_with_good_facts_reports_and_stops_at_phase1_boundary() {
         let dir = TempDir::new("good");
-        dir.write("config.toml", VALID_CONFIG);
-        dir.write("resolv.conf", "nameserver 1.1.1.1\n");
         let config_path = dir
             .path()
             .join("config.toml")
             .to_string_lossy()
             .into_owned();
-        let resolver_path = dir
-            .path()
-            .join("resolv.conf")
-            .to_string_lossy()
-            .into_owned();
+        dir.write("config.toml", VALID_CONFIG);
 
-        let report = run_boot_with_facts(&config_path, &resolver_path, good_facts())
-            .expect("boot with good facts");
+        let report = run_boot_with_facts(&config_path, good_facts()).expect("boot with good facts");
         assert_eq!(report.config.allowlist().len(), 2);
-        assert_eq!(report.nameserver.addr().to_string(), "1.1.1.1");
+        assert_eq!(
+            report.config.resolver_set().primary().addr().to_string(),
+            "1.1.1.1"
+        );
+        assert_eq!(report.config.resolver_set().primary().port(), 53);
         assert_eq!(report.storage.len(), inventory::TRAFFIC_STORAGE_BYTES);
         assert_eq!(
             report.inventory.named_fixed_buffer_bytes(),
@@ -162,25 +148,14 @@ mod tests {
             .join("config.toml")
             .to_string_lossy()
             .into_owned();
-        let resolver_path = dir
-            .path()
-            .join("resolv.conf")
-            .to_string_lossy()
-            .into_owned();
 
-        let err = run_boot_with_facts(&config_path, &resolver_path, good_facts())
-            .expect_err("missing config must fail");
+        let err =
+            run_boot_with_facts(&config_path, good_facts()).expect_err("missing config must fail");
         assert_eq!(err.exit_status(), EX_CONFIG);
 
         dir.write("config.toml", VALID_CONFIG);
-        let err = run_boot_with_facts(&config_path, &resolver_path, good_facts())
-            .expect_err("missing resolver must fail");
-        assert_eq!(err.exit_status(), EX_CONFIG);
-
-        dir.write("resolv.conf", "nameserver 1.1.1.1\n");
         let err = run_boot_with_facts(
             &config_path,
-            &resolver_path,
             KernelFacts {
                 euid: 0,
                 ..good_facts()
@@ -195,8 +170,11 @@ mod tests {
         assert_eq!(EX_CONFIG, 78);
         let cfg_err = config::parse_config_document("bogus").unwrap_err();
         assert_eq!(BootError::Config(cfg_err).exit_status(), EX_CONFIG);
-        let res_err = resolver::parse_resolver_config("").unwrap_err();
-        assert_eq!(BootError::Resolver(res_err).exit_status(), EX_CONFIG);
+        let invalid_resolver = config::parse_config_document(
+            "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"not-an-address\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n",
+        )
+        .unwrap_err();
+        assert_eq!(BootError::Config(invalid_resolver).exit_status(), EX_CONFIG);
         let pre_err = PreflightError::Root;
         assert_eq!(BootError::Preflight(pre_err).exit_status(), EX_CONFIG);
     }
@@ -204,21 +182,15 @@ mod tests {
     #[test]
     fn boot_allocation_failure_maps_to_ex_config78() {
         let dir = TempDir::new("allocfault");
-        dir.write("config.toml", VALID_CONFIG);
-        dir.write("resolv.conf", "nameserver 1.1.1.1\n");
         let config_path = dir
             .path()
             .join("config.toml")
             .to_string_lossy()
             .into_owned();
-        let resolver_path = dir
-            .path()
-            .join("resolv.conf")
-            .to_string_lossy()
-            .into_owned();
+        dir.write("config.toml", VALID_CONFIG);
 
         crate::inventory::arm_alloc_failure();
-        let err = run_boot_with_facts(&config_path, &resolver_path, good_facts())
+        let err = run_boot_with_facts(&config_path, good_facts())
             .expect_err("armed allocation fault must fail boot with StorageUnavailable");
         crate::inventory::clear_alloc_failure();
         assert!(matches!(err, BootError::Storage(_)));
