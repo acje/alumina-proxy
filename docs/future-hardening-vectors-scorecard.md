@@ -6,14 +6,17 @@ carries no normative authority. It is a scored companion to
 `docs/future-hardening-vectors.md` (the vector register), restating and citing the
 implementation only.
 
-**Scope:** the 22 active hardening vectors from `docs/future-hardening-vectors.md`
+**Scope:** the 21 active hardening vectors from `docs/future-hardening-vectors.md`
 (excluded: 12, 30 — not applicable by design). Vectors 13, 15, 16, 20, 26, 27,
 28, 29, 31 were pruned from the register as fully covered, and vectors 2 (DoH),
-4 (DoQ), 25 (QNAME minimization) as low-plausibility/high-risk research discards
-(2026-10-19). Since scoring (2026-10-19), vectors 33, 34, and 36 were
-**implemented and pinned** via the `alumina-hrdn` hardening increment
+3 (DNSCrypt), 4 (DoQ), 25 (QNAME minimization) as low-plausibility/high-risk
+research discards (2026-10-19). Since scoring (2026-10-19), vectors 33, 34, and
+36 were **implemented and pinned** via the `alumina-hrdn` hardening increment
 (`docs/alumina-proxy.md`); they are marked **DONE** in the ranked table and
 per-vector detail sections, and their rows remain with their original scores.
+Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), and 8 (multi-resolver
+cross-validation) are **deferred** (marked **DEFERRED**): high architectural risk
+for high-but-costly security value, retained for research only.
 
 **Method:** 8 independent deep-analysis scores per vector = 4 `linus` (Rust-specialist)
 + 4 `general` raters. Every rater read the actual source before scoring. Scores are 1–10.
@@ -27,7 +30,7 @@ filtering of TLS tunnels* — NOT the existing fixed spec invariants.
 - **Risk** (architectural-change risk) — 1 = localized change … 10 = core redesign.
 - **Overall** = mean(effectiveness, plausibility). Risk reported separately (not folded into rank).
 
-Generated from `scores.jsonl` (200 score lines; 22 scored vectors shown).
+Generated from `scores.jsonl` (200 score lines; 21 scored vectors shown).
 
 ## Ranked table
 
@@ -49,12 +52,11 @@ Generated from `scores.jsonl` (200 score lines; 22 scored vectors shown).
 | 14 | 35 | CONNECT header-line count bound | 6.50 | 3.62 | 9.38 | 1.25 |
 | 15 | 18 | Multi-resolver failover | 6.38 | 5.50 | 7.25 | 4.38 |
 | 16 | 23 | Cross-resolver divergence reporting | 6.12 | 4.88 | 7.38 | 4.50 |
-| 17 | 5 | Resolver cert pinning / TOFU | 6.06 | 7.25 | 4.88 | 6.75 |
-| 18 | 8 | Multi-resolver cross-validation | 6.00 | 7.75 | 4.25 | 8.00 |
-| 19 | 1 | DNS-over-TLS (DoT) | 5.62 | 7.88 | 3.38 | 7.12 |
-| 20 | 6 | DNSSEC validation | 5.62 | 8.75 | 2.50 | 8.12 |
-| 21 | 3 | DNSCrypt | 5.31 | 7.12 | 3.50 | 6.88 |
-| 22 | 10 | EDNS0 / larger-buffer negotiation | 3.69 | 1.12 | 6.25 | 1.62 |
+| 17 | 5 | **DEFERRED** Resolver cert pinning / TOFU | 6.06 | 7.25 | 4.88 | 6.75 |
+| 18 | 8 | **DEFERRED** Multi-resolver cross-validation | 6.00 | 7.75 | 4.25 | 8.00 |
+| 19 | 1 | **DEFERRED** DNS-over-TLS (DoT) | 5.62 | 7.88 | 3.38 | 7.12 |
+| 20 | 6 | **DEFERRED** DNSSEC validation | 5.62 | 8.75 | 2.50 | 8.12 |
+| 21 | 10 | EDNS0 / larger-buffer negotiation | 3.69 | 1.12 | 6.25 | 1.62 |
 
 ## Per-vector detail (all 8 scores, eff/plaus/risk)
 
@@ -304,9 +306,11 @@ Overall **6.12** · Eff **4.88** · Plaus **7.38** · Risk **4.50**
 | linus | 4 | 8 | 6 |
 | linus | 6 | 7 | 5 |
 
-### Rank 17 — Vector 5: Resolver cert pinning / TOFU
+### Rank 17 — Vector 5: Resolver cert pinning / TOFU — **DEFERRED**
 
 Overall **6.06** · Eff **7.25** · Plaus **4.88** · Risk **6.75**
+
+**Status:** **DEFERRED** — only valuable as a prerequisite of DoT (v1); deferred with it as the DoT trust model.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -319,9 +323,11 @@ Overall **6.06** · Eff **7.25** · Plaus **4.88** · Risk **6.75**
 | general | 6 | 3 | 6 |
 | general | 4 | 5 | 6 |
 
-### Rank 18 — Vector 8: Multi-resolver cross-validation
+### Rank 18 — Vector 8: Multi-resolver cross-validation — **DEFERRED**
 
 Overall **6.00** · Eff **7.75** · Plaus **4.25** · Risk **8.00**
+
+**Status:** **DEFERRED** — violates the 1-conn/1-query + no-fallback doctrine; a design-revision candidate, not an incremental hardening.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -334,9 +340,11 @@ Overall **6.00** · Eff **7.75** · Plaus **4.25** · Risk **8.00**
 | general | 7 | 6 | 6 |
 | general | 6 | 4 | 8 |
 
-### Rank 19 — Vector 1: DNS-over-TLS (DoT)
+### Rank 19 — Vector 1: DNS-over-TLS (DoT) — **DEFERRED**
 
 Overall **5.62** · Eff **7.88** · Plaus **3.38** · Risk **7.12**
+
+**Status:** **DEFERRED** — high architectural risk (new TLS client dep, cert handling, resource profile) for high security value; retained for research only. Defer unless the user authorizes a spec amendment.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -349,9 +357,11 @@ Overall **5.62** · Eff **7.88** · Plaus **3.38** · Risk **7.12**
 | general | 7 | 3 | 8 |
 | general | 7 | 3 | 5 |
 
-### Rank 20 — Vector 6: DNSSEC validation
+### Rank 20 — Vector 6: DNSSEC validation — **DEFERRED**
 
 Overall **5.62** · Eff **8.75** · Plaus **2.50** · Risk **8.12**
+
+**Status:** **DEFERRED** — highest effectiveness (8.75) but highest risk (8.12) and lowest plausibility (2.50); feasibility study required before any commitment.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -364,22 +374,7 @@ Overall **5.62** · Eff **8.75** · Plaus **2.50** · Risk **8.12**
 | general | 8 | 3 | 6 |
 | general | 8 | 2 | 8 |
 
-### Rank 21 — Vector 3: DNSCrypt
-
-Overall **5.31** · Eff **7.12** · Plaus **3.50** · Risk **6.88**
-
-| Rater | Eff | Plaus | Risk |
-|---|---|---|---|
-| linus | 8 | 3 | 9 |
-| linus | 8 | 3 | 8 |
-| general | 5 | 3 | 4 |
-| general | 6 | 5 | 5 |
-| linus | 9 | 3 | 8 |
-| linus | 8 | 3 | 9 |
-| general | 7 | 5 | 6 |
-| general | 6 | 3 | 6 |
-
-### Rank 22 — Vector 10: EDNS0 / larger-buffer negotiation
+### Rank 21 — Vector 10: EDNS0 / larger-buffer negotiation
 
 Overall **3.69** · Eff **1.12** · Plaus **6.25** · Risk **1.62**
 

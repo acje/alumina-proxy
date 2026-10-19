@@ -13,14 +13,17 @@ and the open serving-qualification gates (F1–F4, BOUNDARY, E2E —
 **Pruned (2026-10-19):** vectors 13, 15, 16, 20, 26, 27, 28, 29, 31 were
 removed from the candidate register as **fully covered** — each is implemented
 and verified in the current codebase (see §1 Baseline DNS posture and
-`docs/future-hardening-vectors-scorecard.md`). Vectors 2 (DoH), 4 (DoQ), and
-25 (QNAME minimization) were additionally pruned as **low-plausibility /
-high-risk research discards** (see scorecard). On the same date vectors 33, 34,
-and 36 were **promoted out of candidate research as implemented and pinned**:
-their formerly ambiguous behavior was sharpened in the `alumina-hrdn` hardening
-increment (recorded in `docs/alumina-proxy.md`) and each row below is marked
-**DONE** with its pinned semantics and code location. Vector numbers are retained as
-stable identifiers; gaps are intentional.
+`docs/future-hardening-vectors-scorecard.md`). Vectors 2 (DoH), 3 (DNSCrypt),
+4 (DoQ), and 25 (QNAME minimization) were additionally pruned as
+**low-plausibility / high-risk research discards** (see scorecard). On the same
+date vectors 33, 34, and 36 were **promoted out of candidate research as
+implemented and pinned**: their formerly ambiguous behavior was sharpened in the
+`alumina-hrdn` hardening increment (recorded in `docs/alumina-proxy.md`) and
+each row below is marked **DONE** with its pinned semantics and code location.
+Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), and 8 (multi-resolver
+cross-validation) are **deferred** (marked **DEFERRED** below): high
+architectural risk for high-but-costly security value, retained for research
+only. Vector numbers are retained as stable identifiers; gaps are intentional.
 
 ## 1. Baseline DNS posture (already implemented)
 
@@ -49,17 +52,16 @@ stable identifiers; gaps are intentional.
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 1 | **DNS-over-TLS (DoT)** | On-path injection of fake responses | High (new TLS client dep, cert handling, resource profile) | Low — explicit non-goal | Feasibility study; defer unless user authorizes amendment |
-| 3 | **DNSCrypt** | Authenticated channel (less standard) | Medium | Low | Low priority |
-| 5 | **Resolver certificate pinning / TOFU** | CA-compromise resistance | Medium | Low (prerequisite for DoT) | Study as part of DoT |
+| 1 | **DEFERRED** **DNS-over-TLS (DoT)** | On-path injection of fake responses | High (new TLS client dep, cert handling, resource profile) | Low — explicit non-goal | Feasibility study; defer unless user authorizes amendment |
+| 5 | **DEFERRED** **Resolver certificate pinning / TOFU** | CA-compromise resistance | Medium | Low (prerequisite for DoT) | Study as part of DoT |
 
 ### B. Data authenticity (end-to-end; defends against a *compromised* resolver)
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 6 | **DNSSEC validation** | Forged records even from a malicious/poisoned resolver — strongest fit to the "fake DNS record" threat | High (new crypto, new dependency, resource profile) | Low | **Top research priority** — feasibility study for a zero-alloc fixed-profile validating stub |
+| 6 | **DEFERRED** **DNSSEC validation** | Forged records even from a malicious/poisoned resolver — strongest fit to the "fake DNS record" threat | High (new crypto, new dependency, resource profile) | Low | **Top research priority** — feasibility study for a zero-alloc fixed-profile validating stub |
 | 7 | **AD-bit / DO-bit handling** | Require authenticated data; treat unauthenticated answers as lower-trust | Medium | Low | Study as part of DNSSEC |
-| 8 | **Multi-resolver cross-validation / split-horizon detection** | Detect a single compromised resolver | High | Low — violates 1-conn/1-query + no-fallback doctrine | Defer; document as a design-revision candidate |
+| 8 | **DEFERRED** **Multi-resolver cross-validation / split-horizon detection** | Detect a single compromised resolver | High | Low — violates 1-conn/1-query + no-fallback doctrine | Defer; document as a design-revision candidate |
 
 ### C. Response-format hardening (off-path / cache-poisoning resistance)
 
