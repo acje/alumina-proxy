@@ -3,11 +3,21 @@ allowlist = ["api.github.com:443", "example.com:443", "www.example.net:443"]
 # 0.0.0.0:<port> for a dedicated VPC appliance (hard RCE egress confinement).
 listen = "127.0.0.1:5353"
 startup_unresolved_allowance = 0
-# Validated resolver set: 1..=5 numeric unicast IPv4/IPv6 addresses, port 53,
-# no zone identifiers, each optionally in IP#fqdn form (V37 golden path --
-# docs/alumina-proxy.md:62 / alumina-dot-chain-v37 amendment). The FQDN is the
-# validated SNI/SAN match target for the future DoT handshake (port 853, DoT
-# Package 2); the port here stays 53.
+# Validated resolver set: 1..=5 numeric unicast IPv4/IPv6 addresses, no zone
+# identifiers, each in one of three forms (docs/alumina-proxy.md:62 / the
+# alumina-dot-chain amendment, Package 1 + Package 2):
+#   IP                  -- plain DNS, port 53 (tolerated degraded trust; warns)
+#   IP#fqdn             -- DoT, port 853, CA-chain validation
+#   IP#fqdn#pin-sha256= -- DoT, port 853, STRICT SPKI pin + FQDN/SAN validation
+# The FQDN is the validated SNI/SAN match target; presence of an FQDN selects
+# DoT port 853 and NEVER a silent plain-DNS fallback. There is no dynamic pin
+# update: the pin is fixed at startup and a mismatch fails the handshake closed.
+#
+# !!! The pin-sha256 values below are SYNTAX PLACEHOLDERS (the null pin) ---
+#     replace each with the resolver's real SPKI SHA-256 (unpadded base64 of
+#     the 32-byte subject public key info digest, obtained out-of-band / from
+#     the resolver operator). A wrong pin fails closed, so an un-replaced
+#     placeholder makes the entry unusable by design, never silently insecure.
 #
 # Common public DNS services with their documented DoT hostnames (deployment
 # picks 1..=5; IPv6 variants also valid):
@@ -18,7 +28,7 @@ startup_unresolved_allowance = 0
 #   AdGuard DNS:       94.140.14.14 # dns.adguard.com (2a10:50c0::ad1:ff)
 # Bare-IP entries remain valid but each emits one startup warning (degraded
 # trust form).
-resolver = ["1.1.1.1#cloudflare-dns.com", "8.8.8.8#dns.google", "9.9.9.9#dns.quad9.net", "208.67.222.222#dns.opendns.com", "94.140.14.14#dns.adguard.com"]
+resolver = ["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "8.8.8.8#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "9.9.9.9#dns.quad9.net#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "208.67.222.222#dns.opendns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "94.140.14.14#dns.adguard.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
 # Mandatory index-aligned tripwire action tables (docs/alumina-proxy.md:265-281):
 # [any_illegal] scope is the AnyIllegal first-slot Block scope ("connection"|"all");
 # [actions] kind/scope are one literal per allowlist entry, in allowlist order.

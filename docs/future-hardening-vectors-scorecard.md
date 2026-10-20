@@ -34,15 +34,24 @@ marked **DONE** below, with rows remaining at their original scores.
 On 2026-10-20 vectors 24 and 18 were **implemented** via the `alumina-hrdn4`
 hardening increment (`docs/alumina-proxy.md`); they are likewise marked
 **DONE** below, with rows remaining at their original scores.
-Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), 7 (AD-bit / DO-bit handling),
-and 8 (multi-resolver cross-validation) are **deferred** (marked **DEFERRED**):
+Vectors 1 (DoT) and 5 (cert pinning) were **implemented** on 2026-10-20 via the
+`alumina-dot-chain-v1-v5` hardening increment (`docs/alumina-proxy.md`, Package
+2 of the DoT chain): DNS-over-TLS on port 853 with per-entry dial port, strict
+SPKI pin via `IP#fqdn#pin-sha256=<b64>` plus FQDN/SAN validation, no silent
+plain-DNS fallback, and an empty-root CA-chain form that fails closed pending a
+trust-anchor intake; they are marked **DONE** below, with rows remaining at
+their original scores. Vectors 6 (DNSSEC), 7 (AD-bit / DO-bit handling),
+and 8 (multi-resolver cross-validation) remain **deferred** (marked
+**DEFERRED**):
 high architectural risk for high-but-costly security value, retained for
 research only. Vector 7 defers as a dependent of 6 — the AD/DO bits are only
 meaningful with authenticated data. Vector 37 (resolver endpoint as IP+FQDN,
 golden path) was added to the register as a candidate on 2026-10-20 and was
 **implemented** the same day via the `alumina-dot-chain-v37` hardening increment
 (`docs/alumina-proxy.md`) as Package 1 of the DoT chain (a validated `IP#fqdn`
-resolver name identity; the DoT transport itself remains Package 2). Its 8-rater
+resolver name identity); Package 2 of the chain (the DoT transport and strict
+SPKI pinning, vectors 1 and 5) landed the same day via `alumina-dot-chain-v1-v5`.
+Vector 37's 8-rater
 scoring was **DROPPED** — the vector shipped unscored, is marked DONE in the
 register, and is therefore not ranked below.
 
@@ -78,9 +87,9 @@ Generated from `scores.jsonl` (200 score lines; 19 scored vectors shown).
 | 12 | 35 | **DONE** CONNECT header-line count bound — implemented (2026-10-19) | 6.50 | 3.62 | 9.38 | 1.25 |
 | 13 | 18 | **DONE** Multi-resolver failover — implemented (2026-10-20) | 6.38 | 5.50 | 7.25 | 4.38 |
 | 14 | 23 | Cross-resolver divergence reporting | 6.12 | 4.88 | 7.38 | 4.50 |
-| 15 | 5 | **DEFERRED** Resolver cert pinning / TOFU | 6.06 | 7.25 | 4.88 | 6.75 |
+| 15 | 5 | **DONE** Resolver cert pinning / TOFU — implemented (2026-10-20) | 6.06 | 7.25 | 4.88 | 6.75 |
 | 16 | 8 | **DEFERRED** Multi-resolver cross-validation | 6.00 | 7.75 | 4.25 | 8.00 |
-| 17 | 1 | **DEFERRED** DNS-over-TLS (DoT) | 5.62 | 7.88 | 3.38 | 7.12 |
+| 17 | 1 | **DONE** DNS-over-TLS (DoT) — implemented (2026-10-20) | 5.62 | 7.88 | 3.38 | 7.12 |
 | 18 | 6 | **DEFERRED** DNSSEC validation | 5.62 | 8.75 | 2.50 | 8.12 |
 | 19 | 10 | EDNS0 / larger-buffer negotiation | 3.69 | 1.12 | 6.25 | 1.62 |
 
@@ -365,11 +374,18 @@ Overall **6.12** · Eff **4.88** · Plaus **7.38** · Risk **4.50**
 | linus | 4 | 8 | 6 |
 | linus | 6 | 7 | 5 |
 
-### Rank 15 — Vector 5: Resolver cert pinning / TOFU — **DEFERRED**
+### Rank 15 — Vector 5: Resolver cert pinning / TOFU — **DONE**
 
 Overall **6.06** · Eff **7.25** · Plaus **4.88** · Risk **6.75**
 
-**Status:** **DEFERRED** — only valuable as a prerequisite of DoT (v1); deferred with it as the DoT trust model.
+**Status:** **DONE** — implemented (2026-10-20, `alumina-dot-chain-v1-v5`) — strict
+SPKI pinning via an `IP#fqdn#pin-sha256=<b64>` resolver suffix: the base64 is
+decoded to a 32-byte [`SpiPin`] (`src/resolver.rs:98-131`) at config parse and
+compared against a ring SHA-256 of the TLS peer's `subject_public_key_info()`
+with FQDN/SAN validation; a mismatch fails closed as
+`InvalidCertificate(ApplicationVerificationFailure)` (`src/startup_dns.rs:708-723`).
+The no-pin `IP#fqdn` CA-chain form (empty root store) also fails closed
+deterministically; there is no silent plain-DNS fallback.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -399,11 +415,18 @@ Overall **6.00** · Eff **7.75** · Plaus **4.25** · Risk **8.00**
 | general | 7 | 6 | 6 |
 | general | 6 | 4 | 8 |
 
-### Rank 17 — Vector 1: DNS-over-TLS (DoT) — **DEFERRED**
+### Rank 17 — Vector 1: DNS-over-TLS (DoT) — **DONE**
 
 Overall **5.62** · Eff **7.88** · Plaus **3.38** · Risk **7.12**
 
-**Status:** **DEFERRED** — high architectural risk (new TLS client dep, cert handling, resource profile) for high security value; retained for research only. Defer unless the user authorizes a spec amendment.
+**Status:** **DONE** — implemented (2026-10-20, `alumina-dot-chain-v1-v5`) — a
+bare `IP` entry keeps plain DNS on port 53; `IP#fqdn` upgrades to DoT on port
+853 with rustls + rustls-webpki CA-chain validation (empty-root store →
+deterministic failure); `IP#fqdn#pin-sha256=<b64>` adds strict SPKI pinning.
+TLS/alloc is confined to the connect setup path (`build_tls_connection`
+`src/startup_dns.rs:766`, `upgrade_to_tls` `:1546`, `probe_tls_handshake`
+`:1604`, `try_recv` `:1922`, `drain_tls_write` `:2629`); the bare-IP path stays
+allocation-free and no new serving-path runtime surface is exposed.
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|

@@ -645,3 +645,55 @@ The 4 KiB document bound at `:54` was re-measured for the V37 golden path with p
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array, and every configured resolver still dials fixed port 53 this package (DoT port 853 arrives only with the Package-2 transport as its own user-authorized amendment). Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## DoT transport (V1) and strict SPKI pinning (V5), Package 2 of the DoT chain — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-dot-chain-v1-v5`, Package 2, 2026-10-20). It records the user authorization for the second package of the DNS-over-TLS (DoT) chain begun by `alumina-dot-chain-v37` (Package 1, resolver FQDN metadata): the DNS-over-TLS transport on port 853 and its strict SPKI pin variant. It supersedes the `alumina-dot-chain-v37` status row "DoT transport on port 853 with SNI/SAN validation — Deferred (next package of the DoT chain)" and the `#pin-sha256=` suffix rejection the Package 1 amendment recorded at `src/resolver.rs` — a pin suffix is now a valid strict-pin entry, not an `InvalidFqdn`. It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding.
+
+### Amended surface
+
+#### Directory — three resolver trust forms, per-entry dial port
+
+Spec `:54`/`:56`/`:62` and the hrdn4/V37 amendments own the validated `resolver` array. Package 2 gives each 1..=5 entry one of three dial forms selected at startup by entry grammar (never mixed mid-flight, never silently downgraded):
+
+| Resolver entry | Dial | Trust on the handshake |
+| --- | --- | --- |
+| `IP` | plain DNS, port 53 | none (tolerated degraded trust; one startup warning each) |
+| `IP#fqdn` | DoT, port 853 | CA-chain validation (empty root store — see the caveat below) |
+| `IP#fqdn#pin-sha256=<b64>` | DoT, port 853 | strict SPKI pin equality **and** FQDN/SAN validation |
+
+`Nameserver::port()` (`src/resolver.rs:202`) returns 853 whenever the entry carries an FQDN and 53 for a bare-IP entry; the per-entry port drives the dial address the transport registers (`src/startup_dns.rs:2446`). A DoT entry that fails its handshake is settled as one counted connect failure — there is **no** silent plain-DNS fallback and a TLS identity failure never downgrades the connection to cleartext. The startup window, retry schedule, failover/failback, and 1-conn/1-query doctrine are unchanged.
+
+#### Pin grammar and carrier (`#pin-sha256=`)
+
+`SpiPin` (`src/resolver.rs:103`) carries the 32 raw digest bytes inline so `Nameserver`/`ResolverSet` stay `Copy` with no heap. The suffix `#pin-sha256=` (`PIN_SHA256_SUFFIX`, `src/resolver.rs:15`) is a sub-suffix of the `#fqdn` rest, so the single `#` IP/rest boundary splits exactly once and the two suffixes compose. `decode_b64_32` (`src/resolver.rs:155`) accepts exactly 43 unpadded base64 characters, or 43 data characters plus one `=` pad, in either the standard or URL-safe alphabet, with non-zero leftover bits rejected; `config.rs` gates a pin on a DoT port-853 entry (`InvalidResolver` diagnostics) and `parse` maps any decode failure to `PinError::Invalid`.
+
+#### Verifier — strict pin + FQDN/SAN, or empty-root CA-chain
+
+`AluminaServerCertVerifier` (`src/startup_dns.rs:702`) implements `ServerCertVerifier` over the ring provider's supported algorithms. The pinned branch: `ParsedCertificate::try_from` the end entity, then `verify_server_name` against the resolver FQDN as SNI/SAN, then ring SHA-256 of `subject_public_key_info()` compared to `SpiPin::as_bytes()` — a mismatch returns `InvalidCertificate(ApplicationVerificationFailure)`, and the pin branch **skips** CA-chain validation (TOFU-grade strictness, V5). The unpinned `IP#fqdn` branch validates the chain with `verify_server_cert_signed_by_trust_anchor` against `RootCertStore::empty()` (`src/startup_dns.rs:728-734`): with no trust anchors configured, chain validation deterministically fails (`UnknownIssuer`) for a self-signed or CA-untethered certificate, so an unpinned DoT entry fails closed and counts a connect failure.
+
+> **Caveat — empty root store.** No webpki-roots (or other) trust-anchor bundle is carried: `IP#fqdn` entries are validated against an **empty** root store and therefore cannot succeed against a publicly-trusted resolver until a trust-anchor intake lands. This is a deliberate chain-transition state, not a bypass: the entry fails closed and is operator-visible. A follow-up crate intake (`rust-dep-intake`) is required before unpinned DoT is operationally useful for public resolvers; strict-pinned entries are usable immediately because they need no CA chain.
+
+#### Transport confinement and lifecycle
+
+TLS state and its heap allocations are confined to the per-connect DoT setup seam `build_tls_connection` (`src/startup_dns.rs:766`, called from `upgrade_to_tls` `src/startup_dns.rs:1546`): the rustls `ClientConnection` lives in a `Box` inside the connected transport (`DnsConn::Tls`), so the fixed `StartupDns` struct and every non-DoT struct stay compact, and the bare-IP path constructs no TLS state at all. Warm reuse of one established TLS connection across the startup window's exchanges is retained; a handshake or identity failure never reuses a poisoned connection and each failed exchange is counted individually. There is no dynamic pin update at runtime — the pin is fixed at startup.
+
+#### Verification
+
+Hermetic loopback tests (`src/startup_dns/dot_tests.rs`) drive a rustls `ServerConnection` responder over 127.0.0.1 with deterministic embedded certificates (self-signed EC P-256, CN/SAN `dot.test`, plus a same-SPKI SAN-mismatch variant) — no real resolver is dialed. They cover: pinned success for both names × A/AAAA over one warm connection; the handshake-before-send-before-receive stage order; wrong-pin rejection; SAN-mismatch rejection; and unpinned-vs-empty-root rejection — each negative path counts 4 failed exchanges, publishes nothing, and leaves zero bindings. `dot_tests` is wired into the native verification gate (`scripts/verify.sh` INTENDED set; `mid`/`boundary phase1` clippy and the full lib test suite).
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| DoT transport on port 853: `step_handshake`/`probe_tls_handshake`, `upgrade_to_tls`, TLS read/write steps, warm connection reuse; per-entry dial port via `Nameserver::port()` | Implemented (this increment) |
+| Strict SPKI pin `IP#fqdn#pin-sha256=<b64>`: `SpiPin` inline carrier, base64 decode, ring SHA-256 SPKI comparison + FQDN/SAN, pin branch skips chain validation | Implemented (this increment) |
+| CA-chain (no-pin) DoT: `verify_server_cert_signed_by_trust_anchor` against `RootCertStore::empty()` — deterministic fail-closed until trust-anchor intake | Implemented (this increment); trust-anchor intake deferred |
+| No silent plain-DNS fallback; single counted connect failure per failed exchange | Implemented (this increment) |
+| TLS/heap confined to per-connect DoT setup; bare-IP path allocation-free | Implemented (this increment) |
+| Hermetic loopback DoT tests (pinned success, wrong pin, SAN mismatch, empty-root, stage order) wired into native verification | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; the bare-IP resolver path and its fixed port-53 behavior are unchanged. Doctrine: no fallback beyond the declared `resolver` array — a DoT entry's failure is a counted connect failure with no cleartext downgrade and no dynamic pin update. Nothing in this amendment loosens any of these items or restates any profile row differently.

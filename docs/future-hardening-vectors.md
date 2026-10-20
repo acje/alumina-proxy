@@ -44,8 +44,15 @@ moved into the validated TOML config with the `resolv.conf` reader removed
 (24), and multi-resolver failover/failback among the config-declared resolvers
 (18) — and each row below is marked **DONE** with its pinned semantics and
 code location.
-Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), 7 (AD-bit / DO-bit handling),
-and 8 (multi-resolver cross-validation) are **deferred** (marked **DEFERRED**
+Vectors 1 (DoT) and 5 (cert pinning) were **implemented** on 2026-10-20 via the
+`alumina-dot-chain-v1-v5` hardening increment (Package 2 of the DoT chain,
+recorded in `docs/alumina-proxy.md`): DNS-over-TLS on port 853 with per-entry
+dial port, and strict SPKI pin via `IP#fqdn#pin-sha256=<b64>` plus FQDN/SAN
+validation, with no silent plain-DNS fallback; the CA-chain (no-pin) DoT form
+validates against an empty root store and fails closed pending a trust-anchor
+intake. Each row below is marked **DONE** with its pinned semantics and code
+location. Vectors 6 (DNSSEC), 7 (AD-bit / DO-bit handling), and 8
+(multi-resolver cross-validation) remain **deferred** (marked **DEFERRED**
 below): high architectural risk for high-but-costly security value, retained
 for research only. Vector 7 defers as a dependent of 6 — the AD/DO bits are
 only meaningful with authenticated data. Vector numbers are retained as stable
@@ -78,9 +85,9 @@ identifiers; gaps are intentional.
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 1 | **DEFERRED** **DNS-over-TLS (DoT)** | On-path injection of fake responses | High (new TLS client dep, cert handling, resource profile) | Low — explicit non-goal | Feasibility study; defer unless user authorizes amendment |
-| 5 | **DEFERRED** **Resolver certificate pinning / TOFU** | CA-compromise resistance | Medium | Low (prerequisite for DoT) | Study as part of DoT |
-| 37 | **DONE** **Resolver endpoint as IP+FQDN (golden path)** *(implemented, 2026-10-20, Package 1 of the DoT chain)* | A DoT resolver reached by bare IP cannot be name-authenticated (no SNI/SAN match on the TLS handshake); IP-only is a degraded trust form | Low–medium | Medium (extends the validated `resolver` array, V24) | **Implemented by `alumina-dot-chain-v37`** (2026-10-20): each `resolver` entry may be `IP#fqdn`; the FQDN is validated (DNS-name syntax, no wildcard/IDN, labels 1–63 lowercase ASCII, total ≤253), stored zero-alloc inline, and carried as the SNI/SAN match target; IP-only config is tolerated but emits a startup warning — IP+FQDN is the golden path. The DoT transport on port 853 (Package 2 of the chain) remains deferred |
+| 1 | **DONE** **DNS-over-TLS (DoT)** *(implemented, 2026-10-20, Package 2 of the DoT chain)* | On-path injection of fake responses | High (new TLS client dep, cert handling, resource profile) | Medium (transport per-entry, TLS/heap confined to DoT connect setup) | **Implemented by `alumina-dot-chain-v1-v5`** (2026-10-20): a resolver entry carrying an FQDN (`IP#fqdn`, V37) dials DoT on port 853 (`Nameserver::port()`), the rustls client is built only at the per-connect `upgrade_to_tls` seam, and FQDN/SAN validation runs on every DoT handshake; bare-IP entries stay on fixed port 53 with no TLS state and no silent plain-DNS fallback for DoT entries (`src/startup_dns.rs:702-759`, `:1546`, `src/resolver.rs:202`). The CA-chain (no-pin) form validates against an empty root store and fails closed pending a trust-anchor intake |
+| 5 | **DONE** **Resolver strict certificate pinning (SPKI)** *(implemented, 2026-10-20, Package 2 of the DoT chain)* | CA-compromise resistance | Medium | Medium (prerequisite for DoT; now landed with it) | **Implemented by `alumina-dot-chain-v1-v5`** (2026-10-20): `IP#fqdn#pin-sha256=<b64>` parses a 32-byte SPKI pin into the `Copy` `SpiPin` carrier and the DoT verifier compares a ring SHA-256 of the presented certificate's SPKI to the pin (plus FQDN/SAN); a mismatch returns `InvalidCertificate(ApplicationVerificationFailure)`, pin mode skips CA-chain validation, and the pin is fixed at startup with no dynamic update (`src/resolver.rs:103-126`, `:155-182`, `src/startup_dns.rs:716-727`) |
+| 37 | **DONE** **Resolver endpoint as IP+FQDN (golden path)** *(implemented, 2026-10-20, Package 1 of the DoT chain)* | A DoT resolver reached by bare IP cannot be name-authenticated (no SNI/SAN match on the TLS handshake); IP-only is a degraded trust form | Low–medium | Medium (extends the validated `resolver` array, V24) | **Implemented by `alumina-dot-chain-v37`** (2026-10-20): each `resolver` entry may be `IP#fqdn`; the FQDN is validated (DNS-name syntax, no wildcard/IDN, labels 1–63 lowercase ASCII, total ≤253), stored zero-alloc inline, and carried as the SNI/SAN match target; IP-only config is tolerated but emits a startup warning — IP+FQDN is the golden path. The DoT transport on port 853 and strict SPKI pinning landed the same day as Package 2 (`alumina-dot-chain-v1-v5`, this register, vectors 1 and 5) |
 
 ### B. Data authenticity (end-to-end; defends against a *compromised* resolver)
 
