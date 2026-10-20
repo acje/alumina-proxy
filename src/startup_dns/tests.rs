@@ -965,7 +965,7 @@ fn cooperative_silent_peer_yields_pending_before_deadline() {
         "a silent-peer exchange must not publish"
     );
     assert!(
-        transport.stream.is_none(),
+        transport.conn.is_none(),
         "a failed exchange must close the connection for the next attempt"
     );
     drop(responder);

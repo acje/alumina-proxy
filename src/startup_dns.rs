@@ -20,18 +20,28 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Registry, Token};
 
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::{
+    ClientConnection, verify_server_cert_signed_by_trust_anchor, verify_server_name,
+};
+use rustls::crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::server::ParsedCertificate;
+use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+
 use crate::cache::{Cache, CacheError, Family};
 use crate::config::{ALLOWLIST_MAX, Config, Fqdn};
 use crate::dns::{self, BailiwickZones, DNS_MSG_LIMIT, DnsError, ResponseWorkspace};
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::log;
-use crate::resolver::{MAX_RESOLVERS, ResolverSet};
+use crate::resolver::{Fqdn as ResolverFqdn, MAX_RESOLVERS, ResolverSet, SpiPin};
 use crate::schedule::{ScheduleError, Schedules};
 
 pub const EXCHANGE_DEADLINE_SECS: u64 = 2;
@@ -206,6 +216,11 @@ pub(crate) enum ExchangeStep {
     /// A nonblocking connect is in progress toward the exchange deadline; the
     /// query is not written until the socket is verifiably connected.
     Connecting,
+    /// A `DoT` exchange whose TCP socket is connected is driving the rustls
+    /// client handshake toward `is_handshaking() == false`; the query is not
+    /// written until the handshake completes (TLS setup allocations are
+    /// confined to this per-connect seam).
+    TlsHandshake,
     /// The length-prefixed query is not yet fully written and the send can
     /// proceed without waiting; the next turn attempts another nonblocking
     /// write.
@@ -237,10 +252,25 @@ pub(crate) enum TurnResult {
 enum ConnectStep {
     /// The connection is not yet established; the exchange stays in scope.
     Waiting,
-    /// The socket is connected; advance moves to the sending stage next turn.
-    Transition,
+    /// The socket is connected; `next` names the following stage — the `DoT`
+    /// handshake when the resolver carries an FQDN/pin target, or the direct
+    /// send for a bare-IP resolver.
+    Transition { next: ExchangeStep },
     /// A counted failure; the exchange has been settled and closed.
     Failed,
+}
+
+/// The outcome of one nonblocking connect probe.
+enum ConnectProbe {
+    /// The connect is not yet completed; the exchange stays in scope.
+    NotReady,
+    /// The socket is connected; the exchange may transition to its next stage.
+    Connected,
+    /// A counted socket error; the exchange is settled and closed.
+    SocketError,
+    /// The completed connect landed on an unexpected peer; a resolver-peer
+    /// anomaly is counted and the exchange fails closed.
+    PeerMismatch,
 }
 
 /// The progress of one nonblocking query-write step.
@@ -263,6 +293,28 @@ enum RecvStep {
     Waiting,
     Failed,
     Published,
+}
+
+/// The progress of one nonblocking `DoT` TLS-handshake step.
+enum HandshakeStep {
+    /// The handshake is not complete; the exchange stays in scope and the
+    /// owner waits for socket readiness before another turn.
+    Waiting,
+    /// The handshake finished (peer authenticated); advance moves to the
+    /// sending stage next turn.
+    Transition,
+    /// A counted failure (certificate/identity rejection, alert, EOF, or
+    /// socket error); the exchange has been settled and closed.
+    Failed,
+}
+
+/// The outcome of one nonblocking TLS-handshake probe, decided inside the
+/// scoped borrow over the retained connection so the caller can close and
+/// count outside the borrow.
+enum HandshakeProbe {
+    Waiting,
+    Transition,
+    Failed,
 }
 
 /// The reason a startup exchange failed, captured at the step where the
@@ -614,6 +666,120 @@ impl ActiveResolver {
     }
 }
 
+/// The `DoT` identity the transport hands the rustls client for one connection:
+/// the resolver FQDN used as SNI and validated against the presented
+/// certificate's SAN, plus an optional strict SPKI pin. Carried only for
+/// `IP#fqdn`/`IP#fqdn#pin-sha256=` resolver entries; a bare-IP entry keeps
+/// `None` and dials plain DNS, so the FQDN presence is the transport signal
+/// with no silent plain-DNS fallback.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TlsTarget {
+    fqdn: ResolverFqdn,
+    pin: Option<SpiPin>,
+}
+
+/// A connected transport: plain TCP for a bare-IP resolver, or a rustls
+/// client connection over its own TCP socket for a `DoT` resolver. The boxed
+/// connection keeps the fixed [`StartupDns`] struct small while TLS setup
+/// allocations stay confined to the per-connect [`Self::upgrade_to_tls`] seam.
+enum DnsConn {
+    Plain(TcpStream),
+    Tls(TlsConn),
+}
+
+struct TlsConn {
+    tcp: TcpStream,
+    tls: Box<ClientConnection>,
+}
+
+/// A custom [`ServerCertVerifier`] for the `DoT` resolver set: an empty
+/// [`RootCertStore`] is held so a pinned entry's `verify_server_cert` trusts
+/// the pin (with FQDN/SAN validation) instead of any CA chain, while a
+/// CA-chain (no-pin) entry deterministically fails chain validation until a
+/// future trust-anchor intake lands. Everything delegates to the rustls/webpki
+/// verify helpers with the provider's supported algorithms.
+#[derive(Debug)]
+struct AluminaServerCertVerifier {
+    pin: Option<SpiPin>,
+    supported: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for AluminaServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let cert = ParsedCertificate::try_from(end_entity)?;
+        verify_server_name(&cert, server_name)?;
+        if let Some(pin) = self.pin {
+            let digest =
+                ring::digest::digest(&ring::digest::SHA256, &cert.subject_public_key_info());
+            if digest.as_ref() != pin.as_bytes().as_slice() {
+                return Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                ));
+            }
+            return Ok(ServerCertVerified::assertion());
+        }
+        verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &RootCertStore::empty(),
+            intermediates,
+            now,
+            self.supported.all,
+        )?;
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.supported)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.supported)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.supported.supported_schemes()
+    }
+}
+
+/// Builds the rustls client connection for a `DoT` resolver target: the ring
+/// crypto provider, a custom verifier (strict SPKI pin + SNI/SAN validation,
+/// or empty-root CA-chain validation), and the resolver FQDN as the SNI name.
+/// The heap allocations here are the bounded per-connection `DoT` setup cost —
+/// never on the bare-IP path, which constructs no TLS state at all.
+fn build_tls_connection(target: TlsTarget) -> Result<ClientConnection, rustls::Error> {
+    let provider = rustls::crypto::ring::default_provider();
+    let supported = provider.signature_verification_algorithms;
+    let config = ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AluminaServerCertVerifier {
+            pin: target.pin,
+            supported,
+        }))
+        .with_no_client_auth();
+    let server_name = ServerName::try_from(target.fqdn.as_str().to_owned()).map_err(|_| {
+        rustls::Error::General("resolver FQDN is not a valid TLS server name".into())
+    })?;
+    ClientConnection::new(Arc::new(config), server_name)
+}
+
 /// A boot-owned reusable DNS transport. Constructed once before the
 /// startup-window phase so the exchange loop performs no heap allocation or
 /// deallocation: the poll registry, fixed query/recv buffers, and the response
@@ -621,7 +787,14 @@ impl ActiveResolver {
 pub struct StartupDns {
     poll: Poll,
     events: Events,
-    stream: Option<TcpStream>,
+    /// The connected transport: plain TCP for a bare-IP resolver, or a rustls
+    /// client connection over its own TCP socket for a `DoT` resolver. `None`
+    /// between connections (closed, cancelled, or before the first connect).
+    conn: Option<DnsConn>,
+    /// The `DoT` identity of the resolver the transport currently points at:
+    /// FQDN (SNI and SAN validation) plus an optional strict SPKI pin. `None`
+    /// for a bare-IP resolver, which dials plain DNS with no TLS upgrade.
+    tls_target: Option<TlsTarget>,
     query_buf: [u8; QUERY_BUF_LEN],
     recv_buf: [u8; RECV_BUF_LEN],
     workspace: ResponseWorkspace,
@@ -728,7 +901,8 @@ impl StartupDns {
         Ok(StartupDns {
             poll,
             events,
-            stream: None,
+            conn: None,
+            tls_target: None,
             query_buf: [0; QUERY_BUF_LEN],
             recv_buf: [0; RECV_BUF_LEN],
             workspace: ResponseWorkspace::default(),
@@ -818,6 +992,10 @@ impl StartupDns {
         self.addr = nameserver;
         self.resolvers = Some(resolvers);
         self.active_resolver = ActiveResolver::primary(resolvers.len());
+        self.tls_target = resolvers.primary().fqdn().map(|fqdn| TlsTarget {
+            fqdn: *fqdn,
+            pin: resolvers.primary().pin().copied(),
+        });
         self.window_open = true;
         Ok(deadline)
     }
@@ -866,33 +1044,35 @@ impl StartupDns {
     /// the same token is reusable on a fresh source and `armed` clears to keep
     /// the registration state consistent with the closed stream.
     fn close_connection(&mut self) -> Result<(), StartupDnsError> {
-        let deregister_error = if let Some(mut stream) = self.stream.take() {
+        let mut deregister_error = None;
+        if let Some(conn) = self.conn.take() {
+            let mut stream = match conn {
+                DnsConn::Plain(stream) => stream,
+                DnsConn::Tls(conn) => conn.tcp,
+            };
             match &mut self.registration {
                 Registration::Private => match self.poll.registry().deregister(&mut stream) {
-                    Ok(()) => None,
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-                    Err(e) => Some(e.kind()),
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => deregister_error = Some(e.kind()),
                 },
                 Registration::Shared { armed, .. } => {
                     *armed = None;
-                    None
                 }
             }
-        } else {
-            if let Registration::Shared { armed, .. } = &mut self.registration {
-                *armed = None;
-            }
-            None
-        };
+        } else if let Registration::Shared { armed, .. } = &mut self.registration {
+            *armed = None;
+        }
         self.filled = 0;
         self.written = 0;
         self.msglen = None;
-        deregister_error.map_or(Ok(()), |kind| {
-            Err(StartupDnsError::Transport {
+        if let Some(kind) = deregister_error {
+            return Err(StartupDnsError::Transport {
                 kind,
                 detail: "deregister",
-            })
-        })
+            });
+        }
+        Ok(())
     }
 
     fn next_token(&mut self) -> Result<Token, StartupDnsError> {
@@ -928,7 +1108,7 @@ impl StartupDns {
     pub(crate) fn cancel_for_shutdown(&mut self) {
         self.active = None;
         self.window_open = false;
-        self.stream = None;
+        self.conn = None;
         if let Registration::Shared { armed, .. } = &mut self.registration {
             *armed = None;
         }
@@ -945,7 +1125,7 @@ impl StartupDns {
     /// socket after the write-ack.
     #[cfg(test)]
     pub(crate) fn test_fd_readable(&self) -> bool {
-        let Some(stream) = self.stream.as_ref() else {
+        let Some(stream) = raw_stream_ref(&self.conn) else {
             return false;
         };
         let mut probe = [0u8; 1];
@@ -996,7 +1176,7 @@ impl StartupDns {
                 *armed = None;
             }
         }
-        self.stream = Some(stream);
+        self.conn = Some(DnsConn::Plain(stream));
         Ok(None)
     }
 
@@ -1004,7 +1184,7 @@ impl StartupDns {
     /// wakes only for response data (or EOF), never on the always-ready
     /// writable edge once the query is fully sent.
     fn set_stream_interest_readable(&mut self) -> Result<(), StartupDnsError> {
-        let Some(stream) = self.stream.as_mut() else {
+        let Some(stream) = raw_stream(&mut self.conn) else {
             return Ok(());
         };
         if matches!(self.registration, Registration::Shared { .. }) {
@@ -1026,7 +1206,7 @@ impl StartupDns {
     /// by the completed connect. Drops the readable interest because no
     /// response can arrive before the query is fully written.
     fn set_stream_interest_writable(&mut self) -> Result<(), StartupDnsError> {
-        let Some(stream) = self.stream.as_mut() else {
+        let Some(stream) = raw_stream(&mut self.conn) else {
             return Ok(());
         };
         if matches!(self.registration, Registration::Shared { .. }) {
@@ -1070,6 +1250,7 @@ impl StartupDns {
 
     /// The transport peer the next exchange dials: the active resolver's
     /// address, seeded at window begin and relocated by failover and failback.
+    #[cfg(test)]
     pub(crate) const fn peer(&self) -> SocketAddr {
         self.addr
     }
@@ -1082,19 +1263,15 @@ impl StartupDns {
     #[cfg(test)]
     pub(crate) const fn set_peer_for_test(&mut self, addr: SocketAddr) {
         self.addr = addr;
+        self.tls_target = None;
     }
 
     /// Whether a completed nonblocking connect landed on the configured
     /// transport peer. Under test the seam can force a mismatch so the
     /// resolver-peer-anomaly branch is exercised end to end (vec-22).
-    fn peer_matches(&self, peer: SocketAddr) -> bool {
-        #[cfg(test)]
-        {
-            if self.force_peer_mismatch {
-                return false;
-            }
-        }
-        peer == self.peer()
+    #[cfg(test)]
+    pub(crate) fn peer_matches(&self, peer: SocketAddr) -> bool {
+        !self.force_peer_mismatch && peer == self.addr
     }
 
     /// Records a DNS anomaly by kind on the retained transport, saturating so
@@ -1129,7 +1306,7 @@ impl StartupDns {
         if matches!(self.registration, Registration::Shared { .. }) {
             return Ok(());
         }
-        if self.stream.is_some() {
+        if self.conn.is_some() {
             return Err(StartupDnsError::SharedAttachConflict);
         }
         self.registration = Registration::Shared { token, armed: None };
@@ -1156,7 +1333,7 @@ impl StartupDns {
             Registration::Shared { token, armed } => (*token, armed),
             Registration::Private => return Ok(()),
         };
-        let Some(stream) = self.stream.as_mut() else {
+        let Some(stream) = raw_stream(&mut self.conn) else {
             *armed = None;
             return Ok(());
         };
@@ -1196,11 +1373,13 @@ impl StartupDns {
     /// its own.
     fn shared_desired_interest(&self) -> Option<Interest> {
         match self.active.as_ref().map(|ex| ex.step) {
+            Some(ExchangeStep::TlsHandshake | ExchangeStep::SendReady) => {
+                Some(Interest::READABLE | Interest::WRITABLE)
+            }
+            Some(ExchangeStep::Receiving) => Some(Interest::READABLE),
             Some(ExchangeStep::Connecting | ExchangeStep::AwaitWritable) => {
                 Some(Interest::WRITABLE)
             }
-            Some(ExchangeStep::Receiving) => Some(Interest::READABLE),
-            Some(ExchangeStep::SendReady) => Some(Interest::READABLE | Interest::WRITABLE),
             None => None,
         }
     }
@@ -1229,7 +1408,10 @@ impl StartupDns {
         };
         matches!(
             ex.step,
-            ExchangeStep::Connecting | ExchangeStep::AwaitWritable | ExchangeStep::Receiving
+            ExchangeStep::Connecting
+                | ExchangeStep::TlsHandshake
+                | ExchangeStep::AwaitWritable
+                | ExchangeStep::Receiving
         )
     }
 
@@ -1287,21 +1469,39 @@ impl StartupDns {
             self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
             return Ok(ConnectStep::Failed);
         }
-        if let Some(stream) = self.stream.as_mut() {
-            if let Ok(Some(_err)) = stream.take_error() {
+        match self.probe_connect() {
+            ConnectProbe::SocketError => {
                 self.close_connection()?;
                 self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
                 return Ok(ConnectStep::Failed);
             }
-            if let Ok(peer) = stream.peer_addr() {
-                if self.peer_matches(peer) {
-                    return Ok(ConnectStep::Transition);
-                }
+            ConnectProbe::PeerMismatch => {
                 self.close_connection()?;
                 self.note_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
                 self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
                 return Ok(ConnectStep::Failed);
             }
+            ConnectProbe::Connected => {
+                let next = if let Some(target) = self.tls_target {
+                    self.upgrade_to_tls(ex, schedules, target)?;
+                    if self.conn.is_none() {
+                        return Ok(ConnectStep::Failed);
+                    }
+                    let needs_handshake = matches!(
+                        &self.conn,
+                        Some(DnsConn::Tls(conn)) if conn.tls.is_handshaking()
+                    );
+                    if needs_handshake {
+                        ExchangeStep::TlsHandshake
+                    } else {
+                        ExchangeStep::SendReady
+                    }
+                } else {
+                    ExchangeStep::SendReady
+                };
+                return Ok(ConnectStep::Transition { next });
+            }
+            ConnectProbe::NotReady => {}
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
@@ -1311,12 +1511,172 @@ impl StartupDns {
         Ok(ConnectStep::Waiting)
     }
 
-    /// One nonblocking query-write step: at most one write attempt, then the
-    /// deadline is checked before yielding so a completed write is honoured
-    /// even at the boundary (faithful to the original `send_query` loop). A
-    /// would-block is reported as `Blocked` so the stage moves to
-    /// `AwaitWritable`; any other partial progress stays sendable.
+    /// Probes one nonblocking connect: the socket is connected only once
+    /// `peer_addr` is resolvable (a completed nonblocking connect), and a
+    /// completed connect is checked against the configured transport peer so an
+    /// unexpected landing is counted as a resolver-peer anomaly by the caller.
+    fn probe_connect(&mut self) -> ConnectProbe {
+        let Some(stream) = raw_stream(&mut self.conn) else {
+            return ConnectProbe::NotReady;
+        };
+        if let Ok(Some(_err)) = stream.take_error() {
+            return ConnectProbe::SocketError;
+        }
+        if let Ok(peer) = stream.peer_addr() {
+            #[cfg(test)]
+            {
+                if self.force_peer_mismatch {
+                    return ConnectProbe::PeerMismatch;
+                }
+            }
+            return if peer == self.addr {
+                ConnectProbe::Connected
+            } else {
+                ConnectProbe::PeerMismatch
+            };
+        }
+        ConnectProbe::NotReady
+    }
+
+    /// Upgrades an established plain TCP connection to the `DoT` TLS layer: the
+    /// rustls client connection is built against the target (the bounded
+    /// per-connect `DoT` setup allocations) and the retained connection becomes
+    /// a [`DnsConn::Tls`]. A build failure settles as a counted connect
+    /// failure; the upgrade never downgrades back to plain text.
+    fn upgrade_to_tls(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+        target: TlsTarget,
+    ) -> Result<(), StartupDnsError> {
+        let tcp = match self.conn.take() {
+            Some(DnsConn::Plain(stream)) => stream,
+            other => {
+                self.conn = other;
+                return Ok(());
+            }
+        };
+        if let Ok(conn) = build_tls_connection(target) {
+            self.conn = Some(DnsConn::Tls(TlsConn {
+                tcp,
+                tls: Box::new(conn),
+            }));
+            self.probe_tls_handshake();
+        } else {
+            self.close_connection()?;
+            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+        }
+        Ok(())
+    }
+
+    /// One nonblocking `DoT` TLS-handshake step: at most one read and one write
+    /// pass, then readiness is re-checked and the exchange deadline honoured.
+    /// A failure (certificate/identity rejection, alert, EOF, socket error) is
+    /// settled as a counted connect failure, not an abort.
+    fn step_handshake(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<HandshakeStep, StartupDnsError> {
+        match self.probe_tls_handshake() {
+            HandshakeProbe::Waiting => {}
+            HandshakeProbe::Transition => return Ok(HandshakeStep::Transition),
+            HandshakeProbe::Failed => {
+                self.close_connection()?;
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+                return Ok(HandshakeStep::Failed);
+            }
+        }
+        if Instant::now() >= ex.deadline {
+            self.close_connection()?;
+            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+            return Ok(HandshakeStep::Failed);
+        }
+        Ok(HandshakeStep::Waiting)
+    }
+
+    /// Probes one nonblocking handshake pass: pending outbound flights (the
+    /// initial `ClientHello` on the first turn, later client flights after
+    /// processing server records) are drained, then one `read_tls` attempt is
+    /// processed. A `WouldBlock` on either side leaves the exchange waiting on
+    /// the armed socket edges; the handshake completes once rustls reports it
+    /// `is_handshaking() == false`.
+    fn probe_tls_handshake(&mut self) -> HandshakeProbe {
+        let Some(DnsConn::Tls(conn)) = self.conn.as_mut() else {
+            return HandshakeProbe::Failed;
+        };
+        let mut write_blocked = false;
+        loop {
+            match conn.tls.write_tls(&mut conn.tcp) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    write_blocked = true;
+                    break;
+                }
+                Err(_) => return HandshakeProbe::Failed,
+                Ok(_) => {}
+            }
+            if !conn.tls.wants_write() {
+                break;
+            }
+        }
+        if !write_blocked {
+            match conn.tls.read_tls(&mut conn.tcp) {
+                Ok(0) => {
+                    return HandshakeProbe::Failed;
+                }
+                Ok(_n) => {
+                    if conn.tls.process_new_packets().is_err() {
+                        return HandshakeProbe::Failed;
+                    }
+                    loop {
+                        match conn.tls.write_tls(&mut conn.tcp) {
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(_) => return HandshakeProbe::Failed,
+                            Ok(_) => {}
+                        }
+                        if !conn.tls.wants_write() {
+                            break;
+                        }
+                    }
+                }
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    return HandshakeProbe::Failed;
+                }
+            }
+        }
+        if conn.tls.is_handshaking() {
+            HandshakeProbe::Waiting
+        } else {
+            HandshakeProbe::Transition
+        }
+    }
+
+    /// One nonblocking query-write step, routing by transport: `DoT` connections
+    /// write through the TLS writer via [`Self::step_send_tls`]; plain TCP
+    /// connections write the raw length-prefixed query via
+    /// [`Self::step_send_plain`].
     fn step_send(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<SendStep, StartupDnsError> {
+        if matches!(self.conn, Some(DnsConn::Tls(_))) {
+            return self.step_send_tls(ex, schedules);
+        }
+        self.step_send_plain(ex, schedules)
+    }
+
+    /// One nonblocking plain query-write step: at most one write attempt, then
+    /// the deadline is checked before yielding so a completed write is
+    /// honoured even at the boundary (faithful to the original `send_query`
+    /// loop). A would-block is reported as `Blocked` so the stage moves to
+    /// `AwaitWritable`; any other partial progress stays sendable.
+    fn step_send_plain(
         &mut self,
         ex: &mut ActiveExchange,
         schedules: &mut Schedules,
@@ -1328,7 +1688,9 @@ impl StartupDns {
         {
             if let Some(force) = self.force_write.take() {
                 blocked = true;
-                if let (Some(stream), WriteForce::Partial(n)) = (self.stream.as_mut(), force) {
+                if let (Some(stream), WriteForce::Partial(n)) =
+                    (plain_stream(&mut self.conn), force)
+                {
                     let end = (self.written + n).min(ex.qlen);
                     if end > self.written {
                         match stream.write(&self.query_buf[self.written..end]) {
@@ -1363,7 +1725,7 @@ impl StartupDns {
             }
         }
         if !blocked && self.written < ex.qlen {
-            if let Some(stream) = self.stream.as_mut() {
+            if let Some(stream) = plain_stream(&mut self.conn) {
                 match stream.write(&self.query_buf[self.written..ex.qlen]) {
                     Ok(0) => {
                         self.close_connection()?;
@@ -1413,6 +1775,63 @@ impl StartupDns {
         Ok(SendStep::Waiting)
     }
 
+    /// One nonblocking `DoT` query-write step: the remaining length-prefixed
+    /// plaintext is buffered through the rustls writer and the resulting
+    /// outbound ciphertext flushed to the socket, honouring the exchange
+    /// deadline. A would-block on either side is backpressure; a writer or
+    /// socket error settles as a counted send failure.
+    fn step_send_tls(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<SendStep, StartupDnsError> {
+        let probe = match &mut self.conn {
+            Some(DnsConn::Tls(conn)) => tls_send_probe(
+                &self.query_buf[..ex.qlen],
+                &mut self.written,
+                &mut conn.tcp,
+                &mut conn.tls,
+            ),
+            _ => TlsSendProbe::Fail,
+        };
+        match probe {
+            TlsSendProbe::Fail => self.fail_send(ex, schedules),
+            TlsSendProbe::Blocked => {
+                self.set_stream_interest_writable()?;
+                if Instant::now() >= ex.deadline {
+                    self.close_connection()?;
+                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+                    return Ok(SendStep::Failed);
+                }
+                Ok(SendStep::Blocked)
+            }
+            TlsSendProbe::Progress => {
+                if Instant::now() >= ex.deadline {
+                    self.close_connection()?;
+                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+                    return Ok(SendStep::Failed);
+                }
+                Ok(SendStep::Waiting)
+            }
+            TlsSendProbe::Complete => {
+                self.set_stream_interest_readable()?;
+                Ok(SendStep::Transition)
+            }
+        }
+    }
+
+    /// Settles a counted send failure: closes the connection exactly once and
+    /// advances the schedule backoff for the send reason.
+    fn fail_send(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<SendStep, StartupDnsError> {
+        self.close_connection()?;
+        self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Send)?;
+        Ok(SendStep::Failed)
+    }
+
     /// One nonblocking response-read step: at most one read, then a complete
     /// validated message is published; an API/EOF/deadline failure settles the
     /// counted failure and closes the connection exactly once.
@@ -1423,30 +1842,15 @@ impl StartupDns {
         cache: &mut Cache,
         schedules: &mut Schedules,
     ) -> Result<RecvStep, StartupDnsError> {
-        if self.stream.is_none() {
-            self.close_connection()?;
-            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
-            return Ok(RecvStep::Failed);
-        }
         let want = self.msglen.map_or(2, |len| len + 2);
-        if self.filled < want
-            && let Some(stream) = self.stream.as_mut()
-        {
-            match stream.read(&mut self.recv_buf[self.filled..]) {
-                Ok(0) => {
+        if self.filled < want {
+            match self.try_recv() {
+                RecvTry::Failure => {
                     self.close_connection()?;
                     self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
                     return Ok(RecvStep::Failed);
                 }
-                Ok(n) => self.filled += n,
-                Err(e)
-                    if e.kind() == io::ErrorKind::WouldBlock
-                        || e.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => {
-                    self.close_connection()?;
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
-                    return Ok(RecvStep::Failed);
-                }
+                RecvTry::Wait | RecvTry::Progress => {}
             }
         }
         if self.msglen.is_none() && self.filled >= 2 {
@@ -1512,6 +1916,66 @@ impl StartupDns {
         Ok(RecvStep::Waiting)
     }
 
+    /// Fills the fixed receive buffer from the connected transport: plain
+    /// connections read the raw socket, `DoT` connections feed `read_tls` through
+    /// `process_new_packets` and drain the decrypted plaintext via the reader.
+    fn try_recv(&mut self) -> RecvTry {
+        match &mut self.conn {
+            None => RecvTry::Failure,
+            Some(DnsConn::Plain(stream)) => {
+                let filled_before = self.filled;
+                match stream.read(&mut self.recv_buf[self.filled..]) {
+                    Ok(0) => RecvTry::Failure,
+                    Ok(n) => {
+                        self.filled += n;
+                        if self.filled > filled_before {
+                            RecvTry::Progress
+                        } else {
+                            RecvTry::Wait
+                        }
+                    }
+                    Err(e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::Interrupted =>
+                    {
+                        RecvTry::Wait
+                    }
+                    Err(_) => RecvTry::Failure,
+                }
+            }
+            Some(DnsConn::Tls(conn)) => {
+                let filled_before = self.filled;
+                match conn.tls.read_tls(&mut conn.tcp) {
+                    Ok(0) => return RecvTry::Failure,
+                    Ok(_) => {
+                        if conn.tls.process_new_packets().is_err() {
+                            return RecvTry::Failure;
+                        }
+                    }
+                    Err(e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => return RecvTry::Failure,
+                }
+                loop {
+                    match conn.tls.reader().read(&mut self.recv_buf[self.filled..]) {
+                        Ok(0) => break,
+                        Ok(n) => self.filled += n,
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => return RecvTry::Failure,
+                    }
+                    break;
+                }
+                if self.filled > filled_before {
+                    RecvTry::Progress
+                } else {
+                    RecvTry::Wait
+                }
+            }
+        }
+    }
+
     /// Single-pass test-support resolution: visits each admitted name and
     /// record type once inside the fixed startup window, with no retries.
     /// This is not the startup policy path — [`Self::resolve_window`] owns the
@@ -1570,6 +2034,14 @@ impl StartupDns {
         self.addr = nameserver;
         self.resolvers = Some(*config.resolver_set());
         self.active_resolver = ActiveResolver::primary(config.resolver_set().len());
+        self.tls_target = config
+            .resolver_set()
+            .primary()
+            .fqdn()
+            .map(|fqdn| TlsTarget {
+                fqdn: *fqdn,
+                pin: config.resolver_set().primary().pin().copied(),
+            });
         let allowlist = config.allowlist();
         self.bailiwick = BailiwickZones::from_allowlist(allowlist);
         let names = allowlist.len();
@@ -1668,6 +2140,14 @@ impl StartupDns {
         self.addr = nameserver;
         self.resolvers = Some(*config.resolver_set());
         self.active_resolver = ActiveResolver::primary(config.resolver_set().len());
+        self.tls_target = config
+            .resolver_set()
+            .primary()
+            .fqdn()
+            .map(|fqdn| TlsTarget {
+                fqdn: *fqdn,
+                pin: config.resolver_set().primary().pin().copied(),
+            });
         let allowlist = config.allowlist();
         self.bailiwick = BailiwickZones::from_allowlist(allowlist);
         let names = allowlist.len();
@@ -1800,7 +2280,7 @@ impl StartupDns {
             return Err(StartupDnsError::ExchangeActive);
         }
         self.maybe_begin_failback()?;
-        let connect_err = if self.stream.is_none() {
+        let connect_err = if self.conn.is_none() {
             self.begin_connect(self.addr)?
         } else {
             None
@@ -1849,8 +2329,16 @@ impl StartupDns {
         let next_step = match ex.step {
             ExchangeStep::Connecting => match self.step_connect(&mut ex, schedules)? {
                 ConnectStep::Waiting => None,
-                ConnectStep::Transition => Some(ExchangeStep::SendReady),
+                ConnectStep::Transition { next } => Some(next),
                 ConnectStep::Failed => {
+                    self.active = None;
+                    return Ok(TurnResult::Failed);
+                }
+            },
+            ExchangeStep::TlsHandshake => match self.step_handshake(&mut ex, schedules)? {
+                HandshakeStep::Waiting => None,
+                HandshakeStep::Transition => Some(ExchangeStep::SendReady),
+                HandshakeStep::Failed => {
                     self.active = None;
                     return Ok(TurnResult::Failed);
                 }
@@ -1950,12 +2438,16 @@ impl StartupDns {
     /// a configured set keeps its seeded peer (the pre-window and loopback
     /// cases), where the active index stays the primary and the peer is the
     /// caller's injected address.
-    const fn repoint_to_active(&mut self) {
+    fn repoint_to_active(&mut self) {
         let Some(set) = self.resolvers else {
             return;
         };
         if let Some(resolver) = set.get(self.active_resolver.index()) {
             self.addr = SocketAddr::new(resolver.addr(), resolver.port());
+            self.tls_target = resolver.fqdn().map(|fqdn| TlsTarget {
+                fqdn: *fqdn,
+                pin: resolver.pin().copied(),
+            });
         }
     }
 
@@ -2069,6 +2561,115 @@ impl StartupDns {
     }
 }
 
+/// The raw TCP socket of the connected transport, whether the connection is
+/// plain or carries a TLS layer, for registry/reregister and readiness
+/// operations that are common to both. A free function over the `conn` field so
+/// callers keep field-precise borrows (`&mut self.conn` only), never a whole-
+/// struct borrow.
+const fn raw_stream(conn: &mut Option<DnsConn>) -> Option<&mut TcpStream> {
+    match conn {
+        Some(DnsConn::Plain(stream)) => Some(stream),
+        Some(DnsConn::Tls(conn)) => Some(&mut conn.tcp),
+        None => None,
+    }
+}
+
+/// Shared-borrow form of [`raw_stream`] for read-only readiness probes.
+#[cfg(test)]
+const fn raw_stream_ref(conn: &Option<DnsConn>) -> Option<&TcpStream> {
+    match conn {
+        Some(DnsConn::Plain(stream)) => Some(stream),
+        Some(DnsConn::Tls(conn)) => Some(&conn.tcp),
+        None => None,
+    }
+}
+
+/// The raw TCP socket only for a plain connection: a TLS upgrade never
+/// downgrades, so the plain query-write path (which emits the raw
+/// length-prefixed query) is structurally separated from the `DoT` path, which
+/// writes through the TLS writer instead.
+const fn plain_stream(conn: &mut Option<DnsConn>) -> Option<&mut TcpStream> {
+    match conn {
+        Some(DnsConn::Plain(stream)) => Some(stream),
+        _ => None,
+    }
+}
+
+/// The progress of one nonblocking TLS application-data write probe, decided
+/// inside the scoped borrow over the retained connection so the caller can arm
+/// interests and settle failures outside the borrow.
+enum TlsSendProbe {
+    /// Either zero plaintext was accepted this turn or a previous turn's
+    /// outbound ciphertext remains pending; the writer/socket reported
+    /// `WouldBlock` and a writable edge is required.
+    Blocked,
+    /// Some plaintext was accepted and flushed with no full drain; the next
+    /// write pass can proceed without waiting.
+    Progress,
+    /// Every remaining plaintext byte is buffered and every outbound
+    /// ciphertext byte is flushed; the exchange transitions to receiving.
+    Complete,
+    /// A writer or socket error was observed; the exchange is settled and
+    /// closed by the caller.
+    Fail,
+}
+
+/// The progress of one nonblocking receive probe across the plain/TLS split:
+/// `Wait` when no bytes were absorbed this turn, `Progress` when the fixed
+/// receive buffer grew, `Failure` on EOF or a transport/decryption error.
+enum RecvTry {
+    Wait,
+    Progress,
+    Failure,
+}
+
+/// Pushes buffered outbound ciphertext to the socket, nonblocking. Returns
+/// `Ok(true)` when the rustls write buffer is empty, `Ok(false)` when a
+/// `WouldBlock` leaves outbound data pending for the next writable turn.
+fn drain_tls_write(tcp: &mut TcpStream, tls: &mut ClientConnection) -> io::Result<bool> {
+    loop {
+        match tls.write_tls(tcp) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+        if !tls.wants_write() {
+            return Ok(true);
+        }
+    }
+}
+
+/// Performs one nonblocking plaintext-write pass through the TLS writer and
+/// flushes the resulting outbound ciphertext to the socket, classifying the
+/// next cooperative turn's backpressure.
+fn tls_send_probe(
+    plaintext: &[u8],
+    written: &mut usize,
+    tcp: &mut TcpStream,
+    tls: &mut ClientConnection,
+) -> TlsSendProbe {
+    loop {
+        match tls.writer().write(&plaintext[*written..]) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Ok(0) => return TlsSendProbe::Fail,
+            Ok(n) => *written += n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(_) => return TlsSendProbe::Fail,
+        }
+        if *written >= plaintext.len() {
+            break;
+        }
+    }
+    match drain_tls_write(tcp, tls) {
+        Ok(drained) if *written >= plaintext.len() && drained => TlsSendProbe::Complete,
+        Ok(true) => TlsSendProbe::Progress,
+        Ok(false) => TlsSendProbe::Blocked,
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => TlsSendProbe::Blocked,
+        Err(_) => TlsSendProbe::Fail,
+    }
+}
+
 /// The fixed per-name, per-family slot index used by the attempt ledger.
 const fn family_index(family: Family) -> usize {
     match family {
@@ -2116,3 +2717,6 @@ fn wait_until_next_step(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod dot_tests;

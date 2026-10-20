@@ -584,7 +584,7 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::InvalidResolver { index, value } => write!(
                 f,
-                "config resolver[{0}] value {value:?} invalid: expected a numeric unicast IPv4/IPv6 address (optionally `#fqdn`), port 53, no zone identifier, validated lowercase ASCII FQDN",
+                "config resolver[{0}] value {value:?} invalid: expected a numeric unicast IPv4/IPv6 address (optionally `#fqdn`, optionally `#fqdn#pin-sha256=<base64>`), port 53 (bare IP) or 853 (fqdn), no zone identifier, validated lowercase ASCII FQDN",
                 index + 1
             ),
         }
@@ -1238,6 +1238,35 @@ mod enforcement_config_tests {
     }
 
     #[test]
+    fn compact_32_hundred_byte_names_with_pinned_resolver_measured_total_is_4150() {
+        // base64("A".repeat(32)) = 43 unpadded chars (AQ...), the strict SPKI
+        // pin grammar's canonical value; `#dns.google#pin-sha256=` plus the
+        // 44-char padded digest costs 67 bytes over a bare-IP entry and cannot
+        // fit the max-count/max-name compact form.
+        let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+        let doc = full_group_document(32, "all", "block", "domain").replacen(
+            "resolver = [\"1.1.1.1\"]",
+            &format!("resolver = [\"1.1.1.1#dns.google#pin-sha256={b64}\"]"),
+            1,
+        );
+        assert_eq!(
+            doc.len(),
+            4151,
+            "tight 32×100-byte compact form with a pinned DoT entry exceeds 4096 B"
+        );
+        assert!(
+            doc.len() > CONFIG_DOC_LIMIT,
+            "a pinned DoT entry cannot fit the max-count/max-name compact form"
+        );
+        let err = parse_config_document(&doc).expect_err("oversized doc must be rejected");
+        assert!(
+            matches!(&err, ConfigError::OversizedDocument { got, limit } if *limit == CONFIG_DOC_LIMIT && *got == doc.len()),
+            "expected OversizedDocument for {} bytes, got {err:?}",
+            doc.len()
+        );
+    }
+
+    #[test]
     fn flare_connection_32_hundred_byte_names_measured_total_is_4379() {
         let doc = full_group_document(32, "connection", "flare_only", "connection");
         assert_eq!(
@@ -1403,8 +1432,37 @@ mod resolver_config_tests {
         assert_eq!(cfg.resolver_set().len(), 1);
         let primary = cfg.resolver_set().primary();
         assert_eq!(primary.addr().to_string(), "1.1.1.1");
-        assert_eq!(primary.port(), 53, "port stays 53 in V37");
+        assert_eq!(
+            primary.port(),
+            853,
+            "an fqdn resolver is a DoT entry on port 853"
+        );
         assert_eq!(primary.fqdn().expect("fqdn carried").as_str(), "dns.google");
+        assert!(primary.pin().is_none(), "no pin without the pin suffix");
+    }
+
+    #[test]
+    fn resolver_pin_from_config() {
+        // base64("A".repeat(32)) = 43 unpadded chars (AQ...), the resolver
+        // grammar's canonical strict SPKI pin for a DoT entry.
+        let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+        let cfg = parse_config_document(&valid_doc(&format!(
+            "[\"9.9.9.9#dns.quad9.net#pin-sha256={b64}\"]"
+        )))
+        .expect("pinned resolver valid");
+        assert_eq!(cfg.resolver_set().len(), 1);
+        let primary = cfg.resolver_set().primary();
+        assert_eq!(primary.addr().to_string(), "9.9.9.9");
+        assert_eq!(primary.port(), 853, "a pinned entry is a DoT entry");
+        assert_eq!(
+            primary.fqdn().expect("fqdn carried").as_str(),
+            "dns.quad9.net"
+        );
+        assert_eq!(
+            primary.pin().expect("pin carried").as_bytes(),
+            [0x01u8; 32],
+            "the strict SPKI pin decodes to the raw digest"
+        );
     }
 
     #[test]

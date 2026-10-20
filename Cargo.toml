@@ -193,6 +193,20 @@ signal-hook = { version = "=0.4.5", default-features = false }
 # minimal nonblocking-stdout fcntl + write boundary for the log sink. Pinned to
 # the exact resolved version; no new closure node (contract intent 26l1.21.3).
 libc = "=0.2.190"
+# DoT (V1) TLS client + SPKI pinning (V5): rustls with the ring provider.
+# GATED behind rust-dep-intake (T3 build-time surface review) — no build/test
+# before the closure's build-time surface is read. ring chosen over aws-lc-rs
+# for the minimal cc-only C build (no cmake) fitting the constrained-server
+# static-link profile. tls12 kept for DoT resolver compatibility.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "=1.15.1"
+rustls-webpki = { version = "=0.103.15", default-features = false, features = ["ring", "std"] }
+# Direct ring access for the strict DoT SPKI pin: the pin is the SHA-256 of
+# the server's SubjectPublicKeyInfo, and rustls keeps its digest surface
+# crate-private, so the pin check hashes the SPKI with ring directly.
+# ring 0.17.14 is already in the resolved closure (the rustls ring provider's
+# own dependency); promoting it to a direct dependency adds no closure node.
+ring = "=0.17.14"
 
 [features]
 # F1 counting allocator is opt-in so normal production releases are never
