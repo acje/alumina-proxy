@@ -6,13 +6,22 @@ carries no normative authority. It is a scored companion to
 `docs/future-hardening-vectors.md` (the vector register), restating and citing the
 implementation only.
 
-**Scope:** the 20 active hardening vectors from `docs/future-hardening-vectors.md`
-(excluded: 12, 30 — not applicable by design). Vectors 13, 15, 16, 20, 26, 27,
+**Scope:** the 19 active hardening vectors from `docs/future-hardening-vectors.md`
+(excluded: 12, 30 — not applicable by design; 17 — pruned 2026-10-19 as a
+deployment-side vector, rationale below). Vectors 13, 15, 16, 20, 26, 27,
 28, 29, 31 were pruned from the register as fully covered, and vectors 2 (DoH),
 3 (DNSCrypt), 4 (DoQ), 9 (0x20 case randomization), 25 (QNAME minimization) as
 low-plausibility/high-risk research discards (2026-10-19); vector 9 is strictly
 dominated by the TCP + CSPRNG-TID transport and adds zero value under the future
-DoT path. Since scoring (2026-10-19), vectors 33, 34, and
+DoT path. Vector 17 (authoritative-freshness bound) was pruned as a
+**deployment-side vector** (2026-10-19): Alumina cannot observe the age of
+authoritative data, the genuine upstream stale-answer bound is deployment-enforced
+resolver serve-stale control (RFC 8767) already recorded as a deployment
+responsibility at `docs/alumina-proxy.md:130`, and the only Alumina-side lever (a
+configurable honored-TTL cap) does not bound total staleness across renewals —
+analogous to vector 30 (deployment/operator vector only). Its row is removed
+from the ranked table below; the rationale is recorded here for the record.
+Since scoring (2026-10-19), vectors 33, 34, and
 36 were **implemented and pinned** via the `alumina-hrdn` hardening increment
 (`docs/alumina-proxy.md`); they are marked **DONE** in the ranked table and
 per-vector detail sections, and their rows remain with their original scores.
@@ -22,11 +31,16 @@ marked **DONE** below, with rows remaining at their original scores.
 On the same date vectors 11, 21, 22, and 32 were **implemented** via the
 `alumina-hrdn3` hardening increment (`docs/alumina-proxy.md`); they are likewise
 marked **DONE** below, with rows remaining at their original scores.
+On 2026-10-20 vectors 24 and 18 were **implemented** via the `alumina-hrdn4`
+hardening increment (`docs/alumina-proxy.md`); they are likewise marked
+**DONE** below, with rows remaining at their original scores.
 Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), 7 (AD-bit / DO-bit handling),
 and 8 (multi-resolver cross-validation) are **deferred** (marked **DEFERRED**):
 high architectural risk for high-but-costly security value, retained for
 research only. Vector 7 defers as a dependent of 6 — the AD/DO bits are only
-meaningful with authenticated data.
+meaningful with authenticated data. Vector 37 (resolver endpoint as IP+FQDN,
+golden path) was added to the register as a candidate on 2026-10-20; it is not
+yet scored (pending the 8-rater evaluation) and is therefore not ranked below.
 
 **Method:** 8 independent deep-analysis scores per vector = 4 `linus` (Rust-specialist)
 + 4 `general` raters. Every rater read the actual source before scoring. Scores are 1–10.
@@ -40,7 +54,7 @@ filtering of TLS tunnels* — NOT the existing fixed spec invariants.
 - **Risk** (architectural-change risk) — 1 = localized change … 10 = core redesign.
 - **Overall** = mean(effectiveness, plausibility). Risk reported separately (not folded into rank).
 
-Generated from `scores.jsonl` (200 score lines; 20 scored vectors shown).
+Generated from `scores.jsonl` (200 score lines; 19 scored vectors shown).
 
 ## Ranked table
 
@@ -52,20 +66,19 @@ Generated from `scores.jsonl` (200 score lines; 20 scored vectors shown).
 | 4 | 34 | **DONE** ClientHello handshake-length field bound — implemented (2026-10-19) | 7.50 | 5.50 | 9.50 | 1.12 |
 | 5 | 19 | **DONE** Resolver health probing / degraded signaling — implemented (2026-10-19) | 7.44 | 6.50 | 8.38 | 2.38 |
 | 6 | 32 | **DONE** CNAME-chain pinning to known-good zones — implemented (2026-10-19) | 7.44 | 7.38 | 7.50 | 3.00 |
-| 7 | 17 | Authoritative-freshness bound | 7.25 | 7.00 | 7.50 | 3.25 |
-| 8 | 24 | Startup-DNS trust-boundary hardening | 7.12 | 7.12 | 7.12 | 2.75 |
-| 9 | 33 | **DONE** Wrong-family records tolerated-vs-rejected pin — implemented (2026-10-19) | 6.81 | 4.38 | 9.25 | 1.38 |
-| 10 | 36 | **DONE** Non-CONNECT method / request-target form rejection — implemented (2026-10-19) | 6.81 | 4.12 | 9.50 | 1.12 |
-| 11 | 7 | **DEFERRED** AD-bit / DO-bit handling | 6.56 | 6.62 | 6.50 | 4.50 |
-| 12 | 22 | **DONE** Resolver identity / response-source verification — implemented (2026-10-19) | 6.50 | 5.38 | 7.62 | 2.75 |
-| 13 | 35 | **DONE** CONNECT header-line count bound — implemented (2026-10-19) | 6.50 | 3.62 | 9.38 | 1.25 |
-| 14 | 18 | Multi-resolver failover | 6.38 | 5.50 | 7.25 | 4.38 |
-| 15 | 23 | Cross-resolver divergence reporting | 6.12 | 4.88 | 7.38 | 4.50 |
-| 16 | 5 | **DEFERRED** Resolver cert pinning / TOFU | 6.06 | 7.25 | 4.88 | 6.75 |
-| 17 | 8 | **DEFERRED** Multi-resolver cross-validation | 6.00 | 7.75 | 4.25 | 8.00 |
-| 18 | 1 | **DEFERRED** DNS-over-TLS (DoT) | 5.62 | 7.88 | 3.38 | 7.12 |
-| 19 | 6 | **DEFERRED** DNSSEC validation | 5.62 | 8.75 | 2.50 | 8.12 |
-| 20 | 10 | EDNS0 / larger-buffer negotiation | 3.69 | 1.12 | 6.25 | 1.62 |
+| 7 | 24 | **DONE** Startup-DNS trust-boundary hardening — implemented (2026-10-20) | 7.12 | 7.12 | 7.12 | 2.75 |
+| 8 | 33 | **DONE** Wrong-family records tolerated-vs-rejected pin — implemented (2026-10-19) | 6.81 | 4.38 | 9.25 | 1.38 |
+| 9 | 36 | **DONE** Non-CONNECT method / request-target form rejection — implemented (2026-10-19) | 6.81 | 4.12 | 9.50 | 1.12 |
+| 10 | 7 | **DEFERRED** AD-bit / DO-bit handling | 6.56 | 6.62 | 6.50 | 4.50 |
+| 11 | 22 | **DONE** Resolver identity / response-source verification — implemented (2026-10-19) | 6.50 | 5.38 | 7.62 | 2.75 |
+| 12 | 35 | **DONE** CONNECT header-line count bound — implemented (2026-10-19) | 6.50 | 3.62 | 9.38 | 1.25 |
+| 13 | 18 | **DONE** Multi-resolver failover — implemented (2026-10-20) | 6.38 | 5.50 | 7.25 | 4.38 |
+| 14 | 23 | Cross-resolver divergence reporting | 6.12 | 4.88 | 7.38 | 4.50 |
+| 15 | 5 | **DEFERRED** Resolver cert pinning / TOFU | 6.06 | 7.25 | 4.88 | 6.75 |
+| 16 | 8 | **DEFERRED** Multi-resolver cross-validation | 6.00 | 7.75 | 4.25 | 8.00 |
+| 17 | 1 | **DEFERRED** DNS-over-TLS (DoT) | 5.62 | 7.88 | 3.38 | 7.12 |
+| 18 | 6 | **DEFERRED** DNSSEC validation | 5.62 | 8.75 | 2.50 | 8.12 |
+| 19 | 10 | EDNS0 / larger-buffer negotiation | 3.69 | 1.12 | 6.25 | 1.62 |
 
 ## Per-vector detail (all 8 scores, eff/plaus/risk)
 
@@ -194,24 +207,18 @@ vector 11: a followed link outside every allowlist zone fails the exchange with
 | linus | 8 | 7 | 4 |
 | linus | 8 | 7 | 4 |
 
-### Rank 7 — Vector 17: Authoritative-freshness bound
-
-Overall **7.25** · Eff **7.00** · Plaus **7.50** · Risk **3.25**
-
-| Rater | Eff | Plaus | Risk |
-|---|---|---|---|
-| linus | 8 | 7 | 4 |
-| general | 6 | 8 | 3 |
-| general | 6 | 8 | 2 |
-| linus | 8 | 7 | 5 |
-| linus | 8 | 7 | 4 |
-| general | 6 | 8 | 2 |
-| general | 6 | 8 | 2 |
-| linus | 8 | 7 | 4 |
-
-### Rank 8 — Vector 24: Startup-DNS trust-boundary hardening
+### Rank 7 — Vector 24: Startup-DNS trust-boundary hardening — **DONE**
 
 Overall **7.12** · Eff **7.12** · Plaus **7.12** · Risk **2.75**
+
+**Status:** **DONE** — implemented (2026-10-20, `alumina-hrdn4`) — the resolver
+endpoint moved into the validated TOML config as a mandatory `resolver` array
+(1..=5 numeric unicast IPv4/IPv6, port 53, no zone id; `MAX_RESOLVERS=5`,
+`src/resolver.rs:6`), the `resolv.conf` reader
+(`read_resolver_config_file`/`parse_resolver_config`/`Scanner`) was deleted,
+`run_boot(config_path)` reads the resolver from the validated config
+(`src/boot.rs`), and the 4 KiB document preflight re-measured 4084 B with the
+one-entry key (`src/config.rs:1204-1211`).
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -224,7 +231,7 @@ Overall **7.12** · Eff **7.12** · Plaus **7.12** · Risk **2.75**
 | linus | 8 | 7 | 3 |
 | linus | 8 | 7 | 4 |
 
-### Rank 9 — Vector 33: Wrong-family records tolerated-vs-rejected pin — **DONE**
+### Rank 8 — Vector 33: Wrong-family records tolerated-vs-rejected pin — **DONE**
 
 Overall **6.81** · Eff **4.38** · Plaus **9.25** · Risk **1.38**
 
@@ -241,7 +248,7 @@ Overall **6.81** · Eff **4.38** · Plaus **9.25** · Risk **1.38**
 | linus | 4 | 9 | 2 |
 | linus | 4 | 9 | 2 |
 
-### Rank 10 — Vector 36: Non-CONNECT method / request-target form rejection — **DONE**
+### Rank 9 — Vector 36: Non-CONNECT method / request-target form rejection — **DONE**
 
 Overall **6.81** · Eff **4.12** · Plaus **9.50** · Risk **1.12**
 
@@ -258,7 +265,7 @@ Overall **6.81** · Eff **4.12** · Plaus **9.50** · Risk **1.12**
 | linus | 7 | 10 | 1 |
 | linus | 4 | 10 | 1 |
 
-### Rank 11 — Vector 7: AD-bit / DO-bit handling — **DEFERRED**
+### Rank 10 — Vector 7: AD-bit / DO-bit handling — **DEFERRED**
 
 Overall **6.56** · Eff **6.62** · Plaus **6.50** · Risk **4.50**
 
@@ -275,7 +282,7 @@ Overall **6.56** · Eff **6.62** · Plaus **6.50** · Risk **4.50**
 | general | 5 | 6 | 4 |
 | general | 6 | 8 | 3 |
 
-### Rank 12 — Vector 22: Resolver identity / response-source verification — **DONE**
+### Rank 11 — Vector 22: Resolver identity / response-source verification — **DONE**
 
 Overall **6.50** · Eff **5.38** · Plaus **7.62** · Risk **2.75**
 
@@ -295,7 +302,7 @@ exchange (`FailureReason::Connect`) and counts a `ResolverPeerMismatch` anomaly
 | linus | 8 | 7 | 3 |
 | linus | 8 | 7 | 4 |
 
-### Rank 13 — Vector 35: CONNECT header-line count bound — **DONE**
+### Rank 12 — Vector 35: CONNECT header-line count bound — **DONE**
 
 Overall **6.50** · Eff **3.62** · Plaus **9.38** · Risk **1.25**
 
@@ -316,9 +323,17 @@ distinct `TooManyHeaderLines` (`ConnectError` + `ConnectHeadReason`,
 | linus | 4 | 10 | 1 |
 | linus | 4 | 9 | 2 |
 
-### Rank 14 — Vector 18: Multi-resolver failover
+### Rank 13 — Vector 18: Multi-resolver failover — **DONE**
 
 Overall **6.38** · Eff **5.50** · Plaus **7.25** · Risk **4.38**
+
+**Status:** **DONE** — implemented (2026-10-20, `alumina-hrdn4`) — the
+transport relocates across the validated `resolver` array under per-resolver
+passive degradation (`DEGRADED_AFTER=3`), with bounded failback to the primary
+(`FAILBACK_AFTER=900 s`), fail-closed on exhaustion, peer assertion vs the
+active resolver only, and the 1-conn/1-query transport preserved
+(`ActiveResolver`, `src/startup_dns.rs:588-615`; `on_exchange_failed` `:2012`;
+`maybe_begin_failback` `:1792`; `peer_matches` `:1090`).
 
 | Rater | Eff | Plaus | Risk |
 |---|---|---|---|
@@ -331,7 +346,7 @@ Overall **6.38** · Eff **5.50** · Plaus **7.25** · Risk **4.38**
 | general | 5 | 8 | 3 |
 | linus | 7 | 7 | 4 |
 
-### Rank 15 — Vector 23: Cross-resolver divergence reporting
+### Rank 14 — Vector 23: Cross-resolver divergence reporting
 
 Overall **6.12** · Eff **4.88** · Plaus **7.38** · Risk **4.50**
 
@@ -346,7 +361,7 @@ Overall **6.12** · Eff **4.88** · Plaus **7.38** · Risk **4.50**
 | linus | 4 | 8 | 6 |
 | linus | 6 | 7 | 5 |
 
-### Rank 16 — Vector 5: Resolver cert pinning / TOFU — **DEFERRED**
+### Rank 15 — Vector 5: Resolver cert pinning / TOFU — **DEFERRED**
 
 Overall **6.06** · Eff **7.25** · Plaus **4.88** · Risk **6.75**
 
@@ -363,7 +378,7 @@ Overall **6.06** · Eff **7.25** · Plaus **4.88** · Risk **6.75**
 | general | 6 | 3 | 6 |
 | general | 4 | 5 | 6 |
 
-### Rank 17 — Vector 8: Multi-resolver cross-validation — **DEFERRED**
+### Rank 16 — Vector 8: Multi-resolver cross-validation — **DEFERRED**
 
 Overall **6.00** · Eff **7.75** · Plaus **4.25** · Risk **8.00**
 
@@ -380,7 +395,7 @@ Overall **6.00** · Eff **7.75** · Plaus **4.25** · Risk **8.00**
 | general | 7 | 6 | 6 |
 | general | 6 | 4 | 8 |
 
-### Rank 18 — Vector 1: DNS-over-TLS (DoT) — **DEFERRED**
+### Rank 17 — Vector 1: DNS-over-TLS (DoT) — **DEFERRED**
 
 Overall **5.62** · Eff **7.88** · Plaus **3.38** · Risk **7.12**
 
@@ -397,7 +412,7 @@ Overall **5.62** · Eff **7.88** · Plaus **3.38** · Risk **7.12**
 | general | 7 | 3 | 8 |
 | general | 7 | 3 | 5 |
 
-### Rank 19 — Vector 6: DNSSEC validation — **DEFERRED**
+### Rank 18 — Vector 6: DNSSEC validation — **DEFERRED**
 
 Overall **5.62** · Eff **8.75** · Plaus **2.50** · Risk **8.12**
 
@@ -414,7 +429,7 @@ Overall **5.62** · Eff **8.75** · Plaus **2.50** · Risk **8.12**
 | general | 8 | 3 | 6 |
 | general | 8 | 2 | 8 |
 
-### Rank 20 — Vector 10: EDNS0 / larger-buffer negotiation
+### Rank 19 — Vector 10: EDNS0 / larger-buffer negotiation
 
 Overall **3.69** · Eff **1.12** · Plaus **6.25** · Risk **1.62**
 

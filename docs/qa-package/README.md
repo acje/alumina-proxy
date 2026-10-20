@@ -122,13 +122,14 @@ claim), and this repo never provisions VMs, connections or images.
 ## Example inputs are illustrative — never executed by any gate
 
 `config.example.toml` (allowlist `["api.github.com:443", "example.com:443",
-"www.example.net:443"]`, resolver `["127.0.0.1"]`) documents a fixed,
-non-secret configuration shape; it is **illustrative only and executed by
-nothing**. The fixture runner stages its own fixed inputs; `validate.sh` never
-reads the example. Specifying it as a runnable input, or relabelling the
-fixture gate's inputs as the example, would be a false claim. The example
-resolver is loopback-only, so nothing in this package ever dials an external
-host.
+"www.example.net:443"]`, resolver `["1.1.1.1", "8.8.8.8", "9.9.9.9",
+"208.67.222.222", "94.140.14.14"]`) documents a fixed, non-secret
+configuration shape; it is **illustrative only and executed by nothing**. The
+fixture runner stages its own fixed inputs; `validate.sh` never reads the
+example. Specifying it as a runnable input, or relabelling the fixture gate's
+inputs as the example, would be a false claim. The example's public resolver
+set is illustrative only — it is never executed, so nothing in this package
+dials any resolver it names.
 
 ## Protocol compatibility (workloads dialed through Alumina)
 

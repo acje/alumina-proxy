@@ -40,7 +40,7 @@ bounded stdout monitoring (`docs/alumina-proxy.md:238-315`, rp2e amendment).
 ## Runtime surface and fixed inputs
 
 - `./config.toml` (≤ 4096 B, mandatory keys, no defaults) carries the validated
-  resolver set (1..=4 numeric unicast IPs, port 53); no `resolv.conf` read, no
+  resolver set (1..=5 numeric unicast IPs, port 53); no `resolv.conf` read, no
   CLI args, no env overrides; one listening socket; **SIGTERM the only handled
   lifecycle signal** (`docs/alumina-proxy.md:149`).
 - Privilege preflight (non-root, empty caps, `no_new_privs`): unmet → EX_CONFIG

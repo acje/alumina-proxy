@@ -17,7 +17,14 @@ and verified in the current codebase (see §1 Baseline DNS posture and
 4 (DoQ), 9 (0x20 case randomization), and 25 (QNAME minimization) were
 additionally pruned as **low-plausibility / high-risk research discards** (see
 scorecard); vector 9 is strictly dominated by the TCP + CSPRNG-TID transport and
-adds zero value under the future DoT path. On the same
+adds zero value under the future DoT path. Vector 17 (authoritative-freshness
+bound) was pruned as a **deployment-side vector** (2026-10-19): Alumina cannot
+observe the age of authoritative data, the genuine upstream stale-answer bound
+is deployment-enforced resolver serve-stale control (RFC 8767) already recorded
+as a deployment responsibility at `docs/alumina-proxy.md:130`, and the only
+Alumina-side lever (a configurable honored-TTL cap) does not bound total
+staleness across renewals — analogous to vector 30 (deployment/operator vector
+only). On the same
 date vectors 33, 34, and 36 were **promoted out of candidate research as
 implemented and pinned**: their formerly ambiguous behavior was sharpened in the
 `alumina-hrdn` hardening increment (recorded in `docs/alumina-proxy.md`) and
@@ -31,6 +38,12 @@ CNAME bailiwick enforcement + known-good-zone pinning (11/32), the typed DNS
 anomaly fact surface incl. extreme-TTL detection (21), and the resolver peer
 assertion (22) — and each row below is marked **DONE** with its pinned
 semantics and code location.
+On 2026-10-20 vectors 24 and 18 were **implemented** via the `alumina-hrdn4`
+hardening increment (recorded in `docs/alumina-proxy.md`) — the resolver set
+moved into the validated TOML config with the `resolv.conf` reader removed
+(24), and multi-resolver failover/failback among the config-declared resolvers
+(18) — and each row below is marked **DONE** with its pinned semantics and
+code location.
 Vectors 1 (DoT), 5 (cert pinning), 6 (DNSSEC), 7 (AD-bit / DO-bit handling),
 and 8 (multi-resolver cross-validation) are **deferred** (marked **DEFERRED**
 below): high architectural risk for high-but-costly security value, retained
@@ -56,7 +69,7 @@ identifiers; gaps are intentional.
 | **QNAME minimization (RFC 7816)** | **Absent** | no match in `src/` |
 | **EDNS0 / DO bit / DNSSEC validation** | **Absent** | `docs/alumina-proxy.md:63` (explicitly out of scope) |
 | **DoT / DoH / DNSCrypt / DoQ** | **Absent** | `docs/alumina-proxy.md:63`; `build-plan.md:186` (non-goal) |
-| **Multi-resolver / fallback / split-horizon cross-check** | **Absent** | 1 resolver, no fallback (`docs/alumina-proxy.md:68`) |
+| **Multi-resolver failover / split-horizon cross-check** | **Partial** | failover/failback among the config-declared `resolver` array implemented (`alumina-hrdn4`, `src/startup_dns.rs`); split-horizon cross-check still absent |
 | **Full bailiwick enforcement on CNAME targets** | **Partial** | answer-section provenance only; cross-suffix CNAME accepted (`docs/alumina-proxy.md:71`) |
 
 ## 2. All candidate hardening vectors (grouped by threat-model dimension)
@@ -67,6 +80,7 @@ identifiers; gaps are intentional.
 |---|---|---|---|---|---|
 | 1 | **DEFERRED** **DNS-over-TLS (DoT)** | On-path injection of fake responses | High (new TLS client dep, cert handling, resource profile) | Low — explicit non-goal | Feasibility study; defer unless user authorizes amendment |
 | 5 | **DEFERRED** **Resolver certificate pinning / TOFU** | CA-compromise resistance | Medium | Low (prerequisite for DoT) | Study as part of DoT |
+| 37 | **Resolver endpoint as IP+FQDN (golden path)** | A DoT resolver reached by bare IP cannot be name-authenticated (no SNI/SAN match on the TLS handshake); IP-only is a degraded trust form | Low–medium | Medium (extends the validated `resolver` array, V24) | **Candidate (2026-10-20):** declare each resolver as IP+FQDN (`IP#fqdn`); the FQDN is validated (DNS-name syntax, no wildcard/IDN) and carried as the SNI/SAN match target for the future DoT handshake (port 853); IP-only config is tolerated but emits a startup warning — IP+FQDN is the golden path |
 
 ### B. Data authenticity (end-to-end; defends against a *compromised* resolver)
 
@@ -90,13 +104,13 @@ identifiers; gaps are intentional.
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
 | 14 | **DONE** **TTL floor (min-TTL)** *(widened refresh band, implemented 2026-10-19)* | Reject/raise implausibly low TTLs | Low | Low — contradicts `:74` (deliberate zero-TTL-steering support) | **Widened by `alumina-hrdn2`** (2026-10-19): promoted out of candidate research; the refresh band is widened to `REFRESH_MIN=5` / `REFRESH_MAX=900` with `NEGATIVE_REFRESH_MIN=30`, and normal/negative refresh intervals clamp into those bands (`src/schedule.rs`) — per-record low-TTL steering per `:74` is untouched (`src/cache.rs`) |
-| 17 | **Authoritative-freshness bound** | Resolver returning stale data as fresh | Medium | Medium (deployment-side) | Study deployment-enforced upstream stale bound (`docs/alumina-proxy.md:130`) |
+| 17 | **PRUNED** **Authoritative-freshness bound** | Resolver returning stale data as fresh | Medium | Medium (deployment-side) | **Pruned (2026-10-19)** as a deployment-side vector: Alumina cannot observe the age of authoritative data; the genuine upstream stale-answer bound is deployment-enforced resolver serve-stale control (RFC 8767), already recorded as a deployment responsibility at `docs/alumina-proxy.md:130`; the only Alumina-side lever (a configurable honored-TTL cap) does not bound total staleness across renewals — analogous to vector 30 (deployment/operator vector only) |
 
 ### E. Availability & resilience (DNS DoS / resolver failure)
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 18 | **Multi-resolver failover** | Resolver outage | Medium | Low — contradicts no-fallback doctrine | Defer; document as design-revision candidate |
+| 18 | **DONE** **Multi-resolver failover** *(implemented, 2026-10-20)* | Resolver outage | Medium | Medium (failover among config-declared resolvers only — no-fallback doctrine revised by `alumina-hrdn4`) | **Implemented by `alumina-hrdn4`** (2026-10-20): promoted out of candidate research; the transport relocates across the validated `resolver` array under per-resolver passive degradation (`DEGRADED_AFTER=3`), with bounded failback to the primary (`FAILBACK_AFTER=900 s`), fail-closed on exhaustion, peer assertion vs the active resolver only, and the 1-conn/1-query transport preserved (`ActiveResolver`, `src/startup_dns.rs:588-615`; `on_exchange_failed` `:2012`; `maybe_begin_failback` `:1792`; `peer_matches` `:1090`) |
 | 19 | **DONE** **Resolver health probing / degraded signaling** *(implemented, 2026-10-19)* | Early detection of SERVFAIL/timeout storms | Low | Medium | **Implemented by `alumina-hrdn2`** (2026-10-19): promoted out of candidate research; passive degraded signaling in `StartupDns` — ≥3 consecutive failed exchanges (`DEGRADED_AFTER=3`) enter `Degraded`, any successful exchange (a valid negative included) recovers; `ResolverDegraded` monitor fact emitted only on enter/exit transitions and surfaced as the zero-suppressed `rd=` monitor key (`src/startup_dns.rs`, `src/enforcement/monitor.rs`, `src/enforcement/state.rs`, `src/log.rs`) |
 
 ### F. Detection & observability of tampering
@@ -106,7 +120,7 @@ identifiers; gaps are intentional.
 | 21 | **DONE** **Anomaly logging / tripwire on suspicious DNS** *(implemented, 2026-10-19)* | Detect unexpected TTLs, bailiwick violations, CNAME anomalies, resolver identity changes; feed rp2e enforcement | Medium–high | Medium (log-vocabulary amendment) | **Implemented by `alumina-hrdn3`** (2026-10-19): promoted out of candidate research; a typed `DnsAnomalyKind` surface (`BailiwickViolation`/`ResolverPeerMismatch`/`ExtremeTtl`, >96 h extreme-TTL detection via `EXTREME_TTL_THRESHOLD`) drains via `drain_dns_anomalies` into saturating rp2e counters surfaced as zero-suppressed `bv=`/`rpm=`/`xttl=` monitor keys (`src/enforcement/monitor.rs`, `src/startup_dns.rs`, `src/serve.rs`, `src/log.rs`) |
 | 22 | **DONE** **Resolver identity / response-source verification** *(implemented, 2026-10-19)* | Confirm responses originate from the configured resolver | Low | Low (TCP peer is the resolver, so partially inherent) | **Implemented by `alumina-hrdn3`** (2026-10-19): promoted out of candidate research; a completed connect landing on a peer other than the configured nameserver fails the exchange (`FailureReason::Connect`) and counts a `ResolverPeerMismatch` anomaly (`peer_matches`/`step_connect`, `src/startup_dns.rs:1010`, `:1216-1223`) |
 | 23 | **Cross-resolver divergence reporting** | Detect resolver disagreement | Low | Low (only meaningful with multi-resolver) | Low priority unless vector 8 |
-| 24 | **Startup-DNS trust-boundary hardening** | Encrypted/authenticated resolver config (currently plaintext `resolv.conf`) | Low–medium | Medium | Study |
+| 24 | **DONE** **Startup-DNS trust-boundary hardening** *(implemented, 2026-10-20)* | Encrypted/authenticated resolver config (previously plaintext `resolv.conf`) | Low–medium | Medium | **Implemented by `alumina-hrdn4`** (2026-10-20): promoted out of candidate research; the resolver endpoint moved into the validated TOML config as a mandatory `resolver` array (1..=5 numeric unicast IPv4/IPv6, port 53, no zone id; `MAX_RESOLVERS=5`, `src/resolver.rs:6`), the `resolv.conf` reader (`read_resolver_config_file`/`parse_resolver_config`/`Scanner`) was deleted, `run_boot(config_path)` reads the resolver from the validated config (`src/boot.rs`), and the 4 KiB document preflight re-measured 4084 B with the one-entry key (`src/config.rs:1204-1211`) |
 
 ### G. Privacy / information-leakage reduction
 
