@@ -39,8 +39,12 @@ and 8 (multi-resolver cross-validation) are **deferred** (marked **DEFERRED**):
 high architectural risk for high-but-costly security value, retained for
 research only. Vector 7 defers as a dependent of 6 — the AD/DO bits are only
 meaningful with authenticated data. Vector 37 (resolver endpoint as IP+FQDN,
-golden path) was added to the register as a candidate on 2026-10-20; it is not
-yet scored (pending the 8-rater evaluation) and is therefore not ranked below.
+golden path) was added to the register as a candidate on 2026-10-20 and was
+**implemented** the same day via the `alumina-dot-chain-v37` hardening increment
+(`docs/alumina-proxy.md`) as Package 1 of the DoT chain (a validated `IP#fqdn`
+resolver name identity; the DoT transport itself remains Package 2). Its 8-rater
+scoring was **DROPPED** — the vector shipped unscored, is marked DONE in the
+register, and is therefore not ranked below.
 
 **Method:** 8 independent deep-analysis scores per vector = 4 `linus` (Rust-specialist)
 + 4 `general` raters. Every rater read the actual source before scoring. Scores are 1–10.

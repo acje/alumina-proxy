@@ -4,15 +4,21 @@ allowlist = ["api.github.com:443", "example.com:443", "www.example.net:443"]
 listen = "127.0.0.1:5353"
 startup_unresolved_allowance = 0
 # Validated resolver set: 1..=5 numeric unicast IPv4/IPv6 addresses, port 53,
-# no zone identifiers (docs/alumina-proxy.md:62/alumina-hrdn4 amendment).
+# no zone identifiers, each optionally in IP#fqdn form (V37 golden path --
+# docs/alumina-proxy.md:62 / alumina-dot-chain-v37 amendment). The FQDN is the
+# validated SNI/SAN match target for the future DoT handshake (port 853, DoT
+# Package 2); the port here stays 53.
 #
-# Common public DNS services (deployment picks 1..=5; IPv6 variants also valid):
-#   Cloudflare:        1.1.1.1, 1.0.0.1          (2606:4700:4700::1111, ::1001)
-#   Google Public DNS: 8.8.8.8, 8.8.4.4          (2001:4860:4860::8888, ::8844)
-#   Quad9:             9.9.9.9, 149.112.112.112  (2620:fe::fe, 2620:fe::9)
-#   Cisco OpenDNS:     208.67.222.222, 208.67.220.220
-#   AdGuard DNS:       94.140.14.14, 94.140.15.15 (2a10:50c0::ad1:ff, 2a10:50c0::ad2:ff)
-resolver = ["1.1.1.1", "8.8.8.8", "9.9.9.9", "208.67.222.222", "94.140.14.14"]
+# Common public DNS services with their documented DoT hostnames (deployment
+# picks 1..=5; IPv6 variants also valid):
+#   Cloudflare:        1.1.1.1 # cloudflare-dns.com  (2606:4700:4700::1111)
+#   Google Public DNS: 8.8.8.8 # dns.google          (2001:4860:4860::8888)
+#   Quad9:             9.9.9.9 # dns.quad9.net       (2620:fe::fe)
+#   Cisco OpenDNS:     208.67.222.222 # dns.opendns.com
+#   AdGuard DNS:       94.140.14.14 # dns.adguard.com (2a10:50c0::ad1:ff)
+# Bare-IP entries remain valid but each emits one startup warning (degraded
+# trust form).
+resolver = ["1.1.1.1#cloudflare-dns.com", "8.8.8.8#dns.google", "9.9.9.9#dns.quad9.net", "208.67.222.222#dns.opendns.com", "94.140.14.14#dns.adguard.com"]
 # Mandatory index-aligned tripwire action tables (docs/alumina-proxy.md:265-281):
 # [any_illegal] scope is the AnyIllegal first-slot Block scope ("connection"|"all");
 # [actions] kind/scope are one literal per allowlist entry, in allowlist order.
