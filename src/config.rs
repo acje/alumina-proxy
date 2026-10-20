@@ -1298,6 +1298,24 @@ mod resolver_config_tests {
     }
 
     #[test]
+    fn resolver_five_accepted() {
+        let cfg = parse_config_document(&valid_doc(
+            "[\"1.1.1.1\", \"8.8.8.8\", \"9.9.9.9\", \"208.67.222.222\", \"94.140.14.14\"]",
+        ))
+        .expect("five resolvers valid");
+        assert_eq!(cfg.resolver_set().len(), 5);
+        assert_eq!(cfg.resolver_set().primary().addr().to_string(), "1.1.1.1");
+        assert_eq!(
+            cfg.resolver_set()
+                .get(4)
+                .expect("index 4")
+                .addr()
+                .to_string(),
+            "94.140.14.14"
+        );
+    }
+
+    #[test]
     fn resolver_ipv6_unicast_accepted() {
         let cfg = parse_config_document(&valid_doc("[\"2606:4700:4700::1111\"]"))
             .expect("ipv6 unicast resolver valid");
@@ -1315,11 +1333,11 @@ mod resolver_config_tests {
             matches!(empty, ConfigError::ResolverCountOutOfRange { got: 0 }),
             "empty resolver must be ResolverCountOutOfRange, got {empty:?}"
         );
-        let five = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"1.0.0.1\", \"8.8.4.4\", \"9.9.9.9\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
-        let too_many = parse_config_document(five).unwrap_err();
+        let six = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"9.9.9.9\", \"208.67.222.222\", \"94.140.14.14\", \"1.0.0.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+        let too_many = parse_config_document(six).unwrap_err();
         assert!(
-            matches!(too_many, ConfigError::ResolverCountOutOfRange { got: 5 }),
-            "five resolvers must be ResolverCountOutOfRange, got {too_many:?}"
+            matches!(too_many, ConfigError::ResolverCountOutOfRange { got: 6 }),
+            "six resolvers must be ResolverCountOutOfRange, got {too_many:?}"
         );
     }
 

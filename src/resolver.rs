@@ -3,7 +3,7 @@ use std::net::IpAddr;
 
 pub const RESOLVER_PORT: u16 = 53;
 
-pub const MAX_RESOLVERS: usize = 4;
+pub const MAX_RESOLVERS: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Nameserver {
@@ -184,21 +184,23 @@ mod tests {
     #[test]
     fn resolver_set_guards_zero_and_overflow_count() {
         assert!(ResolverSet::from_slice(&[]).is_none());
-        let four = [
+        let five = [
             select("1.1.1.1").expect("ns"),
             select("8.8.8.8").expect("ns"),
-            select("1.0.0.1").expect("ns"),
-            select("8.8.4.4").expect("ns"),
+            select("9.9.9.9").expect("ns"),
+            select("208.67.222.222").expect("ns"),
+            select("94.140.14.14").expect("ns"),
         ];
-        assert_eq!(ResolverSet::from_slice(&four).expect("4 fits").len(), 4);
-        let five = [
+        assert_eq!(ResolverSet::from_slice(&five).expect("5 fits").len(), 5);
+        let six = [
             select("1.1.1.1").expect("ns"),
             select("8.8.8.8").expect("ns"),
             select("1.0.0.1").expect("ns"),
             select("8.8.4.4").expect("ns"),
             select("9.9.9.9").expect("ns"),
+            select("208.67.222.222").expect("ns"),
         ];
-        assert!(ResolverSet::from_slice(&five).is_none());
+        assert!(ResolverSet::from_slice(&six).is_none());
     }
 
     #[test]
