@@ -48,6 +48,12 @@ fn main() {
                 report.config.resolver_set().primary().addr(),
                 report.config.resolver_set().primary().port()
             );
+            for nameserver in report.ip_only_resolvers() {
+                println!(
+                    "alumina: warning: resolver {} has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the future DoT (853) SNI/SAN identity surface is unavailable",
+                    nameserver.addr()
+                );
+            }
             println!(
                 "allowlist entries: {} allowance: {} listen: {}:{}",
                 report.config.allowlist().len(),

@@ -584,7 +584,7 @@ impl fmt::Display for ConfigError {
             ),
             ConfigError::InvalidResolver { index, value } => write!(
                 f,
-                "config resolver[{0}] value {value:?} invalid: expected a numeric unicast IPv4/IPv6 address, port 53, no zone identifier",
+                "config resolver[{0}] value {value:?} invalid: expected a numeric unicast IPv4/IPv6 address (optionally `#fqdn`), port 53, no zone identifier, validated lowercase ASCII FQDN",
                 index + 1
             ),
         }
@@ -1214,6 +1214,30 @@ mod enforcement_config_tests {
     }
 
     #[test]
+    fn compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_4103() {
+        let doc = full_group_document(32, "all", "block", "domain").replacen(
+            "resolver = [\"1.1.1.1\"]",
+            "resolver = [\"1.1.1.1#cloudflare-dns.com\"]",
+            1,
+        );
+        assert_eq!(
+            doc.len(),
+            4103,
+            "tight 32×100-byte compact form with a single realistic IP#fqdn entry exceeds 4096 B"
+        );
+        assert!(
+            doc.len() > CONFIG_DOC_LIMIT,
+            "a realistic IP#fqdn entry cannot fit the max-count/max-name compact form"
+        );
+        let err = parse_config_document(&doc).expect_err("oversized doc must be rejected");
+        assert!(
+            matches!(&err, ConfigError::OversizedDocument { got, limit } if *limit == CONFIG_DOC_LIMIT && *got == doc.len()),
+            "expected OversizedDocument for {} bytes, got {err:?}",
+            doc.len()
+        );
+    }
+
+    #[test]
     fn flare_connection_32_hundred_byte_names_measured_total_is_4379() {
         let doc = full_group_document(32, "connection", "flare_only", "connection");
         assert_eq!(
@@ -1369,6 +1393,73 @@ mod resolver_config_tests {
         assert!(
             matches!(&err, ConfigError::WrongType(_)),
             "integer resolver must be WrongType, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolver_ip_fqdn_from_config() {
+        let cfg = parse_config_document(&valid_doc("[\"1.1.1.1#dns.google\"]"))
+            .expect("IP#fqdn resolver valid");
+        assert_eq!(cfg.resolver_set().len(), 1);
+        let primary = cfg.resolver_set().primary();
+        assert_eq!(primary.addr().to_string(), "1.1.1.1");
+        assert_eq!(primary.port(), 53, "port stays 53 in V37");
+        assert_eq!(primary.fqdn().expect("fqdn carried").as_str(), "dns.google");
+    }
+
+    #[test]
+    fn resolver_ip_only_from_config_has_no_fqdn() {
+        let cfg =
+            parse_config_document(&valid_doc("[\"1.1.1.1\"]")).expect("bare IP resolver valid");
+        assert!(cfg.resolver_set().primary().fqdn().is_none());
+        assert!(cfg.resolver_set().primary().is_ip_only());
+    }
+
+    #[test]
+    fn resolver_bad_fqdn_from_config_is_invalid_resolver() {
+        for value in [
+            "1.1.1.1#*.example.com",
+            "1.1.1.1#",
+            "1.1.1.1#bücher.de",
+            "1.1.1.1#ExAmPLe.com",
+            "1.1.1.1#.example.com",
+            "1.1.1.1#example.com.",
+        ] {
+            let err = parse_config_document(&valid_doc(&format!("[\"{value}\"]")))
+                .expect_err("bad FQDN must be rejected");
+            assert!(
+                matches!(&err, ConfigError::InvalidResolver { index: 0, value: v } if v == value),
+                "{value} must be InvalidResolver{{index:0}}, got {err:?}"
+            );
+            assert_eq!(err.exit_status(), 78, "must exit 78");
+        }
+    }
+
+    #[test]
+    fn resolver_ip_fqdn_example_fits_4kib() {
+        let resolver = "[\"1.1.1.1#cloudflare-dns.com\", \"8.8.8.8#dns.google\", \"9.9.9.9#dns.quad9.net\", \"208.67.222.222#dns.opendns.com\", \"94.140.14.14#dns.adguard.com\"]";
+        let example = format!(
+            "allowlist = [\"api.github.com:443\", \"example.com:443\", \"www.example.net:443\"]\nlisten = \"127.0.0.1:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\", \"connection\"]\n"
+        );
+        assert_eq!(
+            example.len(),
+            437,
+            "4 KiB re-measure: the V37 golden-path IP#fqdn example config is serializer-pinned at 437 B"
+        );
+        assert!(
+            example.len() <= CONFIG_DOC_LIMIT,
+            "IP#fqdn example fits 4096 B (len {})",
+            example.len()
+        );
+        let cfg = parse_config_document(&example).expect("example parses within the 4 KiB bound");
+        assert_eq!(cfg.resolver_set().len(), 5);
+        assert_eq!(
+            cfg.resolver_set()
+                .primary()
+                .fqdn()
+                .expect("fqdn carried")
+                .as_str(),
+            "cloudflare-dns.com"
         );
     }
 

@@ -37,6 +37,20 @@ pub struct BootReport {
     pub inventory: BootInventory,
 }
 
+impl BootReport {
+    /// Every configured resolver entry that carries no `IP#fqdn` FQDN
+    /// metadata. IP-only resolvers remain valid and usable (plain DNS over
+    /// `port 53`) but cannot be `SNI`/`SAN`-authenticated for the future `DoT`
+    /// handshake (`port 853`, V1); the binary renders each as one stdout
+    /// startup warning line.
+    pub fn ip_only_resolvers(&self) -> impl Iterator<Item = &crate::resolver::Nameserver> + '_ {
+        self.config
+            .resolver_set()
+            .iter()
+            .filter(|ns| ns.fqdn().is_none())
+    }
+}
+
 /// Runs the complete boot sequence: kernel preflight, configuration load, and
 /// traffic-storage allocation. The resolver set is read from the validated
 /// config document; no separate platform resolver file is read.
@@ -113,6 +127,8 @@ mod tests {
     }
 
     const VALID_CONFIG: &str = "allowlist = [\"example.com:443\", \"sub.example.org.:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
+
+    const FQDN_CONFIG: &str = "allowlist = [\"example.com:443\", \"sub.example.org.:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1#dns.google\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
 
     #[test]
     fn boot_with_good_facts_reports_and_stops_at_phase1_boundary() {
@@ -195,5 +211,43 @@ mod tests {
         crate::inventory::clear_alloc_failure();
         assert!(matches!(err, BootError::Storage(_)));
         assert_eq!(err.exit_status(), EX_CONFIG);
+    }
+
+    fn boot_report_for(config_body: &str) -> BootReport {
+        let dir = TempDir::new("resolver-warning");
+        let config_path = dir
+            .path()
+            .join("config.toml")
+            .to_string_lossy()
+            .into_owned();
+        dir.write("config.toml", config_body);
+        run_boot_with_facts(&config_path, good_facts()).expect("boot succeeds")
+    }
+
+    #[test]
+    fn ip_only_resolver_streams_one_startup_warning() {
+        let report = boot_report_for(VALID_CONFIG);
+        let warnings: Vec<_> = report.ip_only_resolvers().collect();
+        assert_eq!(warnings.len(), 1, "one IP-only resolver");
+        assert_eq!(warnings[0].addr().to_string(), "1.1.1.1");
+        assert_eq!(warnings[0].port(), 53);
+    }
+
+    #[test]
+    fn fqdn_carried_resolver_streams_no_startup_warning() {
+        let report = boot_report_for(FQDN_CONFIG);
+        assert_eq!(
+            report.ip_only_resolvers().count(),
+            0,
+            "IP#fqdn entry is the golden path: no startup warning"
+        );
+        assert!(
+            report
+                .config
+                .resolver_set()
+                .primary()
+                .fqdn()
+                .is_some_and(|f| f.as_str() == "dns.google")
+        );
     }
 }
