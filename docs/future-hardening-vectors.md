@@ -57,6 +57,12 @@ below): high architectural risk for high-but-costly security value, retained
 for research only. Vector 7 defers as a dependent of 6 — the AD/DO bits are
 only meaningful with authenticated data. Vector numbers are retained as stable
 identifiers; gaps are intentional.
+On 2026-10-20 vector 10 (EDNS0 / larger-buffer negotiation) was **pruned** as a
+low-value discard: Alumina's DNS transport is TCP-only (and DoT on port 853 for
+`IP#fqdn` entries), so EDNS0's UDP payload-size / truncation-negotiation purpose
+is architecturally moot (scorecard Eff 1.12, "Low value (TCP-only avoids
+truncation)"); any EDNS0 need re-enters only via vector 7 (DO-bit), deferred as
+a DNSSEC dependent.
 
 ## 1. Baseline DNS posture (already implemented)
 
@@ -101,7 +107,6 @@ identifiers; gaps are intentional.
 
 | # | Vector | Threat addressed | Cost | Doctrine fit | Research action |
 |---|---|---|---|---|---|
-| 10 | **EDNS0 / larger-buffer negotiation** | Truncation | Low | Low value (TCP-only avoids truncation) | Low priority |
 | 11 | **DONE** **Bailiwick enforcement on CNAME targets** *(implemented, 2026-10-19)* | CNAME chaining into attacker zones | Medium | Medium (narrow amendment) | **Implemented by `alumina-hrdn3`** (2026-10-19): promoted out of candidate research; a followed CNAME link must land inside an allowlist bailiwick zone (parent domain for >2-label names, the apex itself for 2-label names) or the exchange fails with `BailiwickViolation` (`BailiwickZones`, `src/dns.rs:769-816`, gate at `:1142`) |
 | 12 | **Source-port randomization** | Off-path spoofing | N/A | N/A (TCP only; TID already CSPRNG) | Not applicable |
 | 33 | **DONE** **Wrong-family records in a positive answer: tolerated vs. rejected** *(implemented & pinned, 2026-10-19)* | Ambiguity in `:71` — a wrong-family record (e.g., AAAA in an A query's answer section) is tolerated-and-ignored (never a candidate) and never marks its terminal owner as carrying address data; coexist with a CNAME at its owner still fails `CnameCoexist` | Low | Medium (clarity pin) | **Pinned by `alumina-hrdn`** (2026-10-19): promoted out of candidate research; wrong-family records are truly ignored (`src/dns.rs:824-830,847-853`), and NXDOMAIN at an opposite-family-only terminal is a clean `NxDomain`, never `TerminalWithoutData` |

@@ -6,9 +6,10 @@ carries no normative authority. It is a scored companion to
 `docs/future-hardening-vectors.md` (the vector register), restating and citing the
 implementation only.
 
-**Scope:** the 19 active hardening vectors from `docs/future-hardening-vectors.md`
+**Scope:** the 18 active hardening vectors from `docs/future-hardening-vectors.md`
 (excluded: 12, 30 — not applicable by design; 17 — pruned 2026-10-19 as a
-deployment-side vector, rationale below). Vectors 13, 15, 16, 20, 26, 27,
+deployment-side vector, rationale below; 10 — pruned 2026-10-20 as a low-value
+discard, rationale above). Vectors 13, 15, 16, 20, 26, 27,
 28, 29, 31 were pruned from the register as fully covered, and vectors 2 (DoH),
 3 (DNSCrypt), 4 (DoQ), 9 (0x20 case randomization), 25 (QNAME minimization) as
 low-plausibility/high-risk research discards (2026-10-19); vector 9 is strictly
@@ -54,6 +55,12 @@ SPKI pinning, vectors 1 and 5) landed the same day via `alumina-dot-chain-v1-v5`
 Vector 37's 8-rater
 scoring was **DROPPED** — the vector shipped unscored, is marked DONE in the
 register, and is therefore not ranked below.
+On 2026-10-20 vector 10 (EDNS0 / larger-buffer negotiation) was **pruned** as a
+low-value discard: Alumina's DNS transport is TCP-only (and DoT on port 853 for
+`IP#fqdn` entries), so EDNS0's UDP payload-size / truncation-negotiation purpose
+is architecturally moot (Eff 1.12); rationale recorded in the register. Its row
+is removed from the ranked table below; the scores are retained here for the
+record.
 
 **Method:** 8 independent deep-analysis scores per vector = 4 `linus` (Rust-specialist)
 + 4 `general` raters. Every rater read the actual source before scoring. Scores are 1–10.
@@ -67,7 +74,7 @@ filtering of TLS tunnels* — NOT the existing fixed spec invariants.
 - **Risk** (architectural-change risk) — 1 = localized change … 10 = core redesign.
 - **Overall** = mean(effectiveness, plausibility). Risk reported separately (not folded into rank).
 
-Generated from `scores.jsonl` (200 score lines; 19 scored vectors shown).
+Generated from `scores.jsonl` (200 score lines; 18 scored vectors shown).
 
 ## Ranked table
 
@@ -91,7 +98,6 @@ Generated from `scores.jsonl` (200 score lines; 19 scored vectors shown).
 | 16 | 8 | **DEFERRED** Multi-resolver cross-validation | 6.00 | 7.75 | 4.25 | 8.00 |
 | 17 | 1 | **DONE** DNS-over-TLS (DoT) — implemented (2026-10-20) | 5.62 | 7.88 | 3.38 | 7.12 |
 | 18 | 6 | **DEFERRED** DNSSEC validation | 5.62 | 8.75 | 2.50 | 8.12 |
-| 19 | 10 | EDNS0 / larger-buffer negotiation | 3.69 | 1.12 | 6.25 | 1.62 |
 
 ## Per-vector detail (all 8 scores, eff/plaus/risk)
 
@@ -455,19 +461,4 @@ Overall **5.62** · Eff **8.75** · Plaus **2.50** · Risk **8.12**
 | linus | 10 | 2 | 9 |
 | general | 8 | 3 | 6 |
 | general | 8 | 2 | 8 |
-
-### Rank 19 — Vector 10: EDNS0 / larger-buffer negotiation
-
-Overall **3.69** · Eff **1.12** · Plaus **6.25** · Risk **1.62**
-
-| Rater | Eff | Plaus | Risk |
-|---|---|---|---|
-| linus | 1 | 8 | 2 |
-| general | 1 | 8 | 1 |
-| general | 2 | 9 | 1 |
-| linus | 1 | 4 | 3 |
-| linus | 1 | 4 | 2 |
-| general | 1 | 7 | 1 |
-| general | 1 | 7 | 1 |
-| linus | 1 | 3 | 2 |
 
