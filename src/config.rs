@@ -1238,7 +1238,7 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_with_pinned_resolver_measured_total_is_4150() {
+    fn compact_32_hundred_byte_names_with_pinned_resolver_measured_total_is_4151() {
         // base64("A".repeat(32)) = 43 unpadded chars (AQ...), the strict SPKI
         // pin grammar's canonical value; `#dns.google#pin-sha256=` plus the
         // 44-char padded digest costs 67 bytes over a bare-IP entry and cannot
