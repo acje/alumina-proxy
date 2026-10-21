@@ -487,7 +487,8 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         || monitor.facts_early_data_overflow()
         || monitor.facts_unknown_overflow()
         || monitor.facts_resolver_degraded_overflow()
-        || monitor.facts_dns_anomaly_overflow();
+        || monitor.facts_dns_anomaly_overflow()
+        || monitor.facts_downgrade_to_plain_overflow();
     let globals: [(&[u8], u64); 13] = [
         (&b"facts_total"[..], monitor.facts_total()),
         (&b"actions_total"[..], monitor.actions_total()),
@@ -525,6 +526,10 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         return None;
     }
     if monitor.serving_stale() && !push_u64(&mut w, b"ss", 1) {
+        return None;
+    }
+    let downgrade_to_plain = monitor.facts_downgrade_to_plain();
+    if downgrade_to_plain > 0 && !push_u64(&mut w, b"dp", u64::from(downgrade_to_plain)) {
         return None;
     }
     let bailiwick_violation = monitor.facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
@@ -1979,6 +1984,40 @@ mod tests {
         assert!(
             !text.contains("ss="),
             "a clear stale-serving bit stays zero-suppressed: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_monitor_emits_downgrade_to_plain_when_nonzero() {
+        use crate::enforcement::monitor::Monitor;
+        let mut m = Monitor::new();
+        m.note_fact_downgrade_to_plain();
+        m.note_fact_downgrade_to_plain();
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            text.contains(" dp=2"),
+            "the downgrade-to-plain fact key carries its fold: {text}"
+        );
+        assert!(
+            !text.contains("dp=0"),
+            "a zero downgrade fold stays suppressed: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_monitor_suppresses_downgrade_to_plain_when_zero() {
+        use crate::enforcement::monitor::Monitor;
+        let m = Monitor::new();
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            !text.contains("dp="),
+            "a zero downgrade-to-plain fold stays zero-suppressed: {text}"
         );
     }
 

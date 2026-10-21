@@ -735,3 +735,22 @@ The `alumina-hrdn4` failback clause governs the bounded failback probe of the pr
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## Observability: DoT→plain downgrade counter — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-dotdg`, 2026-10-21). It records the user authorization for one observability increment: the enforcement monitor surfaces the failover downgrade path as a zero-suppressed `dp=` event counter in the existing monitor record. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
+
+### Amended surface
+
+The `alumina-rp2e` monitoring vocabulary governs the enforcement monitor record. This increment adds a single event counter: `StartupDns::downgrade_to_plain` (`src/startup_dns.rs`), incremented by the state-machine-local `note_downgrade_if_dot_to_plain` helper at both relocation choke points of `on_exchange_failed` — the failover relocation (degraded active → next healthy) and the failback re-seat (failed probe → `failback_source` backup) — exactly when the departed active resolver carried an `IP#fqdn` FQDN (port 853) and the relocated-to resolver is a bare-IP entry (port 53). A relocation that keeps or gains an FQDN is not a downgrade and is not counted. The counter is drained by the serving storage (`drain_downgrade_to_plain`, `src/serve.rs`) into `Enforcement::note_fact_downgrade_to_plain()` and the monitor's saturating `FactCounters::downgrade_to_plain` (`src/enforcement/monitor.rs`), folded into `facts_total()`. The monitor grammar emits the zero-suppressed `dp=` key after the `ss=` block and before the `bv=` block (`src/log.rs`), only when nonzero (never `dp=0`), and counts its overflow into `ofacts`. The counter is observability-only: serving behavior is byte-identical, with zero new allocations, zero new log surfaces, and no runtime-surface expansion.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Monitor: zero-suppressed `dp=` DoT→plain downgrade event counter, counted on failover and failback re-seat relocations, folded into `facts_total`/`ofacts`, observability-only (`:62`–`:78` monitoring vocabulary) | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.

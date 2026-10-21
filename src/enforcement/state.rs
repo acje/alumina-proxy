@@ -156,6 +156,10 @@ impl Enforcement {
         self.monitor.note_fact_dns_anomaly(kind);
     }
 
+    pub(crate) const fn note_fact_downgrade_to_plain(&mut self) {
+        self.monitor.note_fact_downgrade_to_plain();
+    }
+
     pub(crate) const fn note_serving_stale(&mut self) {
         self.monitor.note_serving_stale();
     }
@@ -238,6 +242,22 @@ mod tests {
             en.counters()
                 .facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation),
             0
+        );
+    }
+
+    #[test]
+    fn note_fact_downgrade_to_plain_passes_through_to_the_monitor() {
+        let t = table(
+            AnyIllegalScope::Connection,
+            &[(ActionKind::FlareOnly, Scope::Connection)],
+        );
+        let mut en = Enforcement::new(t);
+        en.note_fact_downgrade_to_plain();
+        assert_eq!(en.counters().facts_downgrade_to_plain(), 1);
+        assert_eq!(
+            en.counters().facts_total(),
+            1,
+            "the downgrade fact folds into the aggregate fact total"
         );
     }
 

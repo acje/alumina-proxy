@@ -1683,6 +1683,57 @@ fn failover_relocates_to_next_healthy_after_threshold_and_arms_failback() {
 }
 
 #[test]
+fn dot_to_plain_failover_counts_a_downgrade_but_dot_to_dot_and_plain_to_plain_do_not() {
+    let now = 1_000_000u64;
+    // A DoT primary (`IP#fqdn`) relocating onto a plain backup is a downgrade.
+    let dot_set = {
+        let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+        entries[0] = crate::resolver::select("1.1.1.1#dns.google").expect("dot ns");
+        entries[1] = crate::resolver::select("8.8.8.8").expect("plain ns");
+        ResolverSet::from_slice(&entries[..2]).expect("resolver count fits")
+    };
+    let mut transport = seeded_transport(dot_set);
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(transport.active_resolver.index(), 1);
+    assert_eq!(
+        transport.take_downgrade_to_plain(),
+        1,
+        "a DoT→plain failover relocation counts exactly one downgrade"
+    );
+    // A DoT primary relocating onto a DoT backup is not a downgrade.
+    let dot_dot_set = {
+        let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+        entries[0] = crate::resolver::select("1.1.1.1#dns.google").expect("dot ns");
+        entries[1] = crate::resolver::select("8.8.8.8#dns.example").expect("dot ns");
+        ResolverSet::from_slice(&entries[..2]).expect("resolver count fits")
+    };
+    let mut transport = seeded_transport(dot_dot_set);
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(transport.active_resolver.index(), 1);
+    assert_eq!(
+        transport.take_downgrade_to_plain(),
+        0,
+        "a DoT→DoT relocation is not a downgrade"
+    );
+    // A plain primary relocating onto a plain backup is not a downgrade.
+    let plain_set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(plain_set);
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(transport.active_resolver.index(), 1);
+    assert_eq!(
+        transport.take_downgrade_to_plain(),
+        0,
+        "a plain→plain relocation is not a downgrade"
+    );
+}
+
+#[test]
 fn single_resolver_fails_closed_keeping_the_injected_peer() {
     let set = resolver_set_of(&["1.1.1.1"]);
     let mut transport = seeded_transport(set);
@@ -1831,6 +1882,41 @@ fn failed_probe_mid_regime_resets_counter_and_reseats() {
         transport.failback_due,
         Some(due + FAILBACK_AFTER_SECS),
         "the failed probe re-arms the failback timer"
+    );
+}
+
+#[test]
+fn failed_dot_probe_reseating_onto_plain_backup_counts_a_downgrade() {
+    let dot_set = {
+        let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+        entries[0] = crate::resolver::select("1.1.1.1#dns.google").expect("dot ns");
+        entries[1] = crate::resolver::select("8.8.8.8").expect("plain ns");
+        ResolverSet::from_slice(&entries[..2]).expect("resolver count fits")
+    };
+    let mut transport = seeded_transport(dot_set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(transport.active_resolver.index(), 1);
+    assert_eq!(
+        transport.take_downgrade_to_plain(),
+        1,
+        "the initial DoT→plain failover counts one downgrade"
+    );
+    let due = transport.failback_due.expect("failback armed on backup");
+    transport.now0 = due;
+    transport
+        .maybe_begin_failback()
+        .expect("failback probe begins");
+    assert_eq!(transport.active_resolver.index(), 0);
+    // The failed probe re-seats from the DoT primary onto the plain backup.
+    transport.on_exchange_failed(due);
+    assert_eq!(transport.active_resolver.index(), 1);
+    assert_eq!(
+        transport.take_downgrade_to_plain(),
+        1,
+        "the DoT→plain failback re-seat counts a second downgrade"
     );
 }
 

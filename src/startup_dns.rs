@@ -886,6 +886,12 @@ pub struct StartupDns {
     /// accumulate across the resolved set and are taken exactly once so a later
     /// drain never double-counts a detection.
     dns_anomalies: [u32; DnsAnomalyKind::COUNT],
+    /// The count of DoT→plain downgrade relocations awaiting drain by the
+    /// owning `ServeStorage` into the monitor `dp` fact fold. A relocation is a
+    /// downgrade exactly when the departed active resolver carried an `IP#fqdn`
+    /// FQDN and the relocated-to resolver is a bare-IP entry; it accumulates
+    /// across the failover/failback paths and is taken exactly once.
+    downgrade_to_plain: usize,
     #[cfg(test)]
     poll_ticks: u64,
     #[cfg(test)]
@@ -955,6 +961,7 @@ impl StartupDns {
             failback_successes: 0,
             resolver_transitions: 0,
             dns_anomalies: [0; DnsAnomalyKind::COUNT],
+            downgrade_to_plain: 0,
             #[cfg(test)]
             poll_ticks: 0,
             #[cfg(test)]
@@ -989,6 +996,13 @@ impl StartupDns {
     /// pending count to zero for the next window or serving turn.
     pub(crate) fn take_resolver_transitions(&mut self) -> usize {
         std::mem::take(&mut self.resolver_transitions)
+    }
+
+    /// Drains the accumulated DoT→plain downgrade relocations for the owning
+    /// storage to fold into the monitor's `dp` fact, resetting the pending
+    /// count to zero for the next window or serving turn.
+    pub(crate) fn take_downgrade_to_plain(&mut self) -> usize {
+        std::mem::take(&mut self.downgrade_to_plain)
     }
 
     #[cfg(test)]
@@ -2521,6 +2535,26 @@ impl StartupDns {
         Ok(())
     }
 
+    /// Counts a DoT→plain downgrade when a relocation moves the active
+    /// resolver from an `IP#fqdn` entry onto a bare-IP entry, so the monitor
+    /// can surface the failover downgrade path (`dp=`). A relocation that keeps
+    /// or gains an FQDN is not a downgrade and is not counted.
+    fn note_downgrade_if_dot_to_plain(&mut self, from: ActiveResolver, to: ActiveResolver) {
+        let from_is_dot = self
+            .resolvers
+            .as_ref()
+            .and_then(|set| set.get(from.index()))
+            .is_some_and(|ns| ns.fqdn().is_some());
+        let to_is_plain = self
+            .resolvers
+            .as_ref()
+            .and_then(|set| set.get(to.index()))
+            .is_some_and(|ns| ns.fqdn().is_none());
+        if from_is_dot && to_is_plain {
+            self.downgrade_to_plain = self.downgrade_to_plain.saturating_add(1);
+        }
+    }
+
     /// Advances the failover/failback state machine at the single recognized
     /// failure choke point. Every counted failure degrades the active resolver,
     /// recording exactly one enter crossing when healthy resolves cross the
@@ -2539,6 +2573,7 @@ impl StartupDns {
             self.resolver_transitions += 1;
         }
         if let Some(source) = self.failback_source {
+            self.note_downgrade_if_dot_to_plain(active, source);
             self.active_resolver = source;
             self.failback_source = None;
             self.failback_successes = 0;
@@ -2549,6 +2584,7 @@ impl StartupDns {
         if self.degradations[active_index] == ResolverDegradation::Degraded
             && let Some(next) = self.next_healthy_after_active(active)
         {
+            self.note_downgrade_if_dot_to_plain(active, next);
             self.active_resolver = next;
             if !next.is_primary() {
                 self.failback_due = Some(now.saturating_add(FAILBACK_AFTER_SECS));

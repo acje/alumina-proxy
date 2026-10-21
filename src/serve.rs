@@ -381,6 +381,7 @@ impl ServeStorage {
             .advance_exchange(fqdn, &mut self.cache, &mut self.schedules)?;
         self.drain_resolver_transitions();
         self.drain_dns_anomalies();
+        self.drain_downgrade_to_plain();
         Ok(Some(result))
     }
 
@@ -407,6 +408,16 @@ impl ServeStorage {
             for _ in 0..count {
                 self.enforcement.note_fact_dns_anomaly(kind);
             }
+        }
+    }
+
+    /// Folds every DoT→plain downgrade relocation the DNS transport noted into
+    /// the monitor `dp` fact, one fact per downgrade. The transport drains to
+    /// zero, so a later drain never double-counts an earlier downgrade.
+    fn drain_downgrade_to_plain(&mut self) {
+        let downgrades = self.dns.take_downgrade_to_plain();
+        for _ in 0..downgrades {
+            self.enforcement.note_fact_downgrade_to_plain();
         }
     }
 
@@ -599,6 +610,7 @@ impl ServeStorage {
         )?;
         self.drain_resolver_transitions();
         self.drain_dns_anomalies();
+        self.drain_downgrade_to_plain();
         self.settle_startup(now0, report, decision_seconds, false)
     }
 

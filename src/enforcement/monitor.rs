@@ -12,6 +12,7 @@ pub struct FactCounters {
     pub(crate) unknown: [SaturatingCounter; UnknownReason::COUNT],
     pub(crate) resolver_degraded: SaturatingCounter,
     pub(crate) dns_anomaly: [SaturatingCounter; DnsAnomalyKind::COUNT],
+    pub(crate) downgrade_to_plain: SaturatingCounter,
 }
 
 /// The typed DNS anomaly surface folded into the monitor alongside the
@@ -175,6 +176,14 @@ impl Monitor {
         self.dirty = true;
     }
 
+    /// Counts one DoT→plain downgrade relocation (`dp=`), noted by the serving
+    /// storage when the DNS transport drains a downgrade. The counter is an
+    /// event fold like `rd`, never a latched level.
+    pub(crate) const fn note_fact_downgrade_to_plain(&mut self) {
+        self.facts.downgrade_to_plain.bump();
+        self.dirty = true;
+    }
+
     pub(crate) const fn note_action_first_slot_block(&mut self, scope: AnyIllegalScope) {
         self.actions.first_slot_block[scope as usize].bump();
         self.dirty = true;
@@ -311,6 +320,14 @@ impl Monitor {
         self.facts.dns_anomaly.iter().any(|c| c.overflow())
     }
 
+    pub(crate) const fn facts_downgrade_to_plain(&self) -> u32 {
+        self.facts.downgrade_to_plain.value()
+    }
+
+    pub(crate) const fn facts_downgrade_to_plain_overflow(&self) -> bool {
+        self.facts.downgrade_to_plain.overflow()
+    }
+
     pub(crate) fn unknown_total(&self) -> u64 {
         self.facts
             .unknown
@@ -335,6 +352,7 @@ impl Monitor {
                 .iter()
                 .map(|c| u64::from(c.value()))
                 .sum::<u64>()
+            + u64::from(self.facts.downgrade_to_plain.value())
     }
 
     pub(crate) const fn actions_block_all(&self) -> u32 {
@@ -460,6 +478,7 @@ impl Monitor {
         for c in &mut self.facts.dns_anomaly {
             c.saturate_for_test();
         }
+        self.facts.downgrade_to_plain.saturate_for_test();
         for c in &mut self.actions.first_slot_block {
             c.saturate_for_test();
         }
