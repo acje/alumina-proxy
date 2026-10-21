@@ -486,6 +486,10 @@ pub enum ConfigError {
         index: usize,
         value: String,
     },
+    DuplicateResolver {
+        index: usize,
+        value: String,
+    },
 }
 
 impl ConfigError {
@@ -585,6 +589,11 @@ impl fmt::Display for ConfigError {
             ConfigError::InvalidResolver { index, value } => write!(
                 f,
                 "config resolver[{0}] value {value:?} invalid: expected a numeric unicast IPv4/IPv6 address (optionally `#fqdn`, optionally `#fqdn#pin-sha256=<base64>`), port 53 (bare IP) or 853 (fqdn), no zone identifier, validated lowercase ASCII FQDN",
+                index + 1
+            ),
+            ConfigError::DuplicateResolver { index, value } => write!(
+                f,
+                "config resolver[{0}] value {value:?} duplicates an earlier resolver entry",
                 index + 1
             ),
         }
@@ -713,12 +722,17 @@ fn build_resolver_set(table: &toml::Table) -> Result<ResolverSet, ConfigError> {
     }
     let mut nameservers = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {
-        nameservers.push(
-            resolver::select(value).map_err(|_| ConfigError::InvalidResolver {
+        let ns = resolver::select(value).map_err(|_| ConfigError::InvalidResolver {
+            index,
+            value: value.clone(),
+        })?;
+        if nameservers.contains(&ns) {
+            return Err(ConfigError::DuplicateResolver {
                 index,
                 value: value.clone(),
-            })?,
-        );
+            });
+        }
+        nameservers.push(ns);
     }
     resolver::ResolverSet::from_slice(&nameservers).ok_or(ConfigError::ResolverCountOutOfRange {
         got: nameservers.len(),
@@ -1366,6 +1380,33 @@ mod resolver_config_tests {
                 .to_string(),
             "94.140.14.14"
         );
+    }
+
+    #[test]
+    fn resolver_duplicates_rejected() {
+        let err = parse_config_document(&valid_doc("[\"1.1.1.1\", \"1.1.1.1\"]"))
+            .expect_err("exact duplicate resolver must be rejected");
+        assert!(
+            matches!(&err, ConfigError::DuplicateResolver { index: 1, value: v } if v == "1.1.1.1"),
+            "exact duplicate must be DuplicateResolver{{index:1}}, got {err:?}"
+        );
+        assert_eq!(err.exit_status(), 78, "DuplicateResolver must exit 78");
+    }
+
+    #[test]
+    fn resolver_duplicate_fqdn_and_pin_forms_rejected() {
+        let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+        for value in [
+            "1.1.1.1#dns.google",
+            &format!("9.9.9.9#dns.quad9.net#pin-sha256={b64}"),
+        ] {
+            let err = parse_config_document(&valid_doc(&format!("[\"{value}\", \"{value}\"]")))
+                .expect_err("duplicate resolver must be rejected");
+            assert!(
+                matches!(&err, ConfigError::DuplicateResolver { index: 1, value: v } if v == value),
+                "duplicate {value} must be DuplicateResolver{{index:1}}, got {err:?}"
+            );
+        }
     }
 
     #[test]
