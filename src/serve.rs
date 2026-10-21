@@ -833,6 +833,52 @@ mod tests {
     }
 
     #[test]
+    fn drain_dns_anomalies_accumulates_into_the_enforcement_monitor() {
+        let mut storage = booted(1, 0);
+        storage
+            .dns
+            .note_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
+        storage
+            .dns
+            .note_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
+        storage
+            .dns
+            .note_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
+        storage.dns.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+        storage.drain_dns_anomalies();
+        assert_eq!(
+            storage
+                .enforcement
+                .monitor()
+                .facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation),
+            2
+        );
+        assert_eq!(
+            storage
+                .enforcement
+                .monitor()
+                .facts_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch),
+            1
+        );
+        assert_eq!(
+            storage
+                .enforcement
+                .monitor()
+                .facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl),
+            1
+        );
+        storage.drain_dns_anomalies();
+        assert_eq!(
+            storage
+                .enforcement
+                .monitor()
+                .facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation),
+            2,
+            "a second drain must not double-count a drained anomaly"
+        );
+    }
+
+    #[test]
     fn either_family_positive_makes_name_usable() {
         let mut cache = Cache::new(1).unwrap();
         publish_aaaa(&mut cache, 0, FRESH, TTL);

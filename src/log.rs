@@ -1917,6 +1917,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn logging_monitor_summary_emits_positive_rpm_and_xttl() {
+        use crate::enforcement::monitor::{DnsAnomalyKind, Monitor};
+        let mut m = Monitor::new();
+        m.note_fact_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
+        m.note_fact_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
+        m.note_fact_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            text.contains(" rpm=2"),
+            "the resolver-peer-mismatch anomaly key carries its fold: {text}"
+        );
+        assert!(
+            text.contains(" xttl=1"),
+            "the extreme-ttl anomaly key carries its fold: {text}"
+        );
+    }
+
     #[cfg(test)]
     #[test]
     fn logging_monitor_all_saturated_record_fits_the_8k_slot() {
