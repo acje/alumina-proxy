@@ -116,25 +116,25 @@ fn main() {
     }
 }
 
-/// Prints one stdout startup warning line per resolver entry whose trust form
+/// Prints one stderr startup warning line per resolver entry whose trust form
 /// is degraded but operator-visible at boot: bare-IP entries (no `IP#fqdn`
 /// FQDN, plain DNS only) and `IP#fqdn` entries without a strict `#pin-sha256=`
 /// pin (`DoT` against an empty root store, deterministic fail-closed until a
 /// trust-anchor intake lands). Boot-time only; never on a serving path.
 fn print_resolver_warnings(report: &BootReport) {
     for nameserver in report.ip_only_resolvers() {
-        println!(
-            "alumina: warning: resolver {} has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the future DoT (853) SNI/SAN identity surface is unavailable",
+        write_stderr(format_args!(
+            "alumina: warning: resolver {} has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the future DoT (853) SNI/SAN identity surface is unavailable\n",
             nameserver.addr()
-        );
+        ));
     }
     for nameserver in report.unpinned_dot_resolvers() {
         if let Some(fqdn) = nameserver.fqdn() {
-            println!(
-                "alumina: warning: resolver {} ({}) has no #pin-sha256= pin; DoT (853) validates against an empty root store and fails closed until a trust-anchor intake lands",
+            write_stderr(format_args!(
+                "alumina: warning: resolver {} ({}) has no #pin-sha256= pin; DoT (853) validates against an empty root store and fails closed until a trust-anchor intake lands\n",
                 nameserver.addr(),
                 fqdn.as_str()
-            );
+            ));
         }
     }
 }
