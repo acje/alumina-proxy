@@ -69,6 +69,13 @@ impl Fqdn {
                 return Err(FqdnError::Invalid);
             }
         }
+        if value
+            .rsplit('.')
+            .next()
+            .is_some_and(|label| label.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return Err(FqdnError::Invalid);
+        }
         let mut bytes = [0u8; FQDN_MAX_LEN];
         bytes[..value.len()].copy_from_slice(value.as_bytes());
         Ok(Fqdn {
@@ -588,6 +595,19 @@ mod tests {
                 .as_str(),
             "4example.com"
         );
+    }
+
+    #[test]
+    fn select_rejects_all_numeric_final_label() {
+        for bad in ["1.1.1.1#example.123", "1.1.1.1#1.2.3.4"] {
+            let err = select(bad)
+                .err()
+                .unwrap_or_else(|| panic!("{bad} must be rejected"));
+            assert!(
+                matches!(err, ResolverError::InvalidFqdn { .. }),
+                "{bad} must be InvalidFqdn, got {err:?}"
+            );
+        }
     }
 
     #[test]
