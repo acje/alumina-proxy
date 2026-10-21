@@ -665,9 +665,19 @@ fn parse_rdata(msg: &[u8], rd_start: usize, rdlen: usize, ty: u16) -> Result<Rda
             Ok(Rdata::Cname(target))
         }
         TYPE_SOA => {
+            // Cumulative sub-component validation: each parsed name must stay
+            // within the rdata, and the fixed 20-byte tail (serial, refresh,
+            // retry, expire, minimum) must follow exactly, so the tail slice
+            // is provably in-bounds and exactly 20 bytes before it is read.
             let (_, used) = read_name(msg, rd_start)?;
+            if used > end {
+                return Err(DnsError::MalformedSoa);
+            }
             let (_, used2) = read_name(msg, used)?;
-            if rdlen != (used2 - rd_start) + 20 || used2 + 20 != end {
+            if used2 > end {
+                return Err(DnsError::MalformedSoa);
+            }
+            if end - used2 != 20 {
                 return Err(DnsError::MalformedSoa);
             }
             let mut r = Reader::new(&msg[used2..end]);
@@ -2164,6 +2174,56 @@ mod tests {
         msg.extend_from_slice(&soa_record("example.org", 300, 60));
         let out = parse_response_ws("sub.example.org", Family::A, 27, &msg).expect("parse");
         assert_eq!(out, Outcome::NxDomain { soa: None });
+    }
+
+    #[test]
+    fn rejects_soa_with_truncated_tail() {
+        // W1-L1a-F2: the fixed 20-byte SOA tail (serial, refresh, retry,
+        // expire, minimum) must follow the two names exactly; a truncated
+        // tail is rejected as MalformedSoa rather than misread.
+        let mut rdata = qname_bytes("ns1.example.org");
+        rdata.extend_from_slice(&qname_bytes("hostmaster.example.org"));
+        rdata.extend_from_slice(&[0u8; 19]);
+        let mut msg = header(0x1254, true, 0, 1, 1, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [93, 184, 216, 34], 120));
+        msg.extend_from_slice(&raw_record("example.org", 6, 1, 300, &rdata));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x1254, &msg),
+            Err(DnsError::MalformedSoa)
+        );
+    }
+
+    #[test]
+    fn rejects_soa_with_name_overrunning_rdata() {
+        // W1-L1a-F2: a name whose encoded form overruns the declared rdata
+        // boundary is rejected as MalformedSoa (cumulative sub-component
+        // bounds), even though the name bytes remain inside the message.
+        let mut rdata = qname_bytes("ns1.example.org");
+        rdata.extend_from_slice(&qname_bytes("hostmaster.example.org"));
+        rdata.extend_from_slice(&[0u8; 20]);
+        let declared = qname_bytes("ns1.example.org").len() + 20;
+        let mut msg = header(0x1255, true, 0, 1, 1, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [93, 184, 216, 34], 120));
+        msg.extend_from_slice(&qname_bytes("example.org"));
+        msg.extend_from_slice(&6u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&300u32.to_be_bytes());
+        msg.extend_from_slice(
+            &u16::try_from(declared)
+                .expect("declared rdlen fits u16")
+                .to_be_bytes(),
+        );
+        msg.extend_from_slice(&rdata);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x1255, &msg),
+            Err(DnsError::MalformedSoa)
+        );
     }
 
     #[test]
