@@ -5,12 +5,15 @@ use std::time::Duration;
 use mio::net::TcpListener as MioListener;
 
 use alumina::config::parse_config_document;
+use alumina::connect::MAX_HEADER_LINES;
 use alumina::inventory::TrafficStorage;
 use alumina::runtime::Runtime;
 use alumina::serve::ServeStorage;
 
 const LOOPS: usize = 64;
+const OVERLONG_LOOPS: usize = 4;
 const BODY_403: &str = "403 Forbidden";
+const BODY_400: &str = "400 Bad Request";
 
 fn rlimit_stack_readable() -> Option<String> {
     let contents = std::fs::read_to_string("/proc/self/limits").ok()?;
@@ -75,5 +78,50 @@ fn main() {
         }
     }
 
-    println!("MAIN-THREAD-STACK-OK loops={LOOPS} accept+reset cycles on true main thread");
+    for i in 0..OVERLONG_LOOPS {
+        let mut head = Vec::with_capacity(64 + (MAX_HEADER_LINES + 1) * 10);
+        head.extend_from_slice(b"CONNECT sub.example.org:443 HTTP/1.1\r\n");
+        for _ in 0..MAX_HEADER_LINES + 1 {
+            head.extend_from_slice(b"X-Hdr: v\r\n");
+        }
+        head.extend_from_slice(b"\r\n");
+        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect client");
+        client
+            .write_all(&head)
+            .expect("write over-long connect head");
+        let mut seen = false;
+        let mut buf = [0u8; 128];
+        for _ in 0..100 {
+            runtime
+                .turn(Some(Duration::from_millis(2)))
+                .expect("owner turn drives accept+parse+refuse+close");
+            client.set_nonblocking(true).expect("nonblocking client");
+            match client.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    let text = String::from_utf8_lossy(&buf[..n]);
+                    if text.contains(BODY_400) {
+                        seen = true;
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            seen,
+            "over-long iteration {i}: a CONNECT head with more than {MAX_HEADER_LINES} header \
+             lines must be refused with the 400 body"
+        );
+        client.set_nonblocking(false).expect("blocking client");
+        drop(client);
+        for _ in 0..20 {
+            runtime
+                .turn(Some(Duration::from_millis(2)))
+                .expect("owner turn settles close_slot reset");
+        }
+    }
+
+    println!(
+        "MAIN-THREAD-STACK-OK loops={LOOPS} accept+reset cycles on true main thread; over-long-head refusals={OVERLONG_LOOPS}"
+    );
 }
