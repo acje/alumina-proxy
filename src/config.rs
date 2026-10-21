@@ -1515,6 +1515,35 @@ mod resolver_config_tests {
     }
 
     #[test]
+    fn config_document_with_utf8_bom_parses() {
+        let doc = format!("\u{feff}{}", valid_doc("[\"1.1.1.1\"]"));
+        let cfg = parse_config_document(&doc).expect("BOM-prefixed doc parses");
+        assert_eq!(cfg.resolver_set().len(), 1);
+        assert_eq!(cfg.resolver_set().primary().addr().to_string(), "1.1.1.1");
+    }
+
+    #[test]
+    fn config_document_bom_counts_toward_size_limit() {
+        let base = valid_doc("[\"1.1.1.1\"]");
+        let pad = CONFIG_DOC_LIMIT.saturating_sub(base.len() + 2);
+        let exact = format!("{base}\n#{}", "a".repeat(pad));
+        assert_eq!(
+            exact.len(),
+            CONFIG_DOC_LIMIT,
+            "padded doc is exactly the 4 KiB limit"
+        );
+        parse_config_document(&exact).expect("doc at exactly the limit parses");
+        let with_bom = format!("\u{feff}{exact}");
+        assert_eq!(with_bom.len(), CONFIG_DOC_LIMIT + 3, "BOM adds 3 bytes");
+        let err = parse_config_document(&with_bom).expect_err("BOM-prefixed doc exceeds the limit");
+        assert!(
+            matches!(&err, ConfigError::OversizedDocument { got, limit } if *limit == CONFIG_DOC_LIMIT && *got == with_bom.len()),
+            "expected OversizedDocument for {} bytes, got {err:?}",
+            with_bom.len()
+        );
+    }
+
+    #[test]
     fn resolver_bad_fqdn_from_config_is_invalid_resolver() {
         for value in [
             "1.1.1.1#*.example.com",
