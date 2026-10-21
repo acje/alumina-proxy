@@ -239,6 +239,10 @@ impl ConnectParser {
     }
 }
 
+/// Locates the `\r\n\r\n` head terminator with a bounded O(N) window scan.
+/// The head is capped at `CONNECT_LIMIT` (8 KiB) before this runs, so the
+/// linear scan is bounded by a fixed constant and never scales with the
+/// connection count or stream length (W1-L1b-F6).
 fn find_end_of_head(buf: &[u8]) -> Option<usize> {
     if buf.len() < END_OF_HEAD.len() {
         return None;
@@ -366,6 +370,15 @@ fn parse_request_line(line: &[u8]) -> Result<ConnectRequest, ConnectError> {
             detail: "not exactly three tokens",
         })?;
     let version = &line[target_end + 1..];
+    if version.contains(&b' ') {
+        // A space inside the version token means the target itself contained a
+        // space (e.g. `CONNECT host :443 HTTP/1.1`): the request line has more
+        // than the three CONNECT tokens, so it is malformed, never a genuine
+        // version mismatch (W1-L1b-F2).
+        return Err(ConnectError::MalformedRequestLine {
+            detail: "not exactly three tokens",
+        });
+    }
     if version != HTTP_11 {
         return Err(ConnectError::UnsupportedVersion);
     }
@@ -662,6 +675,21 @@ mod tests {
     #[test]
     fn rejects_two_token_request_line() {
         let head = "CONNECT sub.example.org:443\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::MalformedRequestLine {
+                detail: "not exactly three tokens",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_space_in_target_as_malformed_request_line() {
+        // `CONNECT host :443 HTTP/1.1` mis-splits at the first space after the
+        // method, leaving a space inside the version token; that is a malformed
+        // request line (four tokens), never a genuine version mismatch
+        // (W1-L1b-F2).
+        let head = "CONNECT host :443 HTTP/1.1\r\n\r\n";
         assert_eq!(
             parse_full(head.as_bytes()),
             Err(ConnectError::MalformedRequestLine {

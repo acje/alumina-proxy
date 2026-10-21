@@ -676,6 +676,70 @@ fn setup_deadline_frees_silent_seats_with_504() {
 }
 
 #[test]
+fn setup_deadline_frees_partial_hello_pseudo_handshake_seat() {
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        let client = connect(port);
+        pump(serving, 1);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "precondition: the connecting client is admitted into one setup seat"
+        );
+
+        // A slow-client pseudo-handshake: one validly-framed TLS record whose
+        // claimed 5-byte payload is only partially delivered, so the inspector
+        // retains the bytes and never completes a ClientHello (W7-L7a-F2).
+        let partial: &[u8] = &[0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x00];
+        {
+            let ws = &mut serving.slots[0];
+            ws.buf_base = 0;
+            ws.buf_len = partial.len();
+            ws.buf[..partial.len()].copy_from_slice(partial);
+            ws.parse_rel = 0;
+            ws.insp_rel = 0;
+            ws.head_len = 0;
+            ws.hello_end = None;
+            ws.hello_consumed = 0;
+            ws.fwd = 0;
+            ws.approved = FixedHostname::normalize(b"sub.example.org");
+            ws.stage = Stage::ValidatingHello;
+            ws.gate.on_connect_head(0);
+            ws.gate.on_authorized();
+            ws.gate.on_upstream_connected();
+            ws.gate.on_response_ok();
+        }
+        serving.buffer_and_validate(0, &[]);
+        assert!(
+            matches!(serving.slots[0].stage, Stage::ValidatingHello),
+            "a validly-framed but incomplete TLS record must keep the slot in ValidatingHello"
+        );
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the partial-hello pseudo-handshake holds its setup seat"
+        );
+
+        let start = Instant::now();
+        while serving.storage().occupied() > 0 {
+            serving
+                .run_once(None)
+                .expect("block past the next setup deadline");
+            assert!(
+                start.elapsed() <= Duration::from_secs(SETUP_DEADLINE_SECS + 5),
+                "the absolute setup deadline must free the partial-hello seat, not hold it past the bound"
+            );
+        }
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the setup deadline frees the partial-hello pseudo-handshake seat"
+        );
+        drop(client);
+    });
+}
+
+#[test]
 fn future_deadline_only_skips_expire_sweep() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {

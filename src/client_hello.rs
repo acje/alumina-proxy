@@ -9,6 +9,12 @@ pub const MAX_CLIENT_HELLO: usize = 64 * 1024;
 pub const RECORD_PAYLOAD_LIMIT: usize = 16 * 1024;
 
 /// Maximum `ClientHello` handshake message length (4-byte header plus body).
+///
+/// A deliberate interop bound (V34, docs/alumina-proxy.md:478-480): RFC 8446
+/// §5.1 lets a handshake message span multiple TLS records (each ≤ 2^14
+/// payload), so a spec-legal multi-record `ClientHello` larger than 16 KiB is
+/// rejected as `HandshakeTooLarge` rather than reassembled (W1-H1b-F5). The
+/// per-record payload cap is `RECORD_PAYLOAD_LIMIT`.
 pub const MAX_HANDSHAKE_LEN: usize = 16 * 1024;
 
 /// Maximum number of offered `supported_versions` entries retained.
