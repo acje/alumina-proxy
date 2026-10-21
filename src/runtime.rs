@@ -369,7 +369,7 @@ impl Runtime {
             }
             match self.serving.storage_mut().advance_dns()? {
                 Some(TurnResult::Pending) => {}
-                None | Some(TurnResult::Failed | TurnResult::Published) => break,
+                None | Some(TurnResult::Failed(_) | TurnResult::Published(_)) => break,
             }
         }
         Ok(())

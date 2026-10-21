@@ -988,11 +988,11 @@ fn cooperative_silent_peer_yields_pending_before_deadline() {
             TurnResult::Pending => {
                 let _ = transport.wait_dns_readiness(deadline).unwrap();
             }
-            TurnResult::Failed => {
+            TurnResult::Failed(_) => {
                 failures += 1;
                 break;
             }
-            other @ TurnResult::Published => {
+            other @ TurnResult::Published(_) => {
                 panic!("a silent peer must conclude as a counted failure, got {other:?}")
             }
         }
@@ -1057,10 +1057,9 @@ fn cooperative_advance_returns_control_to_worker_between_turns() {
             }
         }
     }
-    assert_eq!(
-        terminal,
-        Some(TurnResult::Failed),
-        "a silent peer must conclude as a counted failure"
+    assert!(
+        matches!(terminal, Some(TurnResult::Failed(_))),
+        "a silent peer must conclude as a counted failure, got {terminal:?}"
     );
     assert!(
         worker_turns >= 2,
@@ -1110,10 +1109,9 @@ fn cooperative_exchange_publishes_on_valid_response() {
             }
         }
     }
-    assert_eq!(
-        result,
-        Some(TurnResult::Published),
-        "a valid response must publish at the primitive level"
+    assert!(
+        matches!(result, Some(TurnResult::Published(_))),
+        "a valid response must publish at the primitive level, got {result:?}"
     );
     assert_eq!(
         bindings_of(&cache, 0, Family::A),
@@ -1305,10 +1303,9 @@ fn start_active_exchange_is_refused_and_first_survives() {
                 }
             }
         }
-        assert_eq!(
-            result,
-            Some(TurnResult::Published),
-            "the first exchange must still conclude despite the refused second start"
+        assert!(
+            matches!(result, Some(TurnResult::Published(_))),
+            "the first exchange must still conclude despite the refused second start, got {result:?}"
         );
         assert_eq!(
             bindings_of(&cache, 0, Family::A),
@@ -1447,10 +1444,9 @@ fn cooperative_send_wouldblock_makes_owner_wait_instead_of_busy_looping() {
             }
         }
     }
-    assert_eq!(
-        result,
-        Some(TurnResult::Published),
-        "a valid response must publish after an awaited would-block send"
+    assert!(
+        matches!(result, Some(TurnResult::Published(_))),
+        "a valid response must publish after an awaited would-block send, got {result:?}"
     );
     assert_ne!(bindings_of(&cache, 0, Family::A), []);
     drop(responder);
@@ -1479,13 +1475,13 @@ fn run_exchange_to_terminal(
 }
 
 /// Starts one exchange with a fresh short deadline and drives it to its
-/// terminal turn, asserting it concludes as `expect`.
+/// terminal turn, asserting its terminal variant satisfies `expect`.
 fn run_exchange_expecting(
     transport: &mut StartupDns,
     fqdn: &crate::config::Fqdn,
     cache: &mut Cache,
     schedules: &mut Schedules,
-    expect: &TurnResult,
+    expect: impl Fn(&TurnResult) -> bool,
 ) {
     // A fresh deadline per exchange keeps every exchange dialing: the
     // responder scripts rely on one accepted connection per exchange.
@@ -1494,9 +1490,9 @@ fn run_exchange_expecting(
         .start_exchange(fqdn, Family::A, 0, deadline)
         .unwrap();
     let terminal = run_exchange_to_terminal(transport, fqdn, cache, schedules, deadline);
-    assert_eq!(
-        terminal, *expect,
-        "the exchange must conclude as {expect:?}, got {terminal:?}"
+    assert!(
+        expect(&terminal),
+        "the exchange must conclude as expected, got {terminal:?}"
     );
 }
 
@@ -1521,9 +1517,17 @@ fn resolver_enters_degraded_once_after_three_consecutive_failures() {
         transport
             .start_exchange(fqdn, Family::A, 0, deadline)
             .unwrap();
-        assert_eq!(
-            run_exchange_to_terminal(&mut transport, fqdn, &mut cache, &mut schedules, deadline),
-            TurnResult::Failed,
+        assert!(
+            matches!(
+                run_exchange_to_terminal(
+                    &mut transport,
+                    fqdn,
+                    &mut cache,
+                    &mut schedules,
+                    deadline
+                ),
+                TurnResult::Failed(_)
+            ),
             "each stalled exchange concludes as a counted failure"
         );
     }
@@ -1553,13 +1557,9 @@ fn resolver_failure_below_threshold_emits_no_transition_and_stays_healthy() {
     transport.now0 = 1_000_000;
     let fqdn = cfg.allowlist().get(0).unwrap();
     for _ in 0..2 {
-        run_exchange_expecting(
-            &mut transport,
-            fqdn,
-            &mut cache,
-            &mut schedules,
-            &TurnResult::Failed,
-        );
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            matches!(t, TurnResult::Failed(_))
+        });
     }
     assert!(
         !transport.resolver_degraded_for_test(),
@@ -1589,13 +1589,9 @@ fn resolver_stays_degraded_without_reemitting_on_further_failures() {
     transport.now0 = 1_000_000;
     let fqdn = cfg.allowlist().get(0).unwrap();
     for _ in 0..4 {
-        run_exchange_expecting(
-            &mut transport,
-            fqdn,
-            &mut cache,
-            &mut schedules,
-            &TurnResult::Failed,
-        );
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            matches!(t, TurnResult::Failed(_))
+        });
     }
     assert!(
         transport.resolver_degraded_for_test(),
@@ -1626,26 +1622,18 @@ fn successful_exchange_recovers_and_emits_exit_crossing_once() {
     transport.now0 = 1_000_000;
     let fqdn = cfg.allowlist().get(0).unwrap();
     for _ in 0..3 {
-        run_exchange_expecting(
-            &mut transport,
-            fqdn,
-            &mut cache,
-            &mut schedules,
-            &TurnResult::Failed,
-        );
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            matches!(t, TurnResult::Failed(_))
+        });
     }
     assert!(
         transport.resolver_degraded_for_test(),
         "three consecutive connect-refused failures relocate the resolver into degraded mode"
     );
     transport.addr = ns(responder.port());
-    run_exchange_expecting(
-        &mut transport,
-        fqdn,
-        &mut cache,
-        &mut schedules,
-        &TurnResult::Published,
-    );
+    run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+        matches!(t, TurnResult::Published(_))
+    });
     assert!(
         !transport.resolver_degraded_for_test(),
         "a successful publication must leave degraded mode"
@@ -1659,13 +1647,9 @@ fn successful_exchange_recovers_and_emits_exit_crossing_once() {
     );
     transport.addr = ns(dead_port);
     for _ in 0..2 {
-        run_exchange_expecting(
-            &mut transport,
-            fqdn,
-            &mut cache,
-            &mut schedules,
-            &TurnResult::Failed,
-        );
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            matches!(t, TurnResult::Failed(_))
+        });
     }
     assert!(
         !transport.resolver_degraded_for_test(),
@@ -1695,13 +1679,9 @@ fn degraded_resolver_recovers_on_a_valid_negative_and_emits_exit_crossing() {
     transport.now0 = 1_000_000;
     let fqdn = cfg.allowlist().get(0).unwrap();
     for _ in 0..3 {
-        run_exchange_expecting(
-            &mut transport,
-            fqdn,
-            &mut cache,
-            &mut schedules,
-            &TurnResult::Failed,
-        );
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            matches!(t, TurnResult::Failed(_))
+        });
     }
     assert!(
         transport.resolver_degraded_for_test(),
@@ -1709,13 +1689,9 @@ fn degraded_resolver_recovers_on_a_valid_negative_and_emits_exit_crossing() {
     );
     let negative = spawn_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
     transport.addr = ns(negative.port());
-    run_exchange_expecting(
-        &mut transport,
-        fqdn,
-        &mut cache,
-        &mut schedules,
-        &TurnResult::Published,
-    );
+    run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+        matches!(t, TurnResult::Published(_))
+    });
     assert!(
         !transport.resolver_degraded_for_test(),
         "a valid negative publishes and recovers the resolver out of degraded mode"
@@ -1746,13 +1722,9 @@ fn genuinely_different_peer_address_is_rejected_without_the_force_seam() {
     transport.addr = SocketAddr::new(IpAddr::from([0, 0, 0, 0]), responder.port());
     transport.now0 = 1_000_000;
     let fqdn = cfg.allowlist().get(0).unwrap();
-    run_exchange_expecting(
-        &mut transport,
-        fqdn,
-        &mut cache,
-        &mut schedules,
-        &TurnResult::Failed,
-    );
+    run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+        matches!(t, TurnResult::Failed(_))
+    });
     let anomalies = transport.take_dns_anomalies();
     assert!(
         anomalies[DnsAnomalyKind::ResolverPeerMismatch.index()] >= 1,
@@ -1774,13 +1746,9 @@ fn out_of_bailiwick_cname_is_recorded_as_a_transport_anomaly() {
     transport.bailiwick = BailiwickZones::from_allowlist(cfg.allowlist());
     transport.now0 = 1_000_000;
     let fqdn = cfg.allowlist().get(0).unwrap();
-    run_exchange_expecting(
-        &mut transport,
-        fqdn,
-        &mut cache,
-        &mut schedules,
-        &TurnResult::Failed,
-    );
+    run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+        matches!(t, TurnResult::Failed(_))
+    });
     let anomalies = transport.take_dns_anomalies();
     assert_eq!(
         anomalies[DnsAnomalyKind::BailiwickViolation.index()],
@@ -1819,9 +1787,17 @@ fn zero_or_oversized_length_prefix_is_refused_fail_closed() {
         transport
             .start_exchange(fqdn, Family::A, 0, deadline)
             .unwrap();
-        assert_eq!(
-            run_exchange_to_terminal(&mut transport, fqdn, &mut cache, &mut schedules, deadline),
-            TurnResult::Failed,
+        assert!(
+            matches!(
+                run_exchange_to_terminal(
+                    &mut transport,
+                    fqdn,
+                    &mut cache,
+                    &mut schedules,
+                    deadline
+                ),
+                TurnResult::Failed(_)
+            ),
             "a zero or oversized length prefix fails the exchange closed"
         );
     }
@@ -2289,4 +2265,105 @@ fn peer_matches_validates_the_active_resolver_only() {
         !transport.peer_matches(primary),
         "the inactive primary resolver no longer validates after failover"
     );
+}
+
+#[test]
+fn turn_result_carries_published_kind_structurally() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+
+    // Each sub-case owns its transport in a nested block so the fixed-profile
+    // transport (a ~144 KiB struct) never accumulates several live copies on
+    // the test thread's stack at once.
+    {
+        // A valid positive A publishes ResolvedPositive.
+        let positive = spawn_responder(vec![vec![Step::PositiveA {
+            ttl: 120,
+            octets: [93, 184, 216, 34],
+        }]]);
+        let mut transport = StartupDns::new().unwrap();
+        transport.addr = ns(positive.port());
+        transport.now0 = 1_000_000;
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            *t == TurnResult::Published(PublishedKind::ResolvedPositive)
+        });
+        drop(positive);
+    }
+
+    {
+        // An all-ineligible positive publishes NoEligible.
+        let ineligible = spawn_responder(vec![vec![Step::PositiveA {
+            ttl: 120,
+            octets: [10, 0, 0, 1],
+        }]]);
+        let mut transport = StartupDns::new().unwrap();
+        transport.addr = ns(ineligible.port());
+        transport.now0 = 1_000_000;
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            *t == TurnResult::Published(PublishedKind::NoEligible)
+        });
+        drop(ineligible);
+    }
+
+    {
+        // A validated NXDOMAIN publishes Negative.
+        let negative = spawn_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
+        let mut transport = StartupDns::new().unwrap();
+        transport.addr = ns(negative.port());
+        transport.now0 = 1_000_000;
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            *t == TurnResult::Published(PublishedKind::Negative)
+        });
+        drop(negative);
+    }
+}
+
+#[test]
+fn turn_result_carries_failure_reason_structurally() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+
+    // Each sub-case owns its transport in a nested block so the fixed-profile
+    // transport (a ~144 KiB struct) never accumulates several live copies on
+    // the test thread's stack at once.
+    {
+        // A refused connect fails with Connect.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
+        let dead_port = probe.local_addr().expect("probe addr").port();
+        drop(probe);
+        let mut transport = StartupDns::new().unwrap();
+        transport.addr = ns(dead_port);
+        transport.now0 = 1_000_000;
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            *t == TurnResult::Failed(FailureReason::Connect)
+        });
+    }
+
+    {
+        // A silent peer times out.
+        let silent = spawn_responder(vec![vec![Step::Stall(Duration::from_secs(1)), Step::Close]]);
+        let mut transport = StartupDns::new().unwrap();
+        transport.addr = ns(silent.port());
+        transport.now0 = 1_000_000;
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            *t == TurnResult::Failed(FailureReason::Timeout)
+        });
+        drop(silent);
+    }
+
+    {
+        // A malformed response fails with Receive.
+        let malformed = spawn_responder(vec![vec![Step::Malformed(vec![1, 2, 3, 4])]]);
+        let mut transport = StartupDns::new().unwrap();
+        transport.addr = ns(malformed.port());
+        transport.now0 = 1_000_000;
+        run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+            *t == TurnResult::Failed(FailureReason::Receive)
+        });
+        drop(malformed);
+    }
 }

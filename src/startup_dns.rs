@@ -241,11 +241,13 @@ pub(crate) enum TurnResult {
     /// The exchange needs another turn; the worker may do other bounded work
     /// and then call [`StartupDns::advance_exchange`] again.
     Pending,
-    /// A fully validated response was applied to the cache and schedule.
-    Published,
+    /// A fully validated response was applied to the cache and schedule; the
+    /// published-outcome classification is carried structurally.
+    Published(PublishedKind),
     /// A counted per-exchange network failure; the connection is closed and
-    /// the schedule backoff has been advanced exactly once.
-    Failed,
+    /// the schedule backoff has been advanced exactly once. The failure reason
+    /// is carried structurally.
+    Failed(FailureReason),
 }
 
 /// The progress of one nonblocking connect step.
@@ -257,7 +259,7 @@ enum ConnectStep {
     /// send for a bare-IP resolver.
     Transition { next: ExchangeStep },
     /// A counted failure; the exchange has been settled and closed.
-    Failed,
+    Failed(FailureReason),
 }
 
 /// The outcome of one nonblocking connect probe.
@@ -285,14 +287,14 @@ enum SendStep {
     /// turn (the readiness interest switches to reads).
     Transition,
     /// A counted failure; the exchange has been settled and closed.
-    Failed,
+    Failed(FailureReason),
 }
 
 /// The progress of one nonblocking response-read step.
 enum RecvStep {
     Waiting,
-    Failed,
-    Published,
+    Failed(FailureReason),
+    Published(PublishedKind),
 }
 
 /// The progress of one nonblocking `DoT` TLS-handshake step.
@@ -305,7 +307,7 @@ enum HandshakeStep {
     Transition,
     /// A counted failure (certificate/identity rejection, alert, EOF, or
     /// socket error); the exchange has been settled and closed.
-    Failed,
+    Failed(FailureReason),
 }
 
 /// The outcome of one nonblocking TLS-handshake probe, decided inside the
@@ -831,13 +833,6 @@ pub struct StartupDns {
     token_gen: usize,
     registration: Registration,
     active: Option<ActiveExchange>,
-    /// The classification of the most recently published outcome, read out by
-    /// the blocking driver when the exchange concludes (never inferred from
-    /// the cache afterwards, where negative and no-eligible are ambiguous).
-    last_published: Option<PublishedKind>,
-    /// The failure reason of the most recently failed step, read out by the
-    /// blocking driver when the exchange concludes.
-    last_failed: Option<FailureReason>,
     /// The configured resolver set owned for failover/failback decisions,
     /// installed at window begin from the config. `None` before any window
     /// (and in loopback tests that seed only a peer) and then treated as a
@@ -943,8 +938,6 @@ impl StartupDns {
             token_gen: 0,
             registration: Registration::Private,
             active: None,
-            last_published: None,
-            last_failed: None,
             resolvers: None,
             active_resolver: ActiveResolver::primary(1),
             degradations: [ResolverDegradation::default(); MAX_RESOLVERS],
@@ -1044,21 +1037,6 @@ impl StartupDns {
         ledger: &WindowLedger,
     ) -> Result<Duration, StartupDnsError> {
         wait_until_next_step(self, schedules, ledger.names(), ledger.resolved())
-    }
-
-    /// The classification of the most recently published startup exchange, so
-    /// a shared owner records a validated negative or no-eligible answer
-    /// distinctly from a resolved positive (never inferred from the cache
-    /// afterwards). `None` when nothing has published.
-    pub(crate) const fn take_published_kind(&mut self) -> Option<PublishedKind> {
-        self.last_published.take()
-    }
-
-    /// The failure reason of the most recently failed startup exchange, so a
-    /// shared owner records the exact counted reason instead of collapsing
-    /// every non-published conclusion into one class.
-    pub(crate) const fn take_failed_reason(&mut self) -> Option<FailureReason> {
-        self.last_failed.take()
     }
 
     /// The outstanding exchange ordinal and family, captured together for a
@@ -1484,26 +1462,28 @@ impl StartupDns {
     ) -> Result<ConnectStep, StartupDnsError> {
         if let Some(_kind) = ex.connect_err.take() {
             self.close_connection()?;
-            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
-            return Ok(ConnectStep::Failed);
+            let reason =
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+            return Ok(ConnectStep::Failed(reason));
         }
         match self.probe_connect() {
             ConnectProbe::SocketError => {
                 self.close_connection()?;
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
-                return Ok(ConnectStep::Failed);
+                let reason =
+                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+                return Ok(ConnectStep::Failed(reason));
             }
             ConnectProbe::PeerMismatch => {
                 self.close_connection()?;
                 self.note_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
-                return Ok(ConnectStep::Failed);
+                let reason =
+                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+                return Ok(ConnectStep::Failed(reason));
             }
             ConnectProbe::Connected => {
                 let next = if let Some(target) = self.tls_target {
-                    self.upgrade_to_tls(ex, schedules, target)?;
-                    if self.conn.is_none() {
-                        return Ok(ConnectStep::Failed);
+                    if let Some(reason) = self.upgrade_to_tls(ex, schedules, target)? {
+                        return Ok(ConnectStep::Failed(reason));
                     }
                     let needs_handshake = matches!(
                         &self.conn,
@@ -1523,8 +1503,9 @@ impl StartupDns {
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
-            return Ok(ConnectStep::Failed);
+            let reason =
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+            return Ok(ConnectStep::Failed(reason));
         }
         Ok(ConnectStep::Waiting)
     }
@@ -1566,12 +1547,12 @@ impl StartupDns {
         ex: &mut ActiveExchange,
         schedules: &mut Schedules,
         target: TlsTarget,
-    ) -> Result<(), StartupDnsError> {
+    ) -> Result<Option<FailureReason>, StartupDnsError> {
         let tcp = match self.conn.take() {
             Some(DnsConn::Plain(stream)) => stream,
             other => {
                 self.conn = other;
-                return Ok(());
+                return Ok(None);
             }
         };
         if let Ok(conn) = build_tls_connection(target) {
@@ -1580,11 +1561,13 @@ impl StartupDns {
                 tls: Box::new(conn),
             }));
             self.probe_tls_handshake();
+            Ok(None)
         } else {
             self.close_connection()?;
-            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::TlsIdentity)?;
+            let reason =
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::TlsIdentity)?;
+            Ok(Some(reason))
         }
-        Ok(())
     }
 
     /// One nonblocking `DoT` TLS-handshake step: at most one read and one write
@@ -1601,14 +1584,20 @@ impl StartupDns {
             HandshakeProbe::Transition => return Ok(HandshakeStep::Transition),
             HandshakeProbe::Failed => {
                 self.close_connection()?;
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::TlsIdentity)?;
-                return Ok(HandshakeStep::Failed);
+                let reason = self.note_failure(
+                    ex.ordinal,
+                    ex.family,
+                    schedules,
+                    FailureReason::TlsIdentity,
+                )?;
+                return Ok(HandshakeStep::Failed(reason));
             }
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
-            return Ok(HandshakeStep::Failed);
+            let reason =
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+            return Ok(HandshakeStep::Failed(reason));
         }
         Ok(HandshakeStep::Waiting)
     }
@@ -1694,6 +1683,10 @@ impl StartupDns {
     /// honoured even at the boundary (faithful to the original `send_query`
     /// loop). A would-block is reported as `Blocked` so the stage moves to
     /// `AwaitWritable`; any other partial progress stays sendable.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "faithful plain-write loop with test force-write scaffolding; each failure arm threads the counted reason"
+    )]
     fn step_send_plain(
         &mut self,
         ex: &mut ActiveExchange,
@@ -1714,13 +1707,13 @@ impl StartupDns {
                         match stream.write(&self.query_buf[self.written..end]) {
                             Ok(0) => {
                                 self.close_connection()?;
-                                self.note_failure(
+                                let reason = self.note_failure(
                                     ex.ordinal,
                                     ex.family,
                                     schedules,
                                     FailureReason::Send,
                                 )?;
-                                return Ok(SendStep::Failed);
+                                return Ok(SendStep::Failed(reason));
                             }
                             Ok(w) => {
                                 self.written += w;
@@ -1729,13 +1722,13 @@ impl StartupDns {
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                             Err(_) => {
                                 self.close_connection()?;
-                                self.note_failure(
+                                let reason = self.note_failure(
                                     ex.ordinal,
                                     ex.family,
                                     schedules,
                                     FailureReason::Send,
                                 )?;
-                                return Ok(SendStep::Failed);
+                                return Ok(SendStep::Failed(reason));
                             }
                         }
                     }
@@ -1747,8 +1740,13 @@ impl StartupDns {
                 match stream.write(&self.query_buf[self.written..ex.qlen]) {
                     Ok(0) => {
                         self.close_connection()?;
-                        self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Send)?;
-                        return Ok(SendStep::Failed);
+                        let reason = self.note_failure(
+                            ex.ordinal,
+                            ex.family,
+                            schedules,
+                            FailureReason::Send,
+                        )?;
+                        return Ok(SendStep::Failed(reason));
                     }
                     Ok(n) => {
                         self.written += n;
@@ -1761,14 +1759,20 @@ impl StartupDns {
                     }
                     Err(_) => {
                         self.close_connection()?;
-                        self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Send)?;
-                        return Ok(SendStep::Failed);
+                        let reason = self.note_failure(
+                            ex.ordinal,
+                            ex.family,
+                            schedules,
+                            FailureReason::Send,
+                        )?;
+                        return Ok(SendStep::Failed(reason));
                     }
                 }
             } else {
                 self.close_connection()?;
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Send)?;
-                return Ok(SendStep::Failed);
+                let reason =
+                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Send)?;
+                return Ok(SendStep::Failed(reason));
             }
         }
         if self.written >= ex.qlen {
@@ -1777,8 +1781,9 @@ impl StartupDns {
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
-            return Ok(SendStep::Failed);
+            let reason =
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+            return Ok(SendStep::Failed(reason));
         }
         if blocked {
             #[cfg(test)]
@@ -1818,16 +1823,26 @@ impl StartupDns {
                 self.set_stream_interest_writable()?;
                 if Instant::now() >= ex.deadline {
                     self.close_connection()?;
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
-                    return Ok(SendStep::Failed);
+                    let reason = self.note_failure(
+                        ex.ordinal,
+                        ex.family,
+                        schedules,
+                        FailureReason::Timeout,
+                    )?;
+                    return Ok(SendStep::Failed(reason));
                 }
                 Ok(SendStep::Blocked)
             }
             TlsSendProbe::Progress => {
                 if Instant::now() >= ex.deadline {
                     self.close_connection()?;
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
-                    return Ok(SendStep::Failed);
+                    let reason = self.note_failure(
+                        ex.ordinal,
+                        ex.family,
+                        schedules,
+                        FailureReason::Timeout,
+                    )?;
+                    return Ok(SendStep::Failed(reason));
                 }
                 Ok(SendStep::Waiting)
             }
@@ -1846,8 +1861,8 @@ impl StartupDns {
         schedules: &mut Schedules,
     ) -> Result<SendStep, StartupDnsError> {
         self.close_connection()?;
-        self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Send)?;
-        Ok(SendStep::Failed)
+        let reason = self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Send)?;
+        Ok(SendStep::Failed(reason))
     }
 
     /// One nonblocking response-read step: at most one read, then a complete
@@ -1865,8 +1880,13 @@ impl StartupDns {
             match self.try_recv() {
                 RecvTry::Failure => {
                     self.close_connection()?;
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
-                    return Ok(RecvStep::Failed);
+                    let reason = self.note_failure(
+                        ex.ordinal,
+                        ex.family,
+                        schedules,
+                        FailureReason::Receive,
+                    )?;
+                    return Ok(RecvStep::Failed(reason));
                 }
                 RecvTry::Wait | RecvTry::Progress => {}
             }
@@ -1875,8 +1895,9 @@ impl StartupDns {
             let len = usize::from(u16::from_be_bytes([self.recv_buf[0], self.recv_buf[1]]));
             if len == 0 || len > DNS_MSG_LIMIT {
                 self.close_connection()?;
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
-                return Ok(RecvStep::Failed);
+                let reason =
+                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
+                return Ok(RecvStep::Failed(reason));
             }
             self.msglen = Some(len);
         }
@@ -1896,7 +1917,7 @@ impl StartupDns {
             self.filled = 0;
             match outcome {
                 Ok(outcome) => {
-                    self.last_published = Some(classify_published(&outcome));
+                    let kind = classify_published(&outcome);
                     let name_index = cache
                         .name_index(ex.ordinal)
                         .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
@@ -1914,22 +1935,28 @@ impl StartupDns {
                     if self.workspace.extreme_ttl() {
                         self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
                     }
-                    return Ok(RecvStep::Published);
+                    return Ok(RecvStep::Published(kind));
                 }
                 Err(err) => {
                     if matches!(err, DnsError::BailiwickViolation) {
                         self.note_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
                     }
                     self.close_connection()?;
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
-                    return Ok(RecvStep::Failed);
+                    let reason = self.note_failure(
+                        ex.ordinal,
+                        ex.family,
+                        schedules,
+                        FailureReason::Receive,
+                    )?;
+                    return Ok(RecvStep::Failed(reason));
                 }
             }
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
-            return Ok(RecvStep::Failed);
+            let reason =
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+            return Ok(RecvStep::Failed(reason));
         }
         Ok(RecvStep::Waiting)
     }
@@ -2348,47 +2375,47 @@ impl StartupDns {
             ExchangeStep::Connecting => match self.step_connect(&mut ex, schedules)? {
                 ConnectStep::Waiting => None,
                 ConnectStep::Transition { next } => Some(next),
-                ConnectStep::Failed => {
+                ConnectStep::Failed(reason) => {
                     self.active = None;
-                    return Ok(TurnResult::Failed);
+                    return Ok(TurnResult::Failed(reason));
                 }
             },
             ExchangeStep::TlsHandshake => match self.step_handshake(&mut ex, schedules)? {
                 HandshakeStep::Waiting => None,
                 HandshakeStep::Transition => Some(ExchangeStep::SendReady),
-                HandshakeStep::Failed => {
+                HandshakeStep::Failed(reason) => {
                     self.active = None;
-                    return Ok(TurnResult::Failed);
+                    return Ok(TurnResult::Failed(reason));
                 }
             },
             ExchangeStep::SendReady => match self.step_send(&mut ex, schedules)? {
                 SendStep::Waiting => None,
                 SendStep::Blocked => Some(ExchangeStep::AwaitWritable),
                 SendStep::Transition => Some(ExchangeStep::Receiving),
-                SendStep::Failed => {
+                SendStep::Failed(reason) => {
                     self.active = None;
-                    return Ok(TurnResult::Failed);
+                    return Ok(TurnResult::Failed(reason));
                 }
             },
             ExchangeStep::AwaitWritable => match self.step_send(&mut ex, schedules)? {
                 SendStep::Waiting => Some(ExchangeStep::SendReady),
                 SendStep::Blocked => None,
                 SendStep::Transition => Some(ExchangeStep::Receiving),
-                SendStep::Failed => {
+                SendStep::Failed(reason) => {
                     self.active = None;
-                    return Ok(TurnResult::Failed);
+                    return Ok(TurnResult::Failed(reason));
                 }
             },
             ExchangeStep::Receiving => match self.step_recv(&mut ex, fqdn, cache, schedules)? {
                 RecvStep::Waiting => None,
-                RecvStep::Failed => {
+                RecvStep::Failed(reason) => {
                     self.active = None;
-                    return Ok(TurnResult::Failed);
+                    return Ok(TurnResult::Failed(reason));
                 }
-                RecvStep::Published => {
+                RecvStep::Published(kind) => {
                     self.active = None;
                     self.on_exchange_succeeded();
-                    return Ok(TurnResult::Published);
+                    return Ok(TurnResult::Published(kind));
                 }
             },
         };
@@ -2432,17 +2459,11 @@ impl StartupDns {
                         .map_or(deadline, |retry| deadline.min(retry));
                     self.wait_dns_readiness(wake)?;
                 }
-                TurnResult::Published => {
-                    return Ok(ExchangeResult::Published(
-                        self.last_published
-                            .take()
-                            .unwrap_or(PublishedKind::ResolvedPositive),
-                    ));
+                TurnResult::Published(kind) => {
+                    return Ok(ExchangeResult::Published(kind));
                 }
-                TurnResult::Failed => {
-                    return Ok(ExchangeResult::Failed(
-                        self.last_failed.take().unwrap_or(FailureReason::Receive),
-                    ));
+                TurnResult::Failed(reason) => {
+                    return Ok(ExchangeResult::Failed(reason));
                 }
             }
         }
@@ -2598,12 +2619,11 @@ impl StartupDns {
         family: Family,
         schedules: &mut Schedules,
         reason: FailureReason,
-    ) -> Result<(), StartupDnsError> {
-        self.last_failed = Some(reason);
+    ) -> Result<FailureReason, StartupDnsError> {
         let now = self.now_u64();
         self.on_exchange_failed(now);
         schedules.note_exchange_failure(ordinal, family, now)?;
-        Ok(())
+        Ok(reason)
     }
 }
 

@@ -651,10 +651,9 @@ fn dot_exchange_traverses_handshake_before_send_and_receive() {
             }
         }
     }
-    assert_eq!(
-        terminal,
-        Some(TurnResult::Published),
-        "a pin-matching DoT exchange must publish at the primitive level"
+    assert!(
+        matches!(terminal, Some(TurnResult::Published(_))),
+        "a pin-matching DoT exchange must publish at the primitive level, got {terminal:?}"
     );
     let at = |step: ExchangeStep| seen.iter().position(|&candidate| candidate == step);
     let handshake =
@@ -750,10 +749,9 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
         &mut poll,
         &mut events,
     );
-    assert_eq!(
-        first,
-        TurnResult::Published,
-        "the first serving-refresh exchange must publish"
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first serving-refresh exchange must publish, got {first:?}"
     );
     assert!(
         transport.conn.is_some(),
@@ -779,10 +777,9 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
         &mut poll,
         &mut events,
     );
-    assert_eq!(
-        second,
-        TurnResult::Published,
-        "the second serving-refresh exchange must publish over the retained transport"
+    assert!(
+        matches!(second, TurnResult::Published(_)),
+        "the second serving-refresh exchange must publish over the retained transport, got {second:?}"
     );
     let second_addr = match transport.conn.as_ref().expect("retained DoT transport") {
         DnsConn::Tls(conn) => &*conn.tls as *const _ as usize,

@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::cache::{CacheError, Family};
 use crate::serve::{StartupError, StartupOutcome};
-use crate::startup_dns::{
-    EXCHANGE_DEADLINE_SECS, FailureReason, PublishedKind, StartupDnsError, TurnResult, WindowLedger,
-};
+use crate::startup_dns::{EXCHANGE_DEADLINE_SECS, StartupDnsError, TurnResult, WindowLedger};
 
 use super::Serving;
 
@@ -78,13 +76,8 @@ impl Serving {
             if let Some((ordinal, ex_family)) = self.storage.dns().active_identity() {
                 match self.storage.advance_dns()? {
                     None | Some(TurnResult::Pending) => {}
-                    Some(TurnResult::Published) => {
+                    Some(TurnResult::Published(kind)) => {
                         tallies.exchanges += 1;
-                        let kind = self
-                            .storage
-                            .dns_mut()
-                            .take_published_kind()
-                            .unwrap_or(PublishedKind::ResolvedPositive);
                         let name_index = self
                             .storage
                             .cache()
@@ -99,7 +92,7 @@ impl Serving {
                         ledger.mark_published(ordinal, kind);
                         ledger.resolve(ordinal, has);
                     }
-                    Some(TurnResult::Failed) => {
+                    Some(TurnResult::Failed(reason)) => {
                         tallies.failed += 1;
                         if tallies.first_failure.is_none() {
                             tallies.first_failure = Some((
@@ -109,11 +102,6 @@ impl Serving {
                             let now = self.storage.dns().now_u64();
                             self.storage.startup_warning_first(now, ordinal, ex_family);
                         }
-                        let reason = self
-                            .storage
-                            .dns_mut()
-                            .take_failed_reason()
-                            .unwrap_or(FailureReason::Receive);
                         ledger.mark_failed(ordinal, reason);
                     }
                 }
