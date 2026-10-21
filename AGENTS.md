@@ -18,7 +18,23 @@ specification, not feature growth.
   destination-address hardening amendment, the `alumina-icdl`
   (2026-10-17) CONNECT Content-Length canonical-digit amendment, and the
   `alumina-mema` (2026-10-18) memory-accounting retained-serving-workspace
-  amendment, all
+  amendment, the `alumina-hrdn` (2026-10-19) DNS wrong-family
+  records/ClientHello handshake bound/CONNECT discriminant split amendment, the
+  `alumina-hrdn2` (2026-10-19) CONNECT header-line count bound/passive resolver
+  degraded signaling/widened refresh band amendment, the `alumina-hrdn3`
+  (2026-10-19) CNAME bailiwick enforcement/DNS anomaly fact surface/resolver
+  peer assertion amendment, the `alumina-hrdn4` (2026-10-20) resolver set in
+  the validated TOML config/resolv.conf reader removed/V18 failover (Stage 1&2)
+  amendment, the `alumina-dot-chain-v37` (2026-10-20) resolver endpoint as
+  `IP#fqdn` (V37, Package 1 of the DoT chain) amendment, the
+  `alumina-dot-chain-v1-v5` (2026-10-20) DoT transport (V1) and strict SPKI
+  pinning (V5), Package 2 of the DoT chain amendment, the `alumina-sslv`
+  (2026-10-21) serving-from-stale observability level bit amendment, the
+  `alumina-failbk` (2026-10-21) failback consecutive-success hysteresis
+  amendment, the `alumina-dotrt` (2026-10-21) DoT transport serving-lifetime
+  warm reuse amendment, the `alumina-dotdg` (2026-10-21) DoT→plain downgrade
+  counter amendment, and the `alumina-zai` (2026-10-21) Zero-Allocation
+  Invariant first-party scope/rustls bounded seam amendment, all
   recorded in the document; no further amendment authority is implied.
 - Status is a scoped local testQA candidate — not production-qualified;
   serving-qualification gates stay open (`docs/build-plan.md` owns them).
