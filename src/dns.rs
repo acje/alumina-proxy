@@ -2271,6 +2271,71 @@ mod tests {
     }
 
     #[test]
+    fn nxdomain_with_same_family_a_at_terminal_is_terminal_without_data() {
+        let mut msg = header(0x1271, true, 3, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [10, 0, 0, 1], 60));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x1271, &msg),
+            Err(DnsError::TerminalWithoutData),
+            "an NXDOMAIN carrying a same-family A at the terminal owner is TerminalWithoutData (W1-H1b-F3)"
+        );
+    }
+
+    #[test]
+    fn rejects_cname_chain_deeper_than_max_links() {
+        let mut msg = header(0x1272, true, 0, 1, 9, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "c1.sub.example.org", 100));
+        for i in 1..9 {
+            let owner = format!("c{i}.sub.example.org");
+            let target = format!("c{}.sub.example.org", i + 1);
+            msg.extend_from_slice(&cname_record(&owner, &target, 100));
+        }
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x1272, &msg),
+            Err(DnsError::CnameTooDeep { links: 9 }),
+            "a rooted CNAME chain longer than MAX_CNAME_LINKS is rejected (W2-H2b-F6)"
+        );
+    }
+
+    #[test]
+    fn rejects_message_too_long() {
+        let msg = vec![0u8; DNS_MSG_LIMIT + 1];
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 0x1273, &msg),
+            Err(DnsError::MessageTooLong),
+            "a response larger than DNS_MSG_LIMIT is refused before parsing (W4-H4b-F2)"
+        );
+    }
+
+    #[test]
+    fn rejects_query_too_long_mid_label() {
+        let mut buf = [0u8; 512];
+        let name = format!("{}.example.org", "a".repeat(64));
+        assert_eq!(
+            write_qname(&mut buf, 0, &name),
+            Err(DnsError::QueryTooLong),
+            "a mid-name label longer than 63 bytes is refused (W4-H4b-F2)"
+        );
+    }
+
+    #[test]
+    fn rejects_query_too_long_tail_label() {
+        let mut buf = [0u8; 512];
+        let name = format!("example.{}", "a".repeat(64));
+        assert_eq!(
+            write_qname(&mut buf, 0, &name),
+            Err(DnsError::QueryTooLong),
+            "a trailing label longer than 63 bytes is refused (W4-H4b-F2)"
+        );
+    }
+
+    #[test]
     fn positive_ignores_unrelated_answer_soa() {
         let mut msg = header(28, true, 0, 1, 2, 0, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
