@@ -24,6 +24,9 @@ enum Step {
         ttl: u32,
         min: u32,
     },
+    BailiwickViolationCname {
+        ttl: u32,
+    },
     PositiveAMismatchedTid {
         ttl: u32,
         octets: [u8; 4],
@@ -36,6 +39,9 @@ enum Step {
     },
     Stall(Duration),
     Malformed(Vec<u8>),
+    LengthPrefixOnly {
+        len: u16,
+    },
     Close,
 }
 
@@ -43,6 +49,7 @@ struct Responder {
     addr: SocketAddr,
     handle: Option<thread::JoinHandle<()>>,
     connections: Arc<AtomicUsize>,
+    closed_after_prefix: Arc<AtomicUsize>,
 }
 
 impl Responder {
@@ -126,7 +133,18 @@ fn respond_for(query: &[u8], step: &Step) -> Option<Vec<u8>> {
                 let owner = qname_bytes("example.org");
                 (3, 0, 1, vec![], vec![record(&owner, 6, *ttl, &soa)])
             }
-            Step::Stall(_) | Step::Malformed(_) | Step::FragmentedPositive { .. } | Step::Close => {
+            Step::BailiwickViolationCname { ttl } => (
+                0,
+                1,
+                0,
+                vec![record(qname, 5, *ttl, &qname_bytes("evil.com"))],
+                vec![],
+            ),
+            Step::Stall(_)
+            | Step::Malformed(_)
+            | Step::LengthPrefixOnly { .. }
+            | Step::FragmentedPositive { .. }
+            | Step::Close => {
                 return None;
             }
         };
@@ -146,11 +164,17 @@ fn respond_for(query: &[u8], step: &Step) -> Option<Vec<u8>> {
     Some(msg)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "test harness dispatches one arm per wire behaviour; the length-prefix probe arm keeps it over the heuristic line budget"
+)]
 fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind responder");
     let addr = listener.local_addr().expect("responder addr");
     let connections = Arc::new(AtomicUsize::new(0));
     let connections_thread = Arc::clone(&connections);
+    let closed_after_prefix = Arc::new(AtomicUsize::new(0));
+    let closed_after_prefix_thread = Arc::clone(&closed_after_prefix);
     let handle = thread::spawn(move || {
         let scripts = conn_scripts.into_iter();
         for conn_steps in scripts {
@@ -181,6 +205,30 @@ fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
                         out.extend_from_slice(&bytes);
                         if sock.write_all(&out).is_err() {
                             break;
+                        }
+                    }
+                    Step::LengthPrefixOnly { len } => {
+                        let mut lenb = [0u8; 2];
+                        if read_exact(&mut sock, &mut lenb).is_err() {
+                            break;
+                        }
+                        let qlen = usize::from(u16::from_be_bytes(lenb));
+                        let mut q = vec![0u8; qlen];
+                        if qlen == 0 || read_exact(&mut sock, &mut q).is_err() {
+                            break;
+                        }
+                        // Write only the 2-byte length prefix, then probe: the
+                        // length-prefix guard must close the connection right
+                        // after the prefix, before any body read or parse. A
+                        // removed guard would instead keep the connection open
+                        // waiting for the never-sent body until the deadline.
+                        if sock.write_all(&len.to_be_bytes()).is_err() {
+                            break;
+                        }
+                        let _ = sock.set_read_timeout(Some(Duration::from_millis(400)));
+                        let mut probe = [0u8; 1];
+                        if matches!(sock.read(&mut probe), Ok(0)) {
+                            closed_after_prefix_thread.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     Step::FragmentedPositive {
@@ -245,6 +293,7 @@ fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
         addr,
         handle: Some(handle),
         connections,
+        closed_after_prefix,
     }
 }
 
@@ -1629,6 +1678,164 @@ fn successful_exchange_recovers_and_emits_exit_crossing_once() {
         "exactly one enter and one exit crossing across the whole recovery arc"
     );
     drop(responder);
+}
+
+#[test]
+fn degraded_resolver_recovers_on_a_valid_negative_and_emits_exit_crossing() {
+    let cfg = config();
+    let responder = spawn_responder(vec![
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+        vec![Step::Stall(Duration::from_secs(1)), Step::Close],
+    ]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    for _ in 0..3 {
+        run_exchange_expecting(
+            &mut transport,
+            fqdn,
+            &mut cache,
+            &mut schedules,
+            &TurnResult::Failed,
+        );
+    }
+    assert!(
+        transport.resolver_degraded_for_test(),
+        "three consecutive failures relocate the resolver into degraded mode"
+    );
+    let negative = spawn_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
+    transport.addr = ns(negative.port());
+    run_exchange_expecting(
+        &mut transport,
+        fqdn,
+        &mut cache,
+        &mut schedules,
+        &TurnResult::Published,
+    );
+    assert!(
+        !transport.resolver_degraded_for_test(),
+        "a valid negative publishes and recovers the resolver out of degraded mode"
+    );
+    assert!(
+        bindings_of(&cache, 0, Family::A).is_empty(),
+        "the recovering exchange is a negative: no address bindings are published"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        2,
+        "one enter and one exit crossing across the degraded/recovery arc"
+    );
+    drop(responder);
+    drop(negative);
+}
+
+#[test]
+fn genuinely_different_peer_address_is_rejected_without_the_force_seam() {
+    let cfg = config();
+    let responder = spawn_responder(vec![vec![Step::Close]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    // The configured nameserver is a wildcard address; the loopback responder
+    // accepts the dial, so the connected peer (127.0.0.1:port) genuinely
+    // differs from the configured address (0.0.0.0:port) — no force seam.
+    transport.addr = SocketAddr::new(IpAddr::from([0, 0, 0, 0]), responder.port());
+    transport.now0 = 1_000_000;
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    run_exchange_expecting(
+        &mut transport,
+        fqdn,
+        &mut cache,
+        &mut schedules,
+        &TurnResult::Failed,
+    );
+    let anomalies = transport.take_dns_anomalies();
+    assert!(
+        anomalies[DnsAnomalyKind::ResolverPeerMismatch.index()] >= 1,
+        "a genuinely different connected peer is counted as a resolver-peer anomaly"
+    );
+    drop(responder);
+}
+
+#[test]
+fn out_of_bailiwick_cname_is_recorded_as_a_transport_anomaly() {
+    let cfg = config();
+    let responder = spawn_responder(vec![vec![Step::BailiwickViolationCname { ttl: 120 }]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    // StartupDns::new() leaves the bailiwick empty; set the real allowlist
+    // zone so the CNAME escape is a genuine violation, not an empty-zone one.
+    transport.bailiwick = BailiwickZones::from_allowlist(cfg.allowlist());
+    transport.now0 = 1_000_000;
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    run_exchange_expecting(
+        &mut transport,
+        fqdn,
+        &mut cache,
+        &mut schedules,
+        &TurnResult::Failed,
+    );
+    let anomalies = transport.take_dns_anomalies();
+    assert_eq!(
+        anomalies[DnsAnomalyKind::BailiwickViolation.index()],
+        1,
+        "a CNAME escaping the allowlist bailiwick is recorded exactly once"
+    );
+    assert_eq!(
+        anomalies[DnsAnomalyKind::ResolverPeerMismatch.index()],
+        0,
+        "a bailiwick rejection is not a peer mismatch"
+    );
+    drop(responder);
+}
+
+#[test]
+fn zero_or_oversized_length_prefix_is_refused_fail_closed() {
+    let cfg = config();
+    let responder = spawn_responder(vec![
+        vec![Step::LengthPrefixOnly { len: 0 }],
+        vec![Step::LengthPrefixOnly {
+            len: u16::try_from(DNS_MSG_LIMIT + 1).expect("oversized prefix fits u16 wire length"),
+        }],
+    ]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    for _ in 0..2 {
+        // A long deadline gives the responder's close-probe (bounded by its
+        // own 400ms read timeout) room to observe the guard's fail-closed
+        // close before any hypothetical body-wait could reach the exchange
+        // deadline; run_exchange_expecting's 200ms deadline is too short.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        transport
+            .start_exchange(fqdn, Family::A, 0, deadline)
+            .unwrap();
+        assert_eq!(
+            run_exchange_to_terminal(&mut transport, fqdn, &mut cache, &mut schedules, deadline),
+            TurnResult::Failed,
+            "a zero or oversized length prefix fails the exchange closed"
+        );
+    }
+    // The responder increments only after its probe observes the transport's
+    // fail-closed close, which lands after the exchange reaches terminal; join
+    // the responder (via drop) so both increments are final before asserting.
+    let closed_after_prefix = Arc::clone(&responder.closed_after_prefix);
+    drop(responder);
+    assert_eq!(
+        closed_after_prefix.load(Ordering::Relaxed),
+        2,
+        "both bad prefixes must be rejected by the length-prefix guard closing \
+         the connection right after the 2-byte prefix, before any body read or parse"
+    );
 }
 
 /// Builds a configured resolver set from numeric address strings for the pure
