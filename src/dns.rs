@@ -791,9 +791,11 @@ impl Default for BailiwickZones {
 }
 
 impl BailiwickZones {
-    /// Derives the deduplicated per-allowlist zone set: a hostname with more
-    /// than two labels contributes its parent domain; a two-label apex
-    /// contributes itself.
+    /// Derives the deduplicated union of per-allowlist zones: a hostname with
+    /// more than two labels contributes its parent domain; a two-label apex
+    /// contributes itself. Because the result is a union, a CNAME target
+    /// inside any allowlisted zone is accepted, including cross-allowlist
+    /// chains (documented design, alumina-hrdn3 bailiwick amendment).
     pub(crate) fn from_allowlist(allowlist: &Allowlist) -> BailiwickZones {
         let mut zones = [DnsName::default(); ALLOWLIST_MAX];
         let mut len = 0;
@@ -928,9 +930,10 @@ pub fn parse_response(
                 match rdata {
                     Rdata::A(ip) => {
                         if family != Family::A {
-                            // Wrong-family record: discarded without marking
-                            // the owner as carrying address data or touching
-                            // an existing CNAME (docs/alumina-proxy.md :476).
+                            // Wrong-family record: discarded silently — no
+                            // address data, no CNAME interaction, and no
+                            // anomaly/telemetry emitted (docs/alumina-proxy.md
+                            // :476; DnsAnomalyKind has no variant for this).
                             reader.skip(rdlen)?;
                             continue;
                         }
@@ -950,9 +953,10 @@ pub fn parse_response(
                     }
                     Rdata::Aaaa(ip) => {
                         if family != Family::Aaaa {
-                            // Wrong-family record: discarded without marking
-                            // the owner as carrying address data or touching
-                            // an existing CNAME (docs/alumina-proxy.md :476).
+                            // Wrong-family record: discarded silently — no
+                            // address data, no CNAME interaction, and no
+                            // anomaly/telemetry emitted (docs/alumina-proxy.md
+                            // :476; DnsAnomalyKind has no variant for this).
                             reader.skip(rdlen)?;
                             continue;
                         }
@@ -1001,6 +1005,9 @@ pub fn parse_response(
         if ty == TYPE_DNAME {
             return Err(DnsError::DnameUnsupported);
         }
+        // E3 fail-closed guard: a malformed A/AAAA rdata in the authority
+        // section aborts the entire parse (no skip/isolate path). The answer
+        // section is guarded the same way inside parse_rdata.
         match ty {
             TYPE_A if rdlen != 4 => {
                 return Err(DnsError::BadRdataLength {
@@ -1035,6 +1042,9 @@ pub fn parse_response(
         if ty == TYPE_DNAME {
             return Err(DnsError::DnameUnsupported);
         }
+        // E3 fail-closed guard: the same strictness applies to
+        // additional/glue records — any malformed A/AAAA rdata here rejects
+        // the entire response rather than being skipped.
         match ty {
             TYPE_A if rdlen != 4 => {
                 return Err(DnsError::BadRdataLength {
