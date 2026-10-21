@@ -354,6 +354,72 @@ fn read_query(sock: &mut TcpStream) -> Option<Vec<u8>> {
     Some(q)
 }
 
+fn read_exact_interruptible(
+    sock: &mut TcpStream,
+    buf: &mut [u8],
+    stop: &std::sync::atomic::AtomicBool,
+) -> io::Result<()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "stop"));
+        }
+        match sock.read(&mut buf[filled..]) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")),
+            Ok(n) => filled += n,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+fn read_query_interruptible(
+    sock: &mut TcpStream,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Option<Vec<u8>> {
+    let mut lenb = [0u8; 2];
+    read_exact_interruptible(sock, &mut lenb, stop).ok()?;
+    let qlen = usize::from(u16::from_be_bytes(lenb));
+    if qlen == 0 {
+        return None;
+    }
+    let mut q = vec![0u8; qlen];
+    read_exact_interruptible(sock, &mut q, stop).ok()?;
+    Some(q)
+}
+
+fn write_response_interruptible(
+    sock: &mut TcpStream,
+    reply: &[u8],
+    stop: &std::sync::atomic::AtomicBool,
+) -> io::Result<()> {
+    let mut framed = Vec::with_capacity(reply.len() + 2);
+    framed.extend_from_slice(
+        &u16::try_from(reply.len())
+            .expect("dns reply fits u16 length prefix")
+            .to_be_bytes(),
+    );
+    framed.extend_from_slice(reply);
+    let mut written = 0;
+    while written < framed.len() {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "stop"));
+        }
+        match sock.write(&framed[written..]) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "write zero")),
+            Ok(n) => written += n,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
 fn record(owner: &[u8], ty: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
     let mut rec = owner.to_vec();
     rec.extend_from_slice(&ty.to_be_bytes());
@@ -1135,7 +1201,27 @@ fn both_ready_settlement_body() {
 
 enum SessionGate {
     Answer(Box<dyn FnMut(Vec<u8>) -> Option<Vec<u8>>>),
+    AnswerThenSilent(Box<dyn FnMut(Vec<u8>) -> Option<Vec<u8>>>),
     Silent,
+}
+
+fn drain_silently(sock: &mut TcpStream, stop: &std::sync::atomic::AtomicBool) {
+    sock.set_nonblocking(true)
+        .expect("silent session nonblocking");
+    let mut sink = [0u8; 64];
+    loop {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        match sock.read(&mut sink) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 fn spawn_supervised_responder(
@@ -1163,33 +1249,47 @@ fn spawn_supervised_responder(
             let gate = on_session(session);
             match gate {
                 SessionGate::Answer(mut answer) => {
-                    while let Some(query) = read_query(&mut sock) {
+                    sock.set_nonblocking(true)
+                        .expect("answer session nonblocking");
+                    while !stop_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                        let Some(query) = read_query_interruptible(&mut sock, &stop_for_thread)
+                        else {
+                            break;
+                        };
                         let Some(reply) = answer(query) else {
                             break;
                         };
-                        if write_response(&mut sock, &reply).is_err() {
+                        if write_response_interruptible(&mut sock, &reply, &stop_for_thread)
+                            .is_err()
+                        {
                             break;
                         }
                     }
                 }
-                SessionGate::Silent => {
+                SessionGate::AnswerThenSilent(mut answer) => {
                     sock.set_nonblocking(true)
-                        .expect("silent session nonblocking");
-                    let mut sink = [0u8; 64];
-                    loop {
-                        if stop_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                        .expect("answer-then-silent session nonblocking");
+                    let mut went_silent = false;
+                    while !stop_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                        let Some(query) = read_query_interruptible(&mut sock, &stop_for_thread)
+                        else {
+                            break;
+                        };
+                        let Some(reply) = answer(query) else {
+                            went_silent = true;
+                            break;
+                        };
+                        if write_response_interruptible(&mut sock, &reply, &stop_for_thread)
+                            .is_err()
+                        {
                             break;
                         }
-                        match sock.read(&mut sink) {
-                            Ok(0) => break,
-                            Ok(_) => {}
-                            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                                std::thread::sleep(Duration::from_millis(1));
-                            }
-                            Err(_) => break,
-                        }
+                    }
+                    if went_silent {
+                        drain_silently(&mut sock, &stop_for_thread);
                     }
                 }
+                SessionGate::Silent => drain_silently(&mut sock, &stop_for_thread),
             }
         }
     });
@@ -1214,7 +1314,7 @@ fn spawn_supervised_positive_with_count() -> (
     (addr, stop, queries, handle)
 }
 
-fn spawn_supervised_first_session_positive_with_count() -> (
+fn spawn_supervised_first_session_positive_then_silent_with_count() -> (
     SocketAddr,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -1225,7 +1325,19 @@ fn spawn_supervised_first_session_positive_with_count() -> (
     let (addr, stop, handle) = spawn_supervised_responder(move |session| {
         sessions_for_thread.store(session, std::sync::atomic::Ordering::SeqCst);
         if session == 1 {
-            SessionGate::Answer(Box::new(|query| positive_response(&query)))
+            // Serve the startup exchanges (A + AAAA on the retained transport),
+            // then go silent so the first serving refresh — which reuses this
+            // retained session under F1 retention — fails and exercises the
+            // owner's backoff retry path instead of being answered positively.
+            let mut served = 0usize;
+            SessionGate::AnswerThenSilent(Box::new(move |query| {
+                served += 1;
+                if served <= 2 {
+                    positive_response(&query)
+                } else {
+                    None
+                }
+            }))
         } else {
             SessionGate::Silent
         }
@@ -1453,13 +1565,17 @@ fn idle_runtime_retries_failed_refresh_on_backoff() {
     t.join().expect("refresh-retry falsifier thread");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "long refresh-retry falsifier body composing responder, startup, and backoff assertions"
+)]
 fn refresh_retry_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
     let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
     let (responder_addr, stop, sessions, responder) =
-        spawn_supervised_first_session_positive_with_count();
+        spawn_supervised_first_session_positive_then_silent_with_count();
     let outcome = owner
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
@@ -1527,8 +1643,9 @@ fn refresh_retry_body() {
         thread::sleep(Duration::from_millis(1));
     }
     assert!(
-        fresh_session,
-        "the first refresh must have reached a fresh session"
+        !fresh_session,
+        "the first refresh must reuse the retained session-1 transport (F1 retention), \
+         not open a fresh session"
     );
 
     let probe_start = Instant::now();

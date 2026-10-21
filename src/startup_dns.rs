@@ -831,13 +831,6 @@ pub struct StartupDns {
     token_gen: usize,
     registration: Registration,
     active: Option<ActiveExchange>,
-    /// Whether the owner is currently inside a startup window. Within the
-    /// window the transport keeps its single connection warm and reusable
-    /// across every allowlist name, exactly as private mode does; the
-    /// per-publish conclusion is withheld until the window ends. Outside a
-    /// window a concluded shared exchange closes the transport so a serving
-    /// refresh never leaves an idle socket under the serving poll.
-    window_open: bool,
     /// The classification of the most recently published outcome, read out by
     /// the blocking driver when the exchange concludes (never inferred from
     /// the cache afterwards, where negative and no-eligible are ambiguous).
@@ -950,7 +943,6 @@ impl StartupDns {
             token_gen: 0,
             registration: Registration::Private,
             active: None,
-            window_open: false,
             last_published: None,
             last_failed: None,
             resolvers: None,
@@ -1038,7 +1030,6 @@ impl StartupDns {
             fqdn: *fqdn,
             pin: resolvers.primary().pin().copied(),
         });
-        self.window_open = true;
         Ok(deadline)
     }
 
@@ -1125,20 +1116,6 @@ impl StartupDns {
         Ok(Token(self.token_gen))
     }
 
-    /// Closes the transport when the shared owner drove this exchange and no
-    /// startup window is open, so a concluded serving-refresh exchange never
-    /// leaves an idle socket registered with (or retained under) the serving
-    /// poll. Private mode keeps the connection warm for reuse within the
-    /// startup window, as does an open window in shared mode: the window owner
-    /// calls this once at window end to close the single reused connection.
-    pub(crate) fn conclude_shared_transport(&mut self) -> Result<(), StartupDnsError> {
-        self.window_open = false;
-        if matches!(self.registration, Registration::Shared { .. }) {
-            self.close_connection()?;
-        }
-        Ok(())
-    }
-
     /// Cancels the retained transport for owner shutdown: the outstanding
     /// exchange is cleared (no deadline or active-exchange predicate remains
     /// to keep the shared poll hot) and the connection closed exactly once.
@@ -1149,7 +1126,6 @@ impl StartupDns {
     /// that would otherwise turn a clean drain into a forced failure.
     pub(crate) fn cancel_for_shutdown(&mut self) {
         self.active = None;
-        self.window_open = false;
         self.conn = None;
         if let Registration::Shared { armed, .. } = &mut self.registration {
             *armed = None;
@@ -2412,9 +2388,6 @@ impl StartupDns {
                 RecvStep::Published => {
                     self.active = None;
                     self.on_exchange_succeeded();
-                    if !self.window_open {
-                        self.conclude_shared_transport()?;
-                    }
                     return Ok(TurnResult::Published);
                 }
             },

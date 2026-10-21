@@ -736,6 +736,33 @@ The `alumina-hrdn4` failback clause governs the bounded failback probe of the pr
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
 
+## DoT transport: serving-lifetime warm reuse — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-dotrt`, 2026-10-21). It records the user authorization for one lifecycle increment to the DoT transport: the one established DoT TLS connection is retained across the serving lifetime (idle retention) rather than closed at the end of the startup window, extending the `alumina-dot-chain-v1-v5` warm-reuse clause. It amends only the warm-reuse/lifecycle surface of the DoT transport amendment enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
+
+### Amended surface
+
+The `alumina-dot-chain-v1-v5` warm-reuse clause (`:679`) retained one established TLS connection across the startup window's exchanges. This increment extends that retention to the serving lifetime: the DoT connection established during the startup window is retained (idle) across serving refreshes and reused for subsequent DNS exchanges — no rebuild, no fresh handshake, and no re-allocation of TLS state on refresh. The prior window-end close is removed: the transport is no longer torn down when the startup window settles.
+
+The retention mechanism is the shared registration's `armed` interest: it clears to `None` while the exchange is idle (`sync_shared`, `src/startup_dns.rs:1345`), so the owner's poll never waits on the retained socket (no spin), while the connection itself stays owned in the transport (`self.conn`). The owner re-aligns the shared registration every serving turn (`sync_dns_shared`, `src/runtime.rs:265`) and once at window end (`src/serving/startup.rs:206`); `start_exchange` (`src/startup_dns.rs`) reuses the retained connection when one is present, and `attach_shared` (`src/startup_dns.rs:1319`) accepts a retained connection (a no-op when the registration is already shared). TLS state and its heap allocations remain confined to the per-connect DoT setup seam `build_tls_connection` (`src/startup_dns.rs:766`) exactly as before.
+
+The close-on-failure, close-on-relocation, and close-on-shutdown lifecycle is unchanged: a handshake or identity failure never reuses a poisoned connection and each failed exchange is counted individually; failover relocation and the failback re-seat close the connection before repointing (`maybe_begin_failback`, `src/startup_dns.rs`); and owner shutdown closes via `cancel_for_shutdown` (`src/startup_dns.rs:1127`), with the retained transport and its heap staying owned until process exit. Only idle retention is added; every close path that existed before remains.
+
+A guard test proves the increment: `serving_refresh_retains_dot_transport_without_rebuild` (`src/startup_dns/dot_tests.rs:574`) drives a serving refresh over the retained DoT connection and asserts no transport rebuild occurs.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Serving-lifetime warm reuse of the one established DoT connection; idle `armed` clears so the owner never waits on the retained socket; refresh reuses the retained connection with no rebuild | Implemented (this increment) |
+| Close-on-failure/relocation/shutdown lifecycle unchanged; poisoned connections never reused; single-counted-failure doctrine intact | Implemented (this increment) |
+| Guard test `serving_refresh_retains_dot_transport_without_rebuild` wired into native verification | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array — a DoT entry's failure is a counted connect failure with no cleartext downgrade, no dynamic pin update, and no silent reuse of a poisoned connection. The DoT transport's per-connect TLS confinement, handshake/identity fail-closed behavior, and the 1-conn/1-query transport profile are unchanged. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
 ## Observability: DoT→plain downgrade counter — user-authorized amendment
 
 **Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-dotdg`, 2026-10-21). It records the user authorization for one observability increment: the enforcement monitor surfaces the failover downgrade path as a zero-suppressed `dp=` event counter in the existing monitor record. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.

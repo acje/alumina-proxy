@@ -210,7 +210,6 @@ impl Serving {
             })
         })?;
         let elapsed = self.storage.dns().window_start().elapsed().as_secs();
-        self.storage.dns_mut().conclude_shared_transport()?;
         self.storage.settle_startup(
             now0,
             ledger.finish(tallies.exchanges, tallies.failed, tallies.first_failure),

@@ -530,3 +530,124 @@ fn dot_exchange_traverses_handshake_before_send_and_receive() {
     transport.close_connection().unwrap();
     drop(responder);
 }
+
+/// Drives a shared-mode exchange to a terminal turn through an external
+/// single-poll owner, mirroring the serving owner's cooperative loop: each
+/// turn re-aligns the shared registration to the exchange phase, waits on the
+/// external poll only when the exchange needs network readiness, and
+/// re-advances until the exchange concludes.
+fn drive_to_terminal(
+    transport: &mut StartupDns,
+    cache: &mut Cache,
+    schedules: &mut Schedules,
+    fqdn: &Fqdn,
+    deadline: Instant,
+    poll: &mut Poll,
+    events: &mut Events,
+) -> TurnResult {
+    loop {
+        match transport.advance_exchange(fqdn, cache, schedules) {
+            Ok(TurnResult::Pending) => {}
+            Ok(terminal) => return terminal,
+            Err(err) => panic!("drive_to_terminal: {err:?}"),
+        }
+        transport
+            .sync_shared(poll.registry())
+            .expect("shared registration stays aligned");
+        if !transport.needs_wait() {
+            continue;
+        }
+        let until = transport
+            .exchange_deadline()
+            .unwrap_or(deadline)
+            .min(deadline);
+        let now = Instant::now();
+        if now >= until {
+            continue;
+        }
+        poll.poll(events, Some(until - now))
+            .expect("external poll wait");
+    }
+}
+
+#[test]
+fn serving_refresh_retains_dot_transport_without_rebuild() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
+        fqdn: *fqdn,
+        pin: cfg.resolver_set().primary().pin().copied(),
+    });
+    transport.registration = Registration::Shared {
+        token: Token(0),
+        armed: None,
+    };
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    // First serving refresh: a fresh dial builds the rustls client and
+    // completes the handshake, then publishes.
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline)
+        .unwrap();
+    let first = drive_to_terminal(
+        &mut transport,
+        &mut cache,
+        &mut schedules,
+        fqdn,
+        deadline,
+        &mut poll,
+        &mut events,
+    );
+    assert_eq!(
+        first,
+        TurnResult::Published,
+        "the first serving-refresh exchange must publish"
+    );
+    assert!(
+        transport.conn.is_some(),
+        "a concluded serving-refresh exchange must retain its DoT transport for the next refresh"
+    );
+    let first_addr = match transport.conn.as_ref().expect("retained DoT transport") {
+        DnsConn::Tls(conn) => &*conn.tls as *const _ as usize,
+        DnsConn::Plain(_) => panic!("a pinned DoT exchange must retain a TLS transport"),
+    };
+
+    // Second serving refresh: the retained transport is reused without a
+    // fresh dial, client rebuild, or re-handshake.
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    transport
+        .start_exchange(fqdn, Family::A, 1, deadline)
+        .unwrap();
+    let second = drive_to_terminal(
+        &mut transport,
+        &mut cache,
+        &mut schedules,
+        fqdn,
+        deadline,
+        &mut poll,
+        &mut events,
+    );
+    assert_eq!(
+        second,
+        TurnResult::Published,
+        "the second serving-refresh exchange must publish over the retained transport"
+    );
+    let second_addr = match transport.conn.as_ref().expect("retained DoT transport") {
+        DnsConn::Tls(conn) => &*conn.tls as *const _ as usize,
+        DnsConn::Plain(_) => panic!("a pinned DoT exchange must retain a TLS transport"),
+    };
+    assert_eq!(
+        first_addr, second_addr,
+        "the serving refresh must reuse the same rustls client allocation, not rebuild it"
+    );
+    transport.cancel_for_shutdown();
+    drop(responder);
+}
