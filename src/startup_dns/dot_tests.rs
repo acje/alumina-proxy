@@ -170,6 +170,32 @@ fn echo_positive(query: &[u8]) -> Vec<u8> {
     msg
 }
 
+/// Builds a structurally valid positive reply whose transaction id differs
+/// from the query's, so the transport's transaction-id check must reject it.
+fn wrong_tid_reply(query: &[u8]) -> Vec<u8> {
+    let tid = u16::from_be_bytes([query[0], query[1]]).wrapping_add(1);
+    let mut reply = echo_positive(query);
+    reply[0] = (tid >> 8) as u8;
+    reply[1] = (tid & 0xff) as u8;
+    reply
+}
+
+/// Builds a well-formed-length message that is not a response: it echoes the
+/// query's transaction id but sets QR=0, so response parsing rejects it as
+/// `NotResponse` instead of publishing anything.
+fn mangled_reply(query: &[u8]) -> Vec<u8> {
+    let tid = u16::from_be_bytes([query[0], query[1]]);
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&tid.to_be_bytes());
+    msg.extend_from_slice(&0x0100u16.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    msg.extend_from_slice(&question_bytes(query));
+    msg
+}
+
 /// Builds the rustls server configuration presenting the embedded
 /// certificate/key pair with the ring provider (no process-default provider is
 /// installed by the transport).
@@ -243,10 +269,32 @@ fn write_tls_message(
     Ok(())
 }
 
+/// The reply mode the loopback TLS responder applies to every query it
+/// serves: a positive echo, or one of the adversarial responses the
+/// transport must fail closed on (wrong transaction id, an over-limit
+/// length prefix, or a malformed non-response).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AdversarialReply {
+    /// Mirror the query with a valid positive answer (TID, name, type).
+    Positive,
+    /// A structurally valid reply whose transaction id differs from the query.
+    WrongTid,
+    /// A length prefix larger than `DNS_MSG_LIMIT`, so the transport's
+    /// length guard fails closed before reading the body.
+    Oversize,
+    /// A well-formed-length message that is not a response (QR=0), so
+    /// response parsing fails closed.
+    Mangled,
+}
+
 /// Serves length-prefixed DNS queries over one accepted TLS connection until
 /// the peer closes or the TLS layer errors. A failure (including a client
 /// certificate-rejection alert on the handshake) simply ends the connection.
-fn serve_queries(tls: &mut ServerConnection, sock: &mut TcpStream) -> io::Result<()> {
+fn serve_queries(
+    tls: &mut ServerConnection,
+    sock: &mut TcpStream,
+    mode: AdversarialReply,
+) -> io::Result<()> {
     let mut plain: Vec<u8> = Vec::new();
     let mut scratch = [0u8; 4096];
     loop {
@@ -255,7 +303,12 @@ fn serve_queries(tls: &mut ServerConnection, sock: &mut TcpStream) -> io::Result
             if plain.len() >= full {
                 let query = plain[2..full].to_vec();
                 plain.drain(..full);
-                let reply = echo_positive(&query);
+                let reply = match mode {
+                    AdversarialReply::Positive => echo_positive(&query),
+                    AdversarialReply::WrongTid => wrong_tid_reply(&query),
+                    AdversarialReply::Oversize => vec![0u8; crate::dns::DNS_MSG_LIMIT + 1],
+                    AdversarialReply::Mangled => mangled_reply(&query),
+                };
                 write_tls_message(tls, sock, &reply)?;
                 continue;
             }
@@ -280,7 +333,7 @@ fn serve_queries(tls: &mut ServerConnection, sock: &mut TcpStream) -> io::Result
 
 /// Drives one accepted connection: completes the server handshake (returning
 /// cleanly on a client alert or EOF) and then serves DNS queries.
-fn serve_conn_blocking(sock: TcpStream, config: &Arc<ServerConfig>) {
+fn serve_conn_blocking(sock: TcpStream, config: &Arc<ServerConfig>, mode: AdversarialReply) {
     let mut sock = sock;
     let Ok(mut tls) = ServerConnection::new(Arc::clone(config)) else {
         return;
@@ -289,7 +342,7 @@ fn serve_conn_blocking(sock: TcpStream, config: &Arc<ServerConfig>) {
     if completed.is_err() {
         return;
     }
-    let _ = serve_queries(&mut tls, &mut sock);
+    let _ = serve_queries(&mut tls, &mut sock, mode);
 }
 
 /// A loopback TLS responder that accepts connections until dropped, completing
@@ -317,7 +370,11 @@ impl Drop for TlsResponder {
     }
 }
 
-fn spawn_tls_responder(cert: &'static [u8], key: &'static [u8]) -> TlsResponder {
+fn spawn_tls_responder(
+    cert: &'static [u8],
+    key: &'static [u8],
+    mode: AdversarialReply,
+) -> TlsResponder {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind tls responder");
     listener
         .set_nonblocking(true)
@@ -331,7 +388,7 @@ fn spawn_tls_responder(cert: &'static [u8], key: &'static [u8]) -> TlsResponder 
             match listener.accept() {
                 Ok((sock, _)) => {
                     if sock.set_nonblocking(false).is_ok() {
-                        serve_conn_blocking(sock, &config);
+                        serve_conn_blocking(sock, &config, mode);
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -350,7 +407,7 @@ fn spawn_tls_responder(cert: &'static [u8], key: &'static [u8]) -> TlsResponder 
 
 #[test]
 fn pinned_dot_resolver_resolves_both_names_over_loopback_tls() {
-    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY);
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
     let cfg = dot_config(&pinned_resolver());
     let mut cache = Cache::new(2).unwrap();
     let mut schedules = Schedules::new(2).unwrap();
@@ -381,7 +438,7 @@ fn pinned_dot_resolver_resolves_both_names_over_loopback_tls() {
 
 #[test]
 fn pinned_dot_wrong_pin_fails_handshake_and_publishes_nothing() {
-    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY);
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
     let cfg = dot_config(WRONG_PINNED_RESOLVER);
     let mut cache = Cache::new(2).unwrap();
     let mut schedules = Schedules::new(2).unwrap();
@@ -410,7 +467,7 @@ fn pinned_dot_wrong_pin_fails_handshake_and_publishes_nothing() {
 
 #[test]
 fn pinned_dot_san_mismatch_fails_identity_and_publishes_nothing() {
-    let responder = spawn_tls_responder(SAN_MISMATCH_CERT, GOOD_KEY);
+    let responder = spawn_tls_responder(SAN_MISMATCH_CERT, GOOD_KEY, AdversarialReply::Positive);
     let cfg = dot_config(&pinned_resolver());
     let mut cache = Cache::new(2).unwrap();
     let mut schedules = Schedules::new(2).unwrap();
@@ -439,7 +496,7 @@ fn pinned_dot_san_mismatch_fails_identity_and_publishes_nothing() {
 
 #[test]
 fn unpinned_dot_with_empty_root_store_rejects_self_signed_and_publishes_nothing() {
-    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY);
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
     let cfg = dot_config(UNPINNED_RESOLVER);
     let mut cache = Cache::new(2).unwrap();
     let mut schedules = Schedules::new(2).unwrap();
@@ -465,8 +522,95 @@ fn unpinned_dot_with_empty_root_store_rejects_self_signed_and_publishes_nothing(
 }
 
 #[test]
+fn dot_wrong_tid_reply_fails_closed_over_tls() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::WrongTid);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(
+        report.failed, 4,
+        "a reply whose transaction id differs from the query must fail every pinned exchange closed"
+    );
+    assert_eq!(report.exchanges, 0);
+    assert_eq!(report.resolved_names, 0);
+    assert_eq!(bindings_of(&cache, 0, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 0, Family::Aaaa), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::Aaaa), Vec::new());
+    drop(responder);
+}
+
+#[test]
+fn dot_oversize_reply_fails_closed_over_tls() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Oversize);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(
+        report.failed, 4,
+        "a reply length prefix over DNS_MSG_LIMIT must fail every pinned exchange closed"
+    );
+    assert_eq!(report.exchanges, 0);
+    assert_eq!(report.resolved_names, 0);
+    assert_eq!(bindings_of(&cache, 0, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 0, Family::Aaaa), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::Aaaa), Vec::new());
+    drop(responder);
+}
+
+#[test]
+fn dot_mangled_reply_fails_closed_over_tls() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Mangled);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(
+        report.failed, 4,
+        "a non-response (QR=0) reply must fail every pinned exchange closed"
+    );
+    assert_eq!(report.exchanges, 0);
+    assert_eq!(report.resolved_names, 0);
+    assert_eq!(bindings_of(&cache, 0, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 0, Family::Aaaa), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::Aaaa), Vec::new());
+    drop(responder);
+}
+
+#[test]
 fn dot_exchange_traverses_handshake_before_send_and_receive() {
-    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY);
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
     let cfg = dot_config(&pinned_resolver());
     let mut cache = Cache::new(2).unwrap();
     let mut schedules = Schedules::new(2).unwrap();
@@ -572,7 +716,7 @@ fn drive_to_terminal(
 
 #[test]
 fn serving_refresh_retains_dot_transport_without_rebuild() {
-    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY);
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
     let cfg = dot_config(&pinned_resolver());
     let mut cache = Cache::new(2).unwrap();
     let mut schedules = Schedules::new(2).unwrap();
