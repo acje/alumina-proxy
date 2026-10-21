@@ -318,13 +318,21 @@ enum HandshakeProbe {
 }
 
 /// The reason a startup exchange failed, captured at the step where the
-/// failure was first observable (connect, send, recv, or deadline).
+/// failure was first observable (connect, send, recv, deadline, or the `DoT`
+/// TLS identity/handshake layer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureReason {
     Connect,
     Send,
     Receive,
     Timeout,
+    /// A `DoT` TLS-layer failure: the rustls client connection could not be
+    /// built for the target, or the handshake failed (certificate/pin/`SAN`
+    /// identity rejection, alert, `EOF`, or socket error). Distinct from
+    /// [`FailureReason::Connect`] so an operator with a misconfigured pin or
+    /// `FQDN` sees a TLS-specific reason instead of an indistinguishable
+    /// plain-TCP connect failure.
+    TlsIdentity,
 }
 
 impl FailureReason {
@@ -334,6 +342,7 @@ impl FailureReason {
             FailureReason::Send => "send",
             FailureReason::Receive => "receive",
             FailureReason::Timeout => "timeout",
+            FailureReason::TlsIdentity => "tls_identity",
         }
     }
 }
@@ -763,6 +772,14 @@ impl ServerCertVerifier for AluminaServerCertVerifier {
 /// or empty-root CA-chain validation), and the resolver FQDN as the SNI name.
 /// The heap allocations here are the bounded per-connection `DoT` setup cost —
 /// never on the bare-IP path, which constructs no TLS state at all.
+///
+/// The client negotiates the rustls safe-default profile (TLS 1.2 + 1.3 via
+/// `with_safe_default_protocol_versions`, with the `tls12` feature kept for
+/// `DoT` resolver compatibility, `Cargo.toml`). This is an intentional,
+/// documented drift from the serving-side profile, which enforces TLS 1.3
+/// only (`validate_versions`); the `DoT` client must interoperate with
+/// arbitrary public resolvers, while the serving surface is a fixed
+/// first-party contract.
 fn build_tls_connection(target: TlsTarget) -> Result<ClientConnection, rustls::Error> {
     let provider = rustls::crypto::ring::default_provider();
     let supported = provider.signature_verification_algorithms;
@@ -1564,7 +1581,7 @@ impl StartupDns {
             self.probe_tls_handshake();
         } else {
             self.close_connection()?;
-            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+            self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::TlsIdentity)?;
         }
         Ok(())
     }
@@ -1583,7 +1600,7 @@ impl StartupDns {
             HandshakeProbe::Transition => return Ok(HandshakeStep::Transition),
             HandshakeProbe::Failed => {
                 self.close_connection()?;
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::TlsIdentity)?;
                 return Ok(HandshakeStep::Failed);
             }
         }

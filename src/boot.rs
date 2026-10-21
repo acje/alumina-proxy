@@ -49,6 +49,22 @@ impl BootReport {
             .iter()
             .filter(|ns| ns.fqdn().is_none())
     }
+
+    /// Every configured resolver entry that carries `IP#fqdn` FQDN metadata but
+    /// no strict `#pin-sha256=` SPKI pin. Such an entry dials `DoT` (port 853)
+    /// and validates its chain against an empty root store, so its handshake
+    /// deterministically fails closed until a trust-anchor intake lands; the
+    /// binary renders each as one stdout startup warning line so the
+    /// misconfiguration is visible at boot rather than as silent permanent
+    /// degradation.
+    pub fn unpinned_dot_resolvers(
+        &self,
+    ) -> impl Iterator<Item = &crate::resolver::Nameserver> + '_ {
+        self.config
+            .resolver_set()
+            .iter()
+            .filter(|ns| ns.fqdn().is_some() && ns.pin().is_none())
+    }
 }
 
 /// Runs the complete boot sequence: kernel preflight, configuration load, and
@@ -129,6 +145,8 @@ mod tests {
     const VALID_CONFIG: &str = "allowlist = [\"example.com:443\", \"sub.example.org.:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
 
     const FQDN_CONFIG: &str = "allowlist = [\"example.com:443\", \"sub.example.org.:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1#dns.google\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
+
+    const PINNED_CONFIG: &str = "allowlist = [\"example.com:443\", \"sub.example.org.:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
 
     #[test]
     fn boot_with_good_facts_reports_and_stops_at_phase1_boundary() {
@@ -248,6 +266,42 @@ mod tests {
                 .primary()
                 .fqdn()
                 .is_some_and(|f| f.as_str() == "dns.google")
+        );
+    }
+
+    #[test]
+    fn unpinned_fqdn_resolver_streams_one_dot_warning() {
+        let report = boot_report_for(FQDN_CONFIG);
+        let warnings: Vec<_> = report.unpinned_dot_resolvers().collect();
+        assert_eq!(warnings.len(), 1, "one unpinned DoT resolver");
+        assert_eq!(warnings[0].addr().to_string(), "1.1.1.1");
+        assert_eq!(warnings[0].port(), 853);
+        assert!(
+            warnings[0]
+                .fqdn()
+                .is_some_and(|f| f.as_str() == "dns.google")
+        );
+        assert!(warnings[0].pin().is_none());
+    }
+
+    #[test]
+    fn pinned_resolver_streams_no_dot_warning() {
+        let report = boot_report_for(PINNED_CONFIG);
+        assert_eq!(
+            report.unpinned_dot_resolvers().count(),
+            0,
+            "pinned IP#fqdn#pin-sha256= entry is usable immediately: no warning"
+        );
+        assert!(report.config.resolver_set().primary().pin().is_some());
+    }
+
+    #[test]
+    fn bare_ip_resolver_streams_no_dot_warning() {
+        let report = boot_report_for(VALID_CONFIG);
+        assert_eq!(
+            report.unpinned_dot_resolvers().count(),
+            0,
+            "bare-IP entry has no FQDN, so it is not an unpinned DoT entry"
         );
     }
 }

@@ -10,7 +10,7 @@
 //! for the process lifetime. A boot or startup failure exits `EX_CONFIG` (78)
 //! with a diagnostic naming the field/source.
 
-use alumina::boot::{EX_CONFIG, run_boot};
+use alumina::boot::{BootReport, EX_CONFIG, run_boot};
 use alumina::runtime::Preallocated;
 use alumina::serve::{ServeStorage, StartupDecision};
 
@@ -48,12 +48,7 @@ fn main() {
                 report.config.resolver_set().primary().addr(),
                 report.config.resolver_set().primary().port()
             );
-            for nameserver in report.ip_only_resolvers() {
-                println!(
-                    "alumina: warning: resolver {} has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the future DoT (853) SNI/SAN identity surface is unavailable",
-                    nameserver.addr()
-                );
-            }
+            print_resolver_warnings(&report);
             println!(
                 "allowlist entries: {} allowance: {} listen: {}:{}",
                 report.config.allowlist().len(),
@@ -117,6 +112,29 @@ fn main() {
         Err(err) => {
             write_stderr(format_args!("alumina: {err}\n"));
             std::process::exit(EX_CONFIG);
+        }
+    }
+}
+
+/// Prints one stdout startup warning line per resolver entry whose trust form
+/// is degraded but operator-visible at boot: bare-IP entries (no `IP#fqdn`
+/// FQDN, plain DNS only) and `IP#fqdn` entries without a strict `#pin-sha256=`
+/// pin (`DoT` against an empty root store, deterministic fail-closed until a
+/// trust-anchor intake lands). Boot-time only; never on a serving path.
+fn print_resolver_warnings(report: &BootReport) {
+    for nameserver in report.ip_only_resolvers() {
+        println!(
+            "alumina: warning: resolver {} has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the future DoT (853) SNI/SAN identity surface is unavailable",
+            nameserver.addr()
+        );
+    }
+    for nameserver in report.unpinned_dot_resolvers() {
+        if let Some(fqdn) = nameserver.fqdn() {
+            println!(
+                "alumina: warning: resolver {} ({}) has no #pin-sha256= pin; DoT (853) validates against an empty root store and fails closed until a trust-anchor intake lands",
+                nameserver.addr(),
+                fqdn.as_str()
+            );
         }
     }
 }
