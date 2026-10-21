@@ -442,7 +442,8 @@ boot_fixtures() {
     #    non-serving scaffold banner, never a hung serve (a child still alive
     #    after signal + 10 s fails the fixture; a supervised-child deadline is
     #    a FAIL, never a pass). The binary's own entry facts (all four sets
-    #    empty, NNP set) must remain the exact stderr.
+    #    empty, NNP set) then the boot-time resolver trust warning (W7-H7a-F2)
+    #    must be the exact stderr.
     pos_script=$(cat <<'POSPOS'
 cd /work
 /app/target/fixture-facts/release/alumina &
@@ -475,7 +476,9 @@ POSPOS
     fixture_require_stdout_contains 'status="drained"'
     fixture_require_stdout_contains "FIXTURE-POSITIVE-SUPERVISED: reaped child rc=0"
     fixture_require_stdout_not_contains "PHASE1-BOOT-OK"
-    fixture_require_stderr_exact "kernel-facts: ruid=65534 euid=65534 suid=65534 fsuid=65534 cap_eff=0 cap_prm=0 cap_amb=0 no_new_privs=1"
+    fixture_require_stderr_exact "$(printf '%s\n' \
+        "kernel-facts: ruid=65534 euid=65534 suid=65534 fsuid=65534 cap_eff=0 cap_prm=0 cap_amb=0 no_new_privs=1" \
+        "alumina: warning: resolver 127.0.0.1 has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the future DoT (853) SNI/SAN identity surface is unavailable")"
 
     # 2) ROOT: euid 0 -> EX_CONFIG 78 (root-UID diagnostic); all four UID axes
     #    reported zero at entry. Negative fixtures must have EMPTY stdout and
