@@ -124,7 +124,7 @@ fn main() {
 fn print_resolver_warnings(report: &BootReport) {
     for nameserver in report.ip_only_resolvers() {
         write_stderr(format_args!(
-            "alumina: warning: resolver {} has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the future DoT (853) SNI/SAN identity surface is unavailable\n",
+            "alumina: warning: resolver {} has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the DoT (853) SNI/SAN identity surface is unavailable\n",
             nameserver.addr()
         ));
     }

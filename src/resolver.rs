@@ -224,7 +224,7 @@ impl Nameserver {
     }
 
     /// The optional validated FQDN of an `IP#fqdn` entry: carried as the `SNI`/
-    /// `SAN` identity target for the future `DoT` handshake (`port 853`, V1).
+    /// `SAN` identity target for the `DoT` handshake (`port 853`, V1).
     /// `None` for a bare-IP entry, which stays valid on plain DNS (`port 53`)
     /// with a startup warning.
     #[must_use]

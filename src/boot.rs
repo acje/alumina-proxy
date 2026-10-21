@@ -40,7 +40,7 @@ pub struct BootReport {
 impl BootReport {
     /// Every configured resolver entry that carries no `IP#fqdn` FQDN
     /// metadata. IP-only resolvers remain valid and usable (plain DNS over
-    /// `port 53`) but cannot be `SNI`/`SAN`-authenticated for the future `DoT`
+    /// `port 53`) but cannot be `SNI`/`SAN`-authenticated for the `DoT`
     /// handshake (`port 853`, V1); the binary renders each as one stdout
     /// startup warning line.
     pub fn ip_only_resolvers(&self) -> impl Iterator<Item = &crate::resolver::Nameserver> + '_ {

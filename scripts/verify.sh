@@ -478,7 +478,7 @@ POSPOS
     fixture_require_stdout_not_contains "PHASE1-BOOT-OK"
     fixture_require_stderr_exact "$(printf '%s\n' \
         "kernel-facts: ruid=65534 euid=65534 suid=65534 fsuid=65534 cap_eff=0 cap_prm=0 cap_amb=0 no_new_privs=1" \
-        "alumina: warning: resolver 127.0.0.1 has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the future DoT (853) SNI/SAN identity surface is unavailable")"
+        "alumina: warning: resolver 127.0.0.1 has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the DoT (853) SNI/SAN identity surface is unavailable")"
 
     # 2) ROOT: euid 0 -> EX_CONFIG 78 (root-UID diagnostic); all four UID axes
     #    reported zero at entry. Negative fixtures must have EMPTY stdout and
