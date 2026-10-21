@@ -928,10 +928,9 @@ pub fn parse_response(
                 match rdata {
                     Rdata::A(ip) => {
                         if family != Family::A {
-                            let idx = ensure_owner(ws, &owner)?;
-                            if ws.owners[idx].cname.is_some() {
-                                return Err(DnsError::CnameCoexist);
-                            }
+                            // Wrong-family record: discarded without marking
+                            // the owner as carrying address data or touching
+                            // an existing CNAME (docs/alumina-proxy.md :476).
                             reader.skip(rdlen)?;
                             continue;
                         }
@@ -951,10 +950,9 @@ pub fn parse_response(
                     }
                     Rdata::Aaaa(ip) => {
                         if family != Family::Aaaa {
-                            let idx = ensure_owner(ws, &owner)?;
-                            if ws.owners[idx].cname.is_some() {
-                                return Err(DnsError::CnameCoexist);
-                            }
+                            // Wrong-family record: discarded without marking
+                            // the owner as carrying address data or touching
+                            // an existing CNAME (docs/alumina-proxy.md :476).
                             reader.skip(rdlen)?;
                             continue;
                         }
@@ -2067,12 +2065,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_coexist_cname_then_opposite_family_address() {
+    fn ignored_opposite_family_address_after_cname_yields_empty_noerror_without_soa() {
         let mut msg = header(0x124d, true, 0, 1, 2, 0, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
-        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
         msg.extend_from_slice(&aaaa_record(
             "sub.example.org",
             [
@@ -2082,7 +2080,7 @@ mod tests {
         ));
         assert_eq!(
             parse_response_ws("sub.example.org", Family::A, 0x124d, &msg),
-            Err(DnsError::CnameCoexist)
+            Err(DnsError::EmptyNoerrorWithoutSoa)
         );
     }
 
@@ -2107,16 +2105,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_coexist_cname_then_opposite_family_address_when_querying_aaaa() {
+    fn ignored_opposite_family_address_after_cname_when_querying_aaaa_yields_empty_noerror_without_soa() {
         let mut msg = header(0x124f, true, 0, 1, 2, 0, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&28u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
-        msg.extend_from_slice(&cname_record("sub.example.org", "edge.test", 200));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
         msg.extend_from_slice(&a_record("sub.example.org", [1, 2, 3, 4], 60));
         assert_eq!(
             parse_response_ws("sub.example.org", Family::Aaaa, 0x124f, &msg),
-            Err(DnsError::CnameCoexist)
+            Err(DnsError::EmptyNoerrorWithoutSoa)
         );
     }
 
