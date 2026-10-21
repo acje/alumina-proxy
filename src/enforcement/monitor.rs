@@ -71,6 +71,7 @@ pub struct Monitor {
     capture_len: usize,
     capture_drops: SaturatingCounter,
     dirty: bool,
+    serving_stale: bool,
     last_report_secs: Option<u64>,
 }
 
@@ -129,6 +130,7 @@ impl Monitor {
             capture_len: 0,
             capture_drops: SaturatingCounter::new(),
             dirty: false,
+            serving_stale: false,
             last_report_secs: None,
         }
     }
@@ -151,6 +153,21 @@ impl Monitor {
     pub(crate) const fn note_fact_resolver_degraded(&mut self) {
         self.facts.resolver_degraded.bump();
         self.dirty = true;
+    }
+
+    /// Latches the persistent "serving from a stale cache entry" level bit
+    /// (W6-H6b-F5). The bit is a level, not an event fold: it survives
+    /// `mark_reported` and is cleared only by a later fresh admission.
+    pub(crate) const fn note_serving_stale(&mut self) {
+        self.serving_stale = true;
+        self.dirty = true;
+    }
+
+    /// Clears the stale-serving level bit on a fresh admission. Deliberately
+    /// does not dirty the aggregate: a normal fresh admission is not an event
+    /// worth its own summary emission.
+    pub(crate) const fn note_serving_fresh(&mut self) {
+        self.serving_stale = false;
     }
 
     pub(crate) const fn note_fact_dns_anomaly(&mut self, kind: DnsAnomalyKind) {
@@ -391,6 +408,10 @@ impl Monitor {
         self.report_drops.value()
     }
 
+    pub(crate) const fn serving_stale(&self) -> bool {
+        self.serving_stale
+    }
+
     pub(crate) fn facts_any_illegal_overflow(&self) -> bool {
         self.facts.any_illegal.iter().any(|c| c.overflow())
     }
@@ -527,6 +548,39 @@ pub(crate) mod tests {
         assert!(
             !m.report_due(8),
             "after a successful re-emission the aggregate is clean again"
+        );
+    }
+
+    #[test]
+    fn serving_stale_latches_persists_across_reports_and_clears_on_fresh() {
+        let mut m = Monitor::new();
+        assert!(!m.serving_stale(), "a fresh monitor is not serving stale");
+        assert!(!m.report_due(5), "clean aggregate is never due");
+        m.note_serving_stale();
+        assert!(m.serving_stale(), "a stale admission latches the level bit");
+        assert!(m.report_due(5), "the latch dirties the aggregate");
+        m.mark_reported(5, true);
+        assert!(
+            m.serving_stale(),
+            "the level bit survives a committed report (level, not an event fold)"
+        );
+        assert!(
+            !m.report_due(6),
+            "a committed report without a new event is clean"
+        );
+        m.note_serving_fresh();
+        assert!(
+            !m.serving_stale(),
+            "a later fresh admission clears the level bit"
+        );
+        assert!(
+            !m.report_due(6),
+            "clearing via fresh admission is not itself an event (no log-volume regression)"
+        );
+        m.note_serving_stale();
+        assert!(
+            m.report_due(6),
+            "a new stale admission re-dirties after the fresh clear"
         );
     }
 

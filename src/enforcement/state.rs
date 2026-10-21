@@ -156,6 +156,14 @@ impl Enforcement {
         self.monitor.note_fact_dns_anomaly(kind);
     }
 
+    pub(crate) const fn note_serving_stale(&mut self) {
+        self.monitor.note_serving_stale();
+    }
+
+    pub(crate) const fn note_serving_fresh(&mut self) {
+        self.monitor.note_serving_fresh();
+    }
+
     pub(crate) const fn monitor(&self) -> &Monitor {
         &self.monitor
     }

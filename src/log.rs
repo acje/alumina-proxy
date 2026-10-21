@@ -524,6 +524,9 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     if resolver_degraded > 0 && !push_u64(&mut w, b"rd", u64::from(resolver_degraded)) {
         return None;
     }
+    if monitor.serving_stale() && !push_u64(&mut w, b"ss", 1) {
+        return None;
+    }
     let bailiwick_violation = monitor.facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
     if bailiwick_violation > 0 && !push_u64(&mut w, b"bv", u64::from(bailiwick_violation)) {
         return None;
@@ -1943,6 +1946,60 @@ mod tests {
         assert!(
             text.contains("x0s=511"),
             "the all-saturated capture ring carries its worst legal slot identity: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_monitor_emits_serving_stale_level_bit_when_latched() {
+        use crate::enforcement::monitor::Monitor;
+        let mut m = Monitor::new();
+        m.note_serving_stale();
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            text.contains(" ss=1"),
+            "the latched stale-serving level bit must be emitted: {text}"
+        );
+        assert!(
+            !text.contains("ss=0"),
+            "the bit is emitted only when latched, never as a zero: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_monitor_suppresses_serving_stale_when_clear() {
+        use crate::enforcement::monitor::Monitor;
+        let m = Monitor::new();
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            !text.contains("ss="),
+            "a clear stale-serving bit stays zero-suppressed: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_monitor_all_saturated_with_serving_stale_fits_the_8k_slot() {
+        use crate::enforcement::monitor::Monitor;
+        let mut m = Monitor::new();
+        m.saturate_all_for_test();
+        m.note_serving_stale();
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            text.len() < SLOT_BYTES,
+            "the all-saturated record with the stale-serving bit stays inside the 8 KiB slot: {} bytes",
+            text.len()
+        );
+        assert!(
+            text.contains(" ss=1"),
+            "the latched stale-serving bit survives the saturated record: {text}"
         );
     }
 

@@ -697,3 +697,22 @@ Hermetic loopback tests (`src/startup_dns/dot_tests.rs`) drive a rustls `ServerC
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; the bare-IP resolver path and its fixed port-53 behavior are unchanged. Doctrine: no fallback beyond the declared `resolver` array — a DoT entry's failure is a counted connect failure with no cleartext downgrade and no dynamic pin update. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## Hardening: serving-from-stale observability level bit — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-sslv`, 2026-10-21). It records the user authorization for one observability increment: the enforcement monitor surfaces the persistent "serving from a stale cache binding" state as a latched, zero-suppressed `ss=` level bit in the existing monitor record. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
+
+### Amended surface
+
+The `alumina-rp2e` monitoring vocabulary governs the enforcement monitor record. This increment adds a single latched level bit: `Monitor::serving_stale` (`src/enforcement/monitor.rs`), set by `note_serving_stale` (set + dirty) and cleared by `note_serving_fresh` (clear, deliberately no dirty to avoid log-volume regression), with the `serving_stale()` accessor. The shared serving owner notes the bit at peer admission (`note_peer_freshness`, `src/serving.rs`) from the cache entry state that granted the peer (Stale → set, Fresh → clear, Empty/Retired → no-op), before the slot borrow. The monitor grammar emits the zero-suppressed `ss=` key after the `rd=` block and before the `bv=` block (`src/log.rs`), only when latched (never `ss=0`), at +5 bytes when set; the all-saturated record with `ss=1` stays inside the 8192-byte slot. The bit is observability-only: serving behavior is byte-identical, with zero new allocations, zero new log surfaces, and no runtime-surface expansion.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Monitor: latched `ss=` serving-from-stale level bit, zero-suppressed after `rd=`, observability-only (`:62`–`:78` monitoring vocabulary) | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.

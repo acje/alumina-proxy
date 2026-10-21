@@ -43,10 +43,10 @@ use mio::{Events, Interest, Poll, Registry, Token};
 
 use signal_hook::consts::SIGTERM;
 
-use crate::cache::Family;
+use crate::cache::{EntryState, Family};
 use crate::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
 use crate::config::FixedHostname;
-use crate::connect::{ConnectHeadReason, ConnectParser, Feed};
+use crate::connect::{ConnectHeadReason, ConnectParser, ConnectRequest, Feed};
 use crate::eligibility::NumericAddr;
 use crate::enforcement::action::{DomainOrdinal, FirstSlot, Scope};
 use crate::enforcement::monitor::{CapturedDetail, CapturedFact, SlotCapture};
@@ -2287,9 +2287,10 @@ impl Serving {
             }
             Ok(ConnectPhase::Peer {
                 addr,
+                family,
                 connect_deadline,
-                ..
             }) => {
+                self.note_peer_freshness(&request, family, now);
                 let slot = &mut self.slots[index];
                 slot.approved = Some(approved);
                 slot.approved_port = request.port();
@@ -2298,6 +2299,28 @@ impl Serving {
                 slot.stage = Stage::Dialing;
                 self.dial(index, addr)
             }
+        }
+    }
+
+    /// Folds the admitted peer's cache freshness into the persistent
+    /// "serving from a stale cache entry" monitor level bit (W6-H6b-F5): a
+    /// `Peer` admission on a `Stale` entry latches the bit, a `Fresh`
+    /// admission clears it. `Empty`/`Retired` are unreachable on a granted
+    /// `Peer` (usable-peer gates on `Fresh | Stale`) and are no-ops.
+    fn note_peer_freshness(&mut self, request: &ConnectRequest, family: Family, now: Instant) {
+        let Some(ordinal) = self.storage.ordinal_for_request(request) else {
+            return;
+        };
+        let Some(name) = self.storage.cache().name_index(ordinal.get()) else {
+            return;
+        };
+        let Ok(entry) = self.storage.cache().entry(name, family) else {
+            return;
+        };
+        match entry.state(self.storage.cache_secs(now)) {
+            EntryState::Stale => self.storage.enforcement_mut().note_serving_stale(),
+            EntryState::Fresh => self.storage.enforcement_mut().note_serving_fresh(),
+            EntryState::Empty | EntryState::Retired => {}
         }
     }
 

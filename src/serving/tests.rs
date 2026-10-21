@@ -6953,3 +6953,69 @@ fn saturated_generation_tokens_fail_closed_without_panic() {
         "ordinary in-range generations must round-trip exactly unchanged"
     );
 }
+
+#[test]
+/// The Peer-branch freshness fold (W6-H6b-F5) latches the persistent
+/// "serving from a stale cache entry" monitor level bit on a Stale admission
+/// and clears it on a later Fresh admission. The helper is invoked directly
+/// against the real storage/cache/clock because a real `Peer` admission
+/// requires an actual eligible upstream dial, which is not hermetic; the
+/// one-line Peer-branch wiring itself is covered by review.
+fn peer_admission_freshness_folds_serving_stale_level_bit() {
+    use crate::cache::Family;
+    use crate::connect::Feed;
+    use crate::eligibility::NumericAddr;
+    use std::net::Ipv4Addr;
+    let port = ephemeral_port();
+    let upstream_port = ephemeral_port();
+    let cfg = config_pair(port, upstream_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let mut parser = crate::connect::ConnectParser::new();
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match parser.feed(head.as_bytes()).expect("head feed") {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        let request = parser
+            .result()
+            .copied()
+            .expect("parsed request")
+            .expect("valid request");
+        assert!(
+            !serving.storage().enforcement().monitor().serving_stale(),
+            "a fresh monitor must not be serving stale"
+        );
+
+        // A fresh family-A binding, folded immediately: the level bit stays clear.
+        serving.storage_mut().publish_test_addr(
+            0,
+            NumericAddr::V4(Ipv4Addr::from([1, 1, 1, 1])),
+            Family::A,
+        );
+        let receipt = serving.storage().cache_secs(Instant::now());
+        serving.note_peer_freshness(&request, Family::A, Instant::now());
+        assert!(
+            !serving.storage().enforcement().monitor().serving_stale(),
+            "a fresh admission must not latch the stale-serving level bit"
+        );
+
+        // Advance the clock past the 600 s freshness deadline (still inside the
+        // retirement grace): the same entry is now Stale and must latch.
+        serving
+            .storage_mut()
+            .mount_clock(Instant::now(), receipt + 601);
+        serving.note_peer_freshness(&request, Family::A, Instant::now());
+        assert!(
+            serving.storage().enforcement().monitor().serving_stale(),
+            "a stale admission must latch the persistent stale-serving level bit"
+        );
+
+        // A later fresh admission clears the level bit again.
+        serving.storage_mut().mount_clock(Instant::now(), receipt);
+        serving.note_peer_freshness(&request, Family::A, Instant::now());
+        assert!(
+            !serving.storage().enforcement().monitor().serving_stale(),
+            "a later fresh admission must clear the stale-serving level bit"
+        );
+    });
+}
