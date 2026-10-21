@@ -2115,7 +2115,7 @@ mod tests {
     }
 
     #[test]
-    fn ignored_opposite_family_address_after_cname_when_querying_aaaa_yields_empty_noerror_without_soa() {
+    fn ignored_opposite_family_aaaa_after_cname_yields_empty_noerror_without_soa() {
         let mut msg = header(0x124f, true, 0, 1, 2, 0, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&28u16.to_be_bytes());
