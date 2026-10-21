@@ -716,3 +716,22 @@ The `alumina-rp2e` monitoring vocabulary governs the enforcement monitor record.
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## Hardening: failback consecutive-success hysteresis — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-failbk`, 2026-10-21). It records the user authorization for one state-machine increment: the failback probe settles only after `FAILBACK_SUCCESSES = 3` consecutive successful primary probes, matching `DEGRADED_AFTER = 3` for hysteresis symmetry. It amends only the failback clause of the multi-resolver failover/failback surface (`alumina-hrdn4`); every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
+
+### Amended surface
+
+The `alumina-hrdn4` failback clause governs the bounded failback probe of the primary resolver. This increment adds a consecutive-success counter: `StartupDns::failback_successes` (`src/startup_dns.rs`), reset to zero when a failback probe begins (`maybe_begin_failback`) and when a probe fails (re-seating onto the backup and re-arming the 900-second grace). A successful probe increments the counter; only the third consecutive successful primary probe settles the failback — clearing the probe source and grace — so a transient primary is not re-adopted on a single success. A success on a non-primary backup leaves the counter and grace untouched. The counter is state-machine-local: zero new allocations, zero new log keys, no runtime-surface expansion, and the fixed 1-conn/1-query transport profile is unchanged.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Failback: `FAILBACK_SUCCESSES = 3` consecutive-success settle, counter reset on probe begin/failure, backup success leaves counter untouched (`alumina-hrdn4` failback clause) | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.

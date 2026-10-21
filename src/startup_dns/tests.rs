@@ -1729,17 +1729,127 @@ fn failback_probes_primary_after_grace_and_success_recovers_it() {
         "the backup is remembered so a failed probe re-seats onto it"
     );
     assert!(transport.failback_due.is_none());
-    // The probe succeeds: the primary recovers and the probe is settled.
+    assert_eq!(
+        transport.failback_successes, 0,
+        "a new probe cycle starts with a zeroed consecutive-success counter"
+    );
+    // The first two probe successes do not settle the failback: the probe
+    // stays armed until the third consecutive success.
+    for _ in 0..2 {
+        transport.on_exchange_succeeded();
+        assert_eq!(
+            transport.failback_source,
+            Some(ActiveResolver::at(1, 2)),
+            "a single success does not settle the failback"
+        );
+        assert!(transport.failback_due.is_none());
+    }
+    assert_eq!(transport.failback_successes, 2);
+    // The third consecutive probe success settles the failback.
     transport.on_exchange_succeeded();
     assert_eq!(transport.active_resolver.index(), 0);
     assert!(transport.failback_source.is_none());
     assert!(transport.failback_due.is_none());
+    assert_eq!(
+        transport.failback_successes, 0,
+        "the counter resets when the probe settles"
+    );
     assert!(!transport.resolver_degraded_for_test());
     assert_eq!(
         transport.take_resolver_transitions(),
         2,
-        "one enter crossing on degradation and one exit crossing on recovery"
+        "one enter crossing on degradation and one exit crossing on the first probe success"
     );
+}
+
+#[test]
+fn failback_does_not_settle_on_one_or_two_probe_successes() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    let due = transport.failback_due.expect("failback armed");
+    transport.now0 = due;
+    transport
+        .maybe_begin_failback()
+        .expect("failback probe begins");
+    assert_eq!(transport.active_resolver.index(), 0);
+    assert!(transport.failback_source.is_some());
+    // One success is not enough to settle the probe.
+    transport.on_exchange_succeeded();
+    assert_eq!(
+        transport.failback_source,
+        Some(ActiveResolver::at(1, 2)),
+        "one success leaves the probe armed"
+    );
+    assert_eq!(transport.failback_successes, 1);
+    // Two successes are still not enough.
+    transport.on_exchange_succeeded();
+    assert_eq!(
+        transport.failback_source,
+        Some(ActiveResolver::at(1, 2)),
+        "two successes leave the probe armed"
+    );
+    assert_eq!(transport.failback_successes, 2);
+    assert!(transport.failback_due.is_none());
+}
+
+#[test]
+fn failed_probe_mid_regime_resets_counter_and_reseats() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    let due = transport.failback_due.expect("failback armed");
+    transport.now0 = due;
+    transport
+        .maybe_begin_failback()
+        .expect("failback probe begins");
+    // Two successes advance the counter into the middle of the regime.
+    transport.on_exchange_succeeded();
+    transport.on_exchange_succeeded();
+    assert_eq!(transport.failback_successes, 2);
+    // A failed probe mid-regime re-seats onto the backup, re-arms the grace,
+    // and resets the counter so the next cycle starts from zero.
+    transport.on_exchange_failed(due);
+    assert_eq!(
+        transport.active_resolver.index(),
+        1,
+        "a failed probe re-seats onto the backup it came from"
+    );
+    assert_eq!(transport.peer().ip().to_string(), "8.8.8.8");
+    assert!(transport.failback_source.is_none());
+    assert_eq!(
+        transport.failback_successes, 0,
+        "a failed probe resets the consecutive-success counter"
+    );
+    assert_eq!(
+        transport.failback_due,
+        Some(due + FAILBACK_AFTER_SECS),
+        "the failed probe re-arms the failback timer"
+    );
+}
+
+#[test]
+fn backup_success_leaves_failback_counter_at_zero() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    let due = transport.failback_due.expect("failback armed");
+    assert_eq!(transport.active_resolver.index(), 1);
+    // A success on the backup leaves the counter and the grace untouched.
+    transport.on_exchange_succeeded();
+    assert_eq!(transport.active_resolver.index(), 1);
+    assert_eq!(transport.failback_successes, 0);
+    assert_eq!(transport.failback_due, Some(due));
+    assert!(transport.failback_source.is_none());
 }
 
 #[test]

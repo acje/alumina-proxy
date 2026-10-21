@@ -612,6 +612,11 @@ impl Default for ResolverDegradation {
 /// into passive degraded mode before any successful exchange resets it.
 const DEGRADED_AFTER: usize = 3;
 
+/// The number of consecutive successful primary probes that settle a failback
+/// probe, symmetric with [`DEGRADED_AFTER`] so a transient primary is not
+/// re-adopted on a single probe success.
+const FAILBACK_SUCCESSES: usize = 3;
+
 /// The whole-second span Alumina spends on a non-primary resolver before the
 /// next exchange probes the primary again (bounded failback recovery). One
 /// failed probe re-degrades the primary and re-arms the timer; a successful
@@ -867,6 +872,11 @@ pub struct StartupDns {
     /// another failover while the primary is being probed. `None` while no
     /// failback probe is in flight.
     failback_source: Option<ActiveResolver>,
+    /// The count of consecutive successful primary probes in the current
+    /// failback probe cycle; the probe settles only at `FAILBACK_SUCCESSES`.
+    /// Reset to zero when a probe begins or fails; always zero while no probe
+    /// is in flight.
+    failback_successes: usize,
     /// The number of degraded-mode enter and exit crossings awaiting drain by
     /// the owning `ServeStorage` into the monitor's `rd` fact fold. Transitions
     /// accumulate across a startup window and are drained once after it closes.
@@ -942,6 +952,7 @@ impl StartupDns {
             degradations: [ResolverDegradation::default(); MAX_RESOLVERS],
             failback_due: None,
             failback_source: None,
+            failback_successes: 0,
             resolver_transitions: 0,
             dns_anomalies: [0; DnsAnomalyKind::COUNT],
             #[cfg(test)]
@@ -2503,6 +2514,7 @@ impl StartupDns {
         }
         self.close_connection()?;
         self.failback_source = Some(self.active_resolver);
+        self.failback_successes = 0;
         self.active_resolver = ActiveResolver::primary(self.active_resolver.set_len());
         self.failback_due = None;
         self.repoint_to_active();
@@ -2529,6 +2541,7 @@ impl StartupDns {
         if let Some(source) = self.failback_source {
             self.active_resolver = source;
             self.failback_source = None;
+            self.failback_successes = 0;
             self.failback_due = Some(now.saturating_add(FAILBACK_AFTER_SECS));
             self.repoint_to_active();
             return;
@@ -2547,9 +2560,12 @@ impl StartupDns {
     /// Advances the resolver state at the single recognized success choke
     /// point, recording exactly one exit crossing when a degraded resolver
     /// publishes a valid outcome: the active resolver recovers to healthy, and
-    /// a successful failback probe against the primary is settled so no further
-    /// probe is armed. A success on a non-primary leaves the failback grace
-    /// armed, so the primary is still probed on the next due exchange.
+    /// a successful primary probe advances the consecutive-success counter,
+    /// settling the failback (clearing probe source and grace) only at
+    /// `FAILBACK_SUCCESSES` so a transient primary is not re-adopted on a
+    /// single success. A success on a non-primary leaves the counter and the
+    /// failback grace untouched, so the primary is still probed on the next
+    /// due exchange.
     fn on_exchange_succeeded(&mut self) {
         let active_index = self.active_resolver.index();
         let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
@@ -2557,9 +2573,13 @@ impl StartupDns {
         if was_degraded {
             self.resolver_transitions += 1;
         }
-        if self.failback_source.is_some() {
-            self.failback_source = None;
-            self.failback_due = None;
+        if self.failback_source.is_some() && self.active_resolver.is_primary() {
+            self.failback_successes += 1;
+            if self.failback_successes >= FAILBACK_SUCCESSES {
+                self.failback_source = None;
+                self.failback_due = None;
+                self.failback_successes = 0;
+            }
         }
     }
 
