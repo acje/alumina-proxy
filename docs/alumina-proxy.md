@@ -208,7 +208,7 @@ The first-iteration target is 1-10 Gbps aggregate relayed payload throughput acr
 
 ### II. Memory & Resource Invariants
 
-- **The Zero-Allocation Invariant:** While serving traffic or refreshing DNS, proxy execution paths, including dependencies, must not allocate or deallocate heap storage. Only boot initialization is exempt; shutdown exits without deallocating.
+- **The Zero-Allocation Invariant:** While serving traffic or refreshing DNS, first-party proxy execution paths must not allocate or deallocate heap storage. Only boot initialization is exempt; shutdown exits without deallocating. Dependency behavior is a bounded seam outside this invariant's first-party scope (see the `alumina-zai` amendment).
 - **The Resource-Bounds Invariant:** Connections, buffers, queues, DNS requests, timers, and logs have explicit capacity limits. Exhaustion rejects work rather than expanding storage without bound.
 
 ### III. Execution & Concurrency Invariants
@@ -781,3 +781,25 @@ The `alumina-rp2e` monitoring vocabulary governs the enforcement monitor record.
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## Zero-Allocation Invariant: first-party scope, rustls bounded seam — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-zai`, 2026-10-21). It records the user authorization for a scope clarification of the Zero-Allocation Invariant (`:211`): the invariant's "including dependencies" clause is narrowed to first-party proxy code paths, and the bounded per-record heap allocations of the pinned rustls 0.23.46 dependency on the warm DoT path are documented as a bounded seam outside that first-party scope. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding.
+
+### Amended surface
+
+The Zero-Allocation Invariant (`:211`) previously read "proxy execution paths, including dependencies, must not allocate or deallocate heap storage." This increment narrows the invariant's binding scope to **first-party proxy execution paths**: first-party serving and DNS-refresh code must not allocate or deallocate heap storage, with boot initialization exempt and shutdown exiting without deallocating. Dependency behavior is a bounded seam outside the invariant's first-party scope.
+
+The pinned rustls 0.23.46 dependency (`Cargo.toml:201`, `=0.23.46`, `default-features=false` with ring/std/tls12/logging) performs bounded per-record heap allocations on the warm DoT path once the handshake completes: inbound, each app-data message is copied into a fresh heap `Vec` (`Payload::into_vec` → `bytes.to_vec()`); outbound, each record is built into a fresh `Vec` (`PrefixedPayload::with_capacity` + `m.encode()`). These allocations are bounded per record at ≤~16-18 KiB, occur only over an established DoT connection, and are confined to the dependency — the documented seam this amendment records, not a first-party allocation. First-party DoT setup allocates only at the documented per-connect setup seam `build_tls_connection` (`alumina-dot-chain-v1-v5`, `:679`), which is the authorized first-party allocation point: each fresh DoT dial builds its TLS state there (rustls `Arc`s for the provider, verifier, and config, the SNI `String`, and the `Box`ed `ClientConnection`), confined to that seam. Retained-transport serving refresh allocates nothing — the established connection is reused warm across serving refreshes (`alumina-dotrt`, `:745`), with no rebuild.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Zero-Allocation Invariant (`:211`): "including dependencies" narrowed to first-party proxy code paths | Implemented (this increment) |
+| rustls 0.23.46 warm-path per-record allocs (inbound `to_vec`, outbound `PrefixedPayload`/`encode`) documented as a bounded seam ≤~16-18 KiB | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array; first-party DoT setup allocates only at the per-connect setup seam `build_tls_connection` (`:679`), and retained-transport refresh allocates nothing; the DoT transport's per-connect TLS confinement, handshake/identity fail-closed behavior, and the 1-conn/1-query transport profile are unchanged. Nothing in this amendment loosens any of these items or restates any profile row differently.

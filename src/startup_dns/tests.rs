@@ -1083,6 +1083,11 @@ fn cooperative_exchange_publishes_on_valid_response() {
 
 #[cfg(feature = "alloc-witness")]
 #[test]
+/// Boot-window allocation witness: the ACTUAL startup DNS window is allocation-free
+/// including a transport reconnect. This qualifies the boot alloc-zero claim for a
+/// plain-DNS (bare-IP) resolver only: `config()`'s `resolver = ["1.1.1.1"]` keeps
+/// `upgrade_to_tls` unreachable, so `counts.all_zero()` does not cover a DoT-configured
+/// boot, which allocates in-window via the documented rustls bounded seam (`alumina-zai`).
 fn startup_dns_phase_is_allocation_free_including_reconnect() {
     use crate::alloc::{self, Phase};
     use crate::serve::{ServeStorage, StartupDecision};
