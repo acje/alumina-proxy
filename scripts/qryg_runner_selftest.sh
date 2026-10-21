@@ -66,9 +66,9 @@ case "$cmd" in
             qryg-h-*)
                 sleep 0.1
                 : > "$work/$stamp.netns-ready"
-                # released by candidate.pid (normal) or by a host_cleanup rm
-                # marker (F1 cancellation/early-failure path)
-                a=0; while [ ! -r "$work/$stamp.candidate.pid" ] && [ ! -e "$SBX/rm.$name" ] && [ "$a" -lt 200 ]; do sleep 0.05; a=$((a+1)); done
+                # released by pid/$stamp.candidate.pid (normal) or by a
+                # host_cleanup rm marker (F1 cancellation/early-failure path)
+                a=0; while [ ! -r "$work/pid/$stamp.candidate.pid" ] && [ ! -e "$SBX/rm.$name" ] && [ "$a" -lt 200 ]; do sleep 0.05; a=$((a+1)); done
                 if [ "${FAKE_H_EARLY:-0}" = "1" ]; then exit 1; fi
                 printf '%s\n' "${FAKE_CLIENT_RC:-0}" > "$work/$stamp.client-done"
                 if [ "${FAKE_NO_REPORT:-0}" != "1" ]; then
@@ -78,7 +78,7 @@ case "$cmd" in
                 b=0; while [ ! -r "$work/$stamp.supervisor-candidate-done" ] && [ ! -e "$SBX/rm.$name" ] && [ "$b" -lt 200 ]; do sleep 0.05; b=$((b+1)); done
                 exit 0 ;;
             qryg-c-*)
-                printf '%s\n' "${FAKE_CAND_PID:-4242}" > "$work/$stamp.candidate.pid"
+                printf '%s\n' "${FAKE_CAND_PID:-4242}" > "$work/pid/$stamp.candidate.pid"
                 if [ "${FAKE_CAND_EARLY:-0}" = "1" ]; then exit 1; fi
                 c=0; while [ ! -r "$SBX/stop.$name" ] && [ ! -e "$SBX/rm.$name" ] && [ "$c" -lt 400 ]; do sleep 0.05; c=$((c+1)); done
                 exit 0 ;;
@@ -152,7 +152,7 @@ chk entry-haproxy-db-nofw \
 chk entry-envoy-conc1 \
     "$(grep -c 'exec /usr/local/bin/envoy -c /cfg/envoy_connect.yaml --concurrency 1' "$ROOT/scripts/qryg/entry_envoy.sh" | tr -d ' ')" "1"
 chk entry-pid-write \
-    "$(grep -c 'echo "\$\$" > "/w/${STAMP}.candidate.pid"' "$ROOT/scripts/qryg/entry_haproxy.sh" | tr -d ' ')" "1"
+    "$(grep -c 'echo "\$\$" > "/w/pid/${STAMP}.candidate.pid"' "$ROOT/scripts/qryg/entry_haproxy.sh" | tr -d ' ')" "1"
 chk wiring-client-mode \
     "$(grep -c -- '--mode "$CLIENT_MODE"' "$ROOT/scripts/qryg/harness_native.sh" | tr -d ' ')" "1"
 chk wiring-proxy-pid \
@@ -397,6 +397,14 @@ cat > "$SBX/hbin/sha256sum" <<'SHA'
 #!/bin/sh
 printf '%064x  %s\n' 0 "${1:-}"
 SHA
+cat > "$SBX/hbin/chown" <<'CHOWN'
+#!/bin/sh
+# F5: the real harness runs as root and chowns /w/pid to 65534:65534; the
+# sandbox body runs as the invoking user (cannot chown to another uid), so the
+# chown is stubbed to exit 0. The structural abstract-delta check still proves
+# the copy differs from the real body only by the scratch path tokens.
+exit 0
+CHOWN
 cat > "$SBX/hbin/python3" <<'PY'
 #!/bin/sh
 if [ "${1:-}" = "-" ]; then exit 0; fi
@@ -427,12 +435,12 @@ case "$role" in
     *) exit 0 ;;
 esac
 PY
-chmod +x "$SBX/hbin/ip" "$SBX/hbin/sha256sum" "$SBX/hbin/python3"
+chmod +x "$SBX/hbin/ip" "$SBX/hbin/sha256sum" "$SBX/hbin/chown" "$SBX/hbin/python3"
 
 harness_body_run() {
     name="$1"; leak="$2"; want_rc="$3"; want_reapfail="$4"
     HB="$SBX/hbody-$name"
-    mkdir -p "$HB/work" "$HB/out" "$HB/app" "$HB/tmp" "$HB/bin"
+    mkdir -p "$HB/work" "$HB/work/pid" "$HB/out" "$HB/app" "$HB/tmp" "$HB/bin"
     sed -e "s#/w/#@QRYW@/#g" \
         -e "s#/work#@QRYW@#g" \
         -e "s#/out/#@QRYO@/#g" \
@@ -459,7 +467,7 @@ harness_body_run() {
     export FAKE_LEAK_BACKEND="$leak" FAKE_CLIENT_RC=0
     ( a=0
       while [ ! -r "$HB/work/$STAMP.netns-ready" ] && [ "$a" -lt 200 ]; do sleep 0.05; a=$((a+1)); done
-      printf '%s\n' 4242 > "$HB/work/$STAMP.candidate.pid" ) &
+      printf '%s\n' 4242 > "$HB/work/pid/$STAMP.candidate.pid" ) &
     wp=$!
     ( b=0
       while [ ! -r "$HB/work/$STAMP.client-done" ] && [ "$b" -lt 400 ]; do sleep 0.05; b=$((b+1)); done

@@ -10,7 +10,7 @@
 # directory mounted from the host into BOTH containers, plus /out for the
 # seam report):
 #   $STAMP.netns-ready              -> written here once netns+backend up
-#   $STAMP.candidate.pid            -> written by the candidate's entry script
+#   pid/$STAMP.candidate.pid        -> written by the candidate's entry script
 #   $STAMP.client-done              -> client rc handed to the supervisor
 #   $STAMP.supervisor-candidate-done-> supervisor confirms candidate reaped
 #
@@ -114,15 +114,24 @@ while time.time() < deadline:
 sys.exit("backend not listening in time")
 PYEOF
 
+# F5 (08-tooling-ci-scripts): confine the candidate pid-marker to /w/pid and
+# make it writable by the candidate (uid 65534). The host user cannot chown to
+# 65534 (WORKDIR is host-owned 755), so the root harness does it here, before
+# the candidate starts; fail closed if the chown cannot be applied.
+chown 65534:65534 /w/pid || {
+    echo "QR-HARNESS-FAIL: cannot chown /w/pid to 65534:65534" >&2
+    exit 1
+}
+
 printf '%s\n' "$STAMP" > "/w/$STAMP.netns-ready"
 
 CAND_PID=""
 w=0
-while [ ! -r "/w/$STAMP.candidate.pid" ] && [ "$w" -lt "${QRYG_ATTACH_WAIT_S:-60}" ]; do
+while [ ! -r "/w/pid/$STAMP.candidate.pid" ] && [ "$w" -lt "${QRYG_ATTACH_WAIT_S:-60}" ]; do
     sleep 0.5
     w=$((w + 1))
 done
-CAND_PID="$(cat "/w/$STAMP.candidate.pid" 2>/dev/null || true)"
+CAND_PID="$(cat "/w/pid/$STAMP.candidate.pid" 2>/dev/null || true)"
 if [ -z "$CAND_PID" ]; then
     echo "QR-HARNESS-FAIL: candidate pid never appeared (attach wait ${QRYG_ATTACH_WAIT_S:-60}s)" >&2
     exit 1

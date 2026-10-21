@@ -611,6 +611,43 @@ docslink_check() {
     echo "DOCSLINK-CHECK-OK"
 }
 
+unsafe_surface_gate() {
+    # F3 (08-tooling-ci-scripts): file-level unsafe-surface confinement. The
+    # `unsafe` keyword is allowed ONLY in src/alloc.rs, src/log.rs, and files
+    # under tests/. Any other *.rs file containing the keyword fails closed,
+    # naming the offender(s). Read-only host-side check; no builds. rg is
+    # preferred; a grep -R fallback covers hosts without rg. target/ and .git
+    # are excluded (gitignored for rg, explicit for grep); the grep fallback
+    # also excludes .ooda/ so gitignored scratch never trips the gate.
+    # Producer exit is captured (cf. sha256_digest): rg/grep exit 1 = no match
+    # (clean); any exit >= 2 is a tooling error and fails closed, never passing
+    # on an empty offender list.
+    offenders=""
+    scan_rc=0
+    if command -v rg >/dev/null 2>&1; then
+        offenders="$(rg -l '\bunsafe\b' --glob '*.rs' --glob '!target/**' 2>/dev/null)" || scan_rc=$?
+    else
+        offenders="$(grep -Rl --include='*.rs' --exclude-dir=target --exclude-dir=.git --exclude-dir=.ooda -E '\bunsafe\b' . 2>/dev/null)" || scan_rc=$?
+        offenders=$(printf '%s\n' "$offenders" | sed 's#^\./##')
+    fi
+    [ "$scan_rc" -lt 2 ] || {
+        echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe scan producer exit $scan_rc (tooling error, not PASS)" >&2
+        exit 1
+    }
+    bad=""
+    for f in $offenders; do
+        case "$f" in
+            src/alloc.rs|src/log.rs|tests/*) ;;
+            *) bad="$bad $f" ;;
+        esac
+    done
+    if [ -n "$bad" ]; then
+        echo "UNSAFE-SURFACE-FAIL: 'unsafe' outside allowlist (src/alloc.rs, src/log.rs, tests/):$bad" >&2
+        exit 1
+    fi
+    echo "UNSAFE-SURFACE-OK: unsafe confined to src/alloc.rs, src/log.rs, tests/"
+}
+
 # One authoritative SHA256 operation for every identity input. Selection:
 # sha256sum preferred, else shasum -a 256 (a SHA256 field must carry real
 # SHA256, never shasum's default SHA1). The producer exit and a non-empty
@@ -894,6 +931,7 @@ boundary_phase1() {
     linux_dispatch 'sh scripts/verify.sh mid union'
     boot_fixtures
     docslink_check
+    unsafe_surface_gate
     git diff --check
     echo "GIT-DIFF-CHECK-OK"
     audit_deny_owner
@@ -1138,6 +1176,6 @@ case "$TIER/$SCOPE" in
     boundary/phase1) boundary_phase1 ;;
     e2e/relay) e2e_relay ;;
     e2e/shutdown) e2e_shutdown ;;
-    docs/*) docslink_check ;;
+    docs/*) docslink_check; unsafe_surface_gate ;;
     *) usage ;;
 esac

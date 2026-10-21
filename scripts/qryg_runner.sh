@@ -110,6 +110,12 @@ host_cleanup() {
             H_JOB=0
         fi
     fi
+    # F5 (08-tooling-ci-scripts): the WORKDIR scratch (755 host-owned, telemetry
+    # pid-marker confined under pid/) is removed on every exit path. The seam
+    # report and native meta live in OUTDIR, outside WORKDIR, so they survive.
+    if [ -d "$WORKDIR" ]; then
+        rm -r "$WORKDIR" || hcr=1
+    fi
     if [ "$hcr" -eq 0 ]; then
         HOST_CLEANED=1
         return 0
@@ -145,7 +151,14 @@ fi
 [ -f "$ROOT/scripts/qryg/harness_native.sh" ] || fail "harness_native.sh missing"
 
 mkdir -p "$OUTDIR" "$WORKDIR"
-chmod 777 "$WORKDIR"
+chmod 755 "$WORKDIR"
+# F5 (08-tooling-ci-scripts): confine the candidate pid-marker to a subdir
+# writable to uid 65534 (candidate entry scripts run as 65534). The harness
+# (root) chowns /w/pid to 65534:65534 before the candidate starts; the host
+# user cannot chown to 65534, so the harness does it. WORKDIR itself stays 755
+# host-owned; only the telemetry pid-marker lives in the confined subdir.
+mkdir -p "$WORKDIR/pid"
+chmod 755 "$WORKDIR/pid"
 
 BENCH_SOURCE_HEAD="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 BENCH_DIRTY_COUNT="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
@@ -263,7 +276,7 @@ while [ ! -f "$WORKDIR/$STAMP.client-done" ]; do
     sleep 0.5
 done
 driver_rc="$(cat "$WORKDIR/$STAMP.client-done" 2>/dev/null || echo 1)"
-PROXY_PID_IN_NS="$(cat "$WORKDIR/$STAMP.candidate.pid" 2>/dev/null || echo 0)"
+PROXY_PID_IN_NS="$(cat "$WORKDIR/pid/$STAMP.candidate.pid" 2>/dev/null || echo 0)"
 echo "QR-CLIENT-DONE: driver_rc=$driver_rc proxy_pid_in_ns=$PROXY_PID_IN_NS"
 
 # --- teardown: candidate first, harness stays up until candidate reaped -----
