@@ -35,6 +35,10 @@ const MAX_CIPHERS: usize = MAX_HANDSHAKE_LEN / 2;
 /// 255 bytes.
 const MAX_ALPN_VALUE: usize = 255;
 
+/// Maximum number of `signature_algorithms` (13) entries retained from the
+/// `ClientHello` body.
+const MAX_SIGALGS: usize = 64;
+
 const RANDOM_LEN: usize = 32;
 
 const CONTENT_HANDSHAKE: u8 = 22;
@@ -44,6 +48,7 @@ const SUPPORTED_VERSIONS: u16 = 43;
 const SERVER_NAME: u16 = 0;
 const ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
 const ALPN: u16 = 16;
+const SIGNATURE_ALGORITHMS: u16 = 13;
 
 const TLS13: u16 = 0x0304;
 const TLS12: u16 = 0x0303;
@@ -65,6 +70,8 @@ pub struct ClientHello {
     extensions_len: usize,
     alpn: [u8; MAX_ALPN_VALUE],
     alpn_len: usize,
+    sigalgs: [u16; MAX_SIGALGS],
+    sigalgs_len: usize,
 }
 
 impl ClientHello {
@@ -111,6 +118,35 @@ impl ClientHello {
     #[must_use]
     pub fn alpn_first_value(&self) -> &[u8] {
         &self.alpn[..self.alpn_len]
+    }
+
+    /// The offered `signature_algorithms` (13) values in wire order, unfiltered.
+    /// Retained leniently: a malformed or overlong extension retains nothing.
+    #[must_use]
+    pub fn sigalgs(&self) -> &[u16] {
+        &self.sigalgs[..self.sigalgs_len]
+    }
+
+    /// The canonical `FoxIO` `JA4` client fingerprint for this `ClientHello`, using
+    /// the highest non-GREASE offered version and SNI presence per the
+    /// `alumina-xfbq8` amendment (docs/alumina-proxy.md:879-895).
+    /// Allocation-free.
+    #[must_use]
+    pub fn ja4(&self) -> [u8; 36] {
+        let version = self
+            .offered_versions()
+            .iter()
+            .copied()
+            .filter(|&v| !is_grease(v))
+            .max()
+            .unwrap_or(0);
+        ja4_fingerprint(
+            version,
+            self.ciphers(),
+            self.extensions(),
+            self.alpn_first_value(),
+            self.sigalgs(),
+        )
     }
 }
 
@@ -531,6 +567,8 @@ fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
     let mut has_ech = false;
     let mut alpn = [0u8; MAX_ALPN_VALUE];
     let mut alpn_len = 0usize;
+    let mut sigalgs = [0u16; MAX_SIGALGS];
+    let mut sigalgs_len = 0usize;
     let mut seen = [0u16; MAX_EXTENSIONS];
     let mut seen_count = 0usize;
     while pos < ext_end {
@@ -564,6 +602,9 @@ fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
             ALPN => {
                 parse_alpn_first_value(ext_data, &mut alpn, &mut alpn_len);
             }
+            SIGNATURE_ALGORITHMS => {
+                sigalgs_len = parse_sig_algs(ext_data, &mut sigalgs);
+            }
             _ => {}
         }
         pos = ext_end_i;
@@ -585,6 +626,8 @@ fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
         extensions_len: seen_count,
         alpn,
         alpn_len,
+        sigalgs,
+        sigalgs_len,
     })
 }
 
@@ -721,6 +764,210 @@ fn parse_alpn_first_value(data: &[u8], out: &mut [u8; MAX_ALPN_VALUE], out_len: 
     let take = value.len().min(MAX_ALPN_VALUE);
     out[..take].copy_from_slice(&value[..take]);
     *out_len = take;
+}
+
+/// Retains the `signature_algorithms` (13) list values, raw and bounded by
+/// `MAX_SIGALGS`. Lenient by design: an odd-length or overlong list retains
+/// nothing but never rejects the `ClientHello`, mirroring the ALPN retention.
+fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> usize {
+    if data.len() < 2 {
+        return 0;
+    }
+    let list_len = usize::from(u16::from_be_bytes([data[0], data[1]]));
+    let list_end = 2 + list_len;
+    if list_end > data.len() {
+        return 0;
+    }
+    let list = &data[2..list_end];
+    if !list.len().is_multiple_of(2) {
+        return 0;
+    }
+    let count = list.len() / 2;
+    let take = count.min(MAX_SIGALGS);
+    for (i, slot) in out[..take].iter_mut().enumerate() {
+        *slot = u16::from_be_bytes([list[i * 2], list[i * 2 + 1]]);
+    }
+    take
+}
+
+/// Computes the canonical `FoxIO` `JA4` client fingerprint as the fixed 36-byte
+/// ASCII string `t{ver}{sni}{cc:02}{ec:02}{alpn}_{chash}_{ehash}` per the
+/// `alumina-xfbq8` amendment (docs/alumina-proxy.md:879-895). Pure and
+/// allocation-free: the SHA-256 inputs are fed incrementally through a
+/// stack-based `ring::digest::Context`, and the sorted cipher/extension lists
+/// are materialized in fixed-capacity stack buffers.
+///
+/// `version` is the highest non-GREASE offered version; `ciphers` and
+/// `extensions` are the retained wire-order lists; `alpn` is the raw first
+/// ALPN value; `sigalgs` the retained `signature_algorithms` values in wire
+/// order. SNI presence (`d`/`i`) is derived from `extensions` containing
+/// extension `0x0000`.
+#[must_use]
+pub fn ja4_fingerprint(
+    version: u16,
+    ciphers: &[u16],
+    extensions: &[u16],
+    alpn: &[u8],
+    sigalgs: &[u16],
+) -> [u8; 36] {
+    let ver = version_token(version);
+    let sni = if extensions.contains(&SERVER_NAME) {
+        b'd'
+    } else {
+        b'i'
+    };
+    let cc = count_token(non_grease_count(ciphers));
+    let ec = count_token(non_grease_count(extensions));
+    let alpn = alpn_token(alpn);
+    let chash = cipher_hash12(ciphers);
+    let ehash = ehash12(extensions, sigalgs);
+
+    let mut out = [0u8; 36];
+    out[0] = b't';
+    out[1..3].copy_from_slice(&ver);
+    out[3] = sni;
+    out[4..6].copy_from_slice(&cc);
+    out[6..8].copy_from_slice(&ec);
+    out[8..10].copy_from_slice(&alpn);
+    out[10] = b'_';
+    out[11..23].copy_from_slice(&chash);
+    out[23] = b'_';
+    out[24..36].copy_from_slice(&ehash);
+    out
+}
+
+const fn version_token(version: u16) -> [u8; 2] {
+    match version {
+        TLS13 => *b"13",
+        TLS12 => *b"12",
+        0x0302 => *b"11",
+        TLS10 => *b"10",
+        _ => *b"00",
+    }
+}
+
+#[expect(clippy::cast_possible_truncation, reason = "count capped at 99 fits u8")]
+const fn count_token(count: usize) -> [u8; 2] {
+    let c = if count > 99 { 99 } else { count } as u8;
+    [b'0' + c / 10, b'0' + c % 10]
+}
+
+const fn is_alnum(b: u8) -> bool {
+    b.is_ascii_digit() || b.is_ascii_lowercase() || b.is_ascii_uppercase()
+}
+
+const fn hex_nibble(v: u8) -> u8 {
+    let n = v & 0x0f;
+    if n < 10 {
+        b'0' + n
+    } else {
+        b'a' + (n - 10)
+    }
+}
+
+const fn alpn_token(alpn: &[u8]) -> [u8; 2] {
+    if alpn.is_empty() {
+        return *b"00";
+    }
+    if alpn.len() == 1 {
+        let c = alpn[0];
+        return [c, c];
+    }
+    let first = alpn[0];
+    let last = alpn[alpn.len() - 1];
+    if is_alnum(first) && is_alnum(last) {
+        [first, last]
+    } else {
+        [hex_nibble(first >> 4), hex_nibble(last)]
+    }
+}
+
+fn non_grease_count(values: &[u16]) -> usize {
+    values.iter().filter(|&&v| !is_grease(v)).count()
+}
+
+#[expect(clippy::cast_possible_truncation, reason = "nibble extraction fits u8")]
+fn feed_u16_hex(ctx: &mut ring::digest::Context, value: u16) {
+    let mut buf = [0u8; 4];
+    for (i, slot) in buf.iter_mut().enumerate() {
+        let shift = 12 - 4 * i;
+        *slot = hex_nibble((value >> shift) as u8);
+    }
+    ctx.update(&buf);
+}
+
+fn hash12_finish(ctx: ring::digest::Context) -> [u8; 12] {
+    let digest = ctx.finish();
+    let bytes = digest.as_ref();
+    let mut out = [0u8; 12];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let byte = bytes[i / 2];
+        let nibble = if i % 2 == 0 { byte >> 4 } else { byte & 0x0f };
+        *slot = hex_nibble(nibble);
+    }
+    out
+}
+
+fn cipher_hash12(ciphers: &[u16]) -> [u8; 12] {
+    let mut sorted = [0u16; MAX_CIPHERS];
+    let mut n = 0usize;
+    for &c in ciphers {
+        if !is_grease(c) {
+            sorted[n] = c;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return [b'0'; 12];
+    }
+    sorted[..n].sort_unstable();
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut first = true;
+    for &c in &sorted[..n] {
+        if !first {
+            ctx.update(b",");
+        }
+        first = false;
+        feed_u16_hex(&mut ctx, c);
+    }
+    hash12_finish(ctx)
+}
+
+fn ehash12(extensions: &[u16], sigalgs: &[u16]) -> [u8; 12] {
+    let mut sorted = [0u16; MAX_EXTENSIONS];
+    let mut n = 0usize;
+    for &e in extensions {
+        if !is_grease(e) && e != SERVER_NAME && e != ALPN {
+            sorted[n] = e;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return [b'0'; 12];
+    }
+    sorted[..n].sort_unstable();
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut first = true;
+    for &e in &sorted[..n] {
+        if !first {
+            ctx.update(b",");
+        }
+        first = false;
+        feed_u16_hex(&mut ctx, e);
+    }
+    ctx.update(b"_");
+    first = true;
+    for &s in sigalgs {
+        if is_grease(s) {
+            continue;
+        }
+        if !first {
+            ctx.update(b",");
+        }
+        first = false;
+        feed_u16_hex(&mut ctx, s);
+    }
+    hash12_finish(ctx)
 }
 
 /// Validates the parsed `ClientHello` against the TLS 1.3-only golden path and
@@ -1309,7 +1556,6 @@ mod tests {
     }
 
     const SV: &[u8] = &[0x02, 0x03, 0x04];
-    const SIGNATURE_ALGORITHMS: u16 = 13;
 
     #[test]
     fn non_host_name_sni_rejected() {
@@ -1471,5 +1717,287 @@ mod tests {
         let wire = hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (ALPN, &[0xff])]);
         let ch = parse_one(&wire).expect("a malformed ALPN extension must not reject the hello");
         assert_eq!(ch.alpn_first_value(), b"");
+    }
+
+    fn sigalgs_ext(values: &[u16]) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            &u16::try_from(values.len() * 2)
+                .expect("sigalgs list fits u16")
+                .to_be_bytes(),
+        );
+        for value in values {
+            data.extend_from_slice(&value.to_be_bytes());
+        }
+        data
+    }
+
+    #[test]
+    fn ja4_v1_published_vector_byte_for_byte() {
+        let ciphers = [
+            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b,
+            0xc02c, 0xc02f, 0xc030, 0xcca8, 0xcca9,
+        ];
+        let ehash_exts = [
+            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b,
+            0x002d, 0x0033, 0x4469, 0xff01,
+        ];
+        let sigalgs = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601];
+        let alpn = alpn_ext(&[b"h2"]);
+        let sni = server_name_ext(&[(0, b"sub.example.org")]);
+        let sigalgs_data = sigalgs_ext(&sigalgs);
+        let mut exts: Vec<(u16, &[u8])> = Vec::new();
+        for ext in ehash_exts {
+            let data: &[u8] = if ext == SUPPORTED_VERSIONS {
+                SV
+            } else if ext == SIGNATURE_ALGORITHMS {
+                &sigalgs_data
+            } else {
+                &[]
+            };
+            exts.push((ext, data));
+        }
+        exts.push((SERVER_NAME, &sni));
+        exts.push((ALPN, &alpn));
+        let wire = hello_with_ciphers_and_extensions(&ciphers, &exts);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(ch.ja4(), *b"t13d1516h2_8daaf6152771_e5627efa2ab1");
+    }
+
+    #[test]
+    fn ja4_v4_spec_consistent_vector_byte_for_byte() {
+        let ciphers = [
+            0xaaaa, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8,
+            0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
+        ];
+        let sigalgs = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601];
+        let alpn = alpn_ext(&[&[0xba, 0xad]]);
+        let sni = server_name_ext(&[(0, b"sub.example.org")]);
+        let sigalgs_data = sigalgs_ext(&sigalgs);
+        let exts: Vec<(u16, &[u8])> = vec![
+            (0x9a9a, &[]),
+            (0xff01, &[]),
+            (0x0033, &[]),
+            (0x002d, &[]),
+            (0x0005, &[]),
+            (0x4469, &[]),
+            (SIGNATURE_ALGORITHMS, &sigalgs_data),
+            (ALPN, &alpn),
+            (0x0023, &[]),
+            (0x001b, &[]),
+            (SUPPORTED_VERSIONS, SV),
+            (SERVER_NAME, &sni),
+            (0x0012, &[]),
+            (0x000a, &[]),
+            (0x0017, &[]),
+            (0x000b, &[]),
+            (0x6a6a, &[]),
+            (0x0015, &[]),
+        ];
+        let wire = hello_with_ciphers_and_extensions(&ciphers, &exts);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(ch.ja4(), *b"t13d1516bd_8daaf6152771_e5627efa2ab1");
+    }
+
+    #[test]
+    fn ja4_grease_filtered_from_counts_and_hashes() {
+        let ciphers = [
+            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b,
+            0xc02c, 0xc02f, 0xc030, 0xcca8, 0xcca9, 0x1a1a,
+        ];
+        let ehash_exts = [
+            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b,
+            0x002d, 0x0033, 0x4469, 0xff01, 0x2a2a,
+        ];
+        let sigalgs = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601];
+        let alpn = alpn_ext(&[b"h2"]);
+        let sni = server_name_ext(&[(0, b"sub.example.org")]);
+        let sigalgs_data = sigalgs_ext(&sigalgs);
+        let mut exts: Vec<(u16, &[u8])> = Vec::new();
+        for ext in ehash_exts {
+            let data: &[u8] = if ext == SUPPORTED_VERSIONS {
+                SV
+            } else if ext == SIGNATURE_ALGORITHMS {
+                &sigalgs_data
+            } else {
+                &[]
+            };
+            exts.push((ext, data));
+        }
+        exts.push((SERVER_NAME, &sni));
+        exts.push((ALPN, &alpn));
+        let wire = hello_with_ciphers_and_extensions(&ciphers, &exts);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(
+            ch.ja4(),
+            *b"t13d1516h2_8daaf6152771_e5627efa2ab1",
+            "GREASE ciphers and extensions must be filtered from counts and hashes"
+        );
+    }
+
+    #[test]
+    fn ja4_version_tokens() {
+        for (version, token) in [
+            (0x0304u16, b"13"),
+            (0x0303, b"12"),
+            (0x0302, b"11"),
+            (0x0301, b"10"),
+            (0x0300, b"00"),
+            (0x0400, b"00"),
+        ] {
+            let out = ja4_fingerprint(version, &[], &[], &[], &[]);
+            assert_eq!(&out[1..3], token, "version token for {version:#06x}");
+        }
+    }
+
+    #[test]
+    fn ja4_alpn_tokens() {
+        assert_eq!(alpn_token(&[]), *b"00");
+        assert_eq!(alpn_token(b"h2"), *b"h2");
+        assert_eq!(alpn_token(b"x"), *b"xx");
+        assert_eq!(alpn_token(&[0x20, 0x61]), *b"21");
+        assert_eq!(alpn_token(&[0x30, 0xab, 0xcd, 0x31]), *b"01");
+        assert_eq!(alpn_token(&[0xab, 0xcd]), *b"ad");
+        assert_eq!(alpn_token(&[0xba, 0xad]), *b"bd");
+    }
+
+    #[test]
+    fn ja4_v2_structural_intent_tls12_no_alpn() {
+        let ciphers: Vec<u16> = (0..19u16).map(|i| 0x0100 + i).collect();
+        let exts: Vec<u16> = std::iter::once(0x0000)
+            .chain((0..7u16).map(|i| 0x1000 + i))
+            .collect();
+        let out = ja4_fingerprint(0x0303, &ciphers, &exts, &[], &[]);
+        assert_eq!(&out[..10], b"t12d190800");
+        assert_eq!(out.len(), 36);
+        assert_eq!(out[10], b'_');
+        assert_eq!(out[23], b'_');
+        for &b in &out[11..23] {
+            assert!(b.is_ascii_hexdigit(), "chash must be hex digits");
+        }
+        for &b in &out[24..36] {
+            assert!(b.is_ascii_hexdigit(), "ehash must be hex digits");
+        }
+    }
+
+    #[test]
+    fn ja4_v3_structural_intent_46_ciphers_with_scsv() {
+        let mut ciphers: Vec<u16> = (0..46u16).map(|i| 0x0100 + i).collect();
+        ciphers[0] = 0x00ff;
+        let alpn = alpn_ext(&[b"h2"]);
+        let sni = server_name_ext(&[(0, b"sub.example.org")]);
+        let exts = [
+            (SUPPORTED_VERSIONS, SV),
+            (SERVER_NAME, &sni),
+            (ALPN, &alpn),
+            (0x0005, &b""[..]),
+            (0x000a, &b""[..]),
+        ];
+        let wire = hello_with_ciphers_and_extensions(&ciphers, &exts);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(&ch.ja4()[..10], b"t13d4605h2");
+        assert_eq!(ch.ja4().len(), 36);
+    }
+
+    #[test]
+    fn ja4_empty_lists_use_sentinel_hashes() {
+        let out = ja4_fingerprint(0x0304, &[], &[], &[], &[]);
+        assert_eq!(out, *b"t13i000000_000000000000_000000000000");
+    }
+
+    #[test]
+    fn retains_sigalgs_values_in_wire_order() {
+        let sigalgs = [0x0403u16, 0x0804, 0x0401];
+        let data = sigalgs_ext(&sigalgs);
+        let wire = hello_with_extensions(&[
+            (SUPPORTED_VERSIONS, SV),
+            (SIGNATURE_ALGORITHMS, &data),
+        ]);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(ch.sigalgs(), &sigalgs);
+    }
+
+    #[test]
+    fn sigalgs_odd_length_retains_nothing() {
+        let sigalgs = [0x00u8, 0x03, 0x04, 0x03, 0x04];
+        let wire = hello_with_extensions(&[
+            (SUPPORTED_VERSIONS, SV),
+            (SIGNATURE_ALGORITHMS, &sigalgs),
+        ]);
+        let ch = parse_one(&wire).expect("parse");
+        assert!(ch.sigalgs().is_empty());
+    }
+
+    #[test]
+    fn sigalgs_overlong_retains_nothing() {
+        let sigalgs = [0x00u8, 0x64, 0x04, 0x03];
+        let wire = hello_with_extensions(&[
+            (SUPPORTED_VERSIONS, SV),
+            (SIGNATURE_ALGORITHMS, &sigalgs),
+        ]);
+        let ch = parse_one(&wire).expect("parse");
+        assert!(ch.sigalgs().is_empty());
+    }
+
+    #[test]
+    fn sigalgs_capped_at_max_sigalgs() {
+        let values: Vec<u16> = (0..70u16).map(|i| 0x0400 + i).collect();
+        let data = sigalgs_ext(&values);
+        let wire = hello_with_extensions(&[
+            (SUPPORTED_VERSIONS, SV),
+            (SIGNATURE_ALGORITHMS, &data),
+        ]);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(ch.sigalgs().len(), MAX_SIGALGS);
+        assert_eq!(ch.sigalgs(), &values[..MAX_SIGALGS]);
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn ja4_path_is_allocation_free() {
+        use crate::alloc::{self, Phase};
+        let ciphers = [
+            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b,
+            0xc02c, 0xc02f, 0xc030, 0xcca8, 0xcca9,
+        ];
+        let ehash_exts = [
+            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b,
+            0x002d, 0x0033, 0x4469, 0xff01,
+        ];
+        let sigalgs = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601];
+        let alpn = alpn_ext(&[b"h2"]);
+        let sni = server_name_ext(&[(0, b"sub.example.org")]);
+        let sigalgs_data = sigalgs_ext(&sigalgs);
+        let mut exts: Vec<(u16, &[u8])> = Vec::new();
+        for ext in ehash_exts {
+            let data: &[u8] = if ext == SUPPORTED_VERSIONS {
+                SV
+            } else if ext == SIGNATURE_ALGORITHMS {
+                &sigalgs_data
+            } else {
+                &[]
+            };
+            exts.push((ext, data));
+        }
+        exts.push((SERVER_NAME, &sni));
+        exts.push((ALPN, &alpn));
+        let wire = hello_with_ciphers_and_extensions(&ciphers, &exts);
+        let ch = parse_one(&wire).expect("parse");
+        let full_exts = [
+            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b,
+            0x002d, 0x0033, 0x4469, 0xff01, SERVER_NAME, ALPN,
+        ];
+
+        let (out, counts) = alloc::run_phase(Phase::Serving, || {
+            let pure = ja4_fingerprint(0x0304, &ciphers, &full_exts, b"h2", &sigalgs);
+            let method = ch.ja4();
+            (pure, method)
+        });
+        assert_eq!(out.0, *b"t13d1516h2_8daaf6152771_e5627efa2ab1");
+        assert_eq!(out.1, out.0);
+        assert!(
+            counts.all_zero(),
+            "the JA4 computation path (pure fn + ClientHello::ja4) must be allocation-free: {counts:?}"
+        );
     }
 }

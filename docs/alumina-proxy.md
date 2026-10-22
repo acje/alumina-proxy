@@ -301,7 +301,7 @@ All added enforcement and monitoring storage is boot-time allocated from the exi
 | Per-ordinal saturated aggregate counters + overflow + window state | 32 | 32 B | 1024 B |
 | Per-slot last-counted window marker | 512 | 8 B | 4096 B |
 | First-seen JA4 baseline table (36-char JA4 + 1-char present flag + 4-byte IP) | 512 | ~41 B | ~21 KiB |
-| ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions in per-slot `ChInspector`) | 512 | ~16.4 KiB | ~8.2 MiB |
+| ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions + `[u16; 64]` sigalgs in per-slot `ChInspector`) | 512 | ~16.5 KiB | ~8.2 MiB |
 
 The planned additional enforcement and monitoring control storage (the five non-JA4 rows above) totals approximately 9–10 KiB against the existing 128 MiB traffic storage and 2 MiB log queue. The two JA4 rows (first-seen baseline ~21 KiB and ClientHello retention ~8.2 MiB) are additional and separately accounted in the JA4 client-fingerprint tripwire amendment section. Exact sizes are fixed at implementation with `sizeof`-verified types. No pacing credit/burst storage is reserved or preallocated while Tarpit is deferred (no speculative reserved pacing allocation); it is added to this table only if a genuine trigger-catalog decision authorizes Tarpit. Per-turn enforcement work composes with the existing 16-op/64 KiB per-visit budget and at-most-256-visit timer recheck; the per-turn control-step count is a fixed value derived from that native per-visit I/O budget at implementation, not an invented range. Block All's bounded physical closure is the only path that walks the slot table.
 
@@ -920,9 +920,9 @@ The "Planned fixed control storage" table gains two rows:
 | Planned structure | Count | Unit size (bound) | Bound total |
 | --- | --- | --- | --- |
 | First-seen JA4 baseline table (36-char JA4 + 1-char present flag + 4-byte IP) | 512 | ~41 B | ~21 KiB |
-| ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions in per-slot `ChInspector`) | 512 | ~16.4 KiB | ~8.2 MiB |
+| ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions + `[u16; 64]` sigalgs in per-slot `ChInspector`) | 512 | ~16.5 KiB | ~8.2 MiB |
 
-The first-seen JA4 baseline table holds 512 fixed entries (32 ordinals × 16 addresses = `MAX_ADDRESSES`), each storing the full 36-character JA4 string plus a 1-character present flag plus the 4-byte IP address: ~41 B/entry × 512 ≈ 21 KiB total (design estimate ~21-27 KiB). The ClientHello JA4 retention is the fixed per-slot storage retained in `ClientHello` inside each `ChInspector` by the parser-retention increment: `[u16; 8192]` (16 KiB) + `[u8; 255]` (255 B) + `[u16; 64]` (128 B) = 16,767 B ≈ 16.4 KiB/slot; 512 × 16,767 B ≈ 8.2 MiB. Both figures are design estimates, not measured, consistent with the table header; exact sizes are fixed at implementation with `sizeof`-verified types.
+The first-seen JA4 baseline table holds 512 fixed entries (32 ordinals × 16 addresses = `MAX_ADDRESSES`), each storing the full 36-character JA4 string plus a 1-character present flag plus the 4-byte IP address: ~41 B/entry × 512 ≈ 21 KiB total (design estimate ~21-27 KiB). The ClientHello JA4 retention is the fixed per-slot storage retained in `ClientHello` inside each `ChInspector` by the parser-retention increment: `[u16; 8192]` (16 KiB) + `[u8; 255]` (255 B) + `[u16; 64]` (128 B) + `[u16; 64]` sigalgs (128 B) = 16,895 B ≈ 16.5 KiB/slot; 512 × 16,895 B ≈ 8.2 MiB. Both figures are design estimates, not measured, consistent with the table header; exact sizes are fixed at implementation with `sizeof`-verified types.
 
 #### Retained serving workspace reconciliation (`:163`/`:188`)
 
