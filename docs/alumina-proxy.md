@@ -303,7 +303,7 @@ All added enforcement and monitoring storage is boot-time allocated from the exi
 | First-seen JA4 baseline table (36-char JA4 + 1-char present flag + 4-byte IP) | 512 | ~41 B | ~21 KiB |
 | ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions in per-slot `ChInspector`) | 512 | ~16.4 KiB | ~8.2 MiB |
 
-The planned additional control storage totals approximately 9–10 KiB against the existing 128 MiB traffic storage and 2 MiB log queue. Exact sizes are fixed at implementation with `sizeof`-verified types. No pacing credit/burst storage is reserved or preallocated while Tarpit is deferred (no speculative reserved pacing allocation); it is added to this table only if a genuine trigger-catalog decision authorizes Tarpit. Per-turn enforcement work composes with the existing 16-op/64 KiB per-visit budget and at-most-256-visit timer recheck; the per-turn control-step count is a fixed value derived from that native per-visit I/O budget at implementation, not an invented range. Block All's bounded physical closure is the only path that walks the slot table.
+The planned additional enforcement and monitoring control storage (the five non-JA4 rows above) totals approximately 9–10 KiB against the existing 128 MiB traffic storage and 2 MiB log queue. The two JA4 rows (first-seen baseline ~21 KiB and ClientHello retention ~8.2 MiB) are additional and separately accounted in the JA4 client-fingerprint tripwire amendment section. Exact sizes are fixed at implementation with `sizeof`-verified types. No pacing credit/burst storage is reserved or preallocated while Tarpit is deferred (no speculative reserved pacing allocation); it is added to this table only if a genuine trigger-catalog decision authorizes Tarpit. Per-turn enforcement work composes with the existing 16-op/64 KiB per-visit budget and at-most-256-visit timer recheck; the per-turn control-step count is a fixed value derived from that native per-visit I/O budget at implementation, not an invented range. Block All's bounded physical closure is the only path that walks the slot table.
 
 ### Explicitly unchanged (non-negotiable)
 
@@ -885,13 +885,13 @@ The tripwire computes the canonical FoxIO JA4 client fingerprint as the fixed 36
 ```
 
 - `t/q/d`: transport — `t` TLS, `q` QUIC, `d` DTLS.
-- `ver`: the TLS version from the `supported_versions` extension (`0x002b`) if present, else the Protocol Version; the `legacy_version` is ignored.
-- `sni d/i`: `d` for a domain SNI, `i` for an IP-address SNI.
-- `cipher_count:02`: two-digit count of offered cipher suites, including SCSV `0x00ff`, after GREASE filtering.
+- `ver`: the HIGHEST value in the `supported_versions` extension (`0x002b`) if present, ignoring GREASE values; else the Protocol Version. The `legacy_version` (handshake version) is ignored.
+- `sni d/i`: `d` if the SNI extension (`0x0000`) is present, `i` if it is absent (presence-based per the canonical rule: a present SNI — even an IP-literal one — yields `d`; only an absent SNI yields `i`). In Alumina's context (`:48` requires exactly one SNI for accepted connections and the config rejects IP-literal allowlist entries), the common case is present → `d`; rejected or malformed initial ClientHellos with no SNI must yield `i`.
+- `cipher_count:02`: two-digit count of offered cipher suites, including SCSV `0x00ff` and `0x5600` and experimental/reserved `0xFE00`-`0xFEFF`, after GREASE filtering.
 - `ext_count:02`: two-digit count of extension types, after GREASE filtering.
 - `alpn_first_last`: the first and last ASCII alphanumeric characters of the first ALPN value, per the verbatim rule below.
 - `hash12(ciphers_sorted)`: the first 12 hex characters of the SHA-256 of the GREASE-filtered, sorted cipher-suite list.
-- `hash12(exts_sorted_excl_SNI/ALPN + "_" + sigalgs_unsorted)`: the first 12 hex characters of the SHA-256 of the sorted extension-type list excluding SNI (`0`) and ALPN (`16`), concatenated with `_` and the unsorted signature-algorithms (`13`) list.
+- `hash12(exts_sorted_excl_SNI/ALPN + "_" + sigalgs_unsorted)`: the first 12 hex characters of the SHA-256 of the GREASE-filtered, sorted extension-type list excluding SNI (`0`) and ALPN (`16`), concatenated with `_` and the unsorted signature-algorithms (`13`) list.
 
 **ALPN hex-fallback rule (verbatim from the FoxIO spec, evidence `alumina-jze0p`):**
 
@@ -944,4 +944,4 @@ The retained serving workspace figure is reconciled to account for the new ~16.4
 
 ### Explicitly unchanged (non-negotiable)
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The JA4 tripwire adds no cipher-suite or ALPN policy (`:48`), inspects only the initial ClientHello (`:50`), and performs zero heap allocation or deallocation after boot. Nothing in this amendment loosens any of these items or restates any profile row differently.
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The JA4 tripwire adds no cipher-suite or ALPN policy (`:48`), inspects only the initial ClientHello (`:50`), and performs zero heap allocation or deallocation after boot. Nothing in this amendment loosens any of these items or restates any profile row differently, except the enumerated serving-workspace reconciliation at `:163`/`:188` (512 × ~152.4 KiB ≈ 76 MiB, replacing the prior 68 MiB figure).
