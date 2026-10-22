@@ -1975,7 +1975,9 @@ fn failback_probes_primary_after_grace_and_success_recovers_it() {
     // The first two probe successes do not settle the failback: the probe
     // stays armed until the third consecutive success.
     for _ in 0..2 {
-        transport.on_exchange_succeeded();
+        transport
+            .on_exchange_succeeded()
+            .expect("success settles without a transport error");
         assert_eq!(
             transport.failback_source,
             Some(ActiveResolver::at(1, 2)),
@@ -1985,7 +1987,9 @@ fn failback_probes_primary_after_grace_and_success_recovers_it() {
     }
     assert_eq!(transport.failback_successes, 2);
     // The third consecutive probe success settles the failback.
-    transport.on_exchange_succeeded();
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
     assert_eq!(transport.active_resolver.index(), 0);
     assert!(transport.failback_source.is_none());
     assert!(transport.failback_due.is_none());
@@ -2017,7 +2021,9 @@ fn failback_does_not_settle_on_one_or_two_probe_successes() {
     assert_eq!(transport.active_resolver.index(), 0);
     assert!(transport.failback_source.is_some());
     // One success is not enough to settle the probe.
-    transport.on_exchange_succeeded();
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
     assert_eq!(
         transport.failback_source,
         Some(ActiveResolver::at(1, 2)),
@@ -2025,7 +2031,9 @@ fn failback_does_not_settle_on_one_or_two_probe_successes() {
     );
     assert_eq!(transport.failback_successes, 1);
     // Two successes are still not enough.
-    transport.on_exchange_succeeded();
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
     assert_eq!(
         transport.failback_source,
         Some(ActiveResolver::at(1, 2)),
@@ -2049,8 +2057,12 @@ fn failed_probe_mid_regime_resets_counter_and_reseats() {
         .maybe_begin_failback()
         .expect("failback probe begins");
     // Two successes advance the counter into the middle of the regime.
-    transport.on_exchange_succeeded();
-    transport.on_exchange_succeeded();
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
     assert_eq!(transport.failback_successes, 2);
     // A failed probe mid-regime re-seats onto the backup, re-arms the grace,
     // and resets the counter so the next cycle starts from zero.
@@ -2119,7 +2131,9 @@ fn backup_success_leaves_failback_counter_at_zero() {
     let due = transport.failback_due.expect("failback armed");
     assert_eq!(transport.active_resolver.index(), 1);
     // A success on the backup leaves the counter and the grace untouched.
-    transport.on_exchange_succeeded();
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
     assert_eq!(transport.active_resolver.index(), 1);
     assert_eq!(transport.failback_successes, 0);
     assert_eq!(transport.failback_due, Some(due));
@@ -2175,7 +2189,9 @@ fn backup_success_keeps_the_failback_probe_armed() {
     let due = transport.failback_due.expect("failback armed");
     // The backup succeeds; the primary is still probed at the next due
     // exchange because the failback grace stays armed on a non-primary.
-    transport.on_exchange_succeeded();
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
     assert_eq!(transport.active_resolver.index(), 1);
     assert_eq!(transport.failback_due, Some(due));
     assert!(transport.failback_source.is_none());
@@ -2602,7 +2618,9 @@ fn successful_probe_records_ok_resets_probed_and_restores_active() {
     });
     transport.active_resolver = ActiveResolver::at(2, 3);
     transport.repoint_to_active();
-    transport.on_exchange_succeeded();
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
     assert_eq!(
         transport.active_resolver,
         ActiveResolver::at(0, 3),
@@ -2619,6 +2637,50 @@ fn successful_probe_records_ok_resets_probed_and_restores_active() {
     assert!(
         transport.failback_source.is_none(),
         "a sweep probe success never touches the failback machinery"
+    );
+}
+
+#[test]
+fn successful_probe_closes_retained_connection_so_the_next_exchange_redials() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, false, true, false, false],
+        active_before: ActiveResolver::at(0, 3),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: Some(2),
+    });
+    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.repoint_to_active();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe peer");
+    let client = mio::net::TcpStream::connect(listener.local_addr().unwrap()).expect("connect");
+    transport.conn = Some(DnsConn::Plain(client));
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
+    assert!(
+        transport.conn.is_none(),
+        "a successful sweep probe must close the retained probe-target connection"
+    );
+    assert_eq!(
+        transport.probe_connect(),
+        ConnectProbe::NotReady,
+        "with the connection closed the next exchange re-dials instead of reusing the stale peer"
+    );
+    assert_eq!(
+        transport.take_dns_anomalies()[DnsAnomalyKind::ResolverPeerMismatch.index()],
+        0,
+        "no resolver-peer mismatch is counted on the exchange after a successful sweep probe"
+    );
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(0, 3),
+        "the pre-sweep active resolver is restored"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        0,
+        "a successful probe never degrades or transitions the restored active resolver"
     );
 }
 

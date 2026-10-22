@@ -263,6 +263,7 @@ enum ConnectStep {
 }
 
 /// The outcome of one nonblocking connect probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectProbe {
     /// The connect is not yet completed; the exchange stays in scope.
     NotReady,
@@ -2466,7 +2467,7 @@ impl StartupDns {
                 }
                 RecvStep::Published(kind) => {
                     self.active = None;
-                    self.on_exchange_succeeded();
+                    self.on_exchange_succeeded()?;
                     return Ok(TurnResult::Published(kind));
                 }
             },
@@ -2765,12 +2766,19 @@ impl StartupDns {
     /// single success. A success on a non-primary leaves the counter and the
     /// failback grace untouched, so the primary is still probed on the next
     /// due exchange.
-    fn on_exchange_succeeded(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// Returns a lifecycle `Transport` error when the retained probe-target
+    /// connection cannot be deregistered; the probe verdict and restore are
+    /// already recorded before the close is attempted.
+    fn on_exchange_succeeded(&mut self) -> Result<(), StartupDnsError> {
         // Probe-mode branch: a successful post-window probe records an `Ok`
         // verdict against the probed resolver, resets that resolver's
-        // degradation to healthy, restores the pre-sweep active transport, and
-        // clears the in-flight probe target. The failback machinery is never
-        // touched by a sweep probe.
+        // degradation to healthy, restores the pre-sweep active transport,
+        // closes the retained probe-target connection so the next exchange
+        // re-dials the restored resolver, and clears the in-flight probe
+        // target. The failback machinery is never touched by a sweep probe.
         let probe = self
             .probe_sweep
             .as_ref()
@@ -2787,7 +2795,8 @@ impl StartupDns {
             }
             self.active_resolver = active_before;
             self.repoint_to_active();
-            return;
+            self.close_connection()?;
+            return Ok(());
         }
         let active_index = self.active_resolver.index();
         let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
@@ -2803,6 +2812,7 @@ impl StartupDns {
                 self.failback_successes = 0;
             }
         }
+        Ok(())
     }
 
     fn note_failure(
