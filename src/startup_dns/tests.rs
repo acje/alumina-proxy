@@ -361,6 +361,20 @@ fn bindings_of(
 }
 
 #[test]
+fn exchange_deadline_is_five_seconds_within_startup_budget() {
+    assert_eq!(
+        EXCHANGE_DEADLINE_SECS, 5,
+        "the DNS exchange deadline is a single 5-second constant (alumina-5sx)"
+    );
+    let worst_case = MAX_RESOLVERS as u64 * DEGRADED_AFTER as u64 * EXCHANGE_DEADLINE_SECS;
+    assert!(
+        worst_case <= STARTUP_WINDOW_SECS,
+        "worst-case all-resolvers-dead startup ({worst_case}s) must fit the \
+         {STARTUP_WINDOW_SECS}s startup window"
+    );
+}
+
+#[test]
 fn token_generation_exhaustion_is_rejected_not_wrapped() {
     let cfg = config();
     let mut cache = Cache::new(2).unwrap();

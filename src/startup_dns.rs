@@ -44,7 +44,7 @@ use crate::log;
 use crate::resolver::{Fqdn as ResolverFqdn, MAX_RESOLVERS, ResolverSet, SpiPin};
 use crate::schedule::{ScheduleError, Schedules};
 
-pub const EXCHANGE_DEADLINE_SECS: u64 = 2;
+pub const EXCHANGE_DEADLINE_SECS: u64 = 5;
 pub const STARTUP_WINDOW_SECS: u64 = 90;
 pub const QUERY_BUF_LEN: usize = 512;
 pub const RECV_BUF_LEN: usize = DNS_MSG_LIMIT + 2;
