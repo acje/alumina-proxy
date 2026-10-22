@@ -22,7 +22,7 @@
 
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::io::RawFd;
 use std::time::{Duration, Instant};
 
@@ -31,7 +31,8 @@ use crate::enforcement::action::{AnyIllegalScope, DomainOrdinal, Scope};
 use crate::enforcement::monitor::{CapturedFact, DnsAnomalyKind, Monitor};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason};
 use crate::inventory;
-use crate::startup_dns::NameOutcome;
+use crate::resolver::Fqdn;
+use crate::startup_dns::{NameOutcome, ProbeVerdict};
 
 pub(crate) const QUEUE_SLOTS: usize = 256;
 pub(crate) const SLOT_BYTES: usize = 8 * 1024;
@@ -154,6 +155,7 @@ enum Kind {
     QueueHigh,
     QueueLow,
     Monitor,
+    ResolverProbe,
 }
 
 impl Kind {
@@ -170,6 +172,7 @@ impl Kind {
             Kind::QueueHigh => "queue_high",
             Kind::QueueLow => "queue_low",
             Kind::Monitor => "monitor",
+            Kind::ResolverProbe => "resolver_probe",
         }
     }
 }
@@ -429,6 +432,29 @@ fn push_indexed_token(w: &mut Entry<'_>, key: &[u8], index: u32, token: &str) ->
     true
 }
 
+/// Writes an indexed resolver address field quoted but never escaped: `IpAddr`
+/// Display emits only digits, `.`, `:`, `[`, and `]`, none of which require
+/// quoting, so it is written straight into the entry without an intermediate
+/// allocation (same rule as `SocketAddr` fields).
+fn push_indexed_addr(w: &mut Entry<'_>, key: &[u8], index: u32, addr: IpAddr) -> bool {
+    if !w.push(b" ") || !w.push(key) {
+        return false;
+    }
+    if fmt::Write::write_fmt(w, format_args!("{index}")).is_err() {
+        return false;
+    }
+    if !w.push(b"=\"") {
+        return false;
+    }
+    if fmt::Write::write_fmt(w, format_args!("{addr}")).is_err() {
+        return false;
+    }
+    if !w.push(b"\"") {
+        return false;
+    }
+    true
+}
+
 /// Encodes the single startup-final record: the header fields plus, in allowlist
 /// ordinal order, one inline segment per unresolved name — `nameN`, `outcomeN`,
 /// and (for failed or not-attempted names) `reasonN`. The names are embedded in
@@ -458,6 +484,55 @@ fn encode_record_final(
         }
         if let Some(reason) = un.reason_token()
             && !push_indexed_quoted(&mut w, b"reason", index, reason)
+        {
+            return None;
+        }
+    }
+    if !w.push(b"\n") {
+        return None;
+    }
+    Some(w.len)
+}
+
+/// Encodes the single post-window probe record: the header fields plus, in
+/// resolver index order, one inline segment per resolver — `resolverN` (the
+/// address, with FQDN/pin presence), `verdictN`, and (for a failed probe)
+/// `reasonN`. The segments are embedded in the same fixed 8 KiB entry as the
+/// header, so the probe result is exactly one record that never exceeds its
+/// slot; an oversize record is dropped whole and counted like every other.
+fn encode_record_probe(
+    slot_buf: &mut [u8; SLOT_BYTES],
+    secs: u64,
+    segments: &[ResolverProbeSegment<'_>],
+) -> Option<usize> {
+    let mut w = Entry {
+        buf: slot_buf,
+        len: 0,
+    };
+    if !write_header(&mut w, Level::Info, Kind::ResolverProbe) {
+        return None;
+    }
+    if !push_u64(&mut w, b"secs", secs) {
+        return None;
+    }
+    for seg in segments {
+        let index = seg.index;
+        if !push_indexed_addr(&mut w, b"resolver", index, seg.addr) {
+            return None;
+        }
+        if let Some(fqdn) = seg.fqdn
+            && !push_indexed_quoted(&mut w, b"fqdn", index, fqdn.as_str())
+        {
+            return None;
+        }
+        if seg.pin && !push_indexed_token(&mut w, b"pin", index, "1") {
+            return None;
+        }
+        if !push_indexed_token(&mut w, b"verdict", index, seg.verdict.as_str()) {
+            return None;
+        }
+        if let ProbeVerdict::Failed(reason) = seg.verdict
+            && !push_indexed_quoted(&mut w, b"reason", index, reason.as_str())
         {
             return None;
         }
@@ -909,6 +984,18 @@ impl StartupUnresolved<'_> {
     }
 }
 
+/// One resolver embedded inline in the single post-window probe record: the
+/// resolver index (the deterministic key suffix), its address with FQDN/pin
+/// presence, and the probe verdict with the failure reason when failed.
+#[derive(Clone, Copy)]
+pub(crate) struct ResolverProbeSegment<'a> {
+    pub(crate) index: u32,
+    pub(crate) addr: IpAddr,
+    pub(crate) fqdn: Option<&'a Fqdn>,
+    pub(crate) pin: bool,
+    pub(crate) verdict: ProbeVerdict,
+}
+
 impl LogStore {
     /// Builds the full queue over the production stdout sink and makes fd 1
     /// nonblocking, so a full or absent stdout pipe can never stall serving.
@@ -1089,6 +1176,29 @@ impl LogStore {
                 &fields,
                 unresolved,
             );
+            match len {
+                Some(len) => {
+                    self.slots[index].bytes = len;
+                    self.count += 1;
+                }
+                None => self.drop_one(),
+            }
+        }
+        self.note_queue_usage();
+    }
+
+    /// The single post-window probe record (docs/alumina-proxy.md:67): one inline
+    /// segment per resolver in index order with its probe verdict and failure
+    /// reason. All resolvers share this one record — the sweep result is never
+    /// fanned out into per-resolver records. An oversize record is dropped
+    /// whole and counted like every other.
+    pub(crate) fn resolver_probe(&mut self, secs: u64, segments: &[ResolverProbeSegment<'_>]) {
+        self.set_now(secs);
+        if self.count >= QUEUE_SLOTS {
+            self.drop_one();
+        } else {
+            let index = self.write_index();
+            let len = encode_record_probe(&mut self.slots[index].buf, secs, segments);
             match len {
                 Some(len) => {
                     self.slots[index].bytes = len;
@@ -1710,6 +1820,86 @@ mod tests {
         store.startup_warning(1, &long, Family::A);
         assert_eq!(store.dropped(), 1, "oversize record dropped whole");
         assert_eq!(store.len(), 0, "nothing queued for the oversize record");
+    }
+
+    #[test]
+    fn logging_resolver_probe_embeds_segments_inline_with_reasons() {
+        use crate::startup_dns::FailureReason;
+        let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+        let doc = format!(
+            "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"9.9.9.9#dns.quad9.net\", \"8.8.8.8#dns.google#pin-sha256={b64}\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+        );
+        let config = crate::config::parse_config_document(&doc).expect("valid config");
+        let resolvers = config.resolver_set();
+        let bare = resolvers.get(0).expect("resolver 0");
+        let quad9 = resolvers.get(1).expect("resolver 1");
+        let google = resolvers.get(2).expect("resolver 2");
+        let (mut store, mut file) = file_logstore();
+        store.resolver_probe(
+            11,
+            &[
+                ResolverProbeSegment {
+                    index: 0,
+                    addr: bare.addr(),
+                    fqdn: bare.fqdn(),
+                    pin: bare.pin().is_some(),
+                    verdict: ProbeVerdict::Ok,
+                },
+                ResolverProbeSegment {
+                    index: 1,
+                    addr: quad9.addr(),
+                    fqdn: quad9.fqdn(),
+                    pin: quad9.pin().is_some(),
+                    verdict: ProbeVerdict::Failed(FailureReason::Timeout),
+                },
+                ResolverProbeSegment {
+                    index: 2,
+                    addr: google.addr(),
+                    fqdn: google.fqdn(),
+                    pin: google.pin().is_some(),
+                    verdict: ProbeVerdict::NotProbed,
+                },
+            ],
+        );
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert_eq!(
+            text,
+            "level=info kind=resolver_probe secs=11 resolver0=\"1.1.1.1\" verdict0=ok resolver1=\"9.9.9.9\" fqdn1=\"dns.quad9.net\" verdict1=failed reason1=\"timeout\" resolver2=\"8.8.8.8\" fqdn2=\"dns.google\" pin2=1 verdict2=not_probed\n",
+            "single probe record embeds resolver/verdict/reason inline per resolver, no fan-out"
+        );
+    }
+
+    #[test]
+    fn logging_oversize_probe_record_is_dropped_whole_and_counted() {
+        use crate::startup_dns::FailureReason;
+        let doc = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#dns.google\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+        let config = crate::config::parse_config_document(doc).expect("valid config");
+        let fqdn = config
+            .resolver_set()
+            .primary()
+            .fqdn()
+            .expect("fqdn carried");
+        // The probe record is structurally bounded (MAX_RESOLVERS × FQDN_MAX_LEN
+        // ≪ 8 KiB) for any real resolver set, so the only way to reach the
+        // oversize path is a caller-supplied segment set far beyond the slot.
+        let segments: Vec<ResolverProbeSegment<'_>> = (0..3000u32)
+            .map(|i| ResolverProbeSegment {
+                index: i,
+                addr: "1.1.1.1".parse().expect("ip"),
+                fqdn: Some(fqdn),
+                pin: true,
+                verdict: ProbeVerdict::Failed(FailureReason::Timeout),
+            })
+            .collect();
+        let (mut store, _file) = file_logstore();
+        store.resolver_probe(1, &segments);
+        assert_eq!(store.dropped(), 1, "oversize probe record dropped whole");
+        assert_eq!(
+            store.len(),
+            0,
+            "nothing queued for the oversize probe record"
+        );
     }
 
     #[test]
