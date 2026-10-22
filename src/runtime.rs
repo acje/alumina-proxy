@@ -255,6 +255,7 @@ impl Runtime {
             self.dns_advances_last_turn = 0;
         }
         if !self.serving.is_shutdown() {
+            self.step_sweep()?;
             self.starts_due_dns_if_idle()?;
             let event_seen = self.serving.take_dns_event();
             let sendable = self.dns_sendable_without_wait();
@@ -271,8 +272,29 @@ impl Runtime {
         Ok(())
     }
 
+    /// Advances the post-window probe sweep on the retained DNS transport,
+    /// folding any concluded probe verdicts into the single `resolver_probe`
+    /// record. Runs before refresh scheduling so the sweep owns the transport
+    /// between probes (docs/alumina-proxy.md:67).
+    ///
+    /// # Errors
+    ///
+    /// Returns a serve error when the underlying sweep step fails.
+    fn step_sweep(&mut self) -> Result<(), ServeError> {
+        self.serving
+            .storage_mut()
+            .step_sweep()
+            .map_err(ServeError::from)
+    }
+
     fn starts_due_dns_if_idle(&mut self) -> Result<(), ServeError> {
-        if self.serving.storage().dns().has_active_exchange() {
+        // A post-window probe sweep owns the retained transport between probes,
+        // so a refresh exchange must not start while it is active: the sweep
+        // restores the pre-sweep active resolver after each probe, and an
+        // interleaved refresh would corrupt that restore.
+        if self.serving.storage().dns().sweep_active()
+            || self.serving.storage().dns().has_active_exchange()
+        {
             return Ok(());
         }
         let secs = self.serving.storage().dns().now_u64();

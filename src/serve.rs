@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use mio::net::TcpListener;
@@ -13,10 +13,11 @@ use crate::connect::ConnectRequest;
 use crate::enforcement::action::DomainOrdinal;
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::enforcement::state::Enforcement;
-use crate::log::LogStore;
+use crate::log::{LogStore, ResolverProbeSegment};
+use crate::resolver::MAX_RESOLVERS;
 use crate::schedule::Schedules;
 use crate::startup_dns::{
-    STARTUP_WINDOW_SECS, StartupDns, StartupDnsError, StartupReport, TurnResult,
+    ProbeVerdict, STARTUP_WINDOW_SECS, StartupDns, StartupDnsError, StartupReport, TurnResult,
 };
 use crate::worker::{
     AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, SlotIndex, TunnelIndex,
@@ -452,6 +453,65 @@ impl ServeStorage {
             .get(ordinal)
             .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
         self.dns.start_exchange(fqdn, family, ordinal, deadline)
+    }
+
+    /// Advances the post-window probe sweep one step on the retained transport:
+    /// begins the sweep on the first call, starts the next probe once the
+    /// previous concludes, and emits the single `resolver_probe` record when no
+    /// unprobed resolver remains. The sweep never relocates a healthy active
+    /// transport — the pre-sweep active resolver is restored after each probe —
+    /// and is mutually exclusive with failback (docs/alumina-proxy.md:67).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying fatal DNS exchange or transport error.
+    pub(crate) fn step_sweep(&mut self) -> Result<(), StartupDnsError> {
+        self.dns.maybe_begin_sweep();
+        if !self.dns.sweep_active() || self.dns.has_active_exchange() {
+            return Ok(());
+        }
+        let fqdn = self
+            .config
+            .allowlist()
+            .get(0)
+            .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
+        if self.dns.sweep_next_probe(fqdn)? {
+            let verdicts = self.dns.take_sweep_verdicts();
+            self.emit_resolver_probe(verdicts);
+        }
+        Ok(())
+    }
+
+    /// Emits the single `resolver_probe` record once the sweep concludes: one
+    /// inline segment per configured resolver in index order, carrying its
+    /// address and FQDN/pin presence plus the accumulated verdict. The record
+    /// is written allocation-free into the fixed 8 KiB slot and drained once
+    /// (docs/alumina-proxy.md:67).
+    fn emit_resolver_probe(&mut self, verdicts: [ProbeVerdict; MAX_RESOLVERS]) {
+        let Some(set) = self.dns.resolvers() else {
+            return;
+        };
+        let secs = self.cache_secs(Instant::now());
+        let mut segments = [ResolverProbeSegment {
+            index: 0,
+            addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            fqdn: None,
+            pin: false,
+            verdict: ProbeVerdict::NotProbed,
+        }; MAX_RESOLVERS];
+        let mut count = 0usize;
+        for (index, ns) in set.iter().enumerate() {
+            segments[count] = ResolverProbeSegment {
+                index: u32::try_from(index).expect("resolver index fits u32"),
+                addr: ns.addr(),
+                fqdn: ns.fqdn(),
+                pin: ns.pin().is_some(),
+                verdict: verdicts[index],
+            };
+            count += 1;
+        }
+        self.logs.resolver_probe(secs, &segments[..count]);
+        self.logs.drain_sink();
     }
 
     /// Admits a new actual connection into a retained slot at the accept
