@@ -133,6 +133,11 @@ fn main() {
             "Host-Not-Allowlisted refuses are detections+actions, never blocked-domain refusals: {line}"
         );
         assert!(line.contains(" ofacts=0"), "no counter saturated: {line}");
+        assert!(
+            !line.contains("d0j="),
+            "the per-ordinal ja4-change fold is zero-suppressed on real stdout when no JA4 \
+             deviation occurred: {line}"
+        );
     }
     let elapsed = started.elapsed().as_secs().max(1);
     assert!(

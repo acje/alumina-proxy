@@ -1099,6 +1099,18 @@ impl LogStore {
         self.count >= QUEUE_SLOTS
     }
 
+    /// The bytes of the most recently committed queued record: test
+    /// observation of the exact emitted record text without draining to a
+    /// sink, so an integration test can assert the folded monitor fields.
+    #[cfg(test)]
+    pub(crate) fn last_record_bytes(&self) -> Option<&[u8]> {
+        if self.count == 0 {
+            return None;
+        }
+        let index = (self.write_index() + QUEUE_MASK) & QUEUE_MASK;
+        Some(&self.slots[index].buf[..self.slots[index].bytes])
+    }
+
     /// The next Instant at which draining the queued logs is useful (N4/T3):
     /// queued non-WouldBlock logs are immediately runnable, WouldBlock-blocked
     /// logs retry on the bounded [`LOG_RETRY`] cadence, and an empty or failed

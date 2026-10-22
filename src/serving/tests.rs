@@ -7224,3 +7224,78 @@ fn ja4_baseline_row_full_returns_neutral() {
         );
     });
 }
+
+#[test]
+fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let wire_a = hello_wire(b"sub.example.org", false);
+        let wire_b = hello_wire_ext(
+            b"sub.example.org",
+            false,
+            &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+        );
+
+        // conn1: first-seen baseline for the (ordinal, addr) pair.
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_a, "sub.example.org");
+        let baseline = serving.ja4_baseline.entries[ordinal.get()][0].ja4;
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            0,
+            "first-seen never flares"
+        );
+
+        // conn2: a different JA4 on the same (ordinal, addr) is a deviation.
+        serving.slots[0].reset();
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_b, "sub.example.org");
+        let deviated = serving.slots[0].inspector.hello().expect("hello").ja4();
+        assert_ne!(
+            deviated, baseline,
+            "the ALPN variant must produce a distinct JA4"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            1,
+            "a deviation flares exactly one change signal"
+        );
+
+        // The forced monitor summary folds the flared counter into the dNj
+        // per-ordinal field of one committed monitor record.
+        let before = serving.storage().logs().len();
+        let committed = serving
+            .storage_mut()
+            .report_monitor_if_due(Instant::now(), true);
+        assert!(committed, "the forced monitor summary must commit");
+        assert_eq!(
+            serving.storage().logs().len(),
+            before + 1,
+            "the monitor summary commits exactly one queued record"
+        );
+        let record = serving
+            .storage()
+            .logs()
+            .last_record_bytes()
+            .expect("committed monitor record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=monitor"),
+            "the committed record is the monitor summary: {text}"
+        );
+        let key = format!(" d{}j=1", ordinal.get());
+        assert!(
+            text.contains(&key),
+            "the flared ja4-change counter reaches the monitor record as {key}: {text}"
+        );
+    });
+}
