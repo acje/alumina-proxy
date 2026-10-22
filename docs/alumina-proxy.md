@@ -803,3 +803,43 @@ The pinned rustls 0.23.46 dependency (`Cargo.toml:201`, `=0.23.46`, `default-fea
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array; first-party DoT setup allocates only at the per-connect setup seam `build_tls_connection` (`:679`), and retained-transport refresh allocates nothing; the DoT transport's per-connect TLS confinement, handshake/identity fail-closed behavior, and the 1-conn/1-query transport profile are unchanged. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## Hardening: post-window per-resolver probe sweep + `resolver_probe` verdict log — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-rbp`, 2026-10-22). It records the user authorization for one observability increment: after the startup decision, a one-time probe sweep tests every configured resolver in the validated `resolver` array (1..=5) that the startup window did not already exercise, and emits one `resolver_probe` record carrying a per-resolver verdict. It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is implemented in the code cited below; this section records only its user authorization.
+
+### Amended surface
+
+#### Post-decision timing (`:64`)
+
+The startup deadline clause (`:64`) governs the 90-second absolute window and its "cannot be extended or supplemented by a network-readiness phase" rule. This increment adds a **post-decision** probe sweep that runs after the startup decision (`settle_startup`, `src/serve.rs`), whether the listener opened or the process exited 75 (on exit-75 the process terminates, so the sweep is moot there). The sweep is not a readiness phase, never extends or supplements the window, never delays listener opening, and does not change the readiness evaluation at `:65`. It is bounded, scheduled work folded into the same cooperative poll pattern as the startup window, subject to the existing round-robin scheduling and at-most-one-query-per-second guard (`:76`) so it cannot starve background refresh.
+
+#### Post-window probe record and verdict vocabulary (`:67`)
+
+The startup diagnostics clause (`:67`) governs startup warning and final-result records. This increment adds a separate `resolver_probe` record (`Kind::ResolverProbe`, `src/log.rs`), emitted **once** after the sweep completes — separate from `startup_final` because that record is emitted at the readiness decision, before the post-window probe verdicts exist. The record carries one inline segment per resolver: index, address (with FQDN/pin presence), verdict (`ok` / `failed` / `not_probed`), and the failure reason when failed. It is encoded through the same allocation-free, bounded `encode_record_final` path into a fixed 8 KiB slot; on overflow the whole record is dropped and counted, like every other record.
+
+#### Sweep semantics (probe state machine)
+
+The probe sweep probes each unprobed resolver exactly once, relocating the existing single DNS TCP connection sequentially — never opening a second connection, so the "DNS TCP connections / outstanding queries | 1 / 1" row (`:172`) is unchanged. The probe target is the primary allowlisted name (ordinal 0), A family, an already-approved query target (`:71`), with the standard 2-second exchange deadline (`:82`).
+
+- **State.** `StartupDns::probe_sweep: Option<ProbeSweep>` (`src/startup_dns.rs`) with `ProbeSweep { remaining: [bool; MAX_RESOLVERS], active_before: ActiveResolver, verdicts: [ProbeVerdict; MAX_RESOLVERS], current: Option<usize> }`; `ProbeVerdict` is `Ok | Failed(FailureReason) | NotProbed`. All fixed-size, no heap.
+- **Trigger.** The sweep begins after the startup decision only when `probe_sweep.is_none() && failback_source.is_none() && resolvers.is_some() && set_len() > 1`; a single-resolver set (`set_len() == 1`) short-circuits — nothing to probe. The active resolver is already exercised by the window and is skipped, receiving verdict `not_probed` in the record.
+- **Probe.** For each unprobed index: relocate temporarily (`close_connection` + `active_resolver = probe_target` + `repoint_to_active`, `src/startup_dns.rs`), keeping the dial target and `active_resolver` in sync so the `:68` resolver-peer assertion is preserved; run one exchange; then settle and restore `active_resolver = active_before` + `repoint_to_active`. A DoT→plain probe relocation records the existing `dp=` downgrade counter (`note_downgrade_if_dot_to_plain`).
+- **Probe-mode branches.** While a sweep probe is in flight, `on_exchange_failed` (`src/startup_dns.rs`) advances the **probed** resolver's consecutive-failure degradation (the third consecutive failure emits the existing edge-triggered `rd=` enter fact at `DEGRADED_AFTER = 3`) but **suppresses the relocation branch and failback arming**, restoring `active_before` instead — the active transport is healthy and must not move. `on_exchange_succeeded` resets the probed resolver to healthy and restores `active_before`. Zero new enforcement surface.
+- **Mutual exclusion with failback.** The sweep runs only when `failback_source.is_none()`; a sweep probe never arms or consumes the failback grace, and a sweep probe relocating to a non-primary is never hijacked into a failback probe.
+- **DoT fail-closed.** An unpinned `IP#fqdn` entry fails its handshake deterministically against the empty root store (`src/startup_dns.rs`); its probe verdict is `failed` with the handshake reason — the honest, operator-visible answer. No silent plain-DNS fallback (V5 doctrine).
+- **Shutdown.** The sweep aborts cleanly on shutdown; partial verdicts are dropped (bounded, best-effort, same as all logging).
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Post-window probe sweep: probes each unprobed resolver exactly once after the startup decision, never extending the window or delaying the listener (`:64`/`:65`) | Implemented (this increment) |
+| Probe-mode semantics: probed-resolver degradation advanced on failure (`rd=` at `DEGRADED_AFTER=3`), relocation suppressed, `active_before` restored; success resets; mutually exclusive with failback; `set_len()==1` short-circuits; clean abort on shutdown | Implemented (this increment) |
+| `resolver_probe` record: `Kind::ResolverProbe`, one inline segment per resolver (index, address + FQDN/pin presence, verdict, failure reason), allocation-free into the fixed 8 KiB slot, drop-whole-and-count on overflow (`:67`) | Implemented (this increment) |
+| Transport profile: 1 conn / 1 outstanding query preserved; sweep relocates the single connection (`:172`) | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array; the probe sweep is not a readiness gate, a second DNS connection, a new query target, or a runtime-surface expansion beyond one new log record kind; the 90-second startup window and its readiness semantics are unchanged. Nothing in this amendment loosens any of these items or restates any profile row differently.
