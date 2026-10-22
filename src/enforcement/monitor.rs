@@ -13,6 +13,7 @@ pub struct FactCounters {
     pub(crate) resolver_degraded: SaturatingCounter,
     pub(crate) dns_anomaly: [SaturatingCounter; DnsAnomalyKind::COUNT],
     pub(crate) downgrade_to_plain: SaturatingCounter,
+    pub(crate) ja4_change: [SaturatingCounter; ALLOWLIST_MAX],
 }
 
 /// The typed DNS anomaly surface folded into the monitor alongside the
@@ -184,6 +185,15 @@ impl Monitor {
         self.dirty = true;
     }
 
+    /// Counts one first-seen JA4 baseline deviation for an ordinal: the
+    /// serving path records a JA4 for a `(ordinal, addr)` pair that differs
+    /// from the pair's first-seen baseline. The per-ordinal counter is an
+    /// event fold, emitted by the monitor record's JA4-change surface.
+    pub(crate) const fn note_fact_ja4_change(&mut self, ordinal: DomainOrdinal) {
+        self.facts.ja4_change[ordinal.get()].bump();
+        self.dirty = true;
+    }
+
     pub(crate) const fn note_action_first_slot_block(&mut self, scope: AnyIllegalScope) {
         self.actions.first_slot_block[scope as usize].bump();
         self.dirty = true;
@@ -289,6 +299,11 @@ impl Monitor {
 
     pub(crate) const fn facts_early_data(&self, ordinal: DomainOrdinal) -> u32 {
         self.facts.early_data[ordinal.get()].value()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn facts_ja4_change(&self, ordinal: DomainOrdinal) -> u32 {
+        self.facts.ja4_change[ordinal.get()].value()
     }
 
     #[cfg(test)]

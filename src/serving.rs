@@ -31,7 +31,7 @@
 
 use std::io;
 use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 #[cfg(test)]
@@ -43,9 +43,9 @@ use mio::{Events, Interest, Poll, Registry, Token};
 
 use signal_hook::consts::SIGTERM;
 
-use crate::cache::{EntryState, Family};
+use crate::cache::{EntryState, Family, MAX_ADDRESSES};
 use crate::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
-use crate::config::FixedHostname;
+use crate::config::{ALLOWLIST_MAX, FixedHostname};
 use crate::connect::{ConnectHeadReason, ConnectParser, ConnectRequest, Feed};
 use crate::eligibility::NumericAddr;
 use crate::enforcement::action::{DomainOrdinal, FirstSlot, Scope};
@@ -551,6 +551,85 @@ impl CoalescedBatch {
     }
 }
 
+/// Empty-slot sentinel for the first-seen JA4 baseline table: the unspecified
+/// IPv4 address. `0.0.0.0/8` is eligibility-excluded (src/eligibility.rs:29-31),
+/// so no established destination can collide with the sentinel.
+const EMPTY_JA4_ADDR: NumericAddr = NumericAddr::V4(Ipv4Addr::UNSPECIFIED);
+
+/// One first-seen JA4 baseline slot: the destination address and the full
+/// 36-byte JA4 fingerprint recorded the first time that address was seen for
+/// its ordinal.
+#[derive(Clone, Copy, Debug)]
+struct Ja4BaselineEntry {
+    addr: NumericAddr,
+    ja4: [u8; 36],
+}
+
+/// The outcome of a first-seen JA4 baseline record attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BaselineOutcome {
+    /// The address was new to the row: its JA4 is now the baseline.
+    FirstSeen,
+    /// The address was already baselined with this exact JA4.
+    Unchanged,
+    /// The address was baselined with a different JA4: a change signal.
+    Changed,
+    /// The ordinal's `MAX_ADDRESSES`-entry row is full; the record is dropped
+    /// neutrally, never signalling a change.
+    RowFull,
+}
+
+/// Fixed 512-entry first-seen JA4 baseline table: `ALLOWLIST_MAX` ordinals by
+/// `MAX_ADDRESSES` addresses, allocated once at boot and never grown, so the
+/// whole baseline path is zero-heap. The baseline is never updated after
+/// first-seen and is reset on restart (the table is a boot-time value).
+#[derive(Clone, Copy, Debug)]
+struct Ja4BaselineTable {
+    entries: [[Ja4BaselineEntry; MAX_ADDRESSES]; ALLOWLIST_MAX],
+}
+
+impl Ja4BaselineTable {
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "boot-fixed 512-entry JA4 baseline table; no runtime heap"
+    )]
+    const fn new() -> Ja4BaselineTable {
+        Ja4BaselineTable {
+            entries: [[Ja4BaselineEntry {
+                addr: EMPTY_JA4_ADDR,
+                ja4: [0; 36],
+            }; MAX_ADDRESSES]; ALLOWLIST_MAX],
+        }
+    }
+
+    /// Records the first-seen JA4 for a `(ordinal, addr)` pair, returning the
+    /// baseline outcome. A row already holding `addr` compares the stored JA4:
+    /// a match is `Unchanged`, a mismatch `Changed`. A full row drops the
+    /// record as `RowFull`; the fixed table never grows.
+    fn record(
+        &mut self,
+        ordinal: DomainOrdinal,
+        addr: NumericAddr,
+        ja4: [u8; 36],
+    ) -> BaselineOutcome {
+        let row = &mut self.entries[ordinal.get()];
+        for entry in row.iter_mut() {
+            if entry.addr == EMPTY_JA4_ADDR {
+                *entry = Ja4BaselineEntry { addr, ja4 };
+                return BaselineOutcome::FirstSeen;
+            }
+            if entry.addr == addr {
+                return if entry.ja4 == ja4 {
+                    BaselineOutcome::Unchanged
+                } else {
+                    BaselineOutcome::Changed
+                };
+            }
+        }
+        BaselineOutcome::RowFull
+    }
+}
+
 /// The per-slot serving workspace: the byte stores come from the boot-owned
 /// traffic store (transferred in by value), and the parser, inspector, gate,
 /// and cursors live here. Nothing per event is allocated, and every direction's
@@ -605,6 +684,19 @@ struct SlotWorkspace {
     /// initiation (docs/alumina-proxy.md:189). Only meaningful while
     /// `stage == Stage::Dialing`; `None` otherwise.
     connect_deadline: Option<Deadline>,
+    /// The destination IP the slot's upstream dial established, set on the
+    /// successful `TcpStream::connect` and cleared on reset. The JA4 baseline
+    /// is keyed on this exact address, so the baseline can never record a
+    /// wrong or missing IP.
+    dest_ip: Option<NumericAddr>,
+    /// At-most-once latch: the first-seen JA4 baseline was recorded (or
+    /// neutrally dropped) for this connection, so the change signal fires at
+    /// most once per connection.
+    ja4_seen: bool,
+    /// The baseline record was deferred past the pipelined-hello edge (the
+    /// hello completed before the dial established `dest_ip`); a successful
+    /// dial re-runs it.
+    ja4_pending: bool,
     #[cfg(test)]
     visits: u16,
     #[cfg(test)]
@@ -646,6 +738,9 @@ impl SlotWorkspace {
             setup_deadline: None,
             connect_family: None,
             connect_deadline: None,
+            dest_ip: None,
+            ja4_seen: false,
+            ja4_pending: false,
             #[cfg(test)]
             visits: 0,
             #[cfg(test)]
@@ -707,6 +802,9 @@ impl SlotWorkspace {
         self.setup_deadline = None;
         self.connect_family = None;
         self.connect_deadline = None;
+        self.dest_ip = None;
+        self.ja4_seen = false;
+        self.ja4_pending = false;
     }
 
     /// Whether this slot currently feeds any deadline into
@@ -855,6 +953,10 @@ pub struct Serving {
     /// [`Self::poll_timeout`] folds only deadline-bearing slots. `is_empty`
     /// is the O(1) early-exit that skips the whole 512-slot scan.
     live_deadline: DeadlineSlots,
+    /// Boot-fixed 512-entry first-seen JA4 baseline table keyed by
+    /// `(DomainOrdinal, NumericAddr)`: a boot-time value that is never updated
+    /// after first-seen and is reset on restart.
+    ja4_baseline: Ja4BaselineTable,
     /// Test-only high-water of `work_since_recheck` observed at a timer/DNS
     /// recheck boundary, so owner-turn fixtures assert the canonical ≤256
     /// bound actually fires between hot visits rather than being inferred.
@@ -958,6 +1060,7 @@ impl Serving {
             progress: BatchProgress::default(),
             next_expiry: None,
             live_deadline: DeadlineSlots::empty(),
+            ja4_baseline: Ja4BaselineTable::new(),
             #[cfg(test)]
             max_work_since_recheck: 0,
             #[cfg(test)]
@@ -2370,6 +2473,10 @@ impl Serving {
         match TcpStream::connect(sock) {
             Ok(stream) => {
                 self.slots[index].upstream = Some(stream);
+                self.slots[index].dest_ip = Some(addr);
+                if self.slots[index].ja4_pending {
+                    self.maybe_record_ja4_baseline(index);
+                }
                 if self.register_upstream(index).is_err() {
                     self.close_slot(index);
                 }
@@ -2593,6 +2700,44 @@ impl Serving {
         ws.stage = Stage::WritingHello;
         ws.fwd = ws.head_len - ws.buf_base;
         self.flush_client_upstream(index);
+        self.maybe_record_ja4_baseline(index);
+    }
+
+    /// Records the first-seen JA4 baseline for the slot's connection, or
+    /// defers it when the dial has not yet established `dest_ip`. Called from
+    /// [`Self::hello_complete`] (the pipelined-hello edge) and again from
+    /// [`Self::dial`] on a successful connect when the hello completed first.
+    /// The `ja4_seen` latch bounds the record to at most once per connection;
+    /// the record keys on the established `dest_ip`, so the baseline can never
+    /// hold a wrong or missing IP. A `Changed` outcome emits the per-ordinal
+    /// JA4-change signal to the monitor.
+    fn maybe_record_ja4_baseline(&mut self, index: usize) {
+        let Some(dest_ip) = self.slots[index].dest_ip else {
+            self.slots[index].ja4_pending = true;
+            return;
+        };
+        let Some(approved) = self.slots[index].approved else {
+            return;
+        };
+        let Some(ordinal) = self.storage.ordinal_for(&approved) else {
+            return;
+        };
+        let Some(ja4) = self.slots[index]
+            .inspector
+            .hello()
+            .map(client_hello::ClientHello::ja4)
+        else {
+            return;
+        };
+        self.slots[index].ja4_pending = false;
+        if self.slots[index].ja4_seen {
+            return;
+        }
+        self.slots[index].ja4_seen = true;
+        let outcome = self.ja4_baseline.record(ordinal, dest_ip, ja4);
+        if outcome == BaselineOutcome::Changed {
+            self.storage.enforcement_mut().note_fact_ja4_change(ordinal);
+        }
     }
 
     /// Entry into the hello-inspection stage: inspect already-buffered bytes

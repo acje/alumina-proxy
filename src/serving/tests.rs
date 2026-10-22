@@ -1,5 +1,5 @@
 use super::*;
-use std::net::{TcpListener as StdListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener as StdListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use crate::enforcement::policy::UnknownReason;
@@ -209,6 +209,13 @@ fn read_outcome_distinguishes_activity_from_retry_wait_and_failure() {
 }
 
 fn hello_wire(sni: &[u8], ech_only: bool) -> Vec<u8> {
+    hello_wire_ext(sni, ech_only, &[])
+}
+
+/// Builds a `ClientHello` wire frame with optional extra extensions appended
+/// after the supported-versions/SNI pair, so fixtures can vary a fingerprint
+/// input (e.g. an ALPN value) while keeping the rest of the hello identical.
+fn hello_wire_ext(sni: &[u8], ech_only: bool, extra_ext: &[(u16, &[u8])]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&[0x03, 0x03]);
     body.extend_from_slice(&[0x2a; 32]);
@@ -240,6 +247,15 @@ fn hello_wire(sni: &[u8], ech_only: bool) -> Vec<u8> {
                 .to_be_bytes(),
         );
         ext.extend_from_slice(sni);
+    }
+    for &(ext_type, data) in extra_ext {
+        ext.extend_from_slice(&ext_type.to_be_bytes());
+        ext.extend_from_slice(
+            &u16::try_from(data.len())
+                .expect("extra extension length fits u16")
+                .to_be_bytes(),
+        );
+        ext.extend_from_slice(data);
     }
     body.extend_from_slice(
         &u16::try_from(ext.len())
@@ -7016,6 +7032,195 @@ fn peer_admission_freshness_folds_serving_stale_level_bit() {
         assert!(
             !serving.storage().enforcement().monitor().serving_stale(),
             "a later fresh admission must clear the stale-serving level bit"
+        );
+    });
+}
+
+#[test]
+fn ja4_first_seen_records_baseline_without_signal() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let wire = hello_wire(b"sub.example.org", false);
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire, "sub.example.org");
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let entry = serving.ja4_baseline.entries[ordinal.get()][0];
+        assert_eq!(
+            entry.addr,
+            NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
+            "the first-seen destination is persisted as the baseline key"
+        );
+        let ja4 = serving.slots[0].inspector.hello().expect("hello").ja4();
+        assert_eq!(
+            entry.ja4, ja4,
+            "the full 36-byte JA4 is stored at first-seen"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            0,
+            "first-seen records the baseline and never flares a change signal"
+        );
+    });
+}
+
+#[test]
+fn ja4_deviation_flares_signal_once_per_connection() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let wire_a = hello_wire(b"sub.example.org", false);
+        let wire_b = hello_wire_ext(
+            b"sub.example.org",
+            false,
+            &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+        );
+
+        // conn1: first-seen baseline for the (ordinal, addr) pair.
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_a, "sub.example.org");
+        let baseline = serving.ja4_baseline.entries[ordinal.get()][0].ja4;
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            0,
+            "first-seen never flares"
+        );
+
+        // conn2: a different JA4 on the same (ordinal, addr) is a deviation.
+        serving.slots[0].reset();
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_b, "sub.example.org");
+        let deviated = serving.slots[0].inspector.hello().expect("hello").ja4();
+        assert_ne!(
+            deviated, baseline,
+            "the ALPN variant must produce a distinct JA4"
+        );
+        assert_eq!(
+            serving.ja4_baseline.entries[ordinal.get()][0].ja4,
+            baseline,
+            "the baseline is never updated after first-seen"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            1,
+            "a deviation flares exactly one change signal"
+        );
+
+        // At-most-once: a second record attempt on the same connection is inert.
+        serving.maybe_record_ja4_baseline(0);
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            1,
+            "the change signal fires at most once per connection"
+        );
+
+        // conn3: a fresh connection with the deviated JA4 flares again.
+        serving.slots[0].reset();
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_b, "sub.example.org");
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            2,
+            "a later connection with the deviated JA4 flares again"
+        );
+    });
+}
+
+#[test]
+fn ja4_baseline_defers_until_dial_persists_dest_ip() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let wire = hello_wire(b"sub.example.org", false);
+        drive_hello(serving, &wire, "sub.example.org");
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        assert!(
+            serving.slots[0].ja4_pending,
+            "a hello completed before the destination IP is known defers the baseline"
+        );
+        assert_eq!(
+            serving.ja4_baseline.entries[ordinal.get()][0].addr,
+            EMPTY_JA4_ADDR,
+            "no baseline is recorded before the destination IP is known"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            0,
+            "a deferred baseline never flares before the IP is known"
+        );
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        serving.maybe_record_ja4_baseline(0);
+        assert!(
+            !serving.slots[0].ja4_pending,
+            "the deferred baseline resolves once the destination IP is known"
+        );
+        let entry = serving.ja4_baseline.entries[ordinal.get()][0];
+        assert_eq!(
+            entry.addr,
+            NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
+            "the dial-persisted destination IP keys the deferred baseline"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            0,
+            "a deferred first-seen still never flares a change signal"
+        );
+    });
+}
+
+#[test]
+fn ja4_baseline_row_full_returns_neutral() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ja4 = [b'j'; 36];
+        for i in 0..MAX_ADDRESSES {
+            let addr = NumericAddr::V4(Ipv4Addr::from([
+                10,
+                0,
+                0,
+                u8::try_from(i).expect("row index fits u8"),
+            ]));
+            assert_eq!(
+                serving.ja4_baseline.record(ordinal, addr, ja4),
+                BaselineOutcome::FirstSeen,
+                "each fresh address in the row is a first-seen baseline"
+            );
+        }
+        assert_eq!(
+            serving.ja4_baseline.record(
+                ordinal,
+                NumericAddr::V4(Ipv4Addr::from([10, 0, 0, 16])),
+                ja4
+            ),
+            BaselineOutcome::RowFull,
+            "a 17th distinct address overflows the fixed 16-entry row neutrally"
         );
     });
 }
