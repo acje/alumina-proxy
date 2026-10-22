@@ -23,6 +23,18 @@ const MAX_VERSIONS: usize = 32;
 /// Maximum number of distinct extensions tracked for duplicate rejection.
 const MAX_EXTENSIONS: usize = 64;
 
+/// Maximum number of cipher suites retained from the `ClientHello` body.
+///
+/// The cipher-suite list is a `u16`-length-prefixed run of 2-byte suites, so a
+/// full 16 KiB handshake body can hold at most `MAX_HANDSHAKE_LEN / 2` suites.
+const MAX_CIPHERS: usize = MAX_HANDSHAKE_LEN / 2;
+
+/// Maximum length in bytes of the retained ALPN first protocol value.
+///
+/// An ALPN protocol name is `u8`-length-prefixed, so a single value is at most
+/// 255 bytes.
+const MAX_ALPN_VALUE: usize = 255;
+
 const RANDOM_LEN: usize = 32;
 
 const CONTENT_HANDSHAKE: u8 = 22;
@@ -31,6 +43,7 @@ const HANDSHAKE_CLIENT_HELLO: u8 = 1;
 const SUPPORTED_VERSIONS: u16 = 43;
 const SERVER_NAME: u16 = 0;
 const ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
+const ALPN: u16 = 16;
 
 const TLS13: u16 = 0x0304;
 const TLS12: u16 = 0x0303;
@@ -46,6 +59,12 @@ pub struct ClientHello {
     sni_len: usize,
     sni_entries: u8,
     has_ech: bool,
+    ciphers: [u16; MAX_CIPHERS],
+    ciphers_len: usize,
+    extensions: [u16; MAX_EXTENSIONS],
+    extensions_len: usize,
+    alpn: [u8; MAX_ALPN_VALUE],
+    alpn_len: usize,
 }
 
 impl ClientHello {
@@ -71,6 +90,27 @@ impl ClientHello {
     #[must_use]
     pub const fn has_ech(&self) -> bool {
         self.has_ech
+    }
+
+    /// The offered cipher suites in wire order, including SCSV `0x00ff` and
+    /// GREASE, unfiltered. Bounded by the 16 KiB handshake cap.
+    #[must_use]
+    pub fn ciphers(&self) -> &[u16] {
+        &self.ciphers[..self.ciphers_len]
+    }
+
+    /// The distinct extension types present in wire order, including ALPN (16)
+    /// and `signature_algorithms` (13), unfiltered.
+    #[must_use]
+    pub fn extensions(&self) -> &[u16] {
+        &self.extensions[..self.extensions_len]
+    }
+
+    /// The raw bytes of the first ALPN protocol value offered, or empty when no
+    /// well-formed ALPN extension was present.
+    #[must_use]
+    pub fn alpn_first_value(&self) -> &[u8] {
+        &self.alpn[..self.alpn_len]
     }
 }
 
@@ -425,6 +465,33 @@ fn u8_at(buf: &[u8], at: usize) -> Result<u8, ChError> {
     })
 }
 
+/// Reads the `u16`-length-prefixed cipher-suite list at `at` into a fixed
+/// `[u16; MAX_CIPHERS]` buffer, returning `(count, buffer)`.
+///
+/// # Errors
+///
+/// Returns `MalformedBody` when the list length is odd, when it exceeds
+/// `MAX_CIPHERS` suites, or when the list overruns the body.
+fn parse_cipher_list(body: &[u8], at: usize) -> Result<(usize, [u16; MAX_CIPHERS]), ChError> {
+    let list_len = usize::from(u16_at(body, at)?);
+    if list_len % 2 != 0 {
+        return Err(ChError::MalformedBody {
+            detail: "odd cipher-suite list",
+        });
+    }
+    let cs_count = list_len / 2;
+    if cs_count > MAX_CIPHERS {
+        return Err(ChError::MalformedBody {
+            detail: "cipher-suite list exceeds bound",
+        });
+    }
+    let mut ciphers = [0u16; MAX_CIPHERS];
+    for (i, slot) in ciphers[..cs_count].iter_mut().enumerate() {
+        *slot = u16_at(body, at + 2 + i * 2)?;
+    }
+    Ok((cs_count, ciphers))
+}
+
 fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
     let legacy = u16_at(body, 0)?;
     if legacy != TLS12 {
@@ -433,13 +500,8 @@ fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
     let mut pos = 2 + RANDOM_LEN;
     let sid_len = usize::from(u8_at(body, pos)?);
     pos += 1 + sid_len;
-    let cs_len = usize::from(u16_at(body, pos)?);
-    if cs_len % 2 != 0 {
-        return Err(ChError::MalformedBody {
-            detail: "odd cipher-suite list",
-        });
-    }
-    pos += 2 + cs_len;
+    let (cs_count, ciphers) = parse_cipher_list(body, pos)?;
+    pos += 2 + cs_count * 2;
     let comp_len = usize::from(u8_at(body, pos)?);
     if comp_len != 1 {
         if comp_len == 0 {
@@ -467,6 +529,8 @@ fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
     let mut sni_len = 0usize;
     let mut sni_entries = 0u8;
     let mut has_ech = false;
+    let mut alpn = [0u8; MAX_ALPN_VALUE];
+    let mut alpn_len = 0usize;
     let mut seen = [0u16; MAX_EXTENSIONS];
     let mut seen_count = 0usize;
     while pos < ext_end {
@@ -497,6 +561,9 @@ fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
             ENCRYPTED_CLIENT_HELLO => {
                 has_ech = true;
             }
+            ALPN => {
+                parse_alpn_first_value(ext_data, &mut alpn, &mut alpn_len);
+            }
             _ => {}
         }
         pos = ext_end_i;
@@ -512,6 +579,12 @@ fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
         sni_len,
         sni_entries,
         has_ech,
+        ciphers,
+        ciphers_len: cs_count,
+        extensions: seen,
+        extensions_len: seen_count,
+        alpn,
+        alpn_len,
     })
 }
 
@@ -620,6 +693,34 @@ fn parse_server_names(
         at = end;
     }
     Ok(())
+}
+
+/// Retains the first ALPN protocol value bytes, raw and bounded by
+/// `MAX_ALPN_VALUE`. Lenient by design: a malformed ALPN extension retains
+/// nothing but never rejects the `ClientHello`, preserving the pre-retention
+/// accept-everything behaviour for this extension.
+fn parse_alpn_first_value(data: &[u8], out: &mut [u8; MAX_ALPN_VALUE], out_len: &mut usize) {
+    if data.len() < 2 {
+        return;
+    }
+    let list_len = usize::from(u16::from_be_bytes([data[0], data[1]]));
+    let list_end = 2 + list_len;
+    if list_end > data.len() {
+        return;
+    }
+    let list = &data[2..list_end];
+    if list.is_empty() {
+        return;
+    }
+    let first_len = usize::from(list[0]);
+    let first_end = 1 + first_len;
+    if first_end > list.len() {
+        return;
+    }
+    let value = &list[1..first_end];
+    let take = value.len().min(MAX_ALPN_VALUE);
+    out[..take].copy_from_slice(&value[..take]);
+    *out_len = take;
 }
 
 /// Validates the parsed `ClientHello` against the TLS 1.3-only golden path and
@@ -784,12 +885,22 @@ mod tests {
     }
 
     fn hello_with_extensions(exts: &[(u16, &[u8])]) -> Vec<u8> {
+        hello_with_ciphers_and_extensions(&[0x002f], exts)
+    }
+
+    fn hello_with_ciphers_and_extensions(ciphers: &[u16], exts: &[(u16, &[u8])]) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&TLS12.to_be_bytes());
         body.extend_from_slice(&[0u8; RANDOM_LEN]);
         body.push(0);
-        body.extend_from_slice(&2u16.to_be_bytes());
-        body.extend_from_slice(&[0x00, 0x2f]);
+        body.extend_from_slice(
+            &u16::try_from(ciphers.len() * 2)
+                .expect("cipher list fits u16")
+                .to_be_bytes(),
+        );
+        for cipher in ciphers {
+            body.extend_from_slice(&cipher.to_be_bytes());
+        }
         body.push(1);
         body.push(0);
         let mut blob = Vec::new();
@@ -813,6 +924,22 @@ mod tests {
         handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
         handshake.extend_from_slice(&body);
         record(&handshake)
+    }
+
+    fn alpn_ext(values: &[&[u8]]) -> Vec<u8> {
+        let mut names = Vec::new();
+        for value in values {
+            names.push(u8::try_from(value.len()).expect("alpn value fits u8"));
+            names.extend_from_slice(value);
+        }
+        let mut ext = Vec::new();
+        ext.extend_from_slice(
+            &u16::try_from(names.len())
+                .expect("alpn names block fits u16")
+                .to_be_bytes(),
+        );
+        ext.extend_from_slice(&names);
+        ext
     }
 
     #[test]
@@ -1182,6 +1309,7 @@ mod tests {
     }
 
     const SV: &[u8] = &[0x02, 0x03, 0x04];
+    const SIGNATURE_ALGORITHMS: u16 = 13;
 
     #[test]
     fn non_host_name_sni_rejected() {
@@ -1296,5 +1424,52 @@ mod tests {
             parse_one(&hello_with_extensions(&exts)),
             Err(ChError::TooManyExtensions)
         );
+    }
+
+    #[test]
+    fn retains_cipher_list_including_scsv() {
+        let ciphers = [0x1301u16, 0x1302, 0x00ff, 0x002f];
+        let wire = hello_with_ciphers_and_extensions(&ciphers, &[(SUPPORTED_VERSIONS, SV)]);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(ch.ciphers(), &ciphers);
+    }
+
+    #[test]
+    fn retains_extension_type_list_including_alpn_and_sigalgs() {
+        let alpn = alpn_ext(&[b"h2"]);
+        let sigalgs = [0x00u8, 0x04, 0x04, 0x01, 0x04, 0x03];
+        let wire = hello_with_extensions(&[
+            (SUPPORTED_VERSIONS, SV),
+            (ALPN, &alpn),
+            (SIGNATURE_ALGORITHMS, &sigalgs),
+        ]);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(
+            ch.extensions(),
+            &[SUPPORTED_VERSIONS, ALPN, SIGNATURE_ALGORITHMS]
+        );
+    }
+
+    #[test]
+    fn retains_alpn_first_value_bytes() {
+        let alpn = alpn_ext(&[b"h2"]);
+        let wire = hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (ALPN, &alpn)]);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(ch.alpn_first_value(), b"h2");
+    }
+
+    #[test]
+    fn retains_only_first_alpn_value() {
+        let alpn = alpn_ext(&[b"h2", b"http/1.1"]);
+        let wire = hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (ALPN, &alpn)]);
+        let ch = parse_one(&wire).expect("parse");
+        assert_eq!(ch.alpn_first_value(), b"h2");
+    }
+
+    #[test]
+    fn malformed_alpn_is_skipped_not_rejected() {
+        let wire = hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (ALPN, &[0xff])]);
+        let ch = parse_one(&wire).expect("a malformed ALPN extension must not reject the hello");
+        assert_eq!(ch.alpn_first_value(), b"");
     }
 }
