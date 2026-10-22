@@ -563,7 +563,8 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         || monitor.facts_unknown_overflow()
         || monitor.facts_resolver_degraded_overflow()
         || monitor.facts_dns_anomaly_overflow()
-        || monitor.facts_downgrade_to_plain_overflow();
+        || monitor.facts_downgrade_to_plain_overflow()
+        || monitor.facts_ja4_change_overflow();
     let globals: [(&[u8], u64); 13] = [
         (&b"facts_total"[..], monitor.facts_total()),
         (&b"actions_total"[..], monitor.actions_total()),
@@ -693,6 +694,18 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
                 u32::try_from(index).expect("allowlist ordinal fits u32"),
                 b"r",
                 u64::from(refusals),
+            )
+        {
+            return None;
+        }
+        let ja4_changes = monitor.facts_ja4_change(ordinal);
+        if ja4_changes > 0
+            && !push_indexed_key_u64(
+                &mut w,
+                b"d",
+                u32::try_from(index).expect("allowlist ordinal fits u32"),
+                b"j",
+                u64::from(ja4_changes),
             )
         {
             return None;
@@ -2049,6 +2062,7 @@ mod tests {
         m.note_fact_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         m.note_fact_early_data(ordinal);
+        m.note_fact_ja4_change(ordinal);
         m.note_action_first_slot_block(AnyIllegalScope::Connection);
         m.note_action_domain_block(ordinal);
         m.note_action_flare(ordinal);
@@ -2058,10 +2072,10 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert_eq!(
             text,
-            "level=info kind=monitor secs=7 facts_total=6 actions_total=3 refusals_total=0 \
+            "level=info kind=monitor secs=7 facts_total=7 actions_total=3 refusals_total=0 \
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
              ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 bv=1 \
-             c14=2 unk3=1 d0f=1 d0b=1 d0l=1\n",
+             c14=2 unk3=1 d0f=1 d0b=1 d0l=1 d0j=1\n",
             "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
         );
         assert!(
@@ -2104,6 +2118,14 @@ mod tests {
         assert!(
             !text.contains(" r=1"),
             "M4: per-field zero-suppression drops the zero refusal field"
+        );
+        assert!(
+            text.contains(" d0j=1"),
+            "the per-ordinal ja4-change fold carries its key: {text}"
+        );
+        assert!(
+            !text.contains("d1j="),
+            "a zero ja4-change fold on another ordinal stays suppressed: {text}"
         );
     }
 

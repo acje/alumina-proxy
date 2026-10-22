@@ -301,7 +301,6 @@ impl Monitor {
         self.facts.early_data[ordinal.get()].value()
     }
 
-    #[cfg(test)]
     pub(crate) const fn facts_ja4_change(&self, ordinal: DomainOrdinal) -> u32 {
         self.facts.ja4_change[ordinal.get()].value()
     }
@@ -368,6 +367,12 @@ impl Monitor {
                 .map(|c| u64::from(c.value()))
                 .sum::<u64>()
             + u64::from(self.facts.downgrade_to_plain.value())
+            + self
+                .facts
+                .ja4_change
+                .iter()
+                .map(|c| u64::from(c.value()))
+                .sum::<u64>()
     }
 
     pub(crate) const fn actions_block_all(&self) -> u32 {
@@ -453,6 +458,10 @@ impl Monitor {
         self.facts.early_data.iter().any(|c| c.overflow())
     }
 
+    pub(crate) fn facts_ja4_change_overflow(&self) -> bool {
+        self.facts.ja4_change.iter().any(|c| c.overflow())
+    }
+
     pub(crate) fn facts_unknown_overflow(&self) -> bool {
         self.facts.unknown.iter().any(|c| c.overflow())
     }
@@ -494,6 +503,9 @@ impl Monitor {
             c.saturate_for_test();
         }
         self.facts.downgrade_to_plain.saturate_for_test();
+        for c in &mut self.facts.ja4_change {
+            c.saturate_for_test();
+        }
         for c in &mut self.actions.first_slot_block {
             c.saturate_for_test();
         }
@@ -645,6 +657,22 @@ pub(crate) mod tests {
         m.saturate_all_for_test();
         assert_eq!(m.facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl), u32::MAX);
         assert!(m.facts_dns_anomaly_overflow());
+    }
+
+    #[test]
+    fn ja4_changes_fold_into_facts_total_and_saturate() {
+        let mut m = Monitor::new();
+        assert_eq!(m.facts_total(), 0, "no change means no fold");
+        let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
+        m.note_fact_ja4_change(ordinal);
+        assert_eq!(
+            m.facts_total(),
+            1,
+            "every ja4-change fact folds into the aggregate"
+        );
+        m.saturate_all_for_test();
+        assert_eq!(m.facts_ja4_change(ordinal), u32::MAX);
+        assert!(m.facts_ja4_change_overflow());
     }
 
     #[test]
