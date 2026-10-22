@@ -926,7 +926,7 @@ The first-seen JA4 baseline table holds 512 fixed entries (32 ordinals × 16 add
 
 #### Retained serving workspace reconciliation (`:163`/`:188`)
 
-The retained serving workspace figure is reconciled to account for the new ~16.4 KiB/slot ClientHello JA4 retention (linus review Info I1): 512 × (136 KiB + ~16.4 KiB) ≈ 512 × ~152.4 KiB ≈ 76 MiB (design estimate), replacing the previous 512 × 136 KiB = 68 MiB at `:163`/`:188` (the 68 MiB figure recorded in the `alumina-mema` amendment describes that amendment's surface and is superseded for the live profile by this reconciled figure). The added retention is boot-time fixed storage with zero heap allocation or deallocation after boot, consistent with the fixed profile.
+The retained serving workspace figure is reconciled to account for the new ~16.5 KiB/slot ClientHello JA4 retention (linus review Info I1): 512 × (136 KiB + ~16.5 KiB) ≈ 512 × ~152.5 KiB ≈ 76 MiB (design estimate), replacing the previous 512 × 136 KiB = 68 MiB at `:163`/`:188` (the 68 MiB figure recorded in the `alumina-mema` amendment describes that amendment's surface and is superseded for the live profile by this reconciled figure). The added retention is boot-time fixed storage with zero heap allocation or deallocation after boot, consistent with the fixed profile.
 
 ### Status
 
