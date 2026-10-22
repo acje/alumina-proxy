@@ -18,7 +18,7 @@ restates and cites it). The `resolver_probe` record is authorized by the
 Alumina resolves allowlisted hostnames through the configured `resolver` array
 using strict-SPKI-pinned DoT (`IP#fqdn#pin-sha256=<SPKI>`). Every configured
 resolver is probed at startup within a fixed 90-second window
-([spec :64](alumina-proxy.md)), each DNS exchange has a **2-second deadline**
+([spec :64](alumina-proxy.md)), each DNS exchange has a **5-second deadline**
 ([spec :82](alumina-proxy.md)), and the transport is a single DNS TCP
 connection with one outstanding query ([spec :172](alumina-proxy.md)). A
 resolver that cannot complete an exchange within that deadline fails startup
@@ -68,7 +68,7 @@ live SPKIs — so this was a **regional reachability** problem, not a pin proble
 The fix was to reorder so `9.9.9.9` is primary (`gh-report-ops` commit
 `fe743b4`). `1.1.1.1` and `8.8.8.8` are retained as valid-pin backups that may
 be regionally slow. Resolver order is a deployment decision: it should reflect
-the measured reachability of the deploy region within the fixed 2-second
+the measured reachability of the deploy region within the fixed 5-second
 exchange deadline, not a global preference ranking.
 
 ## How to verify per-resolver health via `resolver_probe`
@@ -106,7 +106,7 @@ grep 'kind=resolver_probe' <startup-log>
 ```
 
 A `failed` verdict with `reason="timeout"` against a valid pin means the
-resolver is not reachable within the 2-second exchange deadline from the deploy
+resolver is not reachable within the 5-second exchange deadline from the deploy
 region — reorder the array to promote a reachable resolver, exactly as the
 `9.9.9.9` reorder did.
 
@@ -129,7 +129,7 @@ OpenDNS's DigiCert→IdenTrust transition had incidents in Oct 2026).
 ## Fixed-profile note
 
 This recipe changes **no** window or deadline: the 90-second startup window
-([spec :64](alumina-proxy.md)), the 2-second DNS exchange deadline
+([spec :64](alumina-proxy.md)), the 5-second DNS exchange deadline
 ([spec :82](alumina-proxy.md)), and the 1-connection/1-query transport
 ([spec :172](alumina-proxy.md)) are fixed profile rows and are unchanged. The
 `resolver_probe` sweep is post-window observability only — it relocates the

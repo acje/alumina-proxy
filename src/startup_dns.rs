@@ -3,8 +3,8 @@
 //! the OS CSPRNG, and publication of only fully validated outcomes into the
 //! cache and schedule.
 //!
-//! The exchange deadline is 2 seconds, clipped to the caller's absolute
-//! startup window deadline. On timeout, malformed, mismatched, truncated or
+//! The exchange deadline is 5 seconds (`EXCHANGE_DEADLINE_SECS`), clipped to the
+//! caller's absolute startup window deadline. On timeout, malformed, mismatched, truncated or
 //! oversized responses the connection is closed, nothing is published, and the
 //! exchange counts as failed. Startup readiness evaluation from the published
 //! cache remains a caller concern.
@@ -2494,7 +2494,7 @@ impl StartupDns {
     /// polling the DNS registry once per turn until the exchange concludes
     /// within its single clipped deadline. The boot-owned log store is passed
     /// at this seam so logging steps and the log retry deadline participate in
-    /// the same wait without restarting the 90s or 2s deadlines (704q); any
+    /// the same wait without restarting the 90s or 5s deadlines (704q); any
     /// other owner replaces this driver body with a fold of the DNS readiness
     /// and [`Self::exchange_deadline`] into its own combined wait.
     #[expect(
@@ -2663,7 +2663,7 @@ impl StartupDns {
     /// sweep has no unprobed resolver left. The transport is relocated onto the
     /// probe target (closing the retained connection and recording any DoT→plain
     /// downgrade), then a single primary-allowlist `A` exchange begins with the
-    /// fixed two-second deadline. While a probe is in flight the call defers
+    /// fixed five-second deadline. While a probe is in flight the call defers
     /// and returns `false`.
     pub(crate) fn sweep_next_probe(&mut self, fqdn: &Fqdn) -> Result<bool, StartupDnsError> {
         let (index, target) = {

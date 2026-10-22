@@ -87,7 +87,7 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | DNS conns / outstanding queries | 1 / 1 | Slice 2 | designed |
 | Setup / connect deadlines | 10 s / 2 s | Slice 3 | artifact |
 | Upstream attempts per tunnel | ≤4 | Slice 3 | artifact |
-| DNS exchange deadline | 2 s | Slice 2 | artifact |
+| DNS exchange deadline | 5 s | Slice 2 | artifact |
 | Refresh / SOA negative interval | 30–300 s | Slice 2 | artifact |
 | DNS retry backoff | 1,2,4,8,16,30 s | Slice 2 | artifact |
 | Stale grace | 259200 s (72 h) | Slice 2 | artifact |
