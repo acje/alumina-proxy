@@ -287,11 +287,14 @@ impl Runtime {
             .map_err(ServeError::from)
     }
 
+    /// Starts a due refresh exchange only when the retained DNS transport is
+    /// idle. A refresh is suppressed while a post-window probe sweep owns the
+    /// transport between probes: the sweep restores the pre-sweep active
+    /// resolver after each probe, and an interleaved refresh would corrupt that
+    /// restore. The suppression is bounded — at most `MAX_RESOLVERS − 1` probes
+    /// at `EXCHANGE_DEADLINE_SECS` each, once at boot, latched by `sweep_ran` —
+    /// so it can never starve refresh scheduling permanently.
     fn starts_due_dns_if_idle(&mut self) -> Result<(), ServeError> {
-        // A post-window probe sweep owns the retained transport between probes,
-        // so a refresh exchange must not start while it is active: the sweep
-        // restores the pre-sweep active resolver after each probe, and an
-        // interleaved refresh would corrupt that restore.
         if self.serving.storage().dns().sweep_active()
             || self.serving.storage().dns().has_active_exchange()
         {
