@@ -682,6 +682,39 @@ impl ActiveResolver {
     }
 }
 
+/// The per-resolver verdict of the post-window probe sweep, recorded once each
+/// probed resolver's exchange concludes. `Ok` and `Failed` are recorded only
+/// for resolvers the sweep actually probed; a resolver the sweep skipped (the
+/// active resolver at sweep begin) stays `NotProbed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeVerdict {
+    Ok,
+    Failed(FailureReason),
+    NotProbed,
+}
+
+impl ProbeVerdict {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            ProbeVerdict::Ok => "ok",
+            ProbeVerdict::Failed(_) => "failed",
+            ProbeVerdict::NotProbed => "not_probed",
+        }
+    }
+}
+
+/// The post-window probe sweep state: which configured resolvers remain to be
+/// probed, the active resolver the sweep began from (restored after each probe
+/// and after the sweep), the per-resolver verdicts accumulated so far, and the
+/// index of the probe currently in flight. All fixed-size; no heap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProbeSweep {
+    remaining: [bool; MAX_RESOLVERS],
+    active_before: ActiveResolver,
+    verdicts: [ProbeVerdict; MAX_RESOLVERS],
+    current: Option<usize>,
+}
+
 /// The `DoT` identity the transport hands the rustls client for one connection:
 /// the resolver FQDN used as SNI and validated against the presented
 /// certificate's SAN, plus an optional strict SPKI pin. Carried only for
@@ -880,6 +913,16 @@ pub struct StartupDns {
     /// FQDN and the relocated-to resolver is a bare-IP entry; it accumulates
     /// across the failover/failback paths and is taken exactly once.
     downgrade_to_plain: usize,
+    /// The post-window probe sweep state, present only while the sweep is in
+    /// progress: which configured resolvers remain to be probed, the active
+    /// resolver the sweep began from, the accumulated per-resolver verdicts,
+    /// and the probe currently in flight. `None` before the sweep begins and
+    /// after its verdicts are taken.
+    probe_sweep: Option<ProbeSweep>,
+    /// The once-only latch that keeps the post-window probe sweep from
+    /// re-beginning on a later serving turn after its verdicts are taken. Lives
+    /// outside [`ProbeSweep`] so the spec-mandated sweep shape stays exact.
+    sweep_ran: bool,
     #[cfg(test)]
     poll_ticks: u64,
     #[cfg(test)]
@@ -947,6 +990,8 @@ impl StartupDns {
             resolver_transitions: 0,
             dns_anomalies: [0; DnsAnomalyKind::COUNT],
             downgrade_to_plain: 0,
+            probe_sweep: None,
+            sweep_ran: false,
             #[cfg(test)]
             poll_ticks: 0,
             #[cfg(test)]
@@ -1045,6 +1090,12 @@ impl StartupDns {
         self.active.as_ref().map(|ex| (ex.ordinal, ex.family))
     }
 
+    /// The configured resolver set, for the serving owner to fold per-resolver
+    /// verdicts into the `resolver_probe` log record. `None` before any window.
+    pub(crate) const fn resolvers(&self) -> Option<ResolverSet> {
+        self.resolvers
+    }
+
     /// Closes the transport connection exactly once. In private mode the
     /// source is deregistered against the DNS-private poll; a `NotFound`
     /// deregister is the benign already-closed case, any other failure is
@@ -1111,6 +1162,7 @@ impl StartupDns {
         self.filled = 0;
         self.written = 0;
         self.msglen = None;
+        self.probe_sweep = None;
     }
 
     /// Test-only readiness probe on the retained shared stream: true only once
@@ -2511,7 +2563,10 @@ impl StartupDns {
     /// the top of [`Self::start_exchange`] so the probe is the next exchange,
     /// never a background or timer-owned action.
     fn maybe_begin_failback(&mut self) -> Result<(), StartupDnsError> {
-        if self.active_resolver.is_primary() || self.failback_source.is_some() {
+        if self.probe_sweep.is_some()
+            || self.active_resolver.is_primary()
+            || self.failback_source.is_some()
+        {
             return Ok(());
         }
         let Some(due) = self.failback_due else {
@@ -2549,6 +2604,98 @@ impl StartupDns {
         }
     }
 
+    /// Begins the post-window probe sweep exactly once: after the startup
+    /// decision, every configured resolver the window did not exercise is
+    /// probed once so the operator sees a per-resolver verdict. The sweep is
+    /// latched (`sweep_ran`) so it never re-begins on a later turn, deferred
+    /// while a failback probe is in flight so the two probes never overlap,
+    /// and skipped entirely for a single-resolver set or a missing set.
+    pub(crate) fn maybe_begin_sweep(&mut self) {
+        if self.sweep_ran || self.probe_sweep.is_some() || self.failback_source.is_some() {
+            return;
+        }
+        let Some(set) = self.resolvers else {
+            return;
+        };
+        if set.len() <= 1 {
+            return;
+        }
+        let active_index = self.active_resolver.index();
+        let mut remaining = [false; MAX_RESOLVERS];
+        for (index, _) in set.iter().enumerate() {
+            remaining[index] = index != active_index;
+        }
+        self.probe_sweep = Some(ProbeSweep {
+            remaining,
+            active_before: self.active_resolver,
+            verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+            current: None,
+        });
+    }
+
+    /// Whether a post-window probe sweep is currently in progress, so the
+    /// serving owner drives the next probe only while one is active.
+    pub(crate) const fn sweep_active(&self) -> bool {
+        self.probe_sweep.is_some()
+    }
+
+    /// Starts the next probe of the sweep when idle, returning `true` when the
+    /// sweep has no unprobed resolver left. The transport is relocated onto the
+    /// probe target (closing the retained connection and recording any DoT→plain
+    /// downgrade), then a single primary-allowlist `A` exchange begins with the
+    /// fixed two-second deadline. While a probe is in flight the call defers
+    /// and returns `false`.
+    pub(crate) fn sweep_next_probe(&mut self, fqdn: &Fqdn) -> Result<bool, StartupDnsError> {
+        let (index, target) = {
+            let Some(sweep) = self.probe_sweep.as_ref() else {
+                return Ok(true);
+            };
+            if sweep.current.is_some() || self.active.is_some() {
+                return Ok(false);
+            }
+            let Some(index) = sweep.remaining.iter().position(|&r| r) else {
+                return Ok(true);
+            };
+            let set_len = self.active_resolver.set_len();
+            (index, ActiveResolver::at(index, set_len))
+        };
+        self.relocate_for_probe(target)?;
+        let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+        self.start_exchange(fqdn, Family::A, 0, deadline)?;
+        if let Some(sweep) = &mut self.probe_sweep {
+            sweep.remaining[index] = false;
+            sweep.current = Some(index);
+        }
+        Ok(false)
+    }
+
+    /// Relocates the retained transport onto a probe target: the connection is
+    /// closed so the next exchange dials the target, any DoT→plain downgrade is
+    /// counted, and the active resolver is re-seated. Used by the post-window
+    /// probe sweep; the pre-sweep active resolver is kept by the sweep for
+    /// restore.
+    fn relocate_for_probe(&mut self, target: ActiveResolver) -> Result<(), StartupDnsError> {
+        let active = self.active_resolver;
+        self.close_connection()?;
+        self.note_downgrade_if_dot_to_plain(active, target);
+        self.active_resolver = target;
+        self.repoint_to_active();
+        Ok(())
+    }
+
+    /// Takes the accumulated per-resolver verdicts and clears the sweep,
+    /// latching it so it never re-begins on a later turn. Called once when the
+    /// sweep has no unprobed resolver left; the serving owner folds the
+    /// verdicts into a single `resolver_probe` log record.
+    pub(crate) fn take_sweep_verdicts(&mut self) -> [ProbeVerdict; MAX_RESOLVERS] {
+        self.sweep_ran = true;
+        self.probe_sweep
+            .take()
+            .map_or([ProbeVerdict::NotProbed; MAX_RESOLVERS], |sweep| {
+                sweep.verdicts
+            })
+    }
+
     /// Advances the failover/failback state machine at the single recognized
     /// failure choke point. Every counted failure degrades the active resolver,
     /// recording exactly one enter crossing when healthy resolves cross the
@@ -2559,6 +2706,28 @@ impl StartupDns {
     /// probe re-seats onto the backup it came from instead of cascading into
     /// another failover.
     fn on_exchange_failed(&mut self, now: u64) {
+        // Probe-mode branch: while a post-window probe is in flight the active
+        // transport is the temporary probe target, so a failure advances the
+        // probed resolver's degradation count but never relocates the healthy
+        // pre-sweep transport. The probe target stays `current` so the caller
+        // records the verdict with its reason; the pre-sweep active resolver is
+        // restored and relocation/failback arming is suppressed entirely.
+        let probe = self
+            .probe_sweep
+            .as_ref()
+            .and_then(|sweep| sweep.current.map(|index| (index, sweep.active_before)));
+        if let Some((probed, active_before)) = probe {
+            let active = self.active_resolver;
+            let was_degraded = self.degradations[probed] == ResolverDegradation::Degraded;
+            self.degradations[probed] = self.degradations[probed].note_failure();
+            if !was_degraded && self.degradations[probed] == ResolverDegradation::Degraded {
+                self.resolver_transitions += 1;
+            }
+            self.note_downgrade_if_dot_to_plain(active_before, active);
+            self.active_resolver = active_before;
+            self.repoint_to_active();
+            return;
+        }
         let active = self.active_resolver;
         let active_index = active.index();
         let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
@@ -2597,6 +2766,29 @@ impl StartupDns {
     /// failback grace untouched, so the primary is still probed on the next
     /// due exchange.
     fn on_exchange_succeeded(&mut self) {
+        // Probe-mode branch: a successful post-window probe records an `Ok`
+        // verdict against the probed resolver, resets that resolver's
+        // degradation to healthy, restores the pre-sweep active transport, and
+        // clears the in-flight probe target. The failback machinery is never
+        // touched by a sweep probe.
+        let probe = self
+            .probe_sweep
+            .as_ref()
+            .and_then(|sweep| sweep.current.map(|index| (index, sweep.active_before)));
+        if let Some((probed, active_before)) = probe {
+            let was_degraded = self.degradations[probed] == ResolverDegradation::Degraded;
+            self.degradations[probed] = ResolverDegradation::note_success();
+            if was_degraded {
+                self.resolver_transitions += 1;
+            }
+            if let Some(sweep) = &mut self.probe_sweep {
+                sweep.verdicts[probed] = ProbeVerdict::Ok;
+                sweep.current = None;
+            }
+            self.active_resolver = active_before;
+            self.repoint_to_active();
+            return;
+        }
         let active_index = self.active_resolver.index();
         let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
         self.degradations[active_index] = ResolverDegradation::note_success();
@@ -2622,6 +2814,15 @@ impl StartupDns {
     ) -> Result<FailureReason, StartupDnsError> {
         let now = self.now_u64();
         self.on_exchange_failed(now);
+        // A probe-mode failure leaves the probe target `current` so the verdict
+        // is recorded here with its reason, then the in-flight target clears.
+        let probed = self.probe_sweep.as_ref().and_then(|sweep| sweep.current);
+        if let Some(index) = probed
+            && let Some(sweep) = &mut self.probe_sweep
+        {
+            sweep.verdicts[index] = ProbeVerdict::Failed(reason);
+            sweep.current = None;
+        }
         schedules.note_exchange_failure(ordinal, family, now)?;
         Ok(reason)
     }

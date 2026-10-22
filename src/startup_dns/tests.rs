@@ -2367,3 +2367,389 @@ fn turn_result_carries_failure_reason_structurally() {
         drop(malformed);
     }
 }
+
+#[test]
+fn probe_sweep_does_not_begin_for_single_resolver_set() {
+    let set = resolver_set_of(&["1.1.1.1"]);
+    let mut transport = seeded_transport(set);
+    transport.maybe_begin_sweep();
+    assert!(
+        !transport.sweep_active(),
+        "a single-resolver set short-circuits: no post-window probe sweep begins"
+    );
+    assert!(
+        transport.probe_sweep.is_none(),
+        "the sweep state stays absent for a single-resolver set"
+    );
+}
+
+#[test]
+fn probe_sweep_begins_for_multi_resolver_set_skipping_the_active_resolver() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.maybe_begin_sweep();
+    assert!(
+        transport.sweep_active(),
+        "the sweep begins for a multi-resolver set"
+    );
+    let sweep = transport.probe_sweep.expect("sweep began");
+    assert_eq!(
+        sweep.active_before,
+        ActiveResolver::at(0, 3),
+        "the pre-sweep active resolver (the primary) is remembered for restore"
+    );
+    assert_eq!(
+        sweep.remaining,
+        [false, true, true, false, false],
+        "the active resolver is skipped; only the unexercised resolvers remain"
+    );
+    assert_eq!(
+        sweep.verdicts,
+        [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        "every verdict starts as not probed"
+    );
+    assert_eq!(sweep.current, None, "no probe is in flight yet");
+}
+
+#[test]
+fn probe_sweep_does_not_re_begin_after_verdicts_are_taken() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    transport.maybe_begin_sweep();
+    assert!(transport.sweep_active());
+    transport.take_sweep_verdicts();
+    assert!(
+        !transport.sweep_active(),
+        "taking the verdicts clears the sweep state"
+    );
+    transport.maybe_begin_sweep();
+    assert!(
+        !transport.sweep_active(),
+        "the completed sweep never re-begins on a later turn"
+    );
+}
+
+#[test]
+fn probe_sweep_does_not_begin_while_a_failback_probe_is_in_flight() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    transport.failback_source = Some(ActiveResolver::at(1, 2));
+    transport.maybe_begin_sweep();
+    assert!(
+        !transport.sweep_active(),
+        "an in-flight failback probe defers the sweep so the two probes never overlap"
+    );
+}
+
+#[test]
+fn sweep_next_probe_relocates_and_starts_the_first_unprobed_resolver() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.maybe_begin_sweep();
+    let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
+    let done = transport.sweep_next_probe(&fqdn).expect("probe starts");
+    assert!(!done, "the sweep is not done after starting one probe");
+    let sweep = transport.probe_sweep.expect("sweep still active");
+    assert_eq!(
+        sweep.current,
+        Some(1),
+        "the first unprobed resolver is index 1"
+    );
+    assert_eq!(
+        sweep.remaining,
+        [false, false, true, false, false],
+        "the started resolver leaves the remaining set"
+    );
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(1, 3),
+        "the transport relocates onto the probe target"
+    );
+    assert_eq!(transport.peer().ip().to_string(), "8.8.8.8");
+    assert!(
+        transport.has_active_exchange(),
+        "the probe exchange is in flight"
+    );
+}
+
+#[test]
+fn sweep_next_probe_returns_done_when_every_resolver_is_probed() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, false, false, false, false],
+        active_before: ActiveResolver::at(0, 2),
+        verdicts: [
+            ProbeVerdict::Ok,
+            ProbeVerdict::Failed(FailureReason::Connect),
+            ProbeVerdict::NotProbed,
+            ProbeVerdict::NotProbed,
+            ProbeVerdict::NotProbed,
+        ],
+        current: None,
+    });
+    let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
+    let done = transport.sweep_next_probe(&fqdn).expect("no probe starts");
+    assert!(
+        done,
+        "no unprobed resolver remains, so the sweep is complete"
+    );
+    assert!(
+        !transport.has_active_exchange(),
+        "no exchange is started when the sweep is already complete"
+    );
+}
+
+#[test]
+fn sweep_next_probe_returns_false_while_a_probe_is_in_flight() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.maybe_begin_sweep();
+    let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
+    transport
+        .sweep_next_probe(&fqdn)
+        .expect("first probe starts");
+    let done = transport.sweep_next_probe(&fqdn).expect("no second probe");
+    assert!(
+        !done,
+        "an in-flight probe defers the next probe rather than starting a second one"
+    );
+    let sweep = transport.probe_sweep.expect("sweep still active");
+    assert_eq!(sweep.current, Some(1), "the in-flight probe is untouched");
+}
+
+#[test]
+fn failed_probe_advances_probed_degradation_restores_active_and_records_no_failback() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, false, true, false, false],
+        active_before: ActiveResolver::at(0, 3),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: Some(2),
+    });
+    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.repoint_to_active();
+    transport.on_exchange_failed(now);
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(0, 3),
+        "a failed probe restores the pre-sweep active resolver"
+    );
+    assert_eq!(transport.peer().ip().to_string(), "1.1.1.1");
+    assert!(
+        transport.failback_due.is_none(),
+        "a sweep probe failure never arms the failback grace"
+    );
+    assert!(
+        transport.failback_source.is_none(),
+        "a sweep probe failure never arms a failback probe"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        0,
+        "one failure stays below the degraded threshold; no rd= crossing yet"
+    );
+    assert_eq!(
+        transport
+            .probe_sweep
+            .as_ref()
+            .expect("sweep active")
+            .current,
+        Some(2),
+        "the probe target stays current so the caller records the verdict with its reason"
+    );
+}
+
+#[test]
+fn failed_probe_at_threshold_emits_degraded_enter_crossing_for_the_probed_resolver() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, false, true, false, false],
+        active_before: ActiveResolver::at(0, 3),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: Some(2),
+    });
+    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.repoint_to_active();
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        1,
+        "the third consecutive probe failure crosses the probed resolver into degraded"
+    );
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(0, 3),
+        "the probe failure still restores the pre-sweep active resolver"
+    );
+}
+
+#[test]
+fn successful_probe_records_ok_resets_probed_and_restores_active() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, false, true, false, false],
+        active_before: ActiveResolver::at(0, 3),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: Some(2),
+    });
+    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.repoint_to_active();
+    transport.on_exchange_succeeded();
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(0, 3),
+        "a successful probe restores the pre-sweep active resolver"
+    );
+    assert_eq!(transport.peer().ip().to_string(), "1.1.1.1");
+    let sweep = transport.probe_sweep.expect("sweep still active");
+    assert_eq!(sweep.current, None, "the probe target clears on success");
+    assert_eq!(
+        sweep.verdicts[2],
+        ProbeVerdict::Ok,
+        "the successful probe records an ok verdict"
+    );
+    assert!(
+        transport.failback_source.is_none(),
+        "a sweep probe success never touches the failback machinery"
+    );
+}
+
+#[test]
+fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, false, true, false, false],
+        active_before: ActiveResolver::at(0, 3),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: Some(2),
+    });
+    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.repoint_to_active();
+    let mut schedules = Schedules::new(2).unwrap();
+    transport
+        .note_failure(0, Family::A, &mut schedules, FailureReason::Connect)
+        .expect("failure noted");
+    let sweep = transport.probe_sweep.expect("sweep still active");
+    assert_eq!(sweep.current, None, "the verdict recording clears current");
+    assert_eq!(
+        sweep.verdicts[2],
+        ProbeVerdict::Failed(FailureReason::Connect),
+        "the failure reason is captured in the probe verdict"
+    );
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(0, 3),
+        "note_failure flows through the probe-mode restore"
+    );
+}
+
+#[test]
+fn sweep_probe_to_non_primary_is_never_hijacked_into_a_failback_probe() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    // A window failover to the backup arms the failback grace with no source.
+    transport.active_resolver = ActiveResolver::at(1, 3);
+    transport.repoint_to_active();
+    transport.failback_due = Some(now + FAILBACK_AFTER_SECS);
+    transport.failback_source = None;
+    // The sweep begins and probes the non-primary index 2.
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, true, true, false, false],
+        active_before: ActiveResolver::at(1, 3),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: Some(2),
+    });
+    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.repoint_to_active();
+    let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
+    let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+    transport
+        .start_exchange(&fqdn, Family::A, 0, deadline)
+        .expect("probe exchange begins");
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(2, 3),
+        "the sweep probe to a non-primary is not re-routed to the primary by failback"
+    );
+    assert_eq!(
+        transport.failback_source, None,
+        "the failback machinery stays unarmed during the sweep probe"
+    );
+    assert_eq!(
+        transport.failback_due,
+        Some(now + FAILBACK_AFTER_SECS),
+        "the pre-existing failback grace is untouched by the sweep probe"
+    );
+}
+
+#[test]
+fn shutdown_aborts_the_sweep_and_drops_partial_verdicts() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, true, true, false, false],
+        active_before: ActiveResolver::at(0, 3),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: Some(2),
+    });
+    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.repoint_to_active();
+    transport.cancel_for_shutdown();
+    assert!(
+        !transport.sweep_active(),
+        "shutdown clears the sweep so partial verdicts are never emitted"
+    );
+    assert!(
+        !transport.has_active_exchange(),
+        "shutdown clears the outstanding probe exchange"
+    );
+}
+
+#[test]
+fn relocate_for_probe_counts_a_dot_to_plain_downgrade_and_restores_it() {
+    let dot_set = {
+        let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+        entries[0] = crate::resolver::select("1.1.1.1#dns.google").expect("dot ns");
+        entries[1] = crate::resolver::select("8.8.8.8").expect("plain ns");
+        ResolverSet::from_slice(&entries[..2]).expect("resolver count fits")
+    };
+    let mut transport = seeded_transport(dot_set);
+    transport
+        .relocate_for_probe(ActiveResolver::at(1, 2))
+        .expect("relocation succeeds");
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(1, 2),
+        "the probe relocation seats the transport onto the probe target"
+    );
+    assert_eq!(transport.peer().ip().to_string(), "8.8.8.8");
+    assert_eq!(
+        transport.take_downgrade_to_plain(),
+        1,
+        "relocating from a DoT primary onto a plain probe target counts a downgrade"
+    );
+    // A failed probe restores the DoT primary, counting the reverse downgrade.
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, false, false, false, false],
+        active_before: ActiveResolver::at(0, 2),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: Some(1),
+    });
+    transport.on_exchange_failed(1_000_000u64);
+    assert_eq!(transport.active_resolver, ActiveResolver::at(0, 2));
+    assert_eq!(
+        transport.take_downgrade_to_plain(),
+        1,
+        "restoring from a plain probe target onto the DoT primary counts a downgrade"
+    );
+}
