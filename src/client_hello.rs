@@ -849,7 +849,10 @@ const fn version_token(version: u16) -> [u8; 2] {
     }
 }
 
-#[expect(clippy::cast_possible_truncation, reason = "count capped at 99 fits u8")]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "count capped at 99 fits u8"
+)]
 const fn count_token(count: usize) -> [u8; 2] {
     let c = if count > 99 { 99 } else { count } as u8;
     [b'0' + c / 10, b'0' + c % 10]
@@ -861,11 +864,7 @@ const fn is_alnum(b: u8) -> bool {
 
 const fn hex_nibble(v: u8) -> u8 {
     let n = v & 0x0f;
-    if n < 10 {
-        b'0' + n
-    } else {
-        b'a' + (n - 10)
-    }
+    if n < 10 { b'0' + n } else { b'a' + (n - 10) }
 }
 
 const fn alpn_token(alpn: &[u8]) -> [u8; 2] {
@@ -1743,14 +1742,16 @@ mod tests {
     #[test]
     fn ja4_v1_published_vector_byte_for_byte() {
         let ciphers = [
-            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b,
-            0xc02c, 0xc02f, 0xc030, 0xcca8, 0xcca9,
+            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b, 0xc02c,
+            0xc02f, 0xc030, 0xcca8, 0xcca9,
         ];
         let ehash_exts = [
-            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b,
-            0x002d, 0x0033, 0x4469, 0xff01,
+            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b, 0x002d,
+            0x0033, 0x4469, 0xff01,
         ];
-        let sigalgs = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601];
+        let sigalgs = [
+            0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
+        ];
         let alpn = alpn_ext(&[b"h2"]);
         let sni = server_name_ext(&[(0, b"sub.example.org")]);
         let sigalgs_data = sigalgs_ext(&sigalgs);
@@ -1775,10 +1776,12 @@ mod tests {
     #[test]
     fn ja4_v4_spec_consistent_vector_byte_for_byte() {
         let ciphers = [
-            0xaaaa, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8,
-            0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
+            0xaaaa, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013,
+            0xc014, 0x009c, 0x009d, 0x002f, 0x0035,
         ];
-        let sigalgs = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601];
+        let sigalgs = [
+            0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
+        ];
         let alpn = alpn_ext(&[&[0xba, 0xad]]);
         let sni = server_name_ext(&[(0, b"sub.example.org")]);
         let sigalgs_data = sigalgs_ext(&sigalgs);
@@ -1810,14 +1813,16 @@ mod tests {
     #[test]
     fn ja4_grease_filtered_from_counts_and_hashes() {
         let ciphers = [
-            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b,
-            0xc02c, 0xc02f, 0xc030, 0xcca8, 0xcca9, 0x1a1a,
+            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b, 0xc02c,
+            0xc02f, 0xc030, 0xcca8, 0xcca9, 0x1a1a,
         ];
         let ehash_exts = [
-            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b,
-            0x002d, 0x0033, 0x4469, 0xff01, 0x2a2a,
+            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b, 0x002d,
+            0x0033, 0x4469, 0xff01, 0x2a2a,
         ];
-        let sigalgs = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601];
+        let sigalgs = [
+            0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
+        ];
         let alpn = alpn_ext(&[b"h2"]);
         let sni = server_name_ext(&[(0, b"sub.example.org")]);
         let sigalgs_data = sigalgs_ext(&sigalgs);
@@ -1880,8 +1885,7 @@ mod tests {
             .collect();
         let out = ja4_fingerprint(0x0303, &ciphers, &exts, &[], &[]);
         assert_eq!(
-            out,
-            *b"t12d190800_e5f6c4506bb0_04d33385c057",
+            out, *b"t12d190800_e5f6c4506bb0_04d33385c057",
             "empty sigalgs must omit the e-hash underscore (JA4.md: no sigalgs -> string ends without underscore)"
         );
     }
@@ -1907,17 +1911,19 @@ mod tests {
 
     /// Byte-for-byte V2 gate: S4 (latest.pcapng stream 3, SNI
     /// discovery.cem.cloud.us) wire lists from evidence bead alumina-2rkgn.
-    /// legacy_version 0303, no 0x002b, no ALPN, no GREASE.
+    /// `legacy_version` 0303, no 0x002b, no ALPN, no GREASE.
     #[test]
     fn ja4_v2_published_vector_byte_for_byte() {
         let ciphers = [
-            0xc02c, 0xc02b, 0xc030, 0xc02f, 0xc024, 0xc023, 0xc028, 0xc027, 0xc00a, 0xc009,
-            0xc014, 0xc013, 0x009d, 0x009c, 0x003d, 0x003c, 0x0035, 0x002f, 0x000a,
+            0xc02c, 0xc02b, 0xc030, 0xc02f, 0xc024, 0xc023, 0xc028, 0xc027, 0xc00a, 0xc009, 0xc014,
+            0xc013, 0x009d, 0x009c, 0x003d, 0x003c, 0x0035, 0x002f, 0x000a,
         ];
-        let exts = [0x0000, 0x0005, 0x000a, 0x000b, 0x000d, 0x0023, 0x0017, 0xff01];
+        let exts = [
+            0x0000, 0x0005, 0x000a, 0x000b, 0x000d, 0x0023, 0x0017, 0xff01,
+        ];
         let sigalgs = [
-            0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0201, 0x0403, 0x0503, 0x0203, 0x0202,
-            0x0601, 0x0603,
+            0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0201, 0x0403, 0x0503, 0x0203, 0x0202, 0x0601,
+            0x0603,
         ];
         let out = ja4_fingerprint(0x0303, &ciphers, &exts, &[], &sigalgs);
         assert_eq!(out, *b"t12d190800_d83cc789557e_7af1ed941c26");
@@ -1925,20 +1931,20 @@ mod tests {
 
     /// Byte-for-byte V3 gate: S5 (tls-alpn-h2.pcap stream 0, SNI
     /// www.cloudflare.com) wire lists from evidence bead alumina-2rkgn.
-    /// legacy_version 0303, no 0x002b, ALPN first value "h2", no GREASE.
+    /// `legacy_version` 0303, no 0x002b, ALPN first value "h2", no GREASE.
     #[test]
     fn ja4_v3_published_vector_byte_for_byte() {
         let ciphers = [
-            0xc030, 0xc02c, 0xc028, 0xc024, 0xc014, 0xc00a, 0x009f, 0x006b, 0x0039, 0xcca9,
-            0xcca8, 0xccaa, 0xff85, 0x00c4, 0x0088, 0x0081, 0x009d, 0x003d, 0x0035, 0x00c0,
-            0x0084, 0xc02f, 0xc02b, 0xc027, 0xc023, 0xc013, 0xc009, 0x009e, 0x0067, 0x0033,
-            0x00be, 0x0045, 0x009c, 0x003c, 0x002f, 0x00ba, 0x0041, 0xc011, 0xc007, 0x0005,
-            0x0004, 0xc012, 0xc008, 0x0016, 0x000a, 0x00ff,
+            0xc030, 0xc02c, 0xc028, 0xc024, 0xc014, 0xc00a, 0x009f, 0x006b, 0x0039, 0xcca9, 0xcca8,
+            0xccaa, 0xff85, 0x00c4, 0x0088, 0x0081, 0x009d, 0x003d, 0x0035, 0x00c0, 0x0084, 0xc02f,
+            0xc02b, 0xc027, 0xc023, 0xc013, 0xc009, 0x009e, 0x0067, 0x0033, 0x00be, 0x0045, 0x009c,
+            0x003c, 0x002f, 0x00ba, 0x0041, 0xc011, 0xc007, 0x0005, 0x0004, 0xc012, 0xc008, 0x0016,
+            0x000a, 0x00ff,
         ];
         let exts = [0x0000, 0x000b, 0x000a, 0x000d, 0x0010];
         let sigalgs = [
-            0x0601, 0x0603, 0xefef, 0x0501, 0x0503, 0x0401, 0x0403, 0xeeee, 0xeded, 0x0301,
-            0x0303, 0x0201, 0x0203,
+            0x0601, 0x0603, 0xefef, 0x0501, 0x0503, 0x0401, 0x0403, 0xeeee, 0xeded, 0x0301, 0x0303,
+            0x0201, 0x0203,
         ];
         let out = ja4_fingerprint(0x0303, &ciphers, &exts, b"h2", &sigalgs);
         assert_eq!(out, *b"t12d4605h2_85626a9a5f7f_aaf95bb78ec9");
@@ -1954,10 +1960,8 @@ mod tests {
     fn retains_sigalgs_values_in_wire_order() {
         let sigalgs = [0x0403u16, 0x0804, 0x0401];
         let data = sigalgs_ext(&sigalgs);
-        let wire = hello_with_extensions(&[
-            (SUPPORTED_VERSIONS, SV),
-            (SIGNATURE_ALGORITHMS, &data),
-        ]);
+        let wire =
+            hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (SIGNATURE_ALGORITHMS, &data)]);
         let ch = parse_one(&wire).expect("parse");
         assert_eq!(ch.sigalgs(), &sigalgs);
     }
@@ -1965,33 +1969,27 @@ mod tests {
     #[test]
     fn sigalgs_odd_length_retains_nothing() {
         let sigalgs = [0x00u8, 0x03, 0x04, 0x03, 0x04];
-        let wire = hello_with_extensions(&[
-            (SUPPORTED_VERSIONS, SV),
-            (SIGNATURE_ALGORITHMS, &sigalgs),
-        ]);
+        let wire =
+            hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (SIGNATURE_ALGORITHMS, &sigalgs)]);
         let ch = parse_one(&wire).expect("parse");
-        assert!(ch.sigalgs().is_empty());
+        assert!(ch.sigalgs().is_empty(), "sigalgs should be empty");
     }
 
     #[test]
     fn sigalgs_declared_len_exceeding_data_retains_nothing() {
         let sigalgs = [0x00u8, 0x64, 0x04, 0x03];
-        let wire = hello_with_extensions(&[
-            (SUPPORTED_VERSIONS, SV),
-            (SIGNATURE_ALGORITHMS, &sigalgs),
-        ]);
+        let wire =
+            hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (SIGNATURE_ALGORITHMS, &sigalgs)]);
         let ch = parse_one(&wire).expect("parse");
-        assert!(ch.sigalgs().is_empty());
+        assert!(ch.sigalgs().is_empty(), "sigalgs should be empty");
     }
 
     #[test]
     fn sigalgs_capped_at_max_sigalgs() {
         let values: Vec<u16> = (0..70u16).map(|i| 0x0400 + i).collect();
         let data = sigalgs_ext(&values);
-        let wire = hello_with_extensions(&[
-            (SUPPORTED_VERSIONS, SV),
-            (SIGNATURE_ALGORITHMS, &data),
-        ]);
+        let wire =
+            hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (SIGNATURE_ALGORITHMS, &data)]);
         let ch = parse_one(&wire).expect("parse");
         assert_eq!(ch.sigalgs().len(), MAX_SIGALGS);
         assert_eq!(ch.sigalgs(), &values[..MAX_SIGALGS]);
@@ -2002,14 +2000,16 @@ mod tests {
     fn ja4_path_is_allocation_free() {
         use crate::alloc::{self, Phase};
         let ciphers = [
-            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b,
-            0xc02c, 0xc02f, 0xc030, 0xcca8, 0xcca9,
+            0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b, 0xc02c,
+            0xc02f, 0xc030, 0xcca8, 0xcca9,
         ];
         let ehash_exts = [
-            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b,
-            0x002d, 0x0033, 0x4469, 0xff01,
+            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b, 0x002d,
+            0x0033, 0x4469, 0xff01,
         ];
-        let sigalgs = [0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601];
+        let sigalgs = [
+            0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
+        ];
         let alpn = alpn_ext(&[b"h2"]);
         let sni = server_name_ext(&[(0, b"sub.example.org")]);
         let sigalgs_data = sigalgs_ext(&sigalgs);
@@ -2029,8 +2029,22 @@ mod tests {
         let wire = hello_with_ciphers_and_extensions(&ciphers, &exts);
         let ch = parse_one(&wire).expect("parse");
         let full_exts = [
-            0x0005, 0x000a, 0x000b, 0x000d, 0x0012, 0x0015, 0x0017, 0x001b, 0x0023, 0x002b,
-            0x002d, 0x0033, 0x4469, 0xff01, SERVER_NAME, ALPN,
+            0x0005,
+            0x000a,
+            0x000b,
+            0x000d,
+            0x0012,
+            0x0015,
+            0x0017,
+            0x001b,
+            0x0023,
+            0x002b,
+            0x002d,
+            0x0033,
+            0x4469,
+            0xff01,
+            SERVER_NAME,
+            ALPN,
         ];
 
         let (out, counts) = alloc::run_phase(Phase::Serving, || {
