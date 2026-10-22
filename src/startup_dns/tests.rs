@@ -2468,7 +2468,7 @@ fn sweep_next_probe_relocates_and_starts_the_first_unprobed_resolver() {
     let sweep = transport.probe_sweep.expect("sweep still active");
     assert_eq!(
         sweep.current,
-        Some(1),
+        Some(ActiveResolver::at(1, 3)),
         "the first unprobed resolver is index 1"
     );
     assert_eq!(
@@ -2531,7 +2531,11 @@ fn sweep_next_probe_returns_false_while_a_probe_is_in_flight() {
         "an in-flight probe defers the next probe rather than starting a second one"
     );
     let sweep = transport.probe_sweep.expect("sweep still active");
-    assert_eq!(sweep.current, Some(1), "the in-flight probe is untouched");
+    assert_eq!(
+        sweep.current,
+        Some(ActiveResolver::at(1, 3)),
+        "the in-flight probe is untouched"
+    );
 }
 
 #[test]
@@ -2543,7 +2547,7 @@ fn failed_probe_advances_probed_degradation_restores_active_and_records_no_failb
         remaining: [false, false, true, false, false],
         active_before: ActiveResolver::at(0, 3),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(2),
+        current: Some(ActiveResolver::at(2, 3)),
     });
     transport.active_resolver = ActiveResolver::at(2, 3);
     transport.repoint_to_active();
@@ -2573,7 +2577,7 @@ fn failed_probe_advances_probed_degradation_restores_active_and_records_no_failb
             .as_ref()
             .expect("sweep active")
             .current,
-        Some(2),
+        Some(ActiveResolver::at(2, 3)),
         "the probe target stays current so the caller records the verdict with its reason"
     );
 }
@@ -2587,7 +2591,7 @@ fn failed_probe_at_threshold_emits_degraded_enter_crossing_for_the_probed_resolv
         remaining: [false, false, true, false, false],
         active_before: ActiveResolver::at(0, 3),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(2),
+        current: Some(ActiveResolver::at(2, 3)),
     });
     transport.active_resolver = ActiveResolver::at(2, 3);
     transport.repoint_to_active();
@@ -2614,7 +2618,7 @@ fn successful_probe_records_ok_resets_probed_and_restores_active() {
         remaining: [false, false, true, false, false],
         active_before: ActiveResolver::at(0, 3),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(2),
+        current: Some(ActiveResolver::at(2, 3)),
     });
     transport.active_resolver = ActiveResolver::at(2, 3);
     transport.repoint_to_active();
@@ -2648,7 +2652,7 @@ fn successful_probe_closes_retained_connection_so_the_next_exchange_redials() {
         remaining: [false, false, true, false, false],
         active_before: ActiveResolver::at(0, 3),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(2),
+        current: Some(ActiveResolver::at(2, 3)),
     });
     transport.active_resolver = ActiveResolver::at(2, 3);
     transport.repoint_to_active();
@@ -2692,7 +2696,7 @@ fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
         remaining: [false, false, true, false, false],
         active_before: ActiveResolver::at(0, 3),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(2),
+        current: Some(ActiveResolver::at(2, 3)),
     });
     transport.active_resolver = ActiveResolver::at(2, 3);
     transport.repoint_to_active();
@@ -2729,7 +2733,7 @@ fn sweep_probe_to_non_primary_is_never_hijacked_into_a_failback_probe() {
         remaining: [false, true, true, false, false],
         active_before: ActiveResolver::at(1, 3),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(2),
+        current: Some(ActiveResolver::at(2, 3)),
     });
     transport.active_resolver = ActiveResolver::at(2, 3);
     transport.repoint_to_active();
@@ -2762,7 +2766,7 @@ fn shutdown_aborts_the_sweep_and_drops_partial_verdicts() {
         remaining: [false, true, true, false, false],
         active_before: ActiveResolver::at(0, 3),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(2),
+        current: Some(ActiveResolver::at(2, 3)),
     });
     transport.active_resolver = ActiveResolver::at(2, 3);
     transport.repoint_to_active();
@@ -2806,7 +2810,7 @@ fn relocate_for_probe_counts_a_dot_to_plain_downgrade_and_restores_it() {
         remaining: [false, false, false, false, false],
         active_before: ActiveResolver::at(0, 2),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(1),
+        current: Some(ActiveResolver::at(1, 2)),
     });
     transport.on_exchange_failed(1_000_000u64);
     assert_eq!(transport.active_resolver, ActiveResolver::at(0, 2));

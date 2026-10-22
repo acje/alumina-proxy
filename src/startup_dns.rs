@@ -707,13 +707,13 @@ impl ProbeVerdict {
 /// The post-window probe sweep state: which configured resolvers remain to be
 /// probed, the active resolver the sweep began from (restored after each probe
 /// and after the sweep), the per-resolver verdicts accumulated so far, and the
-/// index of the probe currently in flight. All fixed-size; no heap.
+/// probe target currently in flight. All fixed-size; no heap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProbeSweep {
     remaining: [bool; MAX_RESOLVERS],
     active_before: ActiveResolver,
     verdicts: [ProbeVerdict; MAX_RESOLVERS],
-    current: Option<usize>,
+    current: Option<ActiveResolver>,
 }
 
 /// The `DoT` identity the transport hands the rustls client for one connection:
@@ -2665,7 +2665,7 @@ impl StartupDns {
         self.start_exchange(fqdn, Family::A, 0, deadline)?;
         if let Some(sweep) = &mut self.probe_sweep {
             sweep.remaining[index] = false;
-            sweep.current = Some(index);
+            sweep.current = Some(target);
         }
         Ok(false)
     }
@@ -2713,10 +2713,11 @@ impl StartupDns {
         // pre-sweep transport. The probe target stays `current` so the caller
         // records the verdict with its reason; the pre-sweep active resolver is
         // restored and relocation/failback arming is suppressed entirely.
-        let probe = self
-            .probe_sweep
-            .as_ref()
-            .and_then(|sweep| sweep.current.map(|index| (index, sweep.active_before)));
+        let probe = self.probe_sweep.as_ref().and_then(|sweep| {
+            sweep
+                .current
+                .map(|target| (target.index(), sweep.active_before))
+        });
         if let Some((probed, active_before)) = probe {
             let was_degraded = self.degradations[probed] == ResolverDegradation::Degraded;
             self.degradations[probed] = self.degradations[probed].note_failure();
@@ -2777,10 +2778,11 @@ impl StartupDns {
         // closes the retained probe-target connection so the next exchange
         // re-dials the restored resolver, and clears the in-flight probe
         // target. The failback machinery is never touched by a sweep probe.
-        let probe = self
-            .probe_sweep
-            .as_ref()
-            .and_then(|sweep| sweep.current.map(|index| (index, sweep.active_before)));
+        let probe = self.probe_sweep.as_ref().and_then(|sweep| {
+            sweep
+                .current
+                .map(|target| (target.index(), sweep.active_before))
+        });
         if let Some((probed, active_before)) = probe {
             let was_degraded = self.degradations[probed] == ResolverDegradation::Degraded;
             self.degradations[probed] = ResolverDegradation::note_success();
@@ -2824,7 +2826,10 @@ impl StartupDns {
         self.on_exchange_failed(now);
         // A probe-mode failure leaves the probe target `current` so the verdict
         // is recorded here with its reason, then the in-flight target clears.
-        let probed = self.probe_sweep.as_ref().and_then(|sweep| sweep.current);
+        let probed = self
+            .probe_sweep
+            .as_ref()
+            .and_then(|sweep| sweep.current.map(|target| target.index()));
         if let Some(index) = probed
             && let Some(sweep) = &mut self.probe_sweep
         {
