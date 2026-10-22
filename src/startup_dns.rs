@@ -924,6 +924,12 @@ pub struct StartupDns {
     /// re-beginning on a later serving turn after its verdicts are taken. Lives
     /// outside [`ProbeSweep`] so the spec-mandated sweep shape stays exact.
     sweep_ran: bool,
+    /// Which configured resolvers the startup window exercised — every resolver
+    /// that became the active resolver at least once, from the seeded primary
+    /// through each failover/failback relocation. The post-window probe sweep
+    /// skips these as already exercised, probing only resolvers the window
+    /// never touched (docs/alumina-proxy.md:826).
+    window_exercised: [bool; MAX_RESOLVERS],
     #[cfg(test)]
     poll_ticks: u64,
     #[cfg(test)]
@@ -993,6 +999,7 @@ impl StartupDns {
             downgrade_to_plain: 0,
             probe_sweep: None,
             sweep_ran: false,
+            window_exercised: [false; MAX_RESOLVERS],
             #[cfg(test)]
             poll_ticks: 0,
             #[cfg(test)]
@@ -1065,6 +1072,7 @@ impl StartupDns {
         self.addr = nameserver;
         self.resolvers = Some(resolvers);
         self.active_resolver = ActiveResolver::primary(resolvers.len());
+        self.mark_window_exercised(self.active_resolver);
         self.tls_target = resolvers.primary().fqdn().map(|fqdn| TlsTarget {
             fqdn: *fqdn,
             pin: resolvers.primary().pin().copied(),
@@ -2132,6 +2140,7 @@ impl StartupDns {
         self.addr = nameserver;
         self.resolvers = Some(*config.resolver_set());
         self.active_resolver = ActiveResolver::primary(config.resolver_set().len());
+        self.mark_window_exercised(self.active_resolver);
         self.tls_target = config
             .resolver_set()
             .primary()
@@ -2238,6 +2247,7 @@ impl StartupDns {
         self.addr = nameserver;
         self.resolvers = Some(*config.resolver_set());
         self.active_resolver = ActiveResolver::primary(config.resolver_set().len());
+        self.mark_window_exercised(self.active_resolver);
         self.tls_target = config
             .resolver_set()
             .primary()
@@ -2540,6 +2550,15 @@ impl StartupDns {
         }
     }
 
+    /// Records that the startup window exercised the given resolver — it became
+    /// the active resolver at least once, from the seeded primary through each
+    /// failover/failback relocation — so the post-window probe sweep skips it
+    /// as already exercised and probes only resolvers the window never touched
+    /// (docs/alumina-proxy.md:826).
+    const fn mark_window_exercised(&mut self, resolver: ActiveResolver) {
+        self.window_exercised[resolver.index()] = true;
+    }
+
     /// The next resolver after the active one, wrapping within the set, that is
     /// not passively degraded. `None` when the set is single-resolver or every
     /// candidate resolver is degraded, in which case the transport stays on the
@@ -2580,6 +2599,7 @@ impl StartupDns {
         self.failback_source = Some(self.active_resolver);
         self.failback_successes = 0;
         self.active_resolver = ActiveResolver::primary(self.active_resolver.set_len());
+        self.mark_window_exercised(self.active_resolver);
         self.failback_due = None;
         self.repoint_to_active();
         Ok(())
@@ -2621,10 +2641,9 @@ impl StartupDns {
         if set.len() <= 1 {
             return;
         }
-        let active_index = self.active_resolver.index();
         let mut remaining = [false; MAX_RESOLVERS];
         for (index, _) in set.iter().enumerate() {
-            remaining[index] = index != active_index;
+            remaining[index] = !self.window_exercised[index];
         }
         self.probe_sweep = Some(ProbeSweep {
             remaining,
@@ -2737,6 +2756,7 @@ impl StartupDns {
         if let Some(source) = self.failback_source {
             self.note_downgrade_if_dot_to_plain(active, source);
             self.active_resolver = source;
+            self.mark_window_exercised(self.active_resolver);
             self.failback_source = None;
             self.failback_successes = 0;
             self.failback_due = Some(now.saturating_add(FAILBACK_AFTER_SECS));
@@ -2748,6 +2768,7 @@ impl StartupDns {
         {
             self.note_downgrade_if_dot_to_plain(active, next);
             self.active_resolver = next;
+            self.mark_window_exercised(self.active_resolver);
             if !next.is_primary() {
                 self.failback_due = Some(now.saturating_add(FAILBACK_AFTER_SECS));
             }

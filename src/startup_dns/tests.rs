@@ -1826,11 +1826,13 @@ fn resolver_set_of(addrs: &[&str]) -> ResolverSet {
 }
 
 /// A transport seated onto a configured resolver set with the primary active,
-/// as [`StartupDns::begin_window`] leaves it.
+/// as [`StartupDns::begin_window`] leaves it: the primary is recorded as
+/// exercised by the startup window.
 fn seeded_transport(set: ResolverSet) -> StartupDns {
     let mut transport = StartupDns::new().unwrap();
     transport.resolvers = Some(set);
     transport.active_resolver = ActiveResolver::primary(set.len());
+    transport.window_exercised[0] = true;
     transport.now0 = 1_000_000;
     transport
 }
@@ -2425,6 +2427,48 @@ fn probe_sweep_begins_for_multi_resolver_set_skipping_the_active_resolver() {
         "every verdict starts as not probed"
     );
     assert_eq!(sweep.current, None, "no probe is in flight yet");
+}
+
+#[test]
+fn probe_sweep_skips_every_resolver_the_window_exercised() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+    let mut transport = seeded_transport(set);
+    transport.active_resolver = ActiveResolver::at(1, 3);
+    transport.window_exercised = [true, true, false, false, false];
+    transport.maybe_begin_sweep();
+    assert!(
+        transport.sweep_active(),
+        "the sweep begins for a multi-resolver set"
+    );
+    let sweep = transport.probe_sweep.expect("sweep began");
+    assert_eq!(
+        sweep.remaining,
+        [false, false, true, false, false],
+        "every resolver the window exercised is skipped; only the untouched index 2 remains"
+    );
+    let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
+    let done = transport.sweep_next_probe(&fqdn).expect("probe starts");
+    assert!(!done, "the single untouched resolver is probed");
+    assert_eq!(
+        transport.probe_sweep.as_ref().expect("sweep").current,
+        Some(ActiveResolver::at(2, 3)),
+        "the probe targets the only unexercised resolver"
+    );
+    let mut schedules = Schedules::new(2).unwrap();
+    transport
+        .note_failure(0, Family::A, &mut schedules, FailureReason::Connect)
+        .expect("failure noted");
+    let sweep = transport.probe_sweep.expect("sweep still active");
+    assert_eq!(
+        sweep.verdicts[1],
+        ProbeVerdict::NotProbed,
+        "the exercised active resolver is never probed and keeps no verdict"
+    );
+    assert_eq!(
+        sweep.verdicts[2],
+        ProbeVerdict::Failed(FailureReason::Connect),
+        "the unexercised resolver receives the probe verdict"
+    );
 }
 
 #[test]
