@@ -160,7 +160,7 @@ These are fixed build-time limits, not optional TOML settings or measured capaci
 | Concurrent tunnels, including setup / pending setups | 512 / 128 |
 | Traffic buffers per tunnel slot | Two 128 KiB buffers, one per direction |
 | Total preallocated tunnel traffic storage | 128 MiB |
-| Retained serving workspace (per-slot CONNECT head + two 64 KiB ClientHello inspector buffers) | 512 × 136 KiB = 68 MiB |
+| Retained serving workspace (per-slot CONNECT head + two 64 KiB ClientHello inspector buffers + JA4 ClientHello retention) | 512 × ~152.4 KiB ≈ 76 MiB (design estimate) |
 | CONNECT headers | 8 KiB |
 | Buffered TLS bytes before authorization, including record framing | 64 KiB |
 | TLS plaintext record payload during inspection | 16 KiB |
@@ -185,7 +185,7 @@ These are fixed build-time limits, not optional TOML settings or measured capaci
 | Startup resolution window | 90 seconds, absolute; includes DNS TCP establishment |
 | Relay idle deadline / EOF drain deadline / shutdown grace period | 300 seconds / 5 seconds / 8 seconds |
 
-Preallocate 512 tunnel slots with two 128 KiB directional buffers each: `512 * 2 * 128 KiB = 128 MiB`. Reuse these buffers across CONNECT parsing, ClientHello inspection, and relay without discarding coalesced tunnel bytes. The separate CONNECT and ClientHello limits still apply; larger relay buffers do not permit larger setup messages. DNS storage, the retained serving workspace (512 × 136 KiB = 68 MiB of per-slot CONNECT head plus two 64 KiB ClientHello inspector buffers), connection metadata, stacks, executable memory, and kernel socket buffers are outside this traffic-storage budget and must be accounted for separately when sizing the container.
+Preallocate 512 tunnel slots with two 128 KiB directional buffers each: `512 * 2 * 128 KiB = 128 MiB`. Reuse these buffers across CONNECT parsing, ClientHello inspection, and relay without discarding coalesced tunnel bytes. The separate CONNECT and ClientHello limits still apply; larger relay buffers do not permit larger setup messages. DNS storage, the retained serving workspace (512 × ~152.4 KiB ≈ 76 MiB of per-slot CONNECT head plus two 64 KiB ClientHello inspector buffers plus the JA4 ClientHello retention, per the JA4 client-fingerprint tripwire amendment), connection metadata, stacks, executable memory, and kernel socket buffers are outside this traffic-storage budget and must be accounted for separately when sizing the container.
 
 The first-iteration target is 1-10 Gbps aggregate relayed payload throughput across both directions, subject to CPU speed, workload, and network limits. At these rates, 128 MiB represents approximately 1.07 seconds to 107 milliseconds of aggregate payload, not a throughput guarantee. Storage is partitioned by tunnel and direction and cannot all absorb a burst on one connection; a 128 KiB directional buffer represents approximately 1.05 milliseconds at 1 Gbps or 0.10 milliseconds at 10 Gbps. Use socket backpressure rather than buffer growth. Benchmark sustained relay and bursts separately; application buffer capacity is not a substitute for TCP window sizing or a measured CPU budget.
 
@@ -300,6 +300,8 @@ All added enforcement and monitoring storage is boot-time allocated from the exi
 | Per-slot latched tripwire fact (phase, class, validated ordinal, generation) | 512 | 8 B | 4096 B |
 | Per-ordinal saturated aggregate counters + overflow + window state | 32 | 32 B | 1024 B |
 | Per-slot last-counted window marker | 512 | 8 B | 4096 B |
+| First-seen JA4 baseline table (36-char JA4 + 1-char present flag + 4-byte IP) | 512 | ~41 B | ~21 KiB |
+| ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions in per-slot `ChInspector`) | 512 | ~16.4 KiB | ~8.2 MiB |
 
 The planned additional control storage totals approximately 9–10 KiB against the existing 128 MiB traffic storage and 2 MiB log queue. Exact sizes are fixed at implementation with `sizeof`-verified types. No pacing credit/burst storage is reserved or preallocated while Tarpit is deferred (no speculative reserved pacing allocation); it is added to this table only if a genuine trigger-catalog decision authorizes Tarpit. Per-turn enforcement work composes with the existing 16-op/64 KiB per-visit budget and at-most-256-visit timer recheck; the per-turn control-step count is a fixed value derived from that native per-visit I/O budget at implementation, not an invented range. Block All's bounded physical closure is the only path that walks the slot table.
 
@@ -869,3 +871,77 @@ The resource-profile table row "DNS exchange deadline | 2 seconds" (`:176`) is a
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array; the individual upstream connect deadline remains 2 seconds (`:174`); the 90-second startup window and its readiness semantics are unchanged; no runtime surface is expanded — the change is a single constant value. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## JA4 client-fingerprint tripwire — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-xfbq8`, 2026-10-22). It defines the JA4 client-fingerprint tripwire surface: the canonical FoxIO JA4 string format, the fixed ClientHello retention and first-seen baseline storage it requires, and its reconciliation with the existing cipher/ALPN policy ban and the initial-ClientHello inspection scope. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. Specification publication precedes implementation; the status table at the end assigns each surface an honest planned/implemented/deferred status.
+
+### JA4 format clause
+
+The tripwire computes the canonical FoxIO JA4 client fingerprint as the fixed 36-character string:
+
+```
+{t/q/d}{ver}{sni d/i}{cipher_count:02}{ext_count:02}{alpn_first_last}_{hash12(ciphers_sorted)}_{hash12(exts_sorted_excl_SNI/ALPN + "_" + sigalgs_unsorted)}
+```
+
+- `t/q/d`: transport — `t` TLS, `q` QUIC, `d` DTLS.
+- `ver`: the TLS version from the `supported_versions` extension (`0x002b`) if present, else the Protocol Version; the `legacy_version` is ignored.
+- `sni d/i`: `d` for a domain SNI, `i` for an IP-address SNI.
+- `cipher_count:02`: two-digit count of offered cipher suites, including SCSV `0x00ff`, after GREASE filtering.
+- `ext_count:02`: two-digit count of extension types, after GREASE filtering.
+- `alpn_first_last`: the first and last ASCII alphanumeric characters of the first ALPN value, per the verbatim rule below.
+- `hash12(ciphers_sorted)`: the first 12 hex characters of the SHA-256 of the GREASE-filtered, sorted cipher-suite list.
+- `hash12(exts_sorted_excl_SNI/ALPN + "_" + sigalgs_unsorted)`: the first 12 hex characters of the SHA-256 of the sorted extension-type list excluding SNI (`0`) and ALPN (`16`), concatenated with `_` and the unsorted signature-algorithms (`13`) list.
+
+**ALPN hex-fallback rule (verbatim from the FoxIO spec, evidence `alumina-jze0p`):**
+
+> "The first and last ASCII alphanumeric characters of the ALPN (Application-Layer Protocol Negotiation) first value."
+>
+> "If there is no ALPN extension, no ALPN values, or the first ALPN value is empty, then we print "00" as the value in the fingerprint. If the first ALPN value is only a single character, then that character is treated as both the first and last character."
+>
+> "If the first or last byte of the first ALPN is not an ASCII alphanumeric character (meaning not `0x30-0x39`, `0x41-0x5A`, or `0x61-0x7A`), then we print the first and last characters of the hex representation of the first ALPN instead."
+
+The spec mandates the hex-fallback; the FoxIO reference implementations (`python/ja4.py` and `rust/ja4`) instead keep ASCII bytes as-is and substitute `'9'` for non-ASCII bytes, and do not implement the hex-fallback. **Alumina follows the spec** (user-confirmed 2026-10-22): a first or last ALPN byte outside `0x30-0x39`, `0x41-0x5A`, or `0x61-0x7A` triggers the hex-fallback.
+
+### Reconciliation with the cipher/ALPN policy ban (`:48`)
+
+Spec `:48` ("do not introduce cipher-suite or ALPN policy") is unchanged. The JA4 tripwire OBSERVES and RETAINS cipher-suite, extension, and ALPN data from the initial ClientHello for fingerprinting only: it introduces NO cipher-suite or ALPN policy, makes no acceptance/rejection decision on them, and exerts no negotiation influence. The retained data is never used to admit, reject, or modify a connection.
+
+### Reconciliation with the inspection scope (`:50`)
+
+Spec `:50` is unchanged. JA4 computes the fingerprint from the INITIAL ClientHello only, matching the existing inspection-scope clause; later handshake messages (including a second ClientHello following a HelloRetryRequest) and encrypted application traffic remain opaque and are never fingerprinted.
+
+### Fixed storage
+
+#### Control-storage table (`:292`-`:304`)
+
+The "Planned fixed control storage" table gains two rows:
+
+| Planned structure | Count | Unit size (bound) | Bound total |
+| --- | --- | --- | --- |
+| First-seen JA4 baseline table (36-char JA4 + 1-char present flag + 4-byte IP) | 512 | ~41 B | ~21 KiB |
+| ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions in per-slot `ChInspector`) | 512 | ~16.4 KiB | ~8.2 MiB |
+
+The first-seen JA4 baseline table holds 512 fixed entries (32 ordinals × 16 addresses = `MAX_ADDRESSES`), each storing the full 36-character JA4 string plus a 1-character present flag plus the 4-byte IP address: ~41 B/entry × 512 ≈ 21 KiB total (design estimate ~21-27 KiB). The ClientHello JA4 retention is the fixed per-slot storage retained in `ClientHello` inside each `ChInspector` by the parser-retention increment: `[u16; 8192]` (16 KiB) + `[u8; 255]` (255 B) + `[u16; 64]` (128 B) = 16,767 B ≈ 16.4 KiB/slot; 512 × 16,767 B ≈ 8.2 MiB. Both figures are design estimates, not measured, consistent with the table header; exact sizes are fixed at implementation with `sizeof`-verified types.
+
+#### Retained serving workspace reconciliation (`:163`/`:188`)
+
+The retained serving workspace figure is reconciled to account for the new ~16.4 KiB/slot ClientHello JA4 retention (linus review Info I1): 512 × (136 KiB + ~16.4 KiB) ≈ 512 × ~152.4 KiB ≈ 76 MiB (design estimate), replacing the previous 512 × 136 KiB = 68 MiB at `:163`/`:188` (the 68 MiB figure recorded in the `alumina-mema` amendment describes that amendment's surface and is superseded for the live profile by this reconciled figure). The added retention is boot-time fixed storage with zero heap allocation or deallocation after boot, consistent with the fixed profile.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| JA4 format published (canonical FoxIO string + ALPN hex-fallback verbatim rule) | Current revision |
+| ClientHello retention (ciphers/extensions/ALPN retained in `ChInspector`) | Implemented (commit c6493d5) |
+| JA4 computation (canonical string byte-for-byte per spec vectors) | Planned — xfbq8.5 |
+| First-seen baseline table (512 entries, zero heap) | Planned — xfbq8.2 |
+| Per-ordinal JA4 monitor counter | Planned — xfbq8.7 |
+| Integration tests | Planned — xfbq8.8 |
+| Boundary verification | Planned — xfbq8.1 |
+| Deploy to gh-report-ops + log watch | Planned — xfbq8.6 |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The JA4 tripwire adds no cipher-suite or ALPN policy (`:48`), inspects only the initial ClientHello (`:50`), and performs zero heap allocation or deallocation after boot. Nothing in this amendment loosens any of these items or restates any profile row differently.
