@@ -2800,7 +2800,8 @@ fn relocate_for_probe_counts_a_dot_to_plain_downgrade_and_restores_it() {
         1,
         "relocating from a DoT primary onto a plain probe target counts a downgrade"
     );
-    // A failed probe restores the DoT primary, counting the reverse downgrade.
+    // A failed probe restores the DoT primary; the plain-to-DoT restore is an
+    // upgrade, so no second downgrade is counted.
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, false, false, false, false],
         active_before: ActiveResolver::at(0, 2),
@@ -2811,7 +2812,7 @@ fn relocate_for_probe_counts_a_dot_to_plain_downgrade_and_restores_it() {
     assert_eq!(transport.active_resolver, ActiveResolver::at(0, 2));
     assert_eq!(
         transport.take_downgrade_to_plain(),
-        1,
-        "restoring from a plain probe target onto the DoT primary counts a downgrade"
+        0,
+        "restoring from a plain probe target onto the DoT primary counts no downgrade"
     );
 }

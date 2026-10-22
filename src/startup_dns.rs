@@ -2718,13 +2718,11 @@ impl StartupDns {
             .as_ref()
             .and_then(|sweep| sweep.current.map(|index| (index, sweep.active_before)));
         if let Some((probed, active_before)) = probe {
-            let active = self.active_resolver;
             let was_degraded = self.degradations[probed] == ResolverDegradation::Degraded;
             self.degradations[probed] = self.degradations[probed].note_failure();
             if !was_degraded && self.degradations[probed] == ResolverDegradation::Degraded {
                 self.resolver_transitions += 1;
             }
-            self.note_downgrade_if_dot_to_plain(active_before, active);
             self.active_resolver = active_before;
             self.repoint_to_active();
             return;
