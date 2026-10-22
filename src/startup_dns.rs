@@ -2705,14 +2705,13 @@ impl StartupDns {
     /// fail-closed); relocation to a non-primary arms the failback grace so the
     /// primary is probed again. While a failback probe is in flight, a failed
     /// probe re-seats onto the backup it came from instead of cascading into
-    /// another failover.
+    /// another failover. While a post-window probe is in flight, a failure
+    /// advances the probed resolver's degradation count but never relocates the
+    /// healthy pre-sweep transport: the probe target stays `current` so the
+    /// caller records the verdict with its reason, and the pre-sweep active
+    /// resolver is restored with relocation/failback arming suppressed
+    /// entirely.
     fn on_exchange_failed(&mut self, now: u64) {
-        // Probe-mode branch: while a post-window probe is in flight the active
-        // transport is the temporary probe target, so a failure advances the
-        // probed resolver's degradation count but never relocates the healthy
-        // pre-sweep transport. The probe target stays `current` so the caller
-        // records the verdict with its reason; the pre-sweep active resolver is
-        // restored and relocation/failback arming is suppressed entirely.
         let probe = self.probe_sweep.as_ref().and_then(|sweep| {
             sweep
                 .current
@@ -2766,18 +2765,19 @@ impl StartupDns {
     /// failback grace untouched, so the primary is still probed on the next
     /// due exchange.
     ///
+    /// A successful post-window probe records an `Ok` verdict against the
+    /// probed resolver, resets its degradation to healthy, restores the
+    /// pre-sweep active transport, closes the retained probe-target connection
+    /// so the next exchange re-dials the restored resolver, and clears the
+    /// in-flight probe target; the failback machinery is never touched by a
+    /// sweep probe.
+    ///
     /// # Errors
     ///
     /// Returns a lifecycle `Transport` error when the retained probe-target
     /// connection cannot be deregistered; the probe verdict and restore are
     /// already recorded before the close is attempted.
     fn on_exchange_succeeded(&mut self) -> Result<(), StartupDnsError> {
-        // Probe-mode branch: a successful post-window probe records an `Ok`
-        // verdict against the probed resolver, resets that resolver's
-        // degradation to healthy, restores the pre-sweep active transport,
-        // closes the retained probe-target connection so the next exchange
-        // re-dials the restored resolver, and clears the in-flight probe
-        // target. The failback machinery is never touched by a sweep probe.
         let probe = self.probe_sweep.as_ref().and_then(|sweep| {
             sweep
                 .current
@@ -2824,8 +2824,6 @@ impl StartupDns {
     ) -> Result<FailureReason, StartupDnsError> {
         let now = self.now_u64();
         self.on_exchange_failed(now);
-        // A probe-mode failure leaves the probe target `current` so the verdict
-        // is recorded here with its reason, then the in-flight target clears.
         let probed = self
             .probe_sweep
             .as_ref()
