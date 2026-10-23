@@ -1067,7 +1067,9 @@ mod tests {
     fn scan_cursor_advances_past_scanned_bytes_on_miss() {
         let mut parser = ConnectParser::new();
         let head = b"CONNECT sub.example.org:443 HTTP/1.1\r\nHost: x\r\n";
-        parser.feed(head).expect("delimiter-free head stays incomplete");
+        parser
+            .feed(head)
+            .expect("delimiter-free head stays incomplete");
         assert_eq!(
             parser.scan_cursor,
             parser.head_len - (END_OF_HEAD.len() - 1),
