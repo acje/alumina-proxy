@@ -183,6 +183,7 @@ pub enum Feed {
 pub struct ConnectParser {
     head: [u8; CONNECT_LIMIT],
     head_len: usize,
+    scan_cursor: usize,
     result: Option<Result<ConnectRequest, ConnectError>>,
 }
 
@@ -198,6 +199,7 @@ impl ConnectParser {
         ConnectParser {
             head: [0u8; CONNECT_LIMIT],
             head_len: 0,
+            scan_cursor: 0,
             result: None,
         }
     }
@@ -224,9 +226,8 @@ impl ConnectParser {
             self.head[self.head_len..self.head_len + take].copy_from_slice(&data[..take]);
             self.head_len += take;
         }
-        let buffered = &self.head[..self.head_len];
-        if let Some(delim) = find_end_of_head(buffered) {
-            let head = &buffered[..delim];
+        if let Some(delim) = self.find_delimiter() {
+            let head = &self.head[..delim];
             self.result = Some(parse_request(head));
             return Ok(Feed::Complete {
                 head_len: delim + END_OF_HEAD.len(),
@@ -237,22 +238,25 @@ impl ConnectParser {
         }
         Ok(Feed::Incomplete)
     }
-}
 
-/// Locates the `\r\n\r\n` head terminator with a bounded O(N) window scan.
-/// The head is capped at `CONNECT_LIMIT` (8 KiB) before this runs, so the
-/// linear scan is bounded by a fixed constant and never scales with the
-/// connection count or stream length (W1-L1b-F6).
-fn find_end_of_head(buf: &[u8]) -> Option<usize> {
-    if buf.len() < END_OF_HEAD.len() {
-        return None;
-    }
-    for i in 0..=buf.len() - END_OF_HEAD.len() {
-        if &buf[i..i + END_OF_HEAD.len()] == END_OF_HEAD {
-            return Some(i);
+    /// Incrementally locates the `\r\n\r\n` head terminator, scanning only the
+    /// window appended since the previous feed. The head is capped at
+    /// `CONNECT_LIMIT` (8 KiB), so the whole scan is bounded by a fixed
+    /// constant; the cursor turns the per-feed full-head rescan from O(N²) into
+    /// O(N) across feeds (W1-L1b-F6).
+    fn find_delimiter(&mut self) -> Option<usize> {
+        if self.head_len < END_OF_HEAD.len() {
+            return None;
         }
+        let start = self.scan_cursor.min(self.head_len - END_OF_HEAD.len());
+        for i in start..=self.head_len - END_OF_HEAD.len() {
+            if &self.head[i..i + END_OF_HEAD.len()] == END_OF_HEAD {
+                return Some(i);
+            }
+        }
+        self.scan_cursor = self.head_len - (END_OF_HEAD.len() - 1);
+        None
     }
-    None
 }
 
 fn parse_request(head: &[u8]) -> Result<ConnectRequest, ConnectError> {
@@ -1057,5 +1061,31 @@ mod tests {
         let head = "CONNECT xn--bcher-kva.example:443 HTTP/1.1\r\n\r\n";
         let req = parse_full(head.as_bytes()).expect("A-label form is ASCII and accepted");
         assert_eq!(req.hostname(), "xn--bcher-kva.example");
+    }
+
+    #[test]
+    fn scan_cursor_advances_past_scanned_bytes_on_miss() {
+        let mut parser = ConnectParser::new();
+        let head = b"CONNECT sub.example.org:443 HTTP/1.1\r\nHost: x\r\n";
+        parser.feed(head).expect("delimiter-free head stays incomplete");
+        assert_eq!(
+            parser.scan_cursor,
+            parser.head_len - (END_OF_HEAD.len() - 1),
+            "a miss must advance the cursor to the last position a delimiter could still start"
+        );
+    }
+
+    #[test]
+    fn incremental_scan_finds_delimiter_straddling_feed_boundary() {
+        let mut parser = ConnectParser::new();
+        parser
+            .feed(b"CONNECT sub.example.org:443 HTTP/1.1\r\nHo")
+            .expect("incomplete");
+        parser.feed(b"st: x\r\n\r").expect("incomplete");
+        let f = parser.feed(b"\n").expect("complete");
+        assert!(
+            matches!(f, Feed::Complete { .. }),
+            "a delimiter split across feeds must still close the head"
+        );
     }
 }
