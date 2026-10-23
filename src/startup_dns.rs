@@ -2659,6 +2659,22 @@ impl StartupDns {
         self.probe_sweep.is_some()
     }
 
+    /// Test-only seam seeding the post-window probe sweep directly, so a
+    /// serving-loop test can exercise the `sweep_active` deferral guard without
+    /// a startup window or a real probe dial. The probe target is seeded
+    /// `current`, so `sweep_next_probe` defers; `resolvers` stays `None`, so
+    /// `repoint_to_active` never overrides the peer seeded by
+    /// `set_peer_for_test`.
+    #[cfg(test)]
+    pub(crate) fn seed_probe_sweep_for_test(&mut self) {
+        self.probe_sweep = Some(ProbeSweep {
+            remaining: [false; MAX_RESOLVERS],
+            active_before: self.active_resolver,
+            verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+            current: Some(self.active_resolver),
+        });
+    }
+
     /// Starts the next probe of the sweep when idle, returning `true` when the
     /// sweep has no unprobed resolver left. The transport is relocated onto the
     /// probe target (closing the retained connection and recording any DoT→plain

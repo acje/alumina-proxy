@@ -238,37 +238,46 @@ fn hot_relay_many_slots_body() {
     let mut expired_closed = false;
     let mut backlog_admitted = false;
     let mut second_visit_turn = [0i32; HOT_SLOTS];
-    while turns < 900 {
-        runtime
-            .turn(Some(Duration::from_millis(2)))
-            .expect("owner turn");
-        turns += 1;
-        let advances = runtime.dns_advances_last_turn;
-        assert!(
-            advances <= DNS_ADVANCE_BOUND,
-            "one owner turn must advance the stalled DNS exchange at most eight steps,                  observed {advances}"
-        );
-        dns_advanced_any |= advances >= 1;
-        expired_closed |= runtime.serving.test_slot_closed(EXPIRED_INDEX);
-        backlog_admitted |= runtime.serving.storage().occupied() >= accept_backlog.len();
-        let mut all_complete = true;
-        for i in 0..HOT_SLOTS {
-            let visits = runtime.serving.test_slot_visits(FIRST_HOT_INDEX + i);
-            if visits >= 2 && second_visit_turn[i] == 0 {
-                second_visit_turn[i] = turns;
-            }
-            if got[i].lock().unwrap().len() < per_slot {
-                all_complete = false;
-            }
-        }
-        dns_receiving |= matches!(
-            runtime.serving.storage().dns().exchange_step(),
-            Some(crate::startup_dns::ExchangeStep::Receiving)
-        );
-        if dns_receiving && all_complete && expired_closed && backlog_admitted {
-            break;
-        }
+    for lane in &got {
+        drop(lane.lock().unwrap());
     }
+    let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        while turns < 900 {
+            runtime
+                .turn(Some(Duration::from_millis(2)))
+                .expect("owner turn");
+            turns += 1;
+            let advances = runtime.dns_advances_last_turn;
+            assert!(
+                advances <= DNS_ADVANCE_BOUND,
+                "one owner turn must advance the stalled DNS exchange at most eight steps,                  observed {advances}"
+            );
+            dns_advanced_any |= advances >= 1;
+            expired_closed |= runtime.serving.test_slot_closed(EXPIRED_INDEX);
+            backlog_admitted |= runtime.serving.storage().occupied() >= accept_backlog.len();
+            let mut all_complete = true;
+            for i in 0..HOT_SLOTS {
+                let visits = runtime.serving.test_slot_visits(FIRST_HOT_INDEX + i);
+                if visits >= 2 && second_visit_turn[i] == 0 {
+                    second_visit_turn[i] = turns;
+                }
+                if got[i].lock().unwrap().len() < per_slot {
+                    all_complete = false;
+                }
+            }
+            dns_receiving |= matches!(
+                runtime.serving.storage().dns().exchange_step(),
+                Some(crate::startup_dns::ExchangeStep::Receiving)
+            );
+            if dns_receiving && all_complete && expired_closed && backlog_admitted {
+                break;
+            }
+        }
+    });
+    assert!(
+        counts.all_zero(),
+        "the composed serving owner loop must allocate/deallocate nothing: {counts:?}"
+    );
     stop.store(true, Ordering::SeqCst);
     let tails: Vec<Vec<u8>> = got
         .iter()
@@ -328,6 +337,73 @@ fn hot_relay_many_slots_body() {
             "hot relay {i} bytes byte-exact"
         );
     }
+}
+
+#[test]
+fn due_refresh_is_deferred_while_probe_sweep_owns_the_transport() {
+    let t = std::thread::Builder::new()
+        .name("runtime-sweep-deferral".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(due_refresh_is_deferred_while_probe_sweep_owns_the_transport_body)
+        .expect("spawn sweep-deferral thread");
+    t.join().expect("sweep-deferral thread");
+}
+
+fn due_refresh_is_deferred_while_probe_sweep_owns_the_transport_body() {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+    let (responder_addr, responder) = spawn_stall_responder();
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .seed_probe_sweep_for_test();
+
+    let secs = runtime.serving().storage().dns().now_u64();
+    runtime
+        .serving
+        .storage_mut()
+        .schedules_mut()
+        .overwrite_due_at(0, Family::A, secs)
+        .expect("due now for the deferred-refresh probe");
+    runtime
+        .turn(Some(Duration::from_millis(2)))
+        .expect("owner turn");
+
+    assert!(
+        runtime.serving().storage().dns().sweep_active(),
+        "the probe sweep must still own the transport while the refresh is deferred"
+    );
+    assert_eq!(
+        runtime.serving().storage().schedules().next_selectable_due(secs),
+        Some(secs),
+        "the due refresh slot must remain selectable (never consumed by select_due) \
+         while the probe sweep owns the transport"
+    );
+
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .take_sweep_verdicts();
+    runtime
+        .turn(Some(Duration::from_millis(2)))
+        .expect("owner turn");
+    assert!(
+        runtime.serving().storage().dns().has_active_exchange(),
+        "the deferred refresh must start once the sweep terminates via sweep_ran"
+    );
+
+    drop(responder);
 }
 
 fn read_exact(sock: &mut TcpStream, buf: &mut [u8]) -> io::Result<()> {
