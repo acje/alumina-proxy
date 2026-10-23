@@ -256,7 +256,7 @@ mod fixed_hostname_tests {
         assert!(FixedHostname::normalize(b"-bad.example.org").is_none());
         assert!(FixedHostname::normalize(b"bad-.example.org").is_none());
         assert!(FixedHostname::normalize(b"double..dot.example.org").is_none());
-        assert!(FixedHostname::normalize(b"non_ascii_example.org").is_none());
+        assert!(FixedHostname::normalize(b"under_score.example.org").is_none());
     }
 
     #[test]
@@ -1612,5 +1612,80 @@ mod resolver_config_tests {
             "compact 32-name fit form with resolver must still be documented; measured {}",
             compact.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod authorization_boundary_tests {
+    use super::*;
+
+    fn config() -> Config {
+        parse_config_document(
+            "allowlist = [\"sub.example.org:443\", \"other.test:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n",
+        )
+        .expect("valid config")
+    }
+
+    #[test]
+    fn allowlist_position_matches_exact_pair_only() {
+        let cfg = config();
+        assert_eq!(cfg.allowlist_position("sub.example.org", 443), Some(0));
+        assert_eq!(cfg.allowlist_position("other.test", 443), Some(1));
+    }
+
+    #[test]
+    fn allowlist_position_rejects_trailing_dot_and_case_variants() {
+        let cfg = config();
+        // The predicate is exact-bytes on the normalized stored name; a
+        // trailing dot or case variant must not authorize (a trailing-dot
+        // CONNECT that survived normalize would otherwise be a bypass).
+        assert_eq!(cfg.allowlist_position("sub.example.org.", 443), None);
+        assert_eq!(cfg.allowlist_position("SUB.EXAMPLE.ORG", 443), None);
+        assert_eq!(cfg.allowlist_position("Sub.Example.Org", 443), None);
+    }
+
+    #[test]
+    fn allowlist_position_rejects_superstring_and_substring() {
+        let cfg = config();
+        assert_eq!(cfg.allowlist_position("xsub.example.org", 443), None);
+        assert_eq!(cfg.allowlist_position("example.org", 443), None);
+        assert_eq!(
+            cfg.allowlist_position("sub.example.org.evil.test", 443),
+            None
+        );
+    }
+
+    #[test]
+    fn allowlist_position_rejects_empty_hostname_and_wrong_port() {
+        let cfg = config();
+        assert_eq!(cfg.allowlist_position("", 443), None);
+        assert_eq!(cfg.allowlist_position("sub.example.org", 8443), None);
+        assert_eq!(cfg.allowlist_position("sub.example.org", 0), None);
+    }
+
+    #[test]
+    fn fqdn_parse_accepts_ascii_alabel_and_rejects_raw_utf8() {
+        // Spec :61 permits IDNs only in A-label (xn--…) form; the A-label is
+        // lowercase ASCII and must parse, while raw UTF-8 must be rejected.
+        let alabel = Fqdn::parse("xn--bcher-kva.example:443").expect("A-label parses");
+        assert_eq!(alabel.as_str(), "xn--bcher-kva.example");
+        assert_eq!(alabel.port(), 443);
+        let err = Fqdn::parse("bücher.example:443").expect_err("raw UTF-8 rejected");
+        assert!(
+            err.contains("not lowercase ASCII"),
+            "expected label-charset rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_accepts_alabel_and_rejects_real_non_ascii_bytes() {
+        let alabel =
+            FixedHostname::normalize(b"xn--bcher-kva.example").expect("A-label normalizes");
+        assert_eq!(alabel.as_bytes(), b"xn--bcher-kva.example");
+        // Real UTF-8 (>0x7F) must hit the `!input.is_ascii()` reject branch,
+        // unlike the pure-ASCII underscore label exercised by
+        // `rejects_malformed_labels`.
+        assert!(FixedHostname::normalize("bücher.example".as_bytes()).is_none());
+        assert!(FixedHostname::normalize("b\u{e9}cher.example".as_bytes()).is_none());
     }
 }
