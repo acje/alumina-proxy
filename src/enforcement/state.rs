@@ -160,8 +160,8 @@ impl Enforcement {
         self.monitor.note_fact_downgrade_to_plain();
     }
 
-    pub(crate) const fn note_fact_ja4_change(&mut self, ordinal: DomainOrdinal) {
-        self.monitor.note_fact_ja4_change(ordinal);
+    pub(crate) const fn note_fact_ja4_change(&mut self, ordinal: DomainOrdinal, ja4: [u8; 36]) {
+        self.monitor.note_fact_ja4_change(ordinal, ja4);
     }
 
     pub(crate) const fn note_serving_stale(&mut self) {

@@ -5,7 +5,7 @@ use crate::config::ALLOWLIST_MAX;
 
 pub(crate) const CAPTURE_DETAIL_LEN: usize = 64;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct FactCounters {
     pub(crate) any_illegal: [SaturatingCounter; AnyIllegalCause::KIND_COUNT],
     pub(crate) early_data: [SaturatingCounter; ALLOWLIST_MAX],
@@ -14,6 +14,22 @@ pub struct FactCounters {
     pub(crate) dns_anomaly: [SaturatingCounter; DnsAnomalyKind::COUNT],
     pub(crate) downgrade_to_plain: SaturatingCounter,
     pub(crate) ja4_change: [SaturatingCounter; ALLOWLIST_MAX],
+    pub(crate) ja4_value: [[u8; 36]; ALLOWLIST_MAX],
+}
+
+impl Default for FactCounters {
+    fn default() -> Self {
+        FactCounters {
+            any_illegal: std::array::from_fn(|_| SaturatingCounter::new()),
+            early_data: std::array::from_fn(|_| SaturatingCounter::new()),
+            unknown: std::array::from_fn(|_| SaturatingCounter::new()),
+            resolver_degraded: SaturatingCounter::new(),
+            dns_anomaly: std::array::from_fn(|_| SaturatingCounter::new()),
+            downgrade_to_plain: SaturatingCounter::new(),
+            ja4_change: std::array::from_fn(|_| SaturatingCounter::new()),
+            ja4_value: [[0; 36]; ALLOWLIST_MAX],
+        }
+    }
 }
 
 /// The typed DNS anomaly surface folded into the monitor alongside the
@@ -188,9 +204,11 @@ impl Monitor {
     /// Counts one first-seen JA4 baseline deviation for an ordinal: the
     /// serving path records a JA4 for a `(ordinal, addr)` pair that differs
     /// from the pair's first-seen baseline. The per-ordinal counter is an
-    /// event fold, emitted by the monitor record's JA4-change surface.
-    pub(crate) const fn note_fact_ja4_change(&mut self, ordinal: DomainOrdinal) {
+    /// event fold, emitted by the monitor record's JA4-change surface; the
+    /// 36-byte value is retained as the latest changed JA4 for the ordinal.
+    pub(crate) const fn note_fact_ja4_change(&mut self, ordinal: DomainOrdinal, ja4: [u8; 36]) {
         self.facts.ja4_change[ordinal.get()].bump();
+        self.facts.ja4_value[ordinal.get()] = ja4;
         self.dirty = true;
     }
 
@@ -303,6 +321,10 @@ impl Monitor {
 
     pub(crate) const fn facts_ja4_change(&self, ordinal: DomainOrdinal) -> u32 {
         self.facts.ja4_change[ordinal.get()].value()
+    }
+
+    pub(crate) const fn facts_ja4_value(&self, ordinal: DomainOrdinal) -> [u8; 36] {
+        self.facts.ja4_value[ordinal.get()]
     }
 
     #[cfg(test)]
@@ -506,6 +528,9 @@ impl Monitor {
         for c in &mut self.facts.ja4_change {
             c.saturate_for_test();
         }
+        self.facts
+            .ja4_value
+            .fill(*b"t13d1516h2_8daaf6152771_02713d6af862");
         for c in &mut self.actions.first_slot_block {
             c.saturate_for_test();
         }
@@ -664,7 +689,7 @@ pub(crate) mod tests {
         let mut m = Monitor::new();
         assert_eq!(m.facts_total(), 0, "no change means no fold");
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
-        m.note_fact_ja4_change(ordinal);
+        m.note_fact_ja4_change(ordinal, *b"t13d1516h2_8daaf6152771_02713d6af862");
         assert_eq!(
             m.facts_total(),
             1,

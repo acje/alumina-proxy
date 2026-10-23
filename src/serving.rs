@@ -2736,7 +2736,9 @@ impl Serving {
         self.slots[index].ja4_seen = true;
         let outcome = self.ja4_baseline.record(ordinal, dest_ip, ja4);
         if outcome == BaselineOutcome::Changed {
-            self.storage.enforcement_mut().note_fact_ja4_change(ordinal);
+            self.storage
+                .enforcement_mut()
+                .note_fact_ja4_change(ordinal, ja4);
         }
     }
 

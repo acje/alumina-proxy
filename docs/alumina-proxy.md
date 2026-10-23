@@ -945,3 +945,24 @@ The retained serving workspace figure is reconciled to account for the new ~16.5
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The JA4 tripwire adds no cipher-suite or ALPN policy (`:48`), inspects only the initial ClientHello (`:50`), and performs zero heap allocation or deallocation after boot. Nothing in this amendment loosens any of these items or restates any profile row differently, except the enumerated serving-workspace reconciliation at `:163`/`:188` (512 × ~152.4 KiB ≈ 76 MiB, replacing the prior 68 MiB figure).
+
+## C1 JA4 change-signal value — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-c1-1023`, 2026-10-23). It extends the JA4 client-fingerprint tripwire surface to carry the 36-byte JA4 value of the latest changed fingerprint into the JA4 change signal, so a Changed flare emits `d<j>j=N d<j>v="<36-char-ja4>"` in the `level=info kind=monitor` record, zero-suppressed together. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. Specification publication precedes implementation; the status table at the end assigns each surface an honest planned/implemented/deferred status.
+
+### Amended surface
+
+The per-ordinal JA4 change signal (JA4 amendment, the `d<j>j` counter) gains a companion 36-byte value: when a Changed baseline outcome flares the per-ordinal counter, the serving path also stores the full 36-byte JA4 of the changed fingerprint as the latest changed JA4 for that ordinal. The monitor record emits both fields together, zero-suppressed as a unit: `d<j>j=N d<j>v="<36-char-ja4>"` appears only when the ordinal's change counter is nonzero; a no-change ordinal emits neither. The value is retained per ordinal in a fixed `[[u8; 36]; ALLOWLIST_MAX]` table (32 × 36 = 1,152 B), boot-time fixed storage with zero heap allocation or deallocation after boot, consistent with the fixed profile.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Per-ordinal 36-byte JA4 value table (`[[u8; 36]; ALLOWLIST_MAX]`, zero heap) | Implemented (this revision) |
+| Changed flare emits `d<j>j=N d<j>v="<36-char-ja4>"` (zero-suppressed together) | Implemented (this revision) |
+| No-change ordinal emits neither `d<j>j` nor `d<j>v` | Implemented (this revision) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The C1 value table is boot-time fixed storage (32 × 36 = 1,152 B) with zero heap allocation or deallocation after boot; the baseline table semantics are unchanged (a baseline is never updated after first-seen). Nothing in this amendment loosens any of these items or restates any profile row differently.

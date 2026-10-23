@@ -419,6 +419,25 @@ fn push_indexed_quoted(w: &mut Entry<'_>, key: &[u8], index: u32, text: &str) ->
     true
 }
 
+fn push_indexed_key_quoted(
+    w: &mut Entry<'_>,
+    key: &[u8],
+    index: u32,
+    suffix: &[u8],
+    text: &str,
+) -> bool {
+    if !w.push(b" ") || !w.push(key) {
+        return false;
+    }
+    if fmt::Write::write_fmt(w, format_args!("{index}")).is_err() {
+        return false;
+    }
+    if !w.push(suffix) || !w.push(b"=\"") || !push_escaped(w, text) || !w.push(b"\"") {
+        return false;
+    }
+    true
+}
+
 fn push_indexed_token(w: &mut Entry<'_>, key: &[u8], index: u32, token: &str) -> bool {
     if !w.push(b" ") || !w.push(key) {
         return false;
@@ -699,16 +718,27 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
             return None;
         }
         let ja4_changes = monitor.facts_ja4_change(ordinal);
-        if ja4_changes > 0
-            && !push_indexed_key_u64(
+        if ja4_changes > 0 {
+            if !push_indexed_key_u64(
                 &mut w,
                 b"d",
                 u32::try_from(index).expect("allowlist ordinal fits u32"),
                 b"j",
                 u64::from(ja4_changes),
-            )
-        {
-            return None;
+            ) {
+                return None;
+            }
+            let ja4 = monitor.facts_ja4_value(ordinal);
+            let ja4 = std::str::from_utf8(&ja4).expect("ja4 is ASCII");
+            if !push_indexed_key_quoted(
+                &mut w,
+                b"d",
+                u32::try_from(index).expect("allowlist ordinal fits u32"),
+                b"v",
+                ja4,
+            ) {
+                return None;
+            }
         }
     }
     for i in 0..monitor.capture_detail_len() {
@@ -2074,7 +2104,7 @@ mod tests {
         m.note_fact_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         m.note_fact_early_data(ordinal);
-        m.note_fact_ja4_change(ordinal);
+        m.note_fact_ja4_change(ordinal, *b"t13d1516h2_8daaf6152771_02713d6af862");
         m.note_action_first_slot_block(AnyIllegalScope::Connection);
         m.note_action_domain_block(ordinal);
         m.note_action_flare(ordinal);
@@ -2087,7 +2117,8 @@ mod tests {
             "level=info kind=monitor secs=7 facts_total=7 actions_total=3 refusals_total=0 \
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
              ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 bv=1 \
-             c14=2 unk3=1 d0f=1 d0b=1 d0l=1 d0j=1\n",
+             c14=2 unk3=1 d0f=1 d0b=1 d0l=1 d0j=1 \
+             d0v=\"t13d1516h2_8daaf6152771_02713d6af862\"\n",
             "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
         );
         assert!(
@@ -2134,6 +2165,10 @@ mod tests {
         assert!(
             text.contains(" d0j=1"),
             "the per-ordinal ja4-change fold carries its key: {text}"
+        );
+        assert!(
+            text.contains(" d0v=\"t13d1516h2_8daaf6152771_02713d6af862\""),
+            "the per-ordinal ja4-change value carries the 36-char JA4: {text}"
         );
         assert!(
             !text.contains("d1j="),

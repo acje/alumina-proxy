@@ -7064,6 +7064,15 @@ fn ja4_first_seen_records_baseline_without_signal() {
             0,
             "first-seen records the baseline and never flares a change signal"
         );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_value(ordinal),
+            [0; 36],
+            "first-seen records the baseline and never stores a changed JA4 value"
+        );
     });
 }
 
@@ -7116,6 +7125,15 @@ fn ja4_deviation_flares_signal_once_per_connection() {
             1,
             "a deviation flares exactly one change signal"
         );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_value(ordinal),
+            deviated,
+            "the latest changed JA4 value is retained for the ordinal"
+        );
 
         // At-most-once: a second record attempt on the same connection is inert.
         serving.maybe_record_ja4_baseline(0);
@@ -7141,6 +7159,15 @@ fn ja4_deviation_flares_signal_once_per_connection() {
                 .facts_ja4_change(ordinal),
             2,
             "a later connection with the deviated JA4 flares again"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_value(ordinal),
+            deviated,
+            "the retained value stays the latest changed JA4"
         );
     });
 }
@@ -7169,6 +7196,15 @@ fn ja4_baseline_defers_until_dial_persists_dest_ip() {
                 .facts_ja4_change(ordinal),
             0,
             "a deferred baseline never flares before the IP is known"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_value(ordinal),
+            [0; 36],
+            "a deferred baseline never stores a changed JA4 value before the IP is known"
         );
         serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
         serving.maybe_record_ja4_baseline(0);
@@ -7269,6 +7305,15 @@ fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
             1,
             "a deviation flares exactly one change signal"
         );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_value(ordinal),
+            deviated,
+            "the changed JA4 value is retained for the ordinal"
+        );
 
         // The forced monitor summary folds the flared counter into the dNj
         // per-ordinal field of one committed monitor record.
@@ -7296,6 +7341,12 @@ fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
         assert!(
             text.contains(&key),
             "the flared ja4-change counter reaches the monitor record as {key}: {text}"
+        );
+        let deviated_text = std::str::from_utf8(&deviated).expect("ja4 is ASCII");
+        let value_key = format!(" d{}v=\"{deviated_text}\"", ordinal.get());
+        assert!(
+            text.contains(&value_key),
+            "the changed 36-char JA4 value reaches the monitor record as {value_key}: {text}"
         );
     });
 }
