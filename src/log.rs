@@ -1342,11 +1342,12 @@ impl LogStore {
     /// immediate `process::exit` that follows (docs/alumina-proxy.md:220). The caller
     /// drains once after this, and the drain is bounded/nonblocking so a
     /// stalled stdout can never delay the exit verdict.
-    pub(crate) fn shutdown_final(&mut self, secs: u64, status: ShutdownStatus) {
+    pub(crate) fn shutdown_final(&mut self, secs: u64, status: ShutdownStatus, dropped: u64) {
         self.set_now(secs);
         let fields = [
             Field::new("secs", Val::U64(secs)),
             Field::new("status", Val::Str(status.as_str())),
+            Field::new("dropped", Val::U64(dropped)),
         ];
         self.enqueue(Level::Info, Kind::ShutdownFinal, &fields);
     }
@@ -2375,7 +2376,7 @@ mod tests {
             guard += 1;
         }
         assert_eq!(store.len(), QUEUE_SLOTS - 1, "fill leaves one free slot");
-        store.shutdown_final(101, ShutdownStatus::Drained);
+        store.shutdown_final(101, ShutdownStatus::Drained, store.dropped());
         assert_eq!(
             store.len(),
             QUEUE_SLOTS,
@@ -2399,6 +2400,18 @@ mod tests {
         assert!(
             text.contains("kind=shutdown_final"),
             "the shutdown verdict remains emitted despite the refused monitor: {text}"
+        );
+    }
+
+    #[test]
+    fn shutdown_final_record_carries_the_dropped_count() {
+        let (mut store, mut file) = file_logstore();
+        store.shutdown_final(101, ShutdownStatus::Drained, store.dropped());
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            text.contains("dropped=0"),
+            "the shutdown verdict names the dropped-record count: {text}"
         );
     }
 

@@ -131,10 +131,11 @@ impl Preallocated {
             .serving
             .shutdown_exit()
             .map_or(crate::log::ShutdownStatus::Drained, ShutdownExit::status);
+        let dropped = self.serving.storage().log_dropped();
         self.serving
             .storage_mut()
             .logs_mut()
-            .shutdown_final(secs, status);
+            .shutdown_final(secs, status, dropped);
         self.serving.storage_mut().report_monitor_if_due(now, true);
         self.serving.storage_mut().logs_mut().drain_sink();
     }
@@ -360,10 +361,11 @@ impl Runtime {
     pub(crate) fn emit_shutdown_record_and_drain(&mut self, exit: ShutdownExit) {
         let now = Instant::now();
         let secs = self.serving.storage().cache_secs(now);
+        let dropped = self.serving.storage().log_dropped();
         self.serving
             .storage_mut()
             .logs_mut()
-            .shutdown_final(secs, exit.status());
+            .shutdown_final(secs, exit.status(), dropped);
         self.serving.storage_mut().report_monitor_if_due(now, true);
         self.serving.storage_mut().logs_mut().drain_sink();
     }
