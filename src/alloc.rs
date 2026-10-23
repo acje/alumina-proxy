@@ -54,12 +54,13 @@ pub struct Counts {
     pub allocs: u64,
     pub deallocs: u64,
     pub reallocs: u64,
+    pub unphased: u64,
 }
 
 impl Counts {
     #[must_use]
     pub const fn all_zero(self) -> bool {
-        self.allocs == 0 && self.deallocs == 0 && self.reallocs == 0
+        self.allocs == 0 && self.deallocs == 0 && self.reallocs == 0 && self.unphased == 0
     }
 }
 
@@ -68,11 +69,15 @@ type PhaseCounts = [[u64; 3]; NAMED_PHASES];
 thread_local! {
     static CURRENT_PHASE: Cell<Option<Phase>> = const { Cell::new(None) };
     static MEASURED: Cell<PhaseCounts> = const { Cell::new([[0; 3]; NAMED_PHASES]) };
+    static UNPHASED: Cell<u64> = const { Cell::new(0) };
 }
 
 fn measure(event: Event) {
     let phase = CURRENT_PHASE.try_with(Cell::get).unwrap_or(None);
     let Some(phase) = phase else {
+        let _ = UNPHASED.try_with(|cell| {
+            cell.set(cell.get().saturating_add(1));
+        });
         return;
     };
     let p = phase.index();
@@ -96,16 +101,19 @@ impl Drop for PhaseGuard {
 
 pub fn run_phase<R>(phase: Phase, f: impl FnOnce() -> R) -> (R, Counts) {
     let before = MEASURED.with(Cell::get);
+    let unphased_before = UNPHASED.with(Cell::get);
     let _guard = PhaseGuard {
         prev: CURRENT_PHASE.with(|cell| cell.replace(Some(phase))),
     };
     let value = f();
     let after = MEASURED.with(Cell::get);
+    let unphased_after = UNPHASED.with(Cell::get);
     let p = phase.index();
     let counts = Counts {
         allocs: after[p][0] - before[p][0],
         deallocs: after[p][1] - before[p][1],
         reallocs: after[p][2] - before[p][2],
+        unphased: unphased_after - unphased_before,
     };
     (value, counts)
 }
@@ -174,3 +182,44 @@ unsafe impl GlobalAlloc for Counting {
 #[cfg(feature = "alloc-witness")]
 #[global_allocator]
 static WITNESS: Counting = Counting;
+
+#[cfg(all(test, feature = "alloc-witness"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unphased_allocations_are_counted_not_dropped() {
+        let before = UNPHASED.with(Cell::get);
+        let _ = std::hint::black_box(Box::new([0u8; 64]));
+        let after = UNPHASED.with(Cell::get);
+        assert!(
+            after > before,
+            "an allocation with no active phase must be counted, not silently dropped"
+        );
+    }
+
+    #[test]
+    fn pre_window_unphased_allocations_are_absorbed_into_baseline() {
+        let _ = std::hint::black_box(Box::new([0u8; 64]));
+        let ((), counts) = run_phase(Phase::Serving, || {});
+        assert_eq!(
+            counts.unphased, 0,
+            "a pre-window unphased allocation must be absorbed into the run_phase baseline"
+        );
+    }
+
+    #[test]
+    fn in_window_allocations_are_attributed_to_the_phase() {
+        let ((), counts) = run_phase(Phase::Serving, || {
+            let _ = std::hint::black_box(Box::new([0u8; 64]));
+        });
+        assert!(
+            counts.allocs > 0,
+            "an in-window allocation must be attributed to the active phase"
+        );
+        assert_eq!(
+            counts.unphased, 0,
+            "an in-window allocation must not be counted as unphased"
+        );
+    }
+}
