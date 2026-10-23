@@ -123,10 +123,14 @@ claim), and this repo never provisions VMs, connections or images.
 
 `config.example.toml` (allowlist `["api.github.com:443", "example.com:443",
 "www.example.net:443"]`, resolver
-`["1.1.1.1#cloudflare-dns.com", "8.8.8.8#dns.google", "9.9.9.9#dns.quad9.net",
-"208.67.222.222#dns.opendns.com", "94.140.14.14#dns.adguard.com"]` —
-`IP#fqdn` entries carrying each resolver's validated DoT hostname, the V37
-golden path) documents a fixed, non-secret configuration shape; it is
+`["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+"8.8.8.8#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+"9.9.9.9#dns.quad9.net#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+"208.67.222.222#dns.opendns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+"94.140.14.14#dns.adguard.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]` —
+`IP#fqdn#pin-sha256=<b64>` strict-pin entries carrying each resolver's validated
+DoT hostname and SPKI pin (the V5 strict-pin form, null-pin syntax placeholders)
+documents a fixed, non-secret configuration shape; it is
 **illustrative only and executed by nothing**. The fixture runner stages its own
 fixed inputs; `validate.sh` never reads the example. Specifying it as a runnable
 input, or relabelling the fixture gate's inputs as the example, would be a false
@@ -140,7 +144,7 @@ real-world HTTPS API target) and illustrative `example.com:443` /
 `www.example.net:443` — so HTTPS and NATS transports can be reasoned about
 against Alumina's fixed wire contract, with **zero `alumina-proxy` code
 changes**. The contract (`docs/alumina-proxy.md:17-50,200-202`) requires: (1)
-an explicit `HTTP/1.1`/`HTTP/1.0` `CONNECT <fqdn>:<port>` whose port exactly
+an explicit `HTTP/1.1` `CONNECT <fqdn>:<port>` whose port exactly
 matches the allowlisted entry; (2) the **client speaks first**,
 immediately after `200 Connection established`, with a TLS 1.3 `ClientHello`
 whose SNI equals `<fqdn>` (Barrier A); (3) the upstream server sends **zero

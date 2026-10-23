@@ -4,8 +4,8 @@ allowlist = ["api.github.com:443", "example.com:443", "www.example.net:443"]
 listen = "127.0.0.1:5353"
 startup_unresolved_allowance = 0
 # Validated resolver set: 1..=5 numeric unicast IPv4/IPv6 addresses, no zone
-# identifiers, each in one of three forms (docs/alumina-proxy.md:62 / the
-# alumina-dot-chain amendment, Package 1 + Package 2):
+# identifiers, each in one of three forms (docs/alumina-proxy.md:567,616,651 /
+# the alumina-dot-chain amendment, Package 1 + Package 2):
 #   IP                  -- plain DNS, port 53 (tolerated degraded trust; warns)
 #   IP#fqdn             -- DoT, port 853, CA-chain validation
 #   IP#fqdn#pin-sha256= -- DoT, port 853, STRICT SPKI pin + FQDN/SAN validation
