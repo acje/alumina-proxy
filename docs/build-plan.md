@@ -183,7 +183,7 @@ deadline continue.
 ## 7. Explicit build non-goals and unresolved risks
 
 - **Non-goals:** no Tokio/async runtime, multi-thread path, UDP/QUIC, HTTP/2
-  CONNECT, transparent interception, DNS-over-TLS/HTTPS, control/metrics/
+  CONNECT, transparent interception, DNS-over-HTTPS, control/metrics/
   readiness surface, automatic fallback (same set as architecture §9).
 - **Open risks (explicit, honest):**
   1. mio/transitive alloc-freedom not yet evidenced (F3).

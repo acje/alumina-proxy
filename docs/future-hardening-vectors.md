@@ -81,7 +81,8 @@ a DNSSEC dependent.
 | **0x20 case randomization** | **Absent** | no match in `src/` |
 | **QNAME minimization (RFC 7816)** | **Absent** | no match in `src/` |
 | **EDNS0 / DO bit / DNSSEC validation** | **Absent** | `docs/alumina-proxy.md:63` (explicitly out of scope) |
-| **DoT / DoH / DNSCrypt / DoQ** | **Absent** | `docs/alumina-proxy.md:63`; `build-plan.md:186` (non-goal) |
+| **DoT** | **Implemented** | DoT on port 853 for `IP#fqdn` / strict-pin `IP#fqdn#pin-sha256=<b64>` entries (`alumina-dot-chain-v1-v5`; `src/startup_dns.rs:702-759`, `src/resolver.rs:202`) |
+| **DoH / DNSCrypt / DoQ** | **Absent** | no match in `src/` |
 | **Multi-resolver failover / split-horizon cross-check** | **Partial** | failover/failback among the config-declared `resolver` array implemented (`alumina-hrdn4`, `src/startup_dns.rs`); split-horizon cross-check still absent |
 | **Full bailiwick enforcement on CNAME targets** | **Partial** | answer-section provenance only; cross-suffix CNAME accepted (`docs/alumina-proxy.md:71`) |
 
@@ -164,7 +165,7 @@ Ranked by **value-to-Alumina ÷ cost-and-doctrine-fit**:
 | 1 | **DNSSEC validation (B6/B7)** | Directly defeats the "fake DNS record" threat even against a *compromised* resolver — the strongest hardening | Low | Feasibility study: minimal validating stub (crypto, memory, deadline) |
 | 2 | **Bailiwick on CNAME targets (C11)** | Closes the documented cross-suffix-CNAME accepted limitation; cheap, spec-adjacent | Medium | Study: restrict CNAME targets to allowlisted/known zones; measure breakage |
 | 3 | **Anomaly detection/tripwire on DNS (F21)** | Fits existing incident + rp2e enforcement machinery | Medium | Study: which anomalies are signal vs noise for a server |
-| 4 | **DoT (A1)** | The consumer-facing recommendation; explicit non-goal, high cost | Low | Defer unless user authorizes amendment |
+| 4 | **DoH (A1)** | The consumer-facing recommendation; DoT already implemented (vector 1), DoH remains an explicit non-goal, high cost | Low | Defer unless user authorizes amendment |
 | 5 | **Multi-resolver cross-validation (B8)** | High value but violates 1-conn/1-query + no-fallback doctrine | Low | Defer; document as a design-revision candidate |
 
 ## 4. Risks / abort conditions
