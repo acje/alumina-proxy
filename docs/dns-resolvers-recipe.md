@@ -4,7 +4,7 @@ A durable, operator-facing recipe for deploying a **5-resolver strict-SPKI-pinne
 DNS-over-TLS** configuration that succeeds at startup from the `europe-north1`
 deploy region, and for confirming per-resolver health afterwards via the
 `resolver_probe` observability record. It exists so operators do not rediscover
-the `1.1.1.1`/`8.8.8.8` startup failure (root cause: the 2-second exchange
+the `1.1.1.1`/`8.8.8.8` startup failure (root cause: the 5-second exchange
 deadline exceeded from the GCP region).
 
 The governing specification is the byte-canonical
@@ -61,7 +61,7 @@ Pins are the base64 SHA-256 of the server's SPKI, captured with
 
 Deploy ground truth (`gh-report-ops` commit `cb949a7`): at startup `secs=15`,
 three `1.1.1.1` exchanges plus three `8.8.8.8` exchanges each exceeded the
-2-second exchange deadline ([spec :82](alumina-proxy.md)) from `europe-north1`;
+5-second exchange deadline ([spec :82](alumina-proxy.md)) from `europe-north1`;
 `9.9.9.9` succeeded within the deadline. The pins were valid — they matched the
 live SPKIs — so this was a **regional reachability** problem, not a pin problem.
 
