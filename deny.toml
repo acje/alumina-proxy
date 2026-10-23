@@ -1,5 +1,18 @@
 [advisories]
 yanked = "deny"
+unsound = "all"
+unmaintained = "all"
+
+[bans]
+multiple-versions = "deny"
+skip = [
+    { name = "getrandom", version = "0.2.17", reason = "legacy transitive dep (rand 0.8 / tempfile lineage) coexists with 0.4.3; both required by the pinned Cargo.lock" },
+    { name = "windows-sys", version = "0.52.0", reason = "legacy transitive dep (windows-targets 0.52 lineage) coexists with 0.61.2; both required by the pinned Cargo.lock" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
 
 [licenses]
 allow = [
