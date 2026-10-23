@@ -19,7 +19,7 @@ or workload type in a VPC that limits egress to be exclusively through the
 Alumina Proxy. In case of component compromise the attacker will have limited
 opportunities for establishing egress; policy violations and early-upstream-data
 events trigger configurable tripwire actions (`flare_only` / `block`) with
-bounded stdout monitoring (`docs/alumina-proxy.md:238-315`, rp2e amendment).
+bounded stdout monitoring (`docs/alumina-proxy.md:243-323`, rp2e amendment).
 
 ## Documents
 
@@ -40,7 +40,8 @@ bounded stdout monitoring (`docs/alumina-proxy.md:238-315`, rp2e amendment).
 ## Runtime surface and fixed inputs
 
 - `./config.toml` (≤ 4096 B, mandatory keys, no defaults) carries the validated
-  resolver set (1..=5 numeric unicast IPs, port 53); no `resolv.conf` read, no
+  resolver set (1..=5 entries: bare `IP` on port 53, `IP#fqdn` on port 853, or
+  `IP#fqdn#pin-sha256=<b64>` strict-pin on port 853); no `resolv.conf` read, no
   CLI args, no env overrides; one listening socket; **SIGTERM the only handled
   lifecycle signal** (`docs/alumina-proxy.md:149`).
 - Privilege preflight (non-root, empty caps, `no_new_privs`): unmet → EX_CONFIG
@@ -55,7 +56,7 @@ bounded stdout monitoring (`docs/alumina-proxy.md:238-315`, rp2e amendment).
 ## Workload & protocol compatibility (zero proxy code changes)
 
 Alumina's wire contract (`docs/alumina-proxy.md:17-50,200-202`) is: an explicit
-plaintext `HTTP/1.1`/`HTTP/1.0` `CONNECT <fqdn>:<port>` (the port must exactly
+plaintext `HTTP/1.1` `CONNECT <fqdn>:<port>` (the port must exactly
 match the allowlisted entry, e.g. `443`); then — after `200
 Connection established` — the **client speaks first** with a TLS 1.3
 `ClientHello` whose SNI equals `<fqdn>` (Barrier A); and the upstream server
@@ -100,7 +101,7 @@ tripwire state by crashing its own container.
    ▼
 [Dedicated Alumina Appliance VM (tag: alumina-proxy, static internal IP, no public IP)]
    ├── INGRESS: ALLOW tcp:5353 from VPC subnet CIDR only (+ host iptables INPUT rule)
-   ├── EGRESS:  ALLOW tcp:53   -> TCP-capable recursive resolver (via Cloud NAT or VPC resolver)
+   ├── EGRESS:  ALLOW tcp:53,853 -> TCP-capable recursive resolver (via Cloud NAT or VPC resolver)
    ├── EGRESS:  ALLOW tcp:443  -> 0.0.0.0/0 via Cloud NAT (approved allowlist destinations)
    └── EGRESS:  DENY  all      -> 0.0.0.0/0 (all other ports and protocols denied)
 ```
@@ -123,8 +124,8 @@ tripwire state by crashing its own container.
 
 ### 2. Minimal `FROM scratch` container image
 
-Matches `docs/alumina-proxy.md:118` — two files in the root filesystem
-(`/alumina`, `/config.toml`), zero shell or OS utilities:
+Matches `docs/alumina-proxy.md:585` (hrdn4 restatement) — two files in the
+root filesystem (`/alumina`, `/config.toml`), zero shell or OS utilities:
 
 ```dockerfile
 FROM --platform=linux/amd64 rust:1.99.0-alpine AS builder
@@ -190,11 +191,13 @@ ENTRYPOINT ["/alumina"]
   `--tmpfs /tmp:size=64m` scratch mount keep the root filesystem immutable at
   runtime.
 - **TCP-capable DNS resolver (via the config `resolver` entry):** Alumina
-  performs DNS over TCP exclusively (`docs/alumina-proxy.md:68`). Where a cloud
-  provider's link-local metadata DNS (`169.254.169.254:53`) answers UDP only for
-  external records, the `resolver` entry in `config.toml` (baked into the
-  image) is set to a TCP-capable recursive resolver reachable over a narrow
-  `tcp:53` firewall rule; no platform resolver file is read.
+  performs DNS over TCP exclusively (`docs/alumina-proxy.md:68`), with
+  per-entry dial port 53 (bare `IP`) or 853 (DoT `IP#fqdn` / strict-pin
+  `IP#fqdn#pin-sha256=<b64>` forms). Where a cloud provider's link-local
+  metadata DNS (`169.254.169.254:53`) answers UDP only for external records,
+  the `resolver` entry in `config.toml` (baked into the image) is set to a
+  TCP-capable recursive resolver reachable over a narrow `tcp:53,853` firewall
+  rule; no platform resolver file is read.
 - **Client TLS 1.3 requirement:** Client HTTPS stacks using `HTTPS_PROXY` must
   offer TLS 1.3 (`0x0304`) as their minimum protocol version so `ClientHello`
   `supported_versions` does not advertise TLS 1.2 (`0x0303`), which Alumina
