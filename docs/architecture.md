@@ -1,8 +1,8 @@
 # Alumina — Architecture
 
-**Status:** design statement for the as-built implementation at HEAD `8934adb`
-(foundation, boot, wired single-owner serving runtime; provisional parser
-layer). This document is **not** runtime proof — qualification is gated on the
+**Status:** design statement for the as-built implementation (foundation, boot,
+wired single-owner serving runtime; provisional parser layer). This document is
+**not** runtime proof — qualification is gated on the
 Linux acceptance gates in [build-plan.md](build-plan.md) and the proof matrix
 in [traceability.md](traceability.md). **Canonical source:** `docs/alumina-proxy.md` is
 the sole governing specification (no accepted ADRs). Where this document
@@ -23,7 +23,7 @@ post-boot state is preallocated** (§6).
 | Module | Owns (mutating authority) | Citations |
 |---|---|---|
 | `config` | Parsed config, startup validation; EX_CONFIG 78 | `:54,56,58,60` |
-| `resolver` | Resolver-config read (first NS, port 53); DNS TCP transport (1 conn/1 query, getrandom TIDs) | `:62,68` |
+| `resolver` | Validated TOML `resolver` array (1..=5 entries); per-entry dial port 53 (bare `IP`) / 853 (`IP#fqdn`, strict-pin); DNS TCP transport (1 conn/1 query, getrandom TIDs) | `:567-614,616-701` (amendment), `:68` |
 | `dns_parse` | Wire parsing + staging classification (bounded CNAME, negatives, eligibility) | `:69,71,73,86-97` |
 | `cache` | Per-name×type entries, generations, staging, refresh due table, retry/incident, reporting; **tunnels never hold cache refs** | `:74-82,145` |
 | `tunnel` | 512 slots; per-slot state machine; two 128 KiB buffers; per-family counts | `:82,145,160,183` |
@@ -125,7 +125,7 @@ with construction-and-reuse proof as a future gate.
 | Allocation | Size | Citations |
 |---|---|---|
 | Tunnel traffic buffers | 512 × 2 × 128 KiB = 128 MiB | `:160-162,183` |
-| Retained serving workspace (per-slot CONNECT head + 2×64 KiB ClientHello inspector) | 512 × 136 KiB = 68 MiB | `:162,186` |
+| Retained serving workspace (per-slot CONNECT head + 2×64 KiB ClientHello inspector + JA4 retention) | 512 × ~152.5 KiB ≈ 76 MiB (design estimate) | `:162,186,929` |
 | Config document buffer | 4096 B (reject oversized) | `:54,158` |
 | CONNECT / TLS pre-auth | ≤8 KiB / ≤64 KiB | `:163-164` |
 | DNS message/records staging | 16 KiB / 128 RRs | `:165` |
@@ -137,7 +137,8 @@ with construction-and-reuse proof as a future gate.
 | mio Poll/Events | Preallocated at boot; op matrix pinned | `:147,206,230` |
 
 **Outside the 128 MiB budget** (separately accounted): the retained serving
-workspace (512 × 136 KiB = 68 MiB), DNS storage, metadata, stacks, executable,
+workspace (512 × ~152.5 KiB ≈ 76 MiB, design estimate — JA4 ClientHello
+retention reconciled at spec `:929`), DNS storage, metadata, stacks, executable,
 kernel socket buffers (T3; traceability U7).
 **Dependency seam (T2/G4):** `mio`+epoll mandated (`:147`); pin version,
 enumerate operations, gate each on source review + allocator instrumentation
@@ -171,8 +172,9 @@ default-denies workload egress except to Alumina's private VPC endpoint
 (`tcp:5353`) + explicitly required non-HTTPS platform dependencies across all
 routes/families (`:116`), including removing default Private Google Access
 (`199.36.153.8/30:443`) bypasses when unused; exactly one listening socket;
-config read once; raw TCP + a TCP-capable recursive resolver supplied (`:68`);
-no NAT64/DNS64 in the egress path (`:101,116`).
+config read once; a validated `resolver` array with per-entry dial port 53
+(bare `IP`) / 853 (DoT `IP#fqdn` / strict-pin forms) supplied
+(`:567-614,616-701`); no NAT64/DNS64 in the egress path (`:101,116`).
 
 - **Separate VPC appliance vs same-pod sidecar:** Because serverless
   multi-container sidecar sandboxes share a single network namespace
@@ -188,7 +190,7 @@ no NAT64/DNS64 in the egress path (`:101,116`).
 ## 9. Explicit non-goals
 
 UDP/QUIC, HTTP/2 CONNECT, plain HTTP forwarding, transparent interception,
-TLS<1.3, ECH, HTTPS/SVCB substitution, DNS over TLS/HTTPS, recursion/follow-up
+TLS<1.3, ECH, HTTPS/SVCB substitution, DNS over HTTPS, recursion/follow-up
 queries, multi-worker data paths, control plane / readiness / metrics surface,
 DNS64/NAT64 compatibility, upstream auth or cert verification, automatic
 fallback (`:19,49,63,71,72,97,144,149`).
