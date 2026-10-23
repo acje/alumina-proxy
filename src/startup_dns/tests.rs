@@ -859,10 +859,10 @@ fn startup_outcome_failed_carries_latest_failure_reason() {
         vec![
             Step::NodataWithSoa { ttl: 300, min: 60 },
             Step::NodataWithSoa { ttl: 300, min: 60 },
-            Step::Stall(Duration::from_secs(3)),
+            Step::Stall(Duration::from_secs(6)),
             Step::Close,
         ],
-        vec![Step::Stall(Duration::from_secs(3)), Step::Close],
+        vec![Step::Stall(Duration::from_secs(6)), Step::Close],
     ]);
     let mut cache = Cache::new(2).unwrap();
     let mut schedules = Schedules::new(2).unwrap();
