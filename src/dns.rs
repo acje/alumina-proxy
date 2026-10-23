@@ -2432,4 +2432,183 @@ mod tests {
         );
         assert!(matches!(out, Outcome::NxDomain { .. }));
     }
+
+    #[test]
+    fn rejects_truncated_flag() {
+        let mut msg = header(32, true, 0, 1, 0, 0, 0);
+        msg[2] |= 0x02; // flags bit 9 (0x0200): TC
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 32, &msg),
+            Err(DnsError::Truncated)
+        );
+    }
+
+    #[test]
+    fn rejects_bad_opcode() {
+        let mut msg = header(33, true, 0, 1, 0, 0, 0);
+        msg[2] |= 0x08; // opcode 1 (0x0800)
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 33, &msg),
+            Err(DnsError::BadOpcode { got: 1 })
+        );
+    }
+
+    #[test]
+    fn rejects_question_count_zero() {
+        let msg = header(34, true, 0, 0, 0, 0, 0);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 34, &msg),
+            Err(DnsError::QuestionCount { got: 0 })
+        );
+    }
+
+    #[test]
+    fn rejects_question_count_two() {
+        let msg = header(35, true, 0, 2, 0, 0, 0);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 35, &msg),
+            Err(DnsError::QuestionCount { got: 2 })
+        );
+    }
+
+    #[test]
+    fn rejects_bad_class_in_answer() {
+        let mut msg = header(36, true, 0, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&raw_record("sub.example.org", 1, 2, 60, &[1, 2, 3, 4]));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 36, &msg),
+            Err(DnsError::BadClass { got: 2 })
+        );
+    }
+
+    #[test]
+    fn rejects_overlong_label_fail_closed() {
+        let mut msg = header(37, true, 0, 1, 0, 0, 0);
+        msg.push(64);
+        msg.extend_from_slice(&[b'a'; 64]);
+        msg.push(0);
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 37, &msg),
+            Err(DnsError::ReservedLabelType { offset: 12 })
+        );
+    }
+
+    #[test]
+    fn rejects_name_too_long() {
+        let mut msg = header(38, true, 0, 1, 0, 0, 0);
+        for _ in 0..4 {
+            msg.push(63);
+            msg.extend_from_slice(&[b'a'; 63]);
+        }
+        msg.push(0);
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 38, &msg),
+            Err(DnsError::NameTooLong)
+        );
+    }
+
+    #[test]
+    fn rejects_pointer_not_backward() {
+        let mut msg = header(39, true, 0, 1, 0, 0, 0);
+        msg.push(0xc0);
+        msg.push(0x0c); // self-pointer: target 12 >= decode 12
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 39, &msg),
+            Err(DnsError::PointerNotBackward)
+        );
+    }
+
+    #[test]
+    fn rejects_reserved_label_type() {
+        let mut msg = header(40, true, 0, 1, 0, 0, 0);
+        msg.push(0x41); // 0x41 & 0xc0 == 0x40: reserved label type
+        msg.push(b'a');
+        msg.push(0);
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 40, &msg),
+            Err(DnsError::ReservedLabelType { offset: 12 })
+        );
+    }
+
+    #[test]
+    fn rejects_pointer_cycle() {
+        let mut msg = vec![0u8; 4];
+        for i in 0..9u8 {
+            msg.push(0xc0);
+            msg.push(2 + 2 * i);
+        }
+        assert_eq!(read_name(&msg, 20), Err(DnsError::PointerCycle));
+    }
+
+    #[test]
+    fn rejects_conflicting_cname() {
+        let mut msg = header(41, true, 0, 1, 2, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "a.example.org", 60));
+        msg.extend_from_slice(&cname_record("sub.example.org", "b.example.org", 60));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 41, &msg),
+            Err(DnsError::ConflictingCname)
+        );
+    }
+
+    #[test]
+    fn rejects_second_soa() {
+        let mut msg = header(42, true, 0, 1, 0, 2, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&soa_record("example.org", 300, 60));
+        msg.extend_from_slice(&soa_record("example.org", 300, 60));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 42, &msg),
+            Err(DnsError::SoaCount { got: 2 })
+        );
+    }
+
+    #[test]
+    fn rejects_dname_in_answer() {
+        let mut msg = header(43, true, 0, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&raw_record("sub.example.org", 39, 1, 60, &[]));
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 43, &msg),
+            Err(DnsError::DnameUnsupported)
+        );
+    }
+
+    #[test]
+    fn rejects_formerr_notimp_refused_rcodes() {
+        for code in [1u8, 4, 5] {
+            let mut msg = header(u16::from(code), true, code, 1, 0, 0, 0);
+            msg.extend_from_slice(&qname_bytes("sub.example.org"));
+            msg.extend_from_slice(&1u16.to_be_bytes());
+            msg.extend_from_slice(&1u16.to_be_bytes());
+            assert_eq!(
+                parse_response_ws("sub.example.org", Family::A, u16::from(code), &msg),
+                Err(DnsError::BadRcode { code })
+            );
+        }
+    }
 }
