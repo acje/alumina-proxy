@@ -227,14 +227,10 @@ fn config_duplicate_allowlist_names_rejected_after_normalization() {
         config::parse_config_document(dup_normalized),
         Err(ConfigError::DuplicateAllowlistName(_))
     ));
-    let dup_same_host_different_port = "allowlist = [\"a.example:443\", \"a.example:8443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
-    assert!(
-        matches!(
-            config::parse_config_document(dup_same_host_different_port),
-            Err(ConfigError::DuplicateAllowlistName(_))
-        ),
-        "dedup is by normalized hostname, so the same FQDN at a second port is a duplicate"
-    );
+    let dup_same_host_different_port = "allowlist = [\"a.example:443\", \"a.example:8443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
+    let cfg = config::parse_config_document(dup_same_host_different_port)
+        .expect("dedup is by the full <fqdn>:<port> pair, so the same host at a second port is a distinct entry");
+    assert_eq!(cfg.allowlist().len(), 2);
 }
 
 #[test]

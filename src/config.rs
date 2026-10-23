@@ -901,10 +901,13 @@ fn build_allowlist(names: Vec<String>) -> Result<Allowlist, ConfigError> {
     for name in names {
         let fqdn =
             Fqdn::parse(&name).map_err(|reason| ConfigError::InvalidFqdn { name, reason })?;
-        if !seen.insert(fqdn.as_str().to_owned()) {
-            return Err(ConfigError::DuplicateAllowlistName(
-                fqdn.as_str().to_owned(),
-            ));
+        let key = (fqdn.as_str().to_owned(), fqdn.port());
+        if !seen.insert(key) {
+            return Err(ConfigError::DuplicateAllowlistName(format!(
+                "{}:{}",
+                fqdn.as_str(),
+                fqdn.port()
+            )));
         }
         entries.push(fqdn);
     }
@@ -1661,6 +1664,16 @@ mod authorization_boundary_tests {
         assert_eq!(cfg.allowlist_position("", 443), None);
         assert_eq!(cfg.allowlist_position("sub.example.org", 8443), None);
         assert_eq!(cfg.allowlist_position("sub.example.org", 0), None);
+    }
+
+    #[test]
+    fn build_allowlist_same_host_different_ports_both_survive() {
+        let allowlist = build_allowlist(vec![
+            "a.example:443".to_owned(),
+            "a.example:8443".to_owned(),
+        ])
+        .expect("dedup is by the full <fqdn>:<port> pair, so the same host at a second port is a distinct entry");
+        assert_eq!(allowlist.len(), 2);
     }
 
     #[test]
