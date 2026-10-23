@@ -944,8 +944,15 @@ rustup component add clippy rustfmt >/dev/null 2>&1 || true
 command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1 || true
 '
     drc=0
+    # G8-C17: source mounted read-only (:ro,Z, matching the :330/:548 fixture
+    # convention); a separate writable target volume keeps the build outputs
+    # (host target/ feeds host-side artifact_identity and boot_fixtures) while
+    # the checkout itself stays read-only. --user 0:0 matches :548; under the
+    # rootless flock-vm mapping container-root files land as the host user.
     podman --connection flock-vm run --rm --pull=never \
-        -v "$ROOT:/app:Z" \
+        -v "$ROOT:/app:ro,Z" \
+        -v "$ROOT/target:/app/target:Z" \
+        --user 0:0 \
         -e CARGO_HOME=/cargo-home \
         -e CARGO_INCREMENTAL=0 \
         -e CARGO_TERM_PROGRESS_WHEN=never \
