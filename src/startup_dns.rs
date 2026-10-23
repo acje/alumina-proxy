@@ -2595,10 +2595,13 @@ impl StartupDns {
         if self.now_u64() < due {
             return Ok(());
         }
+        let from = self.active_resolver;
         self.close_connection()?;
-        self.failback_source = Some(self.active_resolver);
+        self.failback_source = Some(from);
         self.failback_successes = 0;
-        self.active_resolver = ActiveResolver::primary(self.active_resolver.set_len());
+        let to = ActiveResolver::primary(from.set_len());
+        self.note_downgrade_if_dot_to_plain(from, to);
+        self.active_resolver = to;
         self.mark_window_exercised(self.active_resolver);
         self.failback_due = None;
         self.repoint_to_active();
