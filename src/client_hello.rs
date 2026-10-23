@@ -60,6 +60,7 @@ const TLS10: u16 = 0x0301;
 pub struct ClientHello {
     versions: [u16; MAX_VERSIONS],
     versions_len: usize,
+    record_version: u16,
     sni: [u8; FQDN_MAX_LEN],
     sni_len: usize,
     sni_entries: u8,
@@ -131,8 +132,9 @@ impl ClientHello {
 
     /// The canonical `FoxIO` `JA4` client fingerprint for this `ClientHello`, using
     /// the highest non-GREASE offered version and SNI presence per the
-    /// `alumina-xfbq8` amendment (docs/alumina-proxy.md:879-895).
-    /// Allocation-free.
+    /// `alumina-xfbq8` amendment (docs/alumina-proxy.md:879-895). When no
+    /// non-GREASE `supported_versions` is offered the record-layer protocol
+    /// version supplies the `ver` token. Allocation-free.
     #[must_use]
     pub fn ja4(&self) -> [u8; 36] {
         let version = self
@@ -141,7 +143,7 @@ impl ClientHello {
             .copied()
             .filter(|&v| !is_grease(v))
             .max()
-            .unwrap_or(0);
+            .unwrap_or(self.record_version);
         ja4_fingerprint(
             version,
             self.ciphers(),
@@ -410,7 +412,8 @@ impl ChInspector {
                 Ok(Inspect::NeedMore)
             }
             Some((msg_len, consumed)) => {
-                self.hello = Some(parse_body(&self.scratch[4..4 + msg_len])?);
+                let record_version = u16::from_be_bytes([self.buf[1], self.buf[2]]);
+                self.hello = Some(parse_body(&self.scratch[4..4 + msg_len], record_version)?);
                 self.consumed = consumed;
                 Ok(Inspect::Complete { consumed })
             }
@@ -530,7 +533,11 @@ fn parse_cipher_list(body: &[u8], at: usize) -> Result<(usize, [u16; MAX_CIPHERS
     Ok((cs_count, ciphers))
 }
 
-fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
+#[expect(
+    clippy::too_many_lines,
+    reason = "single cohesive ClientHello body parser; splitting would harm readability"
+)]
+fn parse_body(body: &[u8], record_version: u16) -> Result<ClientHello, ChError> {
     let legacy = u16_at(body, 0)?;
     if legacy != TLS12 {
         return Err(ChError::UnsupportedLegacyVersion { got: legacy });
@@ -618,6 +625,7 @@ fn parse_body(body: &[u8]) -> Result<ClientHello, ChError> {
     Ok(ClientHello {
         versions,
         versions_len,
+        record_version,
         sni,
         sni_len,
         sni_entries,
@@ -1861,6 +1869,32 @@ mod tests {
             let out = ja4_fingerprint(version, &[], &[], &[], &[]);
             assert_eq!(&out[1..3], token, "version token for {version:#06x}");
         }
+    }
+
+    #[test]
+    fn ja4_ver_falls_back_to_record_layer_protocol_version() {
+        let ch = ClientHello {
+            versions: [0u16; MAX_VERSIONS],
+            versions_len: 0,
+            sni: [0u8; FQDN_MAX_LEN],
+            sni_len: 0,
+            sni_entries: 0,
+            has_ech: false,
+            ciphers: [0u16; MAX_CIPHERS],
+            ciphers_len: 0,
+            extensions: [0u16; MAX_EXTENSIONS],
+            extensions_len: 0,
+            alpn: [0u8; MAX_ALPN_VALUE],
+            alpn_len: 0,
+            sigalgs: [0u16; MAX_SIGALGS],
+            sigalgs_len: 0,
+            record_version: TLS12,
+        };
+        assert_eq!(
+            &ch.ja4()[1..3],
+            b"12",
+            "an empty supported_versions must fall back to the record-layer protocol version, not 00"
+        );
     }
 
     #[test]
