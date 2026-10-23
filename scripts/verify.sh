@@ -947,6 +947,7 @@ boundary_phase1() {
     echo "RELEASE-NOT-READY: later-slice and release gates remain NotImplemented, not green"
     echo "BOUNDARY-OWNER-COORD-OK: all applicable phase1 children coordinated and exited 0 on this host"
     echo "FINAL-PHASE1-COMPLETION: BLOCKED — pending fixture/doc/Rust repairs and review approval before any phase1 done-claim (no E2E equivalence claimed)"
+    exit 1
 }
 
 # Real-IO CONNECT/SNI opaque-relay and native SIGTERM shutdown gates against the
