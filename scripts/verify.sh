@@ -900,13 +900,22 @@ audit_deny_owner() {
     command -v cargo-deny >/dev/null 2>&1 || have=0
     if [ "$have" -eq 1 ]; then
         echo "AUDIT-DENY (hard gate, boundary host):"
+        # G8-C22: pin supply-chain tool versions; a drift from the accepted
+        # versions fails closed (a different audit/deny version can change the
+        # gate verdict, so the intake gate must be host-reproducible).
+        AUDIT_VERSION="0.22.1"
+        DENY_VERSION="0.19.4"
+        av=$(cargo-audit --version 2>&1) || av="<unreadable>"
+        [ "${av##* }" = "$AUDIT_VERSION" ] || { echo "AUDIT-DENY FAIL: cargo-audit version '$av' != pinned $AUDIT_VERSION" >&2; exit 1; }
+        dv=$(cargo-deny --version 2>&1) || dv="<unreadable>"
+        [ "${dv##* }" = "$DENY_VERSION" ] || { echo "AUDIT-DENY FAIL: cargo-deny version '$dv' != pinned $DENY_VERSION" >&2; exit 1; }
         ar=0
         cargo +${TOOLCHAIN} audit || ar=$?
         [ "$ar" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo audit exit $ar" >&2; exit 1; }
         dr=0
         cargo +${TOOLCHAIN} deny check || dr=$?
         [ "$dr" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo deny exit $dr" >&2; exit 1; }
-        echo "AUDIT-DENY-OK (audit exit $ar; deny exit $dr)"
+        echo "AUDIT-DENY-OK (audit $AUDIT_VERSION exit $ar; deny $DENY_VERSION exit $dr)"
     else
         echo "AUDIT-DENY-BLOCKED: cargo audit or cargo deny absent on this boundary host; applicable phase1 audit/deny cannot complete" >&2
         exit 1
