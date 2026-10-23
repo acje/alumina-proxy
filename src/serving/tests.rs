@@ -103,6 +103,27 @@ fn serving_poll_timeout_keeps_bounded_floor_while_probe_sweep_active() {
 }
 
 #[test]
+fn serving_poll_timeout_keeps_bounded_floor_while_draining_due_slot() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let secs = serving.storage().dns().now_u64();
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .overwrite_due_at(0, crate::cache::Family::A, secs)
+            .expect("due the A family now");
+        serving.on_sigterm().expect("first SIGTERM observation");
+        let wait = serving.poll_timeout();
+        assert!(
+            matches!(wait, Some(d) if d >= Duration::from_millis(50) && d <= Duration::from_millis(200)),
+            "a selectable-now due slot during draining must fold a bounded floor wake, NOT ZERO: \
+             cancel_for_shutdown has cleared the active exchange and probe sweep, and \
+             is_shutdown() suppresses starts_due_dns_if_idle, so no refresh can start; folding \
+             now would busy-spin the poll for the whole drain window: {wait:?}"
+        );
+    });
+}
+
+#[test]
 fn serving_consumes_boot_traffic_buffers_by_value_not_reallocation() {
     std::thread::Builder::new()
         .name("serving-transfer-test".into())

@@ -3149,7 +3149,7 @@ impl Serving {
         {
             let wake = self.storage.schedule_due_instant(due);
             if wake <= now {
-                if self.storage.dns().sweep_active() {
+                if self.storage.dns().sweep_active() || self.is_shutdown() {
                     let floor = now + Duration::from_millis(100);
                     earliest = Some(earliest.map_or(floor, |e| e.min(floor)));
                 } else {
