@@ -241,7 +241,7 @@ fn hot_relay_many_slots_body() {
     for lane in &got {
         drop(lane.lock().unwrap());
     }
-    let (_, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+    let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
         while turns < 900 {
             runtime
                 .turn(Some(Duration::from_millis(2)))

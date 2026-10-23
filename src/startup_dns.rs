@@ -2666,6 +2666,10 @@ impl StartupDns {
     /// `repoint_to_active` never overrides the peer seeded by
     /// `set_peer_for_test`.
     #[cfg(test)]
+    #[expect(
+        clippy::missing_const_for_fn,
+        reason = "test-only probe-sweep seeding seam; constness is not load-bearing"
+    )]
     pub(crate) fn seed_probe_sweep_for_test(&mut self) {
         self.probe_sweep = Some(ProbeSweep {
             remaining: [false; MAX_RESOLVERS],
