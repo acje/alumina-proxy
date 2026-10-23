@@ -465,7 +465,7 @@ fn serve_conn_blocking(sock: TcpStream, config: &Arc<ServerConfig>, mode: Advers
 }
 
 /// Drives one accepted connection: completes the server handshake, forces a
-/// post-handshake traffic-key refresh (queuing a KeyUpdate record and flushing
+/// post-handshake traffic-key refresh (queuing a `KeyUpdate` record and flushing
 /// any auto-queued session tickets), then serves DNS queries. The transport
 /// must process the post-handshake records as non-application data and still
 /// publish the DNS reply.
@@ -538,7 +538,7 @@ fn spawn_tls_responder_config(config: ServerConfig, mode: AdversarialReply) -> T
 }
 
 /// Spawns a TLS responder that forces a post-handshake traffic-key refresh
-/// (KeyUpdate) on every accepted connection before serving queries.
+/// (`KeyUpdate`) on every accepted connection before serving queries.
 fn spawn_tls_responder_post_handshake(
     config: ServerConfig,
     mode: AdversarialReply,
@@ -1102,7 +1102,7 @@ fn pinned_dot_negotiates_tls12_with_tls12_only_server() {
 #[test]
 fn pinned_dot_oversized_handshake_record_fails_closed() {
     let mut raw = vec![0x16, 0x03, 0x03, 0xff, 0xff];
-    raw.extend(std::iter::repeat(0u8).take(0xffff));
+    raw.extend(std::iter::repeat_n(0u8, 0xffff));
     let responder = spawn_raw_responder(raw);
     let cfg = dot_config(&pinned_resolver());
     let mut cache = Cache::new(2).unwrap();
@@ -1259,9 +1259,10 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
     drop(responder);
 }
 
-/// Calibrated upper bound on allocation events during one warm DoT exchange:
+/// Calibrated upper bound on allocation events during one warm `DoT` exchange:
 /// the transport itself must not allocate, while the bounded rustls seam may
 /// allocate a small number of per-record buffers (docs/alumina-proxy.md:795).
+#[cfg(feature = "alloc-witness")]
 const WARM_DOT_ALLOC_BOUND: u64 = 8;
 
 #[cfg(feature = "alloc-witness")]
