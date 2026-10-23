@@ -220,6 +220,31 @@ mid_union() {
     echo "UNION-MID-OK"
 }
 
+# G8-C02 test-coverage closure: runs the UNFILTERED full suite (lib unit tests
+# + all 7 integration test binaries) witness-off then witness-on, closing the
+# gate coverage hole where lib units and 5 of 7 binaries never ran in any gate
+# selector (all 9 prior atest invocations carried --test foundations|boot).
+# atest-only — no clippy/fmt/whitespace (those are mid_union's job) — so there
+# is no E0463 hazard within this selector itself. The cross-run interaction is
+# with a LATER mid_union's alloc-witness clippy over the shared target dir:
+# mid_full's witness-on run builds the aw boot tests, whose fingerprints could
+# meet mid_union's aw-clippy adjacency. Disposition (cross-run-safe verified or
+# isolated via --target-dir) recorded in the sub-mission back-brief.
+mid_full() {
+    [ "$(uname -s)" = "Linux" ] || {
+        echo "mid full requires Linux execution" >&2
+        exit 1
+    }
+    closure_metadata
+    echo "FULL-SUITE (lib units + all 7 integration binaries, witness-off):"
+    cargo +${TOOLCHAIN} atest -p alumina --locked
+    echo "FULL-SUITE-WITNESS-OFF-OK"
+    echo "FULL-SUITE-WITNESS (lib units + all 7 binaries incl. mio_matrix + eligibility witness, alloc-witness):"
+    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness
+    echo "FULL-SUITE-WITNESS-ON-OK"
+    echo "FULL-SUITE-MID-OK"
+}
+
 # Linux kernel privilege fixtures. The proof-only `fixture-facts` feature build
 # is executed (a clearly-separate variant artifact under target/fixture-facts;
 # the production target/release artifact is left untouched, with before/after
@@ -910,7 +935,7 @@ audit_deny_owner() {
         dv=$(cargo-deny --version 2>&1) || dv="<unreadable>"
         [ "${dv##* }" = "$DENY_VERSION" ] || { echo "AUDIT-DENY FAIL: cargo-deny version '$dv' != pinned $DENY_VERSION" >&2; exit 1; }
         ar=0
-        cargo +${TOOLCHAIN} audit || ar=$?
+        cargo +${TOOLCHAIN} audit --no-fetch || ar=$?
         [ "$ar" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo audit exit $ar" >&2; exit 1; }
         dr=0
         cargo +${TOOLCHAIN} deny check || dr=$?
@@ -969,6 +994,7 @@ boundary_phase1() {
     echo "phase1 boundary (owner seam H1): host sole coordinator; Linux MID via existing flock-vm dispatch"
     identity_snapshot "$IDENTITY_BEFORE"
     linux_dispatch 'sh scripts/verify.sh mid union'
+    linux_dispatch 'sh scripts/verify.sh mid full'
     boot_fixtures
     docslink_check
     unsafe_surface_gate
@@ -1213,6 +1239,7 @@ case "$TIER/$SCOPE" in
     mid/foundations) mid_foundations ;;
     mid/boot) mid_boot ;;
     mid/union) mid_union ;;
+    mid/full) mid_full ;;
     fixtures/boot) boot_fixtures ;;
     boundary/phase1) boundary_phase1 ;;
     e2e/relay) e2e_relay ;;

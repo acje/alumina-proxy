@@ -86,6 +86,13 @@ claim), and this repo never provisions VMs, connections or images.
   via the rootless `flock-vm` connection, `--pull=never`, pinned builder
   image; requires `podman`, a reachable `flock-vm` and the pinned image
   present).
+- `mid full` — **Linux-only**; fail closed on any non-Linux host. Runs the
+  UNFILTERED full suite (lib unit tests + all 7 integration test binaries)
+  witness-off then witness-on (`--features alloc-witness`, incl. the
+  eligibility witness and the alloc-witness-only mio_matrix binary); atest-only
+  (no clippy/fmt). On macOS it runs through `boundary phase1` (Linux dispatch
+  via the rootless `flock-vm` connection, `--pull=never`, pinned builder image;
+  requires `podman`, a reachable `flock-vm` and the pinned image present).
 - `fixtures boot` — **host Podman coordinator (Darwin allowed by source)**;
   requires existing rootless `flock-vm` and rootful `flock-vm-root`
   connections with the pinned builder image present on both (`--pull=never`),
@@ -107,7 +114,8 @@ claim), and this repo never provisions VMs, connections or images.
   resolved on that rootful connection, recorded in the receipt, and the
   consumers re-verify the tag resolves to it and run the ID itself.
 - `boundary phase1` — **host coordinator**: dispatches the Linux MID union once
-  (foundations + boot command sets), then fixtures, docs, git diff,
+  (foundations + boot command sets) and the Linux `mid full` unfiltered full
+  suite once (witness-off + witness-on), then fixtures, docs, git diff,
   audit/deny, identity. Host
   tools required and fail closed when absent: `podman` + reachable `flock-vm`;
   Node with **`NODE_OPTIONS`/`NODE_PATH` unset** and

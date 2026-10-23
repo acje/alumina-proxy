@@ -15,8 +15,8 @@ Host-run selectors and gates (all `sh scripts/verify.sh …` selectors and host
 Cargo commands):
 
 ```
-cargo +1.99.0 atest -p alumina --locked                   # manual-only: no gate selector runs the unfiltered full suite
-cargo +1.99.0 atest -p alumina --locked --features alloc-witness   # manual-only: same, alloc-witness variant
+cargo +1.99.0 atest -p alumina --locked                   # full suite, witness-off — gated on Linux via `mid full` (reached via `sh scripts/verify.sh boundary phase1`); listed here as a manual reference
+cargo +1.99.0 atest -p alumina --locked --features alloc-witness   # full suite, alloc-witness — gated on Linux via `mid full`; listed here as a manual reference
 cargo +1.99.0 fmt --check
 cargo +1.99.0 aclippy -p alumina --locked --all-targets -- -D warnings
 sh scripts/verify.sh docs                       # native offline docs link gate
@@ -28,10 +28,13 @@ sh scripts/verify.sh boundary phase1            # host coordinator: mid+fixtures
 
 `atest`/`aclippy` are the fleet Cargo aliases (host config; each Linux MID
 dispatch writes the same aliases into its throwaway container config — the repo
-does not duplicate them). Gate selectors run a filtered scope: every `verify.sh`
-`atest` invocation carries `--test foundations` or `--test boot` (optionally
-with `--features alloc-witness`); the two unfiltered commands above are a manual
-reference and are not what any gate selector executes.
+does not duplicate them). Most gate selectors run a filtered scope: their
+`verify.sh` `atest` invocations carry `--test foundations` or `--test boot`
+(optionally with `--features alloc-witness`). The `mid full` selector is the
+exception: it runs the UNFILTERED full suite (lib unit tests + all 7
+integration test binaries) witness-off then witness-on (alloc-witness, incl.
+the eligibility witness and the alloc-witness-only mio_matrix binary), on Linux
+via `sh scripts/verify.sh boundary phase1`.
 
 ### Full affected-corpus offline check
 
