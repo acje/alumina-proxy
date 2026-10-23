@@ -75,7 +75,7 @@ pub struct ClientHello {
 }
 
 impl ClientHello {
-    /// The offered non-GREASE supported versions, filtered and ordered.
+    /// The offered non-GREASE supported versions in raw wire order, unfiltered.
     #[must_use]
     pub fn offered_versions(&self) -> &[u16] {
         &self.versions[..self.versions_len]
