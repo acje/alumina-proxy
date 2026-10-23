@@ -5,7 +5,7 @@ TIER="${1:-}"
 SCOPE="${2:-}"
 
 usage() {
-    echo "usage: verify.sh {mid|boundary|fixtures} {foundations|boot|phase1} | verify.sh docs" >&2
+    echo "usage: verify.sh {mid|boundary|fixtures|e2e} {foundations|boot|phase1|relay|shutdown} | verify.sh docs" >&2
     exit 2
 }
 
