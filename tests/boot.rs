@@ -216,7 +216,7 @@ fn config_allowlist_empty_and_over_32_fail() {
 }
 
 #[test]
-fn config_duplicate_allowlist_names_rejected_after_normalization() {
+fn config_allowlist_dedup_by_full_pair_same_host_different_port_distinct() {
     let dup_exact = "allowlist = [\"a.example:443\", \"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n";
     assert!(matches!(
         config::parse_config_document(dup_exact),

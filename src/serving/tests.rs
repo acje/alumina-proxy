@@ -4507,7 +4507,10 @@ fn validated_early_data_applies_block_domain_and_terminates_setup() {
             "early upstream data is a mandatory termination even under a Block action"
         );
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         assert!(
             serving.storage().enforcement().is_blocked(ordinal),
             "Block Domain must mark the validated configured-domain ordinal"
@@ -4572,7 +4575,10 @@ fn validated_early_data_flare_is_reporting_only_and_setup_still_terminates() {
             "FlareOnly never delays the mandatory denial"
         );
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         assert_eq!(
             serving
                 .storage()
@@ -4642,7 +4648,10 @@ fn prevalidated_early_data_folds_unknown_without_any_block() {
             "missing validated identity folds Unknown(NotYetValidated), never a block verdict"
         );
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         assert!(
             !serving.storage().enforcement().is_blocked(ordinal),
             "EvidenceInsufficient must not mark any domain blocked"
@@ -4677,7 +4686,10 @@ fn domain_block_refuses_future_flow_of_the_ordinal_until_restart() {
     let cfg = cfg_doc1(port, "connection", "block", "domain");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         assert!(!serving.storage().enforcement().is_blocked(ordinal));
 
         let mut evil = connect(port);
@@ -4766,7 +4778,10 @@ fn port_mismatch_on_domain_blocked_ordinal_is_host_not_allowlisted() {
     let cfg = cfg_doc1(port, "connection", "block", "domain");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         let mut latch = crate::enforcement::action::FirstSlot::new();
         serving.storage_mut().enforcement_mut().decide(
             &mut latch,
@@ -4952,7 +4967,10 @@ fn block_domain_closes_current_flow_with_matching_ordinal() {
             )
             .expect("early data on the trigger blocks the domain");
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         assert!(serving.storage().enforcement().is_blocked(ordinal));
         assert_eq!(
             serving.storage().occupied(),
@@ -5015,7 +5033,10 @@ fn block_domain_does_not_touch_unrelated_current_flow() {
             )
             .expect("early data on the trigger blocks the domain");
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         assert!(serving.storage().enforcement().is_blocked(ordinal));
         assert_eq!(
             serving.storage().occupied(),
@@ -5025,7 +5046,7 @@ fn block_domain_does_not_touch_unrelated_current_flow() {
         let other = FixedHostname::normalize(b"trusted-other.example.net").expect("normalize");
         let other_ordinal = serving
             .storage()
-            .ordinal_for(&other)
+            .ordinal_for_pair(&other, 443)
             .expect("other ordinal");
         assert!(
             !serving.storage().enforcement().is_blocked(other_ordinal),
@@ -5064,17 +5085,27 @@ fn early_data_on_second_port_blocks_second_ordinal_only() {
 
         let first = serving
             .storage()
-            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 443)
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"a.example").expect("normalize"),
+                443,
+            )
             .expect("first ordinal");
         let second = serving
             .storage()
-            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"a.example").expect("normalize"),
+                8443,
+            )
             .expect("second ordinal");
         assert_ne!(
             first, second,
             "same-host different-port entries must be distinct ordinals"
         );
-        assert_eq!(second.get(), 1, "the 8443 entry is the second allowlist position");
+        assert_eq!(
+            second.get(),
+            1,
+            "the 8443 entry is the second allowlist position"
+        );
         assert!(
             serving.storage().enforcement().is_blocked(second),
             "Block Domain must mark the second port's own ordinal"
@@ -5133,11 +5164,17 @@ fn block_on_first_port_does_not_over_close_second_port_flow() {
             .expect("early data on the first port blocks the first ordinal");
         let first = serving
             .storage()
-            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 443)
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"a.example").expect("normalize"),
+                443,
+            )
             .expect("first ordinal");
         let second = serving
             .storage()
-            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"a.example").expect("normalize"),
+                8443,
+            )
             .expect("second ordinal");
         assert!(serving.storage().enforcement().is_blocked(first));
         assert!(
@@ -5183,7 +5220,10 @@ fn block_on_second_port_closes_second_port_flow() {
             .expect("early data on the second port blocks the second ordinal");
         let second = serving
             .storage()
-            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"a.example").expect("normalize"),
+                8443,
+            )
             .expect("second ordinal");
         assert!(serving.storage().enforcement().is_blocked(second));
         assert_eq!(
@@ -5232,11 +5272,17 @@ fn early_data_on_unconfigured_pair_folds_unattributed() {
         );
         let first = serving
             .storage()
-            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 443)
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"a.example").expect("normalize"),
+                443,
+            )
             .expect("first ordinal");
         let second = serving
             .storage()
-            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"a.example").expect("normalize"),
+                8443,
+            )
             .expect("second ordinal");
         assert!(
             !serving.storage().enforcement().is_blocked(first)
@@ -5727,7 +5773,10 @@ fn block_domain_current_flow_close_spends_zero_allocations() {
             "the Block-Domain current-flow closure must allocate/deallocate nothing: {counts:?}"
         );
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         assert!(serving.storage().enforcement().is_blocked(ordinal));
     });
 }
@@ -5763,7 +5812,10 @@ fn early_data_projection_spends_zero_allocations() {
                 "early upstream data terminates setup"
             );
             let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-            let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&approved, 443)
+                .expect("ordinal");
             assert!(
                 serving.storage().enforcement().is_blocked(ordinal),
                 "validated early data marks the ordinal blocked"
@@ -5823,7 +5875,10 @@ fn monitor_split_on_full_stack_distinguishes_block_action_from_later_refusal() {
     let cfg = cfg_doc1(port, "connection", "block", "domain");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         serving.storage_mut().publish_test_a(ordinal.get());
         let _acceptor = connect(port);
         pump(serving, 20);
@@ -5884,7 +5939,10 @@ fn slot_capture_is_cleared_before_reuse_never_attributes_a_stale_generation() {
     let cfg = cfg_doc1(port, "connection", "block", "domain");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         serving.storage_mut().publish_test_a(ordinal.get());
 
         let _first = connect(port);
@@ -5937,7 +5995,10 @@ fn production_detection_close_transfers_typed_capture_with_slot_identity_into_mo
     let cfg = cfg_doc1(port, "connection", "block", "domain");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         serving.storage_mut().publish_test_a(ordinal.get());
 
         let _first = connect(port);
@@ -7334,7 +7395,10 @@ fn ja4_first_seen_records_baseline_without_signal() {
         serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
         drive_hello(serving, &wire, "sub.example.org");
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         let entry = serving.ja4_baseline.entries[ordinal.get()][0];
         assert_eq!(
             entry.addr,
@@ -7381,11 +7445,17 @@ fn ja4_baseline_keys_second_port_ordinal() {
         drive_hello(serving, &wire, "a.example");
         let second = serving
             .storage()
-            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"a.example").expect("normalize"),
+                8443,
+            )
             .expect("second ordinal");
         let first = serving
             .storage()
-            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 443)
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"a.example").expect("normalize"),
+                443,
+            )
             .expect("first ordinal");
         assert_eq!(
             serving.ja4_baseline.entries[second.get()][0].addr,
@@ -7404,7 +7474,10 @@ fn ja4_baseline_keys_second_port_ordinal() {
 fn ja4_deviation_flares_signal_once_per_connection() {
     with_serving_stack(ephemeral_port(), |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         let wire_a = hello_wire(b"sub.example.org", false);
         let wire_b = hello_wire_ext(
             b"sub.example.org",
@@ -7502,7 +7575,10 @@ fn ja4_baseline_defers_until_dial_persists_dest_ip() {
         let wire = hello_wire(b"sub.example.org", false);
         drive_hello(serving, &wire, "sub.example.org");
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         assert!(
             serving.slots[0].ja4_pending,
             "a hello completed before the destination IP is known defers the baseline"
@@ -7558,7 +7634,10 @@ fn ja4_baseline_defers_until_dial_persists_dest_ip() {
 fn ja4_baseline_row_full_returns_neutral() {
     with_serving_stack(ephemeral_port(), |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         let ja4 = [b'j'; 36];
         for i in 0..MAX_ADDRESSES {
             let addr = NumericAddr::V4(Ipv4Addr::from([
@@ -7589,7 +7668,10 @@ fn ja4_baseline_row_full_returns_neutral() {
 fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
     with_serving_stack(ephemeral_port(), |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving.storage().ordinal_for(&approved).expect("ordinal");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
         let wire_a = hello_wire(b"sub.example.org", false);
         let wire_b = hello_wire_ext(
             b"sub.example.org",

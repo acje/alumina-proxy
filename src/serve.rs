@@ -247,15 +247,6 @@ impl ServeStorage {
         &mut self.enforcement
     }
 
-    pub(crate) fn ordinal_for(&self, hostname: &FixedHostname) -> Option<DomainOrdinal> {
-        let index = self
-            .config
-            .allowlist()
-            .iter()
-            .position(|entry| entry.as_str().as_bytes() == hostname.as_bytes())?;
-        self.enforcement.control().ordinal(index)
-    }
-
     /// The ordinal of a CONNECT that matches an allowlist entry **exactly**,
     /// entry hostname and entry port together. A same-hostname different-port
     /// request is such a miss (no ordinal), so it is authoritatively denied by
@@ -277,7 +268,11 @@ impl ServeStorage {
     /// a configured Block on one port can never over-close or under-close the
     /// other (alumina-9t6w B1). Shares the single allowlist-pair predicate with
     /// the worker decision (alumina-sechd L14).
-    pub(crate) fn ordinal_for_pair(&self, hostname: &FixedHostname, port: u16) -> Option<DomainOrdinal> {
+    pub(crate) fn ordinal_for_pair(
+        &self,
+        hostname: &FixedHostname,
+        port: u16,
+    ) -> Option<DomainOrdinal> {
         let index = self.config.allowlist_position(hostname.as_str(), port)?;
         self.enforcement.control().ordinal(index)
     }
