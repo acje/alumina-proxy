@@ -91,10 +91,10 @@ assert_fresh_variant() {
         echo "QA-PACKAGE-ERROR: exercised artifact sha256 $want_sha does not match this run's built fixture-facts variant $built_sha" >&2
         return 1
     }
-    if [ "$boundary_ok" -eq 1 ]; then
+    if [ "$boundary_coord" -eq 1 ]; then
         echo "exercised fixture-facts variant freshness: built in this run (sha256 $built_sha)"
     else
-        echo "exercised fixture-facts variant integrity: sha256 $built_sha matches variant marker (boundary phase1 failed; digest equality is integrity-only, not this-run attribution)"
+        echo "exercised fixture-facts variant integrity: sha256 $built_sha matches variant marker (boundary phase1 did not coordinate; digest equality is integrity-only, not this-run attribution)"
     fi
 }
 
@@ -105,9 +105,27 @@ assert_fresh_variant() {
 # unchanged) proven by that gate's METADATA-OK predicate.
 BIN=target/fixture-facts/release/alumina
 
-boundary_ok=0
-if sh scripts/verify.sh boundary phase1; then
-    boundary_ok=1
+boundary_coord=0    # BOUNDARY-OWNER-COORD-OK marker present: this-run attribution
+boundary_blocked=0  # coordinated but FINAL-PHASE1-COMPLETION: BLOCKED
+boundary_out=
+# The boundary producer's exit is captured separately from its output; the
+# marker greps below run on the captured output only, so a marker probe can
+# never mask the producer's exit (no masked pipeline). A probe failure is a
+# FAIL, never folded into a clean verdict.
+if boundary_out=$(sh scripts/verify.sh boundary phase1 2>&1); then
+    # Hard-0: coordinated and every child exited 0.
+    boundary_coord=1
+elif printf '%s\n' "$boundary_out" | grep -q 'BOUNDARY-OWNER-COORD-OK'; then
+    # Coordinated (marker present) but non-zero: BLOCKED only when the
+    # completion-BLOCKED marker is also present; otherwise a genuine failure.
+    boundary_coord=1
+    if printf '%s\n' "$boundary_out" | grep -q 'FINAL-PHASE1-COMPLETION: BLOCKED'; then
+        boundary_blocked=1
+        echo "QA-PACKAGE-BLOCKED: boundary phase1 coordinated but completion BLOCKED pending release gates" >&2
+    else
+        echo "QA-PACKAGE-FAIL: boundary phase1 gate failed (coordinated but no BLOCKED marker)" >&2
+        fail=1
+    fi
 else
     echo "QA-PACKAGE-FAIL: boundary phase1 gate failed" >&2
     fail=1
@@ -139,10 +157,10 @@ if [ -n "$HASHER" ] && [ -x "$ROOT/$BIN" ]; then
         fail=1
     }
     if [ -n "$ARTIFACT_SHA" ]; then
-        if [ "$boundary_ok" -eq 1 ]; then
+        if [ "$boundary_coord" -eq 1 ]; then
             echo "exercised artifact (fixture-facts variant, this run): $BIN"
         else
-            echo "exercised artifact (fixture-facts variant; boundary phase1 failed -- unchanged artifact, integrity-only, not this-run attribution): $BIN"
+            echo "exercised artifact (fixture-facts variant; boundary phase1 did not coordinate -- unchanged artifact, integrity-only, not this-run attribution): $BIN"
         fi
         echo "exercised artifact sha256: $ARTIFACT_SHA"
         if ! assert_fresh_variant "$ARTIFACT_SHA" "$ROOT/target/fixture-facts/release/variant.sha256"; then
@@ -158,6 +176,10 @@ elif [ -n "$HASHER" ]; then
 fi
 
 if [ "$fail" -eq 0 ]; then
+    if [ "$boundary_blocked" -eq 1 ]; then
+        echo "QA-PACKAGE-VALIDATE-BLOCKED" >&2
+        exit 1
+    fi
     echo "QA-PACKAGE-VALIDATE-OK"
 else
     echo "QA-PACKAGE-VALIDATE-FAIL" >&2

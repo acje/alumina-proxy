@@ -195,8 +195,15 @@ sh docs/qa-package/validate.sh
    + sha256 + freshness proven against the in-run variant marker the fixture
    gate wrote.
 4. Emits `QA-PACKAGE-VALIDATE-OK`, exit 0, only when identity resolved, the
-   fresh-variant proof holds and every sub-gate hard-0; else
-   `QA-PACKAGE-VALIDATE-FAIL` + non-zero.
+   fresh-variant proof holds and every sub-gate hard-0. Three-state outcome:
+   - **OK** (exit 0) — every sub-gate hard-0, including `boundary phase1`
+     exiting 0.
+   - **BLOCKED** (non-zero) — `boundary phase1` coordinated (emitted
+     `BOUNDARY-OWNER-COORD-OK`) but its completion is `FINAL-PHASE1-COMPLETION:
+     BLOCKED` pending release gates; attribution is still this-run, but
+     `QA-PACKAGE-VALIDATE-OK` is never emitted.
+   - **FAIL** (non-zero) — genuine gate failure (non-zero boundary without the
+     coordination markers, or any probe/identity/freshness failure).
 
 ## Known-open items (not claims of completion)
 
