@@ -44,6 +44,76 @@ const GOOD_CERT: &[u8] = &[
     0xca, 0xb1, 0xe5, 0xb0, 0x84, 0xd3, 0xda,
 ];
 
+/// The same key and SPKI as [`GOOD_CERT`] (so [`PIN_B64`] matches) but already
+/// expired: notBefore 2020-01-01, notAfter 2021-01-01. The pinned verifier
+/// checks only SAN plus SPKI pin, never certificate validity, so this
+/// certificate must still be accepted.
+const EXPIRED_CERT: &[u8] = &[
+    0x30, 0x82, 0x01, 0x4a, 0x30, 0x81, 0xf1, 0xa0, 0x03, 0x02, 0x01, 0x02,
+    0x02, 0x02, 0x10, 0x00, 0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce,
+    0x3d, 0x04, 0x03, 0x02, 0x30, 0x13, 0x31, 0x11, 0x30, 0x0f, 0x06, 0x03,
+    0x55, 0x04, 0x03, 0x0c, 0x08, 0x64, 0x6f, 0x74, 0x2e, 0x74, 0x65, 0x73,
+    0x74, 0x30, 0x1e, 0x17, 0x0d, 0x32, 0x30, 0x30, 0x31, 0x30, 0x31, 0x30,
+    0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x17, 0x0d, 0x32, 0x31, 0x30, 0x31,
+    0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x30, 0x13, 0x31,
+    0x11, 0x30, 0x0f, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x08, 0x64, 0x6f,
+    0x74, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07,
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48,
+    0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0x89, 0xae, 0xea,
+    0xf8, 0xb1, 0x29, 0x78, 0xde, 0x09, 0x08, 0x34, 0x7f, 0x9d, 0x12, 0x90,
+    0x05, 0x10, 0x59, 0xe7, 0xc0, 0x2b, 0xcb, 0x64, 0x2c, 0x88, 0x70, 0x4e,
+    0x88, 0x05, 0xbd, 0x8d, 0x6d, 0xf2, 0x8e, 0xeb, 0x48, 0xa9, 0xf5, 0x47,
+    0xad, 0x1b, 0x8a, 0xc4, 0xa1, 0x67, 0x33, 0xea, 0xa4, 0x0a, 0x46, 0xc1,
+    0x7f, 0x06, 0xc0, 0x00, 0x0d, 0x4c, 0x5d, 0xdd, 0x69, 0x54, 0x09, 0xd1,
+    0x61, 0xa3, 0x35, 0x30, 0x33, 0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x13,
+    0x01, 0x01, 0xff, 0x04, 0x02, 0x30, 0x00, 0x30, 0x0e, 0x06, 0x03, 0x55,
+    0x1d, 0x0f, 0x01, 0x01, 0xff, 0x04, 0x04, 0x03, 0x02, 0x05, 0xa0, 0x30,
+    0x13, 0x06, 0x03, 0x55, 0x1d, 0x11, 0x04, 0x0c, 0x30, 0x0a, 0x82, 0x08,
+    0x64, 0x6f, 0x74, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x30, 0x0a, 0x06, 0x08,
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x03, 0x48, 0x00, 0x30,
+    0x45, 0x02, 0x21, 0x00, 0xf1, 0x1d, 0xf1, 0x43, 0x1f, 0x57, 0xd8, 0x4e,
+    0xe6, 0xca, 0x93, 0xa7, 0x59, 0x6a, 0xa1, 0x7a, 0x31, 0xc5, 0xba, 0x6d,
+    0x2f, 0xa3, 0xd6, 0x0a, 0x59, 0x5c, 0x46, 0xec, 0x13, 0xf8, 0x1b, 0x39,
+    0x02, 0x20, 0x33, 0xeb, 0x43, 0xc8, 0xcf, 0x17, 0xa5, 0x4b, 0x7c, 0xc8,
+    0x28, 0xfb, 0x1f, 0x8d, 0xfe, 0x1a, 0xb9, 0xfa, 0x2d, 0xa4, 0x65, 0x31,
+    0xaa, 0xa0, 0xcf, 0xe3, 0x52, 0xdf, 0x37, 0x63, 0xb6, 0xd4,
+];
+
+/// The same key and SPKI as [`GOOD_CERT`] (so [`PIN_B64`] matches) but not yet
+/// valid: notBefore 2030-01-01, notAfter 2040-01-01. The pinned verifier
+/// checks only SAN plus SPKI pin, never certificate validity, so this
+/// certificate must still be accepted.
+const NOT_YET_VALID_CERT: &[u8] = &[
+    0x30, 0x82, 0x01, 0x49, 0x30, 0x81, 0xf1, 0xa0, 0x03, 0x02, 0x01, 0x02,
+    0x02, 0x02, 0x10, 0x01, 0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce,
+    0x3d, 0x04, 0x03, 0x02, 0x30, 0x13, 0x31, 0x11, 0x30, 0x0f, 0x06, 0x03,
+    0x55, 0x04, 0x03, 0x0c, 0x08, 0x64, 0x6f, 0x74, 0x2e, 0x74, 0x65, 0x73,
+    0x74, 0x30, 0x1e, 0x17, 0x0d, 0x33, 0x30, 0x30, 0x31, 0x30, 0x31, 0x30,
+    0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x17, 0x0d, 0x34, 0x30, 0x30, 0x31,
+    0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5a, 0x30, 0x13, 0x31,
+    0x11, 0x30, 0x0f, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x08, 0x64, 0x6f,
+    0x74, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x30, 0x59, 0x30, 0x13, 0x06, 0x07,
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48,
+    0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0x89, 0xae, 0xea,
+    0xf8, 0xb1, 0x29, 0x78, 0xde, 0x09, 0x08, 0x34, 0x7f, 0x9d, 0x12, 0x90,
+    0x05, 0x10, 0x59, 0xe7, 0xc0, 0x2b, 0xcb, 0x64, 0x2c, 0x88, 0x70, 0x4e,
+    0x88, 0x05, 0xbd, 0x8d, 0x6d, 0xf2, 0x8e, 0xeb, 0x48, 0xa9, 0xf5, 0x47,
+    0xad, 0x1b, 0x8a, 0xc4, 0xa1, 0x67, 0x33, 0xea, 0xa4, 0x0a, 0x46, 0xc1,
+    0x7f, 0x06, 0xc0, 0x00, 0x0d, 0x4c, 0x5d, 0xdd, 0x69, 0x54, 0x09, 0xd1,
+    0x61, 0xa3, 0x35, 0x30, 0x33, 0x30, 0x0c, 0x06, 0x03, 0x55, 0x1d, 0x13,
+    0x01, 0x01, 0xff, 0x04, 0x02, 0x30, 0x00, 0x30, 0x0e, 0x06, 0x03, 0x55,
+    0x1d, 0x0f, 0x01, 0x01, 0xff, 0x04, 0x04, 0x03, 0x02, 0x05, 0xa0, 0x30,
+    0x13, 0x06, 0x03, 0x55, 0x1d, 0x11, 0x04, 0x0c, 0x30, 0x0a, 0x82, 0x08,
+    0x64, 0x6f, 0x74, 0x2e, 0x74, 0x65, 0x73, 0x74, 0x30, 0x0a, 0x06, 0x08,
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02, 0x03, 0x47, 0x00, 0x30,
+    0x44, 0x02, 0x20, 0x61, 0x08, 0x18, 0xba, 0xe9, 0xa1, 0x21, 0x83, 0xbb,
+    0xae, 0x5a, 0x29, 0x85, 0xf6, 0x20, 0xe2, 0xc6, 0x9d, 0x10, 0xbd, 0xde,
+    0x38, 0x4a, 0xa5, 0xfd, 0x30, 0x8e, 0x40, 0x0c, 0x27, 0xfb, 0xae, 0x02,
+    0x20, 0x3c, 0x1e, 0x16, 0x68, 0x72, 0xe0, 0xf0, 0x4b, 0x2a, 0x96, 0x58,
+    0x40, 0xf5, 0xd0, 0x1f, 0xc1, 0xaf, 0xa9, 0x81, 0xfa, 0xa2, 0x27, 0x9c,
+    0xb7, 0xad, 0x22, 0x1b, 0xe1, 0x47, 0x2c, 0x5e, 0xcd,
+];
+
 /// The PKCS#8 DER private key behind [`GOOD_CERT`] and [`SAN_MISMATCH_CERT`]
 /// (same key, same SPKI, same pin, different SAN).
 const GOOD_KEY: &[u8] = &[
@@ -211,6 +281,20 @@ fn server_config(cert: &'static [u8], key: &'static [u8]) -> ServerConfig {
         .expect("loopback server certificate/key valid")
 }
 
+/// Builds a rustls server configuration restricted to TLS 1.2, so the client's
+/// offered 1.2/1.3 set must negotiate down to 1.2 and still publish.
+fn server_config_tls12(cert: &'static [u8], key: &'static [u8]) -> ServerConfig {
+    let provider = rustls::crypto::ring::default_provider();
+    let certificate = CertificateDer::from(cert.to_vec());
+    let key = PrivateKeyDer::try_from(key.to_vec()).expect("embedded ec p256 pkcs8 key");
+    ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS12])
+        .expect("loopback server protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate], key)
+        .expect("loopback server certificate/key valid")
+}
+
 /// Drains whatever decrypted plaintext the rustls connection currently buffers
 /// into `plain`; never blocks on the socket. Returns whether any bytes were
 /// drained, so the caller reads more TLS records only when the buffer is idle.
@@ -239,20 +323,9 @@ fn drain_plaintext(
     Ok(got)
 }
 
-/// Flushes one length-prefixed DNS message through the rustls writer and its
-/// outbound TLS records to the blocking socket.
-fn write_tls_message(
-    tls: &mut ServerConnection,
-    sock: &mut TcpStream,
-    message: &[u8],
-) -> io::Result<()> {
-    tls.writer().write_all(
-        &u16::try_from(message.len())
-            .expect("reply fits u16")
-            .to_be_bytes(),
-    )?;
-    tls.writer().write_all(message)?;
-    tls.writer().flush()?;
+/// Drains the rustls outbound record buffer to the blocking socket until no
+/// further records are queued, tolerating transient WouldBlock/Interrupted.
+fn flush_tls(tls: &mut ServerConnection, sock: &mut TcpStream) -> io::Result<()> {
     loop {
         match tls.write_tls(sock) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -267,6 +340,44 @@ fn write_tls_message(
         }
     }
     Ok(())
+}
+
+/// Flushes one length-prefixed DNS message through the rustls writer and its
+/// outbound TLS records to the blocking socket.
+fn write_tls_message(
+    tls: &mut ServerConnection,
+    sock: &mut TcpStream,
+    message: &[u8],
+) -> io::Result<()> {
+    tls.writer().write_all(
+        &u16::try_from(message.len())
+            .expect("reply fits u16")
+            .to_be_bytes(),
+    )?;
+    tls.writer().write_all(message)?;
+    tls.writer().flush()?;
+    flush_tls(tls, sock)
+}
+
+/// Writes a length-prefixed DNS message so the length prefix and the body land
+/// in separate TLS records: flush after the prefix, then flush after the body.
+/// The transport's per-turn single-plaintext-chunk drain must accumulate both
+/// records across turns before the full message is published.
+fn write_tls_split(
+    tls: &mut ServerConnection,
+    sock: &mut TcpStream,
+    message: &[u8],
+) -> io::Result<()> {
+    tls.writer().write_all(
+        &u16::try_from(message.len())
+            .expect("reply fits u16")
+            .to_be_bytes(),
+    )?;
+    tls.writer().flush()?;
+    flush_tls(tls, sock)?;
+    tls.writer().write_all(message)?;
+    tls.writer().flush()?;
+    flush_tls(tls, sock)
 }
 
 /// The reply mode the loopback TLS responder applies to every query it
@@ -285,6 +396,12 @@ enum AdversarialReply {
     /// A well-formed-length message that is not a response (QR=0), so
     /// response parsing fails closed.
     Mangled,
+    /// Serve exactly one positive reply then close the connection, so a
+    /// retained transport's next exchange reads EOF and fails closed.
+    ServeOnce,
+    /// Split the reply across two TLS records: the length prefix flushed as
+    /// its own record, then the body as a second record.
+    SplitRecord,
 }
 
 /// Serves length-prefixed DNS queries over one accepted TLS connection until
@@ -303,13 +420,29 @@ fn serve_queries(
             if plain.len() >= full {
                 let query = plain[2..full].to_vec();
                 plain.drain(..full);
-                let reply = match mode {
-                    AdversarialReply::Positive => echo_positive(&query),
-                    AdversarialReply::WrongTid => wrong_tid_reply(&query),
-                    AdversarialReply::Oversize => vec![0u8; crate::dns::DNS_MSG_LIMIT + 1],
-                    AdversarialReply::Mangled => mangled_reply(&query),
-                };
-                write_tls_message(tls, sock, &reply)?;
+                match mode {
+                    AdversarialReply::ServeOnce => {
+                        write_tls_message(tls, sock, &echo_positive(&query))?;
+                        return Ok(());
+                    }
+                    AdversarialReply::SplitRecord => {
+                        write_tls_split(tls, sock, &echo_positive(&query))?;
+                        continue;
+                    }
+                    AdversarialReply::Positive => {
+                        write_tls_message(tls, sock, &echo_positive(&query))?;
+                    }
+                    AdversarialReply::WrongTid => {
+                        write_tls_message(tls, sock, &wrong_tid_reply(&query))?;
+                    }
+                    AdversarialReply::Oversize => {
+                        let oversize = vec![0u8; crate::dns::DNS_MSG_LIMIT + 1];
+                        write_tls_message(tls, sock, &oversize)?;
+                    }
+                    AdversarialReply::Mangled => {
+                        write_tls_message(tls, sock, &mangled_reply(&query))?;
+                    }
+                }
                 continue;
             }
         }
@@ -345,6 +478,32 @@ fn serve_conn_blocking(sock: TcpStream, config: &Arc<ServerConfig>, mode: Advers
     let _ = serve_queries(&mut tls, &mut sock, mode);
 }
 
+/// Drives one accepted connection: completes the server handshake, forces a
+/// post-handshake traffic-key refresh (queuing a KeyUpdate record and flushing
+/// any auto-queued session tickets), then serves DNS queries. The transport
+/// must process the post-handshake records as non-application data and still
+/// publish the DNS reply.
+fn serve_conn_blocking_post_handshake(
+    sock: TcpStream,
+    config: &Arc<ServerConfig>,
+    mode: AdversarialReply,
+) {
+    let mut sock = sock;
+    let Ok(mut tls) = ServerConnection::new(Arc::clone(config)) else {
+        return;
+    };
+    if tls.complete_io(&mut sock).is_err() {
+        return;
+    }
+    if tls.refresh_traffic_keys().is_err() {
+        return;
+    }
+    if flush_tls(&mut tls, &mut sock).is_err() {
+        return;
+    }
+    let _ = serve_queries(&mut tls, &mut sock, mode);
+}
+
 /// A loopback TLS responder that accepts connections until dropped, completing
 /// the rustls server handshake and answering each accepted connection's DNS
 /// queries. The nonblocking accept loop with a stop flag lets the owning test
@@ -370,10 +529,37 @@ impl Drop for TlsResponder {
     }
 }
 
+/// The per-connection driver for a spawned TLS responder: completes the
+/// handshake (or performs post-handshake work) and serves the connection.
+type ConnHandler = fn(TcpStream, &Arc<ServerConfig>, AdversarialReply);
+
 fn spawn_tls_responder(
     cert: &'static [u8],
     key: &'static [u8],
     mode: AdversarialReply,
+) -> TlsResponder {
+    spawn_tls_responder_with(Arc::new(server_config(cert, key)), mode, serve_conn_blocking)
+}
+
+/// Spawns a TLS responder from a caller-built server configuration (e.g. a
+/// protocol-version-restricted config).
+fn spawn_tls_responder_config(config: ServerConfig, mode: AdversarialReply) -> TlsResponder {
+    spawn_tls_responder_with(Arc::new(config), mode, serve_conn_blocking)
+}
+
+/// Spawns a TLS responder that forces a post-handshake traffic-key refresh
+/// (KeyUpdate) on every accepted connection before serving queries.
+fn spawn_tls_responder_post_handshake(
+    config: ServerConfig,
+    mode: AdversarialReply,
+) -> TlsResponder {
+    spawn_tls_responder_with(Arc::new(config), mode, serve_conn_blocking_post_handshake)
+}
+
+fn spawn_tls_responder_with(
+    config: Arc<ServerConfig>,
+    mode: AdversarialReply,
+    handler: ConnHandler,
 ) -> TlsResponder {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind tls responder");
     listener
@@ -382,14 +568,48 @@ fn spawn_tls_responder(
     let addr = listener.local_addr().expect("tls responder addr");
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
-    let config = Arc::new(server_config(cert, key));
     let handle = thread::spawn(move || {
         while !stop_thread.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((sock, _)) => {
                     if sock.set_nonblocking(false).is_ok() {
-                        serve_conn_blocking(sock, &config, mode);
+                        handler(sock, &config, mode);
                     }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    TlsResponder {
+        addr,
+        stop,
+        handle: Some(handle),
+    }
+}
+
+/// A loopback responder that writes raw bytes on each accepted connection
+/// without any TLS framing, holding the connection open until dropped. Used to
+/// feed the transport an oversized handshake record that the rustls deframer
+/// must reject ("message buffer full").
+fn spawn_raw_responder(bytes: Vec<u8>) -> TlsResponder {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind raw responder");
+    listener
+        .set_nonblocking(true)
+        .expect("raw responder nonblocking");
+    let addr = listener.local_addr().expect("raw responder addr");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = Arc::clone(&stop);
+    let handle = thread::spawn(move || {
+        let mut held: Vec<TcpStream> = Vec::new();
+        while !stop_thread.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut sock, _)) => {
+                    let _ = sock.set_nonblocking(false);
+                    let _ = sock.write_all(&bytes);
+                    held.push(sock);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(2));
@@ -788,6 +1008,349 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
     assert_eq!(
         first_addr, second_addr,
         "the serving refresh must reuse the same rustls client allocation, not rebuild it"
+    );
+    transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn pinned_dot_accepts_expired_cert_with_matching_pin() {
+    let responder = spawn_tls_responder(EXPIRED_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(report.exchanges, 4);
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        report.resolved_names, 2,
+        "the pinned verifier checks only SAN plus SPKI pin, never certificate validity, so an expired cert must still resolve"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        vec![crate::eligibility::NumericAddr::V4(
+            std::net::Ipv4Addr::new(93, 184, 216, 34)
+        )]
+    );
+    drop(responder);
+}
+
+#[test]
+fn pinned_dot_accepts_not_yet_valid_cert_with_matching_pin() {
+    let responder = spawn_tls_responder(NOT_YET_VALID_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(report.exchanges, 4);
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        report.resolved_names, 2,
+        "the pinned verifier checks only SAN plus SPKI pin, never certificate validity, so a not-yet-valid cert must still resolve"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        vec![crate::eligibility::NumericAddr::V4(
+            std::net::Ipv4Addr::new(93, 184, 216, 34)
+        )]
+    );
+    drop(responder);
+}
+
+#[test]
+fn pinned_dot_negotiates_tls12_with_tls12_only_server() {
+    let responder = spawn_tls_responder_config(
+        server_config_tls12(GOOD_CERT, GOOD_KEY),
+        AdversarialReply::Positive,
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(report.exchanges, 4);
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        report.resolved_names, 2,
+        "the transport's 1.2/1.3 offer must negotiate down to a TLS 1.2-only server and still publish"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        vec![crate::eligibility::NumericAddr::V4(
+            std::net::Ipv4Addr::new(93, 184, 216, 34)
+        )]
+    );
+    drop(responder);
+}
+
+#[test]
+fn pinned_dot_oversized_handshake_record_fails_closed() {
+    let mut raw = vec![0x16, 0x03, 0x03, 0xff, 0xff];
+    raw.extend(std::iter::repeat(0u8).take(0xffff));
+    let responder = spawn_raw_responder(raw);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(
+        report.failed, 4,
+        "an oversized handshake record must overflow the rustls deframer and fail every exchange closed"
+    );
+    assert_eq!(report.exchanges, 0);
+    assert_eq!(report.resolved_names, 0);
+    assert_eq!(bindings_of(&cache, 0, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 0, Family::Aaaa), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::Aaaa), Vec::new());
+    drop(responder);
+}
+
+#[test]
+fn pinned_dot_post_handshake_records_do_not_break_exchange() {
+    let responder = spawn_tls_responder_post_handshake(
+        server_config(GOOD_CERT, GOOD_KEY),
+        AdversarialReply::Positive,
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(report.exchanges, 4);
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        report.resolved_names, 2,
+        "post-handshake KeyUpdate and session-ticket records must be processed as non-application data without breaking the exchange"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        vec![crate::eligibility::NumericAddr::V4(
+            std::net::Ipv4Addr::new(93, 184, 216, 34)
+        )]
+    );
+    drop(responder);
+}
+
+#[test]
+fn pinned_dot_reply_split_across_records_drains_and_publishes() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::SplitRecord);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(report.exchanges, 4);
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        report.resolved_names, 2,
+        "a reply split across two TLS records must drain one plaintext chunk per turn and still publish the assembled message"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        vec![crate::eligibility::NumericAddr::V4(
+            std::net::Ipv4Addr::new(93, 184, 216, 34)
+        )]
+    );
+    drop(responder);
+}
+
+#[test]
+fn pinned_dot_idle_closed_retained_transport_fails_closed() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::ServeOnce);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
+        fqdn: *fqdn,
+        pin: cfg.resolver_set().primary().pin().copied(),
+    });
+    transport.registration = Registration::Shared {
+        token: Token(0),
+        armed: None,
+    };
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline)
+        .unwrap();
+    let first = drive_to_terminal(
+        &mut transport,
+        &mut cache,
+        &mut schedules,
+        fqdn,
+        deadline,
+        &mut poll,
+        &mut events,
+    );
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange over a live connection must publish, got {first:?}"
+    );
+    assert!(
+        transport.conn.is_some(),
+        "a concluded exchange must retain its DoT transport for the next exchange"
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    transport
+        .start_exchange(fqdn, Family::A, 1, deadline)
+        .unwrap();
+    let second = drive_to_terminal(
+        &mut transport,
+        &mut cache,
+        &mut schedules,
+        fqdn,
+        deadline,
+        &mut poll,
+        &mut events,
+    );
+    assert!(
+        matches!(second, TurnResult::Failed(FailureReason::Receive)),
+        "a retained transport whose peer closed after one reply must fail the next exchange closed, got {second:?}"
+    );
+    transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+/// Calibrated upper bound on allocation events during one warm DoT exchange:
+/// the transport itself must not allocate, while the bounded rustls seam may
+/// allocate a small number of per-record buffers (docs/alumina-proxy.md:795).
+const WARM_DOT_ALLOC_BOUND: u64 = 8;
+
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn dot_warm_serving_exchange_alloc_witness() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
+        fqdn: *fqdn,
+        pin: cfg.resolver_set().primary().pin().copied(),
+    });
+    transport.registration = Registration::Shared {
+        token: Token(0),
+        armed: None,
+    };
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    // Cold exchange: builds the rustls client and completes the handshake
+    // outside the measured phase, so the warm path below is the only
+    // allocation surface under witness.
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline)
+        .unwrap();
+    let cold = drive_to_terminal(
+        &mut transport,
+        &mut cache,
+        &mut schedules,
+        fqdn,
+        deadline,
+        &mut poll,
+        &mut events,
+    );
+    assert!(
+        matches!(cold, TurnResult::Published(_)),
+        "the cold DoT exchange must publish, got {cold:?}"
+    );
+    assert!(
+        transport.conn.is_some(),
+        "a concluded DoT exchange must retain its transport for the warm reuse"
+    );
+
+    // Warm exchange over the retained transport: the rustls seam may allocate
+    // a small bounded number of per-record buffers; the transport itself must
+    // not allocate, so reallocs stay zero and total events stay within the
+    // calibrated rustls seam bound.
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    transport
+        .start_exchange(fqdn, Family::A, 1, deadline)
+        .unwrap();
+    let (warm, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        drive_to_terminal(
+            &mut transport,
+            &mut cache,
+            &mut schedules,
+            fqdn,
+            deadline,
+            &mut poll,
+            &mut events,
+        )
+    });
+    assert!(
+        matches!(warm, TurnResult::Published(_)),
+        "the warm DoT exchange must publish over the retained transport, got {warm:?}"
+    );
+    assert_eq!(
+        counts.reallocs, 0,
+        "the warm DoT exchange must not reallocate any transport buffer: {counts:?}"
+    );
+    assert!(
+        counts.allocs <= WARM_DOT_ALLOC_BOUND && counts.deallocs <= WARM_DOT_ALLOC_BOUND,
+        "the warm DoT exchange must stay within the calibrated rustls seam bound: {counts:?}"
     );
     transport.cancel_for_shutdown();
     drop(responder);
