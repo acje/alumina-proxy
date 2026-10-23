@@ -1092,9 +1092,6 @@ pub fn parse_response(
                         earliest = earliest.min(u64::from(*addr_ttl));
                     }
                 }
-                if earliest == u64::MAX {
-                    earliest = 1;
-                }
                 return Ok(Outcome::Positive {
                     family,
                     bindings,
