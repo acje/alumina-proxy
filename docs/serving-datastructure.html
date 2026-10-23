@@ -60,21 +60,21 @@
   (<code>docs/alumina-proxy.md</code> § Initial resource profile + <code>alumina-mema</code> amendment; <code>src/inventory.rs</code>).</p>
 
   <div class="grid">
-    <div class="stat"><div class="k">Retained footprint</div><div class="v">≈ 196 MiB</div>
-      <div class="n">128 traffic + 68 serving + DNS + 2 log</div></div>
+    <div class="stat"><div class="k">Retained footprint</div><div class="v">≈ 206 MiB</div>
+      <div class="n">128 traffic + ≈ 76 serving + DNS + 2 log</div></div>
     <div class="stat"><div class="k">Tunnel slots</div><div class="v">512</div>
       <div class="n">MAX_TUNNELS = TUNNEL_SLOTS</div></div>
     <div class="stat"><div class="k">Pending setups</div><div class="v">128</div>
       <div class="n">MAX_PENDING_SETUPS</div></div>
     <div class="stat"><div class="k">Traffic storage</div><div class="v">128 MiB</div>
       <div class="n">512 × 2 × 128 KiB</div></div>
-    <div class="stat"><div class="k">Serving workspace</div><div class="v">68 MiB</div>
-      <div class="n">512 × 136 KiB</div></div>
+    <div class="stat"><div class="k">Serving workspace</div><div class="v">≈ 76 MiB</div>
+      <div class="n">512 × ~152.5 KiB</div></div>
   </div>
 
   <div class="legend">
     <span><span class="swatch" style="background:var(--traffic)"></span>Traffic storage (128 MiB)</span>
-    <span><span class="swatch" style="background:var(--serving)"></span>Serving workspace (68 MiB)</span>
+    <span><span class="swatch" style="background:var(--serving)"></span>Serving workspace (≈ 76 MiB)</span>
     <span><span class="swatch" style="background:var(--dns)"></span>DNS named buffers</span>
     <span><span class="swatch" style="background:var(--log)"></span>Log queue (2 MiB)</span>
     <span><span class="swatch" style="background:var(--kernel)"></span>Outside budget (kernel/exec/stacks)</span>
@@ -102,7 +102,7 @@
       <div class="box serving"><div class="t">ChInspector scratch</div><div class="s">64 KiB · flattened</div></div>
       <div class="box serving"><div class="t">Gate + cursors</div><div class="s">TunnelGate · fwd/parse/insp rel</div></div>
     </div>
-    <div class="foot">Per-slot: 8 + 64 + 64 = <b>136 KiB</b> (SLOT_WORKSPACE_BYTES). Total: <b>512 × 136 KiB = 68 MiB</b> (SERVING_WORKSPACE_BYTES).</div>
+    <div class="foot">Per-slot: 8 + 64 + 64 = <b>136 KiB</b> (SLOT_WORKSPACE_BYTES) plus ~16.5 KiB ClientHello JA4 retention (spec :929) ≈ <b>152.5 KiB</b>. Total: <b>512 × ~152.5 KiB ≈ 76 MiB</b> (design estimate; SERVING_WORKSPACE_BYTES records 68 MiB).</div>
   </div>
 
   <div class="panel">
@@ -140,13 +140,13 @@
       <thead><tr><th>Component</th><th class="num">Count</th><th class="num">Unit</th><th class="num">Total</th></tr></thead>
       <tbody>
         <tr><td>Tunnel traffic buffers</td><td class="num">512 × 2</td><td class="num">128 KiB</td><td class="num">128 MiB</td></tr>
-        <tr><td>Retained serving workspace (CONNECT head + 2×64 KiB ClientHello)</td><td class="num">512</td><td class="num">136 KiB</td><td class="num">68 MiB</td></tr>
+        <tr><td>Retained serving workspace (CONNECT head + 2×64 KiB ClientHello + JA4 retention)</td><td class="num">512</td><td class="num">~152.5 KiB</td><td class="num">≈ 76 MiB</td></tr>
         <tr><td>DNS named buffers (query + recv + workspace)</td><td class="num">1</td><td class="num">≈16.5 KiB</td><td class="num">&lt; 1 MiB</td></tr>
         <tr><td>Log queue</td><td class="num">256</td><td class="num">8 KiB</td><td class="num">2 MiB</td></tr>
-        <tr><td><b>Retained total</b></td><td class="num"></td><td class="num"></td><td class="num"><b>≈ 196 MiB</b></td></tr>
+        <tr><td><b>Retained total</b></td><td class="num"></td><td class="num"></td><td class="num"><b>≈ 206 MiB</b></td></tr>
       </tbody>
     </table>
-    <div class="foot">Observed VmRSS ≈ 204 MiB on the e2-micro (docs/benchmarks/e2micro-workload.md), consistent with the retained total plus executable/stacks/kernel socket buffers.</div>
+    <div class="foot">Observed VmRSS ≈ 204 MiB on the e2-micro (docs/benchmarks/e2micro-workload.md), consistent with the retained total (≈ 206 MiB design estimate) within measurement tolerance.</div>
   </div>
 
   <div class="foot">Generated from the alumina-proxy source structure (<code>src/inventory.rs</code>, <code>src/serving.rs</code>, <code>src/client_hello.rs</code>, <code>src/startup_dns.rs</code>, <code>src/log.rs</code>) and the fixed resource profile in <code>docs/alumina-proxy.md</code>.</div>
