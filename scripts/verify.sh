@@ -14,7 +14,7 @@ usage() {
 
 TOOLCHAIN="1.99.0"
 
-INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/fault.rs src/fuzz.rs src/config.rs src/resolver.rs src/preflight.rs src/inventory.rs src/boot.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs"
+INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/fault.rs src/fuzz.rs src/config.rs src/resolver.rs src/preflight.rs src/inventory.rs src/boot.rs src/cache.rs src/client_hello.rs src/connect.rs src/dns.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/policy.rs src/enforcement/state.rs src/gate.rs src/log.rs src/runtime.rs src/schedule.rs src/serve.rs src/serving.rs src/startup_dns.rs src/worker.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs"
 
 # docslink gate roots: the exact nonempty argv docslink_check consumes. Shared
 # with the identity snapshot so the boundary content identity covers precisely
