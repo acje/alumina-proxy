@@ -384,7 +384,11 @@ fn due_refresh_is_deferred_while_probe_sweep_owns_the_transport_body() {
         "the probe sweep must still own the transport while the refresh is deferred"
     );
     assert_eq!(
-        runtime.serving().storage().schedules().next_selectable_due(secs),
+        runtime
+            .serving()
+            .storage()
+            .schedules()
+            .next_selectable_due(secs),
         Some(secs),
         "the due refresh slot must remain selectable (never consumed by select_due) \
          while the probe sweep owns the transport"
