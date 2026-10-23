@@ -63,8 +63,29 @@ fn serving_poll_timeout_folds_queued_log_drain_into_earliest_wait() {
 }
 
 #[test]
-fn serving_poll_timeout_folds_bounded_floor_for_idle_selectable_now_due() {
+fn serving_poll_timeout_folds_zero_for_idle_selectable_now_due_not_sweeping() {
     with_serving_stack(ephemeral_port(), |serving| {
+        let secs = serving.storage().dns().now_u64();
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .overwrite_due_at(0, crate::cache::Family::A, secs)
+            .expect("due the A family now");
+        let wait = serving.poll_timeout();
+        assert_eq!(
+            wait,
+            Some(Duration::ZERO),
+            "an idle transport with a selectable-now due slot and no probe sweep folds an \
+             immediate wake so a genuinely-due refresh starts on the next turn without the \
+             100ms anti-spin floor: {wait:?}"
+        );
+    });
+}
+
+#[test]
+fn serving_poll_timeout_keeps_bounded_floor_while_probe_sweep_active() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        serving.storage_mut().dns_mut().seed_probe_sweep_for_test();
         let secs = serving.storage().dns().now_u64();
         serving
             .storage_mut()
@@ -74,9 +95,9 @@ fn serving_poll_timeout_folds_bounded_floor_for_idle_selectable_now_due() {
         let wait = serving.poll_timeout();
         assert!(
             matches!(wait, Some(d) if d >= Duration::from_millis(50) && d <= Duration::from_millis(200)),
-            "an idle transport with a selectable-now due slot folds a bounded floor wake so \
-             an indefinite production poll initiates the refresh without busy-spinning: \
-             {wait:?}"
+            "while the post-boot probe sweep is active, a selectable-now due slot still folds \
+             a bounded floor wake so an indefinite production poll initiates the refresh \
+             without busy-spinning: {wait:?}"
         );
     });
 }

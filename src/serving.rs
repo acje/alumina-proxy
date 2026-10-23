@@ -3149,8 +3149,12 @@ impl Serving {
         {
             let wake = self.storage.schedule_due_instant(due);
             if wake <= now {
-                let floor = now + Duration::from_millis(100);
-                earliest = Some(earliest.map_or(floor, |e| e.min(floor)));
+                if self.storage.dns().sweep_active() {
+                    let floor = now + Duration::from_millis(100);
+                    earliest = Some(earliest.map_or(floor, |e| e.min(floor)));
+                } else {
+                    earliest = Some(earliest.map_or(now, |e| e.min(now)));
+                }
             } else if earliest.is_none_or(|e| wake < e) {
                 earliest = Some(wake);
             }
