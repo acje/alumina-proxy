@@ -6188,6 +6188,68 @@ fn refused_wire_bodies_are_pinned_plain_text() {
 }
 
 #[test]
+/// The five pre-Peer refusal sites carry the requested hostname into the
+/// reject telemetry even though `slot.approved` is not yet set (G11-C01): a
+/// `Forbidden` and a `NoResolvedAddresses` rejection must both emit
+/// `hostname="<requested>"` on the warn-reject record — never a raw-SNI or a
+/// missing hostname field.
+fn pre_peer_refusals_carry_requested_hostname_in_reject_record() {
+    let port = ephemeral_port();
+    let cfg = cfg_doc1(port, "connection", "flare_only", "connection");
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let mut forbidden = connect(port);
+        forbidden
+            .write_all(b"CONNECT evil.example:443 HTTP/1.1\r\n\r\n")
+            .expect("forbidden head");
+        pump(serving, 20);
+        let fb = read_until(&mut forbidden, b"\r\n\r\n");
+        assert!(
+            fb.starts_with(b"HTTP/1.1 403"),
+            "a non-allowlisted CONNECT must be 403, got {fb:?}"
+        );
+        let record = serving
+            .storage()
+            .logs()
+            .last_record_bytes()
+            .expect("Forbidden reject record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=reject") && text.contains("reason=\"forbidden\""),
+            "the Forbidden refusal must emit a reject record: {text}"
+        );
+        assert!(
+            text.contains("hostname=\"evil.example\""),
+            "the Forbidden reject record must carry the requested hostname: {text}"
+        );
+
+        let mut unresolved = connect(port);
+        unresolved
+            .write_all(b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n")
+            .expect("unresolved head");
+        pump(serving, 20);
+        let ub = read_until(&mut unresolved, b"\r\n\r\n");
+        assert!(
+            ub.starts_with(b"HTTP/1.1 502"),
+            "an allowlisted CONNECT against an unpopulated cache must 502, got {ub:?}"
+        );
+        let record = serving
+            .storage()
+            .logs()
+            .last_record_bytes()
+            .expect("NoResolvedAddresses reject record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=reject") && text.contains("reason=\"dial_failed\""),
+            "the NoResolvedAddresses refusal must emit a reject record: {text}"
+        );
+        assert!(
+            text.contains("hostname=\"sub.example.org\""),
+            "the NoResolvedAddresses reject record must carry the requested hostname: {text}"
+        );
+    });
+}
+
+#[test]
 fn capacity_refusal_wire_body_is_pinned_plain_text() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {

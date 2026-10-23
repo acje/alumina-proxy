@@ -2365,27 +2365,27 @@ impl Serving {
             && self.storage.enforcement().is_blocked(ordinal)
         {
             self.storage.enforcement_mut().note_domain_block(ordinal);
-            self.refuse(index, Refusal::Forbidden);
+            self.refuse_with_hostname(index, Refusal::Forbidden, approved);
             return Ok(());
         }
         let now = Instant::now();
         let phase = self.storage.decide(slot, &request, now);
         match phase {
             Err(_) | Ok(ConnectPhase::CandidatesExhausted) => {
-                self.refuse(index, Refusal::DialFailed);
+                self.refuse_with_hostname(index, Refusal::DialFailed, approved);
                 Ok(())
             }
             Ok(ConnectPhase::Forbidden) => {
                 self.any_illegal(index, AnyIllegalCause::HostNotAllowlisted);
-                self.refuse(index, Refusal::Forbidden);
+                self.refuse_with_hostname(index, Refusal::Forbidden, approved);
                 Ok(())
             }
             Ok(ConnectPhase::NoBinding) => {
-                self.refuse(index, Refusal::NoResolvedAddresses);
+                self.refuse_with_hostname(index, Refusal::NoResolvedAddresses, approved);
                 Ok(())
             }
             Ok(ConnectPhase::DeadlineExhausted) => {
-                self.refuse(index, Refusal::SetupTimeout);
+                self.refuse_with_hostname(index, Refusal::SetupTimeout, approved);
                 Ok(())
             }
             Ok(ConnectPhase::Peer {
