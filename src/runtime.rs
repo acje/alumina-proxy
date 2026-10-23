@@ -394,9 +394,16 @@ impl Runtime {
             {
                 self.dns_advances_last_turn += 1;
             }
+            let ordinal = self.serving.storage().dns().active_ordinal();
             match self.serving.storage_mut().advance_dns()? {
                 Some(TurnResult::Pending) => {}
-                None | Some(TurnResult::Failed(_) | TurnResult::Published(_)) => break,
+                Some(TurnResult::Failed(reason)) => {
+                    self.serving
+                        .storage_mut()
+                        .note_exchange_failed(ordinal, reason);
+                    break;
+                }
+                None | Some(TurnResult::Published(_)) => break,
             }
         }
         Ok(())

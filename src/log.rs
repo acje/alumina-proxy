@@ -156,6 +156,7 @@ enum Kind {
     QueueLow,
     Monitor,
     ResolverProbe,
+    ExchangeFailed,
 }
 
 impl Kind {
@@ -173,6 +174,7 @@ impl Kind {
             Kind::QueueLow => "queue_low",
             Kind::Monitor => "monitor",
             Kind::ResolverProbe => "resolver_probe",
+            Kind::ExchangeFailed => "exchange_failed",
         }
     }
 }
@@ -1197,6 +1199,20 @@ impl LogStore {
         self.enqueue(Level::Warn, Kind::StartupWarning, &fields);
     }
 
+    /// One warn per counted exchange failure in the serving loop
+    /// (docs/alumina-proxy.md:67): the allowlist name (when the ordinal is
+    /// still recoverable after the exchange settled) and the structural
+    /// failure reason.
+    pub(crate) fn exchange_failed(&mut self, secs: u64, name: Option<&str>, reason: &'static str) {
+        self.set_now(secs);
+        let fields = [
+            Field::new("secs", Val::U64(secs)),
+            Field::new("name", Val::OptStr(name)),
+            Field::new("reason", Val::Str(reason)),
+        ];
+        self.enqueue(Level::Warn, Kind::ExchangeFailed, &fields);
+    }
+
     /// The single startup-final record (corrected T2): the canonical counts,
     /// plus one inline segment per unresolved name with its latest outcome and
     /// reason. All unresolved names share this one record — the startup result
@@ -1726,6 +1742,22 @@ mod tests {
             "got: {line}"
         );
         assert!(text.ends_with('\n'), "newline framing ends the record");
+    }
+
+    #[test]
+    fn logging_encoder_frames_exchange_failed_with_name_and_reason() {
+        let (mut store, mut file) = file_logstore();
+        store.exchange_failed(7, Some("sub.example.org"), "tls_identity");
+        flush_all(&mut store);
+        let out = read_all(&mut file);
+        let text = String::from_utf8(out).expect("ascii record");
+        let line = text.lines().next().expect("one record");
+        assert!(
+            line.starts_with(
+                "level=warn kind=exchange_failed secs=7 name=\"sub.example.org\" reason=\"tls_identity\""
+            ),
+            "got: {line}"
+        );
     }
 
     #[test]

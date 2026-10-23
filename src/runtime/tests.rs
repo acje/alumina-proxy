@@ -112,6 +112,67 @@ fn falsifier_body() {
 }
 
 #[test]
+fn serving_loop_exchange_failure_emits_exchange_failed_record() {
+    let t = thread::Builder::new()
+        .name("runtime-exchange-failed".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(exchange_failed_body)
+        .expect("spawn exchange-failed thread");
+    t.join().expect("exchange-failed thread");
+}
+
+fn exchange_failed_body() {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+
+    // A held loopback listener (never freed, so no port-reuse race) plus a
+    // past exchange deadline settles the first cooperative turn as a counted
+    // timeout: the mio nonblocking connect never completes synchronously, so
+    // `probe_connect` returns NotReady on advance one and the deadline check
+    // fires `Failed(Timeout)` deterministically, independent of when the
+    // connect actually lands.
+    let held = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind held peer");
+    let held_addr = held.local_addr().expect("held peer addr");
+    let exchange_deadline = Instant::now() - Duration::from_secs(1);
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(held_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, exchange_deadline)
+        .expect("start exchange");
+
+    runtime.cooperative_dns_turn().expect("cooperative turn");
+
+    let record = runtime
+        .serving
+        .storage()
+        .logs()
+        .last_record_bytes()
+        .expect("exchange_failed record");
+    let text = String::from_utf8_lossy(record);
+    assert!(
+        text.contains("kind=exchange_failed"),
+        "the serving-loop failure must emit an exchange_failed record: {text}"
+    );
+    assert!(
+        text.contains("name=\"sub.example.org\""),
+        "the record carries the allowlist name: {text}"
+    );
+    assert!(
+        text.contains("reason=\"timeout\""),
+        "the record carries the structural failure reason: {text}"
+    );
+}
+
+#[test]
 #[cfg(all(test, feature = "alloc-witness"))]
 fn hot_relay_turns_compose_with_bounded_stalled_dns() {
     let t = std::thread::Builder::new()

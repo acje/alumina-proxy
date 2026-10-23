@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use mio::net::TcpListener;
 
 use crate::cache::{Cache, CacheError, EntryState, Family, NameIndex};
-use crate::config::{Config, FixedHostname};
+use crate::config::{Config, FixedHostname, Fqdn};
 use crate::connect::ConnectRequest;
 use crate::enforcement::action::DomainOrdinal;
 use crate::enforcement::monitor::DnsAnomalyKind;
@@ -17,7 +17,8 @@ use crate::log::{LogStore, ResolverProbeSegment};
 use crate::resolver::MAX_RESOLVERS;
 use crate::schedule::Schedules;
 use crate::startup_dns::{
-    ProbeVerdict, STARTUP_WINDOW_SECS, StartupDns, StartupDnsError, StartupReport, TurnResult,
+    FailureReason, ProbeVerdict, STARTUP_WINDOW_SECS, StartupDns, StartupDnsError, StartupReport,
+    TurnResult,
 };
 use crate::worker::{
     AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, SlotIndex, TunnelIndex,
@@ -392,6 +393,20 @@ impl ServeStorage {
         self.drain_dns_anomalies();
         self.drain_downgrade_to_plain();
         Ok(Some(result))
+    }
+
+    /// Emits the per-failure `exchange_failed` record for a counted
+    /// serving-loop exchange failure (G6-C04): the allowlist name is recovered
+    /// from the ordinal captured before the advance settled the exchange. The
+    /// startup window surfaces its own failures through the single
+    /// `startup_final` record, so this serving-loop-only emission never
+    /// duplicates that surface.
+    pub(crate) fn note_exchange_failed(&mut self, ordinal: Option<usize>, reason: FailureReason) {
+        let name = ordinal
+            .and_then(|o| self.config.allowlist().get(o))
+            .map(Fqdn::as_str);
+        let secs = self.cache_secs(Instant::now());
+        self.logs.exchange_failed(secs, name, reason.as_str());
     }
 
     /// Folds any degraded-mode enter/exit crossings the DNS transport
