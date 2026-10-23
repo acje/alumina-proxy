@@ -274,7 +274,7 @@ boot_fixtures() {
     }
     release_sha_before=$(sha256_digest file "$ROOT/$BIN") || exit 1
     echo "BUILD fixture-facts variant (proof-only feature; separate target dir; production artifact untouched):"
-    linux_dispatch 'cargo +1.99.0 build --release --locked --features fixture-facts --target-dir target/fixture-facts'
+    linux_dispatch 'cargo +${TOOLCHAIN} build --release --locked --features fixture-facts --target-dir target/fixture-facts'
     VARBIN="$ROOT/target/fixture-facts/release/alumina"
     [ -x "$VARBIN" ] || {
         echo "BOOT-FIXTURES-BLOCKED: fixture-facts variant binary missing after build" >&2
@@ -917,6 +917,7 @@ command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1 || true
         -e CARGO_HOME=/cargo-home \
         -e CARGO_INCREMENTAL=0 \
         -e CARGO_TERM_PROGRESS_WHEN=never \
+        -e TOOLCHAIN="$TOOLCHAIN" \
         -w /app \
         "$IMAGE" sh -c "$prov$inner" || drc=$?
     [ "$drc" -eq 0 ] || {
@@ -1098,7 +1099,7 @@ e2e_build_receipt() {
         cargo +${TOOLCHAIN} build --locked --release --target "$E2E_TARGET" --target-dir "$TGT"
     else
         echo "PRODUCTION-RELEASE-BUILD (native Linux via container dispatch; host $(uname -s), target=${E2E_TARGET}):"
-        linux_dispatch "cargo +1.99.0 build --locked --release --target ${E2E_TARGET} --target-dir /app/target"
+        linux_dispatch "cargo +${TOOLCHAIN} build --locked --release --target ${E2E_TARGET} --target-dir /app/target"
     fi
     after=$(e2e_receipt_fields "$_gate" "$_harness_py" "$_harness_sh") || exit 1
     # Pre/post build source-input stability: the candidate inputs (HEAD +
