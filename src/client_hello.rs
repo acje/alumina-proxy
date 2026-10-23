@@ -2059,4 +2059,57 @@ mod tests {
             "the JA4 computation path (pure fn + ClientHello::ja4) must be allocation-free: {counts:?}"
         );
     }
+
+    #[test]
+    fn rejects_bad_record_version() {
+        for bad in [0x0304u16, 0x0002, 0x0300] {
+            let mut msg = hello_msg(TLS12, &[TLS13], &["sub.example.org"], false);
+            msg[1] = (bad >> 8) as u8;
+            msg[2] = (bad & 0xff) as u8;
+            assert_eq!(parse_one(&msg), Err(ChError::BadRecordVersion { got: bad }));
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_legacy_version() {
+        for legacy in [0x0302u16, 0x0301] {
+            let msg = hello_msg(legacy, &[TLS13], &["sub.example.org"], false);
+            assert_eq!(
+                parse_one(&msg),
+                Err(ChError::UnsupportedLegacyVersion { got: legacy })
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_missing_compression_methods() {
+        let msg = hello_msg_comp(TLS12, &[TLS13], &["sub.example.org"], false, 0);
+        let handshake = &msg[5..];
+        let body = &handshake[4..];
+        let mut new_body = Vec::new();
+        new_body.extend_from_slice(&body[..41]);
+        new_body.push(0);
+        new_body.extend_from_slice(&body[43..]);
+        let mut no_comp = vec![HANDSHAKE_CLIENT_HELLO];
+        let hl = u32::try_from(new_body.len()).expect("client hello body fits u32");
+        no_comp.extend_from_slice(&hl.to_be_bytes()[1..]);
+        no_comp.extend_from_slice(&new_body);
+        let record = record(&no_comp);
+        assert_eq!(parse_one(&record), Err(ChError::MissingCompressionMethods));
+    }
+
+    #[test]
+    fn rejects_empty_sni_host_name() {
+        let wire = hello_with_extensions(&[
+            (SUPPORTED_VERSIONS, SV),
+            (SERVER_NAME, &server_name_ext(&[(0, b"")])),
+        ]);
+        assert_eq!(
+            parse_one(&wire),
+            Err(ChError::InvalidServerName {
+                detail: "host_name is not a legal FQDN",
+            }),
+            "a zero-length SNI host_name must fail closed at the wire/parser layer"
+        );
+    }
 }
