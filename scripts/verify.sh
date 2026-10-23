@@ -795,7 +795,7 @@ identity_snapshot() {
         adb="$config_home/advisory-db"
         printf 'advisory_db_path=%s\n' "$adb"
         if [ -d "$adb/.git" ]; then
-            adf=$(git -C "$adb" log -1 --format=%cd 2>&1) || adf="<unreadable>"
+            adf=$(git -C "$adb" log -1 --format=%H 2>&1) || adf="<unreadable>"
             printf 'advisory_db_head_date=%s\n' "$adf"
         else
             printf 'advisory_db_head_date=<absent>\n'
