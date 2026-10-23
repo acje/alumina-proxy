@@ -777,6 +777,29 @@ identity_snapshot() {
         printf 'podman_connection=%s\n' "${PODMAN_CONNECTION:-flock-vm}"
         printf 'podman_root_connection=%s\n' "${PODMAN_ROOT_CONNECTION:-flock-vm-root}"
         printf 'cargo_home_effective=%s\n' "$config_home"
+        # G8-C10: supply-chain tool versions + advisory-DB freshness. Absent
+        # tools/DB record <absent> (never a hard fail); the before/after env
+        # diff surfaces any host tool/DB change between snapshots.
+        if command -v cargo-audit >/dev/null 2>&1; then
+            cav=$(cargo-audit --version 2>&1) || cav="<unreadable>"
+            printf 'cargo_audit_version=%s\n' "$cav"
+        else
+            printf 'cargo_audit_version=<absent>\n'
+        fi
+        if command -v cargo-deny >/dev/null 2>&1; then
+            cdv=$(cargo-deny --version 2>&1) || cdv="<unreadable>"
+            printf 'cargo_deny_version=%s\n' "$cdv"
+        else
+            printf 'cargo_deny_version=<absent>\n'
+        fi
+        adb="$config_home/advisory-db"
+        printf 'advisory_db_path=%s\n' "$adb"
+        if [ -d "$adb/.git" ]; then
+            adf=$(git -C "$adb" log -1 --format=%cd 2>&1) || adf="<unreadable>"
+            printf 'advisory_db_head_date=%s\n' "$adf"
+        else
+            printf 'advisory_db_head_date=<absent>\n'
+        fi
         node_env_preflight
         command -v node >/dev/null 2>&1 || {
             echo "SOURCE-IDENTITY FAIL: node path producer failed (node absent; identity impossible, not PASS)" >&2
