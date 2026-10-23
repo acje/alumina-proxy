@@ -7,6 +7,7 @@ pub mod connect;
 pub mod dns;
 pub mod eligibility;
 mod enforcement;
+#[cfg(any(test, debug_assertions))]
 pub mod fault;
 pub mod fuzz;
 pub mod gate;
