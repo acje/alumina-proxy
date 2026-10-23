@@ -223,3 +223,31 @@ mod alloc_fault {
         FAIL.with(std::cell::Cell::get)
     }
 }
+
+#[cfg(test)]
+mod workspace_byte_constants {
+    use super::*;
+
+    #[test]
+    fn slot_workspace_matches_documented_136_kib() {
+        // G5-C06: pin the exact documented per-slot retained workspace figure
+        // (CONNECT parser head + two 64 KiB ClientHello buffers) so the
+        // arithmetic cannot drift from the design estimate.
+        assert_eq!(SLOT_WORKSPACE_BYTES, 136 * 1024);
+        assert_eq!(
+            SLOT_WORKSPACE_BYTES,
+            CONNECT_LIMIT + (MAX_CLIENT_HELLO * 2),
+            "definition must stay in sync with its constituents"
+        );
+    }
+
+    #[test]
+    fn serving_workspace_matches_documented_68_mib() {
+        assert_eq!(SERVING_WORKSPACE_BYTES, 68 * 1024 * 1024);
+        assert_eq!(
+            SERVING_WORKSPACE_BYTES,
+            TUNNEL_SLOTS * SLOT_WORKSPACE_BYTES,
+            "definition must stay in sync with slot count"
+        );
+    }
+}

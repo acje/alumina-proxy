@@ -699,6 +699,25 @@ mod tests {
     }
 
     #[test]
+    fn select_due_at_u64_max_errors_without_mutation() {
+        // G5-C08: `now == u64::MAX` makes the start-rate `checked_add(1)`
+        // overflow; the error must surface before any slot is mutated.
+        let mut schedules = Schedules::new(1).unwrap();
+        schedules.overwrite_due_at(0, Family::A, 0).unwrap();
+        let before = schedules;
+        assert_eq!(
+            schedules.select_due(u64::MAX),
+            Err(ScheduleError::DeadlineOverflow)
+        );
+        assert_eq!(schedules, before, "overflow must not mutate any slot");
+        assert_eq!(
+            schedules.due_time(0, Family::A).unwrap(),
+            Some(0),
+            "due time unchanged"
+        );
+    }
+
+    #[test]
     fn next_selectable_due_guides_the_owner_wake() {
         let mut schedules = Schedules::new(2).unwrap();
         assert_eq!(
