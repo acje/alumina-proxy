@@ -219,7 +219,9 @@ fn hot_relay_many_slots_body() {
         .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
 
-    let per_slot = 96 * 1024;
+    let per_slot: usize = 160 * 1024;
+    let per_slot_kib = per_slot / 1024;
+    let visits_per_slot = per_slot.div_ceil(64 * 1024);
     let stop = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::new();
     let mut holds = Vec::new();
@@ -379,8 +381,8 @@ fn hot_relay_many_slots_body() {
                 .contains(&second_visit_turn[i]),
             "hot slot {i} must reach its second owner visit within one full round-robin pass \
              of the competing hot slots ({HOT_SLOTS} batches; one visit per slot per batch, \
-             and 96KiB needs two visits under the 64KiB cap), so deferring the second visit \
-             past a full pass is starvation; observed on turn {turn}",
+             and {per_slot_kib}KiB needs {visits_per_slot} visits under the 64KiB cap), so \
+             deferring the second visit past a full pass is starvation; observed on turn {turn}",
             turn = second_visit_turn[i]
         );
         assert_eq!(
