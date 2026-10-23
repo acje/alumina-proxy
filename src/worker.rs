@@ -586,6 +586,10 @@ impl Worker {
         reason = "by value encodes the consume-once linear-handle discipline (preventing double release)"
     )]
     pub(crate) fn release(&mut self, slot: SlotIndex) {
+        debug_assert!(
+            matches!(self.slots[slot.index()], SlotState::InSetup { .. }),
+            "release requires an in-setup slot"
+        );
         self.slots[slot.index()] = SlotState::Free;
         self.push_free(slot.0);
         self.pending_count -= 1;
@@ -1309,6 +1313,19 @@ mod tests {
         worker.release(last);
         worker.admit(t0).expect("seat freed by release");
         assert_eq!(worker.pending(), MAX_PENDING_SETUPS);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "release requires an in-setup slot")]
+    fn release_rejects_a_slot_that_is_not_in_setup() {
+        let t0 = anchor();
+        let mut worker = Worker::boot(clock(t0));
+        let slot = worker.admit(t0).expect("admitted");
+        worker.slots[slot.index()] = SlotState::Established {
+            setup_deadline: Deadline::setup(t0),
+        };
+        worker.release(slot);
     }
 
     #[test]
