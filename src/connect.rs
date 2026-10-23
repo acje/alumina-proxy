@@ -587,19 +587,23 @@ mod tests {
     #[test]
     fn rejects_leading_zero_port() {
         let head = "CONNECT sub.example.org:0443 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
-        assert!(matches!(
+        assert_eq!(
             parse_full(head.as_bytes()),
-            Err(ConnectError::MalformedRequestLine { .. })
-        ));
+            Err(ConnectError::MalformedRequestLine {
+                detail: "port has a leading zero",
+            })
+        );
     }
 
     #[test]
     fn rejects_port_out_of_range() {
         let head = "CONNECT sub.example.org:65536 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
-        assert!(matches!(
+        assert_eq!(
             parse_full(head.as_bytes()),
-            Err(ConnectError::MalformedRequestLine { .. })
-        ));
+            Err(ConnectError::MalformedRequestLine {
+                detail: "port is not numeric",
+            })
+        );
     }
 
     #[test]
@@ -612,10 +616,12 @@ mod tests {
     #[test]
     fn rejects_ip_literal() {
         let head = "CONNECT 1.2.3.4:443 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
-        assert!(matches!(
+        assert_eq!(
             parse_full(head.as_bytes()),
-            Err(ConnectError::InvalidHostname { .. })
-        ));
+            Err(ConnectError::InvalidHostname {
+                detail: "hostname is not a lowercase ASCII FQDN",
+            })
+        );
     }
 
     #[test]
@@ -737,37 +743,45 @@ mod tests {
     #[test]
     fn rejects_header_whitespace_before_colon() {
         let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length : 0\r\n\r\n";
-        assert!(matches!(
+        assert_eq!(
             parse_full(head.as_bytes()),
-            Err(ConnectError::MalformedRequestLine { .. })
-        ));
+            Err(ConnectError::MalformedRequestLine {
+                detail: "header name contains whitespace or non-tchar",
+            })
+        );
     }
 
     #[test]
     fn rejects_empty_header_name() {
         let head = "CONNECT sub.example.org:443 HTTP/1.1\r\n: x\r\n\r\n";
-        assert!(matches!(
+        assert_eq!(
             parse_full(head.as_bytes()),
-            Err(ConnectError::MalformedRequestLine { .. })
-        ));
+            Err(ConnectError::MalformedRequestLine {
+                detail: "header name contains whitespace or non-tchar",
+            })
+        );
     }
 
     #[test]
     fn rejects_plus_in_content_length() {
         let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: +0\r\n\r\n";
-        assert!(matches!(
+        assert_eq!(
             parse_full(head.as_bytes()),
-            Err(ConnectError::MalformedRequestLine { .. })
-        ));
+            Err(ConnectError::MalformedRequestLine {
+                detail: "invalid Content-Length",
+            })
+        );
     }
 
     #[test]
     fn rejects_leading_zero_content_length() {
         let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: 000\r\n\r\n";
-        assert!(matches!(
+        assert_eq!(
             parse_full(head.as_bytes()),
-            Err(ConnectError::MalformedRequestLine { .. })
-        ));
+            Err(ConnectError::MalformedRequestLine {
+                detail: "invalid Content-Length",
+            })
+        );
     }
 
     #[test]
@@ -879,5 +893,169 @@ mod tests {
     fn not_allowlisted_host_is_forbidden() {
         let req = parse_full(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n").expect("parse");
         assert!(!is_allowlisted(&req, config().allowlist()));
+    }
+
+    #[test]
+    fn rejects_duplicate_content_length() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n";
+        let err = parse_full(head.as_bytes()).expect_err("doubled CL must be rejected");
+        assert_eq!(err, ConnectError::DuplicateContentLength);
+        assert_eq!(
+            ConnectHeadReason::from_connect_error(&err),
+            ConnectHeadReason::DuplicateContentLength,
+            "the duplicate-CL guard must project onto its own enforcement cause"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_content_length_with_differing_values() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 5\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::DuplicateContentLength),
+            "any second CL header is rejected regardless of value"
+        );
+    }
+
+    #[test]
+    fn rejects_unbracketed_ipv6_literal() {
+        let head = "CONNECT ::1:443 HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::InvalidHostname {
+                detail: "IPv6 literal rejected",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_bracketed_ipv6_literal() {
+        let head = "CONNECT [::1]:443 HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::InvalidHostname {
+                detail: "address literal rejected",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_empty_hostname() {
+        let head = "CONNECT :443 HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::InvalidHostname {
+                detail: "address literal rejected",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_colon_in_content_length() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: 1:\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::MalformedRequestLine {
+                detail: "invalid Content-Length",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_alpha_in_content_length() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: 1a\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::MalformedRequestLine {
+                detail: "invalid Content-Length",
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_content_length_u64_overflow() {
+        let head =
+            "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: 18446744073709551616\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::MalformedRequestLine {
+                detail: "invalid Content-Length",
+            }),
+            "2^64 must overflow the checked arithmetic, not wrap to zero"
+        );
+    }
+
+    #[test]
+    fn accepts_content_length_zero_with_trailing_whitespace() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nContent-Length: 0 \t\r\n\r\n";
+        let req = parse_full(head.as_bytes()).expect("trailing space+tab trimmed before parse");
+        assert_eq!(req.hostname(), "sub.example.org");
+    }
+
+    #[test]
+    fn rejects_lowercase_content_length_nonzero() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\ncontent-length: 5\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::NonzeroContentLength { got: 5 }),
+            "header-name matching must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn rejects_uppercase_content_length_nonzero() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\nCONTENT-LENGTH: 5\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::NonzeroContentLength { got: 5 }),
+            "header-name matching must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn accepts_lowercase_content_length_zero() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\ncontent-length: 0\r\n\r\n";
+        let req = parse_full(head.as_bytes()).expect("lowercase CL: 0 is accepted");
+        assert_eq!(req.hostname(), "sub.example.org");
+    }
+
+    #[test]
+    fn rejects_lowercase_transfer_encoding() {
+        let head = "CONNECT sub.example.org:443 HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::TransferEncoding),
+            "header-name matching must be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn accepts_trailing_dot_connect_and_allowlists() {
+        let head = "CONNECT sub.example.org.:443 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+        let req = parse_full(head.as_bytes()).expect("trailing dot normalized away");
+        assert_eq!(req.hostname(), "sub.example.org");
+        assert!(
+            is_allowlisted(&req, config().allowlist()),
+            "normalized trailing-dot hostname must still authorize against the allowlist"
+        );
+    }
+
+    #[test]
+    fn rejects_raw_utf8_hostname() {
+        let head = "CONNECT bücher.example:443 HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            parse_full(head.as_bytes()),
+            Err(ConnectError::InvalidHostname {
+                detail: "hostname is not a lowercase ASCII FQDN",
+            }),
+            "raw non-ASCII bytes must be rejected by normalize"
+        );
+    }
+
+    #[test]
+    fn accepts_ascii_punycode_hostname() {
+        let head = "CONNECT xn--bcher-kva.example:443 HTTP/1.1\r\n\r\n";
+        let req = parse_full(head.as_bytes()).expect("A-label form is ASCII and accepted");
+        assert_eq!(req.hostname(), "xn--bcher-kva.example");
     }
 }
