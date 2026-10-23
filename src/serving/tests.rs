@@ -4267,6 +4267,16 @@ fn cfg_doc1(port: u16, any_scope: &str, kind: &str, action_scope: &str) -> crate
     crate::config::parse_config_document(&doc).expect("valid enforcement test config")
 }
 
+/// Two allowlist entries for the same hostname on different ports, each with
+/// its own per-entry action: the pair-aware enforcement-attribution fixture
+/// (H1, alumina-qwzns).
+fn cfg_two_ports(port: u16, kind: &str, action_scope: &str) -> crate::config::Config {
+    let doc = format!(
+        "allowlist = [\"a.example:443\", \"a.example:8443\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"{kind}\", \"{kind}\"]\nscope = [\"{action_scope}\", \"{action_scope}\"]\n"
+    );
+    crate::config::parse_config_document(&doc).expect("valid two-port enforcement test config")
+}
+
 fn with_serving_stack_cfg(
     port: u16,
     cfg: crate::config::Config,
@@ -4381,6 +4391,77 @@ fn fabric_relay_slot(serving: &mut Serving, index: usize, approved: &[u8], pendi
     {
         let ws = &mut serving.slots[index];
         ws.approved = FixedHostname::normalize(approved);
+        ws.upstream = Some(up);
+        ws.head_len = 4;
+        ws.hello_end = Some(10);
+        ws.buf_base = 0;
+        ws.buf_len = 0;
+        ws.down_off = 0;
+        ws.down[..pending_down.len()].copy_from_slice(pending_down);
+        ws.down_len = pending_down.len();
+        ws.stage = Stage::Relay;
+        ws.gate.on_connect_head(4);
+        ws.gate.on_authorized();
+        ws.gate.on_upstream_connected();
+        ws.gate.on_response_ok();
+    }
+    serving.register_upstream(index).expect("register upstream");
+}
+
+/// `fabric_validated_early_data_at` plus an explicit `approved_port`: the
+/// pair-aware attribution fixture (H1, alumina-qwzns).
+fn fabric_validated_early_data_pair(
+    serving: &mut Serving,
+    index: usize,
+    host: &[u8],
+    port: u16,
+    test_data: Option<usize>,
+) {
+    let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
+    let origin_addr = origin.local_addr().expect("origin addr");
+    let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
+    let _origin_stream = origin.accept().expect("accept origin side").0;
+    {
+        let ws = &mut serving.slots[index];
+        ws.approved = FixedHostname::normalize(host);
+        ws.approved_port = port;
+        let head_len = format!(
+            "CONNECT {}:{} HTTP/1.1\r\n\r\n",
+            core::str::from_utf8(host).expect("ascii host"),
+            port
+        )
+        .len();
+        ws.head_len = head_len;
+        ws.gate.on_connect_head(head_len);
+        ws.gate.on_authorized();
+        ws.gate.on_upstream_connected();
+        ws.stage = Stage::Dialing;
+        ws.upstream = Some(up);
+    }
+    serving.register_upstream(index).expect("register upstream");
+    if let Some(n) = test_data {
+        serving.slots[index].test_reads = Vec::new();
+        serving.slots[index].test_reads = vec![Ok(n)];
+    }
+}
+
+/// `fabric_relay_slot` plus an explicit `approved_port`: the pair-aware relay
+/// fixture (H1, alumina-qwzns).
+fn fabric_relay_slot_pair(
+    serving: &mut Serving,
+    index: usize,
+    host: &[u8],
+    port: u16,
+    pending_down: &[u8],
+) {
+    let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+    let sink_addr = sink.local_addr().expect("sink addr");
+    let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+    let _sink_stream = sink.accept().expect("accept sink side").0;
+    {
+        let ws = &mut serving.slots[index];
+        ws.approved = FixedHostname::normalize(host);
+        ws.approved_port = port;
         ws.upstream = Some(up);
         ws.head_len = 4;
         ws.hello_end = Some(10);
@@ -4952,6 +5033,216 @@ fn block_domain_does_not_touch_unrelated_current_flow() {
         );
         drop(keep_client);
         pump(serving, 5);
+    });
+}
+
+#[test]
+/// A validated early-data anomaly on the second allowlist entry of a
+/// same-hostname different-port pair must attribute to the second port's own
+/// ordinal: Block Domain marks `a.example:8443` and never the first entry's
+/// `a.example:443` (H1, alumina-qwzns).
+fn early_data_on_second_port_blocks_second_ordinal_only() {
+    let port = ephemeral_port();
+    let cfg = cfg_two_ports(port, "block", "domain");
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let _client = connect(port);
+        pump(serving, 20);
+        assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
+        serving.slots[0].hello_end = Some(10);
+        fabric_validated_early_data_pair(serving, 0, b"a.example", 8443, Some(5));
+        let token = upstream_token(serving.slots[0].slot_gen, 0);
+        serving
+            .dispatch_readiness(
+                token,
+                Readiness {
+                    readable: true,
+                    writable: false,
+                    ..Readiness::none()
+                },
+            )
+            .expect("early origin data");
+
+        let first = serving
+            .storage()
+            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 443)
+            .expect("first ordinal");
+        let second = serving
+            .storage()
+            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .expect("second ordinal");
+        assert_ne!(
+            first, second,
+            "same-host different-port entries must be distinct ordinals"
+        );
+        assert_eq!(second.get(), 1, "the 8443 entry is the second allowlist position");
+        assert!(
+            serving.storage().enforcement().is_blocked(second),
+            "Block Domain must mark the second port's own ordinal"
+        );
+        assert!(
+            !serving.storage().enforcement().is_blocked(first),
+            "Block Domain must not over-block the first port's ordinal"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .actions_domain_block(second),
+            1
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .actions_domain_block(first),
+            0
+        );
+    });
+}
+
+#[test]
+/// A Block-Domain sweep triggered on the first port's ordinal must not close a
+/// live relay flow for the same hostname's second port: the sweep compares
+/// pair-aware slot ordinals, so `a.example:443` and `a.example:8443` are
+/// distinct (H1 over-close guard, alumina-qwzns).
+fn block_on_first_port_does_not_over_close_second_port_flow() {
+    let port = ephemeral_port();
+    let cfg = cfg_two_ports(port, "block", "domain");
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let _trigger_client = connect(port);
+        pump(serving, 20);
+        let keep_client = connect(port);
+        pump(serving, 20);
+        assert_eq!(serving.storage().occupied(), 2);
+
+        serving.slots[0].hello_end = Some(10);
+        fabric_validated_early_data_pair(serving, 0, b"a.example", 443, Some(5));
+        fabric_relay_slot_pair(serving, 1, b"a.example", 8443, b"KEEP-00");
+        let token = upstream_token(serving.slots[0].slot_gen, 0);
+        serving
+            .dispatch_readiness(
+                token,
+                Readiness {
+                    readable: true,
+                    writable: false,
+                    ..Readiness::none()
+                },
+            )
+            .expect("early data on the first port blocks the first ordinal");
+        let first = serving
+            .storage()
+            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 443)
+            .expect("first ordinal");
+        let second = serving
+            .storage()
+            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .expect("second ordinal");
+        assert!(serving.storage().enforcement().is_blocked(first));
+        assert!(
+            !serving.storage().enforcement().is_blocked(second),
+            "the first port's block must not mark the second port's ordinal"
+        );
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the second port's live relay flow survives the first port's domain sweep"
+        );
+        drop(keep_client);
+        pump(serving, 5);
+    });
+}
+
+#[test]
+/// A Block-Domain sweep triggered on the second port's ordinal closes a live
+/// relay flow for the same second port (pair-aware sweep, H1, alumina-qwzns).
+fn block_on_second_port_closes_second_port_flow() {
+    let port = ephemeral_port();
+    let cfg = cfg_two_ports(port, "block", "domain");
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let _trigger_client = connect(port);
+        pump(serving, 20);
+        let relay_client = connect(port);
+        pump(serving, 20);
+        assert_eq!(serving.storage().occupied(), 2);
+
+        serving.slots[0].hello_end = Some(10);
+        fabric_validated_early_data_pair(serving, 0, b"a.example", 8443, Some(5));
+        fabric_relay_slot_pair(serving, 1, b"a.example", 8443, b"KEEP-00");
+        let token = upstream_token(serving.slots[0].slot_gen, 0);
+        serving
+            .dispatch_readiness(
+                token,
+                Readiness {
+                    readable: true,
+                    writable: false,
+                    ..Readiness::none()
+                },
+            )
+            .expect("early data on the second port blocks the second ordinal");
+        let second = serving
+            .storage()
+            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .expect("second ordinal");
+        assert!(serving.storage().enforcement().is_blocked(second));
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the second port's domain sweep closes the matching second-port relay flow"
+        );
+        drop(relay_client);
+        pump(serving, 5);
+    });
+}
+
+#[test]
+/// A validated early-data anomaly on a slot whose (host, port) pair is not an
+/// allowlist entry must fold to `Unattributed` — never a panic and never a
+/// wrong ordinal attribution (defensive fallback, H1, alumina-qwzns).
+fn early_data_on_unconfigured_pair_folds_unattributed() {
+    let port = ephemeral_port();
+    let cfg = cfg_two_ports(port, "block", "domain");
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let _client = connect(port);
+        pump(serving, 20);
+        assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
+        serving.slots[0].hello_end = Some(10);
+        fabric_validated_early_data_pair(serving, 0, b"a.example", 9999, Some(5));
+        let token = upstream_token(serving.slots[0].slot_gen, 0);
+        serving
+            .dispatch_readiness(
+                token,
+                Readiness {
+                    readable: true,
+                    writable: false,
+                    ..Readiness::none()
+                },
+            )
+            .expect("early origin data");
+
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_unknown(UnknownReason::Unattributed),
+            1,
+            "an unconfigured pair folds Unattributed, never a fabricated ordinal"
+        );
+        let first = serving
+            .storage()
+            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 443)
+            .expect("first ordinal");
+        let second = serving
+            .storage()
+            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .expect("second ordinal");
+        assert!(
+            !serving.storage().enforcement().is_blocked(first)
+                && !serving.storage().enforcement().is_blocked(second),
+            "an unconfigured pair must not block any configured ordinal"
+        );
     });
 }
 
@@ -7072,6 +7363,39 @@ fn ja4_first_seen_records_baseline_without_signal() {
                 .facts_ja4_value(ordinal),
             [0; 36],
             "first-seen records the baseline and never stores a changed JA4 value"
+        );
+    });
+}
+
+#[test]
+/// The JA4 baseline for a connection authorized on the second port of a
+/// same-hostname different-port pair must key the second port's own ordinal,
+/// never the first entry's (H1, alumina-qwzns).
+fn ja4_baseline_keys_second_port_ordinal() {
+    let port = ephemeral_port();
+    let cfg = cfg_two_ports(port, "flare_only", "connection");
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let wire = hello_wire(b"a.example", false);
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        serving.slots[0].approved_port = 8443;
+        drive_hello(serving, &wire, "a.example");
+        let second = serving
+            .storage()
+            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 8443)
+            .expect("second ordinal");
+        let first = serving
+            .storage()
+            .ordinal_for_pair(&FixedHostname::normalize(b"a.example").expect("normalize"), 443)
+            .expect("first ordinal");
+        assert_eq!(
+            serving.ja4_baseline.entries[second.get()][0].addr,
+            NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
+            "the second port's connection keys its own ordinal's baseline row"
+        );
+        assert_eq!(
+            serving.ja4_baseline.entries[first.get()][0].addr,
+            EMPTY_JA4_ADDR,
+            "the first port's row must stay empty for a second-port connection"
         );
     });
 }

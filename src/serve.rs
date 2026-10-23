@@ -269,6 +269,19 @@ impl ServeStorage {
         self.enforcement.control().ordinal(index)
     }
 
+    /// The ordinal of a connection already authorized as the exact
+    /// `<fqdn>:<port>` pair, derived from the slot's `approved` hostname and
+    /// `approved_port` together. Enforcement attribution (early-data
+    /// Block-Domain, the domain sweep, JA4 baselines) must key on the pair, so
+    /// a same-hostname different-port allowlist entry gets its own ordinal and
+    /// a configured Block on one port can never over-close or under-close the
+    /// other (alumina-9t6w B1). Shares the single allowlist-pair predicate with
+    /// the worker decision (alumina-sechd L14).
+    pub(crate) fn ordinal_for_pair(&self, hostname: &FixedHostname, port: u16) -> Option<DomainOrdinal> {
+        let index = self.config.allowlist_position(hostname.as_str(), port)?;
+        self.enforcement.control().ordinal(index)
+    }
+
     #[cfg(test)]
     pub(crate) fn publish_test_a(&mut self, ordinal: usize) {
         use crate::cache::{Generation, StagedPositive};

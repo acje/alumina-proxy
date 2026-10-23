@@ -2278,10 +2278,10 @@ impl Serving {
     }
 
     fn slot_ordinal(&self, index: usize) -> Option<DomainOrdinal> {
-        self.slots[index]
-            .approved
+        let slot = &self.slots[index];
+        slot.approved
             .as_ref()
-            .and_then(|host| self.storage.ordinal_for(host))
+            .and_then(|host| self.storage.ordinal_for_pair(host, slot.approved_port))
     }
 
     fn any_illegal(&mut self, index: usize, cause: AnyIllegalCause) -> Effect {
@@ -2594,7 +2594,7 @@ impl Serving {
                             match approved {
                                 Some(host) => self
                                     .storage
-                                    .ordinal_for(&host)
+                                    .ordinal_for_pair(&host, self.slots[index].approved_port)
                                     .map_or(Violation::Unattributed, |ordinal| {
                                         Violation::EarlyUpstreamData { ordinal }
                                     }),
@@ -2719,7 +2719,10 @@ impl Serving {
         let Some(approved) = self.slots[index].approved else {
             return;
         };
-        let Some(ordinal) = self.storage.ordinal_for(&approved) else {
+        let Some(ordinal) = self
+            .storage
+            .ordinal_for_pair(&approved, self.slots[index].approved_port)
+        else {
             return;
         };
         let Some(ja4) = self.slots[index]
