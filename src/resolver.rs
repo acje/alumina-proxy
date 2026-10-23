@@ -22,6 +22,17 @@ pub const FQDN_MAX_LEN: usize = 253;
 
 const FQDN_MAX_LABEL: usize = 63;
 
+/// True when `value` is shaped like an IP literal or numeric shorthand
+/// (first byte a digit and every byte a digit or `.`): rejected so the
+/// resolver FQDN grammar stays strict even though an all-numeric final
+/// label (RFC 1123 DNS-name syntax) is otherwise accepted.
+fn is_ip_literal_shape(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes[0].is_ascii_digit()
+        && bytes.iter().all(|b| *b == b'.' || b.is_ascii_digit())
+}
+
 /// A validated resolver FQDN (the `fqdn` in an `IP#fqdn` entry): lowercase
 /// ASCII DNS-name syntax (labels 1..=63 `[a-z0-9-]`, no leading/trailing
 /// hyphen), total length at most [`FQDN_MAX_LEN`], no wildcard `*`, no
@@ -69,11 +80,7 @@ impl Fqdn {
                 return Err(FqdnError::Invalid);
             }
         }
-        if value
-            .rsplit('.')
-            .next()
-            .is_some_and(|label| label.bytes().all(|b| b.is_ascii_digit()))
-        {
+        if is_ip_literal_shape(value) {
             return Err(FqdnError::Invalid);
         }
         let mut bytes = [0u8; FQDN_MAX_LEN];
@@ -598,14 +605,30 @@ mod tests {
     }
 
     #[test]
-    fn select_rejects_all_numeric_final_label() {
-        for bad in ["1.1.1.1#example.123", "1.1.1.1#1.2.3.4"] {
+    fn select_rejects_ip_literal_shape_fqdn() {
+        for bad in ["1.1.1.1#1.2.3.4", "1.1.1.1#123"] {
             let err = select(bad)
                 .err()
                 .unwrap_or_else(|| panic!("{bad} must be rejected"));
             assert!(
                 matches!(err, ResolverError::InvalidFqdn { .. }),
                 "{bad} must be InvalidFqdn, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_accepts_all_numeric_final_label() {
+        for ok in ["1.1.1.1#example.123", "1.1.1.1#dns.123"] {
+            let fqdn = select(ok)
+                .expect("all-numeric final label is RFC 1123 DNS-name syntax")
+                .fqdn()
+                .expect("fqdn")
+                .as_str()
+                .to_owned();
+            assert!(
+                fqdn.ends_with(".123"),
+                "{ok} must carry the all-numeric final label, got {fqdn:?}"
             );
         }
     }
