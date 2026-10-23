@@ -15,8 +15,8 @@ Host-run selectors and gates (all `sh scripts/verify.sh …` selectors and host
 Cargo commands):
 
 ```
-cargo +1.99.0 atest -p alumina --locked
-cargo +1.99.0 atest -p alumina --locked --features alloc-witness
+cargo +1.99.0 atest -p alumina --locked                   # manual-only: no gate selector runs the unfiltered full suite
+cargo +1.99.0 atest -p alumina --locked --features alloc-witness   # manual-only: same, alloc-witness variant
 cargo +1.99.0 fmt --check
 cargo +1.99.0 aclippy -p alumina --locked --all-targets -- -D warnings
 sh scripts/verify.sh docs                       # native offline docs link gate
@@ -28,7 +28,10 @@ sh scripts/verify.sh boundary phase1            # host coordinator: mid+fixtures
 
 `atest`/`aclippy` are the fleet Cargo aliases (host config; each Linux MID
 dispatch writes the same aliases into its throwaway container config — the repo
-does not duplicate them).
+does not duplicate them). Gate selectors run a filtered scope: every `verify.sh`
+`atest` invocation carries `--test foundations` or `--test boot` (optionally
+with `--features alloc-witness`); the two unfiltered commands above are a manual
+reference and are not what any gate selector executes.
 
 ### Full affected-corpus offline check
 
