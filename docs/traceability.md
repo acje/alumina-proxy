@@ -4,8 +4,8 @@
 section, invariant, resource row, and verification requirement to its design
 home ([architecture.md](architecture.md)), execution plan
 ([build-plan.md](build-plan.md)), and proof status. Canonical source:
-`docs/alumina-proxy.md` (lines 1–315). The repository is a **scoped testQA-ready
-candidate** at HEAD `8934adb` (scoped status owner AGENTS.md): an implemented and
+`docs/alumina-proxy.md` (all sections, including amendments). The repository is
+a **scoped testQA-ready candidate** (scoped status owner AGENTS.md): an implemented and
 correctness-tested subset carries local runtime evidence, while external
 deployment validation and full production qualification remain open.
 
@@ -32,7 +32,7 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | L36–43 | CONNECT accept/reject matrix, one request, 400/403/502/503/504 | Slice 3 | designed → gate |
 | L45–50 | TLS 1.3-only profile, ECH rejection, inspection scope | Slice 4 | designed → gate |
 | L52–58 | Config: 4 KiB TOML, mandatory keys, allowlist, allowance, EX_CONFIG 78 | Slice 1 | designed → gate |
-| L60–62 | Listener; A-label names; resolver selection (first NS, port 53, numeric unicast) | Slice 1 | designed |
+| L60–62 | Listener; A-label names; resolver selection (validated TOML resolver array, first/primary entry; per-entry dial port 53 (bare IP) / 853 (IP#fqdn)) | Slice 1 | designed |
 | L63 | Resolution before listener; requests never trigger lookups | Slice 2 | verified-local (runtime.rs turn; ucxi) |
 | L64–65 | 90 s startup deadline; usable-iff-eligible; allowance; EX_TEMPFAIL 75 | Slices 1/2 | designed → gate |
 | L66–67 | Degraded serving startup-only; no readiness endpoint; startup diagnostics | Slices 1/6 | designed → gate |
@@ -78,7 +78,7 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | Concurrent tunnels (incl. setup) / pending | 512 / 128 | Slice 3 | artifact (not 640) |
 | Traffic buffers per tunnel | 2 × 128 KiB | Slice 3/5 | artifact |
 | Total traffic storage | 128 MiB (512×2×128 KiB) | §6 | artifact |
-| Retained serving workspace (per-slot CONNECT head + 2×64 KiB ClientHello inspector) | 512 × 136 KiB = 68 MiB | §6 | artifact |
+| Retained serving workspace (per-slot CONNECT head + 2×64 KiB ClientHello inspector + JA4 retention) | 512 × ~152.5 KiB ≈ 76 MiB (design estimate) | §6 | artifact |
 | CONNECT headers | 8 KiB | Slice 3 | artifact |
 | Buffered TLS pre-auth | ≤64 KiB | Slice 4 | artifact |
 | DNS message / total RRs | 16 KiB / 128 | Slice 2 | artifact |
@@ -88,7 +88,8 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | Setup / connect deadlines | 10 s / 2 s | Slice 3 | artifact |
 | Upstream attempts per tunnel | ≤4 | Slice 3 | artifact |
 | DNS exchange deadline | 5 s | Slice 2 | artifact |
-| Refresh / SOA negative interval | 30–300 s | Slice 2 | artifact |
+| Refresh interval (normal) | 5–900 s | Slice 2 | artifact |
+| SOA-negative refresh floor | 30–900 s | Slice 2 | artifact |
 | DNS retry backoff | 1,2,4,8,16,30 s | Slice 2 | artifact |
 | Stale grace | 259200 s (72 h) | Slice 2 | artifact |
 | Incident summary interval | 3600 s | Slice 6 | artifact |
@@ -99,8 +100,9 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | Idle / drain / shutdown | 300 / 5 / 8 s | Slice 5 | artifact |
 
 Notes 183–185: 128 MiB decomposition; buffer reuse without discarding;
-outside-budget accounting (retained serving workspace 512 × 136 KiB = 68 MiB,
-DNS storage, metadata, stacks, executable, kernel buffers); throughput
+outside-budget accounting (retained serving workspace 512 × ~152.5 KiB ≈ 76 MiB
+design estimate — JA4 retention reconciled at spec :929; DNS storage, metadata,
+stacks, executable, kernel buffers); throughput
 conditional per-direction — encoded in arch §6 / Slice 7.
 
 ## 4. Verification-requirement matrix (all `docs/alumina-proxy.md:225-236`)
