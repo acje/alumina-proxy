@@ -19,11 +19,17 @@ cargo +1.99.0 atest -p alumina --locked                   # full suite, witness-
 cargo +1.99.0 atest -p alumina --locked --features alloc-witness   # full suite, alloc-witness — gated on Linux via `mid full`; listed here as a manual reference
 cargo +1.99.0 fmt --check
 cargo +1.99.0 aclippy -p alumina --locked --all-targets -- -D warnings
+sh scripts/verify.sh inner check                # INNER tier: cargo check only; host-runnable (compiles on macOS)
+sh scripts/verify.sh mid foundations            # MID tier (Linux-only, fail closed off-Linux): behavior-proof only (fast loop)
+sh scripts/verify.sh mid boot                   # MID tier (Linux-only): behavior-proof only (fast loop)
+sh scripts/verify.sh mid clippy                 # MID tier (Linux-only): clippy -D warnings (production + alloc-witness harness)
+sh scripts/verify.sh mid union                  # MID tier (Linux-only): release + static-ELF + closure metadata + clippy
+sh scripts/verify.sh mid full                   # MID tier (Linux-only): full suite witness-off then witness-on
 sh scripts/verify.sh docs                       # native offline docs link gate
 sh scripts/verify.sh fixtures boot              # host Podman coordinator; Darwin allowed
 sh scripts/verify.sh e2e relay                  # host-runnable; auto-dispatches Linux build on Darwin
 sh scripts/verify.sh e2e shutdown               # host-runnable via rootful harness
-sh scripts/verify.sh boundary phase1            # host coordinator: mid+fixtures+docs+audit/deny+identity; never E2E
+sh scripts/verify.sh boundary phase1            # BOUNDARY tier: mid union + mid full + fixtures + docs + audit/deny + identity; never E2E
 ```
 
 `atest`/`aclippy` are the fleet Cargo aliases (host config; each Linux MID
@@ -35,6 +41,28 @@ exception: it runs the UNFILTERED full suite (lib unit tests + all 7
 integration test binaries) witness-off then witness-on (alloc-witness, incl.
 the eligibility witness and the alloc-witness-only mio_matrix binary), on Linux
 via `sh scripts/verify.sh boundary phase1`.
+
+### Three-tier guarantee contract
+
+Verification is tiered; each tier backs a different claim:
+
+- **INNER** — `sh scripts/verify.sh inner check`: cargo check only (no
+  clippy/fmt/whitespace/release). Host-runnable (compiles on macOS). Fast
+  per-edit feedback; backs no done-claim.
+- **MID** — Linux-only selectors (fail closed off-Linux): `mid foundations`
+  and `mid boot` are behavior-proof-only fast loops (their former
+  static-ELF/clippy/release/closure proofs moved to `mid union`); `mid
+  clippy` runs clippy `-D warnings` for production and the alloc-witness
+  test harness; `mid union` carries release + static-ELF + closure metadata
+  + clippy; `mid full` runs the unfiltered full suite witness-off then
+  witness-on. MID backs per-sub-mission done-claims.
+- **BOUNDARY** — `sh scripts/verify.sh boundary phase1`: one Linux dispatch
+  running `mid union && mid full` (`set -e` aborts on the first red marker)
+  plus `fixtures boot`, the docs link gate, audit/deny, the identity
+  snapshot, and the git-diff check. Never executes E2E.
+  `FINAL-PHASE1-COMPLETION: BLOCKED` (exit 1) is the honest by-design
+  diagnostic when a prerequisite is absent — never converted to a clean
+  result. BOUNDARY backs repo-wide candidate done-claims.
 
 ### Full affected-corpus offline check
 
