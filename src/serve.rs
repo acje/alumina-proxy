@@ -1913,8 +1913,7 @@ mod startup_integration {
 
     /// A socketpair whose writer is already full, so every write is a real
     /// `WouldBlock` on a live nonblocking descriptor.
-    fn stalled_sink(
-    ) -> (
+    fn stalled_sink() -> (
         LogStore,
         std::os::unix::net::UnixStream,
         std::os::unix::net::UnixStream,
@@ -1982,10 +1981,7 @@ mod startup_integration {
                 *line,
                 format!(
                     "level=info kind=startup_name secs=9 ordinal={ordinal} name=\"{}\" outcome=negative",
-                    allowlist
-                        .get(ordinal)
-                        .expect("allowlist ordinal")
-                        .as_str()
+                    allowlist.get(ordinal).expect("allowlist ordinal").as_str()
                 ),
                 "record {ordinal}: ascending ordinal order and the full, untruncated FQDN"
             );
