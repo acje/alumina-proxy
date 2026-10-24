@@ -31,7 +31,7 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | L34 | Incremental parsing, separate limits, absolute deadline, original bytes | §6; Slices 3/4 | designed → gate |
 | L36–43 | CONNECT accept/reject matrix, one request, 400/403/502/503/504 | Slice 3 | designed → gate |
 | L45–50 | TLS 1.3-only profile, ECH rejection, inspection scope | Slice 4 | designed → gate |
-| L52–58 | Config: 4 KiB TOML, mandatory keys, allowlist, allowance, EX_CONFIG 78 | Slice 1 | designed → gate |
+| L52–58 | Config: 16 KiB TOML (keyed `[allowed_fqdn."<fqdn>:<port>"]` tables, `alumina-cfgk`), mandatory keys, allowance, EX_CONFIG 78 | Slice 1 | designed → gate |
 | L60–62 | Listener; A-label names; resolver selection (validated TOML resolver array, first/primary entry; per-entry dial port 53 (bare IP) / 853 (IP#fqdn)) | Slice 1 | designed |
 | L63 | Resolution before listener; requests never trigger lookups | Slice 2 | verified-local (runtime.rs turn; ucxi) |
 | L64–65 | 90 s startup deadline; usable-iff-eligible; allowance; EX_TEMPFAIL 75 | Slices 1/2 | designed → gate |
@@ -47,7 +47,7 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | L196–221 | Invariants I–IV (13) | arch §1 | designed → gate (§2) |
 | L223–236 | Verification requirements (12 categories) | build-plan Slices 1–7 | gate (§4); measured in docs/harness-evaluation.md |
 | L238–263 | rp2e tripwire/action/monitoring/pacing amendment: trigger/action catalog & attribution (AnyIllegal/early-upstream/EOF-reset), Block/Flare semantics, Tarpit **deferred** | arch §2 (`enforcement`) | designed → gate; Tarpit deferred |
-| L265–281 | Mandatory `[any_illegal]`/`[actions]` config schema: index-aligned arrays, force-mandatory group, Tarpit-deferred rejection, 4 KiB capacity | arch §2 (`enforcement`); `src/config.rs` | verified-local (rp2e config surface) |
+| L265–281 (schema superseded by the `alumina-cfgk` amendment, L991–1153) | Mandatory `[any_illegal]` + keyed `[allowed_fqdn."<fqdn>:<port>"]` config schema (`alumina-cfgk`): keyed tables replacing the index-aligned arrays, mandatory `early_data`, force-mandatory group, Tarpit-deferred rejection, 16 KiB capacity (parser-real 32 × 100-byte worst case 5,843 B) | arch §2 (`enforcement`); `src/config.rs` | verified-local (rp2e config surface; keyed schema 2026-10-24) |
 | L283–303 | Bounded stdout monitoring (per-ordinal/global correlated aggregates, drop+count/saturate, no new sink) & planned fixed control-storage bounds (~9–10 KiB) | arch §2 (`enforcement`)/§6 | designed → artifact → gate |
 | L305–315 | Honest implementation status table: amendment/config/enforcement/monitoring implemented; Tarpit deferred; no pacing storage reserved | arch §2 (`enforcement`) | verified-local (rp2e) |
 
@@ -73,7 +73,7 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 
 | Resource | Limit | Design home | Status |
 |---|---|---|---|
-| Config / allowlist | 4 KiB / 1–32 | Slice 1 | artifact |
+| Config / allowlist | 16 KiB / 1–32 keyed tables | Slice 1 | artifact |
 | Worker threads | 1 | §2 III-1 | designed |
 | Concurrent tunnels (incl. setup) / pending | 512 / 128 | Slice 3 | artifact (not 640) |
 | Traffic buffers per tunnel | 2 × 128 KiB | Slice 3/5 | artifact |
@@ -115,7 +115,7 @@ conditional per-direction — encoded in arch §6 / Slice 7.
 | DNS classification (direct/CNAME/negatives, 8/9-link, loops, conflict, AA, SOA, malformed, trust region, pointers, RDLENGTH, QDCOUNT) | Slice 2 | dns_parse | gate |
 | Parser fuzzing (owned corpus/inputs/evidence; CONNECT, ClientHello, DNS wire, log; determinism) | Gate F4, Slices 2/4 | parse/dns_parse/log | gate |
 | DNS observability (first-failure warn, hourly summaries, incident recovery, exact-once accounting, window bounds, saturation, stalls) | Slice 6 | cache/log | gate |
-| Resource profile (4096-B config, 128 MiB, bounded queues/timers, alloc-free, deadline, buffer preservation; process vs kernel split) | Slice 6; F1 | build-wide | gate |
+| Resource profile (16384-B config, 128 MiB, bounded queues/timers, alloc-free, deadline, buffer preservation; process vs kernel split) | Slice 6; F1 | build-wide | gate |
 | Logging (entry bounds, escaped text, whole-record drops, thresholds, one enqueue per rejection, partial writes/stall, alloc-free) | Slice 6 | log | gate |
 | Startup readiness (allowance, all-ready early, exact-allowance degraded, 75/78, 90 s bounds, cancellation, diagnostics, no reapplication) | Slices 1/2/6 | config/lifecycle | gate |
 | Deployment confinement; initial deployment; runtime surface+prereqs; performance | Slice 7 (release gates) | deployment | external |

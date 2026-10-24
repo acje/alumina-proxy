@@ -31,7 +31,7 @@ post-boot state is preallocated** (§6).
 | `worker` / `Runtime` | The single owner loop: readiness demux, scheduling, timers, gate transitions — realized as the shared-readiness `Runtime` | `:138,144,146,147,149` |
 | `log` | 256×8 KiB preallocated queue; allocation-free encode; nonblocking sink; drop+count | `:149,178-179,193-194` |
 | `lifecycle` | SIGTERM, shutdown grace, drain; exit without deallocating | `:149,150,181,192` |
-| `enforcement` | rp2e tripwire/action/monitoring surface (`[any_illegal]`/`[actions]`), per-domain Action, bounded stdout monitoring, control state | `:238-315` (amendment) |
+| `enforcement` | rp2e tripwire/action/monitoring surface (`[any_illegal]` + keyed `[allowed_fqdn."<fqdn>:<port>"]` tables with `early_data`), per-domain Action, bounded stdout monitoring, control state | `:238-315` (amendment), `:991-1153` (amendment) |
 
 > **As-built realization.** `src/main.rs` is the single boot owner: preallocate
 > serving workspaces → startup DNS window (`run_startup`) → on a Serve decision
@@ -41,7 +41,8 @@ post-boot state is preallocated** (§6).
 > `runtime.rs:246-280`). Provisional parsers live in
 > `src/{dns,connect,client_hello,startup_dns}.rs`; the rp2e tripwire/action/
 > monitoring surface lives in `src/enforcement/{mod,action,monitor,policy,state}.rs`
-> with the validated `[any_illegal]`/`[actions]` config schema enforced in
+> with the validated `[any_illegal]` + keyed `[allowed_fqdn."<fqdn>:<port>"]`
+> config schema (`alumina-cfgk`; 16 KiB document bound) enforced in
 > `src/config.rs`. The serving owner is decomposed as `src/serving/{policy,reject,startup,tests}.rs`
 > (fixed Refusal policy mapping, rejection effects, startup window, sibling
 > test module) and the shared-readiness/runtime and startup-DNS test modules live
@@ -126,7 +127,7 @@ with construction-and-reuse proof as a future gate.
 |---|---|---|
 | Tunnel traffic buffers | 512 × 2 × 128 KiB = 128 MiB | `:160-162,183` |
 | Retained serving workspace (per-slot CONNECT head + 2×64 KiB ClientHello inspector + JA4 retention) | 512 × ~152.5 KiB ≈ 76 MiB (design estimate) | `:162,186,929` |
-| Config document buffer | 4096 B (reject oversized) | `:54,158` |
+| Config document buffer | 16385 B (16 KiB bound + 1 oversize-probe byte) | `:54,158` |
 | CONNECT / TLS pre-auth | ≤8 KiB / ≤64 KiB | `:163-164` |
 | DNS message/records staging | 16 KiB / 128 RRs | `:165` |
 | Cache entries | ≤32 names × 2 types, 16 A + 16 AAAA per name | `:74,166` |
@@ -150,7 +151,8 @@ enumerate operations, gate each on source review + allocator instrumentation
 DNS window (exchanges clipped) → listener open; open early only when all names
 usable; at deadline serve if unresolved ≤ allowance else EX_TEMPFAIL 75; no
 readiness endpoint; one first-failure warn, suppressed per-type first warnings,
-one final result. **Logging** (`:178-179,193-194`): allocation-free records ≤8
+one `startup_name` record per unresolved name plus one final summary. **Logging**
+(`:178-179,193-194`): allocation-free records ≤8
 KiB escaped, whole-record drop+count (never truncate), nonblocking drain under
 per-turn budget with partial-write preservation; a stalled sink must not delay
 rejection/tunnel I/O/DNS/deadlines; one warn per rejection and per

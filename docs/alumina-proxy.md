@@ -51,9 +51,9 @@ Alumina's own configuration is strict; client input is accepted where variants h
 
 ## Configuration & DNS
 
-Configuration is a single TOML document of at most 4 KiB (4096 bytes), including comments and whitespace, with a required `allowlist` array of 1 through 32 exact `<fqdn>:<port>` strings and a required `listen` key. Each entry is a lowercase ASCII DNS hostname (an IP literal-shaped entry — a name whose labels are all-numeric, e.g. `1.2.3.4:443` — is invalid configuration) with a canonical decimal port from 1 through 65535 and no leading zero; a bare FQDN without `:port`, an empty or non-numeric port, port `0`, a port above `65535`, or a leading-zero port is invalid configuration. Both limits apply: 32 maximum-length DNS names need not fit. A compact configuration with 32 entries of 100 ASCII bytes each (including the `:port` suffix) and a listener fits within the document limit. Bound the configuration read and reject oversized input without truncating it. Load and fully validate configuration and local prerequisites before opening listeners or issuing DNS queries. There is no runtime policy update interface; see the [runtime surface](#architecture).
+Configuration is a single TOML document of at most 16 KiB (16384 bytes), including comments and whitespace, with a required set of 1 through 32 `[allowed_fqdn."<fqdn>:<port>"]` keyed tables — each carrying exactly one `early_data` inline table with that entry's `action` and `scope` — and a required `listen` key. Each table key is a literal `<fqdn>:<port>` spelling naming a lowercase ASCII DNS hostname (an IP literal-shaped entry — a name whose labels are all-numeric, e.g. `1.2.3.4:443` — is invalid configuration) with a canonical decimal port from 1 through 65535 and no leading zero; a bare FQDN without `:port`, an empty or non-numeric port, port `0`, a port above `65535`, or a leading-zero port is invalid configuration. Table keys are unique after normalization (lowercase FQDN plus canonical port); a duplicate after normalization is invalid configuration. Both limits apply: 32 maximum-length DNS names need not fit. A compact configuration with 32 entries of 100 ASCII bytes each (including the `:port` suffix) and a listener fits within the document limit. Bound the configuration read and reject oversized input without truncating it. Load and fully validate configuration and local prerequisites before opening listeners or issuing DNS queries. There is no runtime policy update interface; see the [runtime surface](#architecture).
 
-`startup_unresolved_allowance` is required and must be an integer from `0` through `allowlist length - 1`; `0` requires every hostname to be usable at startup. An empty allowlist is invalid configuration. The allowance affects startup availability, never destination authorization. All configuration keys are mandatory; no defaults are supplied.
+`startup_unresolved_allowance` is required and must be an integer from `0` through the number of configured `[allowed_fqdn."..."]` tables minus one; `0` requires every hostname to be usable at startup. An empty table set is invalid configuration. The allowance affects startup availability, never destination authorization. All configuration keys are mandatory; no defaults are supplied.
 
 Missing or unreadable configuration, invalid TOML (including duplicate keys or invalid table redefinitions), missing required fields, unknown keys or tables, incorrect types, out-of-range values, conflicting settings, and unmet local prerequisites cause immediate startup failure with exit status 78 (EX_CONFIG) and a diagnostic identifying the field or source location where available. Reject duplicate allowlist names after normalization. Do not coerce types, discard invalid entries, or supply missing required values from defaults, environment variables, or command-line overrides. After startup resolution, DNS timeouts, negative answers, and other network failures are expected runtime outcomes governed by the cache rules below, not configuration errors.
 
@@ -64,7 +64,7 @@ Missing or unreadable configuration, invalid TOML (including duplicate keys or i
 - **Startup deadline:** Startup proceeds in fixed order: privilege check, configuration and resolver reads, storage initialization, DNS startup window, then listener opening. After local validation and storage initialization, set an absolute monotonic deadline 90 seconds ahead, before the first DNS connection attempt. It cannot be extended or supplemented by a network-readiness phase. Clip each exchange deadline to it, including TCP establishment and response processing. Check the clock before publication; only results fully validated and published strictly before the deadline count.
 - **Startup readiness:** A configured hostname is usable if its current cache has an eligible, non-retired positive binding; all others, including validated negatives and unattempted names, count as unresolved. Open the listener early only when all names are usable, atomically rechecking cache and deadline. Otherwise, at the deadline evaluate the cache once: serve if the unresolved count is at most `startup_unresolved_allowance`, or exit with status 75 (EX_TEMPFAIL) for external restart. On expiry, cancel the outstanding exchange, close its transport, and invalidate obsolete work before background resolution resumes.
 - **Degraded serving:** The allowance applies only at startup; subsequent availability follows the normal cache and DNS incident rules. Consistent with the [runtime surface](#architecture), Alumina exposes no readiness endpoint.
-- **Startup diagnostics:** During startup, attempt to enqueue one warn notification on the first exchange failure across all names and record types. Continue tracking per-type incidents and latest failure reasons, but suppress their individual first-failure warnings. Emit one final result on success or failure with full/degraded/failure status, allowance, usable/unresolved counts, and unresolved names with latest outcomes or not-attempted reasons. Suppress hourly summaries until serving; preserve unresolved type incidents and initialize traffic-reporting windows at that transition. Do not replay suppressed warnings when serving begins; retained incidents continue normally, and subsequent new incidents receive the normal per-type warning.
+- **Startup diagnostics:** During startup, attempt to enqueue one warn notification on the first exchange failure across all names and record types. Continue tracking per-type incidents and latest failure reasons, but suppress their individual first-failure warnings. Emit one record per unresolved name carrying the full untruncated name, its latest outcome, and its not-attempted reason, then one final summary result on success or failure with full/degraded/failure status, allowance, usable/unresolved counts, and the number of per-name records that could not be enqueued. Suppress hourly summaries until serving; preserve unresolved type incidents and initialize traffic-reporting windows at that transition. Do not replay suppressed warnings when serving begins; retained incidents continue normally, and subsequent new incidents receive the normal per-type warning.
 - **Transport:** Use plain DNS over TCP only, with one reusable connection and one outstanding query. There is no UDP or alternate-resolver fallback. Validate the response flag, opcode, transaction ID, and question name, type, and class against the outstanding query; draw each transaction ID from the OS CSPRNG (`getrandom`). Close the DNS connection on timeout, malformed or mismatched responses, truncation, or an oversized message; do not publish partial results. TCP is not cryptographic authentication of the resolver or DNS data.
 - **Wire parsing:** Require QDCOUNT 1, exact section counts with no trailing bytes, and RDLENGTH equal to the parsed RDATA (4 for A, 16 for AAAA). Follow compression pointers only to strictly earlier offsets, and only in owner names and CNAME/SOA names. Reject reserved label types, labels over 63 octets, and decoded names over 255 octets.
 - **DNS control traffic:** DNS sockets may reach only the selected resolver endpoint. This control traffic is separate from tunnel destination authorization and may use a private, loopback, or link-local resolver address; it never makes that address eligible as a CONNECT destination.
@@ -155,7 +155,7 @@ These are fixed build-time limits, not optional TOML settings or measured capaci
 
 | Resource | Limit |
 | --- | --- |
-| Configuration document / allowlist entries | 4 KiB / 1 through 32 |
+| Configuration document / allowlist entries | 16 KiB / 1 through 32 |
 | Worker threads | 1 |
 | Concurrent tunnels, including setup / pending setups | 512 / 128 |
 | Traffic buffers per tunnel slot | Two 128 KiB buffers, one per direction |
@@ -232,8 +232,8 @@ The first-iteration target is 1-10 Gbps aggregate relayed payload throughput acr
 - **Lifecycle deadlines:** Check each timer's start, end, and reset events immediately before, at, and after expiry, including delayed timer handling and overlapping deadlines. Exercise connect retries clipped to setup, gate opening at expiry, idle resets by writes in either direction but not reads or readiness, and second EOF/SIGTERM without extension. Verify normal draining and deadline-forced closure with buffered bytes remaining.
 - **DNS classification:** Exercise direct and complete CNAME positive answers, cross-suffix targets, eight-link acceptance, nine-link rejection, loops, conflicting CNAME targets, CNAME/address coexistence, and answer-section provenance. Check direct and CNAME-terminal NXDOMAIN/NODATA with AA both clear and set; NXDOMAIN with or without SOA must evict both types, update both schedules, and clear both incidents, while NODATA requires a valid covering SOA and evicts only the queried type. Reject malformed or contradictory negatives, ambiguous or non-covering SOAs, referrals, incomplete chains, empty NOERROR without SOA, and answer-section DNAME including synthesized CNAME responses. Verify SOA TTL/MINIMUM scheduling at the fixed bounds, immediate eviction despite positive stale grace, zero-cacheable-binding replacement, and no revival after negative TTL expiry or obsolete work. No outcome may trigger follow-up queries or endpoint substitution. Test pointer loops, self and forward pointers, reserved label types, label and name length limits, RDLENGTH mismatches, trailing bytes, and QDCOUNT other than 1.
 - **DNS observability:** Verify first-failure warnings, hourly per-hostname error summaries, independent A/AAAA incident recovery except NXDOMAIN clearing both, immediate no-eligible-binding notifications, no stale-use or per-type retirement notifications, and final partial-window summaries. Confirm valid NODATA does not start an exchange-failure incident. Exercise tunnels established before an incident, multiple writes and both directions in one window, activity across window boundaries, closed and reused slots, stale admissions, and exact-once forwarded-byte accounting. Verify delayed and skipped reporting windows, counter saturation, log-drop accounting, and continued DNS/deadline progress when the log sink is stalled. Reporting must not extend authorization or alter retry scheduling.
-- **Resource profile:** Verify the 4096-byte configuration boundary, the 128 MiB traffic-buffer allocation, bounded queues and timers, allocation-free operation, deadline enforcement, and preservation of buffered bytes across setup and relay. Use allocator instrumentation and dependency checks to verify that startup DNS resolution, serving, background refresh, logging, and shutdown perform no heap allocation or deallocation after boot initialization. Report process and kernel memory separately from the traffic-buffer budget.
-- **Logging:** Verify queue and encoded-entry boundaries, escaped text, whole-record drops and accounting, threshold transitions, and one enqueue attempt per rejection. Verify worst-case final startup results for valid configurations fit the encoded-entry limit, including framing. Exercise partial writes, backpressure, and a stalled sink; enforce the sink work budget while tunnel I/O, DNS, and deadlines continue. Formatting and delivery must remain allocation-free.
+- **Resource profile:** Verify the 16384-byte configuration boundary, the 128 MiB traffic-buffer allocation, bounded queues and timers, allocation-free operation, deadline enforcement, and preservation of buffered bytes across setup and relay. Use allocator instrumentation and dependency checks to verify that startup DNS resolution, serving, background refresh, logging, and shutdown perform no heap allocation or deallocation after boot initialization. Report process and kernel memory separately from the traffic-buffer budget.
+- **Logging:** Verify queue and encoded-entry boundaries, escaped text, whole-record drops and accounting, threshold transitions, and one enqueue attempt per rejection. Verify that the per-name unresolved-name records and the final startup summary result fit the encoded-entry limit for valid configurations, including framing, with each unresolved name emitted exactly once at its full untruncated length and the summary's dropped-name count accounting for per-name records that could not be enqueued. Exercise partial writes, backpressure, and a stalled sink; enforce the sink work budget while tunnel I/O, DNS, and deadlines continue. Formatting and delivery must remain allocation-free.
 - **Startup readiness:** Verify a missing allowance fails configuration validation, integer/type/range validation, zero requiring all hostnames to be usable, and every valid allowlist requiring at least one usable hostname. An empty allowlist must fail configuration validation before DNS queries or listener creation. Exercise all-ready early startup, exact-allowance degraded startup at the deadline, allowance-exceeded exit with status 75, configuration failure with status 78, not-yet-attempted names, NXDOMAIN counted against the allowance, eviction before readiness, and independent A/AAAA outcomes. Check responses immediately before, at, and after the 90-second deadline, delayed timer delivery, DNS TCP establishment inside the exchange budget, cancellation and obsolete-work isolation, and no extension from progress or retries. Verify degraded-result diagnostics, serving-mode incident/window handover, `502` for unavailable names, automatic background recovery, and no active reachability probes. Verify that failures across multiple names and record types produce exactly one startup warning enqueue attempt, while preserving independent incident state and latest reasons. Confirm that serving begins without replaying suppressed warnings and that subsequent new incidents receive normal per-type warnings. Runtime loss of a binding must not reapply the startup allowance or enable permissive fallback.
 - **Deployment confinement:** Demonstrate successful approved third-party calls through the private proxy endpoint and rejection of unapproved CONNECT hostnames. From the application runtime, verify direct connections to approved and unapproved third-party addresses are denied, including IPv4, IPv6 where available, alternate HTTPS ports, UDP/QUIC, private routes, provider-managed paths, and alternate proxies or relays. Exercise clients that ignore proxy settings, proxy-bypass configuration, and proxy unavailability; none may obtain direct egress. Confirm the workload cannot alter proxy or confinement controls, unauthorized sources cannot reach the listener, and clients retain upstream certificate verification. Repeat these checks when networking, client libraries, or permitted dependencies change; this is deployment verification, not a property Alumina can establish internally.
 - **Initial deployment:** Demonstrate TCP DNS resolution and end-to-end CONNECT ingress on the selected Cloud Run worker-pool deployment. Qualify complete direct, CNAME, and negative recursive responses for the intended third-party allowlist against the selected platform resolver, including original CONNECT/SNI preservation. Measure network startup delays against the fixed 90-second DNS budget; verify the chosen allowance and operator-controlled restart policy without automatic timeout extensions. Demonstrate an operator-owned CONNECT plus authenticated TLS check through Alumina for deployment reachability assurance. Compatibility failure requires an explicit deployment or design revision, never automatic protocol or resolver fallback; add bounded follow-up queries only through an explicit revision justified by observed necessary compatibility gaps.
@@ -987,3 +987,167 @@ The post-window probe sweep clause (`:825`) governs the startup probe sweep. Thi
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The alumina-5sx 5-second DNS exchange deadline and all other deadlines are unchanged; this amendment only refreshes a stale citation at `:825` and changes no deadline, no constant, and no code. Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## Keyed configuration schema — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification
+(`alumina-cfgk`, 2026-10-24). It replaces the positional configuration layout — the
+`allowlist` string array plus the index-aligned `[actions]` kind/scope arrays — with
+idiomatic TOML keyed tables, and raises the configuration document bound from 4 KiB to
+16 KiB. It amends only the configuration surface enumerated here: the configuration clause
+(`:54`-`:58`) and the rp2e exact-schema and capacity clauses (`:270`-`:286`). It supersedes
+the rp2e exact-schema subsection (`:270`-`:283`) and its capacity clause (`:286`), which
+remain in place as the historical record of the superseded positional layout, and updates
+the two consequential bound citations it depends on: the resource-profile row (`:158`) and
+the verification requirement (`:235`). It also supersedes, on the document-bound claim only,
+the rp2e status-table row `:317` ("at most 4 KiB") and the two historical 4 KiB document
+preflight subsections — `alumina-hrdn4` (`:587`-`:589`) and `alumina-dot-chain-v37`
+(`:632`-`:634`, with its status row `:644`) — all of which remain in place as the historical
+record of the superseded 4 KiB bound. Every other
+clause of this document — the fixed resource profile, lifecycle deadlines, invariants,
+logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains
+binding. Specification publication precedes implementation; the status table at the end
+assigns each surface an honest planned/implemented/deferred status.
+
+**Second authorization (2026-10-24).** A separate user authorization extends this same
+`alumina-cfgk` amendment to the startup-final record shape only. The single final result at
+`:67` is split into one `startup_name` record per unresolved name — full, never-truncated
+FQDN, its outcome, and its reason — followed by one `startup_final` summary record carrying
+the canonical counts plus `names_dropped`. This extension amends the startup diagnostics
+clause (`:67`) and, consequently, the logging verification requirement (`:236`), and nothing
+else. The log queue geometry is unchanged: 256 x 8 KiB slots (`:183`, `:310`), one slot per
+record exactly as before, no additional storage, no new queue, and no runtime-surface
+expansion.
+
+### Keyed allowlist tables
+
+The `allowlist` array and the positional `[actions]` kind/scope arrays are removed. The sole
+allowlist mapping is the set of `[allowed_fqdn."<fqdn>:<port>"]` table keys: each configured
+domain is defined exactly once, with its action co-located in the same table. This
+eliminates the index-alignment error class and the second mapping; no attacker-controlled
+name table is introduced. The exact schema is:
+
+```
+[any_illegal]
+scope = "connection" | "all"          # AnyIllegal first-slot Block scope; "domain" is invalid configuration
+
+[allowed_fqdn."<fqdn>:<port>"]
+early_data = { action = "flare_only" | "block", scope = "connection" | "domain" | "all" }
+```
+
+- The allowlist is the set of `[allowed_fqdn."..."]` table keys, 1 through 32 tables; empty
+  or more than 32 is invalid configuration (exit 78). Each key is a literal `<fqdn>:<port>`
+  spelling (a bare FQDN key is invalid configuration). Existing FQDN/port validation rules
+  carry over unchanged: lowercase ASCII DNS hostname, canonical decimal port 1 through
+  65535, no leading zero, IP-literal-shaped entry invalid. Table keys are unique after
+  normalization (lowercase FQDN + canonical port); a duplicate-after-normalization is
+  invalid configuration (exit 78).
+- Ordinals are 0-based: 0 through 31 are assigned to the `[allowed_fqdn."..."]` tables in
+  ascending table-key order, not document order (the TOML parser iterates tables in sorted
+  key order), and `Config::allowlist_position` returns `Some(0)` for the first table; the
+  ordinal numbering carried in logs matches that same 0-based numbering. The allowlist and
+  its actions are built from the same table, so enforcement pairing is unaffected by the
+  ordering.
+- Every `[allowed_fqdn."..."]` table contains exactly one key, `early_data`, an inline table
+  with exactly `action` and `scope`. Missing `early_data`, an extra key, or an unknown key
+  is invalid configuration (exit 78); no defaults are supplied, consistent with the
+  all-keys-mandatory doctrine. The `early_data` key names the existing per-domain control
+  (rp2e `:255` early upstream data); it is forward-compatible with a future `ja4` key gated
+  on a separate behavior amendment.
+- Per-FQDN `action` is `flare_only` or `block`; `tarpit` is a reserved keyword for a future
+  action, rejected with an explicit reserved-keyword diagnostic (exit 78), never accepted as
+  an implemented runtime action. Per-FQDN `scope` is `connection`, `domain`, or `all` with
+  unchanged semantics (rp2e `:261`-`:263`).
+- `[any_illegal]` is unchanged and remains mandatory: `scope` must be `connection` or `all`
+  (`domain` invalid, exit 78); an absent group is invalid configuration at enforcement
+  integration (rp2e `:284` preserved).
+- All keys are mandatory with no defaults and no environment or command-line override;
+  unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as today.
+  Configuration validation timing and procedure are unchanged.
+
+### Document bound
+
+`CONFIG_DOC_LIMIT` is raised from 4096 to 16384 bytes. The configuration clause (`:54`) is
+amended to state a single TOML document of at most 16 KiB (16384 bytes), including comments
+and whitespace, with 1 through 32 `[allowed_fqdn."..."]` tables and a required `listen` key.
+Boot-time read only; zero runtime/heap impact; no runtime-surface expansion. The capacity
+clause (rp2e `:286`) is amended to the new bound: the keyed full-schema 32-entry worst case
+is re-measured with the exact document serializer the parser reads (pinned by parser-real
+assertions in `src/config.rs`) and must fit under 16 KiB. Neither a further cap expansion,
+an alias, a silent compact migration, nor a change to the legal literal set is implied.
+
+### Startup-final record shape (second authorization)
+
+The startup result is two record shapes, not one. Unresolved names are never embedded in the
+summary record:
+
+```
+level=info kind=startup_name secs=<n> ordinal=<0..31> name="<full fqdn>" outcome=<negative|no_eligible|failed|not_attempted>[ reason="<token>"]
+level=info kind=startup_final secs=<n> status="<full|degraded|failure|terminated>" allowance=<n> usable=<n> unresolved=<n> exchanges=<n> failed=<n> not_attempted=<n> dropped=<n> names_dropped=<n>
+```
+
+- Exactly one `startup_name` record is attempted per unresolved name, in ascending allowlist
+  ordinal order, before the summary. `name` is the full validated unresolved FQDN, at most
+  253 bytes, and is never truncated or elided; `ordinal` is the same 0-based allowlist
+  ordinal carried elsewhere in logs; `reason` appears only for the `failed` and
+  `not_attempted` outcomes. Resolved names are never emitted.
+- The summary embeds no names, so its field set is fixed and it fits its slot for any counter
+  values, including `u64::MAX`. It is attempted last, so the aggregate readiness outcome is
+  recorded even when every per-name record was dropped.
+- A per-name attempt that cannot be enqueued — full queue or encode overflow — is dropped
+  whole and increments the shared whole-record drop counter exactly once. `names_dropped`
+  reports how many of those failures were per-name attempts: it is a subset of the summary's
+  cumulative `dropped`, and the two are never summed. Counting, never truncation, remains the
+  only overflow response.
+
+Recorded worst-case encoded lengths, including the terminal newline framing, for the widest
+legal configuration (32 keyed FQDNs at the 253-byte maximum with `u64::MAX` counters) against
+the fixed 8192-byte slot:
+
+| Record kind | Worst case | Headroom |
+| --- | --- | --- |
+| `startup_name` | 380 B | 7812 B |
+| `startup_final` | 325 B | 7867 B |
+| `startup_warning` | 331 B | 7861 B |
+| `reject` | 406 B | 7786 B |
+| `early_activity` | 405 B | 7787 B |
+| `exchange_failed` | 341 B | 7851 B |
+| `fatal` | 360 B | 7832 B |
+| `shutdown_final` | 103 B | 8089 B |
+| `capacity_high` / `capacity_low` | 127 B / 125 B | 8065 B / 8067 B |
+| `queue_high` / `queue_low` | 124 B / 122 B | 8068 B / 8070 B |
+| `resolver_probe` | 1857 B | 6335 B |
+| `monitor` | 8091 B | 101 B |
+
+Both startup records fit with wide margins, so the encoded-entry requirement at `:236` is met
+by measurement for every valid configuration. `monitor` is the tightest record in the
+vocabulary at 101 B of headroom; this amendment neither changes that record nor claims it is
+compliant by construction, and the 101-byte margin is recorded as a known risk: any future
+addition to the monitor report shape must re-measure against the 8192-byte slot before it is
+accepted.
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers,
+128 MiB traffic storage, the 256 × 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit
+recheck, DNS response/candidate/incident caps, the 90-second startup window, and all
+deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte
+conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime
+metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI +
+ECH-reject; packet dropping is never implemented; no new dependency unless its intake
+precedes execution; no kernel pacing knob. The enforcement/monitoring surface is
+byte-identical: `Allowlist(Vec<Fqdn>)`, `Config::allowlist_position`, `ControlTable`,
+`decide()`, and the monitoring record shape (`KIND_COUNT`, `s0`/`s1`, `d<j>l`) are
+unchanged; the keyed layout is a configuration-surface change only.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Keyed `[allowed_fqdn."..."]` tables replace `allowlist` array + positional `[actions]` | Implemented (this revision) |
+| 16 KiB document bound (`parser-real` 32 × 100-byte worst case 5,843 B) | Implemented (this revision) |
+| `early_data` inline table; mandatory key; duplicate/unknown/missing exit 78 | Implemented (this revision) |
+| Startup-final split: one `startup_name` record per unresolved name (full FQDN, outcome, reason) plus one `startup_final` summary carrying `names_dropped` | Implemented (this revision) |
+| `tarpit` reserved rejection; `[any_illegal]` unchanged | Implemented (this revision) |
+| Keyed-schema fixtures in the integration tests and script config emitters | Implemented (this revision) |

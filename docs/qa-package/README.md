@@ -144,8 +144,10 @@ claim), and this repo never provisions VMs, connections or images.
 
 ## Example inputs are illustrative — never executed by any gate
 
-`config.example.toml` (allowlist `["api.github.com:443", "example.com:443",
-"www.example.net:443"]`, resolver
+`config.example.toml` (`[allowed_fqdn."<fqdn>:<port>"]` keyed tables —
+`api.github.com:443`, `example.com:443`, `www.example.net:443`, each carrying
+`early_data = { action = "flare_only", scope = "connection" }` under
+`[any_illegal] scope = "connection"` — resolver
 `["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 "8.8.8.8#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 "9.9.9.9#dns.quad9.net#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",

@@ -1,4 +1,3 @@
-allowlist = ["api.github.com:443", "example.com:443", "www.example.net:443"]
 # 127.0.0.1:<port> for local testQA / cooperative sidecar testing;
 # 0.0.0.0:<port> for a dedicated VPC appliance (hard RCE egress confinement).
 listen = "127.0.0.1:5353"
@@ -29,11 +28,18 @@ startup_unresolved_allowance = 0
 # Bare-IP entries remain valid but each emits one startup warning (degraded
 # trust form).
 resolver = ["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "8.8.8.8#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "9.9.9.9#dns.quad9.net#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "208.67.222.222#dns.opendns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "94.140.14.14#dns.adguard.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
-# Mandatory index-aligned tripwire action tables (docs/alumina-proxy.md:265-281):
-# [any_illegal] scope is the AnyIllegal first-slot Block scope ("connection"|"all");
-# [actions] kind/scope are one literal per allowlist entry, in allowlist order.
+# Mandatory keyed allowlist tables (docs/alumina-proxy.md:991-1153, alumina-cfgk
+# 2026-10-24): the [allowed_fqdn."<fqdn>:<port>"] table keys ARE the allowlist
+# (1..=32 tables, each a literal <fqdn>:<port>, unique after normalization);
+# [any_illegal] scope is the AnyIllegal first-slot Block scope ("connection"|"all").
+# Every table carries exactly one early_data inline table holding that entry's
+# action ("flare_only"|"block") and scope ("connection"|"domain"|"all"); every
+# key is mandatory, a missing/extra/unknown key or table is exit 78.
 [any_illegal]
 scope = "connection"
-[actions]
-kind = ["flare_only", "flare_only", "flare_only"]
-scope = ["connection", "connection", "connection"]
+[allowed_fqdn."api.github.com:443"]
+early_data = { action = "flare_only", scope = "connection" }
+[allowed_fqdn."example.com:443"]
+early_data = { action = "flare_only", scope = "connection" }
+[allowed_fqdn."www.example.net:443"]
+early_data = { action = "flare_only", scope = "connection" }

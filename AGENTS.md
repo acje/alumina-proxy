@@ -34,7 +34,11 @@ specification, not feature growth.
   amendment, the `alumina-dotrt` (2026-10-21) DoT transport serving-lifetime
   warm reuse amendment, the `alumina-dotdg` (2026-10-21) DoT→plain downgrade
   counter amendment, and the `alumina-zai` (2026-10-21) Zero-Allocation
-  Invariant first-party scope/rustls bounded seam amendment, all
+  Invariant first-party scope/rustls bounded seam amendment, and the
+  `alumina-cfgk` (2026-10-24) keyed `[allowed_fqdn."<fqdn>:<port>"]`
+  configuration schema/16 KiB document bound amendment and its second
+  authorization (2026-10-24) startup-final record-shape extension (`:67`,
+  `:236`; log queue geometry unchanged), all
   recorded in the document; no further amendment authority is implied.
 - Status is a scoped local testQA candidate — not production-qualified;
   serving-qualification gates stay open (`docs/build-plan.md` owns them).

@@ -39,16 +39,17 @@ bounded stdout monitoring (`docs/alumina-proxy.md:243-323`, rp2e amendment).
 
 ## Runtime surface and fixed inputs
 
-- `./config.toml` (≤ 4096 B, mandatory keys, no defaults) carries the validated
+- `./config.toml` (≤ 16384 B, keyed `[allowed_fqdn."<fqdn>:<port>"]` tables per the `alumina-cfgk` amendment, mandatory keys, no defaults) carries the validated
   resolver set (1..=5 entries: bare `IP` on port 53, `IP#fqdn` on port 853, or
   `IP#fqdn#pin-sha256=<b64>` strict-pin on port 853); no `resolv.conf` read, no
   CLI args, no env overrides; one listening socket; **SIGTERM the only handled
   lifecycle signal** (`docs/alumina-proxy.md:149`).
 - Privilege preflight (non-root, empty caps, `no_new_privs`): unmet → EX_CONFIG
   78; unresolved beyond allowance → EX_TEMPFAIL 75.
-- Example config: `docs/qa-package/config.example.toml` (≤ 4096 B) shows the
-  `resolver` entry plus the mandatory `[any_illegal]` + index-aligned
-  `[actions]` tripwire tables with `<fqdn>:<port>` allowlist entries — a
+- Example config: `docs/qa-package/config.example.toml` (≤ 16384 B) shows the
+  `resolver` entry plus the mandatory `[any_illegal]` and keyed
+  `[allowed_fqdn."<fqdn>:<port>"]` (`early_data` per entry, `alumina-cfgk`
+  keyed schema) tripwire tables with `<fqdn>:<port>` allowlist entries — a
   real-world HTTPS target
   (`api.github.com:443`) and illustrative domains (`example.com:443`,
   `www.example.net:443`); illustrative only, executed by no gate.
