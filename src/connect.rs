@@ -211,15 +211,20 @@ impl ConnectParser {
         self.result.as_ref()
     }
 
-    /// Feeds bytes into the parser, returning `Complete` exactly once the head
-    /// is delimited. Once `Complete` is returned the parser must not be fed
-    /// again for the same connection.
+    /// Feeds bytes into the parser, returning `Complete` once the head is
+    /// delimited and on every subsequent feed. Terminal re-entry consumes no
+    /// bytes and preserves the original parse result without parsing again.
     ///
     /// # Errors
     ///
     /// Returns `TooLong` when the head bytes (excluding any tunnel bytes
     /// coalesced after the delimiter) exceed `CONNECT_LIMIT`.
     pub fn feed(&mut self, data: &[u8]) -> Result<Feed, ConnectError> {
+        if self.result.is_some() {
+            return Ok(Feed::Complete {
+                head_len: self.head_len,
+            });
+        }
         let room = CONNECT_LIMIT - self.head_len;
         let take = data.len().min(room);
         if take > 0 {
@@ -227,11 +232,11 @@ impl ConnectParser {
             self.head_len += take;
         }
         if let Some(delim) = self.find_delimiter() {
+            let head_len = delim + END_OF_HEAD.len();
             let head = &self.head[..delim];
             self.result = Some(parse_request(head));
-            return Ok(Feed::Complete {
-                head_len: delim + END_OF_HEAD.len(),
-            });
+            self.head_len = head_len;
+            return Ok(Feed::Complete { head_len });
         }
         if take < data.len() {
             return Err(ConnectError::TooLong);
@@ -553,6 +558,17 @@ mod tests {
             }
             Feed::Incomplete => panic!("coalesced ClientHello must not block the CONNECT head"),
         }
+    }
+
+    #[test]
+    fn complete_reentry_preserves_terminal_result_without_reparse() {
+        let mut parser = ConnectParser::new();
+        let terminal_feed = parser.feed(HEAD.as_bytes()).expect("complete");
+        let terminal_result = parser.result().copied().expect("settled");
+        parser.head[0] = b'X';
+
+        assert_eq!(parser.feed(b"ignored replay"), Ok(terminal_feed));
+        assert_eq!(parser.result().copied(), Some(terminal_result));
     }
 
     #[test]
