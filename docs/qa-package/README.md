@@ -32,7 +32,7 @@ command, scope and digest — not interchangeable, no artificial shared identity
 | Variant | Path | Built/tested |
 |---|---|---|
 | Exercised smoke artifact (fixture-facts) | `target/fixture-facts/release/alumina` | built by the `fixtures boot` gate from exact source in-run; static-ELF + executed under privilege profile (typed-terminated positive + exit-78 negatives); sha + non-setid + `security.capability` absence proven in-run (`METADATA-OK`) |
-| Production release (MID) | `target/release/alumina` | built by `mid union` (via `boundary phase1`); static-ELF + whitespace + witness gates; **not executed** by this wrapper |
+| Production release (MID) | `target/release/alumina` | built by `mid union` (via `boundary phase1` slow tier); static-ELF + whitespace + witness gates; **not executed** by this wrapper |
 | Production release (e2e musl) | `target/aarch64-unknown-linux-musl/release/alumina` | native relay/shutdown gates green (`sh scripts/verify.sh e2e relay`: 11/11; `e2e shutdown`: 10/10; harness image `localhost/alumina-e2e:e2e-20261011`, immutable ID `9191d288…`) — **historical `bbda19f`-era receipt provenance**, dated/scoped to that candidate, not a current-HEAD claim after rp2e; **not executed by this wrapper** |
 
 `validate.sh` records per-run: source `HEAD`, working-tree status-list identity
@@ -65,8 +65,10 @@ and fails closed otherwise. The
 only authorized execution route is the pinned builder image over the
 `flock-vm`/`flock-vm-root` connections — foreground `--rm` only, **no cloud
 start, no VM/TCP-remote target rotation, no daemon**. The wrapper
-`validate.sh` invokes `boundary phase1` (which dispatches the mid union once,
-then fixtures), then probes the fixture-facts static/hash/freshness. The docs
+`validate.sh` invokes `boundary phase1` (composed: the fast tier — identity +
+change-scope classification + docs/unsafe/whitespace/audit — then the slow
+tier, which dispatches the mid union once and then fixtures), then probes the
+fixture-facts static/hash/freshness. The docs
 control runs once inside `boundary phase1` (the same `docslink_check` the
 `docs` selector runs); the wrapper does not re-invoke it.
 Its convenience is **build ordering only** — it never provisions VMs,
@@ -116,10 +118,20 @@ claim), and this repo never provisions VMs, connections or images.
   `localhost/alumina-e2e:e2e-20261011`: the immutable harness image ID is
   resolved on that rootful connection, recorded in the receipt, and the
   consumers re-verify the tag resolves to it and run the ID itself.
-- `boundary phase1` — **host coordinator**: dispatches the Linux MID union once
-  (foundations + boot command sets) and the Linux `mid full` unfiltered full
-  suite once (witness-off + witness-on), then fixtures, docs, git diff,
-  audit/deny, identity. Host
+- `boundary phase1` — **host coordinator**, split into a fast tier and a slow
+  tier (both exit 1 `BLOCKED` by design; neither ever invokes the e2e
+  selectors). The fast tier (`boundary phase1-fast`) runs cheap host gates
+  only — identity BEFORE, change-scope classification (writes
+  `target/phase1-scope`), docs link gate, unsafe-surface gate, `git diff
+  --check`, audit/deny, identity AFTER/compare — with **no Linux MID, no
+  fixtures**, so a cheap-gate failure aborts before the ~90-min
+  compile-dominated dispatch. The slow tier (`boundary phase1-slow`) reads the
+  scope marker (missing => full, fail-safe): on docs-only it emits an explicit
+  `PHASE1-SLOW-SKIPPED-BY-DESIGN` and skips the MID; on full it dispatches the
+  Linux MID union once (foundations + boot command sets) and the Linux `mid
+  full` unfiltered full suite once (witness-off + witness-on), then fixtures,
+  identity AFTER/compare and artifact identity. The composed selector runs the
+  fast tier then the slow tier unless the scope is docs-only. Host
   tools required and fail closed when absent: `podman` + reachable `flock-vm`;
   Node with **`NODE_OPTIONS`/`NODE_PATH` unset** and
   `scripts/docs_check/check.mjs`; `git`; `sha256sum` (or `shasum`);
@@ -199,9 +211,11 @@ sh docs/qa-package/validate.sh
    sha256 hasher, `file`): any absence is `QA-PACKAGE-PREREQ-FAIL` and aborts
    the run before the heavy native gate, never a silent skip and never a
    pass-by-existing.
-2. Runs `scripts/verify.sh boundary phase1`: the Linux MID union once, then
-   supervised `fixtures boot` positive + exit-78 negatives, the docs link gate
-   once (`docslink_check`), `cargo audit` + `cargo deny check`.
+2. Runs `scripts/verify.sh boundary phase1` with `PHASE1_SCOPE=full` forced
+   (the wrapper always exercises the full ceremony — the Linux MID union once,
+   then supervised `fixtures boot` positive + exit-78 negatives, the docs link
+   gate once (`docslink_check`), `cargo audit` + `cargo deny check` — never a
+   docs-only skip).
 3. Probes the exercised fixture-facts artifact the gate just built: static ELF
    + sha256 + freshness proven against the in-run variant marker the fixture
    gate wrote.

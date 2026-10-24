@@ -112,7 +112,10 @@ boundary_out=
 # marker greps below run on the captured output only, so a marker probe can
 # never mask the producer's exit (no masked pipeline). A probe failure is a
 # FAIL, never folded into a clean verdict.
-if boundary_out=$(sh scripts/verify.sh boundary phase1 2>&1); then
+# PHASE1_SCOPE=full forces the full ceremony (never a docs-only skip): the
+# wrapper's every-sub-gate-hard-0 guarantee requires the Linux MID union +
+# mid full + fixtures + docs + audit/deny to all run for this candidate.
+if boundary_out=$(PHASE1_SCOPE=full sh scripts/verify.sh boundary phase1 2>&1); then
     # Hard-0: coordinated and every child exited 0.
     boundary_coord=1
 elif printf '%s\n' "$boundary_out" | grep -q 'BOUNDARY-OWNER-COORD-OK'; then
