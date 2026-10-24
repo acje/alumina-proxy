@@ -822,7 +822,7 @@ The startup diagnostics clause (`:67`) governs startup warning and final-result 
 
 #### Sweep semantics (probe state machine)
 
-The probe sweep probes each unprobed resolver exactly once, relocating the existing single DNS TCP connection sequentially — never opening a second connection, so the "DNS TCP connections / outstanding queries | 1 / 1" row (`:172`) is unchanged. The probe target is the primary allowlisted name (ordinal 0), A family, an already-approved query target (`:71`), with the standard 2-second exchange deadline (`:82`).
+The probe sweep probes each unprobed resolver exactly once, relocating the existing single DNS TCP connection sequentially — never opening a second connection, so the "DNS TCP connections / outstanding queries | 1 / 1" row (`:172`) is unchanged. The probe target is the primary allowlisted name (ordinal 0), A family, an already-approved query target (`:71`), with the standard 5-second exchange deadline (`:82`).
 
 - **State.** `StartupDns::probe_sweep: Option<ProbeSweep>` (`src/startup_dns.rs`) with `ProbeSweep { remaining: [bool; MAX_RESOLVERS], active_before: ActiveResolver, verdicts: [ProbeVerdict; MAX_RESOLVERS], current: Option<usize> }`; `ProbeVerdict` is `Ok | Failed(FailureReason) | NotProbed`. All fixed-size, no heap.
 - **Trigger.** The sweep begins after the startup decision only when `probe_sweep.is_none() && failback_source.is_none() && resolvers.is_some() && set_len() > 1`; a single-resolver set (`set_len() == 1`) short-circuits — nothing to probe. The active resolver is already exercised by the window and is skipped, receiving verdict `not_probed` in the record.
@@ -966,3 +966,24 @@ The per-ordinal JA4 change signal (JA4 amendment, the `d<j>j` counter) gains a c
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The C1 value table is boot-time fixed storage (32 × 36 = 1,152 B) with zero heap allocation or deallocation after boot; the baseline table semantics are unchanged (a baseline is never updated after first-seen). Nothing in this amendment loosens any of these items or restates any profile row differently.
+
+## Post-window probe sweep exchange-deadline citation — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-rf5x`, 2026-10-24). It records the user authorization for one citation refresh: the post-window probe sweep clause (`:825`) cited the DNS exchange deadline as "2-second", stale after the alumina-5sx amendment raised it to 5 seconds; the citation now reads "5-second exchange deadline (`:82`)". It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. This is a doc-only citation refresh; this section records only its user authorization and changes no code.
+
+### Amended surface
+
+#### Post-window probe sweep exchange deadline (`:825`)
+
+The post-window probe sweep clause (`:825`) governs the startup probe sweep. This amendment refreshes the exchange-deadline citation at `:825` from the stale 2-second value to the 5-second value, aligning `:825` with the alumina-5sx 5-second deadline (single constant `EXCHANGE_DEADLINE_SECS`, `src/startup_dns.rs`); no other text on the line changes.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| Post-window probe sweep exchange-deadline citation refreshed 2s → 5s at `:825`, aligned with `alumina-5sx` | Implemented (this increment) |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The alumina-5sx 5-second DNS exchange deadline and all other deadlines are unchanged; this amendment only refreshes a stale citation at `:825` and changes no deadline, no constant, and no code. Nothing in this amendment loosens any of these items or restates any profile row differently.
