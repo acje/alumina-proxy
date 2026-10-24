@@ -1076,6 +1076,54 @@ phase1_scope_classify() {
     printf '%s\n' "$scope"
 }
 
+# Real change-scope detector (B): unions the committed (HEAD~1..HEAD),
+# uncommitted (HEAD..worktree) and untracked path lists, classifies the union
+# via phase1_scope_classify, echoes the scope, and writes the scope marker to
+# target/phase1-scope (gitignored) so the slow tier can be a separate
+# invocation. Conservative by construction: any git-producer failure, a missing
+# HEAD~1 (root commit), an empty union, or any non-allowlisted path => full
+# (more verification, never less). The PHASE1_SCOPE env override forces
+# full/docs-only; any other value => full (fail-safe).
+phase1_change_scope() {
+    scope="${PHASE1_SCOPE:-}"
+    if [ -n "$scope" ]; then
+        case "$scope" in
+            full|docs-only) ;;
+            *) scope="full" ;;
+        esac
+    else
+        rc=0
+        committed=$(git diff --name-only HEAD~1 HEAD 2>&1) || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "PHASE1-SCOPE-FAIL: git diff HEAD~1..HEAD exit $rc (root commit or unreadable; full ceremony)" >&2
+            scope="full"
+        fi
+        if [ "$scope" != "full" ]; then
+            rc=0
+            uncommitted=$(git diff --name-only HEAD 2>&1) || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                echo "PHASE1-SCOPE-FAIL: git diff HEAD exit $rc (unreadable diff; full ceremony)" >&2
+                scope="full"
+            fi
+        fi
+        if [ "$scope" != "full" ]; then
+            rc=0
+            untracked=$(git ls-files --others --exclude-standard 2>&1) || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                echo "PHASE1-SCOPE-FAIL: git ls-files --others exit $rc (unreadable untracked list; full ceremony)" >&2
+                scope="full"
+            fi
+        fi
+        if [ "$scope" != "full" ]; then
+            paths=$(printf '%s\n%s\n%s\n' "$committed" "$uncommitted" "$untracked")
+            scope=$(printf '%s\n' "$paths" | phase1_scope_classify)
+        fi
+    fi
+    printf '%s\n' "$scope"
+    mkdir -p target
+    printf '%s\n' "$scope" > target/phase1-scope
+}
+
 boundary_phase1() {
     echo "phase1 boundary (owner seam H1): host sole coordinator; Linux MID via existing flock-vm dispatch"
     identity_snapshot "$IDENTITY_BEFORE"
