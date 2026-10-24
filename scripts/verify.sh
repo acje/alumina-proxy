@@ -1127,13 +1127,17 @@ phase1_change_scope() {
 boundary_phase1() {
     echo "phase1 boundary (owner seam H1): host sole coordinator; Linux MID via existing flock-vm dispatch"
     identity_snapshot "$IDENTITY_BEFORE"
-    linux_dispatch 'sh scripts/verify.sh mid union && sh scripts/verify.sh mid full'
-    boot_fixtures
+    # Fast-fail (A): cheap host gates run BEFORE the expensive Linux MID so a
+    # failing docs/unsafe/whitespace/audit gate aborts before the ~90-min
+    # compile-dominated dispatch. None of these mutate identity inputs, so the
+    # BEFORE snapshot stays valid across them.
     docslink_check
     unsafe_surface_gate
     git diff --check
     echo "GIT-DIFF-CHECK-OK"
     audit_deny_owner
+    linux_dispatch 'sh scripts/verify.sh mid union && sh scripts/verify.sh mid full'
+    boot_fixtures
     identity_snapshot "$IDENTITY_AFTER"
     identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
     artifact_identity target/release/alumina || exit 1
