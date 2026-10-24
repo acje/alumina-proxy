@@ -3223,7 +3223,16 @@ impl Serving {
     fn expire_setup(&mut self, i: usize) {
         match self.slots[i].stage {
             Stage::ReadingConnect | Stage::RunningDecision | Stage::Dialing => {
-                self.refuse(i, Refusal::SetupTimeout);
+                match self.slots[i].parser.result().copied() {
+                    Some(Ok(request)) => {
+                        self.refuse_with_hostname(
+                            i,
+                            Refusal::SetupTimeout,
+                            *request.fixed_hostname(),
+                        );
+                    }
+                    _ => self.refuse(i, Refusal::SetupTimeout),
+                }
             }
             Stage::SendingConnected | Stage::ValidatingHello | Stage::WritingHello => {
                 self.flush_down(i);
