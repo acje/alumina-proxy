@@ -4294,6 +4294,37 @@ const _: () = assert!(
     "two 128 KiB buffers per tunnel across 512 slots is the 128 MiB traffic profile"
 );
 
+#[test]
+fn slot_reset_zero_fills_both_relay_buffers() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let ws = &mut serving.slots[0];
+        // Simulate a spent connection (RT-004): both relay buffers hold a full
+        // non-zero payload that must provably never span connections.
+        ws.buf.copy_from_slice(&test_offset_pattern(HOLD_CAP, 0x5a));
+        ws.down
+            .copy_from_slice(&test_offset_pattern(DOWN_CAP, 0xa5));
+        assert!(
+            ws.buf.iter().any(|&b| b != 0),
+            "precondition: hold buffer is non-zero before reset"
+        );
+        assert!(
+            ws.down.iter().any(|&b| b != 0),
+            "precondition: down buffer is non-zero before reset"
+        );
+
+        ws.reset();
+
+        assert!(
+            ws.buf.iter().all(|&b| b == 0),
+            "reset must zero-fill every hold byte (HOLD_CAP = {HOLD_CAP})"
+        );
+        assert!(
+            ws.down.iter().all(|&b| b == 0),
+            "reset must zero-fill every down byte (DOWN_CAP = {DOWN_CAP})"
+        );
+    });
+}
+
 fn serve_on_cfg(port: u16, cfg: &crate::config::Config) -> Serving {
     let storage = ServeStorage::boot(cfg).expect("boot storage");
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), port))
