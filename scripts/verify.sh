@@ -1126,12 +1126,13 @@ phase1_change_scope() {
 
 boundary_phase1_fast() {
     # Fast tier (C): cheap host gates only — identity BEFORE/AFTER stability
-    # self-check, then docs/unsafe/whitespace/audit gates. NO linux_dispatch,
-    # NO MID, NO fixtures. Runs before the expensive Linux MID so a failing
-    # cheap gate aborts before the ~90-min compile-dominated dispatch. None of
-    # these mutate identity inputs, so the BEFORE snapshot stays valid across
-    # them.
+    # self-check, change-scope classification (B), then docs/unsafe/whitespace/
+    # audit gates. NO linux_dispatch, NO MID, NO fixtures. Runs before the
+    # expensive Linux MID so a failing cheap gate aborts before the ~90-min
+    # compile-dominated dispatch. None of these mutate identity inputs, so the
+    # BEFORE snapshot stays valid across them.
     identity_snapshot "$IDENTITY_BEFORE"
+    phase1_scope=$(phase1_change_scope)
     docslink_check
     unsafe_surface_gate
     git diff --check
@@ -1139,13 +1140,28 @@ boundary_phase1_fast() {
     audit_deny_owner
     identity_snapshot "$IDENTITY_AFTER"
     identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
+    echo "PHASE1-SCOPE-CLASSIFIED: $phase1_scope"
 }
 
 boundary_phase1_slow() {
-    # Slow tier (C): Linux MID + fixtures + artifact identity. The AFTER
+    # Slow tier (C): Linux MID + fixtures + artifact identity. Reads the scope
+    # marker written by the fast tier (missing => full, fail-safe); on docs-only
+    # it self-skips with an explicit classification and no MID. The AFTER
     # snapshot is re-taken here (after boot_fixtures) and compared to the
     # BEFORE captured by the fast tier, so a separate slow invocation still
     # proves identity stability across the MID+fixtures.
+    scope="full"
+    if [ -f target/phase1-scope ]; then
+        scope=$(cat target/phase1-scope 2>/dev/null) || scope="full"
+    fi
+    case "$scope" in
+        docs-only)
+            echo "PHASE1-SLOW-SKIPPED-BY-DESIGN: docs-only scope; Linux MID skipped (no Rust/fixture-facts change to verify)"
+            return 0
+            ;;
+        full) ;;
+        *) scope="full" ;;
+    esac
     linux_dispatch 'sh scripts/verify.sh mid union && sh scripts/verify.sh mid full'
     boot_fixtures
     identity_snapshot "$IDENTITY_AFTER"
