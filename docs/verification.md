@@ -29,7 +29,9 @@ sh scripts/verify.sh docs                       # native offline docs link gate
 sh scripts/verify.sh fixtures boot              # host Podman coordinator; Darwin allowed
 sh scripts/verify.sh e2e relay                  # host-runnable; auto-dispatches Linux build on Darwin
 sh scripts/verify.sh e2e shutdown               # host-runnable via rootful harness
-sh scripts/verify.sh boundary phase1            # BOUNDARY tier: mid union + mid full + fixtures + docs + audit/deny + identity; never E2E
+sh scripts/verify.sh boundary phase1-fast       # BOUNDARY fast tier: change-scope classification + cheap host gates (docs/unsafe/whitespace/audit) + identity; no Linux MID, no fixtures, no E2E
+sh scripts/verify.sh boundary phase1-slow       # BOUNDARY slow tier: reads scope marker; docs-only => explicit SKIPPED-BY-DESIGN, no MID; full => mid union + mid full + fixtures + artifact identity
+sh scripts/verify.sh boundary phase1            # BOUNDARY tier (composed): fast tier, then slow tier unless docs-only; never E2E; exit 1 BLOCKED by design
 ```
 
 `atest`/`aclippy` are the fleet Cargo aliases (host config; each Linux MID
@@ -56,13 +58,28 @@ Verification is tiered; each tier backs a different claim:
   test harness; `mid union` carries release + static-ELF + closure metadata
   + clippy; `mid full` runs the unfiltered full suite witness-off then
   witness-on. MID backs per-sub-mission done-claims.
-- **BOUNDARY** — `sh scripts/verify.sh boundary phase1`: one Linux dispatch
-  running `mid union && mid full` (`set -e` aborts on the first red marker)
-  plus `fixtures boot`, the docs link gate, audit/deny, the identity
-  snapshot, and the git-diff check. Never executes E2E.
+- **BOUNDARY** — split into a fast tier and a slow tier; both exit 1
+  `BLOCKED` by design and neither ever executes E2E:
+  - `sh scripts/verify.sh boundary phase1-fast`: identity BEFORE snapshot,
+    change-scope classification (writes `target/phase1-scope`), then the
+    cheap host gates — docs link gate, unsafe-surface gate, `git diff
+    --check`, audit/deny — and an identity AFTER/compare. No Linux MID, no
+    fixtures. Fails fast so a cheap-gate failure aborts before the ~90-min
+    compile-dominated dispatch.
+  - `sh scripts/verify.sh boundary phase1-slow`: reads the scope marker
+    (missing => full, fail-safe). On docs-only it emits an explicit
+    `PHASE1-SLOW-SKIPPED-BY-DESIGN` and skips the Linux MID; on full it runs
+    one Linux dispatch `mid union && mid full` (`set -e` aborts on the first
+    red marker) plus `fixtures boot` and the artifact identity check.
+  - `sh scripts/verify.sh boundary phase1` (composed): fast tier, then the
+    slow tier unless the scope is docs-only. Preserves the single-invocation
+    path used by `docs/qa-package/validate.sh`.
   `FINAL-PHASE1-COMPLETION: BLOCKED` (exit 1) is the honest by-design
   diagnostic when a prerequisite is absent — never converted to a clean
-  result. BOUNDARY backs repo-wide candidate done-claims.
+  result. The split is the **scoped and exact-input** doctrine (above)
+  applied to execution conditionality: a full-scope candidate still runs the
+  full ceremony, and a docs-only candidate skips the MID explicitly, never
+  silently. BOUNDARY backs repo-wide candidate done-claims.
 
 ### Full affected-corpus offline check
 
