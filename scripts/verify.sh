@@ -5,7 +5,7 @@ TIER="${1:-}"
 SCOPE="${2:-}"
 
 usage() {
-    echo "usage: verify.sh {inner|mid|boundary|fixtures|e2e} {check|foundations|boot|union|full|clippy|phase1|relay|shutdown} | verify.sh docs" >&2
+    echo "usage: verify.sh {inner|mid|boundary|fixtures|e2e} {check|foundations|boot|union|full|clippy|phase1|phase1-fast|phase1-slow|relay|shutdown} | verify.sh docs" >&2
     exit 2
 }
 
@@ -1124,23 +1124,42 @@ phase1_change_scope() {
     printf '%s\n' "$scope" > target/phase1-scope
 }
 
-boundary_phase1() {
-    echo "phase1 boundary (owner seam H1): host sole coordinator; Linux MID via existing flock-vm dispatch"
+boundary_phase1_fast() {
+    # Fast tier (C): cheap host gates only — identity BEFORE/AFTER stability
+    # self-check, then docs/unsafe/whitespace/audit gates. NO linux_dispatch,
+    # NO MID, NO fixtures. Runs before the expensive Linux MID so a failing
+    # cheap gate aborts before the ~90-min compile-dominated dispatch. None of
+    # these mutate identity inputs, so the BEFORE snapshot stays valid across
+    # them.
     identity_snapshot "$IDENTITY_BEFORE"
-    # Fast-fail (A): cheap host gates run BEFORE the expensive Linux MID so a
-    # failing docs/unsafe/whitespace/audit gate aborts before the ~90-min
-    # compile-dominated dispatch. None of these mutate identity inputs, so the
-    # BEFORE snapshot stays valid across them.
     docslink_check
     unsafe_surface_gate
     git diff --check
     echo "GIT-DIFF-CHECK-OK"
     audit_deny_owner
+    identity_snapshot "$IDENTITY_AFTER"
+    identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
+}
+
+boundary_phase1_slow() {
+    # Slow tier (C): Linux MID + fixtures + artifact identity. The AFTER
+    # snapshot is re-taken here (after boot_fixtures) and compared to the
+    # BEFORE captured by the fast tier, so a separate slow invocation still
+    # proves identity stability across the MID+fixtures.
     linux_dispatch 'sh scripts/verify.sh mid union && sh scripts/verify.sh mid full'
     boot_fixtures
     identity_snapshot "$IDENTITY_AFTER"
     identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
     artifact_identity target/release/alumina || exit 1
+}
+
+boundary_phase1() {
+    echo "phase1 boundary (owner seam H1): host sole coordinator; Linux MID via existing flock-vm dispatch"
+    boundary_phase1_fast
+    boundary_phase1_slow
+}
+
+boundary_phase1_markers() {
     echo "F3 mio operation matrix: IMPLEMENTED (tests/mio_matrix.rs: 8 tests incl. linux_epoll_operation_matrix with poll/register/reregister/deregister + alloc-witness controls; recorded native release evidence docs/verification.md#native-proofs-scoped-exact-input, z9m0/po3c); current-serving completeness witness still OPEN (cnrd T3) - not 'unbuilt matrix', not 'complete'"
     echo "NotImplemented: DNS wire parser fuzz (Slice 2)"
     echo "NotImplemented: CONNECT/ClientHello parser fuzz (Slices 3-4)"
@@ -1149,7 +1168,6 @@ boundary_phase1() {
     echo "RELEASE-NOT-READY: later-slice and release gates remain NotImplemented, not green"
     echo "BOUNDARY-OWNER-COORD-OK: all applicable phase1 children coordinated and exited 0 on this host"
     echo "FINAL-PHASE1-COMPLETION: BLOCKED — pending fixture/doc/Rust repairs and review approval before any phase1 done-claim (no E2E equivalence claimed)"
-    exit 1
 }
 
 # Real-IO CONNECT/SNI opaque-relay and native SIGTERM shutdown gates against the
@@ -1392,7 +1410,9 @@ case "$TIER/$SCOPE" in
     mid/union) mid_union ;;
     mid/full) mid_full ;;
     fixtures/boot) boot_fixtures ;;
-    boundary/phase1) boundary_phase1 ;;
+    boundary/phase1-fast) boundary_phase1_fast; boundary_phase1_markers; exit 1 ;;
+    boundary/phase1-slow) boundary_phase1_slow; boundary_phase1_markers; exit 1 ;;
+    boundary/phase1) boundary_phase1; boundary_phase1_markers; exit 1 ;;
     e2e/relay) e2e_relay ;;
     e2e/shutdown) e2e_shutdown ;;
     docs/*) docslink_check; unsafe_surface_gate ;;
