@@ -32,7 +32,7 @@ command, scope and digest — not interchangeable, no artificial shared identity
 | Variant | Path | Built/tested |
 |---|---|---|
 | Exercised smoke artifact (fixture-facts) | `target/fixture-facts/release/alumina` | built by the `fixtures boot` gate from exact source in-run; static-ELF + executed under privilege profile (typed-terminated positive + exit-78 negatives); sha + non-setid + `security.capability` absence proven in-run (`METADATA-OK`) |
-| Production release (MID) | `target/release/alumina` | built by `mid boot`; static-ELF + whitespace + witness gates; **not executed** by this wrapper |
+| Production release (MID) | `target/release/alumina` | built by `mid union` (via `boundary phase1`); static-ELF + whitespace + witness gates; **not executed** by this wrapper |
 | Production release (e2e musl) | `target/aarch64-unknown-linux-musl/release/alumina` | native relay/shutdown gates green (`sh scripts/verify.sh e2e relay`: 11/11; `e2e shutdown`: 10/10; harness image `localhost/alumina-e2e:e2e-20261011`, immutable ID `9191d288…`) — **historical `bbda19f`-era receipt provenance**, dated/scoped to that candidate, not a current-HEAD claim after rp2e; **not executed by this wrapper** |
 
 `validate.sh` records per-run: source `HEAD`, working-tree status-list identity
@@ -57,7 +57,7 @@ fixed inputs in a disposable container, bounds the child with real SIGTERM +
 10 s deadline, and asserts the typed records with guard-bitten predicates
 (plant/fail/revert/clean proven). **Standalone prerequisites:** the production
 release binary `target/release/alumina` must already be built — on Linux `sh
-scripts/verify.sh mid boot`; on macOS run `sh scripts/verify.sh boundary
+scripts/verify.sh mid union`; on macOS run `sh scripts/verify.sh boundary
 phase1` (the `mid` selectors fail closed off-Linux) — and the existing
 rootless `flock-vm` **and** rootful `flock-vm-root` connections with the
 pinned builder image present on both are required — `verify.sh` checks them
@@ -82,10 +82,13 @@ image availability is **not asserted here** (not re-tested; no runnable-now
 claim), and this repo never provisions VMs, connections or images.
 
 - `mid foundations` / `mid boot` — **Linux-only**; fail closed on any
-  non-Linux host. On macOS they run through `boundary phase1` (Linux dispatch
-  via the rootless `flock-vm` connection, `--pull=never`, pinned builder
-  image; requires `podman`, a reachable `flock-vm` and the pinned image
-  present).
+  non-Linux host. These standalone selectors are **behavior-proof only**
+  (atest foundations/boot tests, fmt, whitespace): the release build,
+  static-ELF, clippy, and closure-metadata proofs live at `mid union` /
+  `boundary phase1`. On macOS they run through `boundary phase1` (Linux
+  dispatch via the rootless `flock-vm` connection, `--pull=never`, pinned
+  builder image; requires `podman`, a reachable `flock-vm` and the pinned
+  image present).
 - `mid full` — **Linux-only**; fail closed on any non-Linux host. Runs the
   UNFILTERED full suite (lib unit tests + all 7 integration test binaries)
   witness-off then witness-on (`--features alloc-witness`, incl. the
