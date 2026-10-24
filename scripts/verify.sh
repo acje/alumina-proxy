@@ -1057,7 +1057,7 @@ command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1 || true
 
 # Pure change-scope classifier (B): reads a path list on stdin (one per line),
 # echoes `docs-only` when every path is allowlisted (under docs/, or exactly
-# README.md / AGENTS.md / alumina-refinement.md), else `full`. Empty stdin =>
+# README.md / AGENTS.md), else `full`. Empty stdin =>
 # full (fail-safe toward more verification, never less). This is the TDD seam:
 # unit-testable with synthetic path lists and no git.
 phase1_scope_classify() {
@@ -1068,7 +1068,7 @@ phase1_scope_classify() {
         seen=1
         case "$p" in
             *".."*) scope="full"; break ;;
-            docs/*|README.md|AGENTS.md|alumina-refinement.md) ;;
+            docs/*|README.md|AGENTS.md) ;;
             *) scope="full"; break ;;
         esac
     done

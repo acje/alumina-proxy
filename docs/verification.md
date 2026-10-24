@@ -88,11 +88,11 @@ Verification is tiered; each tier backs a different claim:
 `docs/architecture.md`, `docs/build-plan.md`, `docs/traceability.md`,
 `docs/verification.md`, `docs/qa-package/README.md`,
 `docs/future-hardening-vectors.md`. The full retained Markdown
-corpus — all **13** docs — is checked with the explicit nonempty
+corpus — all **12** docs — is checked with the explicit nonempty
 argv command:
 
 ```
-node scripts/docs_check/check.mjs README.md AGENTS.md alumina-refinement.md docs/alumina-proxy.md docs/architecture.md docs/build-plan.md docs/traceability.md docs/harness-evaluation.md docs/benchmarks/100mbps-comparison.md docs/benchmarks/feature-match-matrix.md docs/verification.md docs/qa-package/README.md docs/future-hardening-vectors.md
+node scripts/docs_check/check.mjs README.md AGENTS.md docs/alumina-proxy.md docs/architecture.md docs/build-plan.md docs/traceability.md docs/harness-evaluation.md docs/benchmarks/100mbps-comparison.md docs/benchmarks/feature-match-matrix.md docs/verification.md docs/qa-package/README.md docs/future-hardening-vectors.md
 ```
 
 Selector host context / prerequisites (incl. `mid` Linux-only fail-closed and

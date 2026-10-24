@@ -29,7 +29,6 @@ bounded stdout monitoring (`docs/alumina-proxy.md:243-323`, rp2e amendment).
 | [docs/architecture.md](docs/architecture.md) | Conceptual design + as-built single-owner mapping (decisions D1–D7) |
 | [docs/build-plan.md](docs/build-plan.md) | Qualification owner — gates F0–F4, seven slices, current status |
 | [docs/traceability.md](docs/traceability.md) | Requirement → design → proof matrix + unresolved-evidence ledger |
-| [alumina-refinement.md](alumina-refinement.md) | Material normative candidates for user review only |
 | [docs/harness-evaluation.md](docs/harness-evaluation.md) | Measured harness fitness (dated, scoped) |
 | [docs/qa-package/README.md](docs/qa-package/README.md) | Local testQA run/validation instructions |
 | [docs/verification.md](docs/verification.md) | Verification instructions, command set + offline link checker |
