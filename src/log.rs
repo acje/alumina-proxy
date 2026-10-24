@@ -1276,7 +1276,7 @@ impl LogStore {
     /// silently lost (docs/alumina-proxy.md:197, L18). A path that keeps
     /// running never calls this — it leaves the records queued and retries on
     /// the bounded [`LOG_RETRY`] cadence (`next_drain`).
-    pub(crate) fn strand_queued(&mut self) -> u64 {
+    pub(crate) const fn strand_queued(&mut self) -> u64 {
         let mut stranded = 0u64;
         while self.count > 0 {
             self.drop_one();
