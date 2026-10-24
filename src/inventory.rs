@@ -2,6 +2,7 @@ use std::fmt;
 use std::mem::size_of;
 
 use crate::client_hello::MAX_CLIENT_HELLO;
+use crate::config::CONFIG_DOC_LIMIT;
 use crate::connect::CONNECT_LIMIT;
 use crate::dns::ResponseWorkspace;
 use crate::startup_dns::{QUERY_BUF_LEN, RECV_BUF_LEN};
@@ -10,7 +11,10 @@ pub const TUNNEL_SLOTS: usize = 512;
 pub const BUFFERS_PER_SLOT: usize = 2;
 pub const BUFFER_BYTES: usize = 128 * 1024;
 pub const TRAFFIC_STORAGE_BYTES: usize = TUNNEL_SLOTS * BUFFERS_PER_SLOT * BUFFER_BYTES;
-pub const CONFIG_DOC_BUFFER_BYTES: usize = 4096;
+/// The transient configuration-document read buffer: one byte past the
+/// `CONFIG_DOC_LIMIT` bound so the oversize probe can observe an over-limit
+/// document (`config::load_config_document`'s `take` limit).
+pub const CONFIG_DOC_BUFFER_BYTES: usize = CONFIG_DOC_LIMIT + 1;
 
 /// The retained per-slot serving metadata: the fixed CONNECT parser head and
 /// the two 64 KiB `ClientHello` inspector buffers, allocated once per tunnel

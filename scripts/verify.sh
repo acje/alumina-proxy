@@ -370,7 +370,7 @@ boot_fixtures() {
         printf '%s\n' \
             'set -eu' \
             'mkdir -p /work' \
-            "printf '%s\\n' 'allowlist = [\"example.com:443\"]' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' 'resolver = [\"127.0.0.1\"]' '[any_illegal]' 'scope = \"connection\"' '[actions]' 'kind = [\"flare_only\"]' 'scope = [\"connection\"]' > /work/config.toml" \
+            "printf '%s\\n' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' 'resolver = [\"127.0.0.1\"]' '[any_illegal]' 'scope = \"connection\"' '[allowed_fqdn.\"example.com:443\"]' 'early_data = { action = \"flare_only\", scope = \"connection\" }' > /work/config.toml" \
             'chown -R 65534:65534 /work' \
             'apk add --no-cache util-linux >/dev/null 2>&1 || true'
         true

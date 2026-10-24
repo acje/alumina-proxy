@@ -169,7 +169,7 @@ fn ns(port: u16) -> SocketAddr {
 /// TLS identity (FQDN plus optional pin) comes from this resolver set.
 fn dot_config(resolver_line: &str) -> Config {
     let doc = format!(
-        "allowlist = [\"alpha.example.org:443\", \"beta.example.org:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"{resolver_line}\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n"
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"{resolver_line}\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
     );
     parse_config_document(&doc).expect("valid pinned-dot config")
 }

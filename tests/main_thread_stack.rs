@@ -34,7 +34,7 @@ fn main() {
     let listener = MioListener::bind(bind).expect("bind serving listener");
     let port = listener.local_addr().expect("listener local addr").port();
     let doc = format!(
-        "allowlist = [\"sub.example.org:443\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
     );
     let config = parse_config_document(&doc).expect("valid config");
     let storage = ServeStorage::boot(&config).expect("boot storage");

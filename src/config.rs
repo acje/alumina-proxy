@@ -7,7 +7,7 @@ use std::ops::Range;
 use crate::enforcement::action::{ActionKind, AnyIllegalScope, ControlTable, DomainAction, Scope};
 use crate::resolver::{self, ResolverSet};
 
-pub const CONFIG_DOC_LIMIT: usize = 4096;
+pub const CONFIG_DOC_LIMIT: usize = 16384;
 pub const ALLOWLIST_MIN: usize = 1;
 pub const ALLOWLIST_MAX: usize = 32;
 pub const FQDN_MAX_LEN: usize = 253;
@@ -468,16 +468,11 @@ pub enum ConfigError {
         value: String,
     },
     UnknownAction {
-        index: usize,
+        name: String,
         value: String,
     },
     ActionTarpitDeferred {
-        index: usize,
-    },
-    ActionsLengthMismatch {
-        got_kind: usize,
-        got_scope: usize,
-        expected: usize,
+        name: String,
     },
     ResolverCountOutOfRange {
         got: usize,
@@ -564,23 +559,13 @@ impl fmt::Display for ConfigError {
                 f,
                 "config {key} value {value:?} invalid: expected connection, domain, or all"
             ),
-            ConfigError::UnknownAction { index, value } => write!(
+            ConfigError::UnknownAction { name, value } => write!(
                 f,
-                "config actions.kind[{}] value {value:?}: unknown action (expected flare_only or block)",
-                index + 1
+                "config allowed_fqdn.{name} early_data action value {value:?}: unknown action (expected flare_only or block)"
             ),
-            ConfigError::ActionTarpitDeferred { index } => write!(
+            ConfigError::ActionTarpitDeferred { name } => write!(
                 f,
-                "config actions.kind[{}] is \"tarpit\": Tarpit pacing is deferred and is not accepted as an operational setting (docs/alumina-proxy.md tripwire amendment)",
-                index + 1
-            ),
-            ConfigError::ActionsLengthMismatch {
-                got_kind,
-                got_scope,
-                expected,
-            } => write!(
-                f,
-                "config [actions] kind/scope lengths {got_kind}/{got_scope} must equal allowlist length {expected}"
+                "config allowed_fqdn.{name} early_data action is \"tarpit\": Tarpit pacing is deferred and is not accepted as an operational setting (docs/alumina-proxy.md tripwire amendment)"
             ),
             ConfigError::ResolverCountOutOfRange { got } => write!(
                 f,
@@ -662,18 +647,12 @@ pub fn parse_config_document(doc: &str) -> Result<Config, ConfigError> {
 }
 
 fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
-    let allowlist_names = require_string_list(table, "allowlist")?;
     let listen = require_string(table, "listen")?;
     let allowance = require_integer(table, "startup_unresolved_allowance")?;
     for (key, value) in table {
         if !matches!(
             key.as_str(),
-            "allowlist"
-                | "listen"
-                | "startup_unresolved_allowance"
-                | "resolver"
-                | "any_illegal"
-                | "actions"
+            "listen" | "startup_unresolved_allowance" | "resolver" | "any_illegal" | "allowed_fqdn"
         ) {
             return Err(match value {
                 toml::Value::Table(_) => ConfigError::UnknownTable(key.clone()),
@@ -684,10 +663,7 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
     let any_illegal = table
         .get("any_illegal")
         .ok_or_else(|| ConfigError::MissingField("any_illegal".to_owned()))?;
-    let actions = table
-        .get("actions")
-        .ok_or_else(|| ConfigError::MissingField("actions".to_owned()))?;
-    let allowlist = build_allowlist(allowlist_names)?;
+    let (allowlist, domain_actions) = build_allowlist(table)?;
     let listen = parse_listen(&listen)?;
     let allowance = u8::try_from(allowance)
         .map_err(|_| ConfigError::AllowanceOutOfRange { value: allowance })?;
@@ -697,14 +673,8 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
         });
     }
     let any_scope = parse_any_illegal(any_illegal)?;
-    let domain_actions = parse_actions(actions, allowlist.len())?;
-    let Some(control) = ControlTable::new(any_scope, &domain_actions) else {
-        return Err(ConfigError::ActionsLengthMismatch {
-            got_kind: domain_actions.len(),
-            got_scope: domain_actions.len(),
-            expected: ALLOWLIST_MAX,
-        });
-    };
+    let control = ControlTable::new(any_scope, &domain_actions)
+        .expect("build_allowlist validated 1..=32 entries, so ControlTable::new cannot fail");
     let resolver = build_resolver_set(table)?;
     Ok(Config {
         allowlist,
@@ -763,56 +733,75 @@ fn parse_any_illegal(value: &toml::Value) -> Result<AnyIllegalScope, ConfigError
     }
 }
 
-fn parse_actions(
+fn parse_allowed_fqdn_table(
     value: &toml::Value,
-    allowlist_len: usize,
-) -> Result<Vec<DomainAction>, ConfigError> {
+    fqdn_key: &str,
+) -> Result<DomainAction, ConfigError> {
     let toml::Value::Table(table) = value else {
-        return Err(ConfigError::WrongType("actions: expected table".to_owned()));
+        return Err(ConfigError::WrongType(format!(
+            "allowed_fqdn.{fqdn_key}: expected table"
+        )));
     };
+    let mut early_data = None;
     for key in table.keys() {
-        if !matches!(key.as_str(), "kind" | "scope") {
-            return Err(ConfigError::UnknownKey(format!("actions.{key}")));
+        if key == "early_data" {
+            early_data = Some(table.get(key).expect("key present in iteration"));
+        } else {
+            return Err(ConfigError::UnknownKey(format!(
+                "allowed_fqdn.{fqdn_key}.{key}"
+            )));
         }
     }
-    let kinds = require_string_list(table, "kind")
-        .map_err(|err| prefix_group_error("actions", "kind", err))?;
-    let scopes = require_string_list(table, "scope")
-        .map_err(|err| prefix_group_error("actions", "scope", err))?;
-    if kinds.len() != allowlist_len || scopes.len() != allowlist_len {
-        return Err(ConfigError::ActionsLengthMismatch {
-            got_kind: kinds.len(),
-            got_scope: scopes.len(),
-            expected: allowlist_len,
-        });
+    let early_data = early_data
+        .ok_or_else(|| ConfigError::MissingField(format!("allowed_fqdn.{fqdn_key}.early_data")))?;
+    parse_early_data(early_data, fqdn_key)
+}
+
+fn parse_early_data(value: &toml::Value, fqdn_key: &str) -> Result<DomainAction, ConfigError> {
+    let toml::Value::Table(table) = value else {
+        return Err(ConfigError::WrongType(format!(
+            "allowed_fqdn.{fqdn_key}.early_data: expected table"
+        )));
+    };
+    for key in table.keys() {
+        if !matches!(key.as_str(), "action" | "scope") {
+            return Err(ConfigError::UnknownKey(format!(
+                "allowed_fqdn.{fqdn_key}.early_data.{key}"
+            )));
+        }
     }
-    let mut actions = Vec::with_capacity(kinds.len());
-    for (index, (kind, scope)) in kinds.iter().zip(scopes.iter()).enumerate() {
-        let kind = match kind.as_str() {
-            "flare_only" => ActionKind::FlareOnly,
-            "block" => ActionKind::Block,
-            "tarpit" => return Err(ConfigError::ActionTarpitDeferred { index }),
-            other => {
-                return Err(ConfigError::UnknownAction {
-                    index,
-                    value: other.to_owned(),
-                });
-            }
-        };
-        let scope = match scope.as_str() {
-            "connection" => Scope::Connection,
-            "domain" => Scope::Domain,
-            "all" => Scope::All,
-            other => {
-                return Err(ConfigError::InvalidScope {
-                    key: format!("actions.scope[{}]", index + 1),
-                    value: other.to_owned(),
-                });
-            }
-        };
-        actions.push(DomainAction::new(kind, scope));
-    }
-    Ok(actions)
+    let prefix = format!("allowed_fqdn.{fqdn_key}.early_data");
+    let action = require_string(table, "action")
+        .map_err(|err| prefix_group_error(&prefix, "action", err))?;
+    let scope =
+        require_string(table, "scope").map_err(|err| prefix_group_error(&prefix, "scope", err))?;
+    let kind = match action.as_str() {
+        "flare_only" => ActionKind::FlareOnly,
+        "block" => ActionKind::Block,
+        "tarpit" => {
+            return Err(ConfigError::ActionTarpitDeferred {
+                name: fqdn_key.to_owned(),
+            });
+        }
+        other => {
+            return Err(ConfigError::UnknownAction {
+                name: fqdn_key.to_owned(),
+                value: other.to_owned(),
+            });
+        }
+    };
+    let scope = match scope.as_str() {
+        "connection" => Scope::Connection,
+        "domain" => Scope::Domain,
+        "all" => Scope::All,
+        other => {
+            return Err(ConfigError::InvalidScope {
+                key: format!("allowed_fqdn.{fqdn_key}.early_data.scope"),
+                value: other.to_owned(),
+            });
+        }
+    };
+    Ok(DomainAction::new(kind, scope))
 }
 
 fn prefix_group_error(table: &str, key: &str, err: ConfigError) -> ConfigError {
@@ -889,29 +878,42 @@ const fn value_kind(value: &toml::Value) -> &'static str {
     }
 }
 
-fn build_allowlist(names: Vec<String>) -> Result<Allowlist, ConfigError> {
-    if names.is_empty() {
+fn build_allowlist(table: &toml::Table) -> Result<(Allowlist, Vec<DomainAction>), ConfigError> {
+    let Some(allowed) = table.get("allowed_fqdn") else {
+        return Err(ConfigError::AllowlistEmpty);
+    };
+    let toml::Value::Table(entries) = allowed else {
+        return Err(ConfigError::WrongType(
+            "allowed_fqdn: expected table".to_owned(),
+        ));
+    };
+    if entries.is_empty() {
         return Err(ConfigError::AllowlistEmpty);
     }
-    if names.len() > ALLOWLIST_MAX {
-        return Err(ConfigError::AllowlistTooMany { got: names.len() });
+    if entries.len() > ALLOWLIST_MAX {
+        return Err(ConfigError::AllowlistTooMany { got: entries.len() });
     }
     let mut seen = std::collections::HashSet::new();
-    let mut entries = Vec::with_capacity(names.len());
-    for name in names {
-        let fqdn =
-            Fqdn::parse(&name).map_err(|reason| ConfigError::InvalidFqdn { name, reason })?;
-        let key = (fqdn.as_str().to_owned(), fqdn.port());
-        if !seen.insert(key) {
+    let mut allowlist = Vec::with_capacity(entries.len());
+    let mut actions = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let fqdn = Fqdn::parse(key).map_err(|reason| ConfigError::InvalidFqdn {
+            name: key.clone(),
+            reason,
+        })?;
+        let dedup = (fqdn.as_str().to_owned(), fqdn.port());
+        if !seen.insert(dedup) {
             return Err(ConfigError::DuplicateAllowlistName(format!(
                 "{}:{}",
                 fqdn.as_str(),
                 fqdn.port()
             )));
         }
-        entries.push(fqdn);
+        let action = parse_allowed_fqdn_table(value, key)?;
+        allowlist.push(fqdn);
+        actions.push(action);
     }
-    Ok(Allowlist(entries))
+    Ok((Allowlist(allowlist), actions))
 }
 
 fn parse_listen(listen: &str) -> Result<ListenAddr, ConfigError> {
@@ -972,24 +974,29 @@ mod listen_tests {
 mod enforcement_config_tests {
     use super::*;
     use crate::enforcement::action::{ActionKind, AnyIllegalScope, Scope};
+    use std::fmt::Write as _;
 
-    fn base(names: &str) -> String {
+    fn base() -> String {
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n"
+            .to_owned()
+    }
+
+    fn entry(key: &str, action: &str, scope: &str) -> String {
         format!(
-            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n"
+            "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"{action}\", scope = \"{scope}\" }}\n"
         )
     }
 
-    fn group(names: &str, any_scope: &str, kinds: &str, scopes: &str) -> String {
+    fn group(entries: &str, any_scope: &str) -> String {
         format!(
-            "{base}\n[any_illegal]\nscope = \"{any_scope}\"\n[actions]\nkind = {kinds}\nscope = {scopes}\n",
-            base = base(names)
+            "{base}[any_illegal]\nscope = \"{any_scope}\"\n{entries}",
+            base = base()
         )
     }
 
     #[test]
     fn missing_enforcement_group_fails() {
-        let err = parse_config_document(&base("\"sub.example.org:443\""))
-            .expect_err("group is mandatory");
+        let err = parse_config_document(&base()).expect_err("group is mandatory");
         assert!(
             matches!(&err, ConfigError::MissingField(f) if f == "any_illegal"),
             "expected MissingField(any_illegal), got {err:?}"
@@ -999,10 +1006,12 @@ mod enforcement_config_tests {
     #[test]
     fn parses_full_enforcement_group() {
         let doc = group(
-            "\"sub.example.org:443\", \"other.example.org:443\"",
+            &format!(
+                "{}{}",
+                entry("sub.example.org:443", "block", "domain"),
+                entry("other.example.org:443", "flare_only", "connection"),
+            ),
             "all",
-            "[\"block\", \"flare_only\"]",
-            "[\"domain\", \"connection\"]",
         );
         let cfg = parse_config_document(&doc).expect("valid enforcement config");
         let control = cfg.control();
@@ -1011,30 +1020,25 @@ mod enforcement_config_tests {
         let first = control
             .at(control.ordinal(0).expect("ordinal"))
             .expect("configured");
-        assert_eq!(first.kind(), ActionKind::Block);
-        assert_eq!(first.scope(), Scope::Domain);
+        assert_eq!(first.kind(), ActionKind::FlareOnly);
+        assert_eq!(first.scope(), Scope::Connection);
         let second = control
             .at(control.ordinal(1).expect("ordinal"))
             .expect("configured");
-        assert_eq!(second.kind(), ActionKind::FlareOnly);
-        assert_eq!(second.scope(), Scope::Connection);
+        assert_eq!(second.kind(), ActionKind::Block);
+        assert_eq!(second.scope(), Scope::Domain);
     }
 
     #[test]
     fn accepts_any_illegal_connection_scope() {
-        let doc = group(
-            "\"a.example:443\"",
-            "connection",
-            "[\"block\"]",
-            "[\"domain\"]",
-        );
+        let doc = group(&entry("a.example:443", "block", "domain"), "connection");
         let cfg = parse_config_document(&doc).expect("connection scope valid");
         assert_eq!(cfg.control().any_illegal(), AnyIllegalScope::Connection);
     }
 
     #[test]
     fn rejects_any_illegal_domain_scope() {
-        let doc = group("\"a.example:443\"", "domain", "[\"block\"]", "[\"domain\"]");
+        let doc = group(&entry("a.example:443", "block", "domain"), "domain");
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(err, ConfigError::AnyIllegalScopeDomain),
@@ -1044,12 +1048,7 @@ mod enforcement_config_tests {
 
     #[test]
     fn rejects_any_illegal_unknown_scope() {
-        let doc = group(
-            "\"a.example:443\"",
-            "wired",
-            "[\"block\"]",
-            "[\"connection\"]",
-        );
+        let doc = group(&entry("a.example:443", "block", "connection"), "wired");
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(err, ConfigError::InvalidScope { .. }),
@@ -1058,59 +1057,54 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn rejects_missing_actions_when_any_illegal_present() {
+    fn rejects_missing_early_data() {
         let doc = format!(
-            "{}\n[any_illegal]\nscope = \"all\"\n",
-            base("\"a.example:443\"")
+            "{base}[any_illegal]\nscope = \"all\"\n[allowed_fqdn.\"a.example:443\"]\n",
+            base = base()
         );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(&err, ConfigError::MissingField(f) if f == "actions"),
-            "expected MissingField(actions), got {err:?}"
+            matches!(&err, ConfigError::MissingField(f) if f == "allowed_fqdn.a.example:443.early_data"),
+            "expected MissingField(early_data), got {err:?}"
         );
     }
 
     #[test]
-    fn rejects_missing_any_illegal_when_actions_present() {
+    fn rejects_unknown_key_in_allowed_fqdn_table() {
         let doc = format!(
-            "{}\n[actions]\nkind = [\"block\"]\nscope = [\"domain\"]\n",
-            base("\"a.example:443\"")
+            "{base}[any_illegal]\nscope = \"all\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"block\", scope = \"domain\" }}\nja4 = \"x\"\n",
+            base = base()
         );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(&err, ConfigError::MissingField(f) if f == "any_illegal"),
-            "expected MissingField(any_illegal), got {err:?}"
+            matches!(&err, ConfigError::UnknownKey(k) if k == "allowed_fqdn.a.example:443.ja4"),
+            "expected UnknownKey, got {err:?}"
         );
     }
 
     #[test]
     fn rejects_tarpit_kind_with_deferred_diagnostic() {
-        let doc = group(
-            "\"a.example:443\"",
-            "all",
-            "[\"tarpit\"]",
-            "[\"connection\"]",
-        );
+        let doc = group(&entry("a.example:443", "tarpit", "connection"), "all");
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(err, ConfigError::ActionTarpitDeferred { index: 0 }),
+            matches!(err, ConfigError::ActionTarpitDeferred { ref name } if name == "a.example:443"),
             "expected ActionTarpitDeferred, got {err:?}"
         );
     }
 
     #[test]
     fn rejects_unknown_action_kind() {
-        let doc = group("\"a.example:443\"", "all", "[\"peek\"]", "[\"connection\"]");
+        let doc = group(&entry("a.example:443", "peek", "connection"), "all");
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(err, ConfigError::UnknownAction { index: 0, .. }),
+            matches!(err, ConfigError::UnknownAction { ref name, .. } if name == "a.example:443"),
             "expected UnknownAction, got {err:?}"
         );
     }
 
     #[test]
     fn rejects_unknown_per_domain_scope() {
-        let doc = group("\"a.example:443\"", "all", "[\"block\"]", "[\"wire\"]");
+        let doc = group(&entry("a.example:443", "block", "wire"), "all");
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(err, ConfigError::InvalidScope { .. }),
@@ -1119,23 +1113,75 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn rejects_actions_length_mismatch() {
+    fn rejects_duplicate_after_normalization() {
         let doc = group(
-            "\"a.example:443\"",
+            &format!(
+                "{}{}",
+                entry("a.example:443", "block", "domain"),
+                entry("a.example.:443", "block", "domain"),
+            ),
             "all",
-            "[\"block\", \"block\"]",
-            "[\"domain\", \"domain\"]",
         );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(err, ConfigError::ActionsLengthMismatch { .. }),
-            "expected ActionsLengthMismatch, got {err:?}"
+            matches!(&err, ConfigError::DuplicateAllowlistName(n) if n == "a.example:443"),
+            "expected DuplicateAllowlistName, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_more_than_32_tables() {
+        let mut doc = base();
+        doc.push_str("[any_illegal]\nscope = \"all\"\n");
+        for i in 0..33 {
+            let _ = write!(
+                doc,
+                "[allowed_fqdn.\"n{i:02}.example:443\"]\nearly_data = {{ action = \"block\", scope = \"domain\" }}\n"
+            );
+        }
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::AllowlistTooMany { got: 33 }),
+            "expected AllowlistTooMany, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_allowlist() {
+        let doc = format!(
+            "{base}[any_illegal]\nscope = \"all\"\n[allowed_fqdn]\n",
+            base = base()
+        );
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::AllowlistEmpty),
+            "expected AllowlistEmpty, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_absent_allowlist() {
+        let doc = format!("{base}[any_illegal]\nscope = \"all\"\n", base = base());
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::AllowlistEmpty),
+            "expected AllowlistEmpty, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_bare_fqdn_key() {
+        let doc = group(&entry("a.example", "block", "domain"), "all");
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidFqdn { name, .. } if name == "a.example"),
+            "expected InvalidFqdn, got {err:?}"
         );
     }
 
     #[test]
     fn rejects_unknown_top_level_key_unchanged() {
-        let doc = format!("{}bogus = 1\n", base("\"a.example:443\""));
+        let doc = format!("{}bogus = 1\n", base());
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(err, ConfigError::UnknownKey(_)),
@@ -1143,24 +1189,29 @@ mod enforcement_config_tests {
         );
     }
 
+    fn hundred_byte_name(i: usize) -> String {
+        format!("n{i:02}.{}.{}:443", "a".repeat(48), "b".repeat(43))
+    }
+
+    fn keyed_document(count: usize, any_scope: &str, action: &str, scope: &str) -> String {
+        let mut doc = base();
+        let _ = write!(doc, "[any_illegal]\nscope = \"{any_scope}\"\n");
+        for i in 0..count {
+            let _ = write!(
+                doc,
+                "[allowed_fqdn.\"{}\"]\nearly_data = {{ action = \"{action}\", scope = \"{scope}\" }}\n",
+                hundred_byte_name(i)
+            );
+        }
+        doc
+    }
+
     #[test]
-    fn compact_32_names_with_group_fit_4kib() {
-        let names: Vec<String> = (0..32)
-            .map(|i| format!("n{i:02}.{}.{}:443", "a".repeat(48), "b".repeat(43)))
-            .collect();
-        let list = names
-            .iter()
-            .map(|n| format!("\"{n}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let kinds = vec!["\"block\""; 32].join(", ");
-        let scopes = vec!["\"domain\""; 32].join(", ");
-        let doc = format!(
-            "allowlist = [{list}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"all\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
-        );
+    fn compact_32_names_with_group_fit_16kib() {
+        let doc = keyed_document(32, "all", "block", "domain");
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,
-            "compact config with full enforcement group fits 4096 bytes (len {})",
+            "compact config with full enforcement group fits 16384 bytes (len {})",
             doc.len()
         );
         let cfg = parse_config_document(&doc).expect("fits and parses");
@@ -1168,48 +1219,25 @@ mod enforcement_config_tests {
         assert_eq!(cfg.control().len(), 32);
     }
 
-    fn hundred_byte_names(count: usize) -> String {
-        (0..count)
-            .map(|i| format!("\"n{i:02}.{}.{}:443\"", "a".repeat(48), "b".repeat(43)))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    fn full_group_document(count: usize, any_scope: &str, kind: &str, scope: &str) -> String {
-        let names = hundred_byte_names(count);
-        let kinds = std::iter::repeat_n(format!("\"{kind}\""), count)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let scopes = std::iter::repeat_n(format!("\"{scope}\""), count)
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"{any_scope}\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
-        )
-    }
-
     #[test]
-    fn flare_connection_32_hundred_byte_names_are_rejected_oversized() {
-        let doc = full_group_document(32, "connection", "flare_only", "connection");
+    fn flare_connection_32_hundred_byte_names_fit_and_parse() {
+        let doc = keyed_document(32, "connection", "flare_only", "connection");
         assert!(
-            doc.len() > CONFIG_DOC_LIMIT,
+            doc.len() <= CONFIG_DOC_LIMIT,
             "the longer spelling's measured total is {}",
             doc.len()
         );
-        let err = parse_config_document(&doc).expect_err("oversized doc must be rejected");
-        assert!(
-            matches!(&err, ConfigError::OversizedDocument { got, limit } if *limit == CONFIG_DOC_LIMIT && *got == doc.len()),
-            "expected OversizedDocument for {} bytes, got {err:?}",
-            doc.len()
-        );
+        let cfg = parse_config_document(&doc).expect("fits and parses");
+        assert_eq!(cfg.allowlist().len(), 32);
+        assert_eq!(cfg.control().len(), 32);
     }
 
     #[test]
     fn flare_connection_29_hundred_byte_names_fit_and_parse() {
-        let doc = full_group_document(29, "connection", "flare_only", "connection");
+        let doc = keyed_document(29, "connection", "flare_only", "connection");
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,
-            "29-name longer spelling fits 4096 bytes (len {})",
+            "29-name longer spelling fits 16384 bytes (len {})",
             doc.len()
         );
         let cfg = parse_config_document(&doc).expect("fits and parses");
@@ -1218,11 +1246,11 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_measured_total_is_4084() {
-        let doc = full_group_document(32, "all", "block", "domain");
+    fn compact_32_hundred_byte_names_measured_total_is_5548() {
+        let doc = keyed_document(32, "all", "block", "domain");
         assert_eq!(
             doc.len(),
-            4084,
+            5548,
             "compact 32-name measured total with resolver key"
         );
         let cfg = parse_config_document(&doc).expect("fits and parses");
@@ -1231,79 +1259,59 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_4103() {
-        let doc = full_group_document(32, "all", "block", "domain").replacen(
+    fn compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_5567() {
+        let doc = keyed_document(32, "all", "block", "domain").replacen(
             "resolver = [\"1.1.1.1\"]",
             "resolver = [\"1.1.1.1#cloudflare-dns.com\"]",
             1,
         );
         assert_eq!(
             doc.len(),
-            4103,
-            "tight 32×100-byte compact form with a single realistic IP#fqdn entry exceeds 4096 B"
+            5567,
+            "tight 32×100-byte compact form with a single realistic IP#fqdn entry"
         );
-        assert!(
-            doc.len() > CONFIG_DOC_LIMIT,
-            "a realistic IP#fqdn entry cannot fit the max-count/max-name compact form"
-        );
-        let err = parse_config_document(&doc).expect_err("oversized doc must be rejected");
-        assert!(
-            matches!(&err, ConfigError::OversizedDocument { got, limit } if *limit == CONFIG_DOC_LIMIT && *got == doc.len()),
-            "expected OversizedDocument for {} bytes, got {err:?}",
-            doc.len()
-        );
+        let cfg = parse_config_document(&doc).expect("fits and parses");
+        assert_eq!(cfg.allowlist().len(), 32);
+        assert_eq!(cfg.control().len(), 32);
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_with_pinned_resolver_measured_total_is_4151() {
-        // base64("A".repeat(32)) = 43 unpadded chars (AQ...), the strict SPKI
-        // pin grammar's canonical value; `#dns.google#pin-sha256=` plus the
-        // 44-char padded digest costs 67 bytes over a bare-IP entry and cannot
-        // fit the max-count/max-name compact form.
+    fn compact_32_hundred_byte_names_with_pinned_resolver_measured_total_is_5615() {
         let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
-        let doc = full_group_document(32, "all", "block", "domain").replacen(
+        let doc = keyed_document(32, "all", "block", "domain").replacen(
             "resolver = [\"1.1.1.1\"]",
             &format!("resolver = [\"1.1.1.1#dns.google#pin-sha256={b64}\"]"),
             1,
         );
         assert_eq!(
             doc.len(),
-            4151,
-            "tight 32×100-byte compact form with a pinned DoT entry exceeds 4096 B"
+            5615,
+            "tight 32×100-byte compact form with a pinned DoT entry"
         );
-        assert!(
-            doc.len() > CONFIG_DOC_LIMIT,
-            "a pinned DoT entry cannot fit the max-count/max-name compact form"
-        );
-        let err = parse_config_document(&doc).expect_err("oversized doc must be rejected");
-        assert!(
-            matches!(&err, ConfigError::OversizedDocument { got, limit } if *limit == CONFIG_DOC_LIMIT && *got == doc.len()),
-            "expected OversizedDocument for {} bytes, got {err:?}",
-            doc.len()
-        );
+        let cfg = parse_config_document(&doc).expect("fits and parses");
+        assert_eq!(cfg.allowlist().len(), 32);
+        assert_eq!(cfg.control().len(), 32);
     }
 
     #[test]
-    fn flare_connection_32_hundred_byte_names_measured_total_is_4379() {
-        let doc = full_group_document(32, "connection", "flare_only", "connection");
+    fn flare_connection_32_hundred_byte_names_measured_total_is_5843() {
+        let doc = keyed_document(32, "connection", "flare_only", "connection");
         assert_eq!(
             doc.len(),
-            4379,
+            5843,
             "longer 32-name measured total with resolver key"
         );
-        let err = parse_config_document(&doc).expect_err("oversized doc must be rejected");
-        assert!(
-            matches!(&err, ConfigError::OversizedDocument { got, limit } if *limit == CONFIG_DOC_LIMIT && *got == 4379),
-            "expected OversizedDocument for 4379 bytes, got {err:?}"
-        );
+        let cfg = parse_config_document(&doc).expect("fits and parses");
+        assert_eq!(cfg.allowlist().len(), 32);
+        assert_eq!(cfg.control().len(), 32);
     }
 
     #[test]
-    fn flare_connection_29_hundred_byte_names_measured_total_is_3983() {
-        let doc = full_group_document(29, "connection", "flare_only", "connection");
+    fn flare_connection_29_hundred_byte_names_measured_total_is_5306() {
+        let doc = keyed_document(29, "connection", "flare_only", "connection");
         assert_eq!(
             doc.len(),
-            3983,
+            5306,
             "29-name longer spelling measured total with resolver key"
         );
         let cfg = parse_config_document(&doc).expect("fits and parses");
@@ -1315,25 +1323,17 @@ mod enforcement_config_tests {
 #[cfg(test)]
 mod resolver_config_tests {
     use super::*;
-
-    fn doc(resolver: &str, names: &str) -> String {
-        format!(
-            "allowlist = [{names}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n",
-            names = if names.is_empty() {
-                "\"a.example:443\""
-            } else {
-                names
-            }
-        )
-    }
+    use std::fmt::Write as _;
 
     fn valid_doc(resolver: &str) -> String {
-        doc(resolver, "")
+        format!(
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+        )
     }
 
     #[test]
     fn resolver_key_is_mandatory() {
-        let d = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+        let d = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
         let err = parse_config_document(d).unwrap_err();
         assert!(
             matches!(&err, ConfigError::MissingField(f) if f == "resolver"),
@@ -1430,7 +1430,7 @@ mod resolver_config_tests {
             matches!(empty, ConfigError::ResolverCountOutOfRange { got: 0 }),
             "empty resolver must be ResolverCountOutOfRange, got {empty:?}"
         );
-        let six = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"9.9.9.9\", \"208.67.222.222\", \"94.140.14.14\", \"1.0.0.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+        let six = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"9.9.9.9\", \"208.67.222.222\", \"94.140.14.14\", \"1.0.0.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
         let too_many = parse_config_document(six).unwrap_err();
         assert!(
             matches!(too_many, ConfigError::ResolverCountOutOfRange { got: 6 }),
@@ -1533,7 +1533,7 @@ mod resolver_config_tests {
         assert_eq!(
             exact.len(),
             CONFIG_DOC_LIMIT,
-            "padded doc is exactly the 4 KiB limit"
+            "padded doc is exactly the 16384-byte limit"
         );
         parse_config_document(&exact).expect("doc at exactly the limit parses");
         let with_bom = format!("\u{feff}{exact}");
@@ -1567,22 +1567,22 @@ mod resolver_config_tests {
     }
 
     #[test]
-    fn resolver_ip_fqdn_example_fits_4kib() {
+    fn resolver_ip_fqdn_example_fits_16kib() {
         let resolver = "[\"1.1.1.1#cloudflare-dns.com\", \"8.8.8.8#dns.google\", \"9.9.9.9#dns.quad9.net\", \"208.67.222.222#dns.opendns.com\", \"94.140.14.14#dns.adguard.com\"]";
         let example = format!(
-            "allowlist = [\"api.github.com:443\", \"example.com:443\", \"www.example.net:443\"]\nlisten = \"127.0.0.1:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\", \"connection\"]\n"
+            "listen = \"127.0.0.1:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"api.github.com:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n[allowed_fqdn.\"example.com:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n[allowed_fqdn.\"www.example.net:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
         );
         assert_eq!(
             example.len(),
-            437,
-            "4 KiB re-measure: the V37 golden-path IP#fqdn example config is serializer-pinned at 437 B"
+            538,
+            "16 KiB re-measure: the V37 golden-path IP#fqdn example config is serializer-pinned at 538 B"
         );
         assert!(
             example.len() <= CONFIG_DOC_LIMIT,
-            "IP#fqdn example fits 4096 B (len {})",
+            "IP#fqdn example fits 16384 B (len {})",
             example.len()
         );
-        let cfg = parse_config_document(&example).expect("example parses within the 4 KiB bound");
+        let cfg = parse_config_document(&example).expect("example parses within the 16 KiB bound");
         assert_eq!(cfg.resolver_set().len(), 5);
         assert_eq!(
             cfg.resolver_set()
@@ -1596,20 +1596,17 @@ mod resolver_config_tests {
 
     #[test]
     fn resolver_key_respected_in_compact_fit_form() {
-        let mut names = Vec::with_capacity(32);
-        for i in 0..32usize {
-            names.push(format!("\"{i}.{}.{}:443\"", "a".repeat(48), "b".repeat(43)));
-        }
-        let kinds = std::iter::repeat_n("\"block\"", 32)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let scopes = std::iter::repeat_n("\"domain\"", 32)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let compact = format!(
-            "allowlist = [{}]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"1.0.0.1\", \"8.8.4.4\"]\n[any_illegal]\nscope = \"all\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n",
-            names.join(", ")
+        let mut compact = String::from(
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"1.0.0.1\", \"8.8.4.4\"]\n[any_illegal]\nscope = \"all\"\n",
         );
+        for i in 0..32usize {
+            let _ = write!(
+                compact,
+                "[allowed_fqdn.\"{i}.{}.{}:443\"]\nearly_data = {{ action = \"block\", scope = \"domain\" }}\n",
+                "a".repeat(48),
+                "b".repeat(43)
+            );
+        }
         assert!(
             compact.len() <= CONFIG_DOC_LIMIT,
             "compact 32-name fit form with resolver must still be documented; measured {}",
@@ -1624,7 +1621,7 @@ mod authorization_boundary_tests {
 
     fn config() -> Config {
         parse_config_document(
-            "allowlist = [\"sub.example.org:443\", \"other.test:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n[allowed_fqdn.\"other.test:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n",
         )
         .expect("valid config")
     }
@@ -1632,8 +1629,10 @@ mod authorization_boundary_tests {
     #[test]
     fn allowlist_position_matches_exact_pair_only() {
         let cfg = config();
-        assert_eq!(cfg.allowlist_position("sub.example.org", 443), Some(0));
-        assert_eq!(cfg.allowlist_position("other.test", 443), Some(1));
+        // Keyed tables sort by key (BTreeMap), so `other.test:443` precedes
+        // `sub.example.org:443` and owns ordinal 0.
+        assert_eq!(cfg.allowlist_position("other.test", 443), Some(0));
+        assert_eq!(cfg.allowlist_position("sub.example.org", 443), Some(1));
     }
 
     #[test]
@@ -1668,12 +1667,11 @@ mod authorization_boundary_tests {
 
     #[test]
     fn build_allowlist_same_host_different_ports_both_survive() {
-        let allowlist = build_allowlist(vec![
-            "a.example:443".to_owned(),
-            "a.example:8443".to_owned(),
-        ])
+        let cfg = parse_config_document(
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n",
+        )
         .expect("dedup is by the full <fqdn>:<port> pair, so the same host at a second port is a distinct entry");
-        assert_eq!(allowlist.len(), 2);
+        assert_eq!(cfg.allowlist().len(), 2);
     }
 
     #[test]

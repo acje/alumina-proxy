@@ -14,6 +14,16 @@
 //! ever contains a bare newline except the terminal frame. Numeric values are
 //! plain decimal. The exact field set is kind-specific.
 //!
+//! The startup result is deliberately split across two record shapes so a
+//! valid configuration can never lose it whole: one `startup_name` record per
+//! unresolved name, carrying the full (never truncated) FQDN, its outcome and
+//! its reason, followed by one `startup_final` summary record carrying the
+//! canonical counts plus `names_dropped`. Every per-name attempt that cannot be
+//! enqueued (full queue or encode overflow) is dropped whole and increments the
+//! shared drop counter exactly once; `names_dropped` reports how many of those
+//! attempts failed, so it is a subset of the summary's cumulative `dropped`
+//! tally and the two are never summed (docs/alumina-proxy.md:236).
+//!
 //! Address fields are never escaped: `SocketAddr` Display emits only digits,
 //! `.`, `:`, `[`, `]`, and `%`, none of which require quoting, and is written
 //! straight into the entry without an intermediate allocation. The `%` occurs
@@ -47,6 +57,79 @@ pub(crate) const SINK_MAX_BYTES: usize = 64 * 1024;
 const LOG_RETRY: Duration = Duration::from_millis(100);
 
 const QUEUE_MASK: usize = QUEUE_SLOTS - 1;
+
+/// Longest decimal rendering of a `u64` field (`secs`, counters).
+const U64_DIGITS: usize = 20;
+/// Longest decimal rendering of the `ordinal` field, which is a `u32`.
+const ORDINAL_DIGITS: usize = 10;
+/// Longest outcome token (`not_attempted`).
+const OUTCOME_TOKEN_MAX: usize = 13;
+/// Longest failure/not-attempted reason token (`window_closed`).
+const REASON_TOKEN_MAX: usize = 13;
+/// Longest textual rendering of an [`IpAddr`] field (an uncompressed IPv6).
+const IP_ADDR_TEXT_MAX: usize = 45;
+
+/// Deterministic worst-case encoded length of one `startup_name` record,
+/// including framing: header, `secs` and `ordinal` at their maximum decimal
+/// widths, the full [`crate::config::FQDN_MAX_LEN`] name inside its quotes, the
+/// longest outcome token, and the longest reason token inside its quotes. A
+/// validated FQDN is lowercase `[a-z0-9-.]` ASCII, so escaping never widens it.
+const STARTUP_NAME_MAX: usize = b"level=info kind=startup_name".len()
+    + b" secs=".len()
+    + U64_DIGITS
+    + b" ordinal=".len()
+    + ORDINAL_DIGITS
+    + b" name=\"".len()
+    + crate::config::FQDN_MAX_LEN
+    + 1
+    + b" outcome=".len()
+    + OUTCOME_TOKEN_MAX
+    + b" reason=\"".len()
+    + REASON_TOKEN_MAX
+    + 1
+    + 1;
+
+/// Deterministic worst-case encoded length of one `resolver_probe` segment:
+/// the indexed address (uncompressed IPv6 inside its quotes), the indexed FQDN
+/// inside its quotes, the pin flag, the `failed` verdict and its reason inside
+/// its quotes. Indices are at most `MAX_RESOLVERS - 1`, one decimal digit.
+const RESOLVER_PROBE_SEGMENT_MAX: usize = b" resolver=\"".len()
+    + 1
+    + IP_ADDR_TEXT_MAX
+    + 1
+    + b" fqdn=\"".len()
+    + 1
+    + crate::config::FQDN_MAX_LEN
+    + 1
+    + b" pin=".len()
+    + 1
+    + 1
+    + b" verdict=".len()
+    + 1
+    + "failed".len()
+    + b" reason=\"".len()
+    + 1
+    + REASON_TOKEN_MAX
+    + 1;
+
+/// Deterministic worst-case encoded length of one `resolver_probe` record,
+/// including framing: header, `secs` at its maximum width, and one worst-case
+/// segment per configured resolver.
+const RESOLVER_PROBE_MAX: usize = b"level=info kind=resolver_probe".len()
+    + b" secs=".len()
+    + U64_DIGITS
+    + crate::config::MAX_RESOLVERS * RESOLVER_PROBE_SEGMENT_MAX
+    + 1;
+
+const _: () = assert!(
+    STARTUP_NAME_MAX < SLOT_BYTES,
+    "one startup_name record at the validated FQDN bound must fit its 8 KiB slot"
+);
+const _: () = assert!(
+    RESOLVER_PROBE_MAX < SLOT_BYTES,
+    "one resolver_probe record over MAX_RESOLVERS full FQDNs must fit its 8 KiB slot"
+);
+
 /// Threshold edges: attempt an error record when usage first exceeds 80%,
 /// and again when it falls below 70% (docs/alumina-proxy.md:193).
 const HIGH_PCT_NUMBER: u64 = 80;
@@ -145,6 +228,7 @@ impl Level {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     StartupWarning,
+    StartupName,
     StartupFinal,
     Fatal,
     ShutdownFinal,
@@ -163,6 +247,7 @@ impl Kind {
     const fn as_str(self) -> &'static str {
         match self {
             Kind::StartupWarning => "startup_warning",
+            Kind::StartupName => "startup_name",
             Kind::StartupFinal => "startup_final",
             Kind::Fatal => "fatal",
             Kind::ShutdownFinal => "shutdown_final",
@@ -408,6 +493,14 @@ fn write_fields(w: &mut Entry<'_>, fields: &[Field<'_>]) -> bool {
     true
 }
 
+fn push_quoted(w: &mut Entry<'_>, key: &[u8], text: &str) -> bool {
+    w.push(b" ") && w.push(key) && w.push(b"=\"") && push_escaped(w, text) && w.push(b"\"")
+}
+
+fn push_token(w: &mut Entry<'_>, key: &[u8], token: &str) -> bool {
+    w.push(b" ") && w.push(key) && w.push(b"=") && w.push(token.as_bytes())
+}
+
 fn push_indexed_quoted(w: &mut Entry<'_>, key: &[u8], index: u32, text: &str) -> bool {
     if !w.push(b" ") || !w.push(key) {
         return false;
@@ -476,43 +569,44 @@ fn push_indexed_addr(w: &mut Entry<'_>, key: &[u8], index: u32, addr: IpAddr) ->
     true
 }
 
-/// Encodes the single startup-final record: the header fields plus, in allowlist
-/// ordinal order, one inline segment per unresolved name — `nameN`, `outcomeN`,
-/// and (for failed or not-attempted names) `reasonN`. The names are embedded in
-/// the same fixed 8 KiB entry as the header, so the startup result is exactly
-/// one record that never exceeds its slot.
-fn encode_record_final(
+/// Encodes one `startup_name` record: `secs`, the allowlist `ordinal`, the full
+/// validated FQDN (never truncated), the outcome token, and the reason only
+/// when the outcome carries one. A validated FQDN is lowercase `[a-z0-9-.]`
+/// ASCII, so the escaping pass is a no-op and the encoded length is a
+/// deterministic function of [`FQDN_MAX_LEN`] (see [`STARTUP_NAME_MAX`]).
+fn encode_record_name(
     slot_buf: &mut [u8; SLOT_BYTES],
-    level: Level,
-    kind: Kind,
-    fields: &[Field<'_>],
-    unresolved: &[StartupUnresolved<'_>],
+    secs: u64,
+    un: &StartupUnresolved<'_>,
 ) -> Option<usize> {
     let mut w = Entry {
         buf: slot_buf,
         len: 0,
     };
-    if !write_header(&mut w, level, kind) || !write_fields(&mut w, fields) {
-        return None;
-    }
-    for un in unresolved {
-        let index = un.ordinal;
-        if !push_indexed_quoted(&mut w, b"name", index, un.name) {
-            return None;
-        }
-        if !push_indexed_token(&mut w, b"outcome", index, un.outcome_token()) {
-            return None;
-        }
-        if let Some(reason) = un.reason_token()
-            && !push_indexed_quoted(&mut w, b"reason", index, reason)
-        {
-            return None;
-        }
-    }
-    if !w.push(b"\n") {
-        return None;
-    }
-    Some(w.len)
+    let fitted = write_header(&mut w, Level::Info, Kind::StartupName)
+        && push_u64(&mut w, b"secs", secs)
+        && push_u64(&mut w, b"ordinal", u64::from(un.ordinal))
+        && push_quoted(&mut w, b"name", un.name)
+        && push_token(&mut w, b"outcome", un.outcome_token())
+        && un
+            .reason_token()
+            .is_none_or(|reason| push_quoted(&mut w, b"reason", reason))
+        && w.push(b"\n");
+    fitted.then_some(w.len)
+}
+
+/// Encodes the `startup_final` summary record: the canonical startup counts in
+/// their existing order, with the appended `names_dropped` per-name accounting.
+/// The unresolved names are NOT embedded here — each was emitted first as its
+/// own `startup_name` record — so this record has a fixed field set and always
+/// fits its slot for any count values.
+fn encode_record_final(
+    slot_buf: &mut [u8; SLOT_BYTES],
+    level: Level,
+    kind: Kind,
+    fields: &[Field<'_>],
+) -> Option<usize> {
+    encode_record(slot_buf, level, kind, fields)
 }
 
 /// Encodes the single post-window probe record: the header fields plus, in
@@ -996,12 +1090,16 @@ pub(crate) struct FinalCounts {
     pub(crate) failed: u64,
     pub(crate) not_attempted: u64,
     pub(crate) dropped: u64,
+    /// Per-name `startup_name` attempts that were dropped whole. A subset of
+    /// `dropped`, reported separately so the split's own loss is attributable;
+    /// never added to `dropped`.
+    pub(crate) names_dropped: u64,
 }
 
-/// One unresolved name embedded inline in the single startup-final record: the
-/// allowlist ordinal (the deterministic key suffix) plus the name and its
-/// latest outcome. `Resolved` names are never passed; the segment vocabulary
-/// still covers them for completeness.
+/// One unresolved name emitted as its own `startup_name` record: the allowlist
+/// ordinal (the deterministic key), the full name and its latest outcome.
+/// `Resolved` names are never passed; the outcome vocabulary still covers them
+/// for completeness.
 #[derive(Clone, Copy)]
 pub(crate) struct StartupUnresolved<'a> {
     pub(crate) ordinal: u32,
@@ -1158,6 +1256,37 @@ impl LogStore {
         }
     }
 
+    /// Whether a further drain turn can still deliver queued records: records
+    /// remain and the sink is neither stalled mid-write (a retained cursor
+    /// awaiting the bounded [`LOG_RETRY`] cadence) nor latched failed. A boot
+    /// seam that must deliver more than one [`SINK_MAX_OPS`] budget repeats
+    /// [`Self::drain_sink`] only while this holds, so a stalled sink costs one
+    /// turn instead of spinning.
+    pub(crate) const fn sink_ready(&self) -> bool {
+        self.count > 0 && !self.sink.blocked && !self.sink.failed
+    }
+
+    /// Accounts for every queued record that no later drain turn can deliver
+    /// because the owner is about to exit: each is dropped whole and counted
+    /// exactly once in the shared drop tally, and any retained partial cursor
+    /// is cleared. Returns how many records were stranded. Used only on the
+    /// exit paths, where the queue would otherwise be destroyed uncounted:
+    /// queue-accepted records that cannot be drained before the process ends
+    /// are counted under the existing whole-record drop accounting, never
+    /// silently lost (docs/alumina-proxy.md:197, L18). A path that keeps
+    /// running never calls this — it leaves the records queued and retries on
+    /// the bounded [`LOG_RETRY`] cadence (`next_drain`).
+    pub(crate) fn strand_queued(&mut self) -> u64 {
+        let mut stranded = 0u64;
+        while self.count > 0 {
+            self.drop_one();
+            self.count -= 1;
+            stranded += 1;
+        }
+        self.cursor = None;
+        stranded
+    }
+
     /// Total write calls made by the sink (test observation of the per-turn
     /// op budget).
     #[cfg(test)]
@@ -1213,17 +1342,36 @@ impl LogStore {
         self.enqueue(Level::Warn, Kind::ExchangeFailed, &fields);
     }
 
-    /// The single startup-final record (corrected T2): the canonical counts,
-    /// plus one inline segment per unresolved name with its latest outcome and
-    /// reason. All unresolved names share this one record — the startup result
-    /// is never fanned out into per-name records.
-    pub(crate) fn startup_final(
-        &mut self,
-        secs: u64,
-        status: StartupStatus,
-        counts: FinalCounts,
-        unresolved: &[StartupUnresolved<'_>],
-    ) {
+    /// One `startup_name` record for a single unresolved name: `secs`, the
+    /// allowlist `ordinal`, the full FQDN, the outcome and (when the outcome
+    /// carries one) the reason. Returns `true` when the record was enqueued;
+    /// a full queue or an encode overflow drops it whole and increments the
+    /// shared drop counter exactly once, so the caller can count per-name loss
+    /// without touching the counter itself.
+    pub(crate) fn startup_name(&mut self, secs: u64, un: StartupUnresolved<'_>) -> bool {
+        self.set_now(secs);
+        if self.count >= QUEUE_SLOTS {
+            self.drop_one();
+            self.note_queue_usage();
+            return false;
+        }
+        let index = self.write_index();
+        if let Some(len) = encode_record_name(&mut self.slots[index].buf, secs, &un) {
+            self.commit_record(index, len);
+            self.note_queue_usage();
+            true
+        } else {
+            self.drop_one();
+            self.note_queue_usage();
+            false
+        }
+    }
+
+    /// The `startup_final` summary record, emitted after one `startup_name`
+    /// record per unresolved name: the canonical counts in their existing order
+    /// plus the appended `names_dropped` per-name accounting. No names are
+    /// embedded here, so the record has a fixed field set and always fits.
+    pub(crate) fn startup_final(&mut self, secs: u64, status: StartupStatus, counts: FinalCounts) {
         self.set_now(secs);
         let fields = [
             Field::new("secs", Val::U64(secs)),
@@ -1235,6 +1383,7 @@ impl LogStore {
             Field::new("failed", Val::U64(counts.failed)),
             Field::new("not_attempted", Val::U64(counts.not_attempted)),
             Field::new("dropped", Val::U64(counts.dropped)),
+            Field::new("names_dropped", Val::U64(counts.names_dropped)),
         ];
         if self.count >= QUEUE_SLOTS {
             self.drop_one();
@@ -1245,7 +1394,6 @@ impl LogStore {
                 Level::Info,
                 Kind::StartupFinal,
                 &fields,
-                unresolved,
             );
             match len {
                 Some(len) => {
@@ -1662,19 +1810,7 @@ mod tests {
 
     use std::fmt::Write as _;
 
-    use crate::config::ALLOWLIST_MAX;
-    use crate::config::CONFIG_DOC_LIMIT;
-
-    fn push_compact_group(doc: &mut String, count: usize) {
-        let kinds = vec!["\"block\""; count].join(", ");
-        let scopes = vec!["\"all\""; count].join(", ");
-        let _ = write!(
-            doc,
-            "[any_illegal]\nscope = \"all\"\n[actions]\nkind = [{kinds}]\nscope = [{scopes}]\n"
-        );
-    }
-
-    const _: () = assert!(SLOT_BYTES > CONFIG_DOC_LIMIT + ALLOWLIST_MAX * 64 + 512);
+    use crate::config::{CONFIG_DOC_LIMIT, FQDN_MAX_LEN};
 
     use std::fs::File;
     use std::io::{Read, Seek};
@@ -1785,72 +1921,377 @@ mod tests {
         assert!(!text.as_bytes().contains(&b'\n') || text.ends_with('\n'));
     }
 
-    #[test]
-    fn logging_startup_final_single_record_fits_real_config_bound() {
-        use crate::config::{ALLOWLIST_MAX, CONFIG_DOC_LIMIT, parse_config_document};
-        use crate::startup_dns::FailureReason;
-        let first = b"abcdefghijklmnopqrstuvwxyz0123456789-";
-        let d = "b".repeat(62);
-        let e = "c".repeat(31);
+    /// A distinct 253-byte FQDN (the `FQDN_MAX_LEN` bound) for index `i`:
+    /// 63 + 1 + 63 + 1 + 63 + 1 + 61 bytes of legal lowercase labels.
+    fn widest_name(index: usize) -> String {
+        format!(
+            "{index:02}{}.{}.{}.{}",
+            "a".repeat(61),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        )
+    }
+
+    /// Builds and parses the widest legal configuration: `ALLOWLIST_MAX` keyed
+    /// allowlist tables each carrying a `FQDN_MAX_LEN`-byte name, plus
+    /// `MAX_RESOLVERS` resolvers carrying `FQDN_MAX_LEN`-byte FQDNs and pins,
+    /// all inside `CONFIG_DOC_LIMIT`. The name-bearing worst cases are measured
+    /// from this real document rather than a synthetic string.
+    fn widest_legal_config() -> (crate::config::Config, String) {
+        use crate::config::{ALLOWLIST_MAX, MAX_RESOLVERS};
+        let pin = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
         let mut doc = String::new();
-        doc.push_str("allowlist = [\n");
-        let mut names: Vec<String> = Vec::new();
-        for &c in first.iter().take(ALLOWLIST_MAX) {
-            let c = c as char;
-            let name = format!("{c}.{d}.{e}");
-            let _ = writeln!(doc, "  \"{name}:443\",");
-            names.push(name);
+        doc.push_str("listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [");
+        for i in 0..MAX_RESOLVERS {
+            if i > 0 {
+                doc.push_str(", ");
+            }
+            let _ = write!(
+                doc,
+                "\"2001:abcd:1234:5678:9abc:def0:1234:567{}#{pin_name}#pin-sha256={pin}\"",
+                i + 1,
+                pin_name = widest_name(i)
+            );
         }
-        doc.push_str("]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n");
-        push_compact_group(&mut doc, ALLOWLIST_MAX);
+        doc.push_str("]\n[any_illegal]\nscope = \"all\"\n");
+        for i in 0..ALLOWLIST_MAX {
+            let _ = writeln!(
+                doc,
+                "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"block\", scope = \"all\" }}\n",
+                name = widest_name(i)
+            );
+        }
+        let config = crate::config::parse_config_document(&doc).expect("widest legal config");
+        (config, doc)
+    }
+
+    #[test]
+    fn logging_startup_split_records_fit_widest_legal_config() {
+        use crate::config::{ALLOWLIST_MAX, CONFIG_DOC_LIMIT};
+        use crate::startup_dns::{NameOutcome, NotAttemptedReason};
+        let (config, doc) = widest_legal_config();
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,
-            "worst-case config fits the documented 4096-byte bound: {}",
+            "widest legal config fits the documented 16384-byte bound: {}",
             doc.len()
         );
-        let config = parse_config_document(&doc).expect("valid worst-case config");
         assert_eq!(config.allowlist().len(), ALLOWLIST_MAX);
-        let unresolved: Vec<StartupUnresolved<'_>> = names
-            .iter()
-            .enumerate()
-            .map(|(i, n)| StartupUnresolved {
-                ordinal: u32::try_from(i).expect("allowlist ordinal fits u32"),
-                name: n,
-                outcome: NameOutcome::Failed(FailureReason::Timeout),
-            })
-            .collect();
         let (mut store, mut file) = file_logstore();
+        for (ordinal, name) in config.allowlist().iter().enumerate() {
+            assert!(
+                store.startup_name(
+                    u64::MAX,
+                    StartupUnresolved {
+                        ordinal: u32::try_from(ordinal).expect("allowlist ordinal fits u32"),
+                        name: name.as_str(),
+                        outcome: NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed),
+                    },
+                ),
+                "per-name record {ordinal} is never dropped at the widest legal input"
+            );
+        }
         store.startup_final(
-            9,
+            u64::MAX,
             StartupStatus::Failed,
             FinalCounts {
-                allowance: 0,
-                usable: 0,
                 unresolved: ALLOWLIST_MAX as u64,
                 exchanges: 64,
                 failed: 64,
-                not_attempted: 0,
-                dropped: 0,
+                ..FinalCounts::default()
             },
-            &unresolved,
         );
         assert_eq!(
             store.dropped(),
             0,
-            "no size-drop for the actual worst valid config"
+            "no size-drop for the widest legal configuration"
         );
         flush_all(&mut store);
-        assert_eq!(store.dropped(), 0, "no drop once flushed");
         let out = read_all(&mut file);
         let records: Vec<&[u8]> = out
             .split(|&b| b == b'\n')
             .filter(|s| !s.is_empty())
             .collect();
-        assert_eq!(records.len(), 1, "single final record, no per-name fan-out");
+        assert_eq!(
+            records.len(),
+            ALLOWLIST_MAX + 1,
+            "one startup_name record per unresolved name, then the summary"
+        );
+        for (ordinal, record) in records.iter().enumerate().take(ALLOWLIST_MAX) {
+            assert!(
+                record.len() < SLOT_BYTES,
+                "per-name record {ordinal} incl framing fits the 8 KiB entry: {}",
+                record.len()
+            );
+            let text = std::str::from_utf8(record).expect("ASCII record");
+            assert!(
+                text.starts_with("level=info kind=startup_name "),
+                "each unresolved name is its own startup_name record: {text}"
+            );
+            assert!(
+                text.contains(config.allowlist().get(ordinal).expect("name").as_str()),
+                "the full 253-byte FQDN is carried untruncated: {text}"
+            );
+        }
+        let summary = records[ALLOWLIST_MAX];
         assert!(
-            records[0].len() < SLOT_BYTES,
-            "the startup-final record incl framing fits the 8 KiB entry: {}",
-            records[0].len()
+            summary.starts_with(b"level=info kind=startup_final "),
+            "the last record is the summary"
+        );
+        assert!(
+            summary.windows(13).any(|w| w == b"names_dropped")
+                && std::str::from_utf8(summary)
+                    .expect("ASCII summary")
+                    .contains(" names_dropped=0"),
+            "the summary carries the per-name drop accounting"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one measurement table building the worst-case input for every record kind"
+    )]
+    fn logging_worst_case_record_per_kind_fits_the_slot_with_margin() {
+        use crate::enforcement::monitor::Monitor;
+        use crate::startup_dns::{FailureReason, NotAttemptedReason, ProbeVerdict};
+        let (config, doc) = widest_legal_config();
+        let name = config.allowlist().get(0).expect("widest name").as_str();
+        assert_eq!(name.len(), FQDN_MAX_LEN);
+        let mut slot = [0u8; SLOT_BYTES];
+        let mut worst: Vec<(&str, usize)> = Vec::new();
+
+        let warn = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("name", Val::Str(name)),
+            Field::new("family", Val::Family(Family::Aaaa)),
+        ];
+        worst.push((
+            "startup_warning",
+            encode_record(&mut slot, Level::Warn, Kind::StartupWarning, &warn).expect("fits"),
+        ));
+
+        worst.push((
+            "startup_name",
+            encode_record_name(
+                &mut slot,
+                u64::MAX,
+                &StartupUnresolved {
+                    ordinal: u32::MAX,
+                    name,
+                    outcome: NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed),
+                },
+            )
+            .expect("fits"),
+        ));
+
+        let summary = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("status", Val::Str("terminated")),
+            Field::new("allowance", Val::U64(u64::MAX)),
+            Field::new("usable", Val::U64(u64::MAX)),
+            Field::new("unresolved", Val::U64(u64::MAX)),
+            Field::new("exchanges", Val::U64(u64::MAX)),
+            Field::new("failed", Val::U64(u64::MAX)),
+            Field::new("not_attempted", Val::U64(u64::MAX)),
+            Field::new("dropped", Val::U64(u64::MAX)),
+            Field::new("names_dropped", Val::U64(u64::MAX)),
+        ];
+        worst.push((
+            "startup_final",
+            encode_record_final(&mut slot, Level::Info, Kind::StartupFinal, &summary)
+                .expect("fits"),
+        ));
+
+        let fatal_msg = "m".repeat(300);
+        let fatal = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("message", Val::Str(&fatal_msg)),
+        ];
+        worst.push((
+            "fatal",
+            encode_record(&mut slot, Level::Error, Kind::Fatal, &fatal).expect("fits"),
+        ));
+
+        let shutdown = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("status", Val::Str("drained")),
+            Field::new("dropped", Val::U64(u64::MAX)),
+        ];
+        worst.push((
+            "shutdown_final",
+            encode_record(&mut slot, Level::Info, Kind::ShutdownFinal, &shutdown).expect("fits"),
+        ));
+
+        let peer: SocketAddr = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535"
+            .parse()
+            .expect("widest peer");
+        let reject = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("reason", Val::Str("tls_validation")),
+            Field::new("client", Val::OptAddr(Some(peer))),
+            Field::new("hostname", Val::OptStr(Some(name))),
+        ];
+        worst.push((
+            "reject",
+            encode_record(&mut slot, Level::Warn, Kind::Reject, &reject).expect("fits"),
+        ));
+
+        let activity = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("hostname", Val::OptStr(Some(name))),
+            Field::new("peer", Val::OptAddr(Some(peer))),
+            Field::new("activity", Val::Str("reset")),
+        ];
+        worst.push((
+            "early_activity",
+            encode_record(&mut slot, Level::Warn, Kind::EarlyActivity, &activity).expect("fits"),
+        ));
+
+        let threshold = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("dimension", Val::Str("setups")),
+            Field::new("used", Val::U64(u64::MAX)),
+            Field::new("cap", Val::U64(u64::MAX)),
+        ];
+        for (kind_name, kind, level) in [
+            ("capacity_high", Kind::CapacityHigh, Level::Error),
+            ("capacity_low", Kind::CapacityLow, Level::Info),
+            ("queue_high", Kind::QueueHigh, Level::Error),
+            ("queue_low", Kind::QueueLow, Level::Info),
+        ] {
+            worst.push((
+                kind_name,
+                encode_record(&mut slot, level, kind, &threshold).expect("fits"),
+            ));
+        }
+
+        let exchange = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("name", Val::OptStr(Some(name))),
+            Field::new("reason", Val::Str("tls_identity")),
+        ];
+        worst.push((
+            "exchange_failed",
+            encode_record(&mut slot, Level::Warn, Kind::ExchangeFailed, &exchange).expect("fits"),
+        ));
+
+        let mut monitor = Monitor::new();
+        monitor.saturate_all_for_test();
+        monitor.note_serving_stale();
+        monitor.note_fact_downgrade_to_plain();
+        worst.push((
+            "monitor",
+            encode_monitor(&mut slot, u64::MAX, &monitor).expect("fits"),
+        ));
+
+        let set = config.resolver_set();
+        let mut segments = [ResolverProbeSegment {
+            index: 0,
+            addr: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            fqdn: None,
+            pin: false,
+            verdict: ProbeVerdict::NotProbed,
+        }; crate::config::MAX_RESOLVERS];
+        for (i, seg) in segments.iter_mut().enumerate() {
+            let resolver = set.get(i).expect("widest resolver");
+            *seg = ResolverProbeSegment {
+                index: u32::try_from(i).expect("resolver index fits u32"),
+                addr: resolver.addr(),
+                fqdn: resolver.fqdn(),
+                pin: resolver.pin().is_some(),
+                verdict: ProbeVerdict::Failed(FailureReason::TlsIdentity),
+            };
+        }
+        worst.push((
+            "resolver_probe",
+            encode_record_probe(&mut slot, u64::MAX, &segments).expect("fits"),
+        ));
+
+        assert_eq!(worst.len(), 14, "every record kind is measured");
+        for (kind_name, len) in &worst {
+            eprintln!(
+                "worst-case {kind_name:<16} {len:>5} B record, {:>5} B margin",
+                SLOT_BYTES - len
+            );
+            assert!(
+                *len < SLOT_BYTES,
+                "{kind_name} worst case incl framing fits the 8 KiB entry: {len}"
+            );
+        }
+        let name_len = worst
+            .iter()
+            .find(|(k, _)| *k == "startup_name")
+            .expect("startup_name measured")
+            .1;
+        assert_eq!(
+            name_len, STARTUP_NAME_MAX,
+            "the measured startup_name worst case is exactly the const bound"
+        );
+        let probe_len = worst
+            .iter()
+            .find(|(k, _)| *k == "resolver_probe")
+            .expect("probe measured")
+            .1;
+        assert!(
+            probe_len <= RESOLVER_PROBE_MAX,
+            "measured resolver_probe worst case {probe_len} within the const bound {RESOLVER_PROBE_MAX}"
+        );
+        assert!(
+            doc.len() <= CONFIG_DOC_LIMIT,
+            "the widest legal document stays inside the config bound: {}",
+            doc.len()
+        );
+    }
+
+    #[test]
+    fn logging_startup_name_drop_counts_exactly_once_per_attempt() {
+        use crate::startup_dns::NameOutcome;
+        let un = StartupUnresolved {
+            ordinal: 0,
+            name: "a.example.org",
+            outcome: NameOutcome::Negative,
+        };
+        let (mut full, _file) = file_logstore();
+        let mut filled = 0usize;
+        while !full.is_full() {
+            assert!(full.startup_name(1, un), "filling the queue");
+            filled += 1;
+            assert!(filled <= QUEUE_SLOTS, "the queue fills within its capacity");
+        }
+        let before = full.dropped();
+        assert!(
+            !full.startup_name(1, un),
+            "a full queue refuses the per-name record"
+        );
+        assert_eq!(
+            full.dropped(),
+            before + 1,
+            "a queue-full per-name attempt increments the shared counter once"
+        );
+
+        let long = "z".repeat(SLOT_BYTES * 2);
+        let (mut store, _file) = file_logstore();
+        assert!(
+            !store.startup_name(
+                1,
+                StartupUnresolved {
+                    ordinal: 0,
+                    name: &long,
+                    outcome: NameOutcome::Negative,
+                }
+            ),
+            "an oversize per-name record is dropped whole"
+        );
+        assert_eq!(
+            store.dropped(),
+            1,
+            "an encode-overflow per-name attempt increments the shared counter once"
+        );
+        assert_eq!(
+            store.len(),
+            0,
+            "nothing is committed for the dropped record"
         );
     }
 
@@ -1867,37 +2308,38 @@ mod tests {
     }
 
     #[test]
-    fn logging_startup_final_embeds_outcomes_inline_with_reasons() {
+    fn logging_startup_split_carries_each_name_outcome_and_reason() {
         use crate::startup_dns::{FailureReason, NameOutcome, NotAttemptedReason};
         let (mut store, mut file) = file_logstore();
-        store.startup_final(
-            9,
-            StartupStatus::Failed,
-            FinalCounts::default(),
-            &[
-                StartupUnresolved {
-                    ordinal: 0,
-                    name: "neg.example.org",
-                    outcome: NameOutcome::Negative,
-                },
-                StartupUnresolved {
-                    ordinal: 1,
-                    name: "fail.example.org",
-                    outcome: NameOutcome::Failed(FailureReason::Timeout),
-                },
-                StartupUnresolved {
-                    ordinal: 2,
-                    name: "skip.example.org",
-                    outcome: NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed),
-                },
-            ],
-        );
+        for un in [
+            StartupUnresolved {
+                ordinal: 0,
+                name: "neg.example.org",
+                outcome: NameOutcome::Negative,
+            },
+            StartupUnresolved {
+                ordinal: 1,
+                name: "fail.example.org",
+                outcome: NameOutcome::Failed(FailureReason::Timeout),
+            },
+            StartupUnresolved {
+                ordinal: 2,
+                name: "skip.example.org",
+                outcome: NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed),
+            },
+        ] {
+            assert!(store.startup_name(9, un), "per-name record enqueued");
+        }
+        store.startup_final(9, StartupStatus::Failed, FinalCounts::default());
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert_eq!(
             text,
-            "level=info kind=startup_final secs=9 status=\"failure\" allowance=0 usable=0 unresolved=0 exchanges=0 failed=0 not_attempted=0 dropped=0 name0=\"neg.example.org\" outcome0=negative name1=\"fail.example.org\" outcome1=failed reason1=\"timeout\" name2=\"skip.example.org\" outcome2=not_attempted reason2=\"window_closed\"\n",
-            "single final record embeds name/outcome/reason inline, no fan-out (corrected T2)"
+            "level=info kind=startup_name secs=9 ordinal=0 name=\"neg.example.org\" outcome=negative\n\
+             level=info kind=startup_name secs=9 ordinal=1 name=\"fail.example.org\" outcome=failed reason=\"timeout\"\n\
+             level=info kind=startup_name secs=9 ordinal=2 name=\"skip.example.org\" outcome=not_attempted reason=\"window_closed\"\n\
+             level=info kind=startup_final secs=9 status=\"failure\" allowance=0 usable=0 unresolved=0 exchanges=0 failed=0 not_attempted=0 dropped=0 names_dropped=0\n",
+            "each name carries its outcome and reason in its own record, then the summary"
         );
     }
 
@@ -1915,7 +2357,7 @@ mod tests {
         use crate::startup_dns::FailureReason;
         let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
         let doc = format!(
-            "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"9.9.9.9#dns.quad9.net\", \"8.8.8.8#dns.google#pin-sha256={b64}\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"9.9.9.9#dns.quad9.net\", \"8.8.8.8#dns.google#pin-sha256={b64}\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
         );
         let config = crate::config::parse_config_document(&doc).expect("valid config");
         let resolvers = config.resolver_set();
@@ -1961,7 +2403,7 @@ mod tests {
     #[test]
     fn logging_oversize_probe_record_is_dropped_whole_and_counted() {
         use crate::startup_dns::FailureReason;
-        let doc = "allowlist = [\"a.example:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#dns.google\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n";
+        let doc = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#dns.google\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
         let config = crate::config::parse_config_document(doc).expect("valid config");
         let fqdn = config
             .resolver_set()
@@ -2508,12 +2950,10 @@ mod tests {
         let mut stdout_store = LogStore::new().expect("stdout sink store");
         let ((), counts) = run_phase(Phase::Logging, || {
             store.startup_warning(1, "sub.example.org", Family::A);
-            store.startup_final(
-                2,
-                StartupStatus::Failed,
-                FinalCounts::default(),
-                &unresolved,
-            );
+            for un in unresolved {
+                store.startup_name(2, un);
+            }
+            store.startup_final(2, StartupStatus::Failed, FinalCounts::default());
             store.early_activity(3, Some("sub.example.org"), Some(v4), ActivityKind::Data);
             store.reject(4, RejectReason::Capacity, Some(v4), Some("sub.example.org"));
             store.reject(

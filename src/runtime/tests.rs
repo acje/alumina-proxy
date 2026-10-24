@@ -9,14 +9,14 @@ use crate::cache::Family;
 
 fn config(port: u16) -> crate::config::Config {
     let doc = format!(
-        "allowlist = [\"sub.example.org:443\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
     );
     crate::config::parse_config_document(&doc).expect("valid test config")
 }
 
 fn config_two_names(port: u16) -> crate::config::Config {
     let doc = format!(
-        "allowlist = [\"sub.example.org:443\", \"other.example.org:443\"]\nlisten = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n[allowed_fqdn.\"other.example.org:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
     );
     crate::config::parse_config_document(&doc).expect("valid test config")
 }

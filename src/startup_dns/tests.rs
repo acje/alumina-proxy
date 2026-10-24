@@ -339,7 +339,7 @@ fn read_exact(sock: &mut TcpStream, buf: &mut [u8]) -> io::Result<()> {
 
 fn config() -> Config {
     parse_config_document(
-        "allowlist = [\"alpha.example.org:443\", \"beta.example.org:443\"]\nlisten = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[actions]\nkind = [\"flare_only\", \"flare_only\"]\nscope = [\"connection\", \"connection\"]\n",
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n",
     )
     .expect("valid config")
 }

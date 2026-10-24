@@ -180,15 +180,13 @@ stage=$(cat <<'SNIP'
 set -eu
 mkdir -p /work /out
 printf '%s\n' \
-    'allowlist = ["example.com:443"]' \
     'listen = "127.0.0.1:8080"' \
     'startup_unresolved_allowance = 0' \
     'resolver = ["127.0.0.1"]' \
     '[any_illegal]' \
     'scope = "connection"' \
-    '[actions]' \
-    'kind = ["flare_only"]' \
-    'scope = ["connection"]' > /work/config.toml
+    '[allowed_fqdn."example.com:443"]' \
+    'early_data = { action = "flare_only", scope = "connection" }' > /work/config.toml
 openssl req -x509 -newkey rsa:2048 -keyout /work/ca.key -out /work/ca.pem \
     -days 2 -nodes -subj "/CN=bench-ca" >/dev/null 2>&1
 openssl req -newkey rsa:2048 -keyout /work/server.key -out /work/server.csr \

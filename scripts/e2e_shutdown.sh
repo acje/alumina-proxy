@@ -81,15 +81,15 @@ stage_snippet=$(cat <<'SNIP'
 set -eu
 mkdir -p /work
 printf '%s\n' \
-    'allowlist = ["drain.example.org:443", "force.example.org:443"]' \
     'listen = "127.0.0.1:8080"' \
     'startup_unresolved_allowance = 0' \
     'resolver = ["127.0.0.1"]' \
     '[any_illegal]' \
     'scope = "connection"' \
-    '[actions]' \
-    'kind = ["flare_only", "flare_only"]' \
-    'scope = ["connection", "connection"]' > /work/config.toml
+    '[allowed_fqdn."drain.example.org:443"]' \
+    'early_data = { action = "flare_only", scope = "connection" }' \
+    '[allowed_fqdn."force.example.org:443"]' \
+    'early_data = { action = "flare_only", scope = "connection" }' > /work/config.toml
 chown -R 65534:65534 /work
 SNIP
 )

@@ -403,8 +403,8 @@ impl Latest {
     }
 }
 
-/// The per-name terminal outcome of the startup window, carried inline by the
-/// single final startup record. A name is reported from its actual latest
+/// The per-name terminal outcome of the startup window, carried by the
+/// per-name `startup_name` records. A name is reported from its actual latest
 /// exchange results: a validated negative (NXDOMAIN or empty NODATA answer)
 /// stays distinct from an attempted positive with no eligible bindings and
 /// from an exchange failure with its reason, so the final entry never collapses
