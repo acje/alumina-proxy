@@ -5,7 +5,7 @@ TIER="${1:-}"
 SCOPE="${2:-}"
 
 usage() {
-    echo "usage: verify.sh {mid|boundary|fixtures|e2e} {foundations|boot|phase1|relay|shutdown} | verify.sh docs" >&2
+    echo "usage: verify.sh {inner|mid|boundary|fixtures|e2e} {check|foundations|boot|union|full|clippy|phase1|relay|shutdown} | verify.sh docs" >&2
     exit 2
 }
 
@@ -95,27 +95,62 @@ whitespace_gate() {
         echo "whitespace FAIL: tracked diff contains whitespace errors" >&2
         exit 1
     }
+    # Missing-file fail-closed check FIRST (identical to the prior per-file
+    # loop): every intended file must exist before any content scan.
     for f in $INTENDED; do
         [ -f "$f" ] || {
             echo "whitespace FAIL: intended file missing: $f" >&2
             exit 1
         }
-        rc=0
-        out=$(git diff --no-index --check /dev/null "$f" 2>&1) || rc=$?
-        case "$rc" in
-            0 | 1) ;;
-            *)
-                echo "whitespace FAIL: $f (git exit $rc)" >&2
-                exit 1
-                ;;
-        esac
-        case "$out" in
-            *[![:space:]]*)
-                echo "whitespace FAIL: $f" >&2
-                exit 1
-                ;;
-        esac
     done
+    # ONE awk pass over ALL intended files, checking every line (tracked and
+    # untracked alike) for exactly what `git diff --no-index --check /dev/null
+    # <file>` reports under the default core.whitespace: (a) trailing
+    # whitespace, (b) space-before-tab in leading indent, (c) a new blank line
+    # at EOF. Per-file/per-line diagnostics; any match fails the gate. awk is
+    # required (busybox awk in the flock-vm container).
+    command -v awk >/dev/null 2>&1 || {
+        echo "WHITESPACE-GATE-BLOCKED: awk required and absent (no host proof receipt consumed)" >&2
+        exit 1
+    }
+    # The trailing/indent/blank classes carry CR (`\r`) exactly as git's
+    # default core.whitespace set {space, tab, CR} does; `[[:space:]]` is NOT
+    # used because it over-matches VT/FF/NEL/NBSP beyond git's set. Blank-at-EOF
+    # matches git's exact semantics: a file of only blank lines is clean up to
+    # two blank lines (dirty at three or more), and any trailing blank line
+    # after a non-blank line is dirty. The blank-at-EOF state is flushed per
+    # file: the FNR==1 block (guarded by NR>1) evaluates the PREVIOUS file's
+    # EOF state when a new file starts, and END handles the final file — so
+    # every intended file is checked, not just the last. The space-before-tab
+    # indent class is `^[ \t]* \t` (no `\r`): git's indent scan stops at the
+    # first non-space/tab char, so a leading CR ends the scan before any
+    # space-before-tab can fire; CR is kept in the trailing class (CR-at-EOL is
+    # dirty for git) and in the blank-line class (CR-only lines are blank).
+    wsrc=0
+    # shellcheck disable=SC2016
+    wsprog='
+        FNR == 1 {
+            if (NR > 1 && (trailing_blank >= 3 || (seen_nonblank && trailing_blank >= 1))) { printf "whitespace FAIL: %s:%d: new blank line at EOF\n", f, lastnum; bad = 1 }
+            f = FILENAME; lastnum = 0; seen_nonblank = 0; trailing_blank = 0
+        }
+        {
+            if ($0 ~ /[ \t\r]+$/) { printf "whitespace FAIL: %s:%d: trailing whitespace\n", f, FNR; bad = 1 }
+            if ($0 ~ /^[ \t]* \t/) { printf "whitespace FAIL: %s:%d: space before tab in indent\n", f, FNR; bad = 1 }
+            if ($0 ~ /^[ \t\r]*$/) { trailing_blank++ } else { seen_nonblank = 1; trailing_blank = 0 }
+            lastnum = FNR
+        }
+        END {
+            if (trailing_blank >= 3 || (seen_nonblank && trailing_blank >= 1)) { printf "whitespace FAIL: %s:%d: new blank line at EOF\n", f, lastnum; bad = 1 }
+            exit (bad ? 1 : 0)
+        }
+    '
+    # shellcheck disable=SC2086
+    wsout=$(awk "$wsprog" $INTENDED 2>&1) || wsrc=$?
+    if [ "$wsrc" -ne 0 ]; then
+        printf '%s\n' "$wsout" >&2
+        echo "whitespace FAIL: intended files contain whitespace errors" >&2
+        exit 1
+    fi
     echo "WHITESPACE-GATE-OK (native git, HEAD=$head)"
 }
 
@@ -131,24 +166,12 @@ mid_foundations() {
         echo "F0 static-Linux proof requires Linux execution" >&2
         exit 1
     }
-    closure_metadata
-    echo "PRODUCTION-RELEASE-BUILD (no alloc-witness):"
-    cargo +${TOOLCHAIN} build --locked --release
-    static_gate "target/release/alumina"
-    # NOTE: the release binary is NOT executed here. The binary boots only
-    # under the privilege profile staged by `verify.sh fixtures boot`; running
-    # it as this environment's root fires the root-UID rejection (78), so a
-    # direct exec here would be a negative fixture, not a foundation gate.
     echo "WITNESS-TESTS (--features alloc-witness):"
     cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness --test foundations
     echo "WITNESS-OFF-TESTS (F2/F4 subset):"
     cargo +${TOOLCHAIN} atest -p alumina --locked --test foundations
     echo "FMT:"
     cargo +${TOOLCHAIN} fmt --check
-    echo "CLIPPY (production, no alloc-witness):"
-    cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets -- -D warnings
-    echo "CLIPPY (test-harness with alloc-witness):"
-    cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets --features alloc-witness -- -D warnings
     whitespace_gate
     echo "FOUNDATIONS-MID-OK"
 }
@@ -158,10 +181,6 @@ mid_boot() {
         echo "boot mid requires Linux execution" >&2
         exit 1
     }
-    closure_metadata
-    echo "PRODUCTION-RELEASE-BUILD (boot binary):"
-    cargo +${TOOLCHAIN} build --locked --release
-    static_gate "target/release/alumina"
     echo "BOOT-TESTS (strict parser + validated types + storage inventory):"
     cargo +${TOOLCHAIN} atest -p alumina --locked --test boot
     echo "BOOT-TESTS-WITNESS (alloc retention bound):"
@@ -170,8 +189,6 @@ mid_boot() {
     cargo +${TOOLCHAIN} atest -p alumina --locked --test foundations
     echo "FMT:"
     cargo +${TOOLCHAIN} fmt --check
-    echo "CLIPPY:"
-    cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets -- -D warnings
     whitespace_gate
     echo "BOOT-MID-OK"
 }
@@ -181,12 +198,15 @@ mid_boot() {
 # highest-value native common commands twice (release build, static gate,
 # foundations+boot tests with and without alloc-witness, fmt, clippy both
 # variants, whitespace gate). The standalone `mid foundations` / `mid boot`
-# selectors are unchanged and remain dispatchable on their own.
+# selectors are the fast path (tests/fmt/whitespace only): clippy, the release
+# build, and the static gate are deferred to this union and to the dedicated
+# `mid clippy` selector; closure metadata runs only in this union. A quick
+# per-sub-mission mid run skips the slow native common commands.
 #
-# Ordering: the clippy pair keeps the exact adjacency proven green by the
-# standalone foundation selector (alloc-witness clippy immediately after
-# production clippy, with the alloc-witness lib last built by the witness
-# tests). The boot tests are intentionally deferred until AFTER the clippy
+# Ordering: the clippy pair keeps the exact adjacency proven green by this
+# union's clippy block (alloc-witness clippy immediately after production
+# clippy, with the alloc-witness lib last built by the witness tests). The
+# boot tests are intentionally deferred until AFTER the clippy
 # block (diverging from `mid boot`, which runs them before clippy) so the
 # alloc-witness boot tests never precede the alloc-witness clippy phase. That
 # deliberate reorder avoids an aw-clippy-after-aw-boot-test adjacency in one
@@ -220,6 +240,26 @@ mid_union() {
     echo "UNION-MID-OK"
 }
 
+# Dedicated clippy selector: runs the alloc-witness foundations tests first so
+# the alloc-witness lib is the last aw build, then the production clippy pass
+# immediately followed by the alloc-witness clippy pass — the exact adjacency
+# proven green by the `mid union` clippy block. No boot tests here: the
+# aw boot tests are deferred to `mid union` AFTER the clippy block, keeping the
+# aw-clippy-after-aw-boot-test adjacency (E0463 hazard) out of this selector.
+mid_clippy() {
+    [ "$(uname -s)" = "Linux" ] || {
+        echo "clippy mid requires Linux execution" >&2
+        exit 1
+    }
+    echo "WITNESS-TESTS (--features alloc-witness, aw lib last build):"
+    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness --test foundations
+    echo "CLIPPY (production, no alloc-witness):"
+    cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets -- -D warnings
+    echo "CLIPPY (test-harness with alloc-witness):"
+    cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets --features alloc-witness -- -D warnings
+    echo "CLIPPY-MID-OK"
+}
+
 # G8-C02 test-coverage closure: runs the UNFILTERED full suite (lib unit tests
 # + all 7 integration test binaries) witness-off then witness-on, closing the
 # gate coverage hole where lib units and 5 of 7 binaries never ran in any gate
@@ -235,7 +275,6 @@ mid_full() {
         echo "mid full requires Linux execution" >&2
         exit 1
     }
-    closure_metadata
     echo "FULL-SUITE (lib units + all 7 integration binaries, witness-off):"
     cargo +${TOOLCHAIN} atest -p alumina --locked
     echo "FULL-SUITE-WITNESS-OFF-OK"
@@ -294,7 +333,7 @@ boot_fixtures() {
     }
     BIN="target/release/alumina"
     [ -x "$ROOT/$BIN" ] || {
-        echo "BOOT-FIXTURES-BLOCKED: static binary missing ($BIN); run 'verify.sh mid boot' first" >&2
+        echo "BOOT-FIXTURES-BLOCKED: static binary missing ($BIN); run 'verify.sh mid union' first" >&2
         exit 1
     }
     release_sha_before=$(sha256_digest file "$ROOT/$BIN") || exit 1
@@ -757,24 +796,50 @@ identity_snapshot() {
         echo "SOURCE-IDENTITY FAIL: git status exit $? (dirty scope unreadable, not PASS)" >&2
         exit 1
     }
-    # Record which hasher sha256_digest selects. This is a tool-existence probe
-    # for the env record only; hashing itself stays exclusively in sha256_digest
-    # (a command-substitution cannot propagate the global back to a caller).
+    # Record which hasher the batch uses, then hash ALL identity inputs in ONE
+    # producer invocation (single exec over ~49 files) instead of one
+    # subprocess per file. The hasher is selected in this same shell, so the
+    # global propagates to the env record below. Missing inputs fail closed
+    # BEFORE any hashing; the batch's own exit code and stderr are checked
+    # (never masked), and the temp stderr file is always removed.
     IDENTITY_HASHER=""
     if command -v sha256sum >/dev/null 2>&1; then IDENTITY_HASHER="sha256sum"
     elif command -v shasum >/dev/null 2>&1; then IDENTITY_HASHER="shasum"; fi
-    : >"$dir/inputs.sha256"
+    [ -n "$IDENTITY_HASHER" ] || {
+        echo "SOURCE-IDENTITY FAIL: neither sha256sum nor shasum present (identity impossible, not PASS)" >&2
+        exit 1
+    }
     for f in $IDENTITY_FILES; do
         [ -f "$f" ] || {
             echo "SOURCE-IDENTITY FAIL: identity input missing: $f" >&2
             exit 1
         }
-        h=$(sha256_digest file "$f") || {
-            echo "SOURCE-IDENTITY FAIL: hash $f" >&2
-            exit 1
-        }
-        printf '%s  %s\n' "$h" "$f" >>"$dir/inputs.sha256"
     done
+    rc=0
+    errf="$dir/inputs.sha256.err"
+    : >"$dir/inputs.sha256"
+    # The batch expansion is intentionally unquoted: IDENTITY_FILES is a fixed,
+    # space-free set (INTENDED plus .gitignore and the docs roots), so
+    # word-splitting yields exactly the intended paths. The hasher's stderr is
+    # retained so a failed hash names the failing input; it is surfaced before
+    # removal, never masked.
+    if [ "$IDENTITY_HASHER" = "sha256sum" ]; then
+        # shellcheck disable=SC2086
+        sha256sum $IDENTITY_FILES >"$dir/inputs.sha256" 2>"$errf" || rc=$?
+    else
+        # shellcheck disable=SC2086
+        shasum -a 256 $IDENTITY_FILES >"$dir/inputs.sha256" 2>"$errf" || rc=$?
+    fi
+    [ "$rc" -eq 0 ] || {
+        echo "SOURCE-IDENTITY FAIL: hash batch exit $rc (read failure, not PASS)" >&2
+        if [ -s "$errf" ]; then
+            echo "  hasher stderr:" >&2
+            sed 's/^/    /' "$errf" >&2
+        fi
+        rm -f "$errf"
+        exit 1
+    }
+    rm -f "$errf"
     # Effective Cargo config inventory (finite ancestor closure, qkl seam A):
     # Cargo's hierarchical search consults the cwd ancestry -- EVERY parent up
     # to the filesystem root -- plus the selected Cargo home
@@ -993,8 +1058,7 @@ command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1 || true
 boundary_phase1() {
     echo "phase1 boundary (owner seam H1): host sole coordinator; Linux MID via existing flock-vm dispatch"
     identity_snapshot "$IDENTITY_BEFORE"
-    linux_dispatch 'sh scripts/verify.sh mid union'
-    linux_dispatch 'sh scripts/verify.sh mid full'
+    linux_dispatch 'sh scripts/verify.sh mid union && sh scripts/verify.sh mid full'
     boot_fixtures
     docslink_check
     unsafe_surface_gate
@@ -1235,9 +1299,23 @@ e2e_shutdown() {
     e2e_verify_stable shutdown scripts/e2e_shutdown.py scripts/e2e_shutdown.sh
 }
 
+# inner/check: fastest host-runnable compile gate — `cargo check` on the crate
+# only (no clippy/fmt/whitespace/release). Host-runnable by design (no Linux
+# guard): the crate compiles off-Linux (preflight carries a
+# cfg(not(target_os="linux")) fallback). For a raw-cargo single-test-target
+# check (sub-mission C's per-test selector), use:
+#   cargo +$TOOLCHAIN atest -p alumina --locked --test <target>
+inner_check() {
+    echo "INNER-CHECK (cargo check, no clippy/fmt/whitespace/release):"
+    cargo +${TOOLCHAIN} check --locked -p alumina --all-targets
+    echo "INNER-CHECK-OK"
+}
+
 case "$TIER/$SCOPE" in
+    inner/check) inner_check ;;
     mid/foundations) mid_foundations ;;
     mid/boot) mid_boot ;;
+    mid/clippy) mid_clippy ;;
     mid/union) mid_union ;;
     mid/full) mid_full ;;
     fixtures/boot) boot_fixtures ;;
