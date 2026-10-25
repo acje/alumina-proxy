@@ -304,6 +304,10 @@ impl Enforcement {
         self.monitor.note_fact_downgrade_to_plain();
     }
 
+    pub(crate) const fn note_fact_probe_relocation(&mut self) {
+        self.monitor.note_fact_probe_relocation();
+    }
+
     pub(crate) const fn note_fact_ja4_change(&mut self, ordinal: DomainOrdinal, ja4: [u8; 36]) {
         self.monitor.note_fact_ja4_change(ordinal, ja4);
     }
@@ -406,6 +410,23 @@ mod tests {
             en.counters().facts_total(),
             1,
             "the downgrade fact folds into the aggregate fact total"
+        );
+    }
+
+    #[test]
+    fn note_fact_probe_relocation_passes_through_to_the_monitor() {
+        let t = table(
+            AnyIllegalScope::Connection,
+            &[(ActionKind::FlareOnly, Scope::Connection)],
+        );
+        let mut en = Enforcement::new(t);
+        en.note_fact_probe_relocation();
+        en.note_fact_probe_relocation();
+        assert_eq!(en.counters().facts_probe_relocations(), 2);
+        assert_eq!(
+            en.counters().facts_total(),
+            2,
+            "the probe-relocation fact folds into the aggregate fact total"
         );
     }
 

@@ -405,6 +405,7 @@ impl ServeStorage {
         self.drain_resolver_transitions();
         self.drain_dns_anomalies();
         self.drain_downgrade_to_plain();
+        self.drain_probe_relocations();
         Ok(Some(result))
     }
 
@@ -455,6 +456,17 @@ impl ServeStorage {
         let downgrades = self.dns.take_downgrade_to_plain();
         for _ in 0..downgrades {
             self.enforcement.note_fact_downgrade_to_plain();
+        }
+    }
+
+    /// Folds every post-window probe-sweep relocation the DNS transport noted
+    /// into the monitor `pr` fact, one fact per relocation. The transport
+    /// drains to zero, so a later drain never double-counts an earlier
+    /// relocation.
+    fn drain_probe_relocations(&mut self) {
+        let relocations = self.dns.take_probe_relocations();
+        for _ in 0..relocations {
+            self.enforcement.note_fact_probe_relocation();
         }
     }
 
@@ -707,6 +719,7 @@ impl ServeStorage {
         self.drain_resolver_transitions();
         self.drain_dns_anomalies();
         self.drain_downgrade_to_plain();
+        self.drain_probe_relocations();
         self.settle_startup(now0, report, decision_seconds, false)
     }
 

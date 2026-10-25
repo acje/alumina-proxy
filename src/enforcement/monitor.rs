@@ -13,6 +13,7 @@ pub struct FactCounters {
     pub(crate) resolver_degraded: SaturatingCounter,
     pub(crate) dns_anomaly: [SaturatingCounter; DnsAnomalyKind::COUNT],
     pub(crate) downgrade_to_plain: SaturatingCounter,
+    pub(crate) probe_relocations: SaturatingCounter,
     pub(crate) ja4_change: [SaturatingCounter; ALLOWLIST_MAX],
     pub(crate) ja4_value: [[u8; 36]; ALLOWLIST_MAX],
 }
@@ -26,6 +27,7 @@ impl Default for FactCounters {
             resolver_degraded: SaturatingCounter::new(),
             dns_anomaly: std::array::from_fn(|_| SaturatingCounter::new()),
             downgrade_to_plain: SaturatingCounter::new(),
+            probe_relocations: SaturatingCounter::new(),
             ja4_change: std::array::from_fn(|_| SaturatingCounter::new()),
             ja4_value: [[0; 36]; ALLOWLIST_MAX],
         }
@@ -201,6 +203,15 @@ impl Monitor {
         self.dirty = true;
     }
 
+    /// Counts one post-window probe-sweep relocation (`pr=`), noted by the
+    /// serving storage when the DNS transport drains a probe relocation. The
+    /// counter is an event fold disjoint from the serving `dp=` downgrade
+    /// surface, never a latched level.
+    pub(crate) const fn note_fact_probe_relocation(&mut self) {
+        self.facts.probe_relocations.bump();
+        self.dirty = true;
+    }
+
     /// Counts one first-seen JA4 baseline deviation for an ordinal: the
     /// serving path records a JA4 for a `(ordinal, addr)` pair that differs
     /// from the pair's first-seen baseline. The per-ordinal counter is an
@@ -364,6 +375,14 @@ impl Monitor {
         self.facts.downgrade_to_plain.overflow()
     }
 
+    pub(crate) const fn facts_probe_relocations(&self) -> u32 {
+        self.facts.probe_relocations.value()
+    }
+
+    pub(crate) const fn facts_probe_relocations_overflow(&self) -> bool {
+        self.facts.probe_relocations.overflow()
+    }
+
     pub(crate) fn unknown_total(&self) -> u64 {
         self.facts
             .unknown
@@ -389,6 +408,7 @@ impl Monitor {
                 .map(|c| u64::from(c.value()))
                 .sum::<u64>()
             + u64::from(self.facts.downgrade_to_plain.value())
+            + u64::from(self.facts.probe_relocations.value())
             + self
                 .facts
                 .ja4_change
@@ -525,6 +545,7 @@ impl Monitor {
             c.saturate_for_test();
         }
         self.facts.downgrade_to_plain.saturate_for_test();
+        self.facts.probe_relocations.saturate_for_test();
         for c in &mut self.facts.ja4_change {
             c.saturate_for_test();
         }

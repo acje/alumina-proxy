@@ -2876,7 +2876,7 @@ fn shutdown_aborts_the_sweep_and_drops_partial_verdicts() {
 }
 
 #[test]
-fn relocate_for_probe_counts_a_dot_to_plain_downgrade_and_restores_it() {
+fn relocate_for_probe_counts_a_probe_relocation_and_restores_without_extra() {
     let dot_set = {
         let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
         entries[0] = crate::resolver::select("1.1.1.1#dns.google").expect("dot ns");
@@ -2895,11 +2895,16 @@ fn relocate_for_probe_counts_a_dot_to_plain_downgrade_and_restores_it() {
     assert_eq!(transport.peer().ip().to_string(), "8.8.8.8");
     assert_eq!(
         transport.take_downgrade_to_plain(),
-        1,
-        "relocating from a DoT primary onto a plain probe target counts a downgrade"
+        0,
+        "a probe-sweep relocation is not a serving downgrade and never folds into dp="
     );
-    // A failed probe restores the DoT primary; the plain-to-DoT restore is an
-    // upgrade, so no second downgrade is counted.
+    assert_eq!(
+        transport.take_probe_relocations(),
+        1,
+        "relocating onto a probe target counts a probe relocation"
+    );
+    // A failed probe restores the pre-sweep active resolver; the restore is a
+    // sweep restore, not a relocation, so no second probe relocation is counted.
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, false, false, false, false],
         active_before: ActiveResolver::at(0, 2),
@@ -2909,8 +2914,8 @@ fn relocate_for_probe_counts_a_dot_to_plain_downgrade_and_restores_it() {
     transport.on_exchange_failed(1_000_000u64);
     assert_eq!(transport.active_resolver, ActiveResolver::at(0, 2));
     assert_eq!(
-        transport.take_downgrade_to_plain(),
+        transport.take_probe_relocations(),
         0,
-        "restoring from a plain probe target onto the DoT primary counts no downgrade"
+        "restoring the pre-sweep resolver counts no additional probe relocation"
     );
 }

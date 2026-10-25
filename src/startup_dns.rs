@@ -914,6 +914,12 @@ pub struct StartupDns {
     /// FQDN and the relocated-to resolver is a bare-IP entry; it accumulates
     /// across the failover/failback paths and is taken exactly once.
     downgrade_to_plain: usize,
+    /// The count of post-window probe-sweep relocations awaiting drain by the
+    /// owning `ServeStorage` into the monitor `pr` fact fold. Every
+    /// `relocate_for_probe` call seats the transport onto a probe target and
+    /// counts here, disjoint from the serving `dp=` downgrade surface; it is
+    /// taken exactly once.
+    probe_relocations: usize,
     /// The post-window probe sweep state, present only while the sweep is in
     /// progress: which configured resolvers remain to be probed, the active
     /// resolver the sweep began from, the accumulated per-resolver verdicts,
@@ -997,6 +1003,7 @@ impl StartupDns {
             resolver_transitions: 0,
             dns_anomalies: [0; DnsAnomalyKind::COUNT],
             downgrade_to_plain: 0,
+            probe_relocations: 0,
             probe_sweep: None,
             sweep_ran: false,
             window_exercised: [false; MAX_RESOLVERS],
@@ -1041,6 +1048,13 @@ impl StartupDns {
     /// count to zero for the next window or serving turn.
     pub(crate) fn take_downgrade_to_plain(&mut self) -> usize {
         std::mem::take(&mut self.downgrade_to_plain)
+    }
+
+    /// Drains the accumulated post-window probe-sweep relocations for the
+    /// owning storage to fold into the monitor's `pr` fact, resetting the
+    /// pending count to zero for the next window or serving turn.
+    pub(crate) fn take_probe_relocations(&mut self) -> usize {
+        std::mem::take(&mut self.probe_relocations)
     }
 
     #[cfg(test)]
@@ -2713,14 +2727,13 @@ impl StartupDns {
     }
 
     /// Relocates the retained transport onto a probe target: the connection is
-    /// closed so the next exchange dials the target, any DoT→plain downgrade is
+    /// closed so the next exchange dials the target, the probe relocation is
     /// counted, and the active resolver is re-seated. Used by the post-window
     /// probe sweep; the pre-sweep active resolver is kept by the sweep for
     /// restore.
     fn relocate_for_probe(&mut self, target: ActiveResolver) -> Result<(), StartupDnsError> {
-        let active = self.active_resolver;
         self.close_connection()?;
-        self.note_downgrade_if_dot_to_plain(active, target);
+        self.probe_relocations = self.probe_relocations.saturating_add(1);
         self.active_resolver = target;
         self.repoint_to_active();
         Ok(())
