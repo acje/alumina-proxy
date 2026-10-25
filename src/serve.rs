@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use mio::net::TcpListener;
 
-use crate::cache::{Cache, CacheError, EntryState, Family, NameIndex};
+use crate::cache::{Cache, CacheError, Family, NameIndex};
 use crate::config::{Config, FixedHostname, Fqdn};
 use crate::connect::ConnectRequest;
 use crate::enforcement::action::DomainOrdinal;
@@ -877,7 +877,7 @@ impl ServeStorage {
 fn usable_name(cache: &Cache, name: NameIndex, now: u64) -> Result<bool, CacheError> {
     for family in Family::ALL {
         let entry = cache.entry(name, family)?;
-        if matches!(entry.state(now), EntryState::Fresh | EntryState::Stale) {
+        if entry.servable(now) {
             return Ok(true);
         }
     }

@@ -32,7 +32,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::cache::{Cache, CacheError, Entry, EntryState, Family, NameIndex};
+use crate::cache::{Cache, CacheError, Entry, Family, NameIndex};
 use crate::config::Config;
 use crate::connect::{CONNECT_LIMIT, ConnectRequest};
 use crate::eligibility::NumericAddr;
@@ -903,7 +903,7 @@ fn usable_peer(
     if usize::from(attempted) >= entry.bindings().len() {
         return None;
     }
-    if !matches!(entry.state(now), EntryState::Fresh | EntryState::Stale) {
+    if !entry.servable(now) {
         return None;
     }
     let addr = entry.bindings()[usize::from(attempted)];

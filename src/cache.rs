@@ -9,6 +9,11 @@ pub const MAX_ADDRESSES: usize = 16;
 /// Stale DNS authorization grace after TTL expiry, in seconds.
 pub const STALE_GRACE: u64 = 259_200;
 
+/// How long a stale entry may still be served past its freshness deadline,
+/// in seconds (RT-006). Beyond this window a stale entry is no longer served
+/// even though it remains in the cache until retirement.
+pub const STALE_SERVING_WINDOW: u64 = 3600;
+
 /// Maximum honored DNS TTL, in seconds (docs/alumina-proxy.md L12).
 pub const TTL_CAP: u64 = 86_400;
 
@@ -118,6 +123,22 @@ impl Entry {
                 Some(freshness) if now < freshness => EntryState::Fresh,
                 Some(_) | None => EntryState::Stale,
             },
+        }
+    }
+
+    /// Whether the entry may still be served at `now`: fresh bindings always,
+    /// stale bindings only within `STALE_SERVING_WINDOW` past their freshness
+    /// deadline. A stale entry past the serving window is retained for
+    /// revalidation but never served (RT-006).
+    #[must_use]
+    pub const fn servable(&self, now: u64) -> bool {
+        match self.state(now) {
+            EntryState::Fresh => true,
+            EntryState::Stale => match self.freshness_deadline {
+                Some(freshness) => now < freshness.saturating_add(STALE_SERVING_WINDOW),
+                None => false,
+            },
+            EntryState::Retired | EntryState::Empty => false,
         }
     }
 }
@@ -645,6 +666,35 @@ mod tests {
                 "ttl={ttl}, after retirement"
             );
         }
+    }
+
+    #[test]
+    fn servable_serves_fresh_and_stale_within_window_only() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        publish_simple(
+            &mut cache,
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[pub_addr()],
+            1000,
+            120,
+        );
+        let entry = read(&cache, name, Family::A);
+        let freshness = 1000 + 120;
+        let retirement = freshness + STALE_GRACE;
+        assert!(entry.servable(freshness - 1), "fresh is served");
+        assert!(entry.servable(freshness), "stale at freshness is served");
+        assert!(
+            entry.servable(freshness + STALE_SERVING_WINDOW - 1),
+            "stale just inside the serving window is served"
+        );
+        assert!(
+            !entry.servable(freshness + STALE_SERVING_WINDOW),
+            "stale past the serving window is not served"
+        );
+        assert!(!entry.servable(retirement), "retired is never served");
     }
 
     #[test]
