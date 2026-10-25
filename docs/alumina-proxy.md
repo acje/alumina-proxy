@@ -181,7 +181,7 @@ These are fixed build-time limits, not optional TOML settings or measured capaci
 | Stale-serving window (new upstream authorization after TTL expiry) | 3600 seconds (1 hour) |
 | DNS incident summary interval | 3600 seconds per affected hostname |
 | DNS reporting storage | 32 name/window states, 64 record-type incident states, 512 tunnel window markers |
-| Preallocated log queue / maximum encoded entry | 256 entries / 10 KiB, including framing |
+| Preallocated log queue / maximum encoded entry | 256 entries / 2 KiB, including framing |
 | Log sink work per scheduling turn | 64 KiB or 16 I/O operations, whichever comes first |
 | Startup resolution window | 90 seconds, absolute; includes DNS TCP establishment |
 | Relay idle deadline / EOF drain deadline / shutdown grace period | 300 seconds / 5 seconds / 8 seconds |
@@ -288,7 +288,7 @@ scope = ["connection" | "domain" | "all", ...]  # one literal per allowlist entr
 
 ### Monitoring
 
-Additional LOG KIND(s) on the existing stdout sink — and only that sink — report per-domain action events and correlated per-ordinal and global aggregates. They follow the existing bounded, best-effort, allocation-free logging contract: whole-record drop and count on overflow, saturating counters with an overflow flag, and fold-before-close/reuse. Correlated connection detail is captured as the first detection relation per connection (actual slot index + generation + fact/effect together; an effect can never appear without its fact); a later detection relation on the same connection folds into the correlated per-ordinal and global aggregates only, never into the bounded detail, and is counted as correlated-detail loss — there is no full history. An accepted monitoring summary enqueue consumes its bounded detail window, so a later summary never repeats the same relations as fresh; a refused summary retains the bounded detail and counts the refusal as honest loss. A forced final summary refused at shutdown is likewise counted as loss but cannot be observed after the process exits, so a shutdown report is never guaranteed lossless. An early-upstream-data outcome with no effect (operational Unknown) is observable only through that bounded correlated detail, never as a permanent exact aggregate total. No new sink, endpoint, control, or metrics interface is added; a Flare for Block or Tarpit events is implicit and coalesced at the existing report cadence, never one record per packet.
+Additional LOG KIND(s) on the existing stdout sink — and only that sink — report per-domain action events and correlated per-ordinal and global aggregates. They follow the existing bounded, best-effort, allocation-free logging contract: whole-record drop and count on overflow, saturating counters with an overflow flag, and fold-before-close/reuse. The monitor family is split into an always-emitted, authoritative `kind=monitor` summary and best-effort `monitor_domain` / `monitor_capture` detail batches. The summary carries a fixed core — 13 globals, 10 scalars, 19 `c<i>` counters, 4 `unk<i>` counters, and the `dx=` loss bitset — and is enqueued reserved (commit-point) at every report cadence, so the aggregate readiness outcome is always recorded even when every detail batch is dropped. The detail batches are best-effort: `monitor_domain` packs the 32 domain blocks into 3 batches (~11/11/10 blocks) and `monitor_capture` packs the 64 capture details into 3 batches (~22/22/20 details), each batch ≤ 2048 B with `part=<n>/<total>`, emitted only when the underlying data is nonzero. Detail loss never blocks the summary: `report_drops` counts each dropped `monitor_domain` batch once per batch and `capture_drops` counts each dropped capture detail once per detail — the per-batch/per-detail unit mixing is intentional and documented; both are saturating counters with overflow flags in the summary's fixed core. Correlated connection detail is captured as the first detection relation per connection (actual slot index + generation + fact/effect together; an effect can never appear without its fact); a later detection relation on the same connection folds into the correlated per-ordinal and global aggregates only, never into the bounded detail, and is counted as correlated-detail loss — there is no full history. An accepted monitoring summary enqueue consumes its bounded detail window, so a later summary never repeats the same relations as fresh; a refused summary retains the bounded detail and counts the refusal as honest loss. A forced final summary refused at shutdown is likewise counted as loss but cannot be observed after the process exits, so a shutdown report is never guaranteed lossless. An early-upstream-data outcome with no effect (operational Unknown) is observable only through that bounded correlated detail, never as a permanent exact aggregate total. No new sink, endpoint, control, or metrics interface is added; a Flare for Block or Tarpit events is implicit and coalesced at the existing report cadence, never one record per packet.
 
 ### Planned fixed control storage (design estimate, not measured)
 
@@ -304,7 +304,7 @@ All added enforcement and monitoring storage is boot-time allocated from the exi
 | First-seen JA4 baseline table (36-byte JA4 per entry; per-ordinal, no per-IP element) | 512 | 36 B | 18432 B (~18 KiB) |
 | ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions + `[u16; 64]` sigalgs in per-slot `ChInspector`) | 512 | ~16.5 KiB | ~8.2 MiB |
 
-The planned additional enforcement and monitoring control storage (the five non-JA4 rows above) totals approximately 9–10 KiB against the existing 128 MiB traffic storage and 2 MiB log queue. The two JA4 rows (first-seen baseline ~21 KiB and ClientHello retention ~8.2 MiB) are additional and separately accounted in the JA4 client-fingerprint tripwire amendment section. Exact sizes are fixed at implementation with `sizeof`-verified types. No pacing credit/burst storage is reserved or preallocated while Tarpit is deferred (no speculative reserved pacing allocation); it is added to this table only if a genuine trigger-catalog decision authorizes Tarpit. Per-turn enforcement work composes with the existing 16-op/64 KiB per-visit budget and at-most-256-visit timer recheck; the per-turn control-step count is a fixed value derived from that native per-visit I/O budget at implementation, not an invented range. Block All's bounded physical closure is the only path that walks the slot table.
+The planned additional enforcement and monitoring control storage (the five non-JA4 rows above) totals approximately 9–10 KiB against the existing 128 MiB traffic storage and 512 KiB log queue. The two JA4 rows (first-seen baseline ~21 KiB and ClientHello retention ~8.2 MiB) are additional and separately accounted in the JA4 client-fingerprint tripwire amendment section. Exact sizes are fixed at implementation with `sizeof`-verified types. No pacing credit/burst storage is reserved or preallocated while Tarpit is deferred (no speculative reserved pacing allocation); it is added to this table only if a genuine trigger-catalog decision authorizes Tarpit. Per-turn enforcement work composes with the existing 16-op/64 KiB per-visit budget and at-most-256-visit timer recheck; the per-turn control-step count is a fixed value derived from that native per-visit I/O budget at implementation, not an invented range. Block All's bounded physical closure is the only path that walks the slot table.
 
 ### Explicitly unchanged (non-negotiable)
 
@@ -1103,28 +1103,30 @@ level=info kind=startup_final secs=<n> status="<full|degraded|failure|terminated
 
 Recorded worst-case encoded lengths, including the terminal newline framing, for the widest
 legal configuration (32 keyed FQDNs at the 253-byte maximum with `u64::MAX` counters) against
-the fixed 10240-byte slot:
+the fixed 2048-byte slot:
 
 | Record kind | Worst case | Headroom |
 | --- | --- | --- |
-| `startup_name` | 380 B | 9860 B |
-| `startup_final` | 325 B | 9915 B |
-| `startup_warning` | 331 B | 9909 B |
-| `reject` | 406 B | 9834 B |
-| `early_activity` | 405 B | 9835 B |
-| `exchange_failed` | 341 B | 9899 B |
-| `fatal` | 360 B | 9880 B |
-| `shutdown_final` | 103 B | 10137 B |
-| `capacity_high` / `capacity_low` | 127 B / 125 B | 10113 B / 10115 B |
-| `queue_high` / `queue_low` | 124 B / 122 B | 10116 B / 10118 B |
-| `resolver_probe` | 1857 B | 8383 B |
-| `monitor` | 8191 B | 2049 B |
+| `startup_name` | 380 B | 1668 B |
+| `startup_final` | 325 B | 1723 B |
+| `startup_warning` | 331 B | 1717 B |
+| `reject` | 406 B | 1642 B |
+| `early_activity` | 405 B | 1643 B |
+| `exchange_failed` | 341 B | 1707 B |
+| `fatal` | 360 B | 1688 B |
+| `shutdown_final` | 103 B | 1945 B |
+| `capacity_high` / `capacity_low` | 127 B / 125 B | 1921 B / 1923 B |
+| `queue_high` / `queue_low` | 124 B / 122 B | 1924 B / 1926 B |
+| `resolver_probe` | 1857 B | 191 B |
+| `monitor_summary` | 763 B | 1285 B |
+| `monitor_domain` | 1370 B | 678 B |
+| `monitor_capture` | 1237 B | 811 B |
 
 Both startup records fit with wide margins, so the encoded-entry requirement at `:236` is met
-by measurement for every valid configuration. `monitor` is the tightest record in the
-vocabulary at 2049 B of headroom after the alox8 hex peer render and 10 KiB slot bump; any
-future addition to the monitor report shape must re-measure against the 10240-byte slot
-before it is accepted.
+by measurement for every valid configuration. `resolver_probe` is now the tightest record in
+the vocabulary at 191 B of headroom against the 2048-byte slot; any future addition to any
+monitor-family record shape must re-measure against the 2048-byte slot before it is
+accepted.
 
 ### Explicitly unchanged (non-negotiable)
 
@@ -1482,5 +1484,67 @@ at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second s
 window, and all deadlines — 10/2/300/5/8/3600 seconds. Deterministic tests prove the exact
 monitor grammar renders `d0p="cb007101"` for the V4 peer and the all-saturated monitor
 record with a full V6 max peer fits the 10240-byte slot with margin
+(`logging_monitor_summary_exact_grammar_and_zero_suppression`,
+`logging_worst_case_record_per_kind_fits_the_slot_with_margin`, `src/log.rs`).
+
+## alumina-alox9 (2026-10-25) — 2 KiB log slot and monitor family split
+
+This is the narrow, user-authorized amendment recording the alox9 work: the log queue
+geometry is reconciled to the live rows — 256 × 2 KiB = 512 KiB — and the monitor family is
+split into an always-emitted authoritative summary plus best-effort detail batches. It
+amends only the enumerated surfaces below (the profile row at `:184`, the monitoring
+semantics at `:291`, the log-queue figure at `:307`, and the worst-case table at
+`:1104-1129`); every other clause of this document remains binding and unchanged. The code
+landed in `01a0908..c42f9e2` (alox9-01), `251bc14`, `ca859ef`, and `f4cfb99`; this
+amendment only records it.
+
+The fixed profile is restated unchanged except for the log queue geometry: 512 tunnels,
+128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 × 2 KiB
+log queue (512 KiB), 16-op/64 KiB visits, at-most-256-visit recheck, DNS
+response/candidate/incident caps, the 90-second startup window, and all deadlines —
+10/2/300/5/8/3600 seconds. The per-slot encoded-entry bound is a fixed 2048-byte slot
+(`SLOT_BYTES = 2 * 1024`, `src/log.rs:50`; `MONITOR_RECORD_MAX = 2048`, `src/log.rs:55`; the
+queue stays 256 slots, `QUEUE_SLOTS = 256`, `src/log.rs:49`, with
+`LOG_QUEUE_BYTES = 256 × 2 KiB`, `src/inventory.rs:38`, and the compile-time assertion
+`QUEUE_SLOTS * SLOT_BYTES == LOG_QUEUE_BYTES`, `src/log.rs:150`), replacing the alox8 10 KiB
+geometry.
+
+The monitor family is split into an always-emitted, authoritative `kind=monitor` summary and
+best-effort `monitor_domain` / `monitor_capture` detail batches. The summary carries a fixed
+core — 13 globals, 10 scalars, 19 `c<i>` counters, 4 `unk<i>` counters, and the `dx=` loss
+bitset — and is enqueued reserved (commit-point, `enqueue_reserved(Kind::Monitor, …)`,
+`src/log.rs:1677`) at every report cadence, so the aggregate readiness outcome is always
+recorded even when every detail batch is dropped. The detail batches are best-effort:
+`monitor_domain` packs the 32 domain blocks into 3 batches (~11/11/10 blocks, `DOMAIN_BATCH
+= 11`, `src/log.rs:57`) and `monitor_capture` packs the 64 capture details into 3 batches
+(~22/22/20 details, `CAPTURE_BATCH = 22`, `src/log.rs:59`), each batch ≤ 2048 B with
+`part=<n>/<total>`, emitted only when the underlying data is nonzero. Detail loss never
+blocks the summary: `report_drops` counts each dropped `monitor_domain` batch once per batch
+and `capture_drops` counts each dropped capture detail once per detail — the per-batch/
+per-detail unit mixing is intentional and documented; both are saturating counters with
+overflow flags in the summary's fixed core.
+
+The worst-case encoded lengths re-measure against the fixed 2048-byte slot (widest legal
+configuration, 32 keyed FQDNs at the 253-byte maximum with `u64::MAX` counters, terminal
+newline framing included): `resolver_probe` is the tightest record at 1857 B / 191 B of
+headroom; the monitor family measures `monitor_summary` 763 B / 1285 B, `monitor_domain`
+1370 B / 678 B, and `monitor_capture` 1237 B / 811 B. Any future addition to any
+monitor-family record shape must re-measure against the 2048-byte slot before it is
+accepted.
+
+This supersedes every superseded geometry recital in the document, which remain in place as
+historical record and are not individually edited: the 24 `Explicitly unchanged` fixed
+resource profile recitals of the `256 × 8 KiB log queue` at `:311`, `:403`, `:420`, `:436`,
+`:469`, `:500`, `:531`, `:566`, `:615`, `:650`, `:702`, `:721`, `:740`, `:767`, `:786`,
+`:808`, `:848`, `:874`, `:948`, `:969`, `:990`, `:1133-1134`, `:1390-1391`, and `:1458`;
+the log-queue-geometry recital at `:1019` ("256 x 8 KiB slots"); the `resolver_probe`
+"fixed 8 KiB slot" recitals at `:822` and `:843`; the monitor 8192-byte-slot recitals at
+`:710`, `:1294`, `:1331`, `:1380`, `:1383`, and `:1441`; and the alox8 10 KiB geometry
+recitals within the alox8 block at `:1460`, `:1465-1466`, `:1472-1474`, `:1482`, and
+`:1486`. The alox8 block itself remains the historical record of the superseded 10 KiB
+bound.
+
+Deterministic tests prove the exact monitor grammar and the worst-case slot fit with margin
+for every record kind against the 2048-byte slot
 (`logging_monitor_summary_exact_grammar_and_zero_suppression`,
 `logging_worst_case_record_per_kind_fits_the_slot_with_margin`, `src/log.rs`).
