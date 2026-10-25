@@ -38,7 +38,10 @@ specification, not feature growth.
   `alumina-cfgk` (2026-10-24) keyed `[allowed_fqdn."<fqdn>:<port>"]`
   configuration schema/16 KiB document bound amendment and its second
   authorization (2026-10-24) startup-final record-shape extension (`:67`,
-  `:236`; log queue geometry unchanged), all
+  `:236`; log queue geometry unchanged), and the `alox7` (2026-10-25)
+  low-risk alox hardening amendment (probe isolation, failover ordinal,
+  failback reset, JA4 baseline overflow, zero-TTL stale serving, DoT TLS
+  1.3-only, monitor loss-flag bitset), all
   recorded in the document; no further amendment authority is implied.
 - Status is a scoped local testQA candidate — not production-qualified;
   serving-qualification gates stay open (`docs/build-plan.md` owns them).

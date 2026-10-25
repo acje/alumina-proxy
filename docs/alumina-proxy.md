@@ -1319,15 +1319,17 @@ exclusive (a scope value outside the enumerated set for its surface is invalid c
 rather than a silent override). The exit-78 behavior is unchanged. Implemented (this
 revision).
 
-#### SP-013 — Latest-change value keyed (ordinal, IP) with triggering peer IP
+#### SP-013 — Latest-change value keyed per-ordinal with triggering peer source address
 
-The C1 latest-change 36-byte JA4 value was keyed per ordinal while the baseline is
-per-(ordinal, IP), so the reported value could belong to a different peer than the one whose
-change fired. Resolution: the latest-change value is keyed by the same (ordinal, IP) as its
-baseline, and the triggering peer's IP is included in the flare record, aligning the reported
-fingerprint with the change that fired. The monitor record grows accordingly and is
-re-measured against the 8192-byte slot headroom (`:1120`). Implementation folds into
-sub-mission 6 of this package; this amendment records the binding semantics.
+The C1 latest-change 36-byte JA4 value is keyed per-ordinal, matching the per-ordinal
+first-seen JA4 baseline (SP-005, `Ja4BaselineTable`, `src/serving.rs` — a 36-byte JA4 per
+entry, no per-IP element); there is no per-(ordinal, IP) baseline. The reported value alone
+could belong to a different peer than the one whose change fired, so the triggering peer's
+source address is carried in the flare/monitor record as a fixed tagged IPv4/IPv6 union,
+aligning the reported fingerprint with the change that fired. The monitor record grows
+accordingly and is re-measured against the 8192-byte slot headroom (`:1120`). Implementation
+folds into sub-mission 6 of this package, fulfilled by the alox7 F-12 increment; this
+amendment records the binding semantics.
 
 #### RT-005 — CNAME bailiwick parent-zone note
 
