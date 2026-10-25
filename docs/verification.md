@@ -20,8 +20,8 @@ cargo +1.99.0 atest -p alumina --locked --features alloc-witness   # full suite,
 cargo +1.99.0 fmt --check
 cargo +1.99.0 aclippy -p alumina --locked --all-targets -- -D warnings
 sh scripts/verify.sh inner check                # INNER tier: cargo check only; host-runnable (compiles on macOS)
-sh scripts/verify.sh mid foundations            # MID tier (Linux-only, fail closed off-Linux): behavior-proof only (fast loop)
-sh scripts/verify.sh mid boot                   # MID tier (Linux-only): behavior-proof only (fast loop)
+sh scripts/verify.sh mid foundations            # MID tier (Linux-only, fail closed off-Linux): behavior-proof + fmt/whitespace (fast loop)
+sh scripts/verify.sh mid boot                   # MID tier (Linux-only): behavior-proof + fmt/whitespace (fast loop)
 sh scripts/verify.sh mid clippy                 # MID tier (Linux-only): clippy -D warnings (production + alloc-witness harness)
 sh scripts/verify.sh mid union                  # MID tier (Linux-only): release + static-ELF + closure metadata + clippy
 sh scripts/verify.sh mid full                   # MID tier (Linux-only): full suite witness-off then witness-on
@@ -52,7 +52,7 @@ Verification is tiered; each tier backs a different claim:
   clippy/fmt/whitespace/release). Host-runnable (compiles on macOS). Fast
   per-edit feedback; backs no done-claim.
 - **MID** — Linux-only selectors (fail closed off-Linux): `mid foundations`
-  and `mid boot` are behavior-proof-only fast loops (their former
+  and `mid boot` are behavior-proof + fmt/whitespace fast loops (their former
   static-ELF/clippy/release/closure proofs moved to `mid union`); `mid
   clippy` runs clippy `-D warnings` for production and the alloc-witness
   test harness; `mid union` carries release + static-ELF + closure metadata
