@@ -928,8 +928,7 @@ fn encode_monitor_domain_batch(
     if !push_u64(&mut w, b"secs", secs) {
         return None;
     }
-    if !w.push(b" part=")
-        || fmt::Write::write_fmt(&mut w, format_args!("{part}/{total}")).is_err()
+    if !w.push(b" part=") || fmt::Write::write_fmt(&mut w, format_args!("{part}/{total}")).is_err()
     {
         return None;
     }
@@ -954,7 +953,9 @@ fn encode_monitor_domain_batch(
             if flares > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"l", u64::from(flares)) {
                 return None;
             }
-            if refusals > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"r", u64::from(refusals)) {
+            if refusals > 0
+                && !push_indexed_key_u64(&mut w, b"d", index32, b"r", u64::from(refusals))
+            {
                 return None;
             }
             let ja4_changes = monitor.facts_ja4_change(ordinal);
@@ -1013,8 +1014,7 @@ fn encode_monitor_capture_batch(
     if !push_u64(&mut w, b"secs", secs) {
         return None;
     }
-    if !w.push(b" part=")
-        || fmt::Write::write_fmt(&mut w, format_args!("{part}/{total}")).is_err()
+    if !w.push(b" part=") || fmt::Write::write_fmt(&mut w, format_args!("{part}/{total}")).is_err()
     {
         return None;
     }
@@ -3233,8 +3233,14 @@ mod tests {
             }
         }
         assert_eq!(summaries, 1, "exactly one summary record");
-        assert_eq!(domains, 3, "32 saturated ordinals pack into 3 domain batches");
-        assert_eq!(captures, 3, "64 saturated details pack into 3 capture batches");
+        assert_eq!(
+            domains, 3,
+            "32 saturated ordinals pack into 3 domain batches"
+        );
+        assert_eq!(
+            captures, 3,
+            "64 saturated details pack into 3 capture batches"
+        );
         let mut parts: Vec<&str> = lines
             .iter()
             .filter(|l| l.starts_with("level=info kind=monitor_domain "))

@@ -1041,10 +1041,7 @@ pub(crate) mod tests {
             0,
             "M2': mark_reported always consumes its detail window"
         );
-        assert!(
-            !m.report_due(5),
-            "the emission leaves a clean aggregate"
-        );
+        assert!(!m.report_due(5), "the emission leaves a clean aggregate");
         m.note_consumed_capture(cap(0));
         m.note_suppressed_detail();
         assert_eq!(
@@ -1068,7 +1065,10 @@ pub(crate) mod tests {
             1,
             "M2': the earlier suppression is not re-counted"
         );
-        assert!(!m.report_due(7), "M2': the emission leaves a clean aggregate");
+        assert!(
+            !m.report_due(7),
+            "M2': the emission leaves a clean aggregate"
+        );
     }
 
     #[test]
