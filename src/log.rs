@@ -262,6 +262,16 @@ impl Kind {
             Kind::ExchangeFailed => "exchange_failed",
         }
     }
+
+    /// The priority class (docs/alumina-proxy.md:1299-1301): latch/event
+    /// records are reserved against normal overflow, so they displace the
+    /// newest normal record under pressure instead of being dropped whole.
+    const fn is_reserved(self) -> bool {
+        matches!(
+            self,
+            Kind::Monitor | Kind::StartupFinal | Kind::ResolverProbe
+        )
+    }
 }
 
 /// The terminal startup status carried by the final startup record.
@@ -1036,11 +1046,15 @@ fn push_scope_token(w: &mut Entry<'_>, prefix: &[u8], scope: Scope) -> bool {
     }
 }
 
-/// One fixed 8 KiB slot. `bytes` is the encoded record length; slots are
-/// reused, so a stale `bytes` on an unconsumed slot is never committed.
+/// One fixed 8 KiB slot. `bytes` is the encoded record length; `reserved`
+/// marks a priority-class record that normal overflow must never displace.
+/// Slots are reused, so a stale `bytes` on an unconsumed slot is never
+/// committed and the reserved flag is always rewritten on commit.
+#[derive(Clone, Copy)]
 struct Slot {
     buf: [u8; SLOT_BYTES],
     bytes: usize,
+    reserved: bool,
 }
 
 impl Slot {
@@ -1048,6 +1062,7 @@ impl Slot {
         Slot {
             buf: [0; SLOT_BYTES],
             bytes: 0,
+            reserved: false,
         }
     }
 }
@@ -1437,24 +1452,9 @@ impl LogStore {
             Field::new("dropped", Val::U64(counts.dropped)),
             Field::new("names_dropped", Val::U64(counts.names_dropped)),
         ];
-        if self.count >= QUEUE_SLOTS {
-            self.drop_one();
-        } else {
-            let index = self.write_index();
-            let len = encode_record_final(
-                &mut self.slots[index].buf,
-                Level::Info,
-                Kind::StartupFinal,
-                &fields,
-            );
-            match len {
-                Some(len) => {
-                    self.slots[index].bytes = len;
-                    self.count += 1;
-                }
-                None => self.drop_one(),
-            }
-        }
+        self.enqueue_reserved(Kind::StartupFinal, |buf| {
+            encode_record_final(buf, Level::Info, Kind::StartupFinal, &fields)
+        });
         self.note_queue_usage();
     }
 
@@ -1465,19 +1465,9 @@ impl LogStore {
     /// whole and counted like every other.
     pub(crate) fn resolver_probe(&mut self, secs: u64, segments: &[ResolverProbeSegment<'_>]) {
         self.set_now(secs);
-        if self.count >= QUEUE_SLOTS {
-            self.drop_one();
-        } else {
-            let index = self.write_index();
-            let len = encode_record_probe(&mut self.slots[index].buf, secs, segments);
-            match len {
-                Some(len) => {
-                    self.slots[index].bytes = len;
-                    self.count += 1;
-                }
-                None => self.drop_one(),
-            }
-        }
+        self.enqueue_reserved(Kind::ResolverProbe, |buf| {
+            encode_record_probe(buf, secs, segments)
+        });
         self.note_queue_usage();
     }
 
@@ -1570,16 +1560,10 @@ impl LogStore {
 
     pub(crate) fn monitor_summary(&mut self, secs: u64, monitor: &Monitor) -> bool {
         self.set_now(secs);
-        if self.count >= QUEUE_SLOTS {
-            return false;
-        }
-        let index = self.write_index();
-        let len = encode_monitor(&mut self.slots[index].buf, secs, monitor);
-        len.is_some_and(|len| {
-            self.commit_record(index, len);
-            self.note_queue_usage();
-            true
-        })
+        let committed =
+            self.enqueue_reserved(Kind::Monitor, |buf| encode_monitor(buf, secs, monitor));
+        self.note_queue_usage();
+        committed
     }
 
     /// Evaluates the 80%/70% capacity thresholds for tunnel slots and pending
@@ -1781,7 +1765,74 @@ impl LogStore {
 
     fn commit_record(&mut self, index: usize, len: usize) {
         self.slots[index].bytes = len;
+        self.slots[index].reserved = false;
         self.count += 1;
+    }
+
+    /// Enqueues a reserved priority-class record (docs/alumina-proxy.md:1299-1301).
+    /// On a full ring the record is encoded into a stack scratch slot first and
+    /// only on encode success displaces the newest normal record, so a failed
+    /// encode never evicts a held record. Returns whether the record was
+    /// committed (admitted or displacing).
+    fn enqueue_reserved(
+        &mut self,
+        kind: Kind,
+        encode: impl FnOnce(&mut [u8; SLOT_BYTES]) -> Option<usize>,
+    ) -> bool {
+        debug_assert!(kind.is_reserved());
+        if self.count >= QUEUE_SLOTS {
+            let mut scratch = [0u8; SLOT_BYTES];
+            match encode(&mut scratch) {
+                Some(len) => {
+                    self.displace_reserved(&scratch[..len]);
+                    true
+                }
+                None => {
+                    self.drop_one();
+                    false
+                }
+            }
+        } else {
+            let index = self.write_index();
+            match encode(&mut self.slots[index].buf) {
+                Some(len) => {
+                    self.commit_reserved(index, len);
+                    true
+                }
+                None => {
+                    self.drop_one();
+                    false
+                }
+            }
+        }
+    }
+
+    fn commit_reserved(&mut self, index: usize, len: usize) {
+        self.slots[index].bytes = len;
+        self.slots[index].reserved = true;
+        self.count += 1;
+    }
+
+    /// Displaces the newest normal record to admit a reserved one on a full
+    /// ring: the reserved block newer than the victim shifts one slot toward
+    /// the front and the encoded record takes the newest slot, so only the
+    /// newest-lowest-priority record is lost. When every held record is
+    /// reserved the newest reserved record is the bounded-not-lossless victim
+    /// (docs/alumina-proxy.md:290, :1303).
+    fn displace_reserved(&mut self, scratch: &[u8]) {
+        let victim = (0..QUEUE_SLOTS)
+            .rev()
+            .find(|&j| !self.slots[(self.front + j) & QUEUE_MASK].reserved)
+            .unwrap_or(QUEUE_SLOTS - 1);
+        for j in (victim + 1)..QUEUE_SLOTS {
+            self.slots[(self.front + j - 1) & QUEUE_MASK] =
+                self.slots[(self.front + j) & QUEUE_MASK];
+        }
+        self.drop_one();
+        let index = (self.front + QUEUE_SLOTS - 1) & QUEUE_MASK;
+        self.slots[index].buf[..scratch.len()].copy_from_slice(scratch);
+        self.slots[index].bytes = scratch.len();
+        self.slots[index].reserved = true;
     }
 
     const fn drop_one(&mut self) {
@@ -3008,9 +3059,8 @@ mod tests {
         );
     }
 
-    #[cfg(test)]
     #[test]
-    fn logging_monitor_summary_on_full_ring_refuses_without_displacing_held_records() {
+    fn logging_monitor_summary_on_full_ring_displaces_newest_normal() {
         use crate::enforcement::monitor::Monitor;
         use crate::enforcement::policy::UnknownReason;
         let (mut store, mut file) = file_logstore();
@@ -3030,20 +3080,148 @@ mod tests {
         let mut m = Monitor::new();
         m.note_fact_unknown(UnknownReason::Unattributed);
         assert!(
-            !store.monitor_summary(101, &m),
-            "a full-ring monitor summary is refused, not enqueued"
+            store.monitor_summary(101, &m),
+            "a reserved monitor summary is admitted even on a full ring"
         );
         assert_eq!(
             store.dropped(),
-            dropped_before,
-            "H2: the refused summary does not displace or count away any held record"
+            dropped_before + 1,
+            "H2: the admitted summary displaces and counts the newest normal record"
         );
-        assert_eq!(store.len(), QUEUE_SLOTS, "all held records survive intact");
+        assert_eq!(store.len(), QUEUE_SLOTS, "the ring stays at capacity");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
-            text.contains("kind=shutdown_final"),
-            "the shutdown verdict remains emitted despite the refused monitor: {text}"
+            text.contains("kind=monitor"),
+            "the reserved monitor summary is emitted: {text}"
+        );
+        assert!(
+            !text.contains("kind=shutdown_final"),
+            "the newest normal record (shutdown_final) is the displaced victim: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_reserved_startup_final_displaces_newest_normal_when_full() {
+        let (mut store, mut file) = file_logstore();
+        for i in 0..(QUEUE_SLOTS - 1) {
+            store.startup_warning(100, &format!("n{i}.example.org"), Family::A);
+        }
+        assert_eq!(
+            store.len(),
+            QUEUE_SLOTS,
+            "the high-edge record fills the last ring slot"
+        );
+        assert_eq!(store.dropped(), 0, "no warning is dropped during the fill");
+        store.startup_final(
+            101,
+            StartupStatus::Full,
+            FinalCounts {
+                unresolved: 1,
+                ..FinalCounts::default()
+            },
+        );
+        assert_eq!(
+            store.dropped(),
+            1,
+            "the reserved summary displaces and counts the newest normal record"
+        );
+        assert_eq!(store.len(), QUEUE_SLOTS, "the ring stays at capacity");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            text.contains("kind=startup_final"),
+            "the reserved record is emitted: {text}"
+        );
+        assert!(
+            !text.contains("n254.example.org"),
+            "the newest normal warning is the displaced victim: {text}"
+        );
+        assert!(
+            text.contains("n0.example.org") && text.contains("n253.example.org"),
+            "the older normal warnings survive: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_reserved_records_survive_normal_overflow() {
+        let (mut store, mut file) = file_logstore();
+        for i in 0..QUEUE_SLOTS {
+            store.startup_final(
+                100 + i as u64,
+                StartupStatus::Full,
+                FinalCounts {
+                    unresolved: 1,
+                    ..FinalCounts::default()
+                },
+            );
+        }
+        assert_eq!(store.len(), QUEUE_SLOTS, "reserved records fill the ring");
+        let dropped_before = store.dropped();
+        for _ in 0..16 {
+            store.startup_warning(200, "sub.example.org", Family::A);
+        }
+        assert_eq!(
+            store.dropped(),
+            dropped_before + 16,
+            "normal overflow records are dropped whole, never displacing reserved ones"
+        );
+        assert_eq!(store.len(), QUEUE_SLOTS, "the ring stays at capacity");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert_eq!(
+            text.matches("kind=startup_final").count(),
+            QUEUE_SLOTS,
+            "every reserved record survives the normal overflow: {text}"
+        );
+        assert!(
+            !text.contains("kind=startup_warning"),
+            "no normal overflow record is admitted: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_all_reserved_full_drops_newest_reserved() {
+        use crate::enforcement::monitor::Monitor;
+        use crate::enforcement::policy::UnknownReason;
+        let (mut store, mut file) = file_logstore();
+        for i in 0..QUEUE_SLOTS {
+            store.startup_final(
+                100 + i as u64,
+                StartupStatus::Full,
+                FinalCounts {
+                    unresolved: 1,
+                    ..FinalCounts::default()
+                },
+            );
+        }
+        assert_eq!(store.len(), QUEUE_SLOTS, "reserved records fill the ring");
+        let dropped_before = store.dropped();
+        let mut m = Monitor::new();
+        m.note_fact_unknown(UnknownReason::Unattributed);
+        assert!(
+            store.monitor_summary(101, &m),
+            "a reserved monitor summary is admitted on an all-reserved full ring"
+        );
+        assert_eq!(
+            store.dropped(),
+            dropped_before + 1,
+            "the newest reserved record is the bounded-not-lossless victim"
+        );
+        assert_eq!(store.len(), QUEUE_SLOTS, "the ring stays at capacity");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            text.contains("kind=monitor"),
+            "the monitor summary is emitted: {text}"
+        );
+        assert!(
+            !text.contains("secs=355"),
+            "the newest reserved record is the displaced victim: {text}"
+        );
+        assert!(
+            text.contains("secs=100"),
+            "the oldest reserved records survive: {text}"
         );
     }
 

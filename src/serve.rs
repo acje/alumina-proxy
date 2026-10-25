@@ -1266,7 +1266,8 @@ mod tests {
     }
 
     #[test]
-    fn monitor_report_emits_at_whole_second_cadence_clears_on_commit_and_counts_ring_refusals() {
+    fn monitor_report_emits_at_whole_second_cadence_clears_on_commit_and_admits_ring_full_summary()
+    {
         use crate::enforcement::action::FirstSlot;
         use crate::enforcement::policy::{AnyIllegalCause, Violation};
         use std::time::Instant;
@@ -1344,12 +1345,12 @@ mod tests {
         );
         assert_eq!(
             storage.enforcement().monitor().report_drops(),
-            1,
-            "the ring-full refusal is honest detail loss on the monitor aggregate"
+            0,
+            "SP-010: the reserved summary is admitted on the full ring, so no detail loss"
         );
         assert!(
-            storage.report_monitor_if_due(next + Duration::from_secs(1), false),
-            "L3: a refused summary stays dirty so the next second re-emits"
+            !storage.report_monitor_if_due(next + Duration::from_secs(1), false),
+            "SP-010: the admitted summary clears the aggregate, so no re-emission without a fresh event"
         );
     }
 
