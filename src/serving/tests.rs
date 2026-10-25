@@ -7837,6 +7837,131 @@ fn ja4_set_overflow_flares_signal_once_per_connection() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "long two-deviation overflow decision + loss-flag assertion"
+)]
+fn ja4_set_overflow_fires_decision_on_each_new_distinct_beyond_capacity() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
+        let wire_a = hello_wire(b"sub.example.org", false);
+        let wire_b = hello_wire_ext(
+            b"sub.example.org",
+            false,
+            &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+        );
+        let wire_c = hello_wire_ext(
+            b"sub.example.org",
+            false,
+            &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x33])],
+        );
+
+        // conn1: first-seen seeds the ordinal's set with the real JA4.
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_a, "sub.example.org");
+        let baseline = serving.ja4_baseline.entries[ordinal.get()][0].ja4;
+        assert!(
+            !serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change_loss(ordinal),
+            "a first-seen seeding never sets the detail-loss flag"
+        );
+
+        // Fill the remaining 15 set slots with synthetic distinct JA4s so the
+        // 16-entry set is full before the deviations arrive.
+        for i in 0..MAX_ADDRESSES - 1 {
+            let mut synthetic = [b'x'; 36];
+            synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
+            assert_eq!(
+                serving.ja4_baseline.record(ordinal, synthetic),
+                BaselineOutcome::FirstSeen,
+                "each fresh synthetic JA4 seeds the set"
+            );
+        }
+
+        // conn2: a 17th distinct JA4 overflows the full set; the deviation
+        // decision fires regardless of capacity and the loss flag latches.
+        serving.slots[0].reset();
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_b, "sub.example.org");
+        let deviated_b = serving.slots[0].inspector.hello().expect("hello").ja4();
+        assert_ne!(
+            deviated_b, baseline,
+            "the ALPN h2 variant must produce a distinct JA4"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            1,
+            "a 17th distinct JA4 fires the deviation decision regardless of set capacity"
+        );
+        assert!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change_loss(ordinal),
+            "the overflowed baseline suppresses detail and latches the loss flag"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_value(ordinal),
+            deviated_b,
+            "the latest overflowed JA4 value is retained for the ordinal"
+        );
+
+        // conn3: an 18th DISTINCT JA4 fires the decision again; the loss flag
+        // stays latched and the retained value follows the newest overflow.
+        serving.slots[0].reset();
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_c, "sub.example.org");
+        let deviated_c = serving.slots[0].inspector.hello().expect("hello").ja4();
+        assert_ne!(
+            deviated_c, deviated_b,
+            "the ALPN h3 variant must be distinct from the h2 variant"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            2,
+            "an 18th distinct JA4 fires the deviation decision again"
+        );
+        assert!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change_loss(ordinal),
+            "the loss flag stays latched across further overflows"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_value(ordinal),
+            deviated_c,
+            "the retained value follows the newest overflowed JA4"
+        );
+    });
+}
+
+#[test]
 fn ja4_baseline_defers_until_dial_persists_dest_ip() {
     with_serving_stack(ephemeral_port(), |serving| {
         let wire = hello_wire(b"sub.example.org", false);

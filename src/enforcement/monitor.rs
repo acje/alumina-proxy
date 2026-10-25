@@ -19,6 +19,7 @@ pub struct FactCounters {
     pub(crate) probe_relocations: SaturatingCounter,
     pub(crate) expired_pin_certs: SaturatingCounter,
     pub(crate) ja4_change: [SaturatingCounter; ALLOWLIST_MAX],
+    pub(crate) ja4_change_loss: [bool; ALLOWLIST_MAX],
     pub(crate) ja4_value: [[u8; 36]; ALLOWLIST_MAX],
     pub(crate) ja4_seed: SaturatingCounter,
     pub(crate) ja4_peer_ip: NumericAddr,
@@ -37,6 +38,7 @@ impl Default for FactCounters {
             probe_relocations: SaturatingCounter::new(),
             expired_pin_certs: SaturatingCounter::new(),
             ja4_change: std::array::from_fn(|_| SaturatingCounter::new()),
+            ja4_change_loss: [false; ALLOWLIST_MAX],
             ja4_value: [[0; 36]; ALLOWLIST_MAX],
             ja4_seed: SaturatingCounter::new(),
             ja4_peer_ip: NumericAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -258,7 +260,10 @@ impl Monitor {
     /// up to `MAX_ADDRESSES` distinct strings). The per-ordinal counter is an
     /// event fold, emitted by the monitor record's JA4-change surface; the
     /// 36-byte value is retained as the latest overflowed JA4 for the ordinal,
-    /// keyed to the triggering peer's destination IP (SP-013).
+    /// keyed to the triggering peer's destination IP (SP-013). The overflow
+    /// also latches the per-ordinal detail-loss flag (`d<j>x`): the deviation
+    /// decision fires regardless of set capacity, but the overflowed value is
+    /// not added to the set, so the operator sees that detail was suppressed.
     pub(crate) const fn note_fact_ja4_change(
         &mut self,
         ordinal: DomainOrdinal,
@@ -266,6 +271,7 @@ impl Monitor {
         peer_ip: NumericAddr,
     ) {
         self.facts.ja4_change[ordinal.get()].bump();
+        self.facts.ja4_change_loss[ordinal.get()] = true;
         self.facts.ja4_value[ordinal.get()] = ja4;
         self.facts.ja4_peer_ip = peer_ip;
         self.facts.ja4_peer_ordinal = Some(ordinal);
@@ -390,6 +396,10 @@ impl Monitor {
 
     pub(crate) const fn facts_ja4_change(&self, ordinal: DomainOrdinal) -> u32 {
         self.facts.ja4_change[ordinal.get()].value()
+    }
+
+    pub(crate) const fn facts_ja4_change_loss(&self, ordinal: DomainOrdinal) -> bool {
+        self.facts.ja4_change_loss[ordinal.get()]
     }
 
     pub(crate) const fn facts_ja4_value(&self, ordinal: DomainOrdinal) -> [u8; 36] {
@@ -813,6 +823,10 @@ pub(crate) mod tests {
             "every ja4-seed fact folds into the aggregate"
         );
         assert_eq!(m.facts_ja4_seed(), 1);
+        assert!(
+            !m.facts_ja4_change_loss(ordinal),
+            "a first-seen seeding never sets the detail-loss flag"
+        );
         m.note_fact_ja4_change(ordinal, *b"t13d1516h2_8daaf6152771_02713d6af862", peer);
         assert_eq!(
             m.facts_total(),
@@ -820,6 +834,10 @@ pub(crate) mod tests {
             "seed and change facts fold into the aggregate"
         );
         assert_eq!(m.facts_ja4_change(ordinal), 1);
+        assert!(
+            m.facts_ja4_change_loss(ordinal),
+            "an overflowed baseline suppresses detail and latches the loss flag"
+        );
         assert_eq!(m.ja4_peer_ordinal(), Some(ordinal));
         assert_eq!(m.ja4_peer_ip(), peer);
         m.saturate_all_for_test();
