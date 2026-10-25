@@ -1421,6 +1421,10 @@ The failback clause (`:729`) states the consecutive-success counter resets "when
 | Backup success (non-primary) | unchanged | backup | unchanged (armed) | `None` |
 | Shutdown | discarded | — | — | — |
 
+#### F-08 — JA4 baseline overflow suppresses detail, never the deviation decision
+
+The per-ordinal JA4 set baseline (SP-005, `:1229-1240`) stores up to K=16 distinct observed JA4 strings per ordinal and suppresses every further add until restart. A compromised application can deliberately generate 16 syntactically accepted ClientHello variants, fill the set, and then make subsequent profile changes collapse into the overflow count: the overflow count reveals saturation, but the set can no longer provide distinct change detail for later attacker profiles or legitimate clients, and because the baseline is never updated this blindness persists for the process lifetime. Resolution: the deviation decision is separated from the bounded detail set. The 16-entry set remains the immutable comparison reference (`Ja4BaselineTable`, `src/serving.rs`); every first-seen JA4 beyond set capacity fires the per-ordinal JA4-change deviation signal (`d<j>j` count, `d<j>v` latest overflowed value, `d<j>p` triggering peer), regardless of set capacity — the 17th and every later distinct JA4 each fire the decision. Overflow suppresses detail only, never the decision: the overflowed value is not added to the set (the set is never updated, preserving the SP-005 baseline-never-updated doctrine), only the latest overflowed value is retained, and the per-ordinal detail-loss flag `d<j>x` latches to signal the operator that detail was suppressed. The loss flag is a latched boolean, not a counted fact, and does not fold into `facts_total`. This refines SP-005's suppress-with-count semantics: the count and the loss flag are the operator-visible overflow surface, and the decision is capacity-independent. Deterministic tests prove a 17th distinct JA4 fires the decision and latches the loss flag, and an 18th distinct JA4 fires the decision again with the retained value following the newest overflow (`ja4_set_overflow_fires_decision_on_each_new_distinct_beyond_capacity`, `src/serving/tests.rs`).
+
 ### Status
 
 | Surface | Status |
@@ -1429,6 +1433,7 @@ The failback clause (`:729`) states the consecutive-success counter resets "when
 | F-03: Probe-Isolation Invariant — probe responses determine only the probe verdict and probed-resolver health; name outcomes discarded (`alumina-rbp` `:831` refined) | Implemented (commit `feac28f`) |
 | F-04: failover relocates on the same transition that records the third failure; `5 × 3 × 5 = 75 ≤ 90` budget proof corresponds to the state machine (`:597` corrected) | Implemented (this increment) |
 | F-05: failback counter resets at arm and on probe failure, not on every probe begin; transition table + mid-regime probe-begin regression test (`:729` refined) | Implemented (this increment) |
+| F-08: JA4 baseline overflow suppresses detail only — the deviation fires on every distinct JA4 beyond the 16-entry set, the per-ordinal `d<j>x` loss flag latches, and the latest overflowed value is retained; SP-005 (`:1229-1240`) refined (reconciles the redtm SP-005 "Planned" status row) | Implemented (this increment) |
 
 ### Explicitly unchanged (non-negotiable)
 
