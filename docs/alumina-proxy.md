@@ -1471,9 +1471,11 @@ is widened from 8 KiB to a fixed 10 KiB (`SLOT_BYTES = 10 * 1024`, `src/log.rs`;
 stays 256 slots, `LOG_QUEUE_BYTES = 256 × 10 KiB`, `src/inventory.rs`), and the worst-case
 monitor record re-measures at 8191 B against the 10240-byte slot — 2049 B of headroom. This
 supersedes the 8 KiB geometry claims at `:1019` (log queue geometry "256 x 8 KiB slots"),
-`:1120` (the resolver_probe headroom row), and `:1127` (the re-measure-against-8192-byte
-sentence), and the 22 B known-risk recorded at `:1126`; those remain in place as the
-historical record of the superseded 8 KiB bound. The fixed profile is restated unchanged
+`:1120` (the resolver_probe headroom row), `:1127` (the re-measure-against-8192-byte
+sentence), `:1381` (the SP-013 Status row "re-measured vs 8192-B slot (`:955`/`:1120`,
+8170 B / 22 B margin)"), and `:1452` (the alox7 F-12 Status row "re-measures at 8170 B /
+22 B margin (`:1120` updated)"), and the 22 B known-risk recorded at `:1126`; those remain
+in place as the historical record of the superseded 8 KiB bound. The fixed profile is restated unchanged
 except for the log queue geometry: 512 tunnels, 128 pending setups, two 128 KiB per-slot
 buffers, 128 MiB traffic storage, the 256 × 10 KiB log queue, 16-op/64 KiB visits,
 at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup
