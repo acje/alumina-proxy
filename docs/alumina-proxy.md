@@ -301,7 +301,7 @@ All added enforcement and monitoring storage is boot-time allocated from the exi
 | Per-slot latched tripwire fact (phase, class, validated ordinal, generation) | 512 | 8 B | 4096 B |
 | Per-ordinal saturated aggregate counters + overflow + window state | 32 | 32 B | 1024 B |
 | Per-slot last-counted window marker | 512 | 8 B | 4096 B |
-| First-seen JA4 baseline table (36-char JA4 + 1-char present flag + 4-byte IP) | 512 | ~41 B | ~21 KiB |
+| First-seen JA4 baseline table (36-byte JA4 per entry; per-ordinal, no per-IP element) | 512 | 36 B | 18432 B (~18 KiB) |
 | ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions + `[u16; 64]` sigalgs in per-slot `ChInspector`) | 512 | ~16.5 KiB | ~8.2 MiB |
 
 The planned additional enforcement and monitoring control storage (the five non-JA4 rows above) totals approximately 9–10 KiB against the existing 128 MiB traffic storage and 2 MiB log queue. The two JA4 rows (first-seen baseline ~21 KiB and ClientHello retention ~8.2 MiB) are additional and separately accounted in the JA4 client-fingerprint tripwire amendment section. Exact sizes are fixed at implementation with `sizeof`-verified types. No pacing credit/burst storage is reserved or preallocated while Tarpit is deferred (no speculative reserved pacing allocation); it is added to this table only if a genuine trigger-catalog decision authorizes Tarpit. Per-turn enforcement work composes with the existing 16-op/64 KiB per-visit budget and at-most-256-visit timer recheck; the per-turn control-step count is a fixed value derived from that native per-visit I/O budget at implementation, not an invented range. Block All's bounded physical closure is the only path that walks the slot table.
@@ -1118,14 +1118,14 @@ the fixed 8192-byte slot:
 | `capacity_high` / `capacity_low` | 127 B / 125 B | 8065 B / 8067 B |
 | `queue_high` / `queue_low` | 124 B / 122 B | 8068 B / 8070 B |
 | `resolver_probe` | 1857 B | 6335 B |
-| `monitor` | 8139 B | 53 B |
+| `monitor` | 8170 B | 22 B |
 
 Both startup records fit with wide margins, so the encoded-entry requirement at `:236` is met
 by measurement for every valid configuration. `monitor` is the tightest record in the
-vocabulary at 53 B of headroom; this amendment neither changes that record nor claims it is
-compliant by construction, and the 53-byte margin is recorded as a known risk: any future
-addition to the monitor report shape must re-measure against the 8192-byte slot before it is
-accepted.
+vocabulary at 22 B of headroom; the alox7 F-12 compaction (`dx=` bitset) re-measured it and it
+is not claimed compliant by construction, and the 22-byte margin is recorded as a known risk:
+any future addition to the monitor report shape must re-measure against the 8192-byte slot
+before it is accepted.
 
 ### Explicitly unchanged (non-negotiable)
 
@@ -1433,6 +1433,10 @@ A received TTL of zero is promoted to one second (`:74`), after which the ordina
 
 The DoT handshake clauses (`alumina-dot-chain-v1-v5`, `:676`, `:682`) require identity validation without specifying an allowed protocol-version set, and the recorded rustls configuration carried the `tls12` feature (`Cargo.toml`, `alumina-zai` `:796`), so the DoT specification permitted a pinned, SAN-valid TLS 1.2 session even though the tunnel ClientHello profile (`:47`) and the serving surface are TLS 1.3-only. Resolution: the DoT client negotiates TLS 1.3 only — `build_tls_connection` (`src/startup_dns.rs`) now calls `with_protocol_versions(&[&rustls::version::TLS13])`, and the `tls12` feature is removed from the rustls dependency (`Cargo.toml`), so the client contains no TLS 1.2 code at all. A DoT peer that cannot complete a TLS 1.3 handshake — including a TLS 1.2-only resolver — is deterministically refused at the handshake and counted as a connect failure; the client never negotiates down and never falls back to plain DNS. This refines the DoT handshake clauses (`:676`, `:682`) to bind the client to the same TLS 1.3-only profile as the serving surface. A consequence is recorded: a TLS 1.2-only public resolver is excluded and fails closed until it upgrades. Deterministic tests prove the client fails closed against a TLS 1.2-only peer — a raw responder answering with the TLS 1.2 `protocol_version` fatal alert (`0x46`) that such a server sends to a TLS 1.3-only offer — on both the pinned and CA-chain branches, and negotiates TLS 1.3 with a TLS 1.3-only server (`pinned_dot_rejects_tls12_only_peer`, `unpinned_dot_rejects_tls12_only_peer`, `pinned_dot_negotiates_tls13_with_tls13_only_server`, `src/startup_dns/dot_tests.rs`).
 
+#### F-12 — Monitor loss-flag render compacts to a single `dx=` bitset
+
+The per-ordinal JA4-change detail-loss flag (`d<j>x`, F-08, `:1426`) is a latched boolean per ordinal, rendered by the monitor record as one `d<j>x=1` key per latched ordinal. With all 32 ordinals latched the per-ordinal renders add 214 B to the worst-case monitor record, pushing it to 8372 B — over the 8192-byte log-slot bound (`:236`), which would have made `enqueue_reserved` silently drop the record (violating the `:236` "every valid configuration" guarantee and the `:1120` headroom known risk). Resolution: the 32 latched per-ordinal flags render as a single `dx=<hex>` 32-bit bitset — bit i = ordinal i's `ja4_change_loss` latch, lowercase hex, leading zeros omitted, emitted once only when any flag is set (`encode_monitor`, `src/log.rs`). The per-ordinal latch and accessor are unchanged (`src/enforcement/monitor.rs`); only the render compacts, so the fixed profile and zero-heap record path are preserved. `saturate_all_for_test` now latches all 32 flags so the worst-case slot test exercises the bitset render. The worst-case monitor record re-measures at 8170 B against the 8192-byte slot — 22 B of headroom — restoring the `:236` guarantee and superseding the stale 8139 B / 53 B measurement (`:1120`). This supersedes the F-08 section's `d<j>x` render reference (`:1426`) and its Status row: the loss-flag vocabulary is now the single `dx=` bitset. It also corrects SP-013 (`:1322-1330`): the first-seen JA4 baseline is per-ordinal (SP-005, `Ja4BaselineTable`, `src/serving.rs` — a 36-byte JA4 per entry, no per-IP element), the latest changed JA4 is keyed per-ordinal, and the triggering peer's source address is carried in the flare/monitor record as a fixed tagged IPv4/IPv6 union — there is no per-(ordinal, IP) baseline. SP-013's forward reference ("sub-mission 6") is fulfilled by this increment. Deterministic tests prove the exact monitor grammar (`dx=1` for a single ordinal-0 latch) and the worst-case slot fit with margin (`logging_monitor_summary_exact_grammar_and_zero_suppression`, `logging_worst_case_record_per_kind_fits_the_slot_with_margin`, `src/log.rs`).
+
 ### Status
 
 | Surface | Status |
@@ -1444,6 +1448,7 @@ The DoT handshake clauses (`alumina-dot-chain-v1-v5`, `:676`, `:682`) require id
 | F-08: JA4 baseline overflow suppresses detail only — the deviation fires on every distinct JA4 beyond the 16-entry set, the per-ordinal `d<j>x` loss flag latches, and the latest overflowed value is retained; SP-005 (`:1229-1240`) refined (reconciles the redtm SP-005 "Planned" status row) | Implemented (this increment) |
 | F-10: zero-TTL entries never admit stale serving — per-entry `stale_allowed` bit derived from the earliest supporting TTL, `servable()` gates the stale arm on the bit, and the zero-TTL refresh interval is the one-second boundary (sole exception to the 5-second floor, `:76` refined); RT-006 (`:1341-1349`) refined | Implemented (this increment) |
 | F-11: DoT client negotiates TLS 1.3 only — `build_tls_connection` binds `with_protocol_versions(&[TLS13])`, the `tls12` feature is removed from the rustls dependency, and a TLS 1.2-only peer is refused at the handshake on both pinned and CA-chain branches (DoT handshake clauses `:676`, `:682` refined) | Implemented (this increment) |
+| F-12: monitor loss-flag render compacts to a single `dx=<hex>` 32-bit bitset (bit i = ordinal i) — the per-ordinal `d<j>x` keys are gone, the worst-case monitor record re-measures at 8170 B / 22 B margin (`:1120` updated), F-08's `d<j>x` render reference (`:1426`) is superseded, and SP-013 (`:1322-1330`) is corrected to the per-ordinal baseline + per-ordinal latest changed JA4 + fixed tagged IPv4/IPv6 triggering source address (no per-IP baseline) | Implemented (this increment) |
 
 ### Explicitly unchanged (non-negotiable)
 
