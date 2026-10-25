@@ -307,7 +307,7 @@ The planned additional enforcement and monitoring control storage (the five non-
 
 ### Explicitly unchanged (non-negotiable)
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob.
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8/3600 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob.
 
 ### Status
 
@@ -1386,7 +1386,7 @@ this package; this amendment records the binding semantics.
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers,
 128 MiB traffic storage, the 256 × 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit
 recheck, DNS response/candidate/incident caps, the 90-second startup window, and all
-deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte
+deadlines — 10/2/300/5/8/3600 seconds); empty capability sets and `no_new_privs`; byte
 conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime
 metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI +
 ECH-reject; packet dropping is never implemented; no new dependency unless its intake
