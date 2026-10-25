@@ -2667,6 +2667,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn logging_monitor_summary_exact_grammar_and_zero_suppression() {
         use crate::eligibility::NumericAddr;
         use crate::enforcement::action::{AnyIllegalScope, DomainOrdinal};

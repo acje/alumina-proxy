@@ -886,8 +886,8 @@ pub(crate) mod tests {
         let mut en = Enforcement::new(table(AnyIllegalScope::Connection, &actions));
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         let mut v = Effect::BaselineOnly;
-        for i in 0..3 {
-            let source = Some(SocketAddr::from(([127, 0, 0, 1], 40000 + i as u16)));
+        for i in 0..3u16 {
+            let source = Some(SocketAddr::from(([127, 0, 0, 1], 40000 + i)));
             v = en.decide(
                 &mut FirstSlot::new(),
                 Violation::EarlyUpstreamData { ordinal },

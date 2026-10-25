@@ -2039,7 +2039,9 @@ mod tests {
 
     #[test]
     fn sigalgs_at_max_sigalgs_accepted() {
-        let values: Vec<u16> = (0..MAX_SIGALGS as u16).map(|i| 0x0400 + i).collect();
+        let values: Vec<u16> = (0..MAX_SIGALGS)
+            .map(|i| 0x0400 + u16::try_from(i).expect("sigalg index fits u16"))
+            .collect();
         let data = sigalgs_ext(&values);
         let wire =
             hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (SIGNATURE_ALGORITHMS, &data)]);

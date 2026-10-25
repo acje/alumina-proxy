@@ -601,11 +601,12 @@ mod tests {
         let mut en = Enforcement::new(t);
         let ordinal = t.ordinal(0).expect("ordinal");
         for i in 0..3u64 {
+            let port = u16::try_from(40000 + i).expect("test port fits u16");
             let effect = en.decide(
                 &mut FirstSlot::new(),
                 Violation::EarlyUpstreamData { ordinal },
                 i,
-                Some(SocketAddr::from(([127, 0, 0, 1], 40000 + i as u16))),
+                Some(SocketAddr::from(([127, 0, 0, 1], port))),
             );
             if i < 2 {
                 assert_eq!(
@@ -699,11 +700,12 @@ mod tests {
         }
         assert!(en.block_all(), "three AnyIllegal facts arm the All latch");
         for i in 0..3u64 {
+            let port = u16::try_from(50000 + i).expect("test port fits u16");
             en.decide(
                 &mut FirstSlot::new(),
                 Violation::EarlyUpstreamData { ordinal },
                 10 + i,
-                Some(SocketAddr::from(([127, 0, 0, 1], 50000 + i as u16))),
+                Some(SocketAddr::from(([127, 0, 0, 1], port))),
             );
         }
         assert!(
@@ -972,11 +974,12 @@ mod tests {
         let mut en = Enforcement::new(t);
         let ordinal = t.ordinal(0).expect("ordinal");
         for i in 0..2u64 {
+            let port = u16::try_from(40000 + i).expect("test port fits u16");
             let effect = en.decide(
                 &mut FirstSlot::new(),
                 Violation::EarlyUpstreamData { ordinal },
                 i,
-                Some(SocketAddr::from(([127, 0, 0, 1], 40000 + i as u16))),
+                Some(SocketAddr::from(([127, 0, 0, 1], port))),
             );
             assert_eq!(
                 effect,

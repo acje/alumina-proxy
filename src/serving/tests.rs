@@ -4561,7 +4561,7 @@ fn fabric_relay_slot_pair(
 }
 
 /// A fresh loopback socket pair; returns the server-accepted side. Each call
-/// yields a distinct peer_addr, so per-event client-source corroboration can
+/// yields a distinct `peer_addr`, so per-event client-source corroboration can
 /// reach K distinct sockets (SP-002).
 fn fresh_client_source() -> mio::net::TcpStream {
     let listener = StdListener::bind("127.0.0.1:0").expect("client-source bind");
@@ -4897,11 +4897,8 @@ fn port_mismatch_on_domain_blocked_ordinal_is_host_not_allowlisted() {
             .ordinal_for_pair(&approved, 443)
             .expect("ordinal");
         let mut latch = crate::enforcement::action::FirstSlot::new();
-        for i in 0..3 {
-            let source = Some(std::net::SocketAddr::from((
-                [127, 0, 0, 1],
-                40000 + i as u16,
-            )));
+        for i in 0..3u16 {
+            let source = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 40000 + i)));
             serving.storage_mut().enforcement_mut().decide(
                 &mut latch,
                 crate::enforcement::policy::Violation::EarlyUpstreamData { ordinal },
@@ -7711,7 +7708,7 @@ fn ja4_set_overflow_flares_signal_once_per_connection() {
         // 16-entry set is full before the deviation arrives.
         for i in 0..MAX_ADDRESSES - 1 {
             let mut synthetic = [b'x'; 36];
-            synthetic[0] = b'a' + i as u8;
+            synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
             assert_eq!(
                 serving.ja4_baseline.record(ordinal, synthetic),
                 BaselineOutcome::FirstSeen,
@@ -7871,7 +7868,10 @@ fn ja4_baseline_set_overflow_suppresses_and_dedups_unchanged() {
         };
         for i in 0..MAX_ADDRESSES {
             assert_eq!(
-                serving.ja4_baseline.record(ordinal, synthetic(i as u8)),
+                serving.ja4_baseline.record(
+                    ordinal,
+                    synthetic(u8::try_from(i).expect("addr index fits u8"))
+                ),
                 BaselineOutcome::FirstSeen,
                 "each fresh distinct JA4 seeds the set"
             );
@@ -7961,7 +7961,7 @@ fn ja4_set_overflow_emits_monitor_dnj_record() {
         // Fill the remaining 15 set slots so the 16-entry set is full.
         for i in 0..MAX_ADDRESSES - 1 {
             let mut synthetic = [b'x'; 36];
-            synthetic[0] = b'a' + i as u8;
+            synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
             serving.ja4_baseline.record(ordinal, synthetic);
         }
 
