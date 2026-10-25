@@ -113,14 +113,31 @@ fn main() {
         .collect();
     assert!(
         !monitor_lines.is_empty(),
-        "the runtime must emit a coalesced monitor summary on real stdout"
+        "the runtime must emit a coalesced monitor family on real stdout"
+    );
+    let summaries: Vec<&str> = monitor_lines
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("level=info kind=monitor "))
+        .collect();
+    let detail_batches: Vec<&str> = monitor_lines
+        .iter()
+        .copied()
+        .filter(|l| {
+            l.starts_with("level=info kind=monitor_domain ")
+                || l.starts_with("level=info kind=monitor_capture ")
+        })
+        .collect();
+    assert!(
+        !summaries.is_empty(),
+        "the runtime must emit at least one monitor summary on real stdout"
     );
     assert!(
-        monitor_lines.len() <= MAX_MONITOR_RECORDS,
+        summaries.len() <= MAX_MONITOR_RECORDS,
         "summaries are coalesced to whole seconds, not per detection: {} lines",
-        monitor_lines.len()
+        summaries.len()
     );
-    for line in &monitor_lines {
+    for line in &summaries {
         let facts = field_u64(line, "facts_total");
         let actions = field_u64(line, "actions_total");
         let refusals = field_u64(line, "refusals_total");
@@ -133,21 +150,34 @@ fn main() {
             "Host-Not-Allowlisted refuses are detections+actions, never blocked-domain refusals: {line}"
         );
         assert!(line.contains(" ofacts=0"), "no counter saturated: {line}");
+    }
+    for line in &detail_batches {
+        assert!(
+            line.contains(" part="),
+            "every detail batch carries a part=<n>/<total> marker: {line}"
+        );
+        assert!(
+            !line.contains("facts_total="),
+            "detail batches carry no summary globals: {line}"
+        );
+    }
+    for line in &monitor_lines {
         assert!(
             !line.contains("d0j="),
-            "the per-ordinal ja4-change fold is zero-suppressed on real stdout when no JA4 \
+            "per-ordinal ja4-change is zero-suppressed on real stdout when no JA4 \
              deviation occurred: {line}"
         );
     }
     let elapsed = started.elapsed().as_secs().max(1);
     assert!(
-        monitor_lines.len() as u64 <= (elapsed + 2),
+        summaries.len() as u64 <= (elapsed + 2),
         "at most one summary per whole serving second (elapsed {elapsed}s got {}): {text}",
-        monitor_lines.len()
+        summaries.len()
     );
     eprintln!(
-        "MONITOR-STDOUT-OK loops={LOOPS} records={} refusals=0 facts==actions elapsed={elapsed}s",
-        monitor_lines.len()
+        "MONITOR-STDOUT-OK loops={LOOPS} summaries={} detail_batches={} refusals=0 facts==actions elapsed={elapsed}s",
+        summaries.len(),
+        detail_batches.len()
     );
 }
 
