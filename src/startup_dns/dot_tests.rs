@@ -267,14 +267,14 @@ fn server_config(cert: &'static [u8], key: &'static [u8]) -> ServerConfig {
         .expect("loopback server certificate/key valid")
 }
 
-/// Builds a rustls server configuration restricted to TLS 1.2, so the client's
-/// offered 1.2/1.3 set must negotiate down to 1.2 and still publish.
-fn server_config_tls12(cert: &'static [u8], key: &'static [u8]) -> ServerConfig {
+/// Builds a rustls server configuration restricted to TLS 1.3, so a client
+/// offering only TLS 1.3 must negotiate 1.3 and still publish.
+fn server_config_tls13(cert: &'static [u8], key: &'static [u8]) -> ServerConfig {
     let provider = rustls::crypto::ring::default_provider();
     let certificate = CertificateDer::from(cert.to_vec());
     let key = PrivateKeyDer::try_from(key.to_vec()).expect("embedded ec p256 pkcs8 key");
     ServerConfig::builder_with_provider(Arc::new(provider))
-        .with_protocol_versions(&[&rustls::version::TLS12])
+        .with_protocol_versions(&[&rustls::version::TLS13])
         .expect("loopback server protocol versions")
         .with_no_client_auth()
         .with_single_cert(vec![certificate], key)
@@ -1081,9 +1081,43 @@ fn pinned_dot_accepts_not_yet_valid_cert_with_matching_pin() {
 }
 
 #[test]
-fn pinned_dot_negotiates_tls12_with_tls12_only_server() {
+fn pinned_dot_rejects_tls12_only_peer() {
+    // A TLS 1.2-only server answers a ClientHello offering only TLS 1.3 with a
+    // fatal `protocol_version` alert (0x46). The transport's rustls client has
+    // no TLS 1.2 code at all (the `tls12` feature is removed), so this is the
+    // closest honest byte-level stand-in for that peer: the client must fail
+    // closed on the alert, never fall back to plain DNS.
+    let responder = spawn_raw_responder(vec![0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x46]);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(
+        report.failed, 4,
+        "the TLS 1.3-only DoT client must refuse a peer that cannot complete a TLS 1.3 handshake, never negotiate down"
+    );
+    assert_eq!(report.exchanges, 0);
+    assert_eq!(report.resolved_names, 0);
+    assert_eq!(bindings_of(&cache, 0, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 0, Family::Aaaa), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::Aaaa), Vec::new());
+    drop(responder);
+}
+
+#[test]
+fn pinned_dot_negotiates_tls13_with_tls13_only_server() {
     let responder = spawn_tls_responder_config(
-        server_config_tls12(GOOD_CERT, GOOD_KEY),
+        server_config_tls13(GOOD_CERT, GOOD_KEY),
         AdversarialReply::Positive,
     );
     let cfg = dot_config(&pinned_resolver());
@@ -1103,7 +1137,7 @@ fn pinned_dot_negotiates_tls12_with_tls12_only_server() {
     assert_eq!(report.failed, 0);
     assert_eq!(
         report.resolved_names, 2,
-        "the transport's 1.2/1.3 offer must negotiate down to a TLS 1.2-only server and still publish"
+        "the TLS 1.3-only DoT client must negotiate TLS 1.3 with a TLS 1.3-only server and publish"
     );
     assert_eq!(
         bindings_of(&cache, 0, Family::A),
@@ -1111,6 +1145,35 @@ fn pinned_dot_negotiates_tls12_with_tls12_only_server() {
             std::net::Ipv4Addr::new(93, 184, 216, 34)
         )]
     );
+    drop(responder);
+}
+
+#[test]
+fn unpinned_dot_rejects_tls12_only_peer() {
+    // Same TLS 1.2 `protocol_version` fatal alert on the CA-chain branch: the
+    // client must fail closed at the handshake before any cert check runs.
+    let responder = spawn_raw_responder(vec![0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x46]);
+    let cfg = dot_config(UNPINNED_RESOLVER);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(
+        report.failed, 4,
+        "the TLS 1.3-only DoT client must refuse a peer that cannot complete a TLS 1.3 handshake on the CA-chain branch too"
+    );
+    assert_eq!(report.exchanges, 0);
+    assert_eq!(report.resolved_names, 0);
+    assert_eq!(bindings_of(&cache, 0, Family::A), Vec::new());
+    assert_eq!(bindings_of(&cache, 1, Family::A), Vec::new());
     drop(responder);
 }
 

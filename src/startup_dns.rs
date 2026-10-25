@@ -1040,13 +1040,13 @@ fn cert_outside_validity_window(der: &[u8], now: UnixTime) -> bool {
 /// The heap allocations here are the bounded per-connection `DoT` setup cost —
 /// never on the bare-IP path, which constructs no TLS state at all.
 ///
-/// The client negotiates the rustls safe-default profile (TLS 1.2 + 1.3 via
-/// `with_safe_default_protocol_versions`, with the `tls12` feature kept for
-/// `DoT` resolver compatibility, `Cargo.toml`). This is an intentional,
-/// documented drift from the serving-side profile, which enforces TLS 1.3
-/// only (`validate_versions`); the `DoT` client must interoperate with
-/// arbitrary public resolvers, while the serving surface is a fixed
-/// first-party contract.
+/// The client negotiates TLS 1.3 only (`with_protocol_versions(&[TLS13])`,
+/// with the `tls12` feature removed, `Cargo.toml`), matching the serving-side
+/// profile which enforces TLS 1.3 only (`validate_versions`). A `DoT` resolver
+/// that offers only TLS 1.2 is deterministically refused at the handshake; the
+/// client never negotiates down. This is an intentional hardening: the `DoT`
+/// client and the serving surface share one TLS profile, at the cost of
+/// excluding TLS 1.2-only public resolvers.
 fn build_tls_connection(
     target: TlsTarget,
     expired_pin_certs: Arc<AtomicU32>,
@@ -1054,7 +1054,7 @@ fn build_tls_connection(
     let provider = rustls::crypto::ring::default_provider();
     let supported = provider.signature_verification_algorithms;
     let config = ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_safe_default_protocol_versions()?
+        .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AluminaServerCertVerifier {
             pin: target.pin,

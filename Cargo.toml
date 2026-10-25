@@ -197,8 +197,9 @@ libc = "=0.2.190"
 # GATED behind rust-dep-intake (T3 build-time surface review) — no build/test
 # before the closure's build-time surface is read. ring chosen over aws-lc-rs
 # for the minimal cc-only C build (no cmake) fitting the constrained-server
-# static-link profile. tls12 kept for DoT resolver compatibility.
-rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# static-link profile. TLS 1.3 only (no tls12 feature): the DoT client shares
+# the serving-side TLS profile; TLS 1.2-only resolvers are refused.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging"] }
 rustls-pki-types = "=1.15.1"
 rustls-webpki = { version = "=0.103.16", default-features = false, features = ["ring", "std"] }
 # Direct ring access for the strict DoT SPKI pin: the pin is the SHA-256 of
