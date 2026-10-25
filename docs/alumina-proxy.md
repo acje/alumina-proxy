@@ -1379,7 +1379,7 @@ this package; this amendment records the binding semantics.
 | SP-009: probe-relocation counter disjoint from `dp=`; re-measured vs 8192-B slot (`:774`/`:829`/`:1120`) | Planned — later sub-mission |
 | SP-010: log-queue priority classes; latch/event records reserved; drop newest-lowest first (`:199`/`:290`) | Planned — later sub-mission |
 | SP-012: conflict predicates enumerated at `:58` (doc clarification, no new validation) | Implemented (this revision) |
-| SP-013: latest-change JA4 keyed (ordinal, IP) + triggering peer IP in flare; re-measured vs 8192-B slot (`:955`/`:1120`) | Planned — sub-mission 6 |
+| SP-013: latest-change JA4 keyed per-ordinal (per-ordinal first-seen baseline, `Ja4BaselineTable` — no per-(ordinal, IP) baseline) + triggering peer source address as fixed tagged IPv4/IPv6 union in flare/monitor record; re-measured vs 8192-B slot (`:955`/`:1120`, 8170 B / 22 B margin) | Implemented (this increment) |
 | RT-005: parent-zone bailiwick note; require nothing more today | Implemented (this revision) |
 | RT-006: independent stale-serving window, distinct from 259200 s retention; new profile deadline (`:310`) | Planned — later sub-mission |
 | RT-007: pin-branch Not-Before/Not-After check non-blocking + distinct expired-cert warning fact (`:675`) | Planned — later sub-mission |
