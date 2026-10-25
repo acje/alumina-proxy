@@ -80,6 +80,11 @@ fn falsifier_body() {
         .storage_mut()
         .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .mark_serving_started();
 
     let client = connect(port);
     let mut accepted = false;
@@ -148,6 +153,11 @@ fn exchange_failed_body() {
         .storage_mut()
         .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .mark_serving_started();
 
     runtime.cooperative_dns_turn().expect("cooperative turn");
 
@@ -218,6 +228,11 @@ fn hot_relay_many_slots_body() {
         .storage_mut()
         .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .mark_serving_started();
 
     let per_slot: usize = 160 * 1024;
     let per_slot_kib = per_slot / 1024;
@@ -751,6 +766,14 @@ fn name_published(runtime: &Runtime, ordinal: usize, family: Family) -> bool {
     matches!(cache.entry(name_index, family), Ok(entry) if !entry.bindings().is_empty())
 }
 
+fn owner_name_published(owner: &Preallocated, ordinal: usize, family: Family) -> bool {
+    let cache = owner.serving.storage().cache();
+    let Some(name_index) = cache.name_index(ordinal) else {
+        return false;
+    };
+    matches!(cache.entry(name_index, family), Ok(entry) if !entry.bindings().is_empty())
+}
+
 #[test]
 fn idle_after_published_does_not_spin() {
     let t = thread::Builder::new()
@@ -781,6 +804,11 @@ fn idle_falsifier_body() {
         .storage_mut()
         .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .mark_serving_started();
 
     let mut published = false;
     for _ in 0..200 {
@@ -850,6 +878,11 @@ fn reconnect_falsifier_body() {
         .storage_mut()
         .start_dns_exchange(0, Family::A, Instant::now() + Duration::from_secs(10))
         .expect("start exchange A");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .mark_serving_started();
     let mut first = false;
     for _ in 0..200 {
         runtime
@@ -875,6 +908,11 @@ fn reconnect_falsifier_body() {
         .storage_mut()
         .start_dns_exchange(0, Family::Aaaa, Instant::now() + Duration::from_secs(10))
         .expect("start exchange Aaaa");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .mark_serving_started();
     let mut second = false;
     for _ in 0..200 {
         runtime
@@ -1028,6 +1066,11 @@ fn shutdown_falsifier_body() {
         .storage_mut()
         .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .mark_serving_started();
     assert!(
         runtime.serving().storage().dns().has_active_exchange(),
         "the exchange must be active before the signal"
@@ -1135,6 +1178,11 @@ fn selfpipe_receiving_cancellation_body() {
         .storage_mut()
         .start_dns_exchange(0, Family::A, exchange_deadline)
         .expect("start exchange");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .mark_serving_started();
 
     let mut saw_receiving = false;
     for _ in 0..300 {
@@ -1340,6 +1388,242 @@ fn both_ready_settlement_body() {
         "the final name's answer became readable in the same poll batch, so the \
          post-batch turn re-checks shutdown before advance_dns and never counts it resolved"
     );
+}
+
+/// F3 boundary: a complete response already readable at window expiry must
+/// not be published. The window withholds the final allowlist answer until
+/// the exchange deadline passes with the response fully queued on the DNS fd;
+/// the pre-publication clock check (docs/alumina-proxy.md:64) must fail the
+/// exchange without publishing, so the name stays unresolved and no later
+/// publication occurs.
+fn startup_expiry_gates_already_readable_response_body() {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
+
+    let (responder_addr, held_flag, release_tx, wrote_rx, responder) = spawn_responder_hold_final();
+
+    let fired = std::cell::Cell::new(false);
+    let held_for_hook = held_flag;
+    let release = release_tx;
+    let wrote = wrote_rx;
+    let hook = std::rc::Rc::new(move |serving: &Serving| {
+        if fired.get() {
+            return;
+        }
+        if serving.test_active_ordinal() != Some(1) || !serving.test_active_receiving() {
+            return;
+        }
+        let spin_deadline = Instant::now() + Duration::from_millis(1500);
+        while !held_for_hook.load(std::sync::atomic::Ordering::SeqCst) {
+            if serving.test_active_ordinal() != Some(1) {
+                return;
+            }
+            assert!(
+                Instant::now() < spin_deadline,
+                "the final answer must be withheld once the final exchange is in flight"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        fired.set(true);
+        release
+            .send(())
+            .expect("release the held final allowlist answer");
+        wrote
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the held answer write_response must return before the exchange deadline");
+        let readable_deadline = Instant::now() + Duration::from_secs(5);
+        while !serving.test_dns_fd_readable() {
+            assert!(
+                Instant::now() < readable_deadline,
+                "the complete response must become readable before the exchange deadline"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let ex_deadline = serving
+            .storage()
+            .dns()
+            .exchange_deadline()
+            .expect("the final exchange must still be active with a deadline");
+        while Instant::now() < ex_deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    owner.serving.arm_pre_poll_hook(hook);
+
+    let outcome = owner
+        .run_startup_within(responder_addr, 1000, Duration::from_secs(6))
+        .expect("startup window");
+    drop(responder);
+
+    assert!(
+        !owner_name_published(&owner, 1, Family::A),
+        "a response already readable at expiry must never be published"
+    );
+    assert_eq!(
+        outcome.report.resolved_names, 1,
+        "only the initially-resolved name may count resolved at expiry"
+    );
+}
+
+/// F3 boundary: a response completing during the final turn (after the
+/// exchange deadline) must not be published. The window withholds the final
+/// answer until the exchange deadline has passed, so the response completes
+/// strictly after expiry; the pre-publication clock check must fail the
+/// exchange without publishing (docs/alumina-proxy.md:64-65).
+fn startup_expiry_gates_response_completing_during_final_turn_body() {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
+
+    let (responder_addr, held_flag, release_tx, wrote_rx, responder) = spawn_responder_hold_final();
+
+    let fired = std::cell::Cell::new(false);
+    let held_for_hook = held_flag;
+    let release = release_tx;
+    let wrote = wrote_rx;
+    let hook = std::rc::Rc::new(move |serving: &Serving| {
+        if fired.get() {
+            return;
+        }
+        if serving.test_active_ordinal() != Some(1) || !serving.test_active_receiving() {
+            return;
+        }
+        let spin_deadline = Instant::now() + Duration::from_millis(1500);
+        while !held_for_hook.load(std::sync::atomic::Ordering::SeqCst) {
+            if serving.test_active_ordinal() != Some(1) {
+                return;
+            }
+            assert!(
+                Instant::now() < spin_deadline,
+                "the final answer must be withheld once the final exchange is in flight"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        fired.set(true);
+        let ex_deadline = serving
+            .storage()
+            .dns()
+            .exchange_deadline()
+            .expect("the final exchange must still be active with a deadline");
+        while Instant::now() < ex_deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        release
+            .send(())
+            .expect("release the held final allowlist answer after expiry");
+        wrote
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the held answer write_response must return after expiry");
+        let readable_deadline = Instant::now() + Duration::from_millis(500);
+        while !serving.test_dns_fd_readable() {
+            assert!(
+                Instant::now() < readable_deadline,
+                "the response must complete after the exchange deadline"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    owner.serving.arm_pre_poll_hook(hook);
+
+    let outcome = owner
+        .run_startup_within(responder_addr, 1000, Duration::from_secs(6))
+        .expect("startup window");
+    drop(responder);
+
+    assert!(
+        !owner_name_published(&owner, 1, Family::A),
+        "a response completing after expiry must never be published"
+    );
+    assert_eq!(
+        outcome.report.resolved_names, 1,
+        "only the initially-resolved name may count resolved at expiry"
+    );
+}
+
+/// F3 boundary: the serving runtime must cancel a retained startup exchange
+/// whose window already expired rather than let it advance and publish past
+/// expiry. A past-deadline exchange is constructed directly on the attached
+/// owner (bypassing the window) and deliberately NOT marked as serving; one
+/// serving turn must cancel it without mutating the refresh schedule and
+/// without any publication (docs/alumina-proxy.md:64-65).
+fn retained_startup_exchange_cannot_advance_body() {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+    let (responder_addr, responder) = spawn_stall_responder();
+
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    let past_deadline = Instant::now() - Duration::from_secs(1);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, past_deadline)
+        .expect("start a retained startup exchange past its deadline");
+
+    assert!(
+        !runtime.serving.storage().dns().active_is_serving(),
+        "a directly-started exchange is a retained startup exchange, not a serving refresh"
+    );
+    let due_before = runtime.serving.storage().schedules().due_time(0, Family::A);
+
+    runtime
+        .turn(Some(Duration::from_millis(2)))
+        .expect("one serving turn");
+
+    let due_after = runtime.serving.storage().schedules().due_time(0, Family::A);
+    assert!(
+        !runtime.serving.storage().dns().has_active_exchange(),
+        "the retained startup exchange must be cancelled by the serving runtime"
+    );
+    assert!(
+        !name_published(&runtime, 0, Family::A),
+        "a retained startup exchange past deadline must never publish"
+    );
+    assert_eq!(
+        due_before, due_after,
+        "cancelling a retained startup exchange must not mutate the refresh schedule"
+    );
+    drop(responder);
+}
+
+#[test]
+fn startup_expiry_gates_already_readable_response() {
+    let t = thread::Builder::new()
+        .name("startup-expiry-readable-witness".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(startup_expiry_gates_already_readable_response_body)
+        .expect("spawn startup-expiry readable witness thread");
+    t.join().expect("startup-expiry readable witness thread");
+}
+
+#[test]
+fn startup_expiry_gates_response_completing_during_final_turn() {
+    let t = thread::Builder::new()
+        .name("startup-expiry-final-turn-witness".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(startup_expiry_gates_response_completing_during_final_turn_body)
+        .expect("spawn startup-expiry final-turn witness thread");
+    t.join().expect("startup-expiry final-turn witness thread");
+}
+
+#[test]
+fn retained_startup_exchange_cannot_advance() {
+    let t = thread::Builder::new()
+        .name("retained-startup-exchange-witness".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(retained_startup_exchange_cannot_advance_body)
+        .expect("spawn retained-startup-exchange witness thread");
+    t.join().expect("retained-startup-exchange witness thread");
 }
 
 enum SessionGate {

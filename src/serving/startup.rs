@@ -71,6 +71,13 @@ impl Serving {
                 break;
             }
             if Instant::now() >= window_deadline {
+                if let Some((ordinal, ex_family)) = self.storage.dns().active_identity() {
+                    self.storage
+                        .schedules_mut()
+                        .release_selection(ordinal, ex_family)
+                        .map_err(StartupDnsError::from)?;
+                    self.storage.dns_mut().cancel_for_shutdown();
+                }
                 break;
             }
             if let Some((ordinal, ex_family)) = self.storage.dns().active_identity() {

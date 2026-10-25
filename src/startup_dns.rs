@@ -207,6 +207,11 @@ struct ActiveExchange {
     /// settles as the counted failure it is, never aborted.
     connect_err: Option<io::ErrorKind>,
     tid: u16,
+    /// Whether the exchange was started by the serving runtime (a refresh)
+    /// rather than the startup window. The serving runtime cancels a retained
+    /// startup exchange whose window already expired; a serving refresh is
+    /// never cancelled by that path.
+    serving: bool,
 }
 
 /// The stage of one outstanding exchange, advanced by at most one stage each
@@ -1370,6 +1375,14 @@ impl StartupDns {
         self.active.as_ref().map(|ex| (ex.ordinal, ex.family))
     }
 
+    /// Whether the outstanding exchange was started by the serving runtime
+    /// rather than the startup window, for the runtime-boundary guard that a
+    /// retained startup exchange must not survive into serving.
+    #[cfg(test)]
+    pub(crate) fn active_is_serving(&self) -> bool {
+        self.active.as_ref().is_some_and(|ex| ex.serving)
+    }
+
     /// The configured resolver set, for the serving owner to fold per-resolver
     /// verdicts into the `resolver_probe` log record. `None` before any window.
     pub(crate) const fn resolvers(&self) -> Option<ResolverSet> {
@@ -1443,6 +1456,29 @@ impl StartupDns {
         self.written = 0;
         self.msglen = None;
         self.probe_sweep = None;
+    }
+
+    /// Marks the outstanding exchange as a serving-runtime refresh, so the
+    /// runtime-boundary guard ([`Self::cancel_retained_startup_exchange`])
+    /// never cancels a refresh the serving runtime owns. A no-op when idle;
+    /// the startup window never calls this, so a retained startup exchange
+    /// stays distinguishable from a serving refresh.
+    pub(crate) const fn mark_serving_started(&mut self) {
+        if let Some(ex) = self.active.as_mut() {
+            ex.serving = true;
+        }
+    }
+
+    /// Cancels a retained startup exchange whose window already expired: the
+    /// serving runtime must never advance or publish it
+    /// (docs/alumina-proxy.md:64-65). A serving-runtime refresh is never
+    /// cancelled by this path, and the refresh schedule is left untouched —
+    /// the startup window already released the in-flight selection on the
+    /// expiry path, so no stuck-pending slot can block a later refresh.
+    pub(crate) fn cancel_retained_startup_exchange(&mut self) {
+        if self.active.as_ref().is_some_and(|ex| !ex.serving) {
+            self.cancel_for_shutdown();
+        }
     }
 
     /// Test-only readiness probe on the retained shared stream: true only once
@@ -2252,6 +2288,16 @@ impl StartupDns {
             self.filled = 0;
             match outcome {
                 Ok(outcome) => {
+                    if Instant::now() >= ex.deadline {
+                        self.close_connection()?;
+                        let reason = self.note_failure(
+                            ex.ordinal,
+                            ex.family,
+                            schedules,
+                            FailureReason::Timeout,
+                        )?;
+                        return Ok(RecvStep::Failed(reason));
+                    }
                     let kind = classify_published(&outcome);
                     let name_index = cache
                         .name_index(ex.ordinal)
@@ -2688,6 +2734,7 @@ impl StartupDns {
             qlen: total,
             connect_err,
             tid,
+            serving: false,
         });
         Ok(())
     }

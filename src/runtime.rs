@@ -256,6 +256,10 @@ impl Runtime {
             self.dns_advances_last_turn = 0;
         }
         if !self.serving.is_shutdown() {
+            self.serving
+                .storage_mut()
+                .dns_mut()
+                .cancel_retained_startup_exchange();
             self.step_sweep()?;
             self.starts_due_dns_if_idle()?;
             let event_seen = self.serving.take_dns_event();
@@ -317,6 +321,7 @@ impl Runtime {
             .storage_mut()
             .start_dns_exchange(selected.name(), selected.family(), deadline)
             .map_err(ServeError::from)?;
+        self.serving.storage_mut().dns_mut().mark_serving_started();
         Ok(())
     }
 
