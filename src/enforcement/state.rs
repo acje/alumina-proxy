@@ -1,6 +1,119 @@
+use std::net::SocketAddr;
+
+use crate::config::ALLOWLIST_MAX;
+
 use super::action::{AnyIllegalScope, ControlTable, DomainOrdinal, FirstSlot, Scope};
 use super::monitor::{DnsAnomalyKind, Monitor, SlotCapture};
 use super::policy::{Effect, UnknownReason, Violation, decide as pure_decide};
+
+/// The fixed number of `AnyIllegal` facts that must cross within the fixed
+/// window before the All-scope latch may arm (SP-001; fixed constants, no
+/// speculative pacing).
+pub const ANY_ILLEGAL_THRESHOLD: u32 = 3;
+
+/// The fixed whole-second window within which the threshold facts must arrive
+/// (SP-001).
+pub const ANY_ILLEGAL_WINDOW_SECS: u64 = 60;
+
+/// The fixed number of consecutive distinct source sockets that must
+/// corroborate upstream-sourced early data before a Domain/All Action may
+/// apply (SP-002).
+pub const CORROBORATION_K: u32 = 3;
+
+/// A bounded fact counter that arms once the fixed threshold is crossed within
+/// the fixed window. The armed state is sticky until restart (rp2e :263).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowedCounter {
+    count: u32,
+    window_start: u64,
+    armed: bool,
+}
+
+impl WindowedCounter {
+    pub const fn new() -> WindowedCounter {
+        WindowedCounter {
+            count: 0,
+            window_start: 0,
+            armed: false,
+        }
+    }
+
+    /// Notes a fact at `secs`; returns whether the counter is armed (crossed
+    /// the threshold within the window). Once armed it stays armed.
+    pub const fn note(&mut self, secs: u64) -> bool {
+        if self.armed {
+            return true;
+        }
+        if secs.saturating_sub(self.window_start) >= ANY_ILLEGAL_WINDOW_SECS {
+            self.count = 0;
+            self.window_start = secs;
+        }
+        self.count += 1;
+        if self.count >= ANY_ILLEGAL_THRESHOLD {
+            self.armed = true;
+        }
+        self.armed
+    }
+}
+
+impl Default for WindowedCounter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-ordinal corroboration tracker: K consecutive distinct source sockets
+/// must corroborate upstream-sourced early data before a Domain/All Action may
+/// apply (SP-002). A duplicate of the immediate previous source resets the run
+/// to 1; a missing source resets it to 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Corroboration {
+    run: u32,
+    last_source: Option<SocketAddr>,
+    corroborated: bool,
+}
+
+impl Corroboration {
+    pub const fn new() -> Corroboration {
+        Corroboration {
+            run: 0,
+            last_source: None,
+            corroborated: false,
+        }
+    }
+
+    /// Notes an early-data source; returns whether the ordinal is corroborated
+    /// (K consecutive distinct sources seen). Once corroborated it stays so.
+    pub fn note(&mut self, source: Option<SocketAddr>) -> bool {
+        if self.corroborated {
+            return true;
+        }
+        match source {
+            None => {
+                self.run = 0;
+                self.last_source = None;
+            }
+            Some(src) => {
+                if self.last_source == Some(src) {
+                    self.run = 1;
+                } else {
+                    self.run += 1;
+                }
+                self.last_source = Some(src);
+                if self.run >= CORROBORATION_K {
+                    self.corroborated = true;
+                }
+            }
+        }
+        self.corroborated
+    }
+}
+
+impl Default for Corroboration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SaturatingCounter {
@@ -50,6 +163,8 @@ pub struct Enforcement {
     block_all: bool,
     blocked: u32,
     monitor: Monitor,
+    any_illegal_gate: WindowedCounter,
+    early_data_corroboration: [Corroboration; ALLOWLIST_MAX],
 }
 
 impl Enforcement {
@@ -59,6 +174,8 @@ impl Enforcement {
             block_all: false,
             blocked: 0,
             monitor: Monitor::new(),
+            any_illegal_gate: WindowedCounter::new(),
+            early_data_corroboration: [Corroboration::new(); ALLOWLIST_MAX],
         }
     }
 
@@ -74,8 +191,35 @@ impl Enforcement {
         (self.blocked >> ordinal.get()) & 1 == 1
     }
 
-    pub fn decide(&mut self, latch: &mut FirstSlot, violation: Violation) -> Effect {
-        let effect = pure_decide(&self.control, latch, violation);
+    pub fn decide(
+        &mut self,
+        latch: &mut FirstSlot,
+        violation: Violation,
+        secs: u64,
+        source: Option<SocketAddr>,
+    ) -> Effect {
+        let raw = pure_decide(&self.control, latch, violation);
+        let effect = match violation {
+            Violation::AnyIllegal { cause: _ } => {
+                let crossed = self.any_illegal_gate.note(secs);
+                match raw {
+                    Effect::Block { scope: Scope::All } if !crossed => Effect::BaselineOnly,
+                    _ => raw,
+                }
+            }
+            Violation::EarlyUpstreamData { ordinal } => {
+                let corroborated = self.early_data_corroboration[ordinal.get()].note(source);
+                match raw {
+                    Effect::Block { scope }
+                        if !corroborated && matches!(scope, Scope::Domain | Scope::All) =>
+                    {
+                        Effect::BaselineOnly
+                    }
+                    _ => raw,
+                }
+            }
+            _ => raw,
+        };
         match violation {
             Violation::AnyIllegal { cause } => {
                 self.monitor.note_fact_any_illegal(cause);
@@ -272,31 +416,38 @@ mod tests {
             &[(ActionKind::FlareOnly, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
-        let mut latch = FirstSlot::new();
-        let effect = en.decide(
-            &mut latch,
+        let first = en.decide(
+            &mut FirstSlot::new(),
             Violation::AnyIllegal {
                 cause: crate::enforcement::policy::AnyIllegalCause::HostNotAllowlisted,
             },
+            0,
+            None,
         );
-        assert_eq!(effect, Effect::Block { scope: Scope::All });
-        assert!(en.block_all());
+        assert_eq!(
+            first,
+            Effect::BaselineOnly,
+            "SP-001: one AnyIllegal fact must not arm the All latch"
+        );
+        assert!(!en.block_all());
         assert_eq!(
             en.counters()
                 .facts_any_illegal(AnyIllegalCause::HostNotAllowlisted),
             1
         );
         assert_eq!(en.counters().facts_any_illegal_total(), 1);
-        let again = en.decide(
-            &mut latch,
+        let second = en.decide(
+            &mut FirstSlot::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::TlsProfile(HelloRejectReason::ServerNameMismatch),
             },
+            1,
+            None,
         );
-        assert_eq!(again, Effect::BaselineOnly);
+        assert_eq!(second, Effect::BaselineOnly);
         assert!(
-            en.block_all(),
-            "a latched connection may not fire the action twice"
+            !en.block_all(),
+            "two AnyIllegal facts are still below the fixed threshold"
         );
         assert_eq!(
             en.counters().facts_any_illegal(AnyIllegalCause::TlsProfile(
@@ -306,6 +457,39 @@ mod tests {
             "a later AnyIllegal fact still folds by its exact cause"
         );
         assert_eq!(en.counters().facts_any_illegal_total(), 2);
+        let third = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
+            },
+            2,
+            None,
+        );
+        assert_eq!(
+            third,
+            Effect::Block { scope: Scope::All },
+            "the third AnyIllegal fact within the window crosses the threshold"
+        );
+        assert!(en.block_all());
+        let fourth = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::HostNotAllowlisted,
+            },
+            3,
+            None,
+        );
+        assert_eq!(
+            fourth,
+            Effect::Block { scope: Scope::All },
+            "once armed the All latch stays armed for later AnyIllegal facts"
+        );
+        assert!(en.block_all());
+        assert_eq!(
+            en.counters().facts_any_illegal_total(),
+            4,
+            "every AnyIllegal fact folds regardless of the gating"
+        );
     }
 
     #[test]
@@ -321,12 +505,16 @@ mod tests {
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
             },
+            0,
+            None,
         );
         en.decide(
             &mut latch,
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::TransferEncoding),
             },
+            1,
+            None,
         );
         assert_eq!(
             en.counters()
@@ -352,16 +540,31 @@ mod tests {
             &[(ActionKind::Block, Scope::Domain)],
         );
         let mut en = Enforcement::new(t);
-        let mut latch = FirstSlot::new();
         let ordinal = t.ordinal(0).expect("ordinal");
-        let effect = en.decide(&mut latch, Violation::EarlyUpstreamData { ordinal });
-        assert_eq!(
-            effect,
-            Effect::Block {
-                scope: Scope::Domain
+        for i in 0..3u64 {
+            let effect = en.decide(
+                &mut FirstSlot::new(),
+                Violation::EarlyUpstreamData { ordinal },
+                i,
+                Some(SocketAddr::from(([127, 0, 0, 1], 40000 + i as u16))),
+            );
+            if i < 2 {
+                assert_eq!(
+                    effect,
+                    Effect::BaselineOnly,
+                    "SP-002: early Block{{Domain}} is stripped until K distinct sources corroborate"
+                );
+                assert!(!en.test_blocked(ordinal));
+            } else {
+                assert_eq!(
+                    effect,
+                    Effect::Block {
+                        scope: Scope::Domain
+                    }
+                );
+                assert!(en.test_blocked(ordinal));
             }
-        );
-        assert!(en.test_blocked(ordinal));
+        }
         assert_eq!(en.counters().actions_domain_block(ordinal), 1);
         assert!(!en.block_all());
     }
@@ -376,7 +579,12 @@ mod tests {
         let mut latch = FirstSlot::new();
         let ordinal = t.ordinal(0).expect("ordinal");
         assert_eq!(
-            en.decide(&mut latch, Violation::EarlyUpstreamData { ordinal }),
+            en.decide(
+                &mut latch,
+                Violation::EarlyUpstreamData { ordinal },
+                0,
+                None
+            ),
             Effect::FlareOnly {
                 scope: Scope::Connection
             }
@@ -392,15 +600,17 @@ mod tests {
             &[(ActionKind::FlareOnly, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
-        let mut latch = FirstSlot::new();
-        let effect = en.decide(
-            &mut latch,
-            Violation::AnyIllegal {
-                cause: AnyIllegalCause::HostNotAllowlisted,
-            },
-        );
-        assert_eq!(effect, Effect::Block { scope: Scope::All });
-        assert!(en.block_all());
+        for i in 0..3u64 {
+            en.decide(
+                &mut FirstSlot::new(),
+                Violation::AnyIllegal {
+                    cause: AnyIllegalCause::HostNotAllowlisted,
+                },
+                i,
+                None,
+            );
+        }
+        assert!(en.block_all(), "three AnyIllegal facts arm the All latch");
         assert_eq!(
             en.counters().actions_block_all(),
             1,
@@ -417,16 +627,30 @@ mod tests {
     fn block_all_latch_counts_the_transition_once_not_every_all_application() {
         let t = table(AnyIllegalScope::All, &[(ActionKind::Block, Scope::All); 2]);
         let mut en = Enforcement::new(t);
-        let mut latch = FirstSlot::new();
-        en.decide(
-            &mut latch,
-            Violation::AnyIllegal {
-                cause: AnyIllegalCause::HostNotAllowlisted,
-            },
-        );
         let ordinal = t.ordinal(0).expect("big table ordinal");
-        en.decide(&mut latch, Violation::EarlyUpstreamData { ordinal });
-        assert!(en.block_all(), "both applications select Block All");
+        for i in 0..3u64 {
+            en.decide(
+                &mut FirstSlot::new(),
+                Violation::AnyIllegal {
+                    cause: AnyIllegalCause::HostNotAllowlisted,
+                },
+                i,
+                None,
+            );
+        }
+        assert!(en.block_all(), "three AnyIllegal facts arm the All latch");
+        for i in 0..3u64 {
+            en.decide(
+                &mut FirstSlot::new(),
+                Violation::EarlyUpstreamData { ordinal },
+                10 + i,
+                Some(SocketAddr::from(([127, 0, 0, 1], 50000 + i as u16))),
+            );
+        }
+        assert!(
+            en.block_all(),
+            "a corroborated early-data All application keeps the latch"
+        );
         assert_eq!(
             en.counters().actions_block_all(),
             1,
@@ -450,6 +674,8 @@ mod tests {
         let effect = en.decide(
             &mut latch,
             Violation::EarlyUpstreamData { ordinal: unbound },
+            0,
+            None,
         );
         assert!(matches!(effect, Effect::Unknown { .. }));
         assert_eq!(
@@ -482,6 +708,8 @@ mod tests {
         let effect = en.decide(
             &mut latch,
             Violation::EarlyUpstreamData { ordinal: unbound },
+            0,
+            None,
         );
         assert!(matches!(
             effect,
@@ -501,7 +729,7 @@ mod tests {
         );
         assert_eq!(en.counters().unknown_total(), 0);
         assert_eq!(
-            en.decide(&mut latch, Violation::EvidenceInsufficient),
+            en.decide(&mut latch, Violation::EvidenceInsufficient, 0, None),
             Effect::Unknown {
                 reason: UnknownReason::NotYetValidated
             }
@@ -519,7 +747,7 @@ mod tests {
         let t = table(AnyIllegalScope::All, &[(ActionKind::Block, Scope::All)]);
         let mut en = Enforcement::new(t);
         let mut latch = FirstSlot::new();
-        let effect = en.decide(&mut latch, Violation::MissingParseResult);
+        let effect = en.decide(&mut latch, Violation::MissingParseResult, 0, None);
         assert_eq!(
             effect,
             Effect::Unknown {
@@ -530,7 +758,7 @@ mod tests {
             !matches!(effect, Effect::Block { .. }),
             "a missing internal parse result must never latch Block-All"
         );
-        let effect = en.decide(&mut latch, Violation::Unattributed);
+        let effect = en.decide(&mut latch, Violation::Unattributed, 0, None);
         assert_eq!(
             effect,
             Effect::Unknown {
@@ -548,5 +776,168 @@ mod tests {
             !en.test_blocked(t.ordinal(0).expect("ordinal")),
             "Unknown must never mark a configured domain blocked"
         );
+    }
+
+    #[test]
+    fn windowed_counter_arms_at_threshold_within_window_and_stays_armed() {
+        let mut c = WindowedCounter::new();
+        assert!(!c.note(0), "below the fixed threshold");
+        assert!(!c.note(1), "below the fixed threshold");
+        assert!(c.note(2), "the threshold is crossed within the window");
+        assert!(c.note(3), "once armed the counter stays armed");
+        assert!(
+            c.note(100),
+            "the armed state persists past the window until restart"
+        );
+    }
+
+    #[test]
+    fn windowed_counter_rebases_when_the_window_expires() {
+        let mut c = WindowedCounter::new();
+        assert!(!c.note(0));
+        assert!(!c.note(1));
+        assert!(
+            !c.note(61),
+            "61 - 0 >= 60: the expired window rebases the count to a fresh window"
+        );
+        assert!(!c.note(62));
+        assert!(
+            c.note(63),
+            "three facts in the fresh window cross the threshold"
+        );
+    }
+
+    #[test]
+    fn corroboration_requires_k_distinct_consecutive_sources() {
+        let mut c = Corroboration::new();
+        let a = SocketAddr::from(([127, 0, 0, 1], 40000));
+        let b = SocketAddr::from(([127, 0, 0, 1], 40001));
+        let d = SocketAddr::from(([127, 0, 0, 1], 40003));
+        assert!(!c.note(Some(a)), "the first source starts the run");
+        assert!(
+            !c.note(Some(a)),
+            "a duplicate of the immediate previous source resets the run to 1"
+        );
+        assert!(!c.note(Some(b)), "the second distinct source");
+        assert!(
+            c.note(Some(d)),
+            "three distinct consecutive sources corroborate"
+        );
+    }
+
+    #[test]
+    fn corroboration_missing_source_resets_the_run() {
+        let mut c = Corroboration::new();
+        let a = SocketAddr::from(([127, 0, 0, 1], 40000));
+        let b = SocketAddr::from(([127, 0, 0, 1], 40001));
+        assert!(!c.note(Some(a)));
+        assert!(!c.note(Some(b)));
+        assert!(!c.note(None), "a missing source resets the run to zero");
+        assert!(!c.note(Some(a)));
+        assert!(!c.note(Some(b)));
+        assert!(
+            c.note(Some(a)),
+            "three distinct sources after the reset corroborate"
+        );
+    }
+
+    #[test]
+    fn single_any_illegal_never_latches_all() {
+        let t = table(AnyIllegalScope::All, &[(ActionKind::Block, Scope::All)]);
+        let mut en = Enforcement::new(t);
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::HostNotAllowlisted,
+            },
+            0,
+            None,
+        );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "SP-001: a single unauthenticated AnyIllegal must not arm the All latch"
+        );
+        assert!(!en.block_all());
+        assert_eq!(en.counters().actions_block_all(), 0);
+        assert_eq!(en.counters().actions_total(), 0);
+    }
+
+    #[test]
+    fn three_any_illegal_facts_within_the_window_latch_all() {
+        let t = table(AnyIllegalScope::All, &[(ActionKind::Block, Scope::All)]);
+        let mut en = Enforcement::new(t);
+        assert_eq!(
+            en.decide(
+                &mut FirstSlot::new(),
+                Violation::AnyIllegal {
+                    cause: AnyIllegalCause::HostNotAllowlisted,
+                },
+                0,
+                None,
+            ),
+            Effect::BaselineOnly
+        );
+        assert_eq!(
+            en.decide(
+                &mut FirstSlot::new(),
+                Violation::AnyIllegal {
+                    cause: AnyIllegalCause::HostNotAllowlisted,
+                },
+                1,
+                None,
+            ),
+            Effect::BaselineOnly
+        );
+        assert_eq!(
+            en.decide(
+                &mut FirstSlot::new(),
+                Violation::AnyIllegal {
+                    cause: AnyIllegalCause::HostNotAllowlisted,
+                },
+                2,
+                None,
+            ),
+            Effect::Block { scope: Scope::All },
+            "the third AnyIllegal fact within the window crosses the threshold"
+        );
+        assert!(en.block_all());
+    }
+
+    #[test]
+    fn early_data_domain_block_is_stripped_until_three_distinct_sources() {
+        let t = table(
+            AnyIllegalScope::Connection,
+            &[(ActionKind::Block, Scope::Domain)],
+        );
+        let mut en = Enforcement::new(t);
+        let ordinal = t.ordinal(0).expect("ordinal");
+        for i in 0..2u64 {
+            let effect = en.decide(
+                &mut FirstSlot::new(),
+                Violation::EarlyUpstreamData { ordinal },
+                i,
+                Some(SocketAddr::from(([127, 0, 0, 1], 40000 + i as u16))),
+            );
+            assert_eq!(
+                effect,
+                Effect::BaselineOnly,
+                "SP-002: early Block{{Domain}} is stripped before K distinct sources"
+            );
+            assert!(!en.test_blocked(ordinal));
+        }
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::EarlyUpstreamData { ordinal },
+            2,
+            Some(SocketAddr::from(([127, 0, 0, 1], 40002))),
+        );
+        assert_eq!(
+            effect,
+            Effect::Block {
+                scope: Scope::Domain
+            }
+        );
+        assert!(en.test_blocked(ordinal));
     }
 }

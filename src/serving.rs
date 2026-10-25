@@ -2288,10 +2288,11 @@ impl Serving {
 
     fn any_illegal(&mut self, index: usize, cause: AnyIllegalCause) -> Effect {
         let violation = Violation::AnyIllegal { cause };
+        let secs = self.storage.cache_secs(Instant::now());
         let effect = {
             let slot = &mut self.slots[index];
             let en = self.storage.enforcement_mut();
-            en.decide(&mut slot.first_slot, violation)
+            en.decide(&mut slot.first_slot, violation, secs, None)
         };
         self.stamp_capture(index, CapturedFact::AnyIllegal(cause), effect);
         if matches!(effect, Effect::Block { scope: Scope::All }) {
@@ -2301,10 +2302,15 @@ impl Serving {
     }
 
     fn project_tripwire(&mut self, index: usize, violation: Violation) -> Effect {
+        let secs = self.storage.cache_secs(Instant::now());
+        let source = self.slots[index]
+            .client
+            .as_ref()
+            .and_then(|c| c.peer_addr().ok());
         let effect = {
             let slot = &mut self.slots[index];
             let en = self.storage.enforcement_mut();
-            en.decide(&mut slot.first_slot, violation)
+            en.decide(&mut slot.first_slot, violation, secs, source)
         };
         if let Some(fact) = captured_fact(violation) {
             self.stamp_capture(index, fact, effect);

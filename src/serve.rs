@@ -1238,11 +1238,14 @@ mod tests {
             "a clean monitor is never due"
         );
 
+        let secs = storage.cache_secs(origin);
         storage.enforcement_mut().decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
+            secs,
+            None,
         );
         assert!(
             storage.report_monitor_if_due(origin, false),
@@ -1263,11 +1266,14 @@ mod tests {
             "H1: no new event between seconds, a committed aggregate is not due again"
         );
 
+        let secs = storage.cache_secs(one_second);
         storage.enforcement_mut().decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
+            secs,
+            None,
         );
         assert!(
             storage.report_monitor_if_due(one_second, false),
@@ -1281,11 +1287,14 @@ mod tests {
             }
         }
         let next = one_second + Duration::from_secs(1);
+        let secs = storage.cache_secs(next);
         storage.enforcement_mut().decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
+            secs,
+            None,
         );
         assert!(
             storage.report_monitor_if_due(next, false),
@@ -1354,9 +1363,12 @@ mod tests {
         let cause = AnyIllegalCause::HostNotAllowlisted;
         let ((), counts) = run_phase(Phase::Serving, || {
             for _ in 0..256 {
-                storage
-                    .enforcement_mut()
-                    .decide(&mut FirstSlot::new(), Violation::AnyIllegal { cause });
+                storage.enforcement_mut().decide(
+                    &mut FirstSlot::new(),
+                    Violation::AnyIllegal { cause },
+                    DNS_EPOCH,
+                    None,
+                );
             }
         });
         assert!(

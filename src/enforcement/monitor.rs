@@ -568,6 +568,8 @@ impl Monitor {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::net::SocketAddr;
+
     use super::*;
     use crate::enforcement::action::{ActionKind, DomainAction, FirstSlot, Scope};
     use crate::enforcement::policy::{Effect, Violation};
@@ -724,14 +726,14 @@ pub(crate) mod tests {
             &[(ActionKind::FlareOnly, Scope::Connection)],
         ));
         let cause = AnyIllegalCause::HostNotAllowlisted;
-        let v = en.decide(&mut latch, Violation::AnyIllegal { cause });
+        let v = en.decide(&mut latch, Violation::AnyIllegal { cause }, 0, None);
         assert_eq!(
             v,
             Effect::Block {
                 scope: Scope::Connection
             }
         );
-        en.decide(&mut latch, Violation::AnyIllegal { cause });
+        en.decide(&mut latch, Violation::AnyIllegal { cause }, 0, None);
         assert_eq!(
             en.counters().facts_any_illegal_total(),
             2,
@@ -751,10 +753,16 @@ pub(crate) mod tests {
         let actions = [(ActionKind::Block, Scope::Domain)];
         let mut en = Enforcement::new(table(AnyIllegalScope::Connection, &actions));
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
-        let v = en.decide(
-            &mut FirstSlot::new(),
-            Violation::EarlyUpstreamData { ordinal },
-        );
+        let mut v = Effect::BaselineOnly;
+        for i in 0..3 {
+            let source = Some(SocketAddr::from(([127, 0, 0, 1], 40000 + i as u16)));
+            v = en.decide(
+                &mut FirstSlot::new(),
+                Violation::EarlyUpstreamData { ordinal },
+                0,
+                source,
+            );
+        }
         assert_eq!(
             v,
             Effect::Block {

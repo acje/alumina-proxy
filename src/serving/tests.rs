@@ -4384,19 +4384,27 @@ fn any_illegal_all_latches_before_further_io_stops_admission_and_closes_pending(
 
         let mut b = connect(port);
         b.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
-            .expect("head B");
+            .expect("head B1");
+        pump(serving, 30);
+        let mut b2 = connect(port);
+        b2.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+            .expect("head B2");
+        pump(serving, 30);
+        let mut b3 = connect(port);
+        b3.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+            .expect("head B3");
         pump(serving, 30);
         assert!(
             serving.storage().enforcement().block_all(),
-            "the first AnyIllegal with scope all must latch before erasure"
+            "the third AnyIllegal with scope all must latch before erasure"
         );
         assert_eq!(
             serving.storage().occupied(),
             0,
-            "the latch must close the pending A seat and the offender B before any further I/O"
+            "the latch must close the pending A seat and the offenders before any further I/O"
         );
 
-        let bb = read_until(&mut b, b"\r\n\r\n");
+        let bb = read_until(&mut b3, b"\r\n\r\n");
         assert!(
             bb.is_empty(),
             "after Block All the offender must receive no 403 and no bytes at all (EOF/RST), got {bb:?}"
@@ -4552,6 +4560,59 @@ fn fabric_relay_slot_pair(
     serving.register_upstream(index).expect("register upstream");
 }
 
+/// A fresh loopback socket pair; returns the server-accepted side. Each call
+/// yields a distinct peer_addr, so per-event client-source corroboration can
+/// reach K distinct sockets (SP-002).
+fn fresh_client_source() -> mio::net::TcpStream {
+    let listener = StdListener::bind("127.0.0.1:0").expect("client-source bind");
+    let peer_addr = listener.local_addr().expect("client-source addr");
+    let _client = mio::net::TcpStream::connect(peer_addr).expect("client-source connect");
+    mio::net::TcpStream::from_std(listener.accept().expect("client-source accept").0)
+}
+
+/// Fire one validated-early-data event from a fresh client source socket on
+/// the given slot (SP-002: Domain/All actions need K distinct sources).
+fn fire_early_data(serving: &mut Serving, index: usize, test_data: Option<usize>) {
+    serving.slots[index].hello_end = Some(10);
+    serving.slots[index].client = Some(fresh_client_source());
+    fabric_validated_early_data_at(serving, index, test_data);
+    let token = upstream_token(serving.slots[index].slot_gen, index);
+    serving
+        .dispatch_readiness(
+            token,
+            Readiness {
+                readable: true,
+                writable: false,
+                ..Readiness::none()
+            },
+        )
+        .expect("early origin data");
+}
+
+/// Pair-aware variant of `fire_early_data` (H1, alumina-qwzns).
+fn fire_early_data_pair(
+    serving: &mut Serving,
+    index: usize,
+    host: &[u8],
+    port: u16,
+    test_data: Option<usize>,
+) {
+    serving.slots[index].hello_end = Some(10);
+    serving.slots[index].client = Some(fresh_client_source());
+    fabric_validated_early_data_pair(serving, index, host, port, test_data);
+    let token = upstream_token(serving.slots[index].slot_gen, index);
+    serving
+        .dispatch_readiness(
+            token,
+            Readiness {
+                readable: true,
+                writable: false,
+                ..Readiness::none()
+            },
+        )
+        .expect("early origin data");
+}
+
 #[test]
 fn validated_early_data_applies_block_domain_and_terminates_setup() {
     let port = ephemeral_port();
@@ -4560,19 +4621,9 @@ fn validated_early_data_applies_block_domain_and_terminates_setup() {
         let _client = connect(port);
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data(serving, Some(5));
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early origin data");
+        for _ in 0..3 {
+            fire_early_data(serving, 0, Some(5));
+        }
 
         assert_eq!(
             serving.storage().occupied(),
@@ -4796,19 +4847,9 @@ fn domain_block_refuses_future_flow_of_the_ordinal_until_restart() {
         let _trigger = connect(port);
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 1, "pre-block peer admitted");
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data(serving, Some(5));
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early data blocks the domain");
+        for _ in 0..3 {
+            fire_early_data(serving, 0, Some(5));
+        }
         assert!(serving.storage().enforcement().is_blocked(ordinal));
 
         let mut future = connect(port);
@@ -4856,10 +4897,18 @@ fn port_mismatch_on_domain_blocked_ordinal_is_host_not_allowlisted() {
             .ordinal_for_pair(&approved, 443)
             .expect("ordinal");
         let mut latch = crate::enforcement::action::FirstSlot::new();
-        serving.storage_mut().enforcement_mut().decide(
-            &mut latch,
-            crate::enforcement::policy::Violation::EarlyUpstreamData { ordinal },
-        );
+        for i in 0..3 {
+            let source = Some(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                40000 + i as u16,
+            )));
+            serving.storage_mut().enforcement_mut().decide(
+                &mut latch,
+                crate::enforcement::policy::Violation::EarlyUpstreamData { ordinal },
+                0,
+                source,
+            );
+        }
         assert!(
             serving.storage().enforcement().is_blocked(ordinal),
             "precondition: the configured-domain ordinal is domain-blocked"
@@ -5023,22 +5072,11 @@ fn block_domain_closes_current_flow_with_matching_ordinal() {
             "two sub.example.org flows admitted before the block"
         );
 
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data(serving, Some(5));
         fabric_relay_slot(serving, 1, b"sub.example.org", b"PENDING-DOWN-00");
         assert_eq!(serving.slots[1].down_len, 15, "relay has a pending payload");
-
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early data on the trigger blocks the domain");
+        for _ in 0..3 {
+            fire_early_data(serving, 0, Some(5));
+        }
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
         let ordinal = serving
             .storage()
@@ -5091,20 +5129,10 @@ fn block_domain_does_not_touch_unrelated_current_flow() {
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 2);
 
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data(serving, Some(5));
         fabric_relay_slot(serving, 1, b"trusted-other.example.net", b"KEEP-00");
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early data on the trigger blocks the domain");
+        for _ in 0..3 {
+            fire_early_data(serving, 0, Some(5));
+        }
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
         let ordinal = serving
             .storage()
@@ -5142,19 +5170,9 @@ fn early_data_on_second_port_blocks_second_ordinal_only() {
         let _client = connect(port);
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data_pair(serving, 0, b"a.example", 8443, Some(5));
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early origin data");
+        for _ in 0..3 {
+            fire_early_data_pair(serving, 0, b"a.example", 8443, Some(5));
+        }
 
         let first = serving
             .storage()
@@ -5221,20 +5239,10 @@ fn block_on_first_port_does_not_over_close_second_port_flow() {
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 2);
 
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data_pair(serving, 0, b"a.example", 443, Some(5));
         fabric_relay_slot_pair(serving, 1, b"a.example", 8443, b"KEEP-00");
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early data on the first port blocks the first ordinal");
+        for _ in 0..3 {
+            fire_early_data_pair(serving, 0, b"a.example", 443, Some(5));
+        }
         let first = serving
             .storage()
             .ordinal_for_pair(
@@ -5277,20 +5285,10 @@ fn block_on_second_port_closes_second_port_flow() {
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 2);
 
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data_pair(serving, 0, b"a.example", 8443, Some(5));
         fabric_relay_slot_pair(serving, 1, b"a.example", 8443, b"KEEP-00");
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early data on the second port blocks the second ordinal");
+        for _ in 0..3 {
+            fire_early_data_pair(serving, 0, b"a.example", 8443, Some(5));
+        }
         let second = serving
             .storage()
             .ordinal_for_pair(
@@ -5410,10 +5408,12 @@ fn block_all_guard_refuses_pending_relay_write_after_latch() {
             "a payload is pending upstream->client before the latch"
         );
 
-        let mut evil = connect(port);
-        evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
-            .expect("evil head");
-        pump(serving, 40);
+        for _ in 0..3 {
+            let mut evil = connect(port);
+            evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("evil head");
+            pump(serving, 40);
+        }
         assert!(
             serving.storage().enforcement().block_all(),
             "the AnyIllegal All latch fires"
@@ -5464,10 +5464,12 @@ fn client_writable_latch_guard_closes_live_relay_without_draining() {
     let port = ephemeral_port();
     let cfg = cfg_doc1(port, "all", "flare_only", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
-        let mut evil = connect(port);
-        evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
-            .expect("evil head");
-        pump(serving, 30);
+        for _ in 0..3 {
+            let mut evil = connect(port);
+            evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("evil head");
+            pump(serving, 30);
+        }
         assert!(serving.storage().enforcement().block_all());
         assert_eq!(
             serving.storage().occupied(),
@@ -5528,7 +5530,6 @@ fn client_writable_latch_guard_closes_live_relay_without_draining() {
             ),
             Err(other) => panic!("reader read failed: {other:?}"),
         }
-        drop(evil);
     });
 }
 
@@ -5537,10 +5538,12 @@ fn accept_all_latch_guard_holds_with_listener_re_attached() {
     let port = ephemeral_port();
     let cfg = cfg_doc1(port, "all", "flare_only", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
-        let mut evil = connect(port);
-        evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
-            .expect("evil head");
-        pump(serving, 30);
+        for _ in 0..3 {
+            let mut evil = connect(port);
+            evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("evil head");
+            pump(serving, 30);
+        }
         assert!(serving.storage().enforcement().block_all());
         assert_eq!(
             serving.storage().occupied(),
@@ -5575,7 +5578,6 @@ fn accept_all_latch_guard_holds_with_listener_re_attached() {
             "the accept_all latch guard must hold admission even with a live listener and a pending connection"
         );
         drop(pending);
-        drop(evil);
     });
 }
 
@@ -5699,7 +5701,9 @@ fn genuine_malformed_hello_still_projects_any_illegal_and_latches_scope_all() {
             Err(client_hello::ChError::ServerNameMismatch),
             "the fixture must fail validation only on the SNI, not on parsing"
         );
-        drive_hello(serving, &wire, "sub.example.org");
+        for _ in 0..3 {
+            drive_hello(serving, &wire, "sub.example.org");
+        }
         assert!(
             serving.storage().enforcement().block_all(),
             "a genuine malformed-hello denial must still latch Block All at scope all"
@@ -5712,7 +5716,7 @@ fn genuine_malformed_hello_still_projects_any_illegal_and_latches_scope_all() {
                 .facts_any_illegal(AnyIllegalCause::TlsProfile(
                     HelloRejectReason::ServerNameMismatch
                 )),
-            1,
+            3,
             "the genuine denial folds as AnyIllegal by its exact hello-reject discriminant"
         );
         assert_eq!(
@@ -5956,23 +5960,17 @@ fn monitor_split_on_full_stack_distinguishes_block_action_from_later_refusal() {
         let _acceptor = connect(port);
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 1, "pre-block peer admitted");
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data(serving, Some(5));
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early data blocks the domain");
+        for _ in 0..3 {
+            fire_early_data(serving, 0, Some(5));
+        }
         assert!(serving.storage().enforcement().is_blocked(ordinal));
         {
             let m = serving.storage().enforcement().monitor();
-            assert_eq!(m.facts_early_data(ordinal), 1, "one early-data fact");
+            assert_eq!(
+                m.facts_early_data(ordinal),
+                3,
+                "three corroborated early-data facts"
+            );
             assert_eq!(
                 m.actions_domain_block(ordinal),
                 1,
@@ -6030,19 +6028,9 @@ fn slot_capture_is_cleared_before_reuse_never_attributes_a_stale_generation() {
             serving.slots[0].capture.generation != 0,
             "the admit stamps the slot's own new generation"
         );
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data(serving, Some(5));
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early data blocks the domain");
+        for _ in 0..3 {
+            fire_early_data(serving, 0, Some(5));
+        }
         assert!(
             serving.storage().enforcement().is_blocked(ordinal),
             "cleared capture from reset must not prevent the block"
@@ -6089,19 +6077,9 @@ fn production_detection_close_transfers_typed_capture_with_slot_identity_into_mo
             "slots assign lowest-free first, so the second peer holds slot 1"
         );
 
-        serving.slots[1].hello_end = Some(10);
-        fabric_validated_early_data_at(serving, 1, Some(5));
-        let token = upstream_token(serving.slots[1].slot_gen, 1);
-        serving
-            .dispatch_readiness(
-                token,
-                Readiness {
-                    readable: true,
-                    writable: false,
-                    ..Readiness::none()
-                },
-            )
-            .expect("early data blocks the domain");
+        for _ in 0..3 {
+            fire_early_data(serving, 1, Some(5));
+        }
         assert!(
             serving.storage().enforcement().is_blocked(ordinal),
             "the production detection latched the ordinal"
@@ -6109,10 +6087,10 @@ fn production_detection_close_transfers_typed_capture_with_slot_identity_into_mo
         let m = serving.storage().enforcement().monitor();
         assert_eq!(
             m.capture_detail_len(),
-            1,
-            "M3': close_slot consumed the non-zero stamped capture into the monitor (removal-sensitive)"
+            3,
+            "M3': close_slot consumed each stamped capture into the monitor (removal-sensitive)"
         );
-        let cap = m.capture_detail(0).expect("correlated capture");
+        let cap = m.capture_detail(2).expect("correlated capture");
         assert_eq!(
             cap.slot, 1,
             "H1' pin: the capture carries the actual detection slot index 1, never ring position 0 or a hardcoded slot 0"
