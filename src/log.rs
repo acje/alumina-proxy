@@ -813,10 +813,14 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
             return None;
         }
     }
+    let mut loss_bitset: u32 = 0;
     for index in 0..crate::config::ALLOWLIST_MAX {
         let Some(ordinal) = DomainOrdinal::from_index(index) else {
             break;
         };
+        if monitor.facts_ja4_change_loss(ordinal) {
+            loss_bitset |= 1u32 << index;
+        }
         let facts = monitor.facts_early_data(ordinal);
         let blocks = monitor.actions_domain_block(ordinal);
         let flares = monitor.actions_flare(ordinal);
@@ -897,18 +901,10 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
             {
                 return None;
             }
-            if monitor.facts_ja4_change_loss(ordinal)
-                && !push_indexed_key_u64(
-                    &mut w,
-                    b"d",
-                    u32::try_from(index).expect("allowlist ordinal fits u32"),
-                    b"x",
-                    1,
-                )
-            {
-                return None;
-            }
         }
+    }
+    if loss_bitset != 0 && !push_u64_hex(&mut w, b"dx", u64::from(loss_bitset)) {
+        return None;
     }
     for i in 0..monitor.capture_detail_len() {
         let Some(cap) = monitor.capture_detail(i) else {
@@ -962,6 +958,13 @@ fn push_u64(w: &mut Entry<'_>, key: &[u8], value: u64) -> bool {
         && w.push(key)
         && w.push(b"=")
         && fmt::Write::write_fmt(w, format_args!("{value}")).is_ok()
+}
+
+fn push_u64_hex(w: &mut Entry<'_>, key: &[u8], value: u64) -> bool {
+    w.push(b" ")
+        && w.push(key)
+        && w.push(b"=")
+        && fmt::Write::write_fmt(w, format_args!("{value:x}")).is_ok()
 }
 
 fn push_indexed_u64(w: &mut Entry<'_>, key: &[u8], index: u32, value: u64) -> bool {
@@ -2713,7 +2716,7 @@ mod tests {
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
              ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 ep=1 js=1 bv=1 \
              c14=2 unk3=1 d0f=1 d0b=1 d0l=1 d0j=1 \
-             d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"203.0.113.1\" d0x=1\n",
+             d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"203.0.113.1\" dx=1\n",
             "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
         );
         assert!(

@@ -651,6 +651,7 @@ impl Monitor {
         for c in &mut self.facts.ja4_change {
             c.saturate_for_test();
         }
+        self.facts.ja4_change_loss.fill(true);
         self.facts
             .ja4_value
             .fill(*b"t13d1516h2_8daaf6152771_02713d6af862");
