@@ -1117,12 +1117,12 @@ the fixed 8192-byte slot:
 | `capacity_high` / `capacity_low` | 127 B / 125 B | 8065 B / 8067 B |
 | `queue_high` / `queue_low` | 124 B / 122 B | 8068 B / 8070 B |
 | `resolver_probe` | 1857 B | 6335 B |
-| `monitor` | 8091 B | 101 B |
+| `monitor` | 8139 B | 53 B |
 
 Both startup records fit with wide margins, so the encoded-entry requirement at `:236` is met
 by measurement for every valid configuration. `monitor` is the tightest record in the
-vocabulary at 101 B of headroom; this amendment neither changes that record nor claims it is
-compliant by construction, and the 101-byte margin is recorded as a known risk: any future
+vocabulary at 53 B of headroom; this amendment neither changes that record nor claims it is
+compliant by construction, and the 53-byte margin is recorded as a known risk: any future
 addition to the monitor report shape must re-measure against the 8192-byte slot before it is
 accepted.
 
