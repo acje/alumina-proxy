@@ -79,6 +79,10 @@ pub struct Entry {
     retirement_deadline: Option<u64>,
     bindings: [NumericAddr; MAX_ADDRESSES],
     binding_len: u8,
+    /// Whether this entry may be served past its freshness deadline. Derived
+    /// from the earliest supporting TTL: a zero-TTL entry is never served
+    /// stale (F-10).
+    stale_allowed: bool,
 }
 
 impl Entry {
@@ -88,6 +92,7 @@ impl Entry {
         retirement_deadline: None,
         bindings: [UNUSED_SLOT; MAX_ADDRESSES],
         binding_len: 0,
+        stale_allowed: false,
     };
 
     #[must_use]
@@ -127,19 +132,29 @@ impl Entry {
     }
 
     /// Whether the entry may still be served at `now`: fresh bindings always,
-    /// stale bindings only within `STALE_SERVING_WINDOW` past their freshness
-    /// deadline. A stale entry past the serving window is retained for
-    /// revalidation but never served (RT-006).
+    /// stale bindings only when this entry admits stale serving and only
+    /// within `STALE_SERVING_WINDOW` past their freshness deadline. A zero-TTL
+    /// entry never admits stale serving (F-10). A stale entry past the serving
+    /// window is retained for revalidation but never served (RT-006).
     #[must_use]
     pub const fn servable(&self, now: u64) -> bool {
         match self.state(now) {
             EntryState::Fresh => true,
             EntryState::Stale => match self.freshness_deadline {
-                Some(freshness) => now < freshness.saturating_add(STALE_SERVING_WINDOW),
+                Some(freshness) => {
+                    self.stale_allowed && now < freshness.saturating_add(STALE_SERVING_WINDOW)
+                }
                 None => false,
             },
             EntryState::Retired | EntryState::Empty => false,
         }
+    }
+
+    /// Whether this entry may be served past its freshness deadline. False for
+    /// entries published from a zero-TTL answer (F-10).
+    #[must_use]
+    pub const fn stale_allowed(&self) -> bool {
+        self.stale_allowed
     }
 }
 
@@ -375,6 +390,7 @@ impl Cache {
                 bindings: eligible,
                 binding_len: u8::try_from(eligible_len)
                     .expect("eligible count bounded by MAX_ADDRESSES"),
+                stale_allowed: staged.ttl != 0,
             }
         };
         *entry = new_entry;
@@ -695,6 +711,69 @@ mod tests {
             "stale past the serving window is not served"
         );
         assert!(!entry.servable(retirement), "retired is never served");
+    }
+
+    #[test]
+    fn zero_ttl_entry_never_served_stale() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        publish_simple(
+            &mut cache,
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[pub_addr()],
+            1000,
+            0,
+        );
+        let entry = read(&cache, name, Family::A);
+        let freshness = 1000 + 1;
+        assert!(
+            entry.servable(freshness - 1),
+            "fresh usability before the 1s boundary"
+        );
+        assert!(
+            !entry.servable(freshness),
+            "no stale admission at the 1s boundary"
+        );
+        assert!(
+            !entry.servable(freshness + STALE_SERVING_WINDOW - 1),
+            "no stale admission inside the stale-serving window"
+        );
+    }
+
+    #[test]
+    fn publish_positive_derives_stale_allowed_from_raw_ttl() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        publish_simple(
+            &mut cache,
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[pub_addr()],
+            1000,
+            0,
+        );
+        let zero_ttl = read(&cache, name, Family::A);
+        assert!(
+            !zero_ttl.stale_allowed(),
+            "a zero-TTL answer never admits stale serving"
+        );
+        publish_simple(
+            &mut cache,
+            name,
+            Family::A,
+            zero_ttl.generation(),
+            &[pub_addr()],
+            2000,
+            120,
+        );
+        let nonzero_ttl = read(&cache, name, Family::A);
+        assert!(
+            nonzero_ttl.stale_allowed(),
+            "a nonzero-TTL answer admits stale serving"
+        );
     }
 
     #[test]

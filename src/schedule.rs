@@ -48,10 +48,16 @@ impl Soa {
 }
 
 /// Returns the normal refresh interval for an entry TTL, honoring the fixed
-/// 5/900-second bounds. The floor subsumes the zero-TTL-as-one-second rule.
+/// 5/900-second bounds. A zero TTL (one-second fresh usability, no stale
+/// admission) refreshes at the one-second boundary so steering availability is
+/// preserved without ever extending authorization (F-10).
 #[must_use]
 pub fn normal_refresh_interval(ttl: u64) -> u64 {
-    ttl.clamp(REFRESH_MIN, REFRESH_MAX)
+    if ttl == 0 {
+        1
+    } else {
+        ttl.clamp(REFRESH_MIN, REFRESH_MAX)
+    }
 }
 
 /// Returns the negative refresh interval for a validated negative answer's
@@ -951,7 +957,7 @@ mod tests {
     #[test]
     fn normal_refresh_interval_honors_bounds() {
         let vectors = [
-            (0u64, 5u64),
+            (0u64, 1u64),
             (4, 5),
             (5, 5),
             (6, 6),
