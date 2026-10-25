@@ -8172,9 +8172,11 @@ fn ja4_set_overflow_emits_monitor_dnj_record() {
             "the overflowed JA4 value is retained for the ordinal"
         );
 
-        // The forced monitor summary folds the flared counter into the dNj
-        // per-ordinal field of one committed monitor record, and the latest
-        // overflow's peer IP rides beside it as dNp.
+        // The forced monitor family folds the flared counter into the dNj
+        // per-ordinal field of the monitor_domain batch (the summary carries
+        // no per-ordinal detail), and the latest overflow's peer IP rides
+        // beside it as dNp. The family is the summary plus one nonzero
+        // domain batch; this path creates no captures.
         let before = serving.storage().logs().len();
         let committed = serving
             .storage_mut()
@@ -8182,8 +8184,8 @@ fn ja4_set_overflow_emits_monitor_dnj_record() {
         assert!(committed, "the forced monitor summary must commit");
         assert_eq!(
             serving.storage().logs().len(),
-            before + 1,
-            "the monitor summary commits exactly one queued record"
+            before + 2,
+            "the family is one summary plus one nonzero domain batch"
         );
         let record = serving
             .storage()
@@ -8192,8 +8194,8 @@ fn ja4_set_overflow_emits_monitor_dnj_record() {
             .expect("committed monitor record");
         let text = String::from_utf8_lossy(record);
         assert!(
-            text.contains("kind=monitor"),
-            "the committed record is the monitor summary: {text}"
+            text.starts_with("level=info kind=monitor_domain"),
+            "the newest family record is the monitor_domain batch: {text}"
         );
         let key = format!(" d{}j=1", ordinal.get());
         assert!(

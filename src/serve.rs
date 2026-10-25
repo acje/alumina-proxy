@@ -368,14 +368,14 @@ impl ServeStorage {
         if !due {
             return false;
         }
-        let committed = {
-            let monitor = self.enforcement.monitor();
-            self.logs.monitor_summary(secs, monitor)
-        };
+        {
+            let monitor = self.enforcement.monitor_mut();
+            self.logs.monitor_summary(secs, monitor);
+        }
         if force {
-            self.enforcement.mark_forced_monitor_reported(committed);
+            self.enforcement.mark_forced_monitor_reported();
         } else {
-            self.enforcement.mark_monitor_reported(secs, committed);
+            self.enforcement.mark_monitor_reported(secs);
         }
         true
     }

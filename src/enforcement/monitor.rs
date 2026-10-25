@@ -347,34 +347,21 @@ impl Monitor {
         self.dirty && self.last_report_secs != Some(secs)
     }
 
-    pub(crate) fn mark_reported(&mut self, secs: u64, committed: bool) {
+    pub(crate) fn mark_reported(&mut self, secs: u64) {
         self.last_report_secs = Some(secs);
-        if committed {
-            self.dirty = false;
-            self.clear_captures();
-        } else {
-            self.note_report_drop();
-        }
+        self.dirty = false;
+        self.clear_captures();
     }
 
-    pub(crate) fn mark_forced_reported(&mut self, committed: bool) {
-        if committed {
-            self.dirty = false;
-            self.clear_captures();
-        } else {
-            self.note_report_drop();
-        }
+    pub(crate) fn mark_forced_reported(&mut self) {
+        self.dirty = false;
+        self.clear_captures();
     }
 
     fn clear_captures(&mut self) {
         self.captures = std::array::from_fn(|_| None);
         self.capture_head = 0;
         self.capture_len = 0;
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn last_report_secs(&self) -> Option<u64> {
-        self.last_report_secs
     }
 
     #[cfg(test)]
@@ -719,12 +706,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn committed_emission_clears_dirty_and_a_dropped_summary_re_dirtes() {
+    fn committed_emission_clears_dirty_and_a_new_event_re_dirtes() {
         let mut m = Monitor::new();
         assert!(!m.report_due(5), "clean aggregate is never due");
         m.note_fact_unknown(UnknownReason::Unattributed);
         assert!(m.report_due(5), "dirty aggregate is due at the boundary");
-        m.mark_reported(5, true);
+        m.mark_reported(5);
         assert!(!m.report_due(5), "same second suppresses the re-emission");
         assert!(
             !m.report_due(6),
@@ -733,25 +720,15 @@ pub(crate) mod tests {
         assert_eq!(m.report_drops(), 0);
         m.note_fact_unknown(UnknownReason::Unattributed);
         assert!(m.report_due(6), "a new event re-dirties the aggregate");
-        m.mark_reported(6, false);
+        m.mark_reported(6);
         assert_eq!(
             m.report_drops(),
-            1,
-            "an uncommitted summary is honest detail loss"
+            0,
+            "a summary is always committed; no honest-detail-loss path remains"
         );
         assert!(
-            m.report_due(7),
-            "L3: a dropped summary re-dirties so the current aggregate re-emits next second"
-        );
-        m.mark_reported(7, true);
-        assert_eq!(
-            m.report_drops(),
-            1,
-            "the re-emission commits, loss not re-counted"
-        );
-        assert!(
-            !m.report_due(8),
-            "after a successful re-emission the aggregate is clean again"
+            !m.report_due(7),
+            "the always-committed summary leaves a clean aggregate"
         );
     }
 
@@ -763,7 +740,7 @@ pub(crate) mod tests {
         m.note_serving_stale();
         assert!(m.serving_stale(), "a stale admission latches the level bit");
         assert!(m.report_due(5), "the latch dirties the aggregate");
-        m.mark_reported(5, true);
+        m.mark_reported(5);
         assert!(
             m.serving_stale(),
             "the level bit survives a committed report (level, not an event fold)"
@@ -860,18 +837,27 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn dropped_report_is_counted_as_detail_loss_and_stays_dirty() {
+    fn report_drop_is_counted_once_and_mark_reported_clears() {
         let mut m = Monitor::new();
-        m.note_fact_unknown(UnknownReason::Unattributed);
-        m.mark_reported(5, false);
+        m.note_report_drop();
         assert_eq!(
             m.report_drops(),
             1,
-            "an uncommitted summary is honest detail loss"
+            "a dropped detail batch is honest detail loss"
         );
         assert!(
-            m.last_report_secs().is_some(),
-            "the cadence still advances so the next second re-emits the aggregate"
+            m.report_due(5),
+            "the drop dirties the aggregate for the next summary"
+        );
+        m.mark_reported(5);
+        assert_eq!(
+            m.report_drops(),
+            1,
+            "mark_reported never re-counts the earlier drop"
+        );
+        assert!(
+            !m.report_due(6),
+            "the always-committed summary clears the aggregate"
         );
     }
 
@@ -1029,7 +1015,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn accepted_summary_enqueue_consumes_its_detail_window_and_a_refused_summary_retains() {
+    fn mark_reported_always_consumes_the_detail_window_and_suppression_counts_once() {
         let cause = AnyIllegalCause::HostNotAllowlisted;
         let effect = Effect::Block {
             scope: Scope::Connection,
@@ -1049,40 +1035,40 @@ pub(crate) mod tests {
             1,
             "a consumed capture fills the window"
         );
-        m.mark_reported(5, true);
+        m.mark_reported(5);
         assert_eq!(
             m.capture_detail_len(),
             0,
-            "M2': an accepted enqueue consumes its detail window"
+            "M2': mark_reported always consumes its detail window"
         );
         assert!(
             !m.report_due(5),
-            "the accepted emission leaves a clean aggregate"
+            "the emission leaves a clean aggregate"
         );
         m.note_consumed_capture(cap(0));
-        m.mark_reported(6, false);
+        m.note_suppressed_detail();
         assert_eq!(
             m.capture_detail_len(),
             1,
-            "M2': a refused summary retains its bounded detail window"
+            "M2': a fresh capture refills the window"
         );
         assert_eq!(
-            m.report_drops(),
+            m.capture_drops(),
             1,
-            "M2': the refused summary is truthful counted loss"
+            "M2': the suppression is counted correlated-detail loss"
         );
-        assert!(m.report_due(7), "M2': refused detail re-emits next cadence");
-        m.mark_reported(7, true);
+        m.mark_reported(6);
         assert_eq!(
             m.capture_detail_len(),
             0,
-            "M2': the re-emitted accepted summary consumes the window"
+            "M2': mark_reported consumes the window even after a suppression"
         );
         assert_eq!(
-            m.report_drops(),
+            m.capture_drops(),
             1,
-            "M2': the earlier refusal is not re-counted"
+            "M2': the earlier suppression is not re-counted"
         );
+        assert!(!m.report_due(7), "M2': the emission leaves a clean aggregate");
     }
 
     #[test]
@@ -1158,7 +1144,7 @@ pub(crate) mod tests {
             m.report_due(1),
             "the suppression dirties the aggregate for the next summary"
         );
-        m.mark_reported(1, true);
+        m.mark_reported(1);
         assert_eq!(
             m.capture_drops(),
             1,

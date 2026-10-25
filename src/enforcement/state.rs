@@ -342,6 +342,7 @@ impl Enforcement {
         self.monitor.note_serving_fresh();
     }
 
+    #[cfg(test)]
     pub(crate) const fn monitor(&self) -> &Monitor {
         &self.monitor
     }
@@ -354,12 +355,12 @@ impl Enforcement {
         self.monitor.report_due(secs)
     }
 
-    pub(crate) fn mark_monitor_reported(&mut self, secs: u64, committed: bool) {
-        self.monitor.mark_reported(secs, committed);
+    pub(crate) fn mark_monitor_reported(&mut self, secs: u64) {
+        self.monitor.mark_reported(secs);
     }
 
-    pub(crate) fn mark_forced_monitor_reported(&mut self, committed: bool) {
-        self.monitor.mark_forced_reported(committed);
+    pub(crate) fn mark_forced_monitor_reported(&mut self) {
+        self.monitor.mark_forced_reported();
     }
 
     #[cfg(test)]

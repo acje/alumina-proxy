@@ -52,6 +52,7 @@ pub(crate) const SLOT_BYTES: usize = 10 * 1024;
 /// best-effort `monitor_domain` / `monitor_capture` detail batches each stay
 /// within this bound, well under the slot. The `SLOT_BYTES` shrink is a later
 /// sub-mission.
+#[cfg(test)]
 pub(crate) const MONITOR_RECORD_MAX: usize = 2048;
 /// Nonzero domain blocks packed per `monitor_domain` batch (32 ordinals -> 3).
 const DOMAIN_BATCH: usize = 11;
@@ -715,268 +716,6 @@ fn encode_record_probe(
         }
         if let ProbeVerdict::Failed(reason) = seg.verdict
             && !push_indexed_quoted(&mut w, b"reason", index, reason.as_str())
-        {
-            return None;
-        }
-    }
-    if !w.push(b"\n") {
-        return None;
-    }
-    Some(w.len)
-}
-
-#[expect(
-    clippy::too_many_lines,
-    reason = "long monitor record serializer emitting every indexed field into the fixed slot buffer"
-)]
-fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor) -> Option<usize> {
-    let mut w = Entry {
-        buf: slot_buf,
-        len: 0,
-    };
-    if !write_header(&mut w, Level::Info, Kind::Monitor) {
-        return None;
-    }
-    if !push_u64(&mut w, b"secs", secs) {
-        return None;
-    }
-    let ofacts = monitor.facts_any_illegal_overflow()
-        || monitor.facts_early_data_overflow()
-        || monitor.facts_unknown_overflow()
-        || monitor.facts_resolver_degraded_overflow()
-        || monitor.facts_dns_anomaly_overflow()
-        || monitor.facts_downgrade_to_plain_overflow()
-        || monitor.facts_probe_relocations_overflow()
-        || monitor.facts_expired_pin_certs_overflow()
-        || monitor.facts_ja4_change_overflow()
-        || monitor.facts_ja4_seed_overflow();
-    let globals: [(&[u8], u64); 13] = [
-        (&b"facts_total"[..], monitor.facts_total()),
-        (&b"actions_total"[..], monitor.actions_total()),
-        (&b"refusals_total"[..], monitor.refusals_total()),
-        (&b"ofacts"[..], u64::from(ofacts)),
-        (&b"oactions"[..], u64::from(monitor.actions_overflow())),
-        (&b"orefusals"[..], u64::from(monitor.refusals_overflow())),
-        (&b"report_drops"[..], u64::from(monitor.report_drops())),
-        (
-            &b"oreport_drops"[..],
-            u64::from(monitor.report_drops_overflow()),
-        ),
-        (&b"capture_drops"[..], u64::from(monitor.capture_drops())),
-        (
-            &b"ocapture_drops"[..],
-            u64::from(monitor.capture_drops_overflow()),
-        ),
-        (
-            &b"s0"[..],
-            u64::from(monitor.actions_first_slot_block(AnyIllegalScope::Connection)),
-        ),
-        (
-            &b"s1"[..],
-            u64::from(monitor.actions_first_slot_block(AnyIllegalScope::All)),
-        ),
-        (&b"ba"[..], u64::from(monitor.actions_block_all())),
-    ];
-    for (key, value) in globals {
-        if !push_u64(&mut w, key, value) {
-            return None;
-        }
-    }
-    let resolver_degraded = monitor.facts_resolver_degraded();
-    if resolver_degraded > 0 && !push_u64(&mut w, b"rd", u64::from(resolver_degraded)) {
-        return None;
-    }
-    if monitor.serving_stale() && !push_u64(&mut w, b"ss", 1) {
-        return None;
-    }
-    let sustained_negatives = monitor.sustained_negatives();
-    if sustained_negatives > 0 && !push_u64(&mut w, b"sn", u64::from(sustained_negatives)) {
-        return None;
-    }
-    let downgrade_to_plain = monitor.facts_downgrade_to_plain();
-    if downgrade_to_plain > 0 && !push_u64(&mut w, b"dp", u64::from(downgrade_to_plain)) {
-        return None;
-    }
-    let probe_relocations = monitor.facts_probe_relocations();
-    if probe_relocations > 0 && !push_u64(&mut w, b"pr", u64::from(probe_relocations)) {
-        return None;
-    }
-    let expired_pin_certs = monitor.facts_expired_pin_certs();
-    if expired_pin_certs > 0 && !push_u64(&mut w, b"ep", u64::from(expired_pin_certs)) {
-        return None;
-    }
-    let ja4_seed = monitor.facts_ja4_seed();
-    if ja4_seed > 0 && !push_u64(&mut w, b"js", u64::from(ja4_seed)) {
-        return None;
-    }
-    let bailiwick_violation = monitor.facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
-    if bailiwick_violation > 0 && !push_u64(&mut w, b"bv", u64::from(bailiwick_violation)) {
-        return None;
-    }
-    let resolver_peer_mismatch = monitor.facts_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
-    if resolver_peer_mismatch > 0 && !push_u64(&mut w, b"rpm", u64::from(resolver_peer_mismatch)) {
-        return None;
-    }
-    let extreme_ttl = monitor.facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
-    if extreme_ttl > 0 && !push_u64(&mut w, b"xttl", u64::from(extreme_ttl)) {
-        return None;
-    }
-    for index in 0..AnyIllegalCause::KIND_COUNT {
-        let value = monitor.facts_any_illegal_by_index(index);
-        if value > 0
-            && !push_indexed_u64(
-                &mut w,
-                b"c",
-                u32::try_from(index).expect("cause index fits u32"),
-                u64::from(value),
-            )
-        {
-            return None;
-        }
-    }
-    for index in 0..UnknownReason::COUNT {
-        let value = monitor.facts_unknown_by_index(index);
-        if value > 0
-            && !push_indexed_u64(
-                &mut w,
-                b"unk",
-                u32::try_from(index).expect("unknown cause index fits u32"),
-                u64::from(value),
-            )
-        {
-            return None;
-        }
-    }
-    let mut loss_bitset: u32 = 0;
-    for index in 0..crate::config::ALLOWLIST_MAX {
-        let Some(ordinal) = DomainOrdinal::from_index(index) else {
-            break;
-        };
-        if monitor.facts_ja4_change_loss(ordinal) {
-            loss_bitset |= 1u32 << index;
-        }
-        let facts = monitor.facts_early_data(ordinal);
-        let blocks = monitor.actions_domain_block(ordinal);
-        let flares = monitor.actions_flare(ordinal);
-        let refusals = monitor.refusals_blocked_domain(ordinal);
-        if facts > 0
-            && !push_indexed_key_u64(
-                &mut w,
-                b"d",
-                u32::try_from(index).expect("allowlist ordinal fits u32"),
-                b"f",
-                u64::from(facts),
-            )
-        {
-            return None;
-        }
-        if blocks > 0
-            && !push_indexed_key_u64(
-                &mut w,
-                b"d",
-                u32::try_from(index).expect("allowlist ordinal fits u32"),
-                b"b",
-                u64::from(blocks),
-            )
-        {
-            return None;
-        }
-        if flares > 0
-            && !push_indexed_key_u64(
-                &mut w,
-                b"d",
-                u32::try_from(index).expect("allowlist ordinal fits u32"),
-                b"l",
-                u64::from(flares),
-            )
-        {
-            return None;
-        }
-        if refusals > 0
-            && !push_indexed_key_u64(
-                &mut w,
-                b"d",
-                u32::try_from(index).expect("allowlist ordinal fits u32"),
-                b"r",
-                u64::from(refusals),
-            )
-        {
-            return None;
-        }
-        let ja4_changes = monitor.facts_ja4_change(ordinal);
-        if ja4_changes > 0 {
-            if !push_indexed_key_u64(
-                &mut w,
-                b"d",
-                u32::try_from(index).expect("allowlist ordinal fits u32"),
-                b"j",
-                u64::from(ja4_changes),
-            ) {
-                return None;
-            }
-            let ja4 = monitor.facts_ja4_value(ordinal);
-            let ja4 = std::str::from_utf8(&ja4).expect("ja4 is ASCII");
-            if !push_indexed_key_quoted(
-                &mut w,
-                b"d",
-                u32::try_from(index).expect("allowlist ordinal fits u32"),
-                b"v",
-                ja4,
-            ) {
-                return None;
-            }
-            if monitor.ja4_peer_ordinal() == Some(ordinal)
-                && !push_indexed_key_addr(
-                    &mut w,
-                    b"d",
-                    u32::try_from(index).expect("allowlist ordinal fits u32"),
-                    monitor.ja4_peer_ip().to_ip_addr(),
-                )
-            {
-                return None;
-            }
-        }
-    }
-    if loss_bitset != 0 && !push_u64_hex(&mut w, b"dx", u64::from(loss_bitset)) {
-        return None;
-    }
-    for i in 0..monitor.capture_detail_len() {
-        let Some(cap) = monitor.capture_detail(i) else {
-            break;
-        };
-        if !push_indexed_key_u64(
-            &mut w,
-            b"x",
-            u32::try_from(i).expect("capture detail index fits u32"),
-            b"s",
-            cap.slot as u64,
-        ) {
-            return None;
-        }
-        if !push_indexed_key_u64(
-            &mut w,
-            b"x",
-            u32::try_from(i).expect("capture detail index fits u32"),
-            b"g",
-            cap.generation,
-        ) {
-            return None;
-        }
-        if !push_indexed_token_prefix(
-            &mut w,
-            b"x",
-            u32::try_from(i).expect("capture detail index fits u32"),
-            b"t",
-        ) || !push_fact_token(&mut w, cap.detail.fact)
-        {
-            return None;
-        }
-        if !push_indexed_token_prefix(
-            &mut w,
-            b"x",
-            u32::try_from(i).expect("capture detail index fits u32"),
-            b"a",
-        ) || !push_effect_token(&mut w, cap.detail.effect)
         {
             return None;
         }
@@ -1934,10 +1673,36 @@ impl LogStore {
         self.enqueue(Level::Info, Kind::ShutdownFinal, &fields);
     }
 
-    pub(crate) fn monitor_summary(&mut self, secs: u64, monitor: &Monitor) -> bool {
+    pub(crate) fn monitor_summary(&mut self, secs: u64, monitor: &mut Monitor) -> bool {
         self.set_now(secs);
-        let committed =
-            self.enqueue_reserved(Kind::Monitor, |buf| encode_monitor(buf, secs, monitor));
+        let committed = self.enqueue_reserved(Kind::Monitor, |buf| {
+            let monitor_ref = &*monitor;
+            encode_monitor_summary(buf, secs, monitor_ref)
+        });
+        if committed {
+            let mut start = 0usize;
+            let total = count_domain_batches(monitor);
+            for part in 1..=total {
+                let ok = self.enqueue_normal(|buf| {
+                    let monitor_ref = &*monitor;
+                    encode_monitor_domain_batch(buf, secs, part, total, monitor_ref, &mut start)
+                });
+                if !ok {
+                    monitor.note_report_drop();
+                }
+            }
+            let mut start = 0usize;
+            let total = count_capture_batches(monitor);
+            for part in 1..=total {
+                let ok = self.enqueue_normal(|buf| {
+                    let monitor_ref = &*monitor;
+                    encode_monitor_capture_batch(buf, secs, part, total, monitor_ref, &mut start)
+                });
+                if !ok {
+                    monitor.note_suppressed_detail();
+                }
+            }
+        }
         self.note_queue_usage();
         committed
     }
@@ -3111,7 +2876,7 @@ mod tests {
         m.note_action_domain_block(ordinal);
         m.note_action_flare(ordinal);
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert_eq!(
@@ -3119,9 +2884,10 @@ mod tests {
             "level=info kind=monitor secs=7 facts_total=9 actions_total=3 refusals_total=0 \
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
              ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 ep=1 js=1 bv=1 \
-             c14=2 unk3=1 d0f=1 d0b=1 d0l=1 d0j=1 \
-             d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"cb007101\" dx=1\n",
-            "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
+             c14=2 unk3=1 dx=1\n\
+             level=info kind=monitor_domain secs=7 part=1/1 d0f=1 d0b=1 d0l=1 d0j=1 \
+             d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"cb007101\"\n",
+            "exact monitor grammar: the summary carries the fixed core and dx bitset, the single nonzero domain block rides its monitor_domain batch"
         );
         assert!(
             text.contains(" rd=1"),
@@ -3202,7 +2968,7 @@ mod tests {
         m.note_fact_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
         m.note_fact_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3226,7 +2992,7 @@ mod tests {
             "the worst-case fixture fills the whole correlated-detail ring"
         );
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3270,7 +3036,7 @@ mod tests {
         let mut m = Monitor::new();
         m.note_serving_stale();
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3286,9 +3052,9 @@ mod tests {
     #[test]
     fn logging_monitor_suppresses_serving_stale_when_clear() {
         use crate::enforcement::monitor::Monitor;
-        let m = Monitor::new();
+        let mut m = Monitor::new();
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3305,7 +3071,7 @@ mod tests {
         m.note_incident_open();
         m.note_incident_open();
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3321,9 +3087,9 @@ mod tests {
     #[test]
     fn logging_monitor_suppresses_sustained_negatives_when_zero() {
         use crate::enforcement::monitor::Monitor;
-        let m = Monitor::new();
+        let mut m = Monitor::new();
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3339,7 +3105,7 @@ mod tests {
         m.note_fact_downgrade_to_plain();
         m.note_fact_downgrade_to_plain();
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3355,9 +3121,9 @@ mod tests {
     #[test]
     fn logging_monitor_suppresses_downgrade_to_plain_when_zero() {
         use crate::enforcement::monitor::Monitor;
-        let m = Monitor::new();
+        let mut m = Monitor::new();
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3374,7 +3140,7 @@ mod tests {
         m.note_fact_probe_relocation();
         m.note_fact_probe_relocation();
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3390,9 +3156,9 @@ mod tests {
     #[test]
     fn logging_monitor_suppresses_probe_relocations_when_zero() {
         use crate::enforcement::monitor::Monitor;
-        let m = Monitor::new();
+        let mut m = Monitor::new();
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3408,7 +3174,7 @@ mod tests {
         m.saturate_all_for_test();
         m.note_serving_stale();
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3434,6 +3200,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn logging_monitor_family_each_record_fits_monitor_record_max() {
+        use crate::enforcement::monitor::Monitor;
+        let mut m = Monitor::new();
+        m.saturate_all_for_test();
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            7,
+            "the saturated family is one summary plus 3 domain and 3 capture batches: {text}"
+        );
+        let mut summaries = 0;
+        let mut domains = 0;
+        let mut captures = 0;
+        for line in &lines {
+            assert!(
+                line.len() + 1 < MONITOR_RECORD_MAX,
+                "every family record stays under the 2048 B cap: {} bytes in {line}",
+                line.len() + 1
+            );
+            if line.starts_with("level=info kind=monitor ") {
+                summaries += 1;
+            } else if line.starts_with("level=info kind=monitor_domain ") {
+                domains += 1;
+            } else if line.starts_with("level=info kind=monitor_capture ") {
+                captures += 1;
+            }
+        }
+        assert_eq!(summaries, 1, "exactly one summary record");
+        assert_eq!(domains, 3, "32 saturated ordinals pack into 3 domain batches");
+        assert_eq!(captures, 3, "64 saturated details pack into 3 capture batches");
+        let mut parts: Vec<&str> = lines
+            .iter()
+            .filter(|l| l.starts_with("level=info kind=monitor_domain "))
+            .map(|l| {
+                l.split(" part=")
+                    .nth(1)
+                    .expect("part field")
+                    .split(' ')
+                    .next()
+                    .expect("part token")
+            })
+            .collect();
+        parts.sort_unstable();
+        assert_eq!(
+            parts,
+            vec!["1/3", "2/3", "3/3"],
+            "domain batches carry sequential part=n/total markers"
+        );
+        let mut capture_parts: Vec<&str> = lines
+            .iter()
+            .filter(|l| l.starts_with("level=info kind=monitor_capture "))
+            .map(|l| {
+                l.split(" part=")
+                    .nth(1)
+                    .expect("part field")
+                    .split(' ')
+                    .next()
+                    .expect("part token")
+            })
+            .collect();
+        capture_parts.sort_unstable();
+        assert_eq!(
+            capture_parts,
+            vec!["1/3", "2/3", "3/3"],
+            "capture batches carry sequential part=n/total markers"
+        );
+    }
+
     #[cfg(test)]
     #[test]
     fn logging_monitor_emits_distinct_slot_identity_for_equal_generation_slots() {
@@ -3454,7 +3293,7 @@ mod tests {
         m.note_consumed_capture(cap(0, 1));
         m.note_consumed_capture(cap(1, 1));
         let (mut store, mut file) = file_logstore();
-        assert!(store.monitor_summary(7, &m), "summary committed");
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
@@ -3496,7 +3335,7 @@ mod tests {
         let mut m = Monitor::new();
         m.note_fact_unknown(UnknownReason::Unattributed);
         assert!(
-            store.monitor_summary(101, &m),
+            store.monitor_summary(101, &mut m),
             "a reserved monitor summary is admitted even on a full ring"
         );
         assert_eq!(
@@ -3616,7 +3455,7 @@ mod tests {
         let mut m = Monitor::new();
         m.note_fact_unknown(UnknownReason::Unattributed);
         assert!(
-            store.monitor_summary(101, &m),
+            store.monitor_summary(101, &mut m),
             "a reserved monitor summary is admitted on an all-reserved full ring"
         );
         assert_eq!(
