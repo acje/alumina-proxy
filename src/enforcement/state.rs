@@ -309,6 +309,10 @@ impl Enforcement {
         self.monitor.note_fact_probe_relocation();
     }
 
+    pub(crate) const fn note_fact_expired_pin_cert(&mut self) {
+        self.monitor.note_fact_expired_pin_cert();
+    }
+
     pub(crate) const fn note_incident_open(&mut self) {
         self.monitor.note_incident_open();
     }
@@ -445,6 +449,22 @@ mod tests {
             en.counters().facts_total(),
             2,
             "the probe-relocation fact folds into the aggregate fact total"
+        );
+    }
+
+    #[test]
+    fn note_fact_expired_pin_cert_passes_through_to_the_monitor() {
+        let t = table(
+            AnyIllegalScope::Connection,
+            &[(ActionKind::FlareOnly, Scope::Connection)],
+        );
+        let mut en = Enforcement::new(t);
+        en.note_fact_expired_pin_cert();
+        assert_eq!(en.counters().facts_expired_pin_certs(), 1);
+        assert_eq!(
+            en.counters().facts_total(),
+            1,
+            "the expired-pin-cert fact folds into the aggregate fact total"
         );
     }
 

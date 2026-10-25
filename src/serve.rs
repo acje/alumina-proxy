@@ -406,6 +406,7 @@ impl ServeStorage {
         self.drain_dns_anomalies();
         self.drain_downgrade_to_plain();
         self.drain_probe_relocations();
+        self.drain_expired_pin_certs();
         self.drain_incident_transitions();
         Ok(Some(result))
     }
@@ -468,6 +469,17 @@ impl ServeStorage {
         let relocations = self.dns.take_probe_relocations();
         for _ in 0..relocations {
             self.enforcement.note_fact_probe_relocation();
+        }
+    }
+
+    /// Folds every pin-branch certificate outside its validity window the DNS
+    /// transport noted into the monitor `ep` fact, one fact per certificate.
+    /// The transport drains to zero, so a later drain never double-counts an
+    /// earlier detection.
+    fn drain_expired_pin_certs(&mut self) {
+        let expired = self.dns.take_expired_pin_certs();
+        for _ in 0..expired {
+            self.enforcement.note_fact_expired_pin_cert();
         }
     }
 
@@ -735,6 +747,7 @@ impl ServeStorage {
         self.drain_dns_anomalies();
         self.drain_downgrade_to_plain();
         self.drain_probe_relocations();
+        self.drain_expired_pin_certs();
         self.drain_incident_transitions();
         self.settle_startup(now0, report, decision_seconds, false)
     }

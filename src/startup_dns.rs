@@ -21,6 +21,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -740,6 +741,9 @@ enum DnsConn {
 struct TlsConn {
     tcp: TcpStream,
     tls: Box<ClientConnection>,
+    /// The shared pin-branch expired/not-yet-valid warning counter, drained
+    /// into the owning transport's `ep` fold once at handshake transition.
+    expired_pin_certs: Arc<AtomicU32>,
 }
 
 /// A custom [`ServerCertVerifier`] for the `DoT` resolver set: an empty
@@ -752,6 +756,11 @@ struct TlsConn {
 struct AluminaServerCertVerifier {
     pin: Option<SpiPin>,
     supported: WebPkiSupportedAlgorithms,
+    /// The shared counter for pin-matching certificates whose Not-Before/
+    /// Not-After window excludes the handshake instant (RT-007). The pin
+    /// branch treats validity as a warning, never a rejection, so the count
+    /// is drained into the monitor `ep` fact by the owning transport.
+    expired_pin_certs: Arc<AtomicU32>,
 }
 
 impl ServerCertVerifier for AluminaServerCertVerifier {
@@ -772,6 +781,9 @@ impl ServerCertVerifier for AluminaServerCertVerifier {
                 return Err(rustls::Error::InvalidCertificate(
                     rustls::CertificateError::ApplicationVerificationFailure,
                 ));
+            }
+            if cert_outside_validity_window(end_entity.as_ref(), now) {
+                self.expired_pin_certs.fetch_add(1, Ordering::Relaxed);
             }
             return Ok(ServerCertVerified::assertion());
         }
@@ -808,6 +820,210 @@ impl ServerCertVerifier for AluminaServerCertVerifier {
     }
 }
 
+/// One DER TLV element: the tag byte, the value slice, and the bytes remaining
+/// after the element.
+struct DerElement<'a> {
+    tag: u8,
+    value: &'a [u8],
+    rest: &'a [u8],
+}
+
+/// Reads one DER TLV element from the front of `input`, returning the element
+/// and the remaining bytes. `None` on any structural anomaly (short header,
+/// truncated length, overlong length form) so the caller can fail open.
+fn read_der_element(input: &[u8]) -> Option<DerElement<'_>> {
+    let (&tag, rest) = input.split_first()?;
+    let (&len_byte, rest) = rest.split_first()?;
+    let (len, rest) = if len_byte & 0x80 == 0 {
+        (usize::from(len_byte), rest)
+    } else {
+        let count = usize::from(len_byte & 0x7f);
+        if count == 0 || count > 4 {
+            return None;
+        }
+        let (len_bytes, rest) = rest.split_at_checked(count)?;
+        let mut len = 0usize;
+        for &b in len_bytes {
+            len = len.checked_mul(256)?.checked_add(usize::from(b))?;
+        }
+        (len, rest)
+    };
+    let (value, rest) = rest.split_at_checked(len)?;
+    Some(DerElement { tag, value, rest })
+}
+
+/// Extracts the certificate validity window (`notBefore`, `notAfter`) as Unix
+/// seconds from a DER-encoded X.509 certificate by walking the fixed
+/// `Certificate` → `TBSCertificate` → `Validity` spine. `None` on any
+/// structural anomaly so the caller can fail open: this parse only drives a
+/// warning counter and must never reject a pin-matching handshake.
+fn cert_validity_epochs(der: &[u8]) -> Option<(i64, i64)> {
+    let cert = read_der_element(der)?;
+    if cert.tag != 0x30 {
+        return None;
+    }
+    let tbs = read_der_element(cert.value)?;
+    if tbs.tag != 0x30 {
+        return None;
+    }
+    let mut rest = tbs.value;
+    if rest.first() == Some(&0xa0) {
+        let version = read_der_element(rest)?;
+        rest = version.rest;
+    }
+    let serial = read_der_element(rest)?;
+    if serial.tag != 0x02 {
+        return None;
+    }
+    rest = serial.rest;
+    let signature = read_der_element(rest)?;
+    if signature.tag != 0x30 {
+        return None;
+    }
+    rest = signature.rest;
+    let issuer = read_der_element(rest)?;
+    if issuer.tag != 0x30 {
+        return None;
+    }
+    let validity = read_der_element(issuer.rest)?;
+    if validity.tag != 0x30 {
+        return None;
+    }
+    let not_before = read_der_element(validity.value)?;
+    let not_after = read_der_element(not_before.rest)?;
+    Some((
+        der_time_to_epoch(&not_before)?,
+        der_time_to_epoch(&not_after)?,
+    ))
+}
+
+/// Converts a DER time element (`UTCTime` `YYMMDDHHMMSSZ` or `GeneralizedTime`
+/// `YYYYMMDDHHMMSSZ`) to Unix seconds. `None` on any malformed or
+/// out-of-range input so the caller can fail open.
+fn der_time_to_epoch(element: &DerElement<'_>) -> Option<i64> {
+    let value = element.value;
+    match element.tag {
+        0x17 => {
+            let (year, rest) = value.split_at_checked(2)?;
+            let (month, rest) = rest.split_at_checked(2)?;
+            let (day, rest) = rest.split_at_checked(2)?;
+            let (hour, rest) = rest.split_at_checked(2)?;
+            let (minute, rest) = rest.split_at_checked(2)?;
+            let (second, rest) = rest.split_at_checked(2)?;
+            if rest != b"Z" {
+                return None;
+            }
+            let yy = i64::from(digits2(year)?);
+            let year = if yy >= 50 { 1900 + yy } else { 2000 + yy };
+            ymd_to_epoch(
+                year,
+                i64::from(digits2(month)?),
+                i64::from(digits2(day)?),
+                i64::from(digits2(hour)?),
+                i64::from(digits2(minute)?),
+                i64::from(digits2(second)?),
+            )
+        }
+        0x18 => {
+            let (year, rest) = value.split_at_checked(4)?;
+            let (month, rest) = rest.split_at_checked(2)?;
+            let (day, rest) = rest.split_at_checked(2)?;
+            let (hour, rest) = rest.split_at_checked(2)?;
+            let (minute, rest) = rest.split_at_checked(2)?;
+            let (second, rest) = rest.split_at_checked(2)?;
+            if rest != b"Z" {
+                return None;
+            }
+            ymd_to_epoch(
+                i64::from(digits4(year)?),
+                i64::from(digits2(month)?),
+                i64::from(digits2(day)?),
+                i64::from(digits2(hour)?),
+                i64::from(digits2(minute)?),
+                i64::from(digits2(second)?),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Parses a two-ASCII-digit field as a `u16`, `None` unless both bytes are
+/// decimal digits.
+fn digits2(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() != 2 {
+        return None;
+    }
+    let a = bytes[0].checked_sub(b'0')?;
+    let b = bytes[1].checked_sub(b'0')?;
+    if a > 9 || b > 9 {
+        return None;
+    }
+    Some(u16::from(a) * 10 + u16::from(b))
+}
+
+/// Parses a four-ASCII-digit field as a `u16`, `None` unless every byte is a
+/// decimal digit and the value fits.
+fn digits4(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() != 4 {
+        return None;
+    }
+    let mut value = 0u16;
+    for &b in bytes {
+        let d = b.checked_sub(b'0')?;
+        if d > 9 {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u16::from(d))?;
+    }
+    Some(value)
+}
+
+/// Converts a civil date/time to Unix seconds via the days-from-civil
+/// algorithm (Hinnant). `None` when the month is out of range or an
+/// intermediate product overflows.
+fn ymd_to_epoch(
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+) -> Option<i64> {
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    days.checked_mul(86_400)?
+        .checked_add(hour * 3600)?
+        .checked_add(minute * 60)?
+        .checked_add(second)
+}
+
+/// Days from civil (Hinnant's `days_from_civil`): the number of days since
+/// 1970-01-01 for a proleptic Gregorian date.
+const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Reports whether the end-entity certificate's validity window excludes the
+/// handshake instant. This is a warning-only probe on the pin branch: the pin
+/// match already grounded the identity, and the non-blocking Not-Before/
+/// Not-After check (RT-007) must never reject a pin-matching handshake. The
+/// DER walk is fail-open — any parse anomaly reports no warning rather than
+/// risking a false rejection.
+fn cert_outside_validity_window(der: &[u8], now: UnixTime) -> bool {
+    let Some((not_before, not_after)) = cert_validity_epochs(der) else {
+        return false;
+    };
+    let now = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+    now < not_before || now > not_after
+}
+
 /// Builds the rustls client connection for a `DoT` resolver target: the ring
 /// crypto provider, a custom verifier (strict SPKI pin + SNI/SAN validation,
 /// or empty-root CA-chain validation), and the resolver FQDN as the SNI name.
@@ -821,7 +1037,10 @@ impl ServerCertVerifier for AluminaServerCertVerifier {
 /// only (`validate_versions`); the `DoT` client must interoperate with
 /// arbitrary public resolvers, while the serving surface is a fixed
 /// first-party contract.
-fn build_tls_connection(target: TlsTarget) -> Result<ClientConnection, rustls::Error> {
+fn build_tls_connection(
+    target: TlsTarget,
+    expired_pin_certs: Arc<AtomicU32>,
+) -> Result<ClientConnection, rustls::Error> {
     let provider = rustls::crypto::ring::default_provider();
     let supported = provider.signature_verification_algorithms;
     let config = ClientConfig::builder_with_provider(Arc::new(provider))
@@ -830,6 +1049,7 @@ fn build_tls_connection(target: TlsTarget) -> Result<ClientConnection, rustls::E
         .with_custom_certificate_verifier(Arc::new(AluminaServerCertVerifier {
             pin: target.pin,
             supported,
+            expired_pin_certs,
         }))
         .with_no_client_auth();
     let server_name = ServerName::try_from(target.fqdn.as_str().to_owned()).map_err(|_| {
@@ -920,6 +1140,12 @@ pub struct StartupDns {
     /// counts here, disjoint from the serving `dp=` downgrade surface; it is
     /// taken exactly once.
     probe_relocations: usize,
+    /// The count of pin-matching certificates whose Not-Before/Not-After
+    /// window excluded the handshake instant, awaiting drain by the owning
+    /// `ServeStorage` into the monitor `ep` fact fold (RT-007). The pin branch
+    /// treats validity as a warning, never a rejection; the count is taken
+    /// exactly once at handshake transition.
+    expired_pin_certs: usize,
     /// The count of sustained-negative incident opens awaiting drain by the
     /// owning `ServeStorage` into the monitor `sn=` level. Each validated
     /// NXDOMAIN that opens a new incident raises the level by one; opens
@@ -1014,6 +1240,7 @@ impl StartupDns {
             dns_anomalies: [0; DnsAnomalyKind::COUNT],
             downgrade_to_plain: 0,
             probe_relocations: 0,
+            expired_pin_certs: 0,
             incident_opens: 0,
             incident_closes: 0,
             probe_sweep: None,
@@ -1067,6 +1294,14 @@ impl StartupDns {
     /// pending count to zero for the next window or serving turn.
     pub(crate) fn take_probe_relocations(&mut self) -> usize {
         std::mem::take(&mut self.probe_relocations)
+    }
+
+    /// Drains the accumulated pin-branch expired/not-yet-valid certificate
+    /// warnings for the owning storage to fold into the monitor's `ep` fact,
+    /// resetting the pending count to zero for the next window or serving
+    /// turn.
+    pub(crate) fn take_expired_pin_certs(&mut self) -> usize {
+        std::mem::take(&mut self.expired_pin_certs)
     }
 
     /// Drains the accumulated sustained-negative incident opens and closes for
@@ -1652,10 +1887,12 @@ impl StartupDns {
                 return Ok(None);
             }
         };
-        if let Ok(conn) = build_tls_connection(target) {
+        let expired_pin_certs = Arc::new(AtomicU32::new(0));
+        if let Ok(conn) = build_tls_connection(target, Arc::clone(&expired_pin_certs)) {
             self.conn = Some(DnsConn::Tls(TlsConn {
                 tcp,
                 tls: Box::new(conn),
+                expired_pin_certs,
             }));
             self.probe_tls_handshake();
             Ok(None)
@@ -1756,6 +1993,7 @@ impl StartupDns {
         if conn.tls.is_handshaking() {
             HandshakeProbe::Waiting
         } else {
+            self.expired_pin_certs += conn.expired_pin_certs.swap(0, Ordering::Relaxed) as usize;
             HandshakeProbe::Transition
         }
     }

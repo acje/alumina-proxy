@@ -703,6 +703,7 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         || monitor.facts_dns_anomaly_overflow()
         || monitor.facts_downgrade_to_plain_overflow()
         || monitor.facts_probe_relocations_overflow()
+        || monitor.facts_expired_pin_certs_overflow()
         || monitor.facts_ja4_change_overflow()
         || monitor.facts_ja4_seed_overflow();
     let globals: [(&[u8], u64); 13] = [
@@ -754,6 +755,10 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     }
     let probe_relocations = monitor.facts_probe_relocations();
     if probe_relocations > 0 && !push_u64(&mut w, b"pr", u64::from(probe_relocations)) {
+        return None;
+    }
+    let expired_pin_certs = monitor.facts_expired_pin_certs();
+    if expired_pin_certs > 0 && !push_u64(&mut w, b"ep", u64::from(expired_pin_certs)) {
         return None;
     }
     let ja4_seed = monitor.facts_ja4_seed();
@@ -2628,6 +2633,7 @@ mod tests {
         m.note_fact_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         m.note_fact_early_data(ordinal);
+        m.note_fact_expired_pin_cert();
         m.note_fact_ja4_seed();
         m.note_fact_ja4_change(
             ordinal,
@@ -2643,9 +2649,9 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert_eq!(
             text,
-            "level=info kind=monitor secs=7 facts_total=8 actions_total=3 refusals_total=0 \
+            "level=info kind=monitor secs=7 facts_total=9 actions_total=3 refusals_total=0 \
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
-             ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 js=1 bv=1 \
+             ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 ep=1 js=1 bv=1 \
              c14=2 unk3=1 d0f=1 d0b=1 d0l=1 d0j=1 \
              d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"203.0.113.1\"\n",
             "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
@@ -2659,8 +2665,16 @@ mod tests {
             "a zero resolver-degraded fold stays suppressed: {text}"
         );
         assert!(
-            text.contains(" rd=1 js=1 bv=1"),
-            "the ja4-seed fold follows the resolver-degraded fold, then the dns-anomaly `bv` key: {text}"
+            text.contains(" ep=1"),
+            "the expired-pin-cert fact key carries its fold: {text}"
+        );
+        assert!(
+            !text.contains("ep=0"),
+            "a zero expired-pin-cert fold stays suppressed: {text}"
+        );
+        assert!(
+            text.contains(" rd=1 ep=1 js=1 bv=1"),
+            "the expired-pin fold and ja4-seed fold follow the resolver-degraded fold, then the dns-anomaly `bv` key: {text}"
         );
         assert!(
             text.contains(" js=1"),

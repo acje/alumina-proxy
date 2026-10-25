@@ -643,6 +643,11 @@ fn pinned_dot_resolver_resolves_both_names_over_loopback_tls() {
             std::net::Ipv4Addr::new(93, 184, 216, 34)
         )]
     );
+    assert_eq!(
+        transport.take_expired_pin_certs(),
+        0,
+        "an in-window pin-matching certificate must not raise the expired-pin warning"
+    );
     drop(responder);
 }
 
@@ -1031,6 +1036,11 @@ fn pinned_dot_accepts_expired_cert_with_matching_pin() {
             std::net::Ipv4Addr::new(93, 184, 216, 34)
         )]
     );
+    assert_eq!(
+        transport.take_expired_pin_certs(),
+        1,
+        "the pin-matching expired certificate must raise exactly one expired-pin warning"
+    );
     drop(responder);
 }
 
@@ -1061,6 +1071,11 @@ fn pinned_dot_accepts_not_yet_valid_cert_with_matching_pin() {
         vec![crate::eligibility::NumericAddr::V4(
             std::net::Ipv4Addr::new(93, 184, 216, 34)
         )]
+    );
+    assert_eq!(
+        transport.take_expired_pin_certs(),
+        1,
+        "the pin-matching not-yet-valid certificate must raise exactly one expired-pin warning"
     );
     drop(responder);
 }

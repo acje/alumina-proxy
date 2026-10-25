@@ -17,6 +17,7 @@ pub struct FactCounters {
     pub(crate) dns_anomaly: [SaturatingCounter; DnsAnomalyKind::COUNT],
     pub(crate) downgrade_to_plain: SaturatingCounter,
     pub(crate) probe_relocations: SaturatingCounter,
+    pub(crate) expired_pin_certs: SaturatingCounter,
     pub(crate) ja4_change: [SaturatingCounter; ALLOWLIST_MAX],
     pub(crate) ja4_value: [[u8; 36]; ALLOWLIST_MAX],
     pub(crate) ja4_seed: SaturatingCounter,
@@ -34,6 +35,7 @@ impl Default for FactCounters {
             dns_anomaly: std::array::from_fn(|_| SaturatingCounter::new()),
             downgrade_to_plain: SaturatingCounter::new(),
             probe_relocations: SaturatingCounter::new(),
+            expired_pin_certs: SaturatingCounter::new(),
             ja4_change: std::array::from_fn(|_| SaturatingCounter::new()),
             ja4_value: [[0; 36]; ALLOWLIST_MAX],
             ja4_seed: SaturatingCounter::new(),
@@ -242,6 +244,15 @@ impl Monitor {
         self.dirty = true;
     }
 
+    /// Counts one pin-matching certificate whose Not-Before/Not-After window
+    /// excluded the handshake instant (`ep=`), noted by the serving storage
+    /// when the DNS transport drains a warning (RT-007). The counter is an
+    /// event fold like `dp`/`pr`, never a latched level.
+    pub(crate) const fn note_fact_expired_pin_cert(&mut self) {
+        self.facts.expired_pin_certs.bump();
+        self.dirty = true;
+    }
+
     /// Counts one first-seen JA4 baseline overflow for an ordinal: the serving
     /// path records a JA4 that does not fit the ordinal's set (the set holds
     /// up to `MAX_ADDRESSES` distinct strings). The per-ordinal counter is an
@@ -442,6 +453,14 @@ impl Monitor {
         self.facts.probe_relocations.overflow()
     }
 
+    pub(crate) const fn facts_expired_pin_certs(&self) -> u32 {
+        self.facts.expired_pin_certs.value()
+    }
+
+    pub(crate) const fn facts_expired_pin_certs_overflow(&self) -> bool {
+        self.facts.expired_pin_certs.overflow()
+    }
+
     pub(crate) fn unknown_total(&self) -> u64 {
         self.facts
             .unknown
@@ -468,6 +487,7 @@ impl Monitor {
                 .sum::<u64>()
             + u64::from(self.facts.downgrade_to_plain.value())
             + u64::from(self.facts.probe_relocations.value())
+            + u64::from(self.facts.expired_pin_certs.value())
             + u64::from(self.facts.ja4_seed.value())
             + self
                 .facts
@@ -614,6 +634,7 @@ impl Monitor {
         }
         self.facts.downgrade_to_plain.saturate_for_test();
         self.facts.probe_relocations.saturate_for_test();
+        self.facts.expired_pin_certs.saturate_for_test();
         self.facts.ja4_seed.saturate_for_test();
         self.facts.ja4_peer_ip = NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1]));
         self.facts.ja4_peer_ordinal = DomainOrdinal::from_index(ALLOWLIST_MAX - 1);
