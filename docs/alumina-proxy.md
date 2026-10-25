@@ -40,7 +40,7 @@ Alumina's own configuration is strict; client input is accepted where variants h
 - **Accept:** any hostname case, compared in lowercase; `Content-Length: 0`. Ignore all other headers, including `Host` and `Proxy-Authorization`.
 - **Reject:** a destination port of `0`, a leading-zero or non-numeric port, a port above `65535`, or a `<fqdn>:<port>` pair whose hostname or port does not exactly match one allowlisted entry; nonzero `Content-Length`, any `Transfer-Encoding`, bare LF line endings, and obs-fold.
 - **One request per connection:** close after any error response.
-- **Errors:** Policy violations, which indicate misconfiguration or compromise, receive an empty body: `400` malformed request, `403` hostname not allowlisted. Runtime conditions receive a fixed plain-text body stating the reason: `502` no resolved addresses or upstream connection failed, `503` no capacity, `504` setup deadline expired. Client input is never echoed.
+- **Errors:** Policy violations, which indicate misconfiguration or compromise, receive an empty body: `400` malformed request, `403` hostname not allowlisted. Runtime conditions receive a fixed plain-text body stating the reason: `502` no resolved addresses or upstream connection failed, `503` no capacity, `504` setup deadline expired. Client input is never echoed. The response corpus is an acknowledged allowlist-enumeration and cache-state oracle (alumina-redtm SP-008): the `400`/`403` split discriminates allowlist membership from malformed syntax and the `502`/`503`/`504` split discriminates DNS-cache state per allowlisted name; this is a threat-model acknowledgement only, with no behavior change.
 
 ### TLS ClientHello profile
 
@@ -55,7 +55,7 @@ Configuration is a single TOML document of at most 16 KiB (16384 bytes), includi
 
 `startup_unresolved_allowance` is required and must be an integer from `0` through the number of configured `[allowed_fqdn."..."]` tables minus one; `0` requires every hostname to be usable at startup. An empty table set is invalid configuration. The allowance affects startup availability, never destination authorization. All configuration keys are mandatory; no defaults are supplied.
 
-Missing or unreadable configuration, invalid TOML (including duplicate keys or invalid table redefinitions), missing required fields, unknown keys or tables, incorrect types, out-of-range values, conflicting settings, and unmet local prerequisites cause immediate startup failure with exit status 78 (EX_CONFIG) and a diagnostic identifying the field or source location where available. Reject duplicate allowlist names after normalization. Do not coerce types, discard invalid entries, or supply missing required values from defaults, environment variables, or command-line overrides. After startup resolution, DNS timeouts, negative answers, and other network failures are expected runtime outcomes governed by the cache rules below, not configuration errors.
+Missing or unreadable configuration, invalid TOML (including duplicate keys or invalid table redefinitions), missing required fields, unknown keys or tables, incorrect types, out-of-range values, conflicting settings, and unmet local prerequisites cause immediate startup failure with exit status 78 (EX_CONFIG) and a diagnostic identifying the field or source location where available. The conflicting-settings class is enumerated here for auditability (documentation clarification only; no new validation): the mandated-set predicates — a required set of settings that must be present and consistent together, where a member present more than once after normalization is a conflict (duplicate keys, invalid table redefinitions, and duplicate allowlist names after normalization are the enumerated instances) — and the forbidden-pair predicates — two settings that cannot legally coexist under this document's schema, where the schema's enumerated scope values are exclusive (a scope value outside the enumerated set for its surface is invalid configuration rather than a silent override). Reject duplicate allowlist names after normalization. Do not coerce types, discard invalid entries, or supply missing required values from defaults, environment variables, or command-line overrides. After startup resolution, DNS timeouts, negative answers, and other network failures are expected runtime outcomes governed by the cache rules below, not configuration errors.
 
 - **Listener:** `listen` is a required string of the form `address:port`, with a numeric IPv4 or bracketed IPv6 address and a port from 1 through 65535. Wildcard addresses are allowed. A bind failure prevents startup.
 - **Names:** Configuration uses lowercase ASCII DNS hostnames, with IDNs supplied in A-label form; CONNECT and SNI hostnames compare case-insensitively. Configuration and CONNECT may normalize a single trailing dot; SNI must satisfy TLS hostname syntax. Compare canonical names and issue absolute DNS queries without search suffixes.
@@ -174,8 +174,8 @@ These are fixed build-time limits, not optional TOML settings or measured capaci
 | Setup deadline / individual upstream connect deadline | 10 seconds / 2 seconds |
 | Upstream connection attempts per tunnel | 4, within the setup deadline |
 | DNS exchange deadline | 5 seconds |
-| Normal DNS refresh interval, lower / upper | 30 seconds / 300 seconds |
-| SOA-based negative DNS refresh interval, lower / upper | 30 seconds / 300 seconds |
+| Normal DNS refresh interval, lower / upper | 5 seconds / 900 seconds |
+| SOA-based negative DNS refresh interval, lower / upper | 30 seconds / 900 seconds |
 | DNS failure retry backoff | 1, 2, 4, 8, 16, then 30 seconds capped |
 | Stale DNS authorization grace after TTL expiry | 259200 seconds (72 hours) |
 | DNS incident summary interval | 3600 seconds per affected hostname |
@@ -1151,3 +1151,244 @@ unchanged; the keyed layout is a configuration-surface change only.
 | Startup-final split: one `startup_name` record per unresolved name (full FQDN, outcome, reason) plus one `startup_final` summary carrying `names_dropped` | Implemented (this revision) |
 | `tarpit` reserved rejection; `[any_illegal]` unchanged | Implemented (this revision) |
 | Keyed-schema fixtures in the integration tests and script config emitters | Implemented (this revision) |
+
+## Red-team remediation: 16 findings — user-authorized amendment
+
+**Authority.** This section is a narrow, user-authorized amendment to this specification
+(`alumina-redtm`, 2026-10-25). It records the user authorization for the remediation of the
+16 voter-confirmed findings of the alox adversarial security analysis: the Part 2
+spec-level findings SP-001 through SP-013 (SP-011 was pruned as a 3/3 voter false positive
+and is not remediated here) and the Part 1 findings RT-001, RT-005, RT-006, and RT-007.
+RT-003 and RT-004 are not part of this amendment: they were remediated in code ahead of it
+(CONNECT parser terminal re-entry made a no-op; slot relay buffers zero-filled at reset). It
+amends only the surfaces enumerated here; every other clause of this document — the fixed
+resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 +
+SNI + ECH-reject behavior — is unchanged and remains binding. Where a finding's remediation
+is doc-only (SP-007, SP-008, SP-012, RT-005), this section records the resolution and
+applies the in-place body folds cited below. Where a finding's remediation changes behavior
+(SP-001, SP-002, SP-003, SP-004, SP-005, SP-006, SP-009, SP-010, SP-013, RT-001, RT-006,
+RT-007), this section records the binding semantics and the implementation folds into the
+later sub-missions of this package through the repository's normal red→green verification
+path; the status table at the end assigns each surface an honest planned/implemented status.
+
+### Amended surface
+
+#### SP-001 — All-scope AnyIllegal latch arms only after a bounded fact threshold
+
+The first AnyIllegal control failure could select `Block` scope `All` and latch a
+process-wide egress outage from a single unauthenticated request, with no pacing or
+threshold between Connection and All scope and no unblock path. Resolution: `All` scope arms
+only after a bounded fact counter crosses a fixed threshold within a fixed window, using
+fixed constants; there is no speculative pacing. The rp2e `:263` property is preserved —
+once armed, the latch still performs the synchronous bounded physical closure and persists
+until restart — and `:306` is respected (no speculative pacing allocation; Tarpit remains
+deferred). The threshold and window are fixed constants, not configuration. Implementation
+folds into a later sub-mission of this package; this amendment records the binding
+semantics.
+
+#### SP-002 — Upstream-sourced early data: baseline denial kept; Domain/All attribution requires corroboration
+
+Early upstream data observed before the forwarding gate opens was attributed to the
+validated configured domain, letting an upstream endpoint fire the per-domain latch (and, at
+`All` scope, a process-wide latch) — a vantage orthogonal to the enforcement subject.
+Resolution: the baseline mandatory denial is kept (terminate setup on early upstream data
+while the gate is closed, rp2e `:255`); Domain/All Action selection from upstream-sourced
+early data is stripped unless K consecutive connections across distinct source sockets
+corroborate the signal. The K-connection corroboration is the client-vs-upstream
+discriminator that respects `:32` (no arrival-ordering inference for activity first observed
+after the gate opens); the boundary inference is stated here rather than left to `:32` to
+disclaim. Implementation folds into a later sub-mission of this package; this amendment
+records the binding semantics.
+
+#### SP-003 — Homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup
+
+A resolver array mixing DoT (`IP#fqdn[^pin]`) and plain (`IP`) entries let failover land on
+a bare-IP entry, converting sustained DoT blocking into a silent cleartext-DNS downgrade,
+with validated negatives masking the degradation. Resolution: resolver arrays are
+homogeneous-trust — an array mixing DoT and plain entries is rejected at startup with exit
+78 (EX_CONFIG), removing the cross-entry downgrade path structurally. This respects `:513` (a
+valid negative response still counts as a successful exchange within a homogeneous array) and
+`:663` (tolerated degraded trust is scoped to a homogeneous plain array, not a mixed one).
+Implementation folds into a later sub-mission of this package; this amendment records the
+binding semantics.
+
+#### SP-004 — Sustained-negative incident class
+
+A validated NXDOMAIN evicts both families immediately and clears exchange-failure incidents,
+with only one transition notification and no recurring observable — sustained negatives are
+indistinguishable from deliberate name removal. Resolution: a sustained-negative incident
+class is added: after N consecutive validated negatives across M windows, a negative-refresh
+incident opens that participates in hourly summaries and the `rd`-class monitor facts, giving
+an operator a persistent deletion signal rather than a single event. This respects `:93`
+(validated negatives remain successful outcomes that clear exchange-failure incidents); the
+sustained-negative incident is a distinct incident class and does not invert the
+negative-clears-incident rule. Implementation folds into a later sub-mission of this package;
+this amendment records the binding semantics.
+
+#### SP-005 — Per-ordinal JA4 set baseline
+
+The first-seen per-(ordinal, IP) JA4 baseline conflated multiple clients behind one proxy,
+re-seeded on IP churn, and left the 17th-peer overflow behavior unspecified. Resolution: the
+baseline becomes a per-ordinal set of up to K=16 distinct observed JA4 strings, reusing the
+existing 512-entry table (32 ordinals × 16 slots). At set-capacity overflow, further adds are
+suppressed and a count is incremented (the evict-vs-suppress question is resolved as
+suppress-with-count, preserving the baseline-never-updated semantics). Baseline-seeding
+events are recorded as operator-visible facts so re-seeding churn is distinguishable from
+attacker-driven re-seed. This respects `:922`/`:968` (the fixed 512-entry table shape and the
+baseline-never-updated doctrine). Implementation folds into a later sub-mission of this
+package; this amendment records the binding semantics.
+
+#### SP-006 — Sigalg-list bound and `count:02` overflow rendering
+
+The spec pinned canonical JA4 byte-for-byte fidelity while mandating sigalg retention
+`[u16; 64]`, so a ClientHello offering more than 64 signature algorithms silently truncated
+the hash input; `count:02` overflow rendering was undefined. Resolution: a ClientHello
+offering more than 64 `signature_algorithms` entries is rejected as a ClientHello-profile
+violation, classified as **AnyIllegal**. This is a profile-boundary rejection, not a JA4
+admit/reject decision, so `:908` (JA4 data never used to admit, reject, or modify a
+connection) is respected. `count:02` overflow renders as `99+`: the two-digit count
+saturates at 99 with an overflow marker; this applies to `cipher_count`, the only count that
+can exceed 99 under the 64-extension cap. Implementation folds into a later sub-mission of
+this package; this amendment records the binding semantics.
+
+#### RT-001 — No silent sigalg truncation
+
+The JA4 fingerprint was computed from a deterministically truncated `signature_algorithms`
+list, so entries beyond the retained prefix never reached the fingerprint and profile pivots
+beyond entry 64 never raised `Changed`. Resolution: the sigalg-list bound of SP-006 removes
+the truncation path — a list longer than the retained bound is rejected as a profile
+violation rather than lopped, so the fingerprint input is never silently truncated; the ALPN
+255-byte cut and `count_token` 99 cap remain bounded retention, not truncation of the JA4
+hash input. Implementation folds into a later sub-mission of this package; this amendment
+records the binding semantics.
+
+#### SP-007 — Resource-profile rows folded in place
+
+The body table rows `:177`/`:178` still read 30/300 while `alumina-hrdn2` (Vec 14) amended
+them to 5/900 (normal) and 30/900 (negative), matching the code. Resolution: the rows are
+folded in place to the already-authorized Vec 14 values, exactly as the `alumina-5sx` and
+`alumina-cfgk` amendments did for their rows: `:177` becomes 5 seconds / 900 seconds and
+`:178` becomes 30 seconds / 900 seconds. Implemented (this revision).
+
+#### SP-008 — CONNECT response-corpus oracle acknowledged
+
+The CONNECT error-response taxonomy is an allowlist-enumeration and cache-state oracle,
+unacknowledged in the threat model. Resolution: threat-model acknowledgement only, at `:43`
+(doc-only, no behavior change): the response corpus is an acknowledged
+allowlist/cache-state oracle — the `400`/`403` split discriminates allowlist membership from
+malformed syntax and the `502`/`503`/`504` split discriminates DNS-cache state per
+allowlisted name. No throttling, normalization, or body change is made. Implemented (this
+revision).
+
+#### SP-009 — Probe-relocation counter disjoint from `dp=`
+
+The post-window probe sweep's DoT→plain relocations incremented the same `dp=` downgrade
+counter, making real failovers indistinguishable from probe noise. Resolution: probe
+relocations are counted in a separate bounded fact disjoint from `dp=`, so the downgrade
+counter remains a clean signal; the probe record carries its own relocation segment. This
+respects `:774` (`dp=` remains the sole serving-downgrade surface) and `:829` (probe
+relocations no longer fold into `dp=`). The new monitor field is re-measured against the
+8192-byte slot headroom (`:1120`). Implementation folds into a later sub-mission of this
+package; this amendment records the binding semantics.
+
+#### SP-010 — Log-queue priority classes
+
+The flat 256-entry FIFO dropped the most consequential records (Block All latch, startup
+final, incident summaries) like any best-effort entry under queue pressure. Resolution:
+bounded priority classes are added to the log queue: latch/event records (`Block All`,
+`startup_final`, `resolver_probe`) are reserved and cannot be dropped by new unrelated
+entries; when the queue is full, the newest entry from the lowest class is dropped first.
+This respects `:199` (drop-and-count remains, now class-aware; a stalled sink still never
+delays rejection, tunnel I/O, DNS, or deadlines) and `:290` (the shutdown report remains
+not-guaranteed-lossless; reservation is bounded, not lossless). Implementation folds into a
+later sub-mission of this package; this amendment records the binding semantics.
+
+#### SP-012 — Conflict predicates enumerated
+
+"Conflicting settings" was an unenumerated catch-all in configuration validation, against
+the exact-discriminant precedent the document set for CONNECT. Resolution: the conflict
+predicates are enumerated at `:58` (documentation clarification only; no new validation): the
+mandated-set predicates — a required set of settings that must be present and consistent
+together, where a member present more than once after normalization is a conflict (duplicate
+keys, invalid table redefinitions, and duplicate allowlist names after normalization are the
+enumerated instances) — and the forbidden-pair predicates — two settings that cannot legally
+coexist under this document's schema, where the schema's enumerated scope values are
+exclusive (a scope value outside the enumerated set for its surface is invalid configuration
+rather than a silent override). The exit-78 behavior is unchanged. Implemented (this
+revision).
+
+#### SP-013 — Latest-change value keyed (ordinal, IP) with triggering peer IP
+
+The C1 latest-change 36-byte JA4 value was keyed per ordinal while the baseline is
+per-(ordinal, IP), so the reported value could belong to a different peer than the one whose
+change fired. Resolution: the latest-change value is keyed by the same (ordinal, IP) as its
+baseline, and the triggering peer's IP is included in the flare record, aligning the reported
+fingerprint with the change that fired. The monitor record grows accordingly and is
+re-measured against the 8192-byte slot headroom (`:1120`). Implementation folds into
+sub-mission 6 of this package; this amendment records the binding semantics.
+
+#### RT-005 — CNAME bailiwick parent-zone note
+
+Bailiwick enforcement grants authority at parent-zone granularity, so a parent-zone
+compromise pivots allowlist names anywhere inside that zone; this is a threat-model note, not
+a code defect. Resolution: spec-text note only — require nothing more today. The parent-zone
+SOA granularity is an accepted threat-model boundary: the anomaly surface
+(`BailiwickViolation`) continues to fire only outside the parent SOA, and the residual (a
+parent-zone delegation compromise is indistinguishable in-band) is acknowledged without
+changing the bailiwick rule. Implemented (this revision).
+
+#### RT-006 — Independent stale-serving window
+
+Stale DNS authorization grace (259200 seconds) is shared with retention, so a captured answer
+could keep serving up to 72 hours past TTL expiry with no independent cap. Resolution: a
+separate stale-SERVING window is introduced, independent of the 259200-second retention
+deadline: stale bindings are served only within the new stale-serving window, which is a new
+profile deadline in the fixed enumeration (`:310`). Retention (259200 seconds) is unchanged.
+Implementation folds into a later sub-mission of this package; this amendment records the
+binding semantics.
+
+#### RT-007 — Pin-branch validity check non-blocking with distinct expired-cert fact
+
+The strict-SPKI pin branch checked SAN and SPKI digest but never evaluated
+Not-Before/Not-After, so a pinned key retained trust indefinitely with no expiry forcing.
+Resolution: the pin branch gains a Not-Before/Not-After validity check that is non-blocking —
+it does not fail the handshake, which remains grounded in the pin match plus signature
+verification per `:675` (validity-time check only, no chain-build) — and emits a distinct
+expired-cert warning fact when serving over an expired pinned certificate, forcing pin
+rotation with operator-visible telemetry. Implementation folds into a later sub-mission of
+this package; this amendment records the binding semantics.
+
+### Status
+
+| Surface | Status |
+| --- | --- |
+| This amendment published | Current revision |
+| SP-001: All-scope arms only after bounded fact threshold in fixed window; fixed constants; no speculative pacing (`:263`/`:306`) | Planned — later sub-mission |
+| SP-002: baseline early-data denial kept; Domain/All attribution stripped without K-connection corroboration (`:32`) | Planned — later sub-mission |
+| SP-003: homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup exit 78 (`:513`/`:663`) | Planned — later sub-mission |
+| SP-004: sustained-negative incident class; N negatives across M windows raise `rd`-class incident in hourly summaries (`:93`) | Planned — later sub-mission |
+| SP-005: per-ordinal JA4 set up to K=16 distinct strings; overflow suppresses adds + increments count; seeding events recorded (`:922`/`:968`) | Planned — later sub-mission |
+| SP-006: >64 sigalgs rejected as AnyIllegal profile violation (not JA4 admit/reject, `:908`); `count:02` overflow renders `99+` | Planned — later sub-mission |
+| RT-001: sigalg-list bound at 64; no silent truncation of the JA4 hash input | Planned — later sub-mission |
+| SP-007: profile rows `:177`/`:178` folded in place to 5/900 and 30/900 | Implemented (this revision) |
+| SP-008: CONNECT response-corpus oracle acknowledged at `:43` (doc-only, no behavior change) | Implemented (this revision) |
+| SP-009: probe-relocation counter disjoint from `dp=`; re-measured vs 8192-B slot (`:774`/`:829`/`:1120`) | Planned — later sub-mission |
+| SP-010: log-queue priority classes; latch/event records reserved; drop newest-lowest first (`:199`/`:290`) | Planned — later sub-mission |
+| SP-012: conflict predicates enumerated at `:58` (doc clarification, no new validation) | Implemented (this revision) |
+| SP-013: latest-change JA4 keyed (ordinal, IP) + triggering peer IP in flare; re-measured vs 8192-B slot (`:955`/`:1120`) | Planned — sub-mission 6 |
+| RT-005: parent-zone bailiwick note; require nothing more today | Implemented (this revision) |
+| RT-006: independent stale-serving window, distinct from 259200 s retention; new profile deadline (`:310`) | Planned — later sub-mission |
+| RT-007: pin-branch Not-Before/Not-After check non-blocking + distinct expired-cert warning fact (`:675`) | Planned — later sub-mission |
+
+### Explicitly unchanged (non-negotiable)
+
+The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers,
+128 MiB traffic storage, the 256 × 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit
+recheck, DNS response/candidate/incident caps, the 90-second startup window, and all
+deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte
+conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime
+metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI +
+ECH-reject; packet dropping is never implemented; no new dependency unless its intake
+precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these
+items or restates any profile row differently; the RT-006 stale-serving window is a new
+profile deadline added to the fixed enumeration and changes no existing deadline.
