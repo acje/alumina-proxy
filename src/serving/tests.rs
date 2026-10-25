@@ -5762,21 +5762,44 @@ fn block_all_latch_closure_spends_zero_allocations() {
             "the relay slot owns live client and upstream sockets"
         );
 
-        let mut evil = connect(port);
-        evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
-            .expect("head B");
-
         let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+            let mut evil1 = connect(port);
+            evil1
+                .write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("head B1");
+            pump(&mut serving, 30);
+            assert!(
+                !serving.storage().enforcement().block_all(),
+                "the first AnyIllegal must stay BaselineOnly below the 3-fact latch (SP-001)"
+            );
+
+            let mut evil2 = connect(port);
+            evil2
+                .write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("head B2");
+            pump(&mut serving, 30);
+            assert!(
+                !serving.storage().enforcement().block_all(),
+                "the second AnyIllegal must stay BaselineOnly below the 3-fact latch (SP-001)"
+            );
+
+            let mut evil3 = connect(port);
+            evil3
+                .write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("head B3");
             pump(&mut serving, 30);
             assert!(
                 serving.storage().enforcement().block_all(),
-                "the AnyIllegal All latch fires"
+                "the third AnyIllegal with scope all must latch before erasure"
             );
             assert_eq!(
                 serving.storage().occupied(),
                 0,
                 "Block All closes the pending seat and the live relay slot"
             );
+            drop(evil1);
+            drop(evil2);
+            drop(evil3);
         });
         assert!(
             counts.all_zero(),
@@ -5797,7 +5820,6 @@ fn block_all_latch_closure_spends_zero_allocations() {
             ),
             Err(other) => panic!("relay client read failed: {other:?}"),
         }
-        drop(evil);
         drop(relay_client);
         drop(pending);
     });
@@ -5810,32 +5832,47 @@ fn block_domain_current_flow_close_spends_zero_allocations() {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "connection", "block", "domain");
         let mut serving = serve_on_cfg(port, &cfg);
-        let _trigger_client = connect(port);
-        pump(&mut serving, 20);
-        let _relay_client = connect(port);
-        pump(&mut serving, 20);
-        assert_eq!(
-            serving.storage().occupied(),
-            2,
-            "two sub.example.org flows admitted before the block"
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
+
+        for i in 0..3 {
+            serving.slots[i].hello_end = Some(10);
+            serving.slots[i].client = Some(fresh_client_source());
+            fabric_validated_early_data_at(&mut serving, i, Some(5));
+        }
+        fabric_relay_slot(&mut serving, 3, b"sub.example.org", b"PENDING-DOWN-00");
+        assert!(
+            serving.slots[3].down_len > 0,
+            "the relay slot holds a pending downstream payload"
         );
 
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data(&mut serving, Some(5));
-        fabric_relay_slot(&mut serving, 1, b"sub.example.org", b"PENDING-DOWN-00");
-
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
         let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-            serving
-                .dispatch_readiness(
-                    token,
-                    Readiness {
-                        readable: true,
-                        writable: false,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("early data blocks the domain");
+            for i in 0..3 {
+                let token = upstream_token(serving.slots[i].slot_gen, i);
+                serving
+                    .dispatch_readiness(
+                        token,
+                        Readiness {
+                            readable: true,
+                            writable: false,
+                            ..Readiness::none()
+                        },
+                    )
+                    .expect("early data dispatch");
+                if i < 2 {
+                    assert!(
+                        !serving.storage().enforcement().is_blocked(ordinal),
+                        "early data below K=3 distinct sources must stay BaselineOnly (SP-002)"
+                    );
+                }
+            }
+            assert!(
+                serving.storage().enforcement().is_blocked(ordinal),
+                "the third distinct-source early data corroborates and blocks the domain"
+            );
             assert_eq!(
                 serving.storage().occupied(),
                 0,
@@ -5846,11 +5883,6 @@ fn block_domain_current_flow_close_spends_zero_allocations() {
             counts.all_zero(),
             "the Block-Domain current-flow closure must allocate/deallocate nothing: {counts:?}"
         );
-        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-        let ordinal = serving
-            .storage()
-            .ordinal_for_pair(&approved, 443)
-            .expect("ordinal");
         assert!(serving.storage().enforcement().is_blocked(ordinal));
     });
 }
@@ -5862,34 +5894,43 @@ fn early_data_projection_spends_zero_allocations() {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "connection", "block", "domain");
         let mut serving = serve_on_cfg(port, &cfg);
-        let _client = connect(port);
-        pump(&mut serving, 20);
-        assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
-        serving.slots[0].hello_end = Some(10);
-        fabric_validated_early_data(&mut serving, Some(5));
-        let token = upstream_token(serving.slots[0].slot_gen, 0);
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
+
+        for i in 0..3 {
+            serving.slots[i].hello_end = Some(10);
+            serving.slots[i].client = Some(fresh_client_source());
+            fabric_validated_early_data_at(&mut serving, i, Some(5));
+        }
 
         let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-            serving
-                .dispatch_readiness(
-                    token,
-                    Readiness {
-                        readable: true,
-                        writable: false,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("early origin data projects");
+            for i in 0..3 {
+                let token = upstream_token(serving.slots[i].slot_gen, i);
+                serving
+                    .dispatch_readiness(
+                        token,
+                        Readiness {
+                            readable: true,
+                            writable: false,
+                            ..Readiness::none()
+                        },
+                    )
+                    .expect("early origin data projects");
+                if i < 2 {
+                    assert!(
+                        !serving.storage().enforcement().is_blocked(ordinal),
+                        "early data below K=3 distinct sources must stay BaselineOnly (SP-002)"
+                    );
+                }
+            }
             assert_eq!(
                 serving.storage().occupied(),
                 0,
                 "early upstream data terminates setup"
             );
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
-            let ordinal = serving
-                .storage()
-                .ordinal_for_pair(&approved, 443)
-                .expect("ordinal");
             assert!(
                 serving.storage().enforcement().is_blocked(ordinal),
                 "validated early data marks the ordinal blocked"
@@ -5923,9 +5964,22 @@ fn block_all_storm_sweeps_128_slots_alloc_free() {
             ws.stage = Stage::Dialing;
         }
         let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-            let effect = serving.any_illegal(0, AnyIllegalCause::HostNotAllowlisted);
+            for i in 0..3 {
+                let effect = serving.any_illegal(i, AnyIllegalCause::HostNotAllowlisted);
+                if i < 2 {
+                    assert!(
+                        matches!(effect, Effect::BaselineOnly),
+                        "AnyIllegal facts below the 3-fact window must stay BaselineOnly (SP-001)"
+                    );
+                } else {
+                    assert!(
+                        matches!(effect, Effect::Block { scope: Scope::All }),
+                        "the third AnyIllegal fact latches Block All"
+                    );
+                }
+            }
             assert!(
-                matches!(effect, Effect::Block { scope: Scope::All }),
+                serving.storage().enforcement().block_all(),
                 "the storm trigger latches Block All"
             );
             assert!(
