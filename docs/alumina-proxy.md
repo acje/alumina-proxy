@@ -1246,9 +1246,10 @@ the hash input; `count:02` overflow rendering was undefined. Resolution: a Clien
 offering more than 64 `signature_algorithms` entries is rejected as a ClientHello-profile
 violation, classified as **AnyIllegal**. This is a profile-boundary rejection, not a JA4
 admit/reject decision, so `:908` (JA4 data never used to admit, reject, or modify a
-connection) is respected. `count:02` overflow renders as `99+`: the two-digit count
-saturates at 99 with an overflow marker; this applies to `cipher_count`, the only count that
-can exceed 99 under the 64-extension cap. Implementation folds into a later sub-mission of
+connection) is respected. `count:02` overflow rendering is bounded: the two-digit count
+saturates at 99 with no literal overflow marker (`+` would break the fixed 2-character
+canonical slot of the 36-byte JA4 string); this applies to `cipher_count`, the only count
+that can exceed 99 under the 64-extension cap. Implementation folds into a later sub-mission of
 this package; this amendment records the binding semantics.
 
 #### RT-001 — No silent sigalg truncation
