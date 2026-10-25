@@ -346,6 +346,10 @@ impl Enforcement {
         &self.monitor
     }
 
+    pub(crate) const fn monitor_mut(&mut self) -> &mut Monitor {
+        &mut self.monitor
+    }
+
     pub(crate) fn monitor_due(&self, secs: u64) -> bool {
         self.monitor.report_due(secs)
     }

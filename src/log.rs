@@ -48,6 +48,15 @@ use crate::startup_dns::{NameOutcome, ProbeVerdict};
 
 pub(crate) const QUEUE_SLOTS: usize = 256;
 pub(crate) const SLOT_BYTES: usize = 10 * 1024;
+/// Monitor family record geometry (alox9-01): the always-emitted summary plus
+/// best-effort `monitor_domain` / `monitor_capture` detail batches each stay
+/// within this bound, well under the slot. The `SLOT_BYTES` shrink is a later
+/// sub-mission.
+pub(crate) const MONITOR_RECORD_MAX: usize = 2048;
+/// Nonzero domain blocks packed per `monitor_domain` batch (32 ordinals -> 3).
+const DOMAIN_BATCH: usize = 11;
+/// Nonzero capture details packed per `monitor_capture` batch (64 -> 3).
+const CAPTURE_BATCH: usize = 22;
 /// Per-turn sink budget: at most this many write calls or this many bytes,
 /// whichever is exhausted first (docs/alumina-proxy.md:178,194,146).
 pub(crate) const SINK_MAX_OPS: usize = 16;
@@ -978,6 +987,334 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     Some(w.len)
 }
 
+/// True when a per-ordinal domain block carries at least one `d<i>*` field
+/// (early-data, block, flare, refusal, or ja4-change fold).
+const fn domain_block_nonzero(monitor: &Monitor, ordinal: DomainOrdinal) -> bool {
+    monitor.facts_early_data(ordinal) > 0
+        || monitor.actions_domain_block(ordinal) > 0
+        || monitor.actions_flare(ordinal) > 0
+        || monitor.refusals_blocked_domain(ordinal) > 0
+        || monitor.facts_ja4_change(ordinal) > 0
+}
+
+/// Number of `monitor_domain` batches needed to carry every nonzero domain
+/// block (32 ordinals -> ceil(nonzero / `DOMAIN_BATCH`), zero when none).
+fn count_domain_batches(monitor: &Monitor) -> u32 {
+    let mut nonzero = 0usize;
+    for index in 0..crate::config::ALLOWLIST_MAX {
+        let Some(ordinal) = DomainOrdinal::from_index(index) else {
+            break;
+        };
+        if domain_block_nonzero(monitor, ordinal) {
+            nonzero += 1;
+        }
+    }
+    u32::try_from(nonzero.div_ceil(DOMAIN_BATCH)).expect("domain batch count fits u32")
+}
+
+/// Number of `monitor_capture` batches needed to carry every capture detail
+/// (64 details -> ceil(len / `CAPTURE_BATCH`), zero when the window is empty).
+fn count_capture_batches(monitor: &Monitor) -> u32 {
+    u32::try_from(monitor.capture_detail_len().div_ceil(CAPTURE_BATCH))
+        .expect("capture batch count fits u32")
+}
+
+/// Encodes the always-emitted monitor summary: fixed core globals plus
+/// zero-suppressed scoped folds, but no per-ordinal `d<i>*` or per-capture
+/// `x<i>*` detail (those ride the best-effort detail batches). Sole commit
+/// point of the monitor family (alox9-01).
+#[expect(
+    clippy::too_many_lines,
+    reason = "long monitor record serializer emitting every indexed field into the fixed slot buffer"
+)]
+fn encode_monitor_summary(
+    slot_buf: &mut [u8; SLOT_BYTES],
+    secs: u64,
+    monitor: &Monitor,
+) -> Option<usize> {
+    let mut w = Entry {
+        buf: slot_buf,
+        len: 0,
+    };
+    if !write_header(&mut w, Level::Info, Kind::Monitor) {
+        return None;
+    }
+    if !push_u64(&mut w, b"secs", secs) {
+        return None;
+    }
+    let ofacts = monitor.facts_any_illegal_overflow()
+        || monitor.facts_early_data_overflow()
+        || monitor.facts_unknown_overflow()
+        || monitor.facts_resolver_degraded_overflow()
+        || monitor.facts_dns_anomaly_overflow()
+        || monitor.facts_downgrade_to_plain_overflow()
+        || monitor.facts_probe_relocations_overflow()
+        || monitor.facts_expired_pin_certs_overflow()
+        || monitor.facts_ja4_change_overflow()
+        || monitor.facts_ja4_seed_overflow();
+    let globals: [(&[u8], u64); 13] = [
+        (&b"facts_total"[..], monitor.facts_total()),
+        (&b"actions_total"[..], monitor.actions_total()),
+        (&b"refusals_total"[..], monitor.refusals_total()),
+        (&b"ofacts"[..], u64::from(ofacts)),
+        (&b"oactions"[..], u64::from(monitor.actions_overflow())),
+        (&b"orefusals"[..], u64::from(monitor.refusals_overflow())),
+        (&b"report_drops"[..], u64::from(monitor.report_drops())),
+        (
+            &b"oreport_drops"[..],
+            u64::from(monitor.report_drops_overflow()),
+        ),
+        (&b"capture_drops"[..], u64::from(monitor.capture_drops())),
+        (
+            &b"ocapture_drops"[..],
+            u64::from(monitor.capture_drops_overflow()),
+        ),
+        (
+            &b"s0"[..],
+            u64::from(monitor.actions_first_slot_block(AnyIllegalScope::Connection)),
+        ),
+        (
+            &b"s1"[..],
+            u64::from(monitor.actions_first_slot_block(AnyIllegalScope::All)),
+        ),
+        (&b"ba"[..], u64::from(monitor.actions_block_all())),
+    ];
+    for (key, value) in globals {
+        if !push_u64(&mut w, key, value) {
+            return None;
+        }
+    }
+    let resolver_degraded = monitor.facts_resolver_degraded();
+    if resolver_degraded > 0 && !push_u64(&mut w, b"rd", u64::from(resolver_degraded)) {
+        return None;
+    }
+    if monitor.serving_stale() && !push_u64(&mut w, b"ss", 1) {
+        return None;
+    }
+    let sustained_negatives = monitor.sustained_negatives();
+    if sustained_negatives > 0 && !push_u64(&mut w, b"sn", u64::from(sustained_negatives)) {
+        return None;
+    }
+    let downgrade_to_plain = monitor.facts_downgrade_to_plain();
+    if downgrade_to_plain > 0 && !push_u64(&mut w, b"dp", u64::from(downgrade_to_plain)) {
+        return None;
+    }
+    let probe_relocations = monitor.facts_probe_relocations();
+    if probe_relocations > 0 && !push_u64(&mut w, b"pr", u64::from(probe_relocations)) {
+        return None;
+    }
+    let expired_pin_certs = monitor.facts_expired_pin_certs();
+    if expired_pin_certs > 0 && !push_u64(&mut w, b"ep", u64::from(expired_pin_certs)) {
+        return None;
+    }
+    let ja4_seed = monitor.facts_ja4_seed();
+    if ja4_seed > 0 && !push_u64(&mut w, b"js", u64::from(ja4_seed)) {
+        return None;
+    }
+    let bailiwick_violation = monitor.facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
+    if bailiwick_violation > 0 && !push_u64(&mut w, b"bv", u64::from(bailiwick_violation)) {
+        return None;
+    }
+    let resolver_peer_mismatch = monitor.facts_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
+    if resolver_peer_mismatch > 0 && !push_u64(&mut w, b"rpm", u64::from(resolver_peer_mismatch)) {
+        return None;
+    }
+    let extreme_ttl = monitor.facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+    if extreme_ttl > 0 && !push_u64(&mut w, b"xttl", u64::from(extreme_ttl)) {
+        return None;
+    }
+    for index in 0..AnyIllegalCause::KIND_COUNT {
+        let value = monitor.facts_any_illegal_by_index(index);
+        if value > 0
+            && !push_indexed_u64(
+                &mut w,
+                b"c",
+                u32::try_from(index).expect("cause index fits u32"),
+                u64::from(value),
+            )
+        {
+            return None;
+        }
+    }
+    for index in 0..UnknownReason::COUNT {
+        let value = monitor.facts_unknown_by_index(index);
+        if value > 0
+            && !push_indexed_u64(
+                &mut w,
+                b"unk",
+                u32::try_from(index).expect("unknown cause index fits u32"),
+                u64::from(value),
+            )
+        {
+            return None;
+        }
+    }
+    let mut loss_bitset: u32 = 0;
+    for index in 0..crate::config::ALLOWLIST_MAX {
+        let Some(ordinal) = DomainOrdinal::from_index(index) else {
+            break;
+        };
+        if monitor.facts_ja4_change_loss(ordinal) {
+            loss_bitset |= 1u32 << index;
+        }
+    }
+    if loss_bitset != 0 && !push_u64_hex(&mut w, b"dx", u64::from(loss_bitset)) {
+        return None;
+    }
+    if !w.push(b"\n") {
+        return None;
+    }
+    Some(w.len)
+}
+
+/// Encodes one best-effort `monitor_domain` batch: its own hardcoded header
+/// (no `Kind` variant exists for detail batches), `secs`, `part=n/total`, then
+/// up to [`DOMAIN_BATCH`] nonzero domain blocks scanned ascending from `start`,
+/// advancing `start` past every examined ordinal.
+fn encode_monitor_domain_batch(
+    slot_buf: &mut [u8; SLOT_BYTES],
+    secs: u64,
+    part: u32,
+    total: u32,
+    monitor: &Monitor,
+    start: &mut usize,
+) -> Option<usize> {
+    let mut w = Entry {
+        buf: slot_buf,
+        len: 0,
+    };
+    if !w.push(b"level=info kind=monitor_domain") {
+        return None;
+    }
+    if !push_u64(&mut w, b"secs", secs) {
+        return None;
+    }
+    if !w.push(b" part=")
+        || fmt::Write::write_fmt(&mut w, format_args!("{part}/{total}")).is_err()
+    {
+        return None;
+    }
+    let mut packed = 0usize;
+    let mut index = *start;
+    while index < crate::config::ALLOWLIST_MAX {
+        let Some(ordinal) = DomainOrdinal::from_index(index) else {
+            break;
+        };
+        if domain_block_nonzero(monitor, ordinal) {
+            let index32 = u32::try_from(index).expect("allowlist ordinal fits u32");
+            let facts = monitor.facts_early_data(ordinal);
+            let blocks = monitor.actions_domain_block(ordinal);
+            let flares = monitor.actions_flare(ordinal);
+            let refusals = monitor.refusals_blocked_domain(ordinal);
+            if facts > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"f", u64::from(facts)) {
+                return None;
+            }
+            if blocks > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"b", u64::from(blocks)) {
+                return None;
+            }
+            if flares > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"l", u64::from(flares)) {
+                return None;
+            }
+            if refusals > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"r", u64::from(refusals)) {
+                return None;
+            }
+            let ja4_changes = monitor.facts_ja4_change(ordinal);
+            if ja4_changes > 0 {
+                if !push_indexed_key_u64(&mut w, b"d", index32, b"j", u64::from(ja4_changes)) {
+                    return None;
+                }
+                let ja4 = monitor.facts_ja4_value(ordinal);
+                let ja4 = std::str::from_utf8(&ja4).expect("ja4 is ASCII");
+                if !push_indexed_key_quoted(&mut w, b"d", index32, b"v", ja4) {
+                    return None;
+                }
+                if monitor.ja4_peer_ordinal() == Some(ordinal)
+                    && !push_indexed_key_addr(
+                        &mut w,
+                        b"d",
+                        index32,
+                        monitor.ja4_peer_ip().to_ip_addr(),
+                    )
+                {
+                    return None;
+                }
+            }
+            packed += 1;
+        }
+        index += 1;
+        if packed == DOMAIN_BATCH {
+            break;
+        }
+    }
+    *start = index;
+    if !w.push(b"\n") {
+        return None;
+    }
+    Some(w.len)
+}
+
+/// Encodes one best-effort `monitor_capture` batch: its own hardcoded header,
+/// `secs`, `part=n/total`, then up to [`CAPTURE_BATCH`] capture details scanned
+/// ascending from `start`, advancing `start` past every examined detail.
+fn encode_monitor_capture_batch(
+    slot_buf: &mut [u8; SLOT_BYTES],
+    secs: u64,
+    part: u32,
+    total: u32,
+    monitor: &Monitor,
+    start: &mut usize,
+) -> Option<usize> {
+    let mut w = Entry {
+        buf: slot_buf,
+        len: 0,
+    };
+    if !w.push(b"level=info kind=monitor_capture") {
+        return None;
+    }
+    if !push_u64(&mut w, b"secs", secs) {
+        return None;
+    }
+    if !w.push(b" part=")
+        || fmt::Write::write_fmt(&mut w, format_args!("{part}/{total}")).is_err()
+    {
+        return None;
+    }
+    let mut packed = 0usize;
+    let mut index = *start;
+    while index < monitor.capture_detail_len() {
+        let Some(cap) = monitor.capture_detail(index) else {
+            break;
+        };
+        let index32 = u32::try_from(index).expect("capture detail index fits u32");
+        if !push_indexed_key_u64(&mut w, b"x", index32, b"s", cap.slot as u64) {
+            return None;
+        }
+        if !push_indexed_key_u64(&mut w, b"x", index32, b"g", cap.generation) {
+            return None;
+        }
+        if !push_indexed_token_prefix(&mut w, b"x", index32, b"t")
+            || !push_fact_token(&mut w, cap.detail.fact)
+        {
+            return None;
+        }
+        if !push_indexed_token_prefix(&mut w, b"x", index32, b"a")
+            || !push_effect_token(&mut w, cap.detail.effect)
+        {
+            return None;
+        }
+        packed += 1;
+        index += 1;
+        if packed == CAPTURE_BATCH {
+            break;
+        }
+    }
+    *start = index;
+    if !w.push(b"\n") {
+        return None;
+    }
+    Some(w.len)
+}
+
 fn push_u64(w: &mut Entry<'_>, key: &[u8], value: u64) -> bool {
     w.push(b" ")
         && w.push(key)
@@ -1808,6 +2145,29 @@ impl LogStore {
         self.count += 1;
     }
 
+    /// Best-effort enqueue for a non-reserved record built by `encode` (the
+    /// `monitor_domain` / `monitor_capture` detail batches). On a full ring the
+    /// record is dropped whole without running `encode`; on encode failure it
+    /// is dropped too. Returns whether the record was committed. Never calls
+    /// `note_queue_usage` (the caller accounts queue pressure once per turn).
+    fn enqueue_normal(
+        &mut self,
+        encode: impl FnOnce(&mut [u8; SLOT_BYTES]) -> Option<usize>,
+    ) -> bool {
+        if self.count >= QUEUE_SLOTS {
+            self.drop_one();
+            return false;
+        }
+        let index = self.write_index();
+        if let Some(len) = encode(&mut self.slots[index].buf) {
+            self.commit_record(index, len);
+            true
+        } else {
+            self.drop_one();
+            false
+        }
+    }
+
     /// Enqueues a reserved priority-class record (docs/alumina-proxy.md:1299-1301).
     /// On a full ring the record is encoded into a stack scratch slot first and
     /// only on encode success displaces the newest normal record, so a failed
@@ -2321,8 +2681,20 @@ mod tests {
         monitor.note_serving_stale();
         monitor.note_fact_downgrade_to_plain();
         worst.push((
-            "monitor",
-            encode_monitor(&mut slot, u64::MAX, &monitor).expect("fits"),
+            "monitor_summary",
+            encode_monitor_summary(&mut slot, u64::MAX, &monitor).expect("fits"),
+        ));
+        let mut domain_start = 0usize;
+        worst.push((
+            "monitor_domain",
+            encode_monitor_domain_batch(&mut slot, u64::MAX, 1, 3, &monitor, &mut domain_start)
+                .expect("fits"),
+        ));
+        let mut capture_start = 0usize;
+        worst.push((
+            "monitor_capture",
+            encode_monitor_capture_batch(&mut slot, u64::MAX, 1, 3, &monitor, &mut capture_start)
+                .expect("fits"),
         ));
 
         let set = config.resolver_set();
@@ -2348,7 +2720,7 @@ mod tests {
             encode_record_probe(&mut slot, u64::MAX, &segments).expect("fits"),
         ));
 
-        assert_eq!(worst.len(), 14, "every record kind is measured");
+        assert_eq!(worst.len(), 16, "every record kind is measured");
         for (kind_name, len) in &worst {
             eprintln!(
                 "worst-case {kind_name:<16} {len:>5} B record, {:>5} B margin",
@@ -2358,6 +2730,12 @@ mod tests {
                 *len < SLOT_BYTES,
                 "{kind_name} worst case incl framing fits the 10 KiB entry: {len}"
             );
+            if kind_name.starts_with("monitor") {
+                assert!(
+                    *len <= MONITOR_RECORD_MAX,
+                    "{kind_name} worst case fits the 2048 B monitor record bound: {len}"
+                );
+            }
         }
         let name_len = worst
             .iter()
