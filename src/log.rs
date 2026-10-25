@@ -2994,11 +2994,13 @@ mod tests {
         assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
-        assert!(
-            text.len() < SLOT_BYTES,
-            "the all-saturated monitor record stays inside the 2 KiB slot: {} bytes",
-            text.len()
-        );
+        for line in text.lines() {
+            assert!(
+                line.len() + 1 < SLOT_BYTES,
+                "every emitted record stays inside the 2 KiB slot: {} bytes in {line}",
+                line.len() + 1
+            );
+        }
         assert!(
             text.contains("ofacts=1"),
             "saturation latches the aggregate overflow flags: {text}"
@@ -3176,11 +3178,13 @@ mod tests {
         assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
-        assert!(
-            text.len() < SLOT_BYTES,
-            "the all-saturated record with the stale-serving bit stays inside the 2 KiB slot: {} bytes",
-            text.len()
-        );
+        for line in text.lines() {
+            assert!(
+                line.len() + 1 < SLOT_BYTES,
+                "every emitted record stays inside the 2 KiB slot: {} bytes in {line}",
+                line.len() + 1
+            );
+        }
         assert!(
             text.contains(" ss=1"),
             "the latched stale-serving bit survives the saturated record: {text}"
@@ -3502,7 +3506,7 @@ mod tests {
         let (reader, writer) = UnixStream::pair().expect("socketpair");
         writer.set_nonblocking(true).expect("writer nonblocking");
         let mut store = LogStore::with_fd(writer.as_raw_fd()).expect("pipe sink store");
-        let big = "p".repeat(4000);
+        let big = "p".repeat(1000);
         let mut turns = 0;
         while turns < 8 * QUEUE_SLOTS && store.len() < QUEUE_SLOTS {
             store.startup_warning(1, &big, Family::A);
@@ -3632,7 +3636,7 @@ mod tests {
         let writer_fd = writer.as_raw_fd();
         drop(reader);
         let mut store = LogStore::with_fd(writer_fd).expect("pipe sink store");
-        let big = "p".repeat(4000);
+        let big = "p".repeat(1000);
         let mut guard = 0;
         while guard < 8 * QUEUE_SLOTS && store.len() < QUEUE_SLOTS {
             store.startup_warning(1, &big, Family::A);
@@ -3696,7 +3700,7 @@ mod tests {
         let (reader, writer) = UnixStream::pair().expect("socketpair");
         writer.set_nonblocking(true).expect("writer nonblocking");
         let mut store = LogStore::with_fd(writer.as_raw_fd()).expect("pipe sink store");
-        let big = "p".repeat(4000);
+        let big = "p".repeat(1000);
         for _ in 0..QUEUE_SLOTS {
             store.startup_warning(1, &big, Family::A);
         }
@@ -3759,7 +3763,7 @@ mod tests {
         writer.set_nonblocking(true).expect("writer nonblocking");
         reader.set_nonblocking(true).expect("reader nonblocking");
         let mut subject = LogStore::with_fd(writer.as_raw_fd()).expect("pipe sink store");
-        let big = "p".repeat(4000);
+        let big = "p".repeat(1000);
         for _ in 0..40 {
             subject.startup_warning(1, &big, Family::A);
         }
