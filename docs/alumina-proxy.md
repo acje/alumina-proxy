@@ -1369,7 +1369,7 @@ this package; this amendment records the binding semantics.
 | SP-003: homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup exit 78 (`:513`/`:663`) | Planned — later sub-mission |
 | SP-004: sustained-negative incident class; N negatives across M windows raise `rd`-class incident in hourly summaries (`:93`) | Planned — later sub-mission |
 | SP-005: per-ordinal JA4 set up to K=16 distinct strings; overflow suppresses adds + increments count; seeding events recorded (`:922`/`:968`) | Planned — later sub-mission |
-| SP-006: >64 sigalgs rejected as AnyIllegal profile violation (not JA4 admit/reject, `:908`); `count:02` overflow renders `99+` | Planned — later sub-mission |
+| SP-006: >64 sigalgs rejected as AnyIllegal profile violation (not JA4 admit/reject, `:908`); `count:02` overflow saturates at 99 (no literal marker) | Planned — later sub-mission |
 | RT-001: sigalg-list bound at 64; no silent truncation of the JA4 hash input | Planned — later sub-mission |
 | SP-007: profile rows `:177`/`:178` folded in place to 5/900 and 30/900 | Implemented (this revision) |
 | SP-008: CONNECT response-corpus oracle acknowledged at `:43` (doc-only, no behavior change) | Implemented (this revision) |
