@@ -1395,9 +1395,9 @@ precedes execution; no kernel pacing knob. Nothing in this amendment loosens any
 items or restates any profile row differently; the RT-006 stale-serving window is a new
 profile deadline added to the fixed enumeration and changes no existing deadline.
 
-## Low-risk alox hardening: probe isolation and failover ordinal — user-authorized amendment
+## Low-risk alox hardening: probe isolation, failover ordinal, and failback reset — user-authorized amendment
 
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alox7`, 2026-10-25). It records the user authorization for the remediation of two voter-confirmed low-risk findings of the alox adversarial security analysis — F-03 (observational resolver probes are not isolated from authorization state) and F-04 (failover transition count invalidates the 75-second startup budget proof). It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. F-03's remediation was implemented in code ahead of this record (commit `feac28f`); this section backfills its binding semantics. F-04's remediation is a clarification: the code already relocates on the same transition that records the third failure, so this section corrects the stale `:597` failover wording and records the exact-ordinal and five-resolver budget tests that prove the `5 × 3 × 5 = 75 ≤ 90` invariant corresponds to the state machine.
+**Authority.** This section is a narrow, user-authorized amendment to this specification (`alox7`, 2026-10-25). It records the user authorization for the remediation of three voter-confirmed low-risk findings of the alox adversarial security analysis — F-03 (observational resolver probes are not isolated from authorization state), F-04 (failover transition count invalidates the 75-second startup budget proof), and F-05 (the failback reset wording makes the three-consecutive-success settle unreachable). It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. F-03's remediation was implemented in code ahead of this record (commit `feac28f`); this section backfills its binding semantics. F-04's remediation is a clarification: the code already relocates on the same transition that records the third failure, so this section corrects the stale `:597` failover wording and records the exact-ordinal and five-resolver budget tests that prove the `5 × 3 × 5 = 75 ≤ 90` invariant corresponds to the state machine. F-05's remediation is a clarification: the code already resets the counter at arm and on probe failure, so this section refines the ambiguous `:729` reset-point wording and records the transition table and mid-regime probe-begin regression test that prove the three-success settle is reachable.
 
 #### F-03 — Probe-Isolation Invariant
 
@@ -1407,6 +1407,20 @@ The post-window probe sweep (`alumina-rbp`, `:824-834`) is an observational incr
 
 The failover clause (`:597`) states that "once the active resolver is degraded, the next counted failure relocates the transport" — implying four failures per relocation, which with five resolvers yields `4 + 4 + 4 + 4 + 3 = 19` exchanges = 95 seconds, exceeding the absolute 90-second startup window (`:64`) and invalidating the `5 × 3 × 5 = 75 ≤ 90` budget proof (`:858`). Resolution: the failover clause is corrected to state that relocation happens on the **same transition** that records the third consecutive failure and marks the active resolver degraded (`on_exchange_failed`, `src/startup_dns.rs`): the degradation advance and the relocation are one call, so each relocation away from a resolver requires three failures, not four. The complete five-resolver worst case is 15 exchanges (`5 × 3`), each bounded by the 5-second exchange deadline, giving `15 × 5 = 75 ≤ 90` — the budget proof at `:858` therefore corresponds to the state machine. The 90-second deadline (`:64`) is unchanged. Deterministic tests prove the exact failure ordinal that closes, repoints, and starts against each resolver, and the complete five-resolver startup budget (`five_resolvers_relocate_on_the_third_failure_not_the_fourth`, `five_resolver_startup_budget_fits_the_window`, `src/startup_dns/tests.rs`).
 
+#### F-05 — Failback counter resets at arm and on failure, not on every probe begin
+
+The failback clause (`:729`) states the consecutive-success counter resets "when a failback probe begins" — a wording readable as resetting on every probe begin, which would make the `FAILBACK_SUCCESSES = 3` settle unreachable (each success reaches only one, the next probe begin resets it again, and the probe loops on the backup with repeated 900-second relocation cycles). Resolution: the reset points are refined to the two transitions that actually reset the counter (`maybe_begin_failback` / `on_exchange_failed`, `src/startup_dns.rs`): the counter resets to zero when failback is initially **armed** — the backup→primary transition in `maybe_begin_failback` (`:3019`) — and when a probe **fails**, re-seating onto the backup and re-arming the grace (`:3202`). It does not reset on any later probe begin: once armed, `maybe_begin_failback` is a no-op for the rest of the regime (guards `:3004-3006`), so the counter accumulates across probe begins while the transport remains on the primary. Between successful but not-yet-settling probes the transport resides on the primary with the probe armed (`failback_source` set to the backup) and the grace **not** re-armed (`failback_due` stays `None`); the grace is re-armed only by a failed probe. The counter increments on each successful primary probe and settles — clearing the probe source, grace, and counter — only at the third consecutive success (`:3270-3274`). A success on a non-primary backup leaves the counter and grace untouched (`is_primary()` guard, `:3269`). On shutdown the counter is discarded with the transport; the next boot starts unarmed with the counter at zero. The compact transition table below is the state machine; the deterministic regression test `probe_begin_mid_regime_does_not_reset_the_failback_counter` (`src/startup_dns/tests.rs`) drives `maybe_begin_failback` between successes to prove a probe begin mid-regime does not reset the counter.
+
+| Transition | Counter | Transport | Grace (`failback_due`) | Probe source (`failback_source`) |
+| --- | --- | --- | --- | --- |
+| Failback armed (backup→primary) | 0 (reset) | primary | `None` | set (backup) |
+| Probe success 1 | 1 | primary | `None` | set (backup) |
+| Probe success 2 | 2 | primary | `None` | set (backup) |
+| Probe success 3 (settle) | 0 (reset) | primary | `None` | cleared |
+| Probe failure after success 1/2 | 0 (reset) | backup (re-seated) | re-armed (`now + FAILBACK_AFTER_SECS`) | cleared |
+| Backup success (non-primary) | unchanged | backup | unchanged (armed) | `None` |
+| Shutdown | discarded | — | — | — |
+
 ### Status
 
 | Surface | Status |
@@ -1414,6 +1428,7 @@ The failover clause (`:597`) states that "once the active resolver is degraded, 
 | This amendment published | Current revision |
 | F-03: Probe-Isolation Invariant — probe responses determine only the probe verdict and probed-resolver health; name outcomes discarded (`alumina-rbp` `:831` refined) | Implemented (commit `feac28f`) |
 | F-04: failover relocates on the same transition that records the third failure; `5 × 3 × 5 = 75 ≤ 90` budget proof corresponds to the state machine (`:597` corrected) | Implemented (this increment) |
+| F-05: failback counter resets at arm and on probe failure, not on every probe begin; transition table + mid-regime probe-begin regression test (`:729` refined) | Implemented (this increment) |
 
 ### Explicitly unchanged (non-negotiable)
 
