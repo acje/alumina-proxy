@@ -1199,6 +1199,9 @@ fn classify_soa(
 }
 
 fn soa_covers(name: &[u8], soa_owner: &[u8]) -> bool {
+    if soa_owner.is_empty() {
+        return true;
+    }
     if name == soa_owner {
         return true;
     }
@@ -1307,11 +1310,11 @@ mod tests {
         m
     }
 
-    fn soa_record(owner: &str, ttl: u32, minimum: u32) -> Vec<u8> {
+    fn soa_with_owner(owner: &[u8], ttl: u32, minimum: u32) -> Vec<u8> {
         let mname = qname_bytes("ns1.example.org");
         let rname = qname_bytes("hostmaster.example.org");
         let rdata_len = mname.len() + rname.len() + 20;
-        let mut m = qname_bytes(owner);
+        let mut m = owner.to_vec();
         m.extend_from_slice(&6u16.to_be_bytes());
         m.extend_from_slice(&1u16.to_be_bytes());
         m.extend_from_slice(&ttl.to_be_bytes());
@@ -1328,6 +1331,14 @@ mod tests {
         }
         m.extend_from_slice(&fields);
         m
+    }
+
+    fn soa_record(owner: &str, ttl: u32, minimum: u32) -> Vec<u8> {
+        soa_with_owner(&qname_bytes(owner), ttl, minimum)
+    }
+
+    fn root_soa_record(ttl: u32, minimum: u32) -> Vec<u8> {
+        soa_with_owner(&[0u8], ttl, minimum)
     }
 
     fn direct_a(name: &str, tid: u16, octets: [u8; 4], ttl: u32) -> Vec<u8> {
@@ -1622,6 +1633,72 @@ mod tests {
             out,
             Outcome::NoData {
                 family: Family::A,
+                soa: Some(Soa::new(300, 60)),
+            }
+        );
+    }
+
+    #[test]
+    fn soa_covers_root_owner_covers_every_terminal() {
+        assert!(soa_covers(b"sub.example.org", b""));
+        assert!(soa_covers(b"example.org", b""));
+        assert!(soa_covers(b"", b""));
+    }
+
+    #[test]
+    fn soa_covers_keeps_equal_owner_and_boundary_suffix() {
+        assert!(soa_covers(b"example.org", b"example.org"));
+        assert!(soa_covers(b"sub.example.org", b"example.org"));
+        assert!(!soa_covers(b"sub.example.org", b"other.example.net"));
+        assert!(!soa_covers(b"sub.example.org", b"ample.org"));
+    }
+
+    #[test]
+    fn nodata_with_root_soa_covers_terminal() {
+        let mut msg = header(0x1401, true, 0, 1, 0, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&root_soa_record(300, 60));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1401, &msg).expect("parse");
+        assert_eq!(
+            out,
+            Outcome::NoData {
+                family: Family::A,
+                soa: Some(Soa::new(300, 60)),
+            }
+        );
+    }
+
+    #[test]
+    fn nodata_through_cname_with_root_soa_covers_terminal() {
+        let mut msg = header(0x1402, true, 0, 1, 1, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
+        msg.extend_from_slice(&root_soa_record(300, 60));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1402, &msg).expect("parse");
+        assert_eq!(
+            out,
+            Outcome::NoData {
+                family: Family::A,
+                soa: Some(Soa::new(300, 60)),
+            }
+        );
+    }
+
+    #[test]
+    fn nxdomain_with_root_soa_schedules_negative() {
+        let mut msg = header(0x1403, true, 3, 1, 0, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&root_soa_record(300, 60));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1403, &msg).expect("parse");
+        assert_eq!(
+            out,
+            Outcome::NxDomain {
                 soa: Some(Soa::new(300, 60)),
             }
         );
