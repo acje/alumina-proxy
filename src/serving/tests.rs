@@ -7611,12 +7611,17 @@ fn ja4_first_seen_records_baseline_without_signal() {
         assert_eq!(
             entry.addr,
             NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
-            "the first-seen destination is persisted as the baseline key"
+            "the seeding destination is persisted as the entry's address"
         );
         let ja4 = serving.slots[0].inspector.hello().expect("hello").ja4();
         assert_eq!(
             entry.ja4, ja4,
             "the full 36-byte JA4 is stored at first-seen"
+        );
+        assert_eq!(
+            serving.storage().enforcement().counters().facts_ja4_seed(),
+            1,
+            "first-seen records a seeding event"
         );
         assert_eq!(
             serving
@@ -7671,15 +7676,15 @@ fn ja4_baseline_keys_second_port_ordinal() {
             "the second port's connection keys its own ordinal's baseline row"
         );
         assert_eq!(
-            serving.ja4_baseline.entries[first.get()][0].addr,
-            EMPTY_JA4_ADDR,
+            serving.ja4_baseline.entries[first.get()][0].ja4,
+            [0; 36],
             "the first port's row must stay empty for a second-port connection"
         );
     });
 }
 
 #[test]
-fn ja4_deviation_flares_signal_once_per_connection() {
+fn ja4_set_overflow_flares_signal_once_per_connection() {
     with_serving_stack(ephemeral_port(), |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
         let ordinal = serving
@@ -7693,7 +7698,7 @@ fn ja4_deviation_flares_signal_once_per_connection() {
             &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
         );
 
-        // conn1: first-seen baseline for the (ordinal, addr) pair.
+        // conn1: first-seen seeds the ordinal's set with the real JA4.
         serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
         drive_hello(serving, &wire_a, "sub.example.org");
         let baseline = serving.ja4_baseline.entries[ordinal.get()][0].ja4;
@@ -7707,7 +7712,25 @@ fn ja4_deviation_flares_signal_once_per_connection() {
             "first-seen never flares"
         );
 
-        // conn2: a different JA4 on the same (ordinal, addr) is a deviation.
+        // Fill the remaining 15 set slots with synthetic distinct JA4s so the
+        // 16-entry set is full before the deviation arrives.
+        for i in 0..MAX_ADDRESSES - 1 {
+            let mut synthetic = [b'x'; 36];
+            synthetic[0] = b'a' + i as u8;
+            let addr = NumericAddr::V4(Ipv4Addr::from([
+                10,
+                0,
+                0,
+                u8::try_from(i).expect("row index fits u8"),
+            ]));
+            assert_eq!(
+                serving.ja4_baseline.record(ordinal, addr, synthetic),
+                BaselineOutcome::FirstSeen,
+                "each fresh synthetic JA4 seeds the set"
+            );
+        }
+
+        // conn2: a 17th distinct JA4 overflows the full set and flares.
         serving.slots[0].reset();
         serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
         drive_hello(serving, &wire_b, "sub.example.org");
@@ -7717,18 +7740,13 @@ fn ja4_deviation_flares_signal_once_per_connection() {
             "the ALPN variant must produce a distinct JA4"
         );
         assert_eq!(
-            serving.ja4_baseline.entries[ordinal.get()][0].ja4,
-            baseline,
-            "the baseline is never updated after first-seen"
-        );
-        assert_eq!(
             serving
                 .storage()
                 .enforcement()
                 .counters()
                 .facts_ja4_change(ordinal),
             1,
-            "a deviation flares exactly one change signal"
+            "a 17th distinct JA4 overflows the full set and flares one change signal"
         );
         assert_eq!(
             serving
@@ -7737,7 +7755,7 @@ fn ja4_deviation_flares_signal_once_per_connection() {
                 .counters()
                 .facts_ja4_value(ordinal),
             deviated,
-            "the latest changed JA4 value is retained for the ordinal"
+            "the latest overflowed JA4 value is retained for the ordinal"
         );
 
         // At-most-once: a second record attempt on the same connection is inert.
@@ -7752,7 +7770,8 @@ fn ja4_deviation_flares_signal_once_per_connection() {
             "the change signal fires at most once per connection"
         );
 
-        // conn3: a fresh connection with the deviated JA4 flares again.
+        // conn3: a fresh connection with the same overflowed JA4 flares again
+        // (the overflowed JA4 is never added to the full set).
         serving.slots[0].reset();
         serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
         drive_hello(serving, &wire_b, "sub.example.org");
@@ -7763,7 +7782,7 @@ fn ja4_deviation_flares_signal_once_per_connection() {
                 .counters()
                 .facts_ja4_change(ordinal),
             2,
-            "a later connection with the deviated JA4 flares again"
+            "a later connection with the overflowed JA4 flares again"
         );
         assert_eq!(
             serving
@@ -7772,7 +7791,7 @@ fn ja4_deviation_flares_signal_once_per_connection() {
                 .counters()
                 .facts_ja4_value(ordinal),
             deviated,
-            "the retained value stays the latest changed JA4"
+            "the retained value stays the latest overflowed JA4"
         );
     });
 }
@@ -7795,6 +7814,11 @@ fn ja4_baseline_defers_until_dial_persists_dest_ip() {
             serving.ja4_baseline.entries[ordinal.get()][0].addr,
             EMPTY_JA4_ADDR,
             "no baseline is recorded before the destination IP is known"
+        );
+        assert_eq!(
+            serving.storage().enforcement().counters().facts_ja4_seed(),
+            0,
+            "a deferred baseline never seeds before the IP is known"
         );
         assert_eq!(
             serving
@@ -7827,6 +7851,11 @@ fn ja4_baseline_defers_until_dial_persists_dest_ip() {
             "the dial-persisted destination IP keys the deferred baseline"
         );
         assert_eq!(
+            serving.storage().enforcement().counters().facts_ja4_seed(),
+            1,
+            "a deferred first-seen records exactly one seeding event"
+        );
+        assert_eq!(
             serving
                 .storage()
                 .enforcement()
@@ -7839,14 +7868,18 @@ fn ja4_baseline_defers_until_dial_persists_dest_ip() {
 }
 
 #[test]
-fn ja4_baseline_row_full_returns_neutral() {
+fn ja4_baseline_set_overflow_suppresses_and_dedups_unchanged() {
     with_serving_stack(ephemeral_port(), |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
         let ordinal = serving
             .storage()
             .ordinal_for_pair(&approved, 443)
             .expect("ordinal");
-        let ja4 = [b'j'; 36];
+        let synthetic = |i: u8| {
+            let mut j = [b'x'; 36];
+            j[0] = b'a' + i;
+            j
+        };
         for i in 0..MAX_ADDRESSES {
             let addr = NumericAddr::V4(Ipv4Addr::from([
                 10,
@@ -7855,25 +7888,76 @@ fn ja4_baseline_row_full_returns_neutral() {
                 u8::try_from(i).expect("row index fits u8"),
             ]));
             assert_eq!(
-                serving.ja4_baseline.record(ordinal, addr, ja4),
+                serving
+                    .ja4_baseline
+                    .record(ordinal, addr, synthetic(i as u8)),
                 BaselineOutcome::FirstSeen,
-                "each fresh address in the row is a first-seen baseline"
+                "each fresh distinct JA4 seeds the set"
             );
         }
         assert_eq!(
             serving.ja4_baseline.record(
                 ordinal,
                 NumericAddr::V4(Ipv4Addr::from([10, 0, 0, 16])),
-                ja4
+                synthetic(16)
             ),
-            BaselineOutcome::RowFull,
-            "a 17th distinct address overflows the fixed 16-entry row neutrally"
+            BaselineOutcome::Overflow,
+            "a 17th distinct JA4 overflows the fixed 16-entry set"
+        );
+        assert_eq!(
+            serving.ja4_baseline.record(
+                ordinal,
+                NumericAddr::V4(Ipv4Addr::from([10, 0, 0, 17])),
+                synthetic(0)
+            ),
+            BaselineOutcome::Unchanged,
+            "a JA4 already in the set is unchanged regardless of peer address"
         );
     });
 }
 
 #[test]
-fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
+fn ja4_set_unchanged_does_not_reseed_or_signal_across_ips() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
+        let wire = hello_wire(b"sub.example.org", false);
+
+        // conn1: first-seen seeds the set with the JA4.
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire, "sub.example.org");
+        assert_eq!(
+            serving.storage().enforcement().counters().facts_ja4_seed(),
+            1,
+            "the first connection seeds the set once"
+        );
+
+        // conn2: the same JA4 from a different destination IP is unchanged.
+        serving.slots[0].reset();
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 2])));
+        drive_hello(serving, &wire, "sub.example.org");
+        assert_eq!(
+            serving.storage().enforcement().counters().facts_ja4_seed(),
+            1,
+            "a repeated JA4 from another IP never re-seeds the set"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .facts_ja4_change(ordinal),
+            0,
+            "a repeated JA4 from another IP never flares a change signal"
+        );
+    });
+}
+
+#[test]
+fn ja4_set_overflow_emits_monitor_dnj_record() {
     with_serving_stack(ephemeral_port(), |serving| {
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
         let ordinal = serving
@@ -7887,7 +7971,7 @@ fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
             &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
         );
 
-        // conn1: first-seen baseline for the (ordinal, addr) pair.
+        // conn1: first-seen seeds the ordinal's set with the real JA4.
         serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
         drive_hello(serving, &wire_a, "sub.example.org");
         let baseline = serving.ja4_baseline.entries[ordinal.get()][0].ja4;
@@ -7901,7 +7985,20 @@ fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
             "first-seen never flares"
         );
 
-        // conn2: a different JA4 on the same (ordinal, addr) is a deviation.
+        // Fill the remaining 15 set slots so the 16-entry set is full.
+        for i in 0..MAX_ADDRESSES - 1 {
+            let mut synthetic = [b'x'; 36];
+            synthetic[0] = b'a' + i as u8;
+            let addr = NumericAddr::V4(Ipv4Addr::from([
+                10,
+                0,
+                0,
+                u8::try_from(i).expect("row index fits u8"),
+            ]));
+            serving.ja4_baseline.record(ordinal, addr, synthetic);
+        }
+
+        // conn2: a 17th distinct JA4 overflows the full set and flares.
         serving.slots[0].reset();
         serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
         drive_hello(serving, &wire_b, "sub.example.org");
@@ -7917,7 +8014,7 @@ fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
                 .counters()
                 .facts_ja4_change(ordinal),
             1,
-            "a deviation flares exactly one change signal"
+            "a 17th distinct JA4 overflows the full set and flares one change signal"
         );
         assert_eq!(
             serving
@@ -7926,11 +8023,12 @@ fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
                 .counters()
                 .facts_ja4_value(ordinal),
             deviated,
-            "the changed JA4 value is retained for the ordinal"
+            "the overflowed JA4 value is retained for the ordinal"
         );
 
         // The forced monitor summary folds the flared counter into the dNj
-        // per-ordinal field of one committed monitor record.
+        // per-ordinal field of one committed monitor record, and the latest
+        // overflow's peer IP rides beside it as dNp.
         let before = serving.storage().logs().len();
         let committed = serving
             .storage_mut()
@@ -7960,7 +8058,12 @@ fn ja4_tripwire_deviation_emits_monitor_dnj_record() {
         let value_key = format!(" d{}v=\"{deviated_text}\"", ordinal.get());
         assert!(
             text.contains(&value_key),
-            "the changed 36-char JA4 value reaches the monitor record as {value_key}: {text}"
+            "the overflowed 36-char JA4 value reaches the monitor record as {value_key}: {text}"
+        );
+        let peer_key = format!(" d{}p=\"203.0.113.1\"", ordinal.get());
+        assert!(
+            text.contains(&peer_key),
+            "the latest overflow's peer destination IP reaches the monitor record as {peer_key}: {text}"
         );
     });
 }

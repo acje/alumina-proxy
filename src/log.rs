@@ -569,6 +569,29 @@ fn push_indexed_addr(w: &mut Entry<'_>, key: &[u8], index: u32, addr: IpAddr) ->
     true
 }
 
+/// Writes an indexed keyed address field quoted but never escaped: `IpAddr`
+/// Display emits only digits, `.`, `:`, `[`, and `]`, none of which require
+/// quoting, so it is written straight into the entry without an intermediate
+/// allocation (same rule as `push_indexed_addr`).
+fn push_indexed_key_addr(w: &mut Entry<'_>, key: &[u8], index: u32, addr: IpAddr) -> bool {
+    if !w.push(b" ") || !w.push(key) {
+        return false;
+    }
+    if fmt::Write::write_fmt(w, format_args!("{index}")).is_err() {
+        return false;
+    }
+    if !w.push(b"p=\"") {
+        return false;
+    }
+    if fmt::Write::write_fmt(w, format_args!("{addr}")).is_err() {
+        return false;
+    }
+    if !w.push(b"\"") {
+        return false;
+    }
+    true
+}
+
 /// Encodes one `startup_name` record: `secs`, the allowlist `ordinal`, the full
 /// validated FQDN (never truncated), the outcome token, and the reason only
 /// when the outcome carries one. A validated FQDN is lowercase `[a-z0-9-.]`
@@ -680,7 +703,8 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
         || monitor.facts_dns_anomaly_overflow()
         || monitor.facts_downgrade_to_plain_overflow()
         || monitor.facts_probe_relocations_overflow()
-        || monitor.facts_ja4_change_overflow();
+        || monitor.facts_ja4_change_overflow()
+        || monitor.facts_ja4_seed_overflow();
     let globals: [(&[u8], u64); 13] = [
         (&b"facts_total"[..], monitor.facts_total()),
         (&b"actions_total"[..], monitor.actions_total()),
@@ -730,6 +754,10 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     }
     let probe_relocations = monitor.facts_probe_relocations();
     if probe_relocations > 0 && !push_u64(&mut w, b"pr", u64::from(probe_relocations)) {
+        return None;
+    }
+    let ja4_seed = monitor.facts_ja4_seed();
+    if ja4_seed > 0 && !push_u64(&mut w, b"js", u64::from(ja4_seed)) {
         return None;
     }
     let bailiwick_violation = monitor.facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
@@ -842,6 +870,16 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
                 b"v",
                 ja4,
             ) {
+                return None;
+            }
+            if monitor.ja4_peer_ordinal() == Some(ordinal)
+                && !push_indexed_key_addr(
+                    &mut w,
+                    b"d",
+                    u32::try_from(index).expect("allowlist ordinal fits u32"),
+                    monitor.ja4_peer_ip().to_ip_addr(),
+                )
+            {
                 return None;
             }
         }
@@ -2577,9 +2615,11 @@ mod tests {
 
     #[test]
     fn logging_monitor_summary_exact_grammar_and_zero_suppression() {
+        use crate::eligibility::NumericAddr;
         use crate::enforcement::action::{AnyIllegalScope, DomainOrdinal};
         use crate::enforcement::monitor::{DnsAnomalyKind, Monitor};
         use crate::enforcement::policy::UnknownReason;
+        use std::net::Ipv4Addr;
         let mut m = Monitor::new();
         m.note_fact_any_illegal(crate::enforcement::policy::AnyIllegalCause::HostNotAllowlisted);
         m.note_fact_any_illegal(crate::enforcement::policy::AnyIllegalCause::HostNotAllowlisted);
@@ -2588,7 +2628,12 @@ mod tests {
         m.note_fact_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         m.note_fact_early_data(ordinal);
-        m.note_fact_ja4_change(ordinal, *b"t13d1516h2_8daaf6152771_02713d6af862");
+        m.note_fact_ja4_seed();
+        m.note_fact_ja4_change(
+            ordinal,
+            *b"t13d1516h2_8daaf6152771_02713d6af862",
+            NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
+        );
         m.note_action_first_slot_block(AnyIllegalScope::Connection);
         m.note_action_domain_block(ordinal);
         m.note_action_flare(ordinal);
@@ -2598,11 +2643,11 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert_eq!(
             text,
-            "level=info kind=monitor secs=7 facts_total=7 actions_total=3 refusals_total=0 \
+            "level=info kind=monitor secs=7 facts_total=8 actions_total=3 refusals_total=0 \
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
-             ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 bv=1 \
+             ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 js=1 bv=1 \
              c14=2 unk3=1 d0f=1 d0b=1 d0l=1 d0j=1 \
-             d0v=\"t13d1516h2_8daaf6152771_02713d6af862\"\n",
+             d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"203.0.113.1\"\n",
             "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
         );
         assert!(
@@ -2614,8 +2659,12 @@ mod tests {
             "a zero resolver-degraded fold stays suppressed: {text}"
         );
         assert!(
-            text.contains(" rd=1 bv=1"),
-            "the dns-anomaly `bv` key follows the resolver-degraded fold: {text}"
+            text.contains(" rd=1 js=1 bv=1"),
+            "the ja4-seed fold follows the resolver-degraded fold, then the dns-anomaly `bv` key: {text}"
+        );
+        assert!(
+            text.contains(" js=1"),
+            "the ja4-seed fact key carries its fold: {text}"
         );
         assert!(
             text.contains(" bv=1"),
@@ -2653,6 +2702,10 @@ mod tests {
         assert!(
             text.contains(" d0v=\"t13d1516h2_8daaf6152771_02713d6af862\""),
             "the per-ordinal ja4-change value carries the 36-char JA4: {text}"
+        );
+        assert!(
+            text.contains(" d0p=\"203.0.113.1\""),
+            "the latest-overflow ordinal's peer IP rides beside the ja4-change value: {text}"
         );
         assert!(
             !text.contains("d1j="),
@@ -2719,6 +2772,14 @@ mod tests {
         assert!(
             text.contains(" sn=32"),
             "the saturated sustained-negatives level is emitted: {text}"
+        );
+        assert!(
+            text.contains(" js=4294967295"),
+            "the saturated ja4-seed fold is emitted: {text}"
+        );
+        assert!(
+            text.contains(" d31p=\"203.0.113.1\""),
+            "saturation keys the latest-overflow peer IP to the last ordinal: {text}"
         );
     }
 
@@ -2881,6 +2942,14 @@ mod tests {
         assert!(
             text.contains(" sn=32"),
             "the saturated sustained-negatives level survives the saturated record: {text}"
+        );
+        assert!(
+            text.contains(" js=4294967295"),
+            "the saturated ja4-seed fold survives the saturated record: {text}"
+        );
+        assert!(
+            text.contains(" d31p=\"203.0.113.1\""),
+            "the latest-overflow peer IP survives the saturated record: {text}"
         );
     }
 

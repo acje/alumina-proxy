@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// An IPv4 or IPv6 address candidate as a numeric value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,6 +14,15 @@ impl NumericAddr {
         match self {
             NumericAddr::V4(addr) => ipv4_is_eligible(addr),
             NumericAddr::V6(addr) => ipv6_is_eligible(addr),
+        }
+    }
+
+    /// Returns this address as a standard `IpAddr` value.
+    #[must_use]
+    pub fn to_ip_addr(self) -> IpAddr {
+        match self {
+            NumericAddr::V4(addr) => IpAddr::V4(addr),
+            NumericAddr::V6(addr) => IpAddr::V6(addr),
         }
     }
 }

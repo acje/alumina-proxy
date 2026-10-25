@@ -1,7 +1,10 @@
+use std::net::Ipv4Addr;
+
 use super::action::{AnyIllegalScope, DomainOrdinal};
 use super::policy::{AnyIllegalCause, Effect, UnknownReason};
 use super::state::SaturatingCounter;
 use crate::config::ALLOWLIST_MAX;
+use crate::eligibility::NumericAddr;
 
 pub(crate) const CAPTURE_DETAIL_LEN: usize = 64;
 
@@ -16,6 +19,9 @@ pub struct FactCounters {
     pub(crate) probe_relocations: SaturatingCounter,
     pub(crate) ja4_change: [SaturatingCounter; ALLOWLIST_MAX],
     pub(crate) ja4_value: [[u8; 36]; ALLOWLIST_MAX],
+    pub(crate) ja4_seed: SaturatingCounter,
+    pub(crate) ja4_peer_ip: NumericAddr,
+    pub(crate) ja4_peer_ordinal: Option<DomainOrdinal>,
 }
 
 impl Default for FactCounters {
@@ -30,6 +36,9 @@ impl Default for FactCounters {
             probe_relocations: SaturatingCounter::new(),
             ja4_change: std::array::from_fn(|_| SaturatingCounter::new()),
             ja4_value: [[0; 36]; ALLOWLIST_MAX],
+            ja4_seed: SaturatingCounter::new(),
+            ja4_peer_ip: NumericAddr::V4(Ipv4Addr::UNSPECIFIED),
+            ja4_peer_ordinal: None,
         }
     }
 }
@@ -233,14 +242,31 @@ impl Monitor {
         self.dirty = true;
     }
 
-    /// Counts one first-seen JA4 baseline deviation for an ordinal: the
-    /// serving path records a JA4 for a `(ordinal, addr)` pair that differs
-    /// from the pair's first-seen baseline. The per-ordinal counter is an
+    /// Counts one first-seen JA4 baseline overflow for an ordinal: the serving
+    /// path records a JA4 that does not fit the ordinal's set (the set holds
+    /// up to `MAX_ADDRESSES` distinct strings). The per-ordinal counter is an
     /// event fold, emitted by the monitor record's JA4-change surface; the
-    /// 36-byte value is retained as the latest changed JA4 for the ordinal.
-    pub(crate) const fn note_fact_ja4_change(&mut self, ordinal: DomainOrdinal, ja4: [u8; 36]) {
+    /// 36-byte value is retained as the latest overflowed JA4 for the ordinal,
+    /// keyed to the triggering peer's destination IP (SP-013).
+    pub(crate) const fn note_fact_ja4_change(
+        &mut self,
+        ordinal: DomainOrdinal,
+        ja4: [u8; 36],
+        peer_ip: NumericAddr,
+    ) {
         self.facts.ja4_change[ordinal.get()].bump();
         self.facts.ja4_value[ordinal.get()] = ja4;
+        self.facts.ja4_peer_ip = peer_ip;
+        self.facts.ja4_peer_ordinal = Some(ordinal);
+        self.dirty = true;
+    }
+
+    /// Counts one first-seen JA4 baseline seeding event: a JA4 added to an
+    /// ordinal's set. The global counter is an operator-visible fact so
+    /// re-seeding churn is distinguishable from attacker-driven re-seed
+    /// (SP-005).
+    pub(crate) const fn note_fact_ja4_seed(&mut self) {
+        self.facts.ja4_seed.bump();
         self.dirty = true;
     }
 
@@ -359,6 +385,18 @@ impl Monitor {
         self.facts.ja4_value[ordinal.get()]
     }
 
+    pub(crate) const fn facts_ja4_seed(&self) -> u32 {
+        self.facts.ja4_seed.value()
+    }
+
+    pub(crate) const fn ja4_peer_ordinal(&self) -> Option<DomainOrdinal> {
+        self.facts.ja4_peer_ordinal
+    }
+
+    pub(crate) const fn ja4_peer_ip(&self) -> NumericAddr {
+        self.facts.ja4_peer_ip
+    }
+
     #[cfg(test)]
     pub(crate) const fn facts_unknown(&self, reason: UnknownReason) -> u32 {
         self.facts.unknown[reason.index()].value()
@@ -430,6 +468,7 @@ impl Monitor {
                 .sum::<u64>()
             + u64::from(self.facts.downgrade_to_plain.value())
             + u64::from(self.facts.probe_relocations.value())
+            + u64::from(self.facts.ja4_seed.value())
             + self
                 .facts
                 .ja4_change
@@ -529,6 +568,10 @@ impl Monitor {
         self.facts.ja4_change.iter().any(|c| c.overflow())
     }
 
+    pub(crate) fn facts_ja4_seed_overflow(&self) -> bool {
+        self.facts.ja4_seed.overflow()
+    }
+
     pub(crate) fn facts_unknown_overflow(&self) -> bool {
         self.facts.unknown.iter().any(|c| c.overflow())
     }
@@ -571,6 +614,9 @@ impl Monitor {
         }
         self.facts.downgrade_to_plain.saturate_for_test();
         self.facts.probe_relocations.saturate_for_test();
+        self.facts.ja4_seed.saturate_for_test();
+        self.facts.ja4_peer_ip = NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1]));
+        self.facts.ja4_peer_ordinal = DomainOrdinal::from_index(ALLOWLIST_MAX - 1);
         for c in &mut self.facts.ja4_change {
             c.saturate_for_test();
         }
@@ -615,7 +661,7 @@ impl Monitor {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::net::SocketAddr;
+    use std::net::{Ipv4Addr, SocketAddr};
 
     use super::*;
     use crate::enforcement::action::{ActionKind, DomainAction, FirstSlot, Scope};
@@ -734,19 +780,37 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn ja4_changes_fold_into_facts_total_and_saturate() {
+    fn ja4_facts_fold_into_facts_total_and_saturate() {
         let mut m = Monitor::new();
-        assert_eq!(m.facts_total(), 0, "no change means no fold");
+        assert_eq!(m.facts_total(), 0, "no fact means no fold");
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
-        m.note_fact_ja4_change(ordinal, *b"t13d1516h2_8daaf6152771_02713d6af862");
+        let peer = NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1]));
+        m.note_fact_ja4_seed();
         assert_eq!(
             m.facts_total(),
             1,
-            "every ja4-change fact folds into the aggregate"
+            "every ja4-seed fact folds into the aggregate"
         );
+        assert_eq!(m.facts_ja4_seed(), 1);
+        m.note_fact_ja4_change(ordinal, *b"t13d1516h2_8daaf6152771_02713d6af862", peer);
+        assert_eq!(
+            m.facts_total(),
+            2,
+            "seed and change facts fold into the aggregate"
+        );
+        assert_eq!(m.facts_ja4_change(ordinal), 1);
+        assert_eq!(m.ja4_peer_ordinal(), Some(ordinal));
+        assert_eq!(m.ja4_peer_ip(), peer);
         m.saturate_all_for_test();
         assert_eq!(m.facts_ja4_change(ordinal), u32::MAX);
         assert!(m.facts_ja4_change_overflow());
+        assert_eq!(m.facts_ja4_seed(), u32::MAX);
+        assert!(m.facts_ja4_seed_overflow());
+        assert_eq!(
+            m.ja4_peer_ordinal(),
+            DomainOrdinal::from_index(ALLOWLIST_MAX - 1),
+            "saturation keys the latest-overflow peer to the last ordinal"
+        );
     }
 
     #[test]

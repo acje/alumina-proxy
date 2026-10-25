@@ -551,14 +551,15 @@ impl CoalescedBatch {
     }
 }
 
-/// Empty-slot sentinel for the first-seen JA4 baseline table: the unspecified
-/// IPv4 address. `0.0.0.0/8` is eligibility-excluded (src/eligibility.rs:29-31),
-/// so no established destination can collide with the sentinel.
+/// Placeholder address for an empty first-seen JA4 baseline slot. The empty
+/// slot is recognised by its `ja4 == [0; 36]` sentinel; this address is only
+/// the placeholder `addr` for such slots. `0.0.0.0/8` is eligibility-excluded
+/// (src/eligibility.rs:29-31), so no established destination can collide.
 const EMPTY_JA4_ADDR: NumericAddr = NumericAddr::V4(Ipv4Addr::UNSPECIFIED);
 
-/// One first-seen JA4 baseline slot: the destination address and the full
-/// 36-byte JA4 fingerprint recorded the first time that address was seen for
-/// its ordinal.
+/// One first-seen JA4 baseline slot: the seeding destination address and the
+/// full 36-byte JA4 fingerprint. An empty slot carries `ja4 == [0; 36]` (JA4
+/// fingerprints are ASCII and never all-zero) with `addr` as the placeholder.
 #[derive(Clone, Copy, Debug)]
 struct Ja4BaselineEntry {
     addr: NumericAddr,
@@ -568,21 +569,20 @@ struct Ja4BaselineEntry {
 /// The outcome of a first-seen JA4 baseline record attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BaselineOutcome {
-    /// The address was new to the row: its JA4 is now the baseline.
+    /// The JA4 was new to the ordinal's set: it is added as a seeding event.
     FirstSeen,
-    /// The address was already baselined with this exact JA4.
+    /// The JA4 was already in the ordinal's set (any peer address).
     Unchanged,
-    /// The address was baselined with a different JA4: a change signal.
-    Changed,
-    /// The ordinal's `MAX_ADDRESSES`-entry row is full; the record is dropped
-    /// neutrally, never signalling a change.
-    RowFull,
+    /// The ordinal's `MAX_ADDRESSES`-entry set is full; the add is suppressed
+    /// and the overflow is counted as a change signal.
+    Overflow,
 }
 
 /// Fixed 512-entry first-seen JA4 baseline table: `ALLOWLIST_MAX` ordinals by
-/// `MAX_ADDRESSES` addresses, allocated once at boot and never grown, so the
-/// whole baseline path is zero-heap. The baseline is never updated after
-/// first-seen and is reset on restart (the table is a boot-time value).
+/// `MAX_ADDRESSES` set entries, allocated once at boot and never grown, so the
+/// whole baseline path is zero-heap. Each ordinal holds a set of up to 16
+/// distinct observed JA4 strings; the baseline is never updated after seeding
+/// and is reset on restart (the table is a boot-time value).
 #[derive(Clone, Copy, Debug)]
 struct Ja4BaselineTable {
     entries: [[Ja4BaselineEntry; MAX_ADDRESSES]; ALLOWLIST_MAX],
@@ -602,10 +602,11 @@ impl Ja4BaselineTable {
         }
     }
 
-    /// Records the first-seen JA4 for a `(ordinal, addr)` pair, returning the
-    /// baseline outcome. A row already holding `addr` compares the stored JA4:
-    /// a match is `Unchanged`, a mismatch `Changed`. A full row drops the
-    /// record as `RowFull`; the fixed table never grows.
+    /// Records an observed JA4 for an ordinal's set, returning the baseline
+    /// outcome. A JA4 already in the set is `Unchanged` regardless of peer
+    /// address. A new JA4 occupies the first empty slot as `FirstSeen` (a
+    /// seeding event). A full set drops the add as `Overflow`; the fixed table
+    /// never grows.
     fn record(
         &mut self,
         ordinal: DomainOrdinal,
@@ -613,20 +614,18 @@ impl Ja4BaselineTable {
         ja4: [u8; 36],
     ) -> BaselineOutcome {
         let row = &mut self.entries[ordinal.get()];
+        for entry in row.iter() {
+            if entry.ja4 == ja4 {
+                return BaselineOutcome::Unchanged;
+            }
+        }
         for entry in row.iter_mut() {
-            if entry.addr == EMPTY_JA4_ADDR {
+            if entry.ja4 == [0; 36] {
                 *entry = Ja4BaselineEntry { addr, ja4 };
                 return BaselineOutcome::FirstSeen;
             }
-            if entry.addr == addr {
-                return if entry.ja4 == ja4 {
-                    BaselineOutcome::Unchanged
-                } else {
-                    BaselineOutcome::Changed
-                };
-            }
         }
-        BaselineOutcome::RowFull
+        BaselineOutcome::Overflow
     }
 }
 
@@ -2717,8 +2716,9 @@ impl Serving {
     /// [`Self::dial`] on a successful connect when the hello completed first.
     /// The `ja4_seen` latch bounds the record to at most once per connection;
     /// the record keys on the established `dest_ip`, so the baseline can never
-    /// hold a wrong or missing IP. A `Changed` outcome emits the per-ordinal
-    /// JA4-change signal to the monitor.
+    /// hold a wrong or missing IP. A `FirstSeen` outcome records a seeding
+    /// event; an `Overflow` outcome emits the per-ordinal JA4-change signal to
+    /// the monitor, keyed to the triggering peer's destination IP.
     fn maybe_record_ja4_baseline(&mut self, index: usize) {
         let Some(dest_ip) = self.slots[index].dest_ip else {
             self.slots[index].ja4_pending = true;
@@ -2746,10 +2746,16 @@ impl Serving {
         }
         self.slots[index].ja4_seen = true;
         let outcome = self.ja4_baseline.record(ordinal, dest_ip, ja4);
-        if outcome == BaselineOutcome::Changed {
-            self.storage
-                .enforcement_mut()
-                .note_fact_ja4_change(ordinal, ja4);
+        match outcome {
+            BaselineOutcome::FirstSeen => {
+                self.storage.enforcement_mut().note_fact_ja4_seed();
+            }
+            BaselineOutcome::Overflow => {
+                self.storage
+                    .enforcement_mut()
+                    .note_fact_ja4_change(ordinal, ja4, dest_ip);
+            }
+            BaselineOutcome::Unchanged => {}
         }
     }
 

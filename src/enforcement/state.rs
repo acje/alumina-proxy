@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use crate::config::ALLOWLIST_MAX;
+use crate::eligibility::NumericAddr;
 
 use super::action::{AnyIllegalScope, ControlTable, DomainOrdinal, FirstSlot, Scope};
 use super::monitor::{DnsAnomalyKind, Monitor, SlotCapture};
@@ -316,8 +317,17 @@ impl Enforcement {
         self.monitor.note_incident_close();
     }
 
-    pub(crate) const fn note_fact_ja4_change(&mut self, ordinal: DomainOrdinal, ja4: [u8; 36]) {
-        self.monitor.note_fact_ja4_change(ordinal, ja4);
+    pub(crate) const fn note_fact_ja4_change(
+        &mut self,
+        ordinal: DomainOrdinal,
+        ja4: [u8; 36],
+        peer_ip: NumericAddr,
+    ) {
+        self.monitor.note_fact_ja4_change(ordinal, ja4, peer_ip);
+    }
+
+    pub(crate) const fn note_fact_ja4_seed(&mut self) {
+        self.monitor.note_fact_ja4_seed();
     }
 
     pub(crate) const fn note_serving_stale(&mut self) {
