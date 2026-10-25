@@ -1779,30 +1779,27 @@ impl LogStore {
         kind: Kind,
         encode: impl FnOnce(&mut [u8; SLOT_BYTES]) -> Option<usize>,
     ) -> bool {
-        debug_assert!(kind.is_reserved());
+        debug_assert!(
+            kind.is_reserved(),
+            "only reserved priority-class kinds reach enqueue_reserved"
+        );
         if self.count >= QUEUE_SLOTS {
             let mut scratch = [0u8; SLOT_BYTES];
-            match encode(&mut scratch) {
-                Some(len) => {
-                    self.displace_reserved(&scratch[..len]);
-                    true
-                }
-                None => {
-                    self.drop_one();
-                    false
-                }
+            if let Some(len) = encode(&mut scratch) {
+                self.displace_reserved(&scratch[..len]);
+                true
+            } else {
+                self.drop_one();
+                false
             }
         } else {
             let index = self.write_index();
-            match encode(&mut self.slots[index].buf) {
-                Some(len) => {
-                    self.commit_reserved(index, len);
-                    true
-                }
-                None => {
-                    self.drop_one();
-                    false
-                }
+            if let Some(len) = encode(&mut self.slots[index].buf) {
+                self.commit_reserved(index, len);
+                true
+            } else {
+                self.drop_one();
+                false
             }
         }
     }
