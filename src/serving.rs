@@ -551,18 +551,11 @@ impl CoalescedBatch {
     }
 }
 
-/// Placeholder address for an empty first-seen JA4 baseline slot. The empty
-/// slot is recognised by its `ja4 == [0; 36]` sentinel; this address is only
-/// the placeholder `addr` for such slots. `0.0.0.0/8` is eligibility-excluded
-/// (src/eligibility.rs:29-31), so no established destination can collide.
-const EMPTY_JA4_ADDR: NumericAddr = NumericAddr::V4(Ipv4Addr::UNSPECIFIED);
-
-/// One first-seen JA4 baseline slot: the seeding destination address and the
-/// full 36-byte JA4 fingerprint. An empty slot carries `ja4 == [0; 36]` (JA4
-/// fingerprints are ASCII and never all-zero) with `addr` as the placeholder.
+/// One first-seen JA4 baseline slot: the full 36-byte JA4 fingerprint. An
+/// empty slot carries `ja4 == [0; 36]` (JA4 fingerprints are ASCII and never
+/// all-zero), the empty-set sentinel.
 #[derive(Clone, Copy, Debug)]
 struct Ja4BaselineEntry {
-    addr: NumericAddr,
     ja4: [u8; 36],
 }
 
@@ -595,10 +588,7 @@ impl Ja4BaselineTable {
     )]
     const fn new() -> Ja4BaselineTable {
         Ja4BaselineTable {
-            entries: [[Ja4BaselineEntry {
-                addr: EMPTY_JA4_ADDR,
-                ja4: [0; 36],
-            }; MAX_ADDRESSES]; ALLOWLIST_MAX],
+            entries: [[Ja4BaselineEntry { ja4: [0; 36] }; MAX_ADDRESSES]; ALLOWLIST_MAX],
         }
     }
 
@@ -607,12 +597,7 @@ impl Ja4BaselineTable {
     /// address. A new JA4 occupies the first empty slot as `FirstSeen` (a
     /// seeding event). A full set drops the add as `Overflow`; the fixed table
     /// never grows.
-    fn record(
-        &mut self,
-        ordinal: DomainOrdinal,
-        addr: NumericAddr,
-        ja4: [u8; 36],
-    ) -> BaselineOutcome {
+    fn record(&mut self, ordinal: DomainOrdinal, ja4: [u8; 36]) -> BaselineOutcome {
         let row = &mut self.entries[ordinal.get()];
         for entry in row.iter() {
             if entry.ja4 == ja4 {
@@ -621,7 +606,7 @@ impl Ja4BaselineTable {
         }
         for entry in row.iter_mut() {
             if entry.ja4 == [0; 36] {
-                *entry = Ja4BaselineEntry { addr, ja4 };
+                *entry = Ja4BaselineEntry { ja4 };
                 return BaselineOutcome::FirstSeen;
             }
         }
@@ -2745,7 +2730,7 @@ impl Serving {
             return;
         }
         self.slots[index].ja4_seen = true;
-        let outcome = self.ja4_baseline.record(ordinal, dest_ip, ja4);
+        let outcome = self.ja4_baseline.record(ordinal, ja4);
         match outcome {
             BaselineOutcome::FirstSeen => {
                 self.storage.enforcement_mut().note_fact_ja4_seed();

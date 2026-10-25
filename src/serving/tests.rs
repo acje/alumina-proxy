@@ -7608,11 +7608,6 @@ fn ja4_first_seen_records_baseline_without_signal() {
             .ordinal_for_pair(&approved, 443)
             .expect("ordinal");
         let entry = serving.ja4_baseline.entries[ordinal.get()][0];
-        assert_eq!(
-            entry.addr,
-            NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
-            "the seeding destination is persisted as the entry's address"
-        );
         let ja4 = serving.slots[0].inspector.hello().expect("hello").ja4();
         assert_eq!(
             entry.ja4, ja4,
@@ -7671,8 +7666,8 @@ fn ja4_baseline_keys_second_port_ordinal() {
             )
             .expect("first ordinal");
         assert_eq!(
-            serving.ja4_baseline.entries[second.get()][0].addr,
-            NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
+            serving.ja4_baseline.entries[second.get()][0].ja4,
+            serving.slots[0].inspector.hello().expect("hello").ja4(),
             "the second port's connection keys its own ordinal's baseline row"
         );
         assert_eq!(
@@ -7717,14 +7712,8 @@ fn ja4_set_overflow_flares_signal_once_per_connection() {
         for i in 0..MAX_ADDRESSES - 1 {
             let mut synthetic = [b'x'; 36];
             synthetic[0] = b'a' + i as u8;
-            let addr = NumericAddr::V4(Ipv4Addr::from([
-                10,
-                0,
-                0,
-                u8::try_from(i).expect("row index fits u8"),
-            ]));
             assert_eq!(
-                serving.ja4_baseline.record(ordinal, addr, synthetic),
+                serving.ja4_baseline.record(ordinal, synthetic),
                 BaselineOutcome::FirstSeen,
                 "each fresh synthetic JA4 seeds the set"
             );
@@ -7811,8 +7800,8 @@ fn ja4_baseline_defers_until_dial_persists_dest_ip() {
             "a hello completed before the destination IP is known defers the baseline"
         );
         assert_eq!(
-            serving.ja4_baseline.entries[ordinal.get()][0].addr,
-            EMPTY_JA4_ADDR,
+            serving.ja4_baseline.entries[ordinal.get()][0].ja4,
+            [0; 36],
             "no baseline is recorded before the destination IP is known"
         );
         assert_eq!(
@@ -7846,8 +7835,8 @@ fn ja4_baseline_defers_until_dial_persists_dest_ip() {
         );
         let entry = serving.ja4_baseline.entries[ordinal.get()][0];
         assert_eq!(
-            entry.addr,
-            NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
+            entry.ja4,
+            serving.slots[0].inspector.hello().expect("hello").ja4(),
             "the dial-persisted destination IP keys the deferred baseline"
         );
         assert_eq!(
@@ -7881,35 +7870,19 @@ fn ja4_baseline_set_overflow_suppresses_and_dedups_unchanged() {
             j
         };
         for i in 0..MAX_ADDRESSES {
-            let addr = NumericAddr::V4(Ipv4Addr::from([
-                10,
-                0,
-                0,
-                u8::try_from(i).expect("row index fits u8"),
-            ]));
             assert_eq!(
-                serving
-                    .ja4_baseline
-                    .record(ordinal, addr, synthetic(i as u8)),
+                serving.ja4_baseline.record(ordinal, synthetic(i as u8)),
                 BaselineOutcome::FirstSeen,
                 "each fresh distinct JA4 seeds the set"
             );
         }
         assert_eq!(
-            serving.ja4_baseline.record(
-                ordinal,
-                NumericAddr::V4(Ipv4Addr::from([10, 0, 0, 16])),
-                synthetic(16)
-            ),
+            serving.ja4_baseline.record(ordinal, synthetic(16)),
             BaselineOutcome::Overflow,
             "a 17th distinct JA4 overflows the fixed 16-entry set"
         );
         assert_eq!(
-            serving.ja4_baseline.record(
-                ordinal,
-                NumericAddr::V4(Ipv4Addr::from([10, 0, 0, 17])),
-                synthetic(0)
-            ),
+            serving.ja4_baseline.record(ordinal, synthetic(0)),
             BaselineOutcome::Unchanged,
             "a JA4 already in the set is unchanged regardless of peer address"
         );
@@ -7989,13 +7962,7 @@ fn ja4_set_overflow_emits_monitor_dnj_record() {
         for i in 0..MAX_ADDRESSES - 1 {
             let mut synthetic = [b'x'; 36];
             synthetic[0] = b'a' + i as u8;
-            let addr = NumericAddr::V4(Ipv4Addr::from([
-                10,
-                0,
-                0,
-                u8::try_from(i).expect("row index fits u8"),
-            ]));
-            serving.ja4_baseline.record(ordinal, addr, synthetic);
+            serving.ja4_baseline.record(ordinal, synthetic);
         }
 
         // conn2: a 17th distinct JA4 overflows the full set and flares.
