@@ -2506,7 +2506,7 @@ fn probe_sweep_skips_every_resolver_the_window_exercised() {
     );
     let mut schedules = Schedules::new(2).unwrap();
     transport
-        .note_failure(0, Family::A, &mut schedules, FailureReason::Connect)
+        .note_failure(0, Family::A, true, &mut schedules, FailureReason::Connect)
         .expect("failure noted");
     let sweep = transport.probe_sweep.expect("sweep still active");
     assert_eq!(
@@ -2783,6 +2783,108 @@ fn successful_probe_closes_retained_connection_so_the_next_exchange_redials() {
 }
 
 #[test]
+fn probe_exchange_publishes_no_name_authorization_state() {
+    // F-03: a post-window probe is a pure sensor. It parses and validates a
+    // response to record a verdict, but must never mutate name-authorization
+    // state (cache bindings, refresh schedule). The active exchange on the
+    // same name DOES apply the outcome, so the probe's non-mutation is
+    // observable byte-for-byte.
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let responder = spawn_responder(vec![
+        // Connection 1: the active exchange publishes a 120s positive.
+        vec![Step::PositiveA {
+            ttl: 120,
+            octets: [93, 184, 216, 34],
+        }],
+        // Connection 2: the probe exchange returns a different positive; if
+        // the probe wrongly applied the outcome the mutation would be visible.
+        vec![Step::PositiveA {
+            ttl: 300,
+            octets: [1, 1, 1, 1],
+        }],
+    ]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]));
+    transport.addr = ns(responder.port());
+    // Seed the post-window probe sweep directly (the established probe-sweep
+    // test pattern): index 1 is the sole unprobed resolver and the pre-sweep
+    // active resolver stays the primary. `resolvers` is cleared so
+    // `repoint_to_active` never overrides the injected responder peer and the
+    // probe dials `addr` above, not a real resolver.
+    transport.resolvers = None;
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, true, false, false, false],
+        active_before: ActiveResolver::at(0, 3),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: None,
+    });
+
+    // Phase 1: a normal active exchange publishes name-authorization state.
+    let deadline = Instant::now() + Duration::from_millis(200);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline)
+        .unwrap();
+    assert!(
+        matches!(
+            run_exchange_to_terminal(&mut transport, fqdn, &mut cache, &mut schedules, deadline),
+            TurnResult::Published(_)
+        ),
+        "the active exchange publishes its outcome"
+    );
+    let bindings_before = bindings_of(&cache, 0, Family::A);
+    let due_before = schedules.due_time(0, Family::A).unwrap();
+    assert_ne!(bindings_before, [], "the active exchange established bindings");
+    assert!(
+        due_before.is_some(),
+        "the active exchange committed a refresh schedule"
+    );
+
+    // Phase 2: the probe exchange must leave that state byte-for-byte intact.
+    let done = transport
+        .sweep_next_probe(fqdn)
+        .expect("the probe exchange starts");
+    assert!(!done, "the sweep is not done after starting the probe");
+    let probe_deadline = Instant::now() + Duration::from_secs(5);
+    assert!(
+        matches!(
+            run_exchange_to_terminal(
+                &mut transport,
+                fqdn,
+                &mut cache,
+                &mut schedules,
+                probe_deadline
+            ),
+            TurnResult::Published(_)
+        ),
+        "the probe exchange still publishes so the verdict is recorded"
+    );
+    let sweep = transport.probe_sweep.expect("sweep still active");
+    assert_eq!(
+        sweep.verdicts[1],
+        ProbeVerdict::Ok,
+        "the probe records its ok verdict against the probed resolver"
+    );
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(0, 3),
+        "the probe restores the pre-sweep active resolver"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        bindings_before,
+        "a probe must never publish name bindings"
+    );
+    assert_eq!(
+        schedules.due_time(0, Family::A).unwrap(),
+        due_before,
+        "a probe must never commit a refresh schedule"
+    );
+    drop(responder);
+}
+
+#[test]
 fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
     let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
     let mut transport = seeded_transport(set);
@@ -2796,7 +2898,7 @@ fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
     transport.repoint_to_active();
     let mut schedules = Schedules::new(2).unwrap();
     transport
-        .note_failure(0, Family::A, &mut schedules, FailureReason::Connect)
+        .note_failure(0, Family::A, true, &mut schedules, FailureReason::Connect)
         .expect("failure noted");
     let sweep = transport.probe_sweep.expect("sweep still active");
     assert_eq!(sweep.current, None, "the verdict recording clears current");

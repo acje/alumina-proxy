@@ -212,6 +212,11 @@ struct ActiveExchange {
     /// startup exchange whose window already expired; a serving refresh is
     /// never cancelled by that path.
     serving: bool,
+    /// Whether the exchange is a post-window probe rather than a startup or
+    /// serving exchange. A probe is a pure sensor: it parses and validates a
+    /// response to record a resolver verdict, but never publishes
+    /// name-authorization state (docs/alumina-proxy.md:826).
+    probe: bool,
 }
 
 /// The stage of one outstanding exchange, advanced by at most one stage each
@@ -1469,6 +1474,16 @@ impl StartupDns {
         }
     }
 
+    /// Marks the outstanding exchange as a post-window probe, so the receive
+    /// step discards the name outcome instead of publishing name-authorization
+    /// state. A no-op when idle; only the probe sweep calls this, so a probe
+    /// stays distinguishable from a startup or serving exchange.
+    pub(crate) const fn mark_probe_started(&mut self) {
+        if let Some(ex) = self.active.as_mut() {
+            ex.probe = true;
+        }
+    }
+
     /// Cancels a retained startup exchange whose window already expired: the
     /// serving runtime must never advance or publish it
     /// (docs/alumina-proxy.md:64-65). A serving-runtime refresh is never
@@ -1831,21 +1846,21 @@ impl StartupDns {
         if let Some(_kind) = ex.connect_err.take() {
             self.close_connection()?;
             let reason =
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Connect)?;
             return Ok(ConnectStep::Failed(reason));
         }
         match self.probe_connect() {
             ConnectProbe::SocketError => {
                 self.close_connection()?;
                 let reason =
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+                    self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Connect)?;
                 return Ok(ConnectStep::Failed(reason));
             }
             ConnectProbe::PeerMismatch => {
                 self.close_connection()?;
                 self.note_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
                 let reason =
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Connect)?;
+                    self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Connect)?;
                 return Ok(ConnectStep::Failed(reason));
             }
             ConnectProbe::Connected => {
@@ -1872,7 +1887,7 @@ impl StartupDns {
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
             let reason =
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Timeout)?;
             return Ok(ConnectStep::Failed(reason));
         }
         Ok(ConnectStep::Waiting)
@@ -1935,7 +1950,7 @@ impl StartupDns {
         } else {
             self.close_connection()?;
             let reason =
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::TlsIdentity)?;
+                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::TlsIdentity)?;
             Ok(Some(reason))
         }
     }
@@ -1957,6 +1972,7 @@ impl StartupDns {
                 let reason = self.note_failure(
                     ex.ordinal,
                     ex.family,
+                    ex.probe,
                     schedules,
                     FailureReason::TlsIdentity,
                 )?;
@@ -1966,7 +1982,7 @@ impl StartupDns {
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
             let reason =
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Timeout)?;
             return Ok(HandshakeStep::Failed(reason));
         }
         Ok(HandshakeStep::Waiting)
@@ -2081,6 +2097,7 @@ impl StartupDns {
                                 let reason = self.note_failure(
                                     ex.ordinal,
                                     ex.family,
+                                    ex.probe,
                                     schedules,
                                     FailureReason::Send,
                                 )?;
@@ -2096,6 +2113,7 @@ impl StartupDns {
                                 let reason = self.note_failure(
                                     ex.ordinal,
                                     ex.family,
+                                    ex.probe,
                                     schedules,
                                     FailureReason::Send,
                                 )?;
@@ -2114,6 +2132,7 @@ impl StartupDns {
                         let reason = self.note_failure(
                             ex.ordinal,
                             ex.family,
+                            ex.probe,
                             schedules,
                             FailureReason::Send,
                         )?;
@@ -2133,6 +2152,7 @@ impl StartupDns {
                         let reason = self.note_failure(
                             ex.ordinal,
                             ex.family,
+                            ex.probe,
                             schedules,
                             FailureReason::Send,
                         )?;
@@ -2142,7 +2162,7 @@ impl StartupDns {
             } else {
                 self.close_connection()?;
                 let reason =
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Send)?;
+                    self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Send)?;
                 return Ok(SendStep::Failed(reason));
             }
         }
@@ -2153,7 +2173,7 @@ impl StartupDns {
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
             let reason =
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Timeout)?;
             return Ok(SendStep::Failed(reason));
         }
         if blocked {
@@ -2197,6 +2217,7 @@ impl StartupDns {
                     let reason = self.note_failure(
                         ex.ordinal,
                         ex.family,
+                        ex.probe,
                         schedules,
                         FailureReason::Timeout,
                     )?;
@@ -2210,6 +2231,7 @@ impl StartupDns {
                     let reason = self.note_failure(
                         ex.ordinal,
                         ex.family,
+                        ex.probe,
                         schedules,
                         FailureReason::Timeout,
                     )?;
@@ -2232,13 +2254,17 @@ impl StartupDns {
         schedules: &mut Schedules,
     ) -> Result<SendStep, StartupDnsError> {
         self.close_connection()?;
-        let reason = self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Send)?;
+        let reason = self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Send)?;
         Ok(SendStep::Failed(reason))
     }
 
     /// One nonblocking response-read step: at most one read, then a complete
     /// validated message is published; an API/EOF/deadline failure settles the
     /// counted failure and closes the connection exactly once.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "faithful response-read step threading the counted reason through every failure arm plus the probe/name publish gate"
+    )]
     fn step_recv(
         &mut self,
         ex: &mut ActiveExchange,
@@ -2254,6 +2280,7 @@ impl StartupDns {
                     let reason = self.note_failure(
                         ex.ordinal,
                         ex.family,
+                        ex.probe,
                         schedules,
                         FailureReason::Receive,
                     )?;
@@ -2267,7 +2294,7 @@ impl StartupDns {
             if len == 0 || len > DNS_MSG_LIMIT {
                 self.close_connection()?;
                 let reason =
-                    self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Receive)?;
+                    self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Receive)?;
                 return Ok(RecvStep::Failed(reason));
             }
             self.msglen = Some(len);
@@ -2293,12 +2320,19 @@ impl StartupDns {
                         let reason = self.note_failure(
                             ex.ordinal,
                             ex.family,
+                            ex.probe,
                             schedules,
                             FailureReason::Timeout,
                         )?;
                         return Ok(RecvStep::Failed(reason));
                     }
                     let kind = classify_published(&outcome);
+                    if ex.probe {
+                        if self.workspace.extreme_ttl() {
+                            self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+                        }
+                        return Ok(RecvStep::Published(kind));
+                    }
                     let name_index = cache
                         .name_index(ex.ordinal)
                         .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
@@ -2331,6 +2365,7 @@ impl StartupDns {
                     let reason = self.note_failure(
                         ex.ordinal,
                         ex.family,
+                        ex.probe,
                         schedules,
                         FailureReason::Receive,
                     )?;
@@ -2341,7 +2376,7 @@ impl StartupDns {
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
             let reason =
-                self.note_failure(ex.ordinal, ex.family, schedules, FailureReason::Timeout)?;
+                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Timeout)?;
             return Ok(RecvStep::Failed(reason));
         }
         Ok(RecvStep::Waiting)
@@ -2735,6 +2770,7 @@ impl StartupDns {
             connect_err,
             tid,
             serving: false,
+            probe: false,
         });
         Ok(())
     }
@@ -3031,6 +3067,7 @@ impl StartupDns {
         self.relocate_for_probe(target)?;
         let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
         self.start_exchange(fqdn, Family::A, 0, deadline)?;
+        self.mark_probe_started();
         if let Some(sweep) = &mut self.probe_sweep {
             sweep.remaining[index] = false;
             sweep.current = Some(target);
@@ -3188,6 +3225,7 @@ impl StartupDns {
         &mut self,
         ordinal: usize,
         family: Family,
+        probe: bool,
         schedules: &mut Schedules,
         reason: FailureReason,
     ) -> Result<FailureReason, StartupDnsError> {
@@ -3203,7 +3241,9 @@ impl StartupDns {
             sweep.verdicts[index] = ProbeVerdict::Failed(reason);
             sweep.current = None;
         }
-        schedules.note_exchange_failure(ordinal, family, now)?;
+        if !probe {
+            schedules.note_exchange_failure(ordinal, family, now)?;
+        }
         Ok(reason)
     }
 }
