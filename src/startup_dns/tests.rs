@@ -2278,6 +2278,86 @@ fn three_resolvers_relocate_in_order_then_fail_closed_on_exhaustion() {
 }
 
 #[test]
+fn five_resolvers_relocate_on_the_third_failure_not_the_fourth() {
+    let addrs = ["1.1.1.1", "8.8.8.8", "9.9.9.9", "4.4.4.4", "2.2.2.2"];
+    let set = resolver_set_of(&addrs);
+    let mut transport = seeded_transport(set);
+    transport.repoint_to_active();
+    let now = 1_000_000u64;
+    for resolver in 0..MAX_RESOLVERS {
+        // The first two counted failures stay on the current resolver; the
+        // third — the same transition that marks it degraded — relocates to
+        // the next healthy resolver, or fail-closes on the last.
+        transport.on_exchange_failed(now);
+        assert_eq!(
+            transport.active_resolver.index(),
+            resolver,
+            "failure {} stays on resolver {resolver}",
+            3 * resolver + 1
+        );
+        assert_eq!(
+            transport.peer().ip().to_string(),
+            addrs[resolver],
+            "the transport still dials resolver {resolver}"
+        );
+        transport.on_exchange_failed(now);
+        assert_eq!(
+            transport.active_resolver.index(),
+            resolver,
+            "failure {} stays on resolver {resolver}",
+            3 * resolver + 2
+        );
+        transport.on_exchange_failed(now);
+        let next = (resolver + 1).min(MAX_RESOLVERS - 1);
+        assert_eq!(
+            transport.active_resolver.index(),
+            next,
+            "failure {} relocates (or fail-closes on the last)",
+            3 * (resolver + 1)
+        );
+        assert_eq!(
+            transport.peer().ip().to_string(),
+            addrs[next],
+            "the transport repoints onto resolver {next}"
+        );
+    }
+    assert_eq!(
+        transport.active_resolver.index(),
+        MAX_RESOLVERS - 1,
+        "all five resolvers degraded: the transport fail-closes on the last"
+    );
+}
+
+#[test]
+fn five_resolver_startup_budget_fits_the_window() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9", "4.4.4.4", "2.2.2.2"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    // The complete five-resolver worst case is 15 exchanges: each resolver
+    // degrades after three counted failures, and the third failure is the
+    // same transition that relocates. At 5 s per exchange that is
+    // 15 × 5 = 75 s, inside the 90 s startup window.
+    for _ in 0..(MAX_RESOLVERS * DEGRADED_AFTER) {
+        transport.on_exchange_failed(now);
+    }
+    assert_eq!(
+        transport.active_resolver.index(),
+        MAX_RESOLVERS - 1,
+        "the last resolver holds after exhaustion (fail-closed)"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        MAX_RESOLVERS,
+        "each resolver crosses into degraded exactly once"
+    );
+    assert!(
+        MAX_RESOLVERS as u64 * DEGRADED_AFTER as u64 * EXCHANGE_DEADLINE_SECS
+            <= STARTUP_WINDOW_SECS,
+        "15 exchanges × 5 s = 75 s fits the 90 s startup window"
+    );
+}
+
+#[test]
 fn next_healthy_wraps_within_the_set() {
     let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
     let mut transport = seeded_transport(set);
@@ -2835,7 +2915,11 @@ fn probe_exchange_publishes_no_name_authorization_state() {
     );
     let bindings_before = bindings_of(&cache, 0, Family::A);
     let due_before = schedules.due_time(0, Family::A).unwrap();
-    assert_ne!(bindings_before, [], "the active exchange established bindings");
+    assert_ne!(
+        bindings_before,
+        [],
+        "the active exchange established bindings"
+    );
     assert!(
         due_before.is_some(),
         "the active exchange committed a refresh schedule"
