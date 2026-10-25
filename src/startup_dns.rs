@@ -1845,22 +1845,37 @@ impl StartupDns {
     ) -> Result<ConnectStep, StartupDnsError> {
         if let Some(_kind) = ex.connect_err.take() {
             self.close_connection()?;
-            let reason =
-                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Connect)?;
+            let reason = self.note_failure(
+                ex.ordinal,
+                ex.family,
+                ex.probe,
+                schedules,
+                FailureReason::Connect,
+            )?;
             return Ok(ConnectStep::Failed(reason));
         }
         match self.probe_connect() {
             ConnectProbe::SocketError => {
                 self.close_connection()?;
-                let reason =
-                    self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Connect)?;
+                let reason = self.note_failure(
+                    ex.ordinal,
+                    ex.family,
+                    ex.probe,
+                    schedules,
+                    FailureReason::Connect,
+                )?;
                 return Ok(ConnectStep::Failed(reason));
             }
             ConnectProbe::PeerMismatch => {
                 self.close_connection()?;
                 self.note_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
-                let reason =
-                    self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Connect)?;
+                let reason = self.note_failure(
+                    ex.ordinal,
+                    ex.family,
+                    ex.probe,
+                    schedules,
+                    FailureReason::Connect,
+                )?;
                 return Ok(ConnectStep::Failed(reason));
             }
             ConnectProbe::Connected => {
@@ -1886,8 +1901,13 @@ impl StartupDns {
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            let reason =
-                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Timeout)?;
+            let reason = self.note_failure(
+                ex.ordinal,
+                ex.family,
+                ex.probe,
+                schedules,
+                FailureReason::Timeout,
+            )?;
             return Ok(ConnectStep::Failed(reason));
         }
         Ok(ConnectStep::Waiting)
@@ -1949,8 +1969,13 @@ impl StartupDns {
             Ok(None)
         } else {
             self.close_connection()?;
-            let reason =
-                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::TlsIdentity)?;
+            let reason = self.note_failure(
+                ex.ordinal,
+                ex.family,
+                ex.probe,
+                schedules,
+                FailureReason::TlsIdentity,
+            )?;
             Ok(Some(reason))
         }
     }
@@ -1981,8 +2006,13 @@ impl StartupDns {
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            let reason =
-                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Timeout)?;
+            let reason = self.note_failure(
+                ex.ordinal,
+                ex.family,
+                ex.probe,
+                schedules,
+                FailureReason::Timeout,
+            )?;
             return Ok(HandshakeStep::Failed(reason));
         }
         Ok(HandshakeStep::Waiting)
@@ -2161,8 +2191,13 @@ impl StartupDns {
                 }
             } else {
                 self.close_connection()?;
-                let reason =
-                    self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Send)?;
+                let reason = self.note_failure(
+                    ex.ordinal,
+                    ex.family,
+                    ex.probe,
+                    schedules,
+                    FailureReason::Send,
+                )?;
                 return Ok(SendStep::Failed(reason));
             }
         }
@@ -2172,8 +2207,13 @@ impl StartupDns {
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            let reason =
-                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Timeout)?;
+            let reason = self.note_failure(
+                ex.ordinal,
+                ex.family,
+                ex.probe,
+                schedules,
+                FailureReason::Timeout,
+            )?;
             return Ok(SendStep::Failed(reason));
         }
         if blocked {
@@ -2254,7 +2294,13 @@ impl StartupDns {
         schedules: &mut Schedules,
     ) -> Result<SendStep, StartupDnsError> {
         self.close_connection()?;
-        let reason = self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Send)?;
+        let reason = self.note_failure(
+            ex.ordinal,
+            ex.family,
+            ex.probe,
+            schedules,
+            FailureReason::Send,
+        )?;
         Ok(SendStep::Failed(reason))
     }
 
@@ -2293,8 +2339,13 @@ impl StartupDns {
             let len = usize::from(u16::from_be_bytes([self.recv_buf[0], self.recv_buf[1]]));
             if len == 0 || len > DNS_MSG_LIMIT {
                 self.close_connection()?;
-                let reason =
-                    self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Receive)?;
+                let reason = self.note_failure(
+                    ex.ordinal,
+                    ex.family,
+                    ex.probe,
+                    schedules,
+                    FailureReason::Receive,
+                )?;
                 return Ok(RecvStep::Failed(reason));
             }
             self.msglen = Some(len);
@@ -2375,8 +2426,13 @@ impl StartupDns {
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            let reason =
-                self.note_failure(ex.ordinal, ex.family, ex.probe, schedules, FailureReason::Timeout)?;
+            let reason = self.note_failure(
+                ex.ordinal,
+                ex.family,
+                ex.probe,
+                schedules,
+                FailureReason::Timeout,
+            )?;
             return Ok(RecvStep::Failed(reason));
         }
         Ok(RecvStep::Waiting)
