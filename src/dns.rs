@@ -226,6 +226,7 @@ pub enum DnsError {
         len: usize,
     },
     NameTooLong,
+    EmbeddedDotInLabel,
     PointerNotBackward,
     PointerCycle,
     ConflictingCname,
@@ -282,6 +283,9 @@ impl fmt::Display for DnsError {
             }
             DnsError::LabelTooLong { len } => write!(f, "DNS label {len} bytes exceeds 63"),
             DnsError::NameTooLong => write!(f, "DNS name exceeds 255 bytes"),
+            DnsError::EmbeddedDotInLabel => {
+                write!(f, "DNS label content contains an embedded dot")
+            }
             DnsError::PointerNotBackward => write!(f, "DNS compression pointer not backward"),
             DnsError::PointerCycle => write!(f, "DNS compression pointer cycle"),
             DnsError::ConflictingCname => write!(f, "DNS conflicting CNAME targets"),
@@ -536,7 +540,7 @@ impl<'a> Reader<'a> {
 /// root, or 2-byte pointer) as written at `at`, never the end of an expanded
 /// name reached by following a pointer, so callers can resume field parsing at
 /// the correct offset after a compressed owner, CNAME target, or SOA name.
-fn read_name(msg: &[u8], at: usize) -> Result<(DnsName, usize), DnsError> {
+fn read_name(msg: &[u8], at: usize, strict: bool) -> Result<(DnsName, usize), DnsError> {
     let mut out = DnsName::default();
     let mut field = at;
     let mut decode = at;
@@ -567,6 +571,9 @@ fn read_name(msg: &[u8], at: usize) -> Result<(DnsName, usize), DnsError> {
                     out.push(b'.')?;
                 }
                 for &b in &msg[start..end] {
+                    if strict && b == b'.' {
+                        return Err(DnsError::EmbeddedDotInLabel);
+                    }
                     out.push(b.to_ascii_lowercase())?;
                 }
                 decode = end;
@@ -602,7 +609,7 @@ fn read_name(msg: &[u8], at: usize) -> Result<(DnsName, usize), DnsError> {
 
 fn read_rr(msg: &[u8], reader: &mut Reader) -> Result<(DnsName, u16, u16, u32), DnsError> {
     let start = reader.pos;
-    let (owner, end) = read_name(msg, start)?;
+    let (owner, end) = read_name(msg, start, true)?;
     reader.pos = end;
     let ty = reader.u16()?;
     let class = reader.u16()?;
@@ -657,7 +664,7 @@ fn parse_rdata(msg: &[u8], rd_start: usize, rdlen: usize, ty: u16) -> Result<Rda
             Ok(Rdata::Aaaa(Ipv6Addr::from(octets)))
         }
         TYPE_CNAME => {
-            let (target, used) = read_name(msg, rd_start)?;
+            let (target, used) = read_name(msg, rd_start, true)?;
             if used != end {
                 return Err(DnsError::BadRdataLength {
                     ty,
@@ -672,11 +679,11 @@ fn parse_rdata(msg: &[u8], rd_start: usize, rdlen: usize, ty: u16) -> Result<Rda
             // within the rdata, and the fixed 20-byte tail (serial, refresh,
             // retry, expire, minimum) must follow exactly, so the tail slice
             // is provably in-bounds and exactly 20 bytes before it is read.
-            let (_, used) = read_name(msg, rd_start)?;
+            let (_, used) = read_name(msg, rd_start, false)?;
             if used > end {
                 return Err(DnsError::MalformedSoa);
             }
-            let (_, used2) = read_name(msg, used)?;
+            let (_, used2) = read_name(msg, used, false)?;
             if used2 > end {
                 return Err(DnsError::MalformedSoa);
             }
@@ -906,7 +913,7 @@ pub fn parse_response(
             limit: MAX_TOTAL_RR,
         });
     }
-    let (qname, after_q) = read_name(msg, reader.pos)?;
+    let (qname, after_q) = read_name(msg, reader.pos, true)?;
     reader.pos = after_q;
     let qtype = reader.u16()?;
     let qclass = reader.u16()?;
@@ -1252,6 +1259,14 @@ mod tests {
             out.push(u8::try_from(label.len()).expect("dns label at most 63 bytes"));
             out.extend_from_slice(label.as_bytes());
         }
+        out.push(0);
+        out
+    }
+
+    fn single_label_qname(label: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(u8::try_from(label.len()).expect("dns label at most 63 bytes"));
+        out.extend_from_slice(label.as_bytes());
         out.push(0);
         out
     }
@@ -2557,7 +2572,7 @@ mod tests {
             msg.push(0xc0);
             msg.push(2 + 2 * i);
         }
-        assert_eq!(read_name(&msg, 20), Err(DnsError::PointerCycle));
+        assert_eq!(read_name(&msg, 20, false), Err(DnsError::PointerCycle));
     }
 
     #[test]
@@ -2613,5 +2628,205 @@ mod tests {
                 Err(DnsError::BadRcode { code })
             );
         }
+    }
+
+    #[test]
+    fn rejects_embedded_dot_in_question_qname() {
+        let mut msg = header(60, true, 0, 1, 0, 0, 0);
+        msg.extend_from_slice(&single_label_qname("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 60, &msg),
+            Err(DnsError::EmbeddedDotInLabel)
+        );
+    }
+
+    #[test]
+    fn rejects_embedded_dot_in_answer_owner() {
+        let mut msg = header(61, true, 0, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        let mut owner = single_label_qname("sub.example.org");
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&120u32.to_be_bytes());
+        owner.extend_from_slice(&4u16.to_be_bytes());
+        owner.extend_from_slice(&[93, 184, 216, 34]);
+        msg.extend_from_slice(&owner);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 61, &msg),
+            Err(DnsError::EmbeddedDotInLabel)
+        );
+    }
+
+    #[test]
+    fn rejects_embedded_dot_in_cname_target() {
+        let mut msg = header(62, true, 0, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        let mut owner = qname_bytes("sub.example.org");
+        owner.extend_from_slice(&5u16.to_be_bytes());
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&60u32.to_be_bytes());
+        let target = single_label_qname("a.example.org");
+        owner.extend_from_slice(
+            &u16::try_from(target.len())
+                .expect("cname target fits u16")
+                .to_be_bytes(),
+        );
+        owner.extend_from_slice(&target);
+        msg.extend_from_slice(&owner);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 62, &msg),
+            Err(DnsError::EmbeddedDotInLabel)
+        );
+    }
+
+    #[test]
+    fn rejects_embedded_dot_in_terminal_address_owner() {
+        let mut msg = header(63, true, 0, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        let mut owner = single_label_qname("sub.example.org");
+        owner.extend_from_slice(&28u16.to_be_bytes());
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&120u32.to_be_bytes());
+        owner.extend_from_slice(&16u16.to_be_bytes());
+        owner.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        msg.extend_from_slice(&owner);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 63, &msg),
+            Err(DnsError::EmbeddedDotInLabel)
+        );
+    }
+
+    #[test]
+    fn rejects_embedded_dot_duplicate_owner_key() {
+        let mut msg = header(64, true, 0, 1, 2, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&a_record("sub.example.org", [93, 184, 216, 34], 120));
+        let mut owner = single_label_qname("sub.example.org");
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&120u32.to_be_bytes());
+        owner.extend_from_slice(&4u16.to_be_bytes());
+        owner.extend_from_slice(&[140, 82, 121, 5]);
+        msg.extend_from_slice(&owner);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 64, &msg),
+            Err(DnsError::EmbeddedDotInLabel)
+        );
+    }
+
+    #[test]
+    fn rejects_embedded_dot_bailiwick_suffix() {
+        let mut msg = header(65, true, 0, 1, 1, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        let mut owner = qname_bytes("sub.example.org");
+        owner.extend_from_slice(&5u16.to_be_bytes());
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&60u32.to_be_bytes());
+        let target = single_label_qname("example.org");
+        owner.extend_from_slice(
+            &u16::try_from(target.len())
+                .expect("cname target fits u16")
+                .to_be_bytes(),
+        );
+        owner.extend_from_slice(&target);
+        msg.extend_from_slice(&owner);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 65, &msg),
+            Err(DnsError::EmbeddedDotInLabel)
+        );
+    }
+
+    #[test]
+    fn rejects_embedded_dot_soa_owner() {
+        let mut msg = header(66, true, 3, 1, 0, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        let mut owner = single_label_qname("example.org");
+        owner.extend_from_slice(&6u16.to_be_bytes());
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&300u32.to_be_bytes());
+        let mname = qname_bytes("ns1.example.org");
+        let rname = qname_bytes("hostmaster.example.org");
+        let rdata_len = mname.len() + rname.len() + 20;
+        owner.extend_from_slice(
+            &u16::try_from(rdata_len)
+                .expect("soa rdata fits u16")
+                .to_be_bytes(),
+        );
+        owner.extend_from_slice(&mname);
+        owner.extend_from_slice(&rname);
+        for v in [1u32, 3600, 600, 86400, 60] {
+            owner.extend_from_slice(&v.to_be_bytes());
+        }
+        msg.extend_from_slice(&owner);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 66, &msg),
+            Err(DnsError::EmbeddedDotInLabel)
+        );
+    }
+
+    #[test]
+    fn rejects_adversarial_embedded_dot_witness() {
+        let mut msg = header(67, true, 0, 1, 1, 0, 0);
+        msg.extend_from_slice(&single_label_qname("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        let mut owner = single_label_qname("sub.example.org");
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&120u32.to_be_bytes());
+        owner.extend_from_slice(&4u16.to_be_bytes());
+        owner.extend_from_slice(&[93, 184, 216, 34]);
+        msg.extend_from_slice(&owner);
+        assert_eq!(
+            parse_response_ws("sub.example.org", Family::A, 67, &msg),
+            Err(DnsError::EmbeddedDotInLabel)
+        );
+    }
+
+    #[test]
+    fn accepts_embedded_dot_in_soa_mname_rname() {
+        let mut msg = header(68, true, 3, 1, 0, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        let mut owner = qname_bytes("example.org");
+        owner.extend_from_slice(&6u16.to_be_bytes());
+        owner.extend_from_slice(&1u16.to_be_bytes());
+        owner.extend_from_slice(&300u32.to_be_bytes());
+        let mname = single_label_qname("ns1.example.org");
+        let rname = single_label_qname("hostmaster.example.org");
+        let rdata_len = mname.len() + rname.len() + 20;
+        owner.extend_from_slice(
+            &u16::try_from(rdata_len)
+                .expect("soa rdata fits u16")
+                .to_be_bytes(),
+        );
+        owner.extend_from_slice(&mname);
+        owner.extend_from_slice(&rname);
+        for v in [1u32, 3600, 600, 86400, 60] {
+            owner.extend_from_slice(&v.to_be_bytes());
+        }
+        msg.extend_from_slice(&owner);
+        let out = parse_response_ws("sub.example.org", Family::A, 68, &msg).expect("parse");
+        assert_eq!(
+            out,
+            Outcome::NxDomain {
+                soa: Some(Soa::new(300, 60)),
+            }
+        );
     }
 }
