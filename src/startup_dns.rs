@@ -920,6 +920,16 @@ pub struct StartupDns {
     /// counts here, disjoint from the serving `dp=` downgrade surface; it is
     /// taken exactly once.
     probe_relocations: usize,
+    /// The count of sustained-negative incident opens awaiting drain by the
+    /// owning `ServeStorage` into the monitor `sn=` level. Each validated
+    /// NXDOMAIN that opens a new incident raises the level by one; opens
+    /// accumulate across the resolved set and are taken exactly once.
+    incident_opens: usize,
+    /// The count of sustained-negative incident closes awaiting drain by the
+    /// owning `ServeStorage` into the monitor `sn=` level. Each validated
+    /// positive that closes an open incident lowers the level by one; closes
+    /// accumulate across the resolved set and are taken exactly once.
+    incident_closes: usize,
     /// The post-window probe sweep state, present only while the sweep is in
     /// progress: which configured resolvers remain to be probed, the active
     /// resolver the sweep began from, the accumulated per-resolver verdicts,
@@ -1004,6 +1014,8 @@ impl StartupDns {
             dns_anomalies: [0; DnsAnomalyKind::COUNT],
             downgrade_to_plain: 0,
             probe_relocations: 0,
+            incident_opens: 0,
+            incident_closes: 0,
             probe_sweep: None,
             sweep_ran: false,
             window_exercised: [false; MAX_RESOLVERS],
@@ -1055,6 +1067,16 @@ impl StartupDns {
     /// pending count to zero for the next window or serving turn.
     pub(crate) fn take_probe_relocations(&mut self) -> usize {
         std::mem::take(&mut self.probe_relocations)
+    }
+
+    /// Drains the accumulated sustained-negative incident opens and closes for
+    /// the owning storage to fold into the monitor's `sn=` level, resetting
+    /// both pending counts to zero for the next window or serving turn.
+    pub(crate) fn take_incident_transitions(&mut self) -> (usize, usize) {
+        (
+            std::mem::take(&mut self.incident_opens),
+            std::mem::take(&mut self.incident_closes),
+        )
     }
 
     #[cfg(test)]
@@ -1998,7 +2020,7 @@ impl StartupDns {
                         .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
                     let generation = cache.entry(name_index, ex.family)?.generation();
                     let receipt = self.now_u64();
-                    dns::apply_outcome(
+                    let transition = dns::apply_outcome(
                         cache,
                         schedules,
                         ex.ordinal,
@@ -2007,6 +2029,11 @@ impl StartupDns {
                         self.now_u64(),
                         &outcome,
                     )?;
+                    match transition {
+                        crate::schedule::IncidentTransition::Opened => self.incident_opens += 1,
+                        crate::schedule::IncidentTransition::Closed => self.incident_closes += 1,
+                        crate::schedule::IncidentTransition::None => {}
+                    }
                     if self.workspace.extreme_ttl() {
                         self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
                     }

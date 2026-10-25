@@ -92,6 +92,7 @@ pub struct Monitor {
     capture_drops: SaturatingCounter,
     dirty: bool,
     serving_stale: bool,
+    sustained_negatives: u8,
     last_report_secs: Option<u64>,
 }
 
@@ -151,6 +152,7 @@ impl Monitor {
             capture_drops: SaturatingCounter::new(),
             dirty: false,
             serving_stale: false,
+            sustained_negatives: 0,
             last_report_secs: None,
         }
     }
@@ -188,6 +190,25 @@ impl Monitor {
     /// worth its own summary emission.
     pub(crate) const fn note_serving_fresh(&mut self) {
         self.serving_stale = false;
+    }
+
+    /// Raises the sustained-negative incident level (`sn=`) by one, clamped to
+    /// the 0..=32 name span. A level, not an event fold: it survives
+    /// `mark_reported` and is lowered only by `note_incident_close`.
+    pub(crate) const fn note_incident_open(&mut self) {
+        self.sustained_negatives = if self.sustained_negatives >= 32 {
+            32
+        } else {
+            self.sustained_negatives + 1
+        };
+        self.dirty = true;
+    }
+
+    /// Lowers the sustained-negative incident level (`sn=`) by one, clamped at
+    /// zero. A level, not an event fold.
+    pub(crate) const fn note_incident_close(&mut self) {
+        self.sustained_negatives = self.sustained_negatives.saturating_sub(1);
+        self.dirty = true;
     }
 
     pub(crate) const fn note_fact_dns_anomaly(&mut self, kind: DnsAnomalyKind) {
@@ -492,6 +513,10 @@ impl Monitor {
         self.serving_stale
     }
 
+    pub(crate) const fn sustained_negatives(&self) -> u8 {
+        self.sustained_negatives
+    }
+
     pub(crate) fn facts_any_illegal_overflow(&self) -> bool {
         self.facts.any_illegal.iter().any(|c| c.overflow())
     }
@@ -583,6 +608,7 @@ impl Monitor {
             self.capture_len += 1;
         }
         self.capture_drops.saturate_for_test();
+        self.sustained_negatives = 32;
         self.dirty = true;
     }
 }

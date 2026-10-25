@@ -406,6 +406,7 @@ impl ServeStorage {
         self.drain_dns_anomalies();
         self.drain_downgrade_to_plain();
         self.drain_probe_relocations();
+        self.drain_incident_transitions();
         Ok(Some(result))
     }
 
@@ -467,6 +468,20 @@ impl ServeStorage {
         let relocations = self.dns.take_probe_relocations();
         for _ in 0..relocations {
             self.enforcement.note_fact_probe_relocation();
+        }
+    }
+
+    /// Folds the sustained-negative incident opens and closes the DNS transport
+    /// accumulated into the monitor `sn=` level: each open raises the level by
+    /// one, each close lowers it by one. The transport drains to zero, so a
+    /// later drain never double-counts an earlier transition.
+    fn drain_incident_transitions(&mut self) {
+        let (opens, closes) = self.dns.take_incident_transitions();
+        for _ in 0..opens {
+            self.enforcement.note_incident_open();
+        }
+        for _ in 0..closes {
+            self.enforcement.note_incident_close();
         }
     }
 
@@ -720,6 +735,7 @@ impl ServeStorage {
         self.drain_dns_anomalies();
         self.drain_downgrade_to_plain();
         self.drain_probe_relocations();
+        self.drain_incident_transitions();
         self.settle_startup(now0, report, decision_seconds, false)
     }
 

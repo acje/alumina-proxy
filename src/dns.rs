@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use crate::cache::{Cache, CacheError, Family, Generation, MAX_ADDRESSES, StagedPositive};
 use crate::config::{ALLOWLIST_MAX, Allowlist, Fqdn};
 use crate::eligibility::NumericAddr;
-use crate::schedule::{Schedules, Soa};
+use crate::schedule::{IncidentTransition, Schedules, Soa};
 
 /// Maximum DNS message size accepted over the wire (16 KiB).
 pub const DNS_MSG_LIMIT: usize = 16 * 1024;
@@ -319,7 +319,8 @@ impl fmt::Display for DnsError {
 
 /// Applies a validated `outcome` to the cache and schedule for one allowlist
 /// `index`, using the in-flight `generation` and the monotonic `receipt` and
-/// `now` values. Only validated outcomes mutate state.
+/// `now` values. Only validated outcomes mutate state. Returns the
+/// sustained-negative incident delta the outcome produced for the name.
 ///
 /// # Errors
 ///
@@ -333,7 +334,7 @@ pub fn apply_outcome(
     receipt: u64,
     now: u64,
     outcome: &Outcome,
-) -> Result<(), DnsError> {
+) -> Result<IncidentTransition, DnsError> {
     let name = cache
         .name_index(index)
         .ok_or(DnsError::Cache(CacheError::NameOutOfRange))?;
@@ -358,6 +359,7 @@ pub fn apply_outcome(
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
             cache.publish_positive(&staged).map_err(DnsError::Cache)?;
             schedules.commit_positive(index, *positive_family, prepared);
+            Ok(schedules.reset_negative_streak(index))
         }
         Outcome::NxDomain { soa } => {
             let prepared = schedules
@@ -365,6 +367,7 @@ pub fn apply_outcome(
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
             cache.evict_nxdomain(name).map_err(DnsError::Cache)?;
             schedules.commit_nxdomain(index, prepared);
+            Ok(schedules.note_negative_streak(index, now))
         }
         Outcome::NoData {
             family: no_data_family,
@@ -377,9 +380,9 @@ pub fn apply_outcome(
                 .evict_nodata(name, *no_data_family)
                 .map_err(DnsError::Cache)?;
             schedules.commit_nodata(index, *no_data_family, prepared);
+            Ok(IncidentTransition::None)
         }
     }
-    Ok(())
 }
 
 const fn map_schedule(err: crate::schedule::ScheduleError) -> CacheError {

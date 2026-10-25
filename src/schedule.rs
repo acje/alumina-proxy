@@ -17,6 +17,17 @@ pub const BACKOFF_STAGES: [u64; 6] = [1, 2, 4, 8, 16, 30];
 #[expect(clippy::cast_possible_truncation, reason = "six backoff stages fit u8")]
 const LAST_BACKOFF_STAGE: u8 = (BACKOFF_STAGES.len() - 1) as u8;
 
+/// The sustained-negative incident threshold: a name opens an incident when
+/// its consecutive validated-NXDOMAIN streak reaches this count.
+pub const INCIDENT_N: u8 = 8;
+
+/// The number of distinct whole-hour windows a sustained-negative streak must
+/// span before the incident opens.
+pub const INCIDENT_M: u8 = 2;
+
+/// The whole-hour window length for the incident span test, in seconds.
+pub const INCIDENT_WINDOW: u64 = 3600;
+
 /// The SOA TTL and MINIMUM of a validated negative answer, used to schedule
 /// the next negative refresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +113,32 @@ impl DueToken {
     }
 }
 
+/// The per-name sustained-negative streak state: the consecutive validated
+/// NXDOMAIN count, the distinct whole-hour windows the streak has spanned, and
+/// the last window the streak touched. NODATA and exchange failures never
+/// touch it; a validated positive (either family) resets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NegativeStreak {
+    count: u8,
+    windows: u8,
+    last_window: u64,
+}
+
+const STREAK_CLEAR: NegativeStreak = NegativeStreak {
+    count: 0,
+    windows: 0,
+    last_window: u64::MAX,
+};
+
+/// The incident-state delta one validated outcome produces for a name:
+/// whether a sustained-negative incident opened or closed, or neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncidentTransition {
+    Opened,
+    Closed,
+    None,
+}
+
 const fn family_slot(family: Family) -> usize {
     match family {
         Family::A => 0,
@@ -126,6 +163,7 @@ pub struct Schedules {
     next_scan: u8,
     slots: [[Slot; 2]; ALLOWLIST_MAX],
     next_due: Option<u64>,
+    negative_streaks: [NegativeStreak; ALLOWLIST_MAX],
 }
 
 impl Schedules {
@@ -145,6 +183,7 @@ impl Schedules {
             next_scan: 0,
             slots: [[UNDUE; 2]; ALLOWLIST_MAX],
             next_due: None,
+            negative_streaks: [STREAK_CLEAR; ALLOWLIST_MAX],
         })
     }
 
@@ -400,6 +439,46 @@ impl Schedules {
     pub(crate) fn commit_nxdomain(&mut self, name: usize, prepared: [PreparedDue; 2]) {
         for family in [Family::A, Family::Aaaa] {
             self.commit_slot(name, family, prepared[family_slot(family)]);
+        }
+    }
+
+    /// Records one validated NXDOMAIN on the name's sustained-negative streak
+    /// and returns whether the incident opened. The streak increments only on
+    /// a validated NXDOMAIN; NODATA and exchange failures never touch it. The
+    /// incident opens once the streak reaches `INCIDENT_N` across
+    /// `INCIDENT_M` distinct whole-hour windows, and stays open (no re-open)
+    /// until a validated positive resets it.
+    pub(crate) const fn note_negative_streak(
+        &mut self,
+        name: usize,
+        now: u64,
+    ) -> IncidentTransition {
+        let streak = &mut self.negative_streaks[name];
+        let was_incident = streak.count >= INCIDENT_N && streak.windows >= INCIDENT_M;
+        streak.count = streak.count.saturating_add(1);
+        let window = now / INCIDENT_WINDOW;
+        if window != streak.last_window {
+            streak.windows = streak.windows.saturating_add(1);
+            streak.last_window = window;
+        }
+        let is_incident = streak.count >= INCIDENT_N && streak.windows >= INCIDENT_M;
+        if is_incident && !was_incident {
+            IncidentTransition::Opened
+        } else {
+            IncidentTransition::None
+        }
+    }
+
+    /// Resets the name's sustained-negative streak on a validated positive
+    /// (either family) and returns whether an open incident closed.
+    pub(crate) const fn reset_negative_streak(&mut self, name: usize) -> IncidentTransition {
+        let streak = &mut self.negative_streaks[name];
+        let was_incident = streak.count >= INCIDENT_N && streak.windows >= INCIDENT_M;
+        *streak = STREAK_CLEAR;
+        if was_incident {
+            IncidentTransition::Closed
+        } else {
+            IncidentTransition::None
         }
     }
 
@@ -1110,6 +1189,60 @@ mod tests {
         assert!(
             success_path.all_zero(),
             "success path allocated: {success_path:?}"
+        );
+    }
+
+    #[test]
+    fn sustained_negative_streak_opens_incident_at_n_across_m_windows() {
+        let mut schedules = Schedules::new(1).unwrap();
+        for _ in 0..(INCIDENT_N - 1) {
+            assert_eq!(
+                schedules.note_negative_streak(0, 0),
+                IncidentTransition::None,
+                "below N no incident even within one window"
+            );
+        }
+        assert_eq!(
+            schedules.note_negative_streak(0, 0),
+            IncidentTransition::None,
+            "count at N but a single window does not open an incident"
+        );
+        assert_eq!(
+            schedules.note_negative_streak(0, INCIDENT_WINDOW),
+            IncidentTransition::Opened,
+            "count >= N across two distinct windows opens the incident"
+        );
+        assert_eq!(
+            schedules.note_negative_streak(0, INCIDENT_WINDOW * 2),
+            IncidentTransition::None,
+            "an already-open incident does not re-open"
+        );
+        assert_eq!(
+            schedules.reset_negative_streak(0),
+            IncidentTransition::Closed,
+            "a validated positive resets the streak and closes the incident"
+        );
+        assert_eq!(
+            schedules.note_negative_streak(0, INCIDENT_WINDOW * 3),
+            IncidentTransition::None,
+            "the streak restarts from zero after the reset"
+        );
+    }
+
+    #[test]
+    fn sustained_negative_streak_ignores_nodata_and_exchange_failures() {
+        let mut schedules = Schedules::new(1).unwrap();
+        schedules.note_nodata(0, Family::A, None, 0, 0).unwrap();
+        schedules.note_exchange_failure(0, Family::A, 0).unwrap();
+        assert_eq!(
+            schedules.note_negative_streak(0, 0),
+            IncidentTransition::None,
+            "a single NXDOMAIN after NODATA/failure stays below N"
+        );
+        assert_eq!(
+            schedules.reset_negative_streak(0),
+            IncidentTransition::None,
+            "a positive without an open incident closes nothing"
         );
     }
 }

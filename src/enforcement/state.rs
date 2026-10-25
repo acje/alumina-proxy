@@ -308,6 +308,14 @@ impl Enforcement {
         self.monitor.note_fact_probe_relocation();
     }
 
+    pub(crate) const fn note_incident_open(&mut self) {
+        self.monitor.note_incident_open();
+    }
+
+    pub(crate) const fn note_incident_close(&mut self) {
+        self.monitor.note_incident_close();
+    }
+
     pub(crate) const fn note_fact_ja4_change(&mut self, ordinal: DomainOrdinal, ja4: [u8; 36]) {
         self.monitor.note_fact_ja4_change(ordinal, ja4);
     }

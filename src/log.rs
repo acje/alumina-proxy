@@ -720,6 +720,10 @@ fn encode_monitor(slot_buf: &mut [u8; SLOT_BYTES], secs: u64, monitor: &Monitor)
     if monitor.serving_stale() && !push_u64(&mut w, b"ss", 1) {
         return None;
     }
+    let sustained_negatives = monitor.sustained_negatives();
+    if sustained_negatives > 0 && !push_u64(&mut w, b"sn", u64::from(sustained_negatives)) {
+        return None;
+    }
     let downgrade_to_plain = monitor.facts_downgrade_to_plain();
     if downgrade_to_plain > 0 && !push_u64(&mut w, b"dp", u64::from(downgrade_to_plain)) {
         return None;
@@ -2712,6 +2716,10 @@ mod tests {
             text.contains("x0s=511"),
             "the all-saturated capture ring carries its worst legal slot identity: {text}"
         );
+        assert!(
+            text.contains(" sn=32"),
+            "the saturated sustained-negatives level is emitted: {text}"
+        );
     }
 
     #[test]
@@ -2744,6 +2752,41 @@ mod tests {
         assert!(
             !text.contains("ss="),
             "a clear stale-serving bit stays zero-suppressed: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_monitor_emits_sustained_negatives_when_nonzero() {
+        use crate::enforcement::monitor::Monitor;
+        let mut m = Monitor::new();
+        m.note_incident_open();
+        m.note_incident_open();
+        m.note_incident_open();
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            text.contains(" sn=3"),
+            "the sustained-negatives level carries its count: {text}"
+        );
+        assert!(
+            !text.contains("sn=0"),
+            "a zero sustained-negatives level stays suppressed: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_monitor_suppresses_sustained_negatives_when_zero() {
+        use crate::enforcement::monitor::Monitor;
+        let m = Monitor::new();
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            !text.contains("sn="),
+            "a zero sustained-negatives level stays zero-suppressed: {text}"
         );
     }
 
@@ -2834,6 +2877,10 @@ mod tests {
         assert!(
             text.contains(" ss=1"),
             "the latched stale-serving bit survives the saturated record: {text}"
+        );
+        assert!(
+            text.contains(" sn=32"),
+            "the saturated sustained-negatives level survives the saturated record: {text}"
         );
     }
 
