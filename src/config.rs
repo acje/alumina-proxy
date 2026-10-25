@@ -485,6 +485,7 @@ pub enum ConfigError {
         index: usize,
         value: String,
     },
+    MixedResolverTrust,
 }
 
 impl ConfigError {
@@ -580,6 +581,10 @@ impl fmt::Display for ConfigError {
                 f,
                 "config resolver[{0}] value {value:?} duplicates an earlier resolver entry",
                 index + 1
+            ),
+            ConfigError::MixedResolverTrust => write!(
+                f,
+                "config resolver array mixes plain (bare-IP) and DoT (IP#fqdn) entries; a resolver set must be trust-homogeneous"
             ),
         }
     }
@@ -691,11 +696,20 @@ fn build_resolver_set(table: &toml::Table) -> Result<ResolverSet, ConfigError> {
         return Err(ConfigError::ResolverCountOutOfRange { got: values.len() });
     }
     let mut nameservers = Vec::with_capacity(values.len());
+    let mut plain_trust: Option<bool> = None;
     for (index, value) in values.iter().enumerate() {
         let ns = resolver::select(value).map_err(|_| ConfigError::InvalidResolver {
             index,
             value: value.clone(),
         })?;
+        let is_plain = ns.is_ip_only();
+        if let Some(existing) = plain_trust {
+            if existing != is_plain {
+                return Err(ConfigError::MixedResolverTrust);
+            }
+        } else {
+            plain_trust = Some(is_plain);
+        }
         if nameservers.contains(&ns) {
             return Err(ConfigError::DuplicateResolver {
                 index,
@@ -1515,6 +1529,22 @@ mod resolver_config_tests {
             parse_config_document(&valid_doc("[\"1.1.1.1\"]")).expect("bare IP resolver valid");
         assert!(cfg.resolver_set().primary().fqdn().is_none());
         assert!(cfg.resolver_set().primary().is_ip_only());
+    }
+
+    #[test]
+    fn resolver_mixed_plain_and_dot_trust_rejected() {
+        for value in [
+            "[\"1.1.1.1\", \"9.9.9.9#dns.quad9.net\"]",
+            "[\"9.9.9.9#dns.quad9.net\", \"1.1.1.1\"]",
+        ] {
+            let err = parse_config_document(&valid_doc(value))
+                .expect_err("mixed plain/DoT resolver array must be rejected");
+            assert!(
+                matches!(&err, ConfigError::MixedResolverTrust),
+                "mixed resolver array must be MixedResolverTrust, got {err:?}"
+            );
+            assert_eq!(err.exit_status(), 78, "MixedResolverTrust must exit 78");
+        }
     }
 
     #[test]

@@ -2357,7 +2357,7 @@ mod tests {
         use crate::startup_dns::FailureReason;
         let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
         let doc = format!(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"9.9.9.9#dns.quad9.net\", \"8.8.8.8#dns.google#pin-sha256={b64}\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#one.one.one.one\", \"9.9.9.9#dns.quad9.net\", \"8.8.8.8#dns.google#pin-sha256={b64}\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
         );
         let config = crate::config::parse_config_document(&doc).expect("valid config");
         let resolvers = config.resolver_set();
@@ -2395,7 +2395,7 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert_eq!(
             text,
-            "level=info kind=resolver_probe secs=11 resolver0=\"1.1.1.1\" verdict0=ok resolver1=\"9.9.9.9\" fqdn1=\"dns.quad9.net\" verdict1=failed reason1=\"timeout\" resolver2=\"8.8.8.8\" fqdn2=\"dns.google\" pin2=1 verdict2=not_probed\n",
+            "level=info kind=resolver_probe secs=11 resolver0=\"1.1.1.1\" fqdn0=\"one.one.one.one\" verdict0=ok resolver1=\"9.9.9.9\" fqdn1=\"dns.quad9.net\" verdict1=failed reason1=\"timeout\" resolver2=\"8.8.8.8\" fqdn2=\"dns.google\" pin2=1 verdict2=not_probed\n",
             "single probe record embeds resolver/verdict/reason inline per resolver, no fan-out"
         );
     }
