@@ -560,7 +560,7 @@ impl ServeStorage {
     /// Emits the single `resolver_probe` record once the sweep concludes: one
     /// inline segment per configured resolver in index order, carrying its
     /// address and FQDN/pin presence plus the accumulated verdict. The record
-    /// is written allocation-free into the fixed 8 KiB slot and drained once
+    /// is written allocation-free into the fixed 2 KiB slot and drained once
     /// (docs/alumina-proxy.md:67).
     fn emit_resolver_probe(&mut self, verdicts: [ProbeVerdict; MAX_RESOLVERS]) {
         let Some(set) = self.dns.resolvers() else {
