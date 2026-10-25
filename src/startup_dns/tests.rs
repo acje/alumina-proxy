@@ -2250,6 +2250,86 @@ fn backup_success_keeps_the_failback_probe_armed() {
 }
 
 #[test]
+fn probe_begin_mid_regime_does_not_reset_the_failback_counter() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let now = 1_000_000u64;
+    for _ in 0..3 {
+        transport.on_exchange_failed(now);
+    }
+    let due = transport.failback_due.expect("failback armed");
+    transport.now0 = due;
+    transport
+        .maybe_begin_failback()
+        .expect("failback probe begins");
+    assert_eq!(transport.failback_successes, 0);
+    assert_eq!(
+        transport.failback_source,
+        Some(ActiveResolver::at(1, 2)),
+        "the backup is remembered so a failed probe re-seats onto it"
+    );
+    // The first probe success advances the counter into the middle of the
+    // regime while the probe stays armed on the primary.
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
+    assert_eq!(transport.failback_successes, 1);
+    // A later exchange re-enters the probe-begin path while the probe is
+    // already armed; it must NOT reset the counter. A literal "reset on every
+    // probe begin" would make the third consecutive success unreachable.
+    transport
+        .maybe_begin_failback()
+        .expect("armed probe-begin is a no-op");
+    assert_eq!(
+        transport.failback_successes, 1,
+        "a probe begin mid-regime does not reset the consecutive-success counter"
+    );
+    // A failed probe mid-regime re-seats onto the backup, re-arms the grace,
+    // and resets the counter so the next cycle starts from zero.
+    transport.on_exchange_failed(due);
+    assert_eq!(transport.active_resolver.index(), 1);
+    assert_eq!(transport.failback_successes, 0);
+    assert_eq!(
+        transport.failback_due,
+        Some(due + FAILBACK_AFTER_SECS),
+        "the failed probe re-arms the failback timer"
+    );
+    // The grace elapses again; the next probe begins a fresh cycle.
+    transport.now0 = due + FAILBACK_AFTER_SECS;
+    transport
+        .maybe_begin_failback()
+        .expect("failback probe begins");
+    assert_eq!(transport.failback_successes, 0);
+    // Two successes advance the counter to two; a probe begin still does not
+    // reset it mid-regime.
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
+    assert_eq!(transport.failback_successes, 2);
+    transport
+        .maybe_begin_failback()
+        .expect("armed probe-begin is a no-op");
+    assert_eq!(
+        transport.failback_successes, 2,
+        "a probe begin mid-regime does not reset the consecutive-success counter"
+    );
+    // The third consecutive success settles the failback.
+    transport
+        .on_exchange_succeeded()
+        .expect("success settles without a transport error");
+    assert_eq!(transport.active_resolver.index(), 0);
+    assert!(transport.failback_source.is_none());
+    assert!(transport.failback_due.is_none());
+    assert_eq!(
+        transport.failback_successes, 0,
+        "the counter resets when the probe settles"
+    );
+}
+
+#[test]
 fn three_resolvers_relocate_in_order_then_fail_closed_on_exhaustion() {
     let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
     let mut transport = seeded_transport(set);
