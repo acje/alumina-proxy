@@ -689,6 +689,12 @@ impl Monitor {
         self.sustained_negatives = 32;
         self.dirty = true;
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_peer_ip_v6_max_for_test(&mut self) {
+        self.facts.ja4_peer_ip = NumericAddr::V6(std::net::Ipv6Addr::from([0xff; 16]));
+        self.dirty = true;
+    }
 }
 
 #[cfg(test)]

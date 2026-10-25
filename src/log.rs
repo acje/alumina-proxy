@@ -1,8 +1,8 @@
 //! Boot-owned bounded allocation-free logging.
 //!
-//! The log store is a preallocated queue of 256 fixed 8 KiB slots. Records are
+//! The log store is a preallocated queue of 256 fixed 10 KiB slots. Records are
 //! encoded directly into a slot with a deterministic escaping grammar, never
-//! truncated: a record that would exceed its 8 KiB slot (including the
+//! truncated: a record that would exceed its 10 KiB slot (including the
 //! terminating newline framing) is dropped whole and counted. Enqueue and
 //! drain are allocation-free and nonblocking; a stalled stdout sink yields
 //! with its partial write cursor retained and never delays traffic, DNS, or
@@ -24,11 +24,13 @@
 //! attempts failed, so it is a subset of the summary's cumulative `dropped`
 //! tally and the two are never summed (docs/alumina-proxy.md:236).
 //!
-//! Address fields are never escaped: `SocketAddr` Display emits only digits,
-//! `.`, `:`, `[`, `]`, and `%`, none of which require quoting, and is written
-//! straight into the entry without an intermediate allocation. The `%` occurs
-//! only as the IPv6 zone id, which std formats as a plain decimal `u32`, so a
-//! scoped address never widens the character set.
+//! Address fields are never escaped: resolver `SocketAddr` Display emits only
+//! digits, `.`, `:`, `[`, `]`, and `%`, none of which require quoting, and is
+//! written straight into the entry without an intermediate allocation. The `%`
+//! occurs only as the IPv6 zone id, which std formats as a plain decimal `u32`,
+//! so a scoped address never widens the character set. The monitor's indexed
+//! peer-address fields (`d<i>p`) instead render fixed-width lowercase hex of
+//! the raw address bytes (V4 = 8 chars, V6 = 32 chars), zero-padded per byte.
 
 use std::fmt;
 use std::io;
@@ -45,7 +47,7 @@ use crate::resolver::Fqdn;
 use crate::startup_dns::{NameOutcome, ProbeVerdict};
 
 pub(crate) const QUEUE_SLOTS: usize = 256;
-pub(crate) const SLOT_BYTES: usize = 8 * 1024;
+pub(crate) const SLOT_BYTES: usize = 10 * 1024;
 /// Per-turn sink budget: at most this many write calls or this many bytes,
 /// whichever is exhausted first (docs/alumina-proxy.md:178,194,146).
 pub(crate) const SINK_MAX_OPS: usize = 16;
@@ -123,11 +125,11 @@ const RESOLVER_PROBE_MAX: usize = b"level=info kind=resolver_probe".len()
 
 const _: () = assert!(
     STARTUP_NAME_MAX < SLOT_BYTES,
-    "one startup_name record at the validated FQDN bound must fit its 8 KiB slot"
+    "one startup_name record at the validated FQDN bound must fit its 10 KiB slot"
 );
 const _: () = assert!(
     RESOLVER_PROBE_MAX < SLOT_BYTES,
-    "one resolver_probe record over MAX_RESOLVERS full FQDNs must fit its 8 KiB slot"
+    "one resolver_probe record over MAX_RESOLVERS full FQDNs must fit its 10 KiB slot"
 );
 
 /// Threshold edges: attempt an error record when usage first exceeds 80%,
@@ -579,10 +581,12 @@ fn push_indexed_addr(w: &mut Entry<'_>, key: &[u8], index: u32, addr: IpAddr) ->
     true
 }
 
-/// Writes an indexed keyed address field quoted but never escaped: `IpAddr`
-/// Display emits only digits, `.`, `:`, `[`, and `]`, none of which require
-/// quoting, so it is written straight into the entry without an intermediate
-/// allocation (same rule as `push_indexed_addr`).
+/// Writes an indexed keyed peer-address field quoted but never escaped: the
+/// address is rendered as raw lowercase hex of its fixed bytes (V4 = 8 chars,
+/// V6 = 32 chars), each byte zero-padded to two digits so leading zeros are
+/// never dropped. The fixed-width `[0-9a-f]` set needs no quoting, so it is
+/// written straight into the entry without an intermediate allocation (same
+/// rule as `push_indexed_addr`).
 fn push_indexed_key_addr(w: &mut Entry<'_>, key: &[u8], index: u32, addr: IpAddr) -> bool {
     if !w.push(b" ") || !w.push(key) {
         return false;
@@ -593,11 +597,32 @@ fn push_indexed_key_addr(w: &mut Entry<'_>, key: &[u8], index: u32, addr: IpAddr
     if !w.push(b"p=\"") {
         return false;
     }
-    if fmt::Write::write_fmt(w, format_args!("{addr}")).is_err() {
+    if !push_addr_hex(w, addr) {
         return false;
     }
     if !w.push(b"\"") {
         return false;
+    }
+    true
+}
+
+/// Renders `addr` as fixed-width lowercase hex of its raw bytes (V4 = 8 chars,
+/// V6 = 32 chars), byte-wise zero-padded to two digits, never dropping leading
+/// zeros. Written straight into the entry; no intermediate allocation.
+fn push_addr_hex(w: &mut Entry<'_>, addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => push_octets_hex(w, &v4.octets()),
+        IpAddr::V6(v6) => push_octets_hex(w, &v6.octets()),
+    }
+}
+
+/// Writes `octets` as lowercase hex, one byte at a time, each zero-padded to
+/// two digits.
+fn push_octets_hex(w: &mut Entry<'_>, octets: &[u8]) -> bool {
+    for &b in octets {
+        if !w.push(&[HEX[(b >> 4) as usize], HEX[(b & 0x0f) as usize]]) {
+            return false;
+        }
     }
     true
 }
@@ -645,7 +670,7 @@ fn encode_record_final(
 /// Encodes the single post-window probe record: the header fields plus, in
 /// resolver index order, one inline segment per resolver — `resolverN` (the
 /// address, with FQDN/pin presence), `verdictN`, and (for a failed probe)
-/// `reasonN`. The segments are embedded in the same fixed 8 KiB entry as the
+/// `reasonN`. The segments are embedded in the same fixed 10 KiB entry as the
 /// header, so the probe result is exactly one record that never exceeds its
 /// slot; an oversize record is dropped whole and counted like every other.
 fn encode_record_probe(
@@ -1060,7 +1085,7 @@ fn push_scope_token(w: &mut Entry<'_>, prefix: &[u8], scope: Scope) -> bool {
     }
 }
 
-/// One fixed 8 KiB slot. `bytes` is the encoded record length; `reserved`
+/// One fixed 10 KiB slot. `bytes` is the encoded record length; `reserved`
 /// marks a priority-class record that normal overflow must never displace.
 /// Slots are reused, so a stale `bytes` on an unconsumed slot is never
 /// committed and the reserved flag is always rewritten on commit.
@@ -2134,7 +2159,7 @@ mod tests {
         for (ordinal, record) in records.iter().enumerate().take(ALLOWLIST_MAX) {
             assert!(
                 record.len() < SLOT_BYTES,
-                "per-name record {ordinal} incl framing fits the 8 KiB entry: {}",
+                "per-name record {ordinal} incl framing fits the 10 KiB entry: {}",
                 record.len()
             );
             let text = std::str::from_utf8(record).expect("ASCII record");
@@ -2292,6 +2317,7 @@ mod tests {
 
         let mut monitor = Monitor::new();
         monitor.saturate_all_for_test();
+        monitor.set_peer_ip_v6_max_for_test();
         monitor.note_serving_stale();
         monitor.note_fact_downgrade_to_plain();
         worst.push((
@@ -2330,7 +2356,7 @@ mod tests {
             );
             assert!(
                 *len < SLOT_BYTES,
-                "{kind_name} worst case incl framing fits the 8 KiB entry: {len}"
+                "{kind_name} worst case incl framing fits the 10 KiB entry: {len}"
             );
         }
         let name_len = worst
@@ -2525,7 +2551,7 @@ mod tests {
             .fqdn()
             .expect("fqdn carried");
         // The probe record is structurally bounded (MAX_RESOLVERS × FQDN_MAX_LEN
-        // ≪ 8 KiB) for any real resolver set, so the only way to reach the
+        // ≪ 10 KiB) for any real resolver set, so the only way to reach the
         // oversize path is a caller-supplied segment set far beyond the slot.
         let segments: Vec<ResolverProbeSegment<'_>> = (0..3000u32)
             .map(|i| ResolverProbeSegment {
@@ -2716,7 +2742,7 @@ mod tests {
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
              ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 ep=1 js=1 bv=1 \
              c14=2 unk3=1 d0f=1 d0b=1 d0l=1 d0j=1 \
-             d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"203.0.113.1\" dx=1\n",
+             d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"cb007101\" dx=1\n",
             "exact monitor grammar: always-emit globals, then zero-suppressed scoped segments"
         );
         assert!(
@@ -2781,7 +2807,7 @@ mod tests {
             "the per-ordinal ja4-change value carries the 36-char JA4: {text}"
         );
         assert!(
-            text.contains(" d0p=\"203.0.113.1\""),
+            text.contains(" d0p=\"cb007101\""),
             "the latest-overflow ordinal's peer IP rides beside the ja4-change value: {text}"
         );
         assert!(
@@ -2827,7 +2853,7 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
             text.len() < SLOT_BYTES,
-            "the all-saturated monitor record stays inside the 8 KiB slot: {} bytes",
+            "the all-saturated monitor record stays inside the 10 KiB slot: {} bytes",
             text.len()
         );
         assert!(
@@ -2855,7 +2881,7 @@ mod tests {
             "the saturated ja4-seed fold is emitted: {text}"
         );
         assert!(
-            text.contains(" d31p=\"203.0.113.1\""),
+            text.contains(" d31p=\"cb007101\""),
             "saturation keys the latest-overflow peer IP to the last ordinal: {text}"
         );
     }
@@ -3009,7 +3035,7 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
             text.len() < SLOT_BYTES,
-            "the all-saturated record with the stale-serving bit stays inside the 8 KiB slot: {} bytes",
+            "the all-saturated record with the stale-serving bit stays inside the 10 KiB slot: {} bytes",
             text.len()
         );
         assert!(
@@ -3025,7 +3051,7 @@ mod tests {
             "the saturated ja4-seed fold survives the saturated record: {text}"
         );
         assert!(
-            text.contains(" d31p=\"203.0.113.1\""),
+            text.contains(" d31p=\"cb007101\""),
             "the latest-overflow peer IP survives the saturated record: {text}"
         );
     }

@@ -8206,7 +8206,7 @@ fn ja4_set_overflow_emits_monitor_dnj_record() {
             text.contains(&value_key),
             "the overflowed 36-char JA4 value reaches the monitor record as {value_key}: {text}"
         );
-        let peer_key = format!(" d{}p=\"203.0.113.1\"", ordinal.get());
+        let peer_key = format!(" d{}p=\"cb007101\"", ordinal.get());
         assert!(
             text.contains(&peer_key),
             "the latest overflow's peer destination IP reaches the monitor record as {peer_key}: {text}"

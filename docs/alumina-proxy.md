@@ -181,7 +181,7 @@ These are fixed build-time limits, not optional TOML settings or measured capaci
 | Stale-serving window (new upstream authorization after TTL expiry) | 3600 seconds (1 hour) |
 | DNS incident summary interval | 3600 seconds per affected hostname |
 | DNS reporting storage | 32 name/window states, 64 record-type incident states, 512 tunnel window markers |
-| Preallocated log queue / maximum encoded entry | 256 entries / 8 KiB, including framing |
+| Preallocated log queue / maximum encoded entry | 256 entries / 10 KiB, including framing |
 | Log sink work per scheduling turn | 64 KiB or 16 I/O operations, whichever comes first |
 | Startup resolution window | 90 seconds, absolute; includes DNS TCP establishment |
 | Relay idle deadline / EOF drain deadline / shutdown grace period | 300 seconds / 5 seconds / 8 seconds |
@@ -1103,28 +1103,27 @@ level=info kind=startup_final secs=<n> status="<full|degraded|failure|terminated
 
 Recorded worst-case encoded lengths, including the terminal newline framing, for the widest
 legal configuration (32 keyed FQDNs at the 253-byte maximum with `u64::MAX` counters) against
-the fixed 8192-byte slot:
+the fixed 10240-byte slot:
 
 | Record kind | Worst case | Headroom |
 | --- | --- | --- |
-| `startup_name` | 380 B | 7812 B |
-| `startup_final` | 325 B | 7867 B |
-| `startup_warning` | 331 B | 7861 B |
-| `reject` | 406 B | 7786 B |
-| `early_activity` | 405 B | 7787 B |
-| `exchange_failed` | 341 B | 7851 B |
-| `fatal` | 360 B | 7832 B |
-| `shutdown_final` | 103 B | 8089 B |
-| `capacity_high` / `capacity_low` | 127 B / 125 B | 8065 B / 8067 B |
-| `queue_high` / `queue_low` | 124 B / 122 B | 8068 B / 8070 B |
-| `resolver_probe` | 1857 B | 6335 B |
-| `monitor` | 8170 B | 22 B |
+| `startup_name` | 380 B | 9860 B |
+| `startup_final` | 325 B | 9915 B |
+| `startup_warning` | 331 B | 9909 B |
+| `reject` | 406 B | 9834 B |
+| `early_activity` | 405 B | 9835 B |
+| `exchange_failed` | 341 B | 9899 B |
+| `fatal` | 360 B | 9880 B |
+| `shutdown_final` | 103 B | 10137 B |
+| `capacity_high` / `capacity_low` | 127 B / 125 B | 10113 B / 10115 B |
+| `queue_high` / `queue_low` | 124 B / 122 B | 10116 B / 10118 B |
+| `resolver_probe` | 1857 B | 8383 B |
+| `monitor` | 8191 B | 2049 B |
 
 Both startup records fit with wide margins, so the encoded-entry requirement at `:236` is met
 by measurement for every valid configuration. `monitor` is the tightest record in the
-vocabulary at 22 B of headroom; the alox7 F-12 compaction (`dx=` bitset) re-measured it and it
-is not claimed compliant by construction, and the 22-byte margin is recorded as a known risk:
-any future addition to the monitor report shape must re-measure against the 8192-byte slot
+vocabulary at 2049 B of headroom after the alox8 hex peer render and 10 KiB slot bump; any
+future addition to the monitor report shape must re-measure against the 10240-byte slot
 before it is accepted.
 
 ### Explicitly unchanged (non-negotiable)
@@ -1455,3 +1454,31 @@ The per-ordinal JA4-change detail-loss flag (`d<j>x`, F-08, `:1426`) is a latche
 ### Explicitly unchanged (non-negotiable)
 
 The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 × 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8/3600 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently; the probe sweep remains a bounded, observational increment that never expands the runtime surface. The 5-second normal-refresh floor (`:76`) is unchanged for every nonzero-TTL entry; the zero-TTL one-second refresh boundary is the sole exception, scoped to zero-TTL entries only and documented in the F-10 section above.
+
+## alumina-alox8 (2026-10-25) — lossless peer-IP hex render and 10 KiB log slot
+
+The alox7 F-12 monitor record (`:1438`) carries the latest JA4-change overflow's triggering
+peer as a fixed tagged IPv4/IPv6 union rendered through `IpAddr` Display (`d<j>p`). The
+widest legal peer — a full 16-byte IPv6 address — renders as 39 characters (`ffff:ffff:ffff:
+ffff:ffff:ffff:ffff:ffff`), and with the 8 KiB slot the all-saturated monitor worst case
+overflows the fixed 8192-byte slot (`:236`), silently dropping the record and violating the
+"every valid configuration" guarantee. Resolution: the `d<j>p` peer-address field renders as
+raw lowercase hex of the address's fixed bytes — V4 = 8 chars, V6 = 32 chars, each byte
+zero-padded to two digits so leading zeros are never dropped (lossless; `203.0.113.1` →
+`cb007101`) — written straight into the entry with no intermediate allocation
+(`push_indexed_key_addr`, `src/log.rs`), preserving the zero-heap record path. The log slot
+is widened from 8 KiB to a fixed 10 KiB (`SLOT_BYTES = 10 * 1024`, `src/log.rs`; the queue
+stays 256 slots, `LOG_QUEUE_BYTES = 256 × 10 KiB`, `src/inventory.rs`), and the worst-case
+monitor record re-measures at 8191 B against the 10240-byte slot — 2049 B of headroom. This
+supersedes the 8 KiB geometry claims at `:1019` (log queue geometry "256 x 8 KiB slots"),
+`:1120` (the resolver_probe headroom row), and `:1127` (the re-measure-against-8192-byte
+sentence), and the 22 B known-risk recorded at `:1126`; those remain in place as the
+historical record of the superseded 8 KiB bound. The fixed profile is restated unchanged
+except for the log queue geometry: 512 tunnels, 128 pending setups, two 128 KiB per-slot
+buffers, 128 MiB traffic storage, the 256 × 10 KiB log queue, 16-op/64 KiB visits,
+at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup
+window, and all deadlines — 10/2/300/5/8/3600 seconds. Deterministic tests prove the exact
+monitor grammar renders `d0p="cb007101"` for the V4 peer and the all-saturated monitor
+record with a full V6 max peer fits the 10240-byte slot with margin
+(`logging_monitor_summary_exact_grammar_and_zero_suppression`,
+`logging_worst_case_record_per_kind_fits_the_slot_with_margin`, `src/log.rs`).

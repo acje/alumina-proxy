@@ -32,10 +32,10 @@ pub const SERVING_WORKSPACE_BYTES: usize = TUNNEL_SLOTS * SLOT_WORKSPACE_BYTES;
 pub const DNS_NAMED_BUFFER_BYTES: usize =
     QUERY_BUF_LEN + RECV_BUF_LEN + size_of::<ResponseWorkspace>();
 
-/// The boot-owned best-effort log queue (256 records x 8 KiB), reserved and
+/// The boot-owned best-effort log queue (256 records x 10 KiB), reserved and
 /// initialized once by the log store at boot and retained for the process
 /// lifetime.
-pub const LOG_QUEUE_BYTES: usize = 256 * (8 * 1024);
+pub const LOG_QUEUE_BYTES: usize = 256 * (10 * 1024);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StorageUnavailable;
