@@ -986,10 +986,11 @@ pub fn parse_response(
                     }
                     Rdata::Cname(target) => {
                         let idx = ensure_owner(ws, &owner)?;
-                        if let Some((existing, _)) = &ws.owners[idx].cname {
+                        if let Some((existing, existing_ttl)) = &ws.owners[idx].cname {
                             if !existing.eq_bytes(target.as_slice()) {
                                 return Err(DnsError::ConflictingCname);
                             }
+                            ws.owners[idx].cname = Some((target, (*existing_ttl).min(ttl)));
                         } else if ws.owners[idx].has_addr_data {
                             return Err(DnsError::CnameCoexist);
                         } else {
@@ -2586,6 +2587,155 @@ mod tests {
         assert_eq!(
             parse_response_ws("sub.example.org", Family::A, 41, &msg),
             Err(DnsError::ConflictingCname)
+        );
+    }
+
+    fn positive_freshness_deadline(outcome: &Outcome, receipt: u64) -> (u64, u64) {
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let index = cache.name_index(0).expect("index");
+        let generation = cache.entry(index, Family::A).expect("entry").generation();
+        apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            generation,
+            receipt,
+            receipt,
+            outcome,
+        )
+        .expect("apply");
+        let entry = cache.entry(index, Family::A).expect("entry");
+        let (freshness, retirement) = entry.deadlines();
+        (
+            freshness.expect("freshness deadline"),
+            retirement.expect("retirement deadline"),
+        )
+    }
+
+    #[test]
+    fn duplicate_identical_cname_long_then_short_takes_earliest_ttl() {
+        let mut msg = header(0x1264, true, 0, 1, 3, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 30));
+        msg.extend_from_slice(&a_record("edge.example.org", [93, 184, 216, 34], 40));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1264, &msg).expect("parse");
+        let parsed_ttl = match &out {
+            Outcome::Positive { bindings, ttl, .. } => {
+                assert_eq!(
+                    bindings.as_slice(),
+                    &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+                );
+                *ttl
+            }
+            other => panic!("expected positive, got {other:?}"),
+        };
+        assert_eq!(
+            parsed_ttl, 30,
+            "duplicate short TTL wins over the earlier long TTL"
+        );
+        assert_eq!(
+            positive_freshness_deadline(&out, 1000),
+            (1000 + parsed_ttl, 1000 + parsed_ttl + 259_200),
+            "cache freshness deadline reflects the earliest supporting CNAME TTL"
+        );
+    }
+
+    #[test]
+    fn duplicate_identical_cname_short_then_long_keeps_earliest_ttl() {
+        let mut msg = header(0x1266, true, 0, 1, 3, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 30));
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
+        msg.extend_from_slice(&a_record("edge.example.org", [93, 184, 216, 34], 40));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1266, &msg).expect("parse");
+        let parsed_ttl = match &out {
+            Outcome::Positive { bindings, ttl, .. } => {
+                assert_eq!(
+                    bindings.as_slice(),
+                    &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+                );
+                *ttl
+            }
+            other => panic!("expected positive, got {other:?}"),
+        };
+        assert_eq!(
+            parsed_ttl, 30,
+            "duplicate short TTL stays the earliest regardless of order"
+        );
+        assert_eq!(
+            positive_freshness_deadline(&out, 1000),
+            (1000 + parsed_ttl, 1000 + parsed_ttl + 259_200),
+            "cache freshness deadline reflects the earliest supporting CNAME TTL"
+        );
+    }
+
+    #[test]
+    fn duplicate_identical_cname_multi_link_long_then_short_takes_earliest_ttl() {
+        let mut msg = header(0x1267, true, 0, 1, 4, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
+        msg.extend_from_slice(&cname_record("edge.example.org", "deep.example.org", 200));
+        msg.extend_from_slice(&cname_record("edge.example.org", "deep.example.org", 30));
+        msg.extend_from_slice(&a_record("deep.example.org", [93, 184, 216, 34], 40));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1267, &msg).expect("parse");
+        let parsed_ttl = match &out {
+            Outcome::Positive { bindings, ttl, .. } => {
+                assert_eq!(
+                    bindings.as_slice(),
+                    &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+                );
+                *ttl
+            }
+            other => panic!("expected positive, got {other:?}"),
+        };
+        assert_eq!(
+            parsed_ttl, 30,
+            "duplicate short TTL at a middle link wins over the earlier long TTL"
+        );
+        assert_eq!(
+            positive_freshness_deadline(&out, 1000),
+            (1000 + parsed_ttl, 1000 + parsed_ttl + 259_200),
+            "cache freshness deadline reflects the earliest supporting CNAME TTL"
+        );
+    }
+
+    #[test]
+    fn duplicate_identical_cname_multi_link_short_then_long_keeps_earliest_ttl() {
+        let mut msg = header(0x1268, true, 0, 1, 4, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "edge.example.org", 200));
+        msg.extend_from_slice(&cname_record("edge.example.org", "deep.example.org", 30));
+        msg.extend_from_slice(&cname_record("edge.example.org", "deep.example.org", 200));
+        msg.extend_from_slice(&a_record("deep.example.org", [93, 184, 216, 34], 40));
+        let out = parse_response_ws("sub.example.org", Family::A, 0x1268, &msg).expect("parse");
+        let parsed_ttl = match &out {
+            Outcome::Positive { bindings, ttl, .. } => {
+                assert_eq!(
+                    bindings.as_slice(),
+                    &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+                );
+                *ttl
+            }
+            other => panic!("expected positive, got {other:?}"),
+        };
+        assert_eq!(
+            parsed_ttl, 30,
+            "duplicate short TTL at a middle link stays earliest regardless of order"
+        );
+        assert_eq!(
+            positive_freshness_deadline(&out, 1000),
+            (1000 + parsed_ttl, 1000 + parsed_ttl + 259_200),
+            "cache freshness deadline reflects the earliest supporting CNAME TTL"
         );
     }
 
