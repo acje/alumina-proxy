@@ -123,8 +123,8 @@ impl ClientHello {
 
     /// The offered `signature_algorithms` (13) values in wire order, unfiltered.
     /// Retained leniently: a malformed (odd-length) extension retains nothing;
-    /// an overlong list is deterministically truncated to the first 64 entries
-    /// and never rejects.
+    /// an overlong list (> 64 entries) rejects the `ClientHello` as
+    /// `TooManySigAlgs` rather than silently truncating.
     #[must_use]
     pub fn sigalgs(&self) -> &[u16] {
         &self.sigalgs[..self.sigalgs_len]
@@ -180,6 +180,7 @@ pub enum ChError {
     DuplicateExtension { ext: u16 },
     MalformedExtension { ext: u16 },
     TooManyExtensions,
+    TooManySigAlgs,
     EchPresent,
     InvalidServerName { detail: &'static str },
     ServerNameMismatch,
@@ -249,6 +250,12 @@ impl fmt::Display for ChError {
             ChError::TooManyExtensions => {
                 write!(f, "ClientHello carries more than 64 distinct extensions")
             }
+            ChError::TooManySigAlgs => {
+                write!(
+                    f,
+                    "ClientHello carries more than 64 signature_algorithms entries"
+                )
+            }
             ChError::EchPresent => write!(
                 f,
                 "encrypted_client_hello (ECH) extension present; rejected"
@@ -303,7 +310,8 @@ impl HelloRejectReason {
             | ChError::NonNullCompression
             | ChError::DuplicateExtension { .. }
             | ChError::MalformedExtension { .. }
-            | ChError::TooManyExtensions => HelloRejectReason::Profile,
+            | ChError::TooManyExtensions
+            | ChError::TooManySigAlgs => HelloRejectReason::Profile,
         }
     }
 
@@ -612,7 +620,7 @@ fn parse_body(body: &[u8], record_version: u16) -> Result<ClientHello, ChError> 
                 parse_alpn_first_value(ext_data, &mut alpn, &mut alpn_len);
             }
             SIGNATURE_ALGORITHMS => {
-                sigalgs_len = parse_sig_algs(ext_data, &mut sigalgs);
+                sigalgs_len = parse_sig_algs(ext_data, &mut sigalgs)?;
             }
             _ => {}
         }
@@ -777,28 +785,30 @@ fn parse_alpn_first_value(data: &[u8], out: &mut [u8; MAX_ALPN_VALUE], out_len: 
 }
 
 /// Retains the `signature_algorithms` (13) list values, raw and bounded by
-/// `MAX_SIGALGS`. Lenient by design: an odd-length list retains nothing; an
-/// overlong list is deterministically truncated to the first `MAX_SIGALGS`
-/// entries. Neither rejects the `ClientHello`, mirroring the ALPN retention.
-fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> usize {
+/// `MAX_SIGALGS`. Lenient by design: a malformed (odd-length or
+/// over-declared) list retains nothing. An overlong list is rejected as
+/// `TooManySigAlgs` so the JA4 hash input is never silently lopped.
+fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> Result<usize, ChError> {
     if data.len() < 2 {
-        return 0;
+        return Ok(0);
     }
     let list_len = usize::from(u16::from_be_bytes([data[0], data[1]]));
     let list_end = 2 + list_len;
     if list_end > data.len() {
-        return 0;
+        return Ok(0);
     }
     let list = &data[2..list_end];
     if !list.len().is_multiple_of(2) {
-        return 0;
+        return Ok(0);
     }
     let count = list.len() / 2;
-    let take = count.min(MAX_SIGALGS);
-    for (i, slot) in out[..take].iter_mut().enumerate() {
+    if count > MAX_SIGALGS {
+        return Err(ChError::TooManySigAlgs);
+    }
+    for (i, slot) in out[..count].iter_mut().enumerate() {
         *slot = u16::from_be_bytes([list[i * 2], list[i * 2 + 1]]);
     }
-    take
+    Ok(count)
 }
 
 /// Computes the canonical `FoxIO` `JA4` client fingerprint as the fixed 36-byte
@@ -2019,14 +2029,30 @@ mod tests {
     }
 
     #[test]
-    fn sigalgs_capped_at_max_sigalgs() {
+    fn sigalgs_over_max_sigalgs_rejected() {
         let values: Vec<u16> = (0..70u16).map(|i| 0x0400 + i).collect();
         let data = sigalgs_ext(&values);
         let wire =
             hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (SIGNATURE_ALGORITHMS, &data)]);
+        assert_eq!(parse_one(&wire), Err(ChError::TooManySigAlgs));
+    }
+
+    #[test]
+    fn sigalgs_at_max_sigalgs_accepted() {
+        let values: Vec<u16> = (0..MAX_SIGALGS as u16).map(|i| 0x0400 + i).collect();
+        let data = sigalgs_ext(&values);
+        let wire =
+            hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (SIGNATURE_ALGORITHMS, &data)]);
         let ch = parse_one(&wire).expect("parse");
-        assert_eq!(ch.sigalgs().len(), MAX_SIGALGS);
-        assert_eq!(ch.sigalgs(), &values[..MAX_SIGALGS]);
+        assert_eq!(ch.sigalgs(), &values[..]);
+    }
+
+    #[test]
+    fn sigalgs_over_max_rejects_as_profile() {
+        assert_eq!(
+            HelloRejectReason::from_ch_error(&ChError::TooManySigAlgs),
+            HelloRejectReason::Profile
+        );
     }
 
     #[cfg(feature = "alloc-witness")]
