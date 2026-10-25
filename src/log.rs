@@ -1,8 +1,8 @@
 //! Boot-owned bounded allocation-free logging.
 //!
-//! The log store is a preallocated queue of 256 fixed 10 KiB slots. Records are
+//! The log store is a preallocated queue of 256 fixed 2 KiB slots. Records are
 //! encoded directly into a slot with a deterministic escaping grammar, never
-//! truncated: a record that would exceed its 10 KiB slot (including the
+//! truncated: a record that would exceed its 2 KiB slot (including the
 //! terminating newline framing) is dropped whole and counted. Enqueue and
 //! drain are allocation-free and nonblocking; a stalled stdout sink yields
 //! with its partial write cursor retained and never delays traffic, DNS, or
@@ -47,11 +47,10 @@ use crate::resolver::Fqdn;
 use crate::startup_dns::{NameOutcome, ProbeVerdict};
 
 pub(crate) const QUEUE_SLOTS: usize = 256;
-pub(crate) const SLOT_BYTES: usize = 10 * 1024;
+pub(crate) const SLOT_BYTES: usize = 2 * 1024;
 /// Monitor family record geometry (alox9-01): the always-emitted summary plus
 /// best-effort `monitor_domain` / `monitor_capture` detail batches each stay
-/// within this bound, well under the slot. The `SLOT_BYTES` shrink is a later
-/// sub-mission.
+/// within this bound, matching the 2 KiB slot (alox9-02).
 #[cfg(test)]
 pub(crate) const MONITOR_RECORD_MAX: usize = 2048;
 /// Nonzero domain blocks packed per `monitor_domain` batch (32 ordinals -> 3).
@@ -135,11 +134,11 @@ const RESOLVER_PROBE_MAX: usize = b"level=info kind=resolver_probe".len()
 
 const _: () = assert!(
     STARTUP_NAME_MAX < SLOT_BYTES,
-    "one startup_name record at the validated FQDN bound must fit its 10 KiB slot"
+    "one startup_name record at the validated FQDN bound must fit its 2 KiB slot"
 );
 const _: () = assert!(
     RESOLVER_PROBE_MAX < SLOT_BYTES,
-    "one resolver_probe record over MAX_RESOLVERS full FQDNs must fit its 10 KiB slot"
+    "one resolver_probe record over MAX_RESOLVERS full FQDNs must fit its 2 KiB slot"
 );
 
 /// Threshold edges: attempt an error record when usage first exceeds 80%,
@@ -680,7 +679,7 @@ fn encode_record_final(
 /// Encodes the single post-window probe record: the header fields plus, in
 /// resolver index order, one inline segment per resolver — `resolverN` (the
 /// address, with FQDN/pin presence), `verdictN`, and (for a failed probe)
-/// `reasonN`. The segments are embedded in the same fixed 10 KiB entry as the
+/// `reasonN`. The segments are embedded in the same fixed 2 KiB entry as the
 /// header, so the probe result is exactly one record that never exceeds its
 /// slot; an oversize record is dropped whole and counted like every other.
 fn encode_record_probe(
@@ -1161,7 +1160,7 @@ fn push_scope_token(w: &mut Entry<'_>, prefix: &[u8], scope: Scope) -> bool {
     }
 }
 
-/// One fixed 10 KiB slot. `bytes` is the encoded record length; `reserved`
+/// One fixed 2 KiB slot. `bytes` is the encoded record length; `reserved`
 /// marks a priority-class record that normal overflow must never displace.
 /// Slots are reused, so a stale `bytes` on an unconsumed slot is never
 /// committed and the reserved flag is always rewritten on commit.
@@ -1240,7 +1239,7 @@ struct SinkState {
 /// Failure to construct the boot-owned store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogStoreError {
-    /// The 2 MiB backing queue could not be reserved.
+    /// The 512 KiB backing queue could not be reserved.
     Reserve,
     /// fd 1 could not be made nonblocking.
     StdoutNonblocking,
@@ -1327,7 +1326,7 @@ impl LogStore {
     ///
     /// # Errors
     ///
-    /// Returns [`LogStoreError`] when the 2 MiB backing queue cannot be
+    /// Returns [`LogStoreError`] when the 512 KiB backing queue cannot be
     /// reserved or the stdout descriptor cannot be made nonblocking.
     pub(crate) fn new() -> Result<LogStore, LogStoreError> {
         Self::with_io(SinkIo::Stdout)
@@ -2284,7 +2283,7 @@ mod tests {
         for (ordinal, record) in records.iter().enumerate().take(ALLOWLIST_MAX) {
             assert!(
                 record.len() < SLOT_BYTES,
-                "per-name record {ordinal} incl framing fits the 10 KiB entry: {}",
+                "per-name record {ordinal} incl framing fits the 2 KiB entry: {}",
                 record.len()
             );
             let text = std::str::from_utf8(record).expect("ASCII record");
@@ -2493,7 +2492,7 @@ mod tests {
             );
             assert!(
                 *len < SLOT_BYTES,
-                "{kind_name} worst case incl framing fits the 10 KiB entry: {len}"
+                "{kind_name} worst case incl framing fits the 2 KiB entry: {len}"
             );
             if kind_name.starts_with("monitor") {
                 assert!(
@@ -2694,7 +2693,7 @@ mod tests {
             .fqdn()
             .expect("fqdn carried");
         // The probe record is structurally bounded (MAX_RESOLVERS × FQDN_MAX_LEN
-        // ≪ 10 KiB) for any real resolver set, so the only way to reach the
+        // ≪ 2 KiB) for any real resolver set, so the only way to reach the
         // oversize path is a caller-supplied segment set far beyond the slot.
         let segments: Vec<ResolverProbeSegment<'_>> = (0..3000u32)
             .map(|i| ResolverProbeSegment {
@@ -2983,7 +2982,7 @@ mod tests {
 
     #[cfg(test)]
     #[test]
-    fn logging_monitor_all_saturated_record_fits_the_8k_slot() {
+    fn logging_monitor_all_saturated_record_fits_the_2k_slot() {
         use crate::enforcement::monitor::Monitor;
         let mut m = Monitor::new();
         m.saturate_all_for_test();
@@ -2997,7 +2996,7 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
             text.len() < SLOT_BYTES,
-            "the all-saturated monitor record stays inside the 10 KiB slot: {} bytes",
+            "the all-saturated monitor record stays inside the 2 KiB slot: {} bytes",
             text.len()
         );
         assert!(
@@ -3168,7 +3167,7 @@ mod tests {
     }
 
     #[test]
-    fn logging_monitor_all_saturated_with_serving_stale_fits_the_8k_slot() {
+    fn logging_monitor_all_saturated_with_serving_stale_fits_the_2k_slot() {
         use crate::enforcement::monitor::Monitor;
         let mut m = Monitor::new();
         m.saturate_all_for_test();
@@ -3179,7 +3178,7 @@ mod tests {
         let text = String::from_utf8(read_all(&mut file)).unwrap();
         assert!(
             text.len() < SLOT_BYTES,
-            "the all-saturated record with the stale-serving bit stays inside the 10 KiB slot: {} bytes",
+            "the all-saturated record with the stale-serving bit stays inside the 2 KiB slot: {} bytes",
             text.len()
         );
         assert!(

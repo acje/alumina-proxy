@@ -40,7 +40,7 @@ fn main() {
                 report.inventory.transient_scratch_bytes()
             );
             println!(
-                "inventory reserved-future: boot-owned best-effort log queue (256 records x 8 KiB), reserved and initialized once by the log store at boot and retained for the process lifetime: {}",
+                "inventory reserved-future: boot-owned best-effort log queue (256 records x 2 KiB), reserved and initialized once by the log store at boot and retained for the process lifetime: {}",
                 report.inventory.reserved_future_bytes()
             );
             println!(
