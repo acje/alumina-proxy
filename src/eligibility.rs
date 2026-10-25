@@ -19,7 +19,7 @@ impl NumericAddr {
 
     /// Returns this address as a standard `IpAddr` value.
     #[must_use]
-    pub fn to_ip_addr(self) -> IpAddr {
+    pub const fn to_ip_addr(self) -> IpAddr {
         match self {
             NumericAddr::V4(addr) => IpAddr::V4(addr),
             NumericAddr::V6(addr) => IpAddr::V6(addr),

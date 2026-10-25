@@ -568,7 +568,7 @@ impl Monitor {
         self.facts.ja4_change.iter().any(|c| c.overflow())
     }
 
-    pub(crate) fn facts_ja4_seed_overflow(&self) -> bool {
+    pub(crate) const fn facts_ja4_seed_overflow(&self) -> bool {
         self.facts.ja4_seed.overflow()
     }
 
