@@ -223,7 +223,13 @@ fn bench_ja4(hello: &[u8], iterations: u64) -> (u128, [u8; 36], [u8; 36]) {
     let mut acc = [0u8; 36];
     let start = Instant::now();
     for _ in 0..iterations {
-        let fp = ja4_fingerprint(version, ciphers, extensions, alpn, sigalgs);
+        let fp = ja4_fingerprint(
+            black_box(version),
+            black_box(ciphers),
+            black_box(extensions),
+            black_box(alpn),
+            black_box(sigalgs),
+        );
         for (slot, byte) in acc.iter_mut().zip(fp) {
             *slot = slot.wrapping_add(byte);
         }
