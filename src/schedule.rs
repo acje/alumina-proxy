@@ -147,21 +147,18 @@ pub enum IncidentTransition {
 }
 
 /// The per-type exchange-failure incident state for one allowlist name and
-/// family: whether an incident is open, when it opened, and the reason of the
-/// most recent failure while open. The `reason` is meaningful only while
-/// `open`; the closed sentinel carries a placeholder.
+/// family: either closed, or open with the monotonic second at which it opened
+/// and the reason of the most recent failure while open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TypeIncident {
-    open: bool,
-    opened_at: u64,
-    reason: FailureReason,
+pub(crate) enum TypeIncident {
+    Closed,
+    Open {
+        opened_at: u64,
+        reason: FailureReason,
+    },
 }
 
-const INCIDENT_CLEAR: TypeIncident = TypeIncident {
-    open: false,
-    opened_at: 0,
-    reason: FailureReason::Timeout,
-};
+const INCIDENT_CLEAR: TypeIncident = TypeIncident::Closed;
 
 /// The per-type incident delta one exchange failure or validated outcome
 /// produces for one family: whether a per-type incident opened, updated
@@ -420,16 +417,18 @@ impl Schedules {
         slot.pending = false;
         self.recompute_next_due();
         let incident = &mut self.exchange_incidents[name][family_slot(family)];
-        if incident.open {
-            incident.reason = reason;
-            Ok(PerTypeTransition::SilentUpdate)
-        } else {
-            *incident = TypeIncident {
-                open: true,
-                opened_at: now,
-                reason,
-            };
-            Ok(PerTypeTransition::Opened)
+        match *incident {
+            TypeIncident::Open { opened_at, .. } => {
+                *incident = TypeIncident::Open { opened_at, reason };
+                Ok(PerTypeTransition::SilentUpdate)
+            }
+            TypeIncident::Closed => {
+                *incident = TypeIncident::Open {
+                    opened_at: now,
+                    reason,
+                };
+                Ok(PerTypeTransition::Opened)
+            }
         }
     }
 
@@ -447,13 +446,26 @@ impl Schedules {
     ) -> Result<PerTypeTransition, ScheduleError> {
         self.admit(name)?;
         let incident = &mut self.exchange_incidents[name][family_slot(family)];
-        if incident.open {
-            let duration = now.saturating_sub(incident.opened_at);
-            *incident = INCIDENT_CLEAR;
-            Ok(PerTypeTransition::Recovered { duration })
-        } else {
-            Ok(PerTypeTransition::None)
+        match *incident {
+            TypeIncident::Open { opened_at, .. } => {
+                let duration = now.saturating_sub(opened_at);
+                *incident = INCIDENT_CLEAR;
+                Ok(PerTypeTransition::Recovered { duration })
+            }
+            TypeIncident::Closed => Ok(PerTypeTransition::None),
         }
+    }
+
+    /// Returns the per-type exchange-failure incident state for one allowlist
+    /// name and family, or `None` when `name` is not admitted. Read-only; used
+    /// by the serving-side reporting surface to reconcile its windows with the
+    /// schedule's incident state (including incidents opened before serving
+    /// began).
+    pub(crate) fn incident(&self, name: usize, family: Family) -> Option<TypeIncident> {
+        if name >= usize::from(self.name_count) {
+            return None;
+        }
+        Some(self.exchange_incidents[name][family_slot(family)])
     }
 
     /// Records a validated NXDOMAIN for the whole name.
