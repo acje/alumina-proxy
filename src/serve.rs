@@ -14,7 +14,8 @@ use crate::enforcement::action::DomainOrdinal;
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::enforcement::state::Enforcement;
 use crate::incident_report::{
-    ClosedWindow, EligibleTransition, IncidentReport, IncidentSummary, TypeSummary,
+    ClosedWindow, EligibleTransition, IncidentReport, IncidentSnapshot, IncidentSummary,
+    TypeSummary,
 };
 use crate::log::{Level, LogStore, ResolverProbeSegment};
 use crate::resolver::MAX_RESOLVERS;
@@ -400,6 +401,25 @@ impl ServeStorage {
         true
     }
 
+    /// The per-family incident snapshot for one allowlist name, read from the
+    /// schedule's current `TypeIncident` state: the opened-at second and latest
+    /// failure reason for each family currently in incident, `None` otherwise.
+    /// Used to seed the incident report's sticky per-window snapshot when a
+    /// window opens, so the closing summary reflects the window's actual
+    /// incident activity even when the incident recovers at the boundary turn.
+    fn incident_snapshot(&self, ordinal: usize) -> [IncidentSnapshot; 2] {
+        let mut snap = [None, None];
+        for (i, family) in Family::ALL.iter().copied().enumerate() {
+            snap[i] = match self.schedules.incident(ordinal, family) {
+                Some(crate::schedule::TypeIncident::Open { opened_at, reason }) => {
+                    Some((opened_at, reason.as_str()))
+                }
+                _ => None,
+            };
+        }
+        snap
+    }
+
     /// The per-turn incident reporting pass (docs/alumina-proxy.md:79-81): opens
     /// windows for names already in incident (including incidents opened before
     /// serving began), rotates every open window at its 3600-second boundary,
@@ -419,7 +439,9 @@ impl ServeStorage {
                 )
             });
             if in_incident {
-                self.incident_report.note_incident_open(ordinal, secs);
+                let snapshot = self.incident_snapshot(ordinal);
+                self.incident_report
+                    .note_incident_open(ordinal, secs, snapshot);
             }
         }
         self.incident_report.rotate_all_if_due(secs);
@@ -449,7 +471,14 @@ impl ServeStorage {
                     Some(crate::schedule::TypeIncident::Closed)
                 )
             });
-            if both_closed && let Some(closed) = self.incident_report.close_window(ordinal, secs) {
+            // L1: a full recovery coinciding with the boundary turn closes a
+            // zero-duration partial window ([secs, secs)); its info summary is
+            // vacuous (all counters 0, no meaningful partial window) and is
+            // suppressed.
+            if both_closed
+                && let Some(closed) = self.incident_report.close_window(ordinal, secs)
+                && closed.duration() > 0
+            {
                 self.emit_incident_summary(ordinal, closed, Level::Info);
             }
         }
@@ -468,11 +497,13 @@ impl ServeStorage {
         let secs = self.cache_secs(Instant::now());
         let mut types = [TypeSummary::EMPTY; 2];
         for (i, family) in Family::ALL.iter().copied().enumerate() {
-            let (start, reason) = match self.schedules.incident(ordinal, family) {
-                Some(crate::schedule::TypeIncident::Open { opened_at, reason }) => {
-                    (Some(opened_at), Some(reason.as_str()))
-                }
-                _ => (None, None),
+            // M1: the per-type incident fields come from the snapshot captured
+            // into the closed window at rotation/close, not from the schedule
+            // read live at emission — so a recovery coinciding with the window
+            // boundary still reports the window's actual incident activity.
+            let (start, reason) = match closed.incident[i] {
+                Some((opened_at, reason)) => (Some(opened_at), Some(reason)),
+                None => (None, None),
             };
             let (addrs, state, freshness, retirement) = self
                 .cache
@@ -482,8 +513,11 @@ impl ServeStorage {
                     (
                         entry.bindings().len() as u64,
                         entry.state(secs).as_str(),
-                        freshness,
-                        retirement,
+                        // L2: report remaining seconds until the freshness and
+                        // retirement deadlines (docs/alumina-proxy.md:80), not
+                        // the absolute monotonic deadlines.
+                        freshness.map(|f| f.saturating_sub(secs)),
+                        retirement.map(|r| r.saturating_sub(secs)),
                     )
                 });
             types[i] = TypeSummary {
@@ -563,9 +597,13 @@ impl ServeStorage {
         let secs = self.cache_secs(Instant::now());
         if let Some(family) = family {
             match &result {
-                TurnResult::Failed(_) => {
-                    self.incident_report
-                        .note_exchange_failure(ordinal, family, secs);
+                TurnResult::Failed(reason) => {
+                    self.incident_report.note_exchange_failure(
+                        ordinal,
+                        family,
+                        secs,
+                        reason.as_str(),
+                    );
                 }
                 TurnResult::Published(PublishedKind::ResolvedPositive) => {
                     self.incident_report.note_positive(ordinal, family, secs);
@@ -692,7 +730,9 @@ impl ServeStorage {
                 IncidentNote::Open { reason, .. } => {
                     self.logs
                         .incident_open(secs, fqdn.as_str(), family, reason.as_str());
-                    self.incident_report.note_incident_open(ordinal, secs);
+                    let snapshot = self.incident_snapshot(ordinal);
+                    self.incident_report
+                        .note_incident_open(ordinal, secs, snapshot);
                 }
                 IncidentNote::Recovered { duration, .. } => {
                     self.logs
@@ -1731,6 +1771,128 @@ mod tests {
         assert!(
             far > Instant::now(),
             "overflow must saturate to the farthest instant, never collapse to now"
+        );
+    }
+
+    #[test]
+    fn report_incident_if_due_emits_window_summary_through_real_path() {
+        let mut storage = booted(1, 0);
+        let origin = Instant::now();
+        storage.mount_clock(origin, 1000);
+        // Open the A incident and its reporting window at secs 1000.
+        storage
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .expect("open A incident");
+        storage.report_incident_if_due(origin);
+        // A second failure inside the window updates the latest reason.
+        storage
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 2000, FailureReason::Connect)
+            .expect("update A incident");
+        // The 3600s boundary rotation must emit the error summary for the
+        // closed window through the real orchestration path (M2).
+        storage.report_incident_if_due(origin + Duration::from_secs(3600));
+        let record = storage
+            .logs()
+            .last_record_bytes()
+            .expect("incident summary record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=incident_summary") && text.contains("level=error"),
+            "the boundary rotation must emit the error summary: {text}"
+        );
+        assert!(
+            text.contains("window_start=1000")
+                && text.contains("window_end=4600")
+                && text.contains("duration=3600"),
+            "the summary must span the full closed window: {text}"
+        );
+        assert!(
+            text.contains("types=\"a\"") && text.contains("a_start=1000"),
+            "the summary must report the window's A incident: {text}"
+        );
+        assert!(
+            text.contains("a_reason=\"connect\""),
+            "the summary must carry the latest failure reason: {text}"
+        );
+    }
+
+    #[test]
+    fn boundary_recovery_coincidence_reports_window_incident_activity() {
+        let mut storage = booted(1, 0);
+        let origin = Instant::now();
+        storage.mount_clock(origin, 1000);
+        // Open the A incident and its reporting window at secs 1000.
+        storage
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .expect("open A incident");
+        storage.report_incident_if_due(origin);
+        // A full recovery detected at the boundary turn: both incidents clear.
+        storage
+            .schedules_mut()
+            .clear_exchange_incident(0, Family::A, 1000 + 3600)
+            .expect("clear A incident");
+        storage.report_incident_if_due(origin + Duration::from_secs(3600));
+        // M1: the window's error summary must reflect the window's actual A
+        // incident activity even though the incident recovered at the boundary
+        // turn; L1: the zero-duration info summary must be suppressed, so the
+        // error summary is the last record.
+        let record = storage
+            .logs()
+            .last_record_bytes()
+            .expect("incident summary record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=incident_summary") && text.contains("level=error"),
+            "the boundary rotation must emit the error summary: {text}"
+        );
+        assert!(
+            text.contains("types=\"a\"") && text.contains("a_start=1000"),
+            "the error summary must report the window's A incident, not types=none: {text}"
+        );
+        assert!(
+            text.contains("window_start=1000") && text.contains("window_end=4600"),
+            "the error summary must span the full closed window: {text}"
+        );
+    }
+
+    #[test]
+    fn summary_reports_remaining_freshness_and_retirement_deadlines() {
+        let mut storage = booted(1, 0);
+        let origin = Instant::now();
+        storage.mount_clock(origin, 1000);
+        // A binding with receipt 1000 and TTL 10: freshness deadline 1010,
+        // retirement deadline 1010 + STALE_GRACE = 260210.
+        storage.publish_test_a(0);
+        storage
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .expect("open A incident");
+        storage.report_incident_if_due(origin);
+        // Full recovery closes the partial window at secs 1500.
+        storage
+            .schedules_mut()
+            .clear_exchange_incident(0, Family::A, 1500)
+            .expect("clear A incident");
+        storage.report_incident_if_due(origin + Duration::from_secs(500));
+        let record = storage
+            .logs()
+            .last_record_bytes()
+            .expect("info summary record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=incident_summary") && text.contains("level=info"),
+            "the recovery must emit the info summary: {text}"
+        );
+        // L2: the deadlines are reported as remaining seconds (deadline - secs),
+        // not the absolute monotonic deadlines. The summary's secs is the
+        // emission-time clock read (1000 here): freshness 1010 - 1000 = 10,
+        // retirement 260210 - 1000 = 259210.
+        assert!(
+            text.contains("a_freshness=10") && text.contains("a_retirement=259210"),
+            "a_freshness/a_retirement must be remaining seconds, not absolute: {text}"
         );
     }
 }
