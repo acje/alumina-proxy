@@ -28,7 +28,7 @@ post-boot state is preallocated** (§6).
 | `worker` / `Runtime` | The single owner loop: readiness demux, scheduling, timers, gate transitions — realized as the shared-readiness `Runtime` | `:138,144,146,147,149` |
 | `log` | 256×8 KiB preallocated queue; allocation-free encode; nonblocking sink; drop+count | `:149,178-179,193-194` |
 | `lifecycle` | SIGTERM, shutdown grace, drain; exit without deallocating | `:149,150,181,192` |
-| `enforcement` | rp2e tripwire/action/monitoring surface (`[any_illegal]` + keyed `[allowed_fqdn."<fqdn>:<port>"]` tables with `early_data`), per-domain Action, bounded stdout monitoring, control state | `:238-315` (amendment), `:991-1153` (amendment) |
+| `enforcement` | rp2e tripwire/action/monitoring surface (`[any_illegal]` + keyed `[allowed_fqdn."<fqdn>:<port>"]` tables with `early_data`), per-domain Action, bounded stdout monitoring, control state | §Tripwire actions, monitoring, and pacing, §Keyed configuration schema |
 
 > **As-built realization.** `src/main.rs` is the single boot owner: preallocate
 > serving workspaces → startup DNS window (`run_startup`) → on a Serve decision
@@ -136,7 +136,7 @@ with construction-and-reuse proof as a future gate.
 
 **Outside the 128 MiB budget** (separately accounted): the retained serving
 workspace (512 × ~152.5 KiB ≈ 76 MiB, design estimate — JA4 ClientHello
-retention reconciled at spec `:929`), DNS storage, metadata, stacks, executable,
+retention reconciled at spec §JA4 client-fingerprint tripwire), DNS storage, metadata, stacks, executable,
 kernel socket buffers (T3).
 **Dependency seam (T2/G4):** `mio`+epoll mandated (`:147`); pin version,
 enumerate operations, gate each on source review + allocator instrumentation
