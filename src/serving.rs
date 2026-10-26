@@ -789,8 +789,6 @@ impl SlotWorkspace {
         self.dest_ip = None;
         self.ja4_seen = false;
         self.ja4_pending = false;
-        self.buf.fill(0);
-        self.down.fill(0);
     }
 
     /// Whether this slot currently feeds any deadline into

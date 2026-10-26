@@ -1,4 +1,5 @@
 use std::fmt;
+use std::mem::MaybeUninit;
 
 use crate::config::{FQDN_MAX_LEN, FixedHostname};
 
@@ -56,7 +57,7 @@ const TLS10: u16 = 0x0301;
 
 /// A parsed and framed `ClientHello`, before profile validation. All fields are
 /// fixed-capacity so the gate allocates nothing on the serving path.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ClientHello {
     versions: [u16; MAX_VERSIONS],
     versions_len: usize,
@@ -65,7 +66,7 @@ pub struct ClientHello {
     sni_len: usize,
     sni_entries: u8,
     has_ech: bool,
-    ciphers: [u16; MAX_CIPHERS],
+    ciphers: [MaybeUninit<u16>; MAX_CIPHERS],
     ciphers_len: usize,
     extensions: [u16; MAX_EXTENSIONS],
     extensions_len: usize,
@@ -103,8 +104,12 @@ impl ClientHello {
     /// The offered cipher suites in wire order, including SCSV `0x00ff` and
     /// GREASE, unfiltered. Bounded by the 16 KiB handshake cap.
     #[must_use]
-    pub fn ciphers(&self) -> &[u16] {
-        &self.ciphers[..self.ciphers_len]
+    pub const fn ciphers(&self) -> &[u16] {
+        // SAFETY: `parse_cipher_list` writes every slot in `ciphers[..ciphers_len]`
+        // before the `ClientHello` is constructed, so the first `ciphers_len`
+        // elements are initialized; `MaybeUninit<u16>` has the same layout as
+        // `u16`, and the uninitialized tail is never read here.
+        unsafe { std::slice::from_raw_parts(self.ciphers.as_ptr().cast::<u16>(), self.ciphers_len) }
     }
 
     /// The distinct extension types present in wire order, including ALPN (16)
@@ -153,6 +158,50 @@ impl ClientHello {
         )
     }
 }
+
+impl fmt::Debug for ClientHello {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientHello")
+            .field("versions", &self.offered_versions())
+            .field("versions_len", &self.versions_len)
+            .field("record_version", &self.record_version)
+            .field("sni", &self.server_name())
+            .field("sni_len", &self.sni_len)
+            .field("sni_entries", &self.sni_entries)
+            .field("has_ech", &self.has_ech)
+            .field("ciphers", &self.ciphers())
+            .field("ciphers_len", &self.ciphers_len)
+            .field("extensions", &self.extensions())
+            .field("extensions_len", &self.extensions_len)
+            .field("alpn", &self.alpn_first_value())
+            .field("alpn_len", &self.alpn_len)
+            .field("sigalgs", &self.sigalgs())
+            .field("sigalgs_len", &self.sigalgs_len)
+            .finish()
+    }
+}
+
+impl PartialEq for ClientHello {
+    fn eq(&self, other: &Self) -> bool {
+        self.offered_versions() == other.offered_versions()
+            && self.versions_len == other.versions_len
+            && self.record_version == other.record_version
+            && self.server_name() == other.server_name()
+            && self.sni_len == other.sni_len
+            && self.sni_entries == other.sni_entries
+            && self.has_ech == other.has_ech
+            && self.ciphers() == other.ciphers()
+            && self.ciphers_len == other.ciphers_len
+            && self.extensions() == other.extensions()
+            && self.extensions_len == other.extensions_len
+            && self.alpn_first_value() == other.alpn_first_value()
+            && self.alpn_len == other.alpn_len
+            && self.sigalgs() == other.sigalgs()
+            && self.sigalgs_len == other.sigalgs_len
+    }
+}
+
+impl Eq for ClientHello {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HelloAccepted {
@@ -521,7 +570,10 @@ fn u8_at(buf: &[u8], at: usize) -> Result<u8, ChError> {
 ///
 /// Returns `MalformedBody` when the list length is odd, when it exceeds
 /// `MAX_CIPHERS` suites, or when the list overruns the body.
-fn parse_cipher_list(body: &[u8], at: usize) -> Result<(usize, [u16; MAX_CIPHERS]), ChError> {
+fn parse_cipher_list(
+    body: &[u8],
+    at: usize,
+) -> Result<(usize, [MaybeUninit<u16>; MAX_CIPHERS]), ChError> {
     let list_len = usize::from(u16_at(body, at)?);
     if list_len % 2 != 0 {
         return Err(ChError::MalformedBody {
@@ -534,9 +586,9 @@ fn parse_cipher_list(body: &[u8], at: usize) -> Result<(usize, [u16; MAX_CIPHERS
             detail: "cipher-suite list exceeds bound",
         });
     }
-    let mut ciphers = [0u16; MAX_CIPHERS];
+    let mut ciphers = [const { MaybeUninit::uninit() }; MAX_CIPHERS];
     for (i, slot) in ciphers[..cs_count].iter_mut().enumerate() {
-        *slot = u16_at(body, at + 2 + i * 2)?;
+        slot.write(u16_at(body, at + 2 + i * 2)?);
     }
     Ok((cs_count, ciphers))
 }
@@ -1890,7 +1942,7 @@ mod tests {
             sni_len: 0,
             sni_entries: 0,
             has_ech: false,
-            ciphers: [0u16; MAX_CIPHERS],
+            ciphers: [const { MaybeUninit::uninit() }; MAX_CIPHERS],
             ciphers_len: 0,
             extensions: [0u16; MAX_EXTENSIONS],
             extensions_len: 0,

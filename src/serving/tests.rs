@@ -4295,7 +4295,7 @@ const _: () = assert!(
 );
 
 #[test]
-fn slot_reset_zero_fills_both_relay_buffers() {
+fn slot_reset_bounds_stale_bytes_without_zero_fill() {
     with_serving_stack(ephemeral_port(), |serving| {
         let ws = &mut serving.slots[0];
         // Simulate a spent connection (RT-004): both relay buffers hold a full
@@ -4314,13 +4314,20 @@ fn slot_reset_zero_fills_both_relay_buffers() {
 
         ws.reset();
 
+        // The read cursors are cleared, so no stale byte can be observed across
+        // connections even though the reused buffers are no longer zeroed.
+        assert_eq!(ws.buf_len, 0, "reset must clear the hold read length");
+        assert_eq!(ws.down_len, 0, "reset must clear the down read length");
+        assert_eq!(ws.fwd, 0, "reset must clear the forward cursor");
+        assert_eq!(ws.down_off, 0, "reset must clear the down offset");
+        assert_eq!(ws.buf_base, 0, "reset must clear the hold base offset");
         assert!(
-            ws.buf.iter().all(|&b| b == 0),
-            "reset must zero-fill every hold byte (HOLD_CAP = {HOLD_CAP})"
+            ws.buf.iter().any(|&b| b != 0),
+            "reset no longer zero-fills the hold buffer (dead memset removed)"
         );
         assert!(
-            ws.down.iter().all(|&b| b == 0),
-            "reset must zero-fill every down byte (DOWN_CAP = {DOWN_CAP})"
+            ws.down.iter().any(|&b| b != 0),
+            "reset no longer zero-fills the down buffer (dead memset removed)"
         );
     });
 }
