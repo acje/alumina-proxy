@@ -980,7 +980,7 @@ fn cooperative_silent_peer_yields_pending_before_deadline() {
     let fqdn = cfg.allowlist().get(0).unwrap();
     let deadline = Instant::now() + Duration::from_millis(400);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline)
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
         .unwrap();
     let first = transport
         .advance_exchange(fqdn, &mut cache, &mut schedules)
@@ -1046,7 +1046,7 @@ fn cooperative_advance_returns_control_to_worker_between_turns() {
     let fqdn = cfg.allowlist().get(0).unwrap();
     let deadline = Instant::now() + Duration::from_millis(400);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline)
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
         .unwrap();
     let mut worker_turns = 0u32;
     let mut terminal = None;
@@ -1100,7 +1100,7 @@ fn cooperative_exchange_publishes_on_valid_response() {
     let fqdn = cfg.allowlist().get(0).unwrap();
     let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline)
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
         .unwrap();
     let mut result = None;
     for _ in 0..256 {
@@ -1138,6 +1138,77 @@ fn cooperative_exchange_publishes_on_valid_response() {
     assert!(
         (120..=125).contains(&interval),
         "refresh from receipt + min(300, max(30,120)): {interval}"
+    );
+    drop(responder);
+}
+
+#[test]
+fn stale_generation_is_refused_at_apply() {
+    let cfg = config();
+    let responder = spawn_responder(vec![vec![
+        Step::PositiveA {
+            ttl: 120,
+            octets: [1, 1, 1, 1],
+        },
+        Step::Close,
+    ]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+    let name_index = cache.name_index(0).unwrap();
+    let captured = cache.entry(name_index, Family::A).unwrap().generation();
+    assert_eq!(captured, Generation::INITIAL);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline, captured)
+        .unwrap();
+    // Bump the cache entry generation while the exchange is in flight so the
+    // generation captured at start is stale when the response is applied.
+    let staged = crate::cache::StagedPositive::stage(
+        name_index,
+        Family::A,
+        captured,
+        &[crate::eligibility::NumericAddr::V4(
+            std::net::Ipv4Addr::new(1, 1, 1, 1),
+        )],
+        transport.now_u64(),
+        120,
+    )
+    .unwrap();
+    cache.publish_positive(&staged).unwrap();
+    let mut result = None;
+    for _ in 0..256 {
+        match transport.advance_exchange(fqdn, &mut cache, &mut schedules) {
+            Ok(TurnResult::Pending) => {
+                if transport
+                    .exchange_deadline()
+                    .is_some_and(|d| Instant::now() >= d)
+                {
+                    continue;
+                }
+                let _ = transport.wait_dns_readiness(deadline).unwrap();
+            }
+            Ok(term) => {
+                result = Some(Ok(term));
+                break;
+            }
+            Err(err) => {
+                result = Some(Err(err));
+                break;
+            }
+        }
+    }
+    assert!(
+        matches!(
+            result,
+            Some(Err(StartupDnsError::Dns(DnsError::Cache(
+                CacheError::StaleGeneration
+            ))))
+        ),
+        "an obsolete captured generation must refuse apply, got {result:?}"
     );
     drop(responder);
 }
@@ -1262,10 +1333,10 @@ fn start_active_exchange_is_refused_and_first_survives() {
         transport.addr = ns(dead_port);
         transport.now0 = 1_000_000;
         transport
-            .start_exchange(fqdn0, Family::A, 0, deadline)
+            .start_exchange(fqdn0, Family::A, 0, deadline, Generation::INITIAL)
             .unwrap();
         let err = transport
-            .start_exchange(fqdn1, Family::A, 1, deadline)
+            .start_exchange(fqdn1, Family::A, 1, deadline, Generation::INITIAL)
             .expect_err(
                 "a second start on an active exchange must be refused, never silently \
                  replace the outstanding exchange",
@@ -1290,10 +1361,10 @@ fn start_active_exchange_is_refused_and_first_survives() {
         transport.addr = ns(responder.port());
         transport.now0 = 1_000_000;
         transport
-            .start_exchange(fqdn0, Family::A, 0, deadline)
+            .start_exchange(fqdn0, Family::A, 0, deadline, Generation::INITIAL)
             .unwrap();
         let err = transport
-            .start_exchange(fqdn1, Family::A, 1, deadline)
+            .start_exchange(fqdn1, Family::A, 1, deadline, Generation::INITIAL)
             .expect_err("a refused second start must not be absorbed or deferred; it is typed");
         assert_eq!(err, StartupDnsError::ExchangeActive);
         let mut result = None;
@@ -1347,7 +1418,7 @@ fn cooperative_turn_performs_zero_blocking_polls() {
     let fqdn = cfg.allowlist().get(0).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline)
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
         .unwrap();
     for _ in 0..32 {
         let before = transport.poll_ticks;
@@ -1389,7 +1460,7 @@ fn cooperative_send_wouldblock_makes_owner_wait_instead_of_busy_looping() {
     let fqdn = cfg.allowlist().get(0).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline)
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
         .unwrap();
     transport.arm_write(WriteForce::Partial(1));
     let mut guard = 0;
@@ -1500,8 +1571,10 @@ fn run_exchange_expecting(
     // A fresh deadline per exchange keeps every exchange dialing: the
     // responder scripts rely on one accepted connection per exchange.
     let deadline = Instant::now() + Duration::from_millis(200);
+    let name_index = cache.name_index(0).unwrap();
+    let generation = cache.entry(name_index, Family::A).unwrap().generation();
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline)
+        .start_exchange(fqdn, Family::A, 0, deadline, generation)
         .unwrap();
     let terminal = run_exchange_to_terminal(transport, fqdn, cache, schedules, deadline);
     assert!(
@@ -1529,7 +1602,7 @@ fn resolver_enters_degraded_once_after_three_consecutive_failures() {
         // responder scripts rely on one accepted connection per exchange.
         let deadline = Instant::now() + Duration::from_millis(200);
         transport
-            .start_exchange(fqdn, Family::A, 0, deadline)
+            .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
             .unwrap();
         assert!(
             matches!(
@@ -1800,7 +1873,7 @@ fn zero_or_oversized_length_prefix_is_refused_fail_closed() {
         // deadline; run_exchange_expecting's 200ms deadline is too short.
         let deadline = Instant::now() + Duration::from_secs(2);
         transport
-            .start_exchange(fqdn, Family::A, 0, deadline)
+            .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
             .unwrap();
         assert!(
             matches!(
@@ -2985,7 +3058,7 @@ fn probe_exchange_publishes_no_name_authorization_state() {
     // Phase 1: a normal active exchange publishes name-authorization state.
     let deadline = Instant::now() + Duration::from_millis(200);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline)
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
         .unwrap();
     assert!(
         matches!(
@@ -3101,7 +3174,7 @@ fn sweep_probe_to_non_primary_is_never_hijacked_into_a_failback_probe() {
     let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
     let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
     transport
-        .start_exchange(&fqdn, Family::A, 0, deadline)
+        .start_exchange(&fqdn, Family::A, 0, deadline, Generation::INITIAL)
         .expect("probe exchange begins");
     assert_eq!(
         transport.active_resolver,

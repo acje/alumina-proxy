@@ -527,7 +527,17 @@ impl ServeStorage {
             .allowlist()
             .get(ordinal)
             .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
-        self.dns.start_exchange(fqdn, family, ordinal, deadline)
+        let name_index = self
+            .cache
+            .name_index(ordinal)
+            .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
+        let generation = self
+            .cache
+            .entry(name_index, family)
+            .map_err(StartupDnsError::Cache)?
+            .generation();
+        self.dns
+            .start_exchange(fqdn, family, ordinal, deadline, generation)
     }
 
     /// Advances the post-window probe sweep one step on the retained transport:

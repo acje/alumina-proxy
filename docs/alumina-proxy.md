@@ -1838,3 +1838,31 @@ Test: `from_allowlist_fails_stop_on_suffix_slot_overflow` (`src/dns.rs`).
 
 The fixed profile is preserved: single boot owner and single serving owner, two reused
 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
+
+## alumina-alox17 (2026-10-26) — Capture cache generation at exchange start
+
+This is the narrow, user-authorized amendment making the cache StaleGeneration guard
+(`src/cache.rs:357-359`) load-bearing for in-flight exchanges. It amends only the `:74`
+cache-lifetime sentence surface — "DNS queries and refresh results belong to cache state,
+not connection generations; obsolete results cannot overwrite newer cache state" — by
+capturing the cache entry generation into the exchange at start and using that captured
+value at apply, and appends this block; every other clause of this document remains
+binding and unchanged.
+
+Previously the apply step re-read the entry generation from the cache at the moment of
+publication, so an exchange that started against generation *G* and applied after the entry
+had advanced to *G*+1 would re-read *G*+1 and publish, defeating the guard. Now
+`start_exchange` (`src/startup_dns.rs:2817-2824`) takes the generation captured by its
+caller, and `ActiveExchange` carries it (`src/startup_dns.rs:236-240`); the apply step
+(`src/startup_dns.rs:2413`) passes `ex.generation` to `apply_outcome`, so an obsolete
+in-flight result is refused with `StaleGeneration` exactly as the guard intends. The
+startup blocking driver captures the current entry generation before starting
+(`src/startup_dns.rs:2950-2955`), and the serving seam does the same
+(`src/serve.rs:519-531`). A post-window probe is a pure sensor that never applies cache
+state, so its exchange carries `Generation::INITIAL` and never compares
+(`src/startup_dns.rs:3148`). Test: `stale_generation_is_refused_at_apply`
+(`src/startup_dns/tests.rs:1146`) bumps the entry generation while an exchange is in
+flight and asserts the apply is refused.
+
+The fixed profile is preserved: single boot owner and single serving owner, two reused
+128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.

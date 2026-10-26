@@ -37,7 +37,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
-use crate::cache::{Cache, CacheError, Family};
+use crate::cache::{Cache, CacheError, Family, Generation};
 use crate::config::{ALLOWLIST_MAX, Config, Fqdn};
 use crate::dns::{self, BailiwickZones, DNS_MSG_LIMIT, DnsError, ResponseWorkspace};
 use crate::enforcement::monitor::DnsAnomalyKind;
@@ -233,6 +233,11 @@ struct ActiveExchange {
     /// response to record a resolver verdict, but never publishes
     /// name-authorization state (docs/alumina-proxy.md:826).
     probe: bool,
+    /// The cache entry generation captured at exchange start. Apply compares
+    /// the staged result against this captured value so an obsolete result
+    /// cannot overwrite newer cache state (docs/alumina-proxy.md:74,
+    /// cache.rs:357-359).
+    generation: Generation,
 }
 
 /// The stage of one outstanding exchange, advanced by at most one stage each
@@ -2400,16 +2405,12 @@ impl StartupDns {
                         }
                         return Ok(RecvStep::Published(kind));
                     }
-                    let name_index = cache
-                        .name_index(ex.ordinal)
-                        .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
-                    let generation = cache.entry(name_index, ex.family)?.generation();
                     let receipt = self.now_u64();
                     let transition = dns::apply_outcome(
                         cache,
                         schedules,
                         ex.ordinal,
-                        generation,
+                        ex.generation,
                         receipt,
                         self.now_u64(),
                         &outcome,
@@ -2815,6 +2816,7 @@ impl StartupDns {
         family: Family,
         ordinal: usize,
         deadline: Instant,
+        generation: Generation,
     ) -> Result<(), StartupDnsError> {
         if self.active.is_some() {
             return Err(StartupDnsError::ExchangeActive);
@@ -2843,6 +2845,7 @@ impl StartupDns {
             tid,
             serving: false,
             probe: false,
+            generation,
         });
         Ok(())
     }
@@ -2945,7 +2948,11 @@ impl StartupDns {
         deadline: Instant,
         logs: &mut log::LogStore,
     ) -> Result<ExchangeResult, StartupDnsError> {
-        self.start_exchange(fqdn, family, ordinal, deadline)?;
+        let name_index = cache
+            .name_index(ordinal)
+            .ok_or(CacheError::NameOutOfRange)?;
+        let generation = cache.entry(name_index, family)?.generation();
+        self.start_exchange(fqdn, family, ordinal, deadline, generation)?;
         loop {
             match self.advance_exchange(fqdn, cache, schedules)? {
                 TurnResult::Pending => {
@@ -3138,7 +3145,11 @@ impl StartupDns {
         };
         self.relocate_for_probe(target)?;
         let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
-        self.start_exchange(fqdn, Family::A, 0, deadline)?;
+        // A probe is a pure sensor that never applies cache state
+        // (mark_probe_started sets probe=true; advance_exchange returns
+        // RecvStep::Published before the cache apply), so the captured
+        // generation is the initial value and is never compared.
+        self.start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)?;
         self.mark_probe_started();
         if let Some(sweep) = &mut self.probe_sweep {
             sweep.remaining[index] = false;
