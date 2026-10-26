@@ -42,6 +42,7 @@ use crate::cache::Family;
 use crate::enforcement::action::{AnyIllegalScope, DomainOrdinal, Scope};
 use crate::enforcement::monitor::{CapturedFact, DnsAnomalyKind, Monitor};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason};
+use crate::incident_report::IncidentSummary;
 use crate::inventory;
 use crate::resolver::Fqdn;
 use crate::startup_dns::{NameOutcome, ProbeVerdict};
@@ -254,6 +255,9 @@ enum Kind {
     ExchangeFailed,
     IncidentOpen,
     IncidentRecovered,
+    IncidentSummary,
+    IncidentEligibleLoss,
+    IncidentEligibleRecovered,
 }
 
 impl Kind {
@@ -275,6 +279,9 @@ impl Kind {
             Kind::ExchangeFailed => "exchange_failed",
             Kind::IncidentOpen => "incident_open",
             Kind::IncidentRecovered => "incident_recovered",
+            Kind::IncidentSummary => "incident_summary",
+            Kind::IncidentEligibleLoss => "incident_eligible_loss",
+            Kind::IncidentEligibleRecovered => "incident_eligible_recovered",
         }
     }
 
@@ -336,6 +343,7 @@ pub(crate) enum Val<'a> {
     Str(&'a str),
     OptStr(Option<&'a str>),
     U64(u64),
+    OptU64(Option<u64>),
     OptAddr(Option<SocketAddr>),
     Family(Family),
 }
@@ -479,7 +487,7 @@ fn write_header(w: &mut Entry<'_>, level: Level, kind: Kind) -> bool {
 
 fn write_fields(w: &mut Entry<'_>, fields: &[Field<'_>]) -> bool {
     for field in fields {
-        if let Val::OptStr(None) | Val::OptAddr(None) = field.val {
+        if let Val::OptStr(None) | Val::OptAddr(None) | Val::OptU64(None) = field.val {
             continue;
         }
         if !w.push(b" ") || !w.push(field.key.as_bytes()) || !w.push(b"=") {
@@ -491,7 +499,7 @@ fn write_fields(w: &mut Entry<'_>, fields: &[Field<'_>]) -> bool {
                     return false;
                 }
             }
-            Val::U64(value) => {
+            Val::U64(value) | Val::OptU64(Some(value)) => {
                 if fmt::Write::write_fmt(w, format_args!("{value}")).is_err() {
                     return false;
                 }
@@ -512,10 +520,73 @@ fn write_fields(w: &mut Entry<'_>, fields: &[Field<'_>]) -> bool {
                     return false;
                 }
             }
-            Val::OptStr(None) | Val::OptAddr(None) => {}
+            Val::OptStr(None) | Val::OptAddr(None) | Val::OptU64(None) => {}
         }
     }
     true
+}
+
+/// The `types=` token for an incident summary: which record families are
+/// currently in incident (`start` present), in A/Aaaa order.
+const fn summary_types(summary: &IncidentSummary) -> &'static str {
+    match (
+        summary.types[0].start.is_some(),
+        summary.types[1].start.is_some(),
+    ) {
+        (true, true) => "both",
+        (true, false) => "a",
+        (false, true) => "aaaa",
+        (false, false) => "none",
+    }
+}
+
+/// The fixed 31-field incident summary record (docs/alumina-proxy.md:80):
+/// window span, coalescing and overflow flags, window activity, and the
+/// per-type incident/cache snapshot. Optional fields emit nothing when absent.
+fn incident_summary_fields<'a>(
+    secs: u64,
+    name: &'a str,
+    summary: &'a IncidentSummary,
+) -> [Field<'a>; 31] {
+    [
+        Field::new("secs", Val::U64(secs)),
+        Field::new("name", Val::Str(name)),
+        Field::new("window_start", Val::U64(summary.window_start)),
+        Field::new("window_end", Val::U64(summary.window_end)),
+        Field::new("duration", Val::U64(summary.duration)),
+        Field::new("skipped", Val::U64(u64::from(summary.skipped))),
+        Field::new("overflow", Val::U64(u64::from(summary.overflow))),
+        Field::new("types", Val::Str(summary_types(summary))),
+        Field::new("tunnels", Val::U64(summary.tunnels)),
+        Field::new("bytes", Val::U64(summary.bytes)),
+        Field::new("stale", Val::U64(summary.stale)),
+        Field::new("a_start", Val::OptU64(summary.types[0].start)),
+        Field::new("a_elapsed", Val::U64(summary.types[0].elapsed)),
+        Field::new("a_reason", Val::OptStr(summary.types[0].reason)),
+        Field::new(
+            "a_last_positive",
+            Val::OptU64(summary.types[0].last_positive),
+        ),
+        Field::new("a_attempts", Val::U64(summary.types[0].attempts)),
+        Field::new("a_failures", Val::U64(summary.types[0].failures)),
+        Field::new("a_addrs", Val::U64(summary.types[0].addrs)),
+        Field::new("a_state", Val::Str(summary.types[0].state)),
+        Field::new("a_freshness", Val::OptU64(summary.types[0].freshness)),
+        Field::new("a_retirement", Val::OptU64(summary.types[0].retirement)),
+        Field::new("aaaa_start", Val::OptU64(summary.types[1].start)),
+        Field::new("aaaa_elapsed", Val::U64(summary.types[1].elapsed)),
+        Field::new("aaaa_reason", Val::OptStr(summary.types[1].reason)),
+        Field::new(
+            "aaaa_last_positive",
+            Val::OptU64(summary.types[1].last_positive),
+        ),
+        Field::new("aaaa_attempts", Val::U64(summary.types[1].attempts)),
+        Field::new("aaaa_failures", Val::U64(summary.types[1].failures)),
+        Field::new("aaaa_addrs", Val::U64(summary.types[1].addrs)),
+        Field::new("aaaa_state", Val::Str(summary.types[1].state)),
+        Field::new("aaaa_freshness", Val::OptU64(summary.types[1].freshness)),
+        Field::new("aaaa_retirement", Val::OptU64(summary.types[1].retirement)),
+    ]
 }
 
 fn push_quoted(w: &mut Entry<'_>, key: &[u8], text: &str) -> bool {
@@ -1568,6 +1639,44 @@ impl LogStore {
         self.enqueue(Level::Info, Kind::IncidentRecovered, &fields);
     }
 
+    /// One error summary per hostname after each 3600-second reporting window
+    /// while either type has an incident, or the info-level final partial
+    /// summary on full hostname incident recovery (docs/alumina-proxy.md:79-80).
+    /// The full record payload is built by the serving side; this encoder only
+    /// formats it.
+    pub(crate) fn incident_summary(
+        &mut self,
+        secs: u64,
+        name: &str,
+        level: Level,
+        summary: &IncidentSummary,
+    ) {
+        self.set_now(secs);
+        let fields = incident_summary_fields(secs, name, summary);
+        self.enqueue(level, Kind::IncidentSummary, &fields);
+    }
+
+    /// One error when a hostname transitions from having eligible bindings to
+    /// having none (docs/alumina-proxy.md:79).
+    pub(crate) fn incident_eligible_loss(&mut self, secs: u64, name: &str) {
+        self.set_now(secs);
+        let fields = [
+            Field::new("secs", Val::U64(secs)),
+            Field::new("name", Val::Str(name)),
+        ];
+        self.enqueue(Level::Error, Kind::IncidentEligibleLoss, &fields);
+    }
+
+    /// One info when a hostname's eligible bindings recover (docs/alumina-proxy.md:79).
+    pub(crate) fn incident_eligible_recovered(&mut self, secs: u64, name: &str) {
+        self.set_now(secs);
+        let fields = [
+            Field::new("secs", Val::U64(secs)),
+            Field::new("name", Val::Str(name)),
+        ];
+        self.enqueue(Level::Info, Kind::IncidentEligibleRecovered, &fields);
+    }
+
     /// One `startup_name` record for a single unresolved name: `secs`, the
     /// allowlist `ordinal`, the full FQDN, the outcome and (when the outcome
     /// carries one) the reason. Returns `true` when the record was enqueued;
@@ -2394,6 +2503,7 @@ mod tests {
     )]
     fn logging_worst_case_record_per_kind_fits_the_slot_with_margin() {
         use crate::enforcement::monitor::Monitor;
+        use crate::incident_report::TypeSummary;
         use crate::startup_dns::{FailureReason, NotAttemptedReason, ProbeVerdict};
         let (config, doc) = widest_legal_config();
         let name = config.allowlist().get(0).expect("widest name").as_str();
@@ -2545,6 +2655,78 @@ mod tests {
             .expect("fits"),
         ));
 
+        let incident_summary = IncidentSummary {
+            window_start: u64::MAX - 1,
+            window_end: u64::MAX,
+            duration: 1,
+            skipped: u32::MAX,
+            overflow: true,
+            types: [
+                TypeSummary {
+                    start: Some(u64::MAX - 1),
+                    elapsed: u64::MAX,
+                    reason: Some("tls_identity"),
+                    last_positive: Some(u64::MAX),
+                    attempts: u64::MAX,
+                    failures: u64::MAX,
+                    addrs: u64::MAX,
+                    state: "retired",
+                    freshness: Some(u64::MAX),
+                    retirement: Some(u64::MAX),
+                },
+                TypeSummary {
+                    start: Some(u64::MAX - 1),
+                    elapsed: u64::MAX,
+                    reason: Some("tls_identity"),
+                    last_positive: Some(u64::MAX),
+                    attempts: u64::MAX,
+                    failures: u64::MAX,
+                    addrs: u64::MAX,
+                    state: "retired",
+                    freshness: Some(u64::MAX),
+                    retirement: Some(u64::MAX),
+                },
+            ],
+            tunnels: u64::MAX,
+            bytes: u64::MAX,
+            stale: u64::MAX,
+        };
+        worst.push((
+            "incident_summary",
+            encode_record(
+                &mut slot,
+                Level::Error,
+                Kind::IncidentSummary,
+                &incident_summary_fields(u64::MAX, name, &incident_summary),
+            )
+            .expect("fits"),
+        ));
+
+        let incident_eligible = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("name", Val::Str(name)),
+        ];
+        worst.push((
+            "incident_eligible_loss",
+            encode_record(
+                &mut slot,
+                Level::Error,
+                Kind::IncidentEligibleLoss,
+                &incident_eligible,
+            )
+            .expect("fits"),
+        ));
+        worst.push((
+            "incident_eligible_recovered",
+            encode_record(
+                &mut slot,
+                Level::Info,
+                Kind::IncidentEligibleRecovered,
+                &incident_eligible,
+            )
+            .expect("fits"),
+        ));
+
         let mut monitor = Monitor::new();
         monitor.saturate_all_for_test();
         monitor.set_peer_ip_v6_max_for_test();
@@ -2590,7 +2772,7 @@ mod tests {
             encode_record_probe(&mut slot, u64::MAX, &segments).expect("fits"),
         ));
 
-        assert_eq!(worst.len(), 18, "every record kind is measured");
+        assert_eq!(worst.len(), 21, "every record kind is measured");
         for (kind_name, len) in &worst {
             eprintln!(
                 "worst-case {kind_name:<16} {len:>5} B record, {:>5} B margin",

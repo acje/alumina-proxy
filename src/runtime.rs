@@ -273,6 +273,9 @@ impl Runtime {
         self.serving
             .storage_mut()
             .report_monitor_if_due(Instant::now(), false);
+        self.serving
+            .storage_mut()
+            .report_incident_if_due(Instant::now());
         self.serving.storage_mut().logs_mut().drain_sink();
         Ok(())
     }

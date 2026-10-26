@@ -6959,7 +6959,7 @@ fn peer_admission_freshness_folds_serving_stale_level_bit() {
             Family::A,
         );
         let receipt = serving.storage().cache_secs(Instant::now());
-        serving.note_peer_freshness(&request, Family::A, Instant::now());
+        serving.note_peer_freshness(&request, Family::A, Instant::now(), 0);
         assert!(
             !serving.storage().enforcement().monitor().serving_stale(),
             "a fresh admission must not latch the stale-serving level bit"
@@ -6970,7 +6970,7 @@ fn peer_admission_freshness_folds_serving_stale_level_bit() {
         serving
             .storage_mut()
             .mount_clock(Instant::now(), receipt + 601);
-        serving.note_peer_freshness(&request, Family::A, Instant::now());
+        serving.note_peer_freshness(&request, Family::A, Instant::now(), 0);
         assert!(
             serving.storage().enforcement().monitor().serving_stale(),
             "a stale admission must latch the persistent stale-serving level bit"
@@ -6978,7 +6978,7 @@ fn peer_admission_freshness_folds_serving_stale_level_bit() {
 
         // A later fresh admission clears the level bit again.
         serving.storage_mut().mount_clock(Instant::now(), receipt);
-        serving.note_peer_freshness(&request, Family::A, Instant::now());
+        serving.note_peer_freshness(&request, Family::A, Instant::now(), 0);
         assert!(
             !serving.storage().enforcement().monitor().serving_stale(),
             "a later fresh admission must clear the stale-serving level bit"

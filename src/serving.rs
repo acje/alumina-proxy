@@ -664,6 +664,11 @@ struct SlotWorkspace {
     /// establishment records on the exact family attempted and retries through
     /// the slot-carried ledger. `None` outside a live decision dial.
     connect_family: Option<Family>,
+    /// The allowlist ordinal whose DNS incident report this slot's tunnel
+    /// activity belongs to, set when a [`ConnectPhase::Peer`] decision commits
+    /// the upstream peer and cleared on reset. `None` while the slot has no
+    /// committed peer, so pre-relay writes are never attributed.
+    report_name: Option<usize>,
     /// The clipped per-attempt connect deadline anchored at this attempt's
     /// initiation (docs/alumina-proxy.md:189). Only meaningful while
     /// `stage == Stage::Dialing`; `None` otherwise.
@@ -721,6 +726,7 @@ impl SlotWorkspace {
             idle_deadline: None,
             setup_deadline: None,
             connect_family: None,
+            report_name: None,
             connect_deadline: None,
             dest_ip: None,
             ja4_seen: false,
@@ -785,6 +791,7 @@ impl SlotWorkspace {
         self.idle_deadline = None;
         self.setup_deadline = None;
         self.connect_family = None;
+        self.report_name = None;
         self.connect_deadline = None;
         self.dest_ip = None;
         self.ja4_seen = false;
@@ -1923,6 +1930,24 @@ impl Serving {
         }
     }
 
+    /// Folds one successful relay-phase write into the slot's name incident
+    /// report window (docs/alumina-proxy.md:80): only `Stage::Relay` writes are
+    /// tunnel payload bytes — the CONNECT request, the CONNECT response, and
+    /// refusal bodies are excluded. The slot's committed peer ordinal and
+    /// generation stamp attribute the bytes to the exact tunnel and name.
+    fn note_incident_tunnel_bytes(&mut self, index: usize, bytes: u64, secs: u64) {
+        let Some(name) = self.slots[index].report_name else {
+            return;
+        };
+        if self.slots[index].stage != Stage::Relay {
+            return;
+        }
+        let slot_gen = self.slots[index].slot_gen;
+        self.storage
+            .incident_report_mut()
+            .note_tunnel_bytes(name, index, slot_gen, bytes, secs);
+    }
+
     /// The byte room left in `index`'s live visit; `default` when the visit is
     /// not live, so a single read/write slice can never push a live visit past
     /// the canonical 64 KiB bound.
@@ -2379,8 +2404,12 @@ impl Serving {
                 family,
                 connect_deadline,
             }) => {
-                self.note_peer_freshness(&request, family, now);
+                self.note_peer_freshness(&request, family, now, index);
                 let slot = &mut self.slots[index];
+                slot.report_name = self
+                    .storage
+                    .ordinal_for_request(&request)
+                    .map(DomainOrdinal::get);
                 slot.approved = Some(approved);
                 slot.approved_port = request.port();
                 slot.gate.on_authorized();
@@ -2395,8 +2424,18 @@ impl Serving {
     /// "serving from a stale cache entry" monitor level bit (W6-H6b-F5): a
     /// `Peer` admission on a `Stale` entry latches the bit, a `Fresh`
     /// admission clears it. `Empty`/`Retired` are unreachable on a granted
-    /// `Peer` (usable-peer gates on `Fresh | Stale`) and are no-ops.
-    fn note_peer_freshness(&mut self, request: &ConnectRequest, family: Family, now: Instant) {
+    /// `Peer` (usable-peer gates on `Fresh | Stale`) and are no-ops. A first
+    /// admission on a `Stale` entry also records a stale-binding admission in
+    /// the name's incident report window (docs/alumina-proxy.md:80): retries
+    /// (the slot already carries a `connect_family`) and relay activity are
+    /// not admissions.
+    fn note_peer_freshness(
+        &mut self,
+        request: &ConnectRequest,
+        family: Family,
+        now: Instant,
+        index: usize,
+    ) {
         let Some(ordinal) = self.storage.ordinal_for_request(request) else {
             return;
         };
@@ -2407,7 +2446,15 @@ impl Serving {
             return;
         };
         match entry.state(self.storage.cache_secs(now)) {
-            EntryState::Stale => self.storage.enforcement_mut().note_serving_stale(),
+            EntryState::Stale => {
+                self.storage.enforcement_mut().note_serving_stale();
+                if self.slots[index].connect_family.is_none() {
+                    let secs = self.storage.cache_secs(now);
+                    self.storage
+                        .incident_report_mut()
+                        .note_stale_admission(ordinal.get(), secs);
+                }
+            }
             EntryState::Fresh => self.storage.enforcement_mut().note_serving_fresh(),
             EntryState::Empty | EntryState::Retired => {}
         }
@@ -2756,6 +2803,7 @@ impl Serving {
     /// structural write delta: `fwd` advanced by exactly that count) plus
     /// whether a non-WouldBlock failure occurred.
     fn drain_to_upstream(&mut self, index: usize) -> (usize, bool) {
+        let secs = self.storage.cache_secs(Instant::now());
         let mut written = 0;
         let mut failed = false;
         loop {
@@ -2791,6 +2839,7 @@ impl Serving {
                 WriteOutcome::Wrote(n) => {
                     written += n;
                     self.note_op(index, n);
+                    self.note_incident_tunnel_bytes(index, n as u64, secs);
                 }
                 WriteOutcome::Wait => {
                     self.note_op(index, 0);
@@ -2854,6 +2903,7 @@ impl Serving {
     }
 
     fn flush_down(&mut self, index: usize) {
+        let secs = self.storage.cache_secs(Instant::now());
         let mut failed = false;
         loop {
             if self.visit_exhausted(index) {
@@ -2886,6 +2936,9 @@ impl Serving {
             };
             if let Some(bytes) = note {
                 self.note_op(index, bytes);
+                if bytes > 0 {
+                    self.note_incident_tunnel_bytes(index, bytes as u64, secs);
+                }
             }
             failed = failed || err;
             if stalled {

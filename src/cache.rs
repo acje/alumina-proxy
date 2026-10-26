@@ -70,6 +70,17 @@ pub enum EntryState {
     Retired,
 }
 
+impl EntryState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            EntryState::Empty => "empty",
+            EntryState::Fresh => "fresh",
+            EntryState::Stale => "stale",
+            EntryState::Retired => "retired",
+        }
+    }
+}
+
 /// A single cache entry: bindings, one freshness deadline, one retirement
 /// deadline, and a generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

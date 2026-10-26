@@ -11,6 +11,7 @@ mod enforcement;
 pub mod fault;
 pub mod fuzz;
 pub mod gate;
+mod incident_report;
 pub mod inventory;
 pub mod log;
 pub mod preflight;
