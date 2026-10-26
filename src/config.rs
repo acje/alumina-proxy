@@ -511,6 +511,9 @@ pub enum ConfigError {
         value: i64,
     },
     AnyIllegalScopeDomain,
+    EarlyDataBlockScopeInvalid {
+        scope: String,
+    },
     InvalidScope {
         key: String,
         value: String,
@@ -622,6 +625,10 @@ impl fmt::Display for ConfigError {
             ConfigError::AnyIllegalScopeDomain => write!(
                 f,
                 "config any_illegal.scope \"domain\" invalid: AnyIllegal Block scope is connection or all only"
+            ),
+            ConfigError::EarlyDataBlockScopeInvalid { scope } => write!(
+                f,
+                "config early_data action \"block\" scope {scope:?} invalid: Block scope is connection only"
             ),
             ConfigError::InvalidScope { key, value } => write!(
                 f,
@@ -908,7 +915,8 @@ fn parse_early_data(value: &toml::Value, fqdn_key: &str) -> Result<DomainAction,
             });
         }
     };
-    let scope = match scope.as_str() {
+    let scope_text = scope;
+    let scope = match scope_text.as_str() {
         "connection" => Scope::Connection,
         "domain" => Scope::Domain,
         "all" => Scope::All,
@@ -919,6 +927,9 @@ fn parse_early_data(value: &toml::Value, fqdn_key: &str) -> Result<DomainAction,
             });
         }
     };
+    if kind == ActionKind::Block && !matches!(scope, Scope::Connection) {
+        return Err(ConfigError::EarlyDataBlockScopeInvalid { scope: scope_text });
+    }
     Ok(DomainAction::new(kind, scope))
 }
 
@@ -1167,7 +1178,7 @@ mod enforcement_config_tests {
         let doc = group(
             &format!(
                 "{}{}",
-                entry("sub.example.org:443", "block", "domain"),
+                entry("sub.example.org:443", "block", "connection"),
                 entry("other.example.org:443", "flare_only", "connection"),
             ),
             "all",
@@ -1185,19 +1196,19 @@ mod enforcement_config_tests {
             .at(control.ordinal(1).expect("ordinal"))
             .expect("configured");
         assert_eq!(second.kind(), ActionKind::Block);
-        assert_eq!(second.scope(), Scope::Domain);
+        assert_eq!(second.scope(), Scope::Connection);
     }
 
     #[test]
     fn accepts_any_illegal_connection_scope() {
-        let doc = group(&entry("a.example:443", "block", "domain"), "connection");
+        let doc = group(&entry("a.example:443", "block", "connection"), "connection");
         let cfg = parse_config_document(&doc).expect("connection scope valid");
         assert_eq!(cfg.control().any_illegal(), AnyIllegalScope::Connection);
     }
 
     #[test]
     fn rejects_any_illegal_domain_scope() {
-        let doc = group(&entry("a.example:443", "block", "domain"), "domain");
+        let doc = group(&entry("a.example:443", "block", "connection"), "domain");
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(err, ConfigError::AnyIllegalScopeDomain),
@@ -1272,12 +1283,34 @@ mod enforcement_config_tests {
     }
 
     #[test]
+    fn rejects_early_data_block_domain_scope() {
+        let doc = group(&entry("a.example:443", "block", "domain"), "all");
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::EarlyDataBlockScopeInvalid { scope } if scope == "domain"),
+            "expected EarlyDataBlockScopeInvalid(domain), got {err:?}"
+        );
+        assert_eq!(err.exit_status(), 78);
+    }
+
+    #[test]
+    fn rejects_early_data_block_all_scope() {
+        let doc = group(&entry("a.example:443", "block", "all"), "all");
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::EarlyDataBlockScopeInvalid { scope } if scope == "all"),
+            "expected EarlyDataBlockScopeInvalid(all), got {err:?}"
+        );
+        assert_eq!(err.exit_status(), 78);
+    }
+
+    #[test]
     fn rejects_duplicate_after_normalization() {
         let doc = group(
             &format!(
                 "{}{}",
-                entry("a.example:443", "block", "domain"),
-                entry("a.example.:443", "block", "domain"),
+                entry("a.example:443", "block", "connection"),
+                entry("a.example.:443", "block", "connection"),
             ),
             "all",
         );
@@ -1330,7 +1363,7 @@ mod enforcement_config_tests {
 
     #[test]
     fn rejects_bare_fqdn_key() {
-        let doc = group(&entry("a.example", "block", "domain"), "all");
+        let doc = group(&entry("a.example", "block", "connection"), "all");
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(&err, ConfigError::InvalidFqdn { name, .. } if name == "a.example"),
@@ -1367,7 +1400,7 @@ mod enforcement_config_tests {
 
     #[test]
     fn compact_32_names_with_group_fit_16kib() {
-        let doc = keyed_document(32, "all", "block", "domain");
+        let doc = keyed_document(32, "all", "block", "connection");
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,
             "compact config with full enforcement group fits 16384 bytes (len {})",
@@ -1405,11 +1438,11 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_measured_total_is_5548() {
-        let doc = keyed_document(32, "all", "block", "domain");
+    fn compact_32_hundred_byte_names_measured_total_is_5676() {
+        let doc = keyed_document(32, "all", "block", "connection");
         assert_eq!(
             doc.len(),
-            5548,
+            5676,
             "compact 32-name measured total with resolver key"
         );
         let cfg = parse_config_document(&doc).expect("fits and parses");
@@ -1418,15 +1451,15 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_5567() {
-        let doc = keyed_document(32, "all", "block", "domain").replacen(
+    fn compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_5695() {
+        let doc = keyed_document(32, "all", "block", "connection").replacen(
             "resolver = [\"1.1.1.1\"]",
             "resolver = [\"1.1.1.1#cloudflare-dns.com\"]",
             1,
         );
         assert_eq!(
             doc.len(),
-            5567,
+            5695,
             "tight 32×100-byte compact form with a single realistic IP#fqdn entry"
         );
         let cfg = parse_config_document(&doc).expect("fits and parses");
@@ -1435,16 +1468,16 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_with_pinned_resolver_measured_total_is_5615() {
+    fn compact_32_hundred_byte_names_with_pinned_resolver_measured_total_is_5743() {
         let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
-        let doc = keyed_document(32, "all", "block", "domain").replacen(
+        let doc = keyed_document(32, "all", "block", "connection").replacen(
             "resolver = [\"1.1.1.1\"]",
             &format!("resolver = [\"1.1.1.1#dns.google#pin-sha256={b64}\"]"),
             1,
         );
         assert_eq!(
             doc.len(),
-            5615,
+            5743,
             "tight 32×100-byte compact form with a pinned DoT entry"
         );
         let cfg = parse_config_document(&doc).expect("fits and parses");

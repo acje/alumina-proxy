@@ -1033,7 +1033,7 @@ name table is introduced. The exact schema is:
 scope = "connection" | "all"          # AnyIllegal first-slot Block scope; "domain" is invalid configuration
 
 [allowed_fqdn."<fqdn>:<port>"]
-early_data = { action = "flare_only" | "block", scope = "connection" | "domain" | "all" }
+early_data = { action = "flare_only" | "block", scope = "connection" | "domain" | "all" }  # block scope "domain"/"all" is invalid configuration (exit 78)
 ```
 
 - The allowlist is the set of `[allowed_fqdn."..."]` table keys, 1 through 32 tables; empty
@@ -1189,19 +1189,20 @@ deferred). The threshold and window are fixed constants, not configuration. Impl
 folds into a later sub-mission of this package; this amendment records the binding
 semantics.
 
-#### SP-002 — Upstream-sourced early data: baseline denial kept; Domain/All attribution requires corroboration
+#### SP-002 — Upstream-sourced early data: baseline denial kept; Domain/All block scopes rejected at startup
 
 Early upstream data observed before the forwarding gate opens was attributed to the
 validated configured domain, letting an upstream endpoint fire the per-domain latch (and, at
-`All` scope, a process-wide latch) — a vantage orthogonal to the enforcement subject.
-Resolution: the baseline mandatory denial is kept (terminate setup on early upstream data
-while the gate is closed, rp2e `:255`); Domain/All Action selection from upstream-sourced
-early data is stripped unless K consecutive connections across distinct source sockets
-corroborate the signal. The K-connection corroboration is the client-vs-upstream
-discriminator that respects `:32` (no arrival-ordering inference for activity first observed
-after the gate opens); the boundary inference is stated here rather than left to `:32` to
-disclaim. Implementation folds into a later sub-mission of this package; this amendment
-records the binding semantics.
+`All` scope, a process-wide latch) — a vantage orthogonal to the enforcement subject. The
+earlier K-connection corroboration proposal is superseded (permanently ineligible); the
+resolution is now structural. `early_data = { action = "block", scope = "domain" | "all" }`
+is invalid configuration, rejected at startup with exit 78 (EX_CONFIG); the only legal
+`block` scope for `early_data` is `connection`. The baseline mandatory denial is kept
+(terminate setup on early upstream data while the gate is closed, rp2e `:255`); the
+K-connection corroboration state and gate are removed from the enforcement path, and the
+upstream-sourced signal can no longer select a per-domain or process-wide latch because
+those scopes are unreachable from configuration. This amendment records the binding
+semantics.
 
 #### SP-003 — Homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup
 
@@ -1373,7 +1374,7 @@ this package; this amendment records the binding semantics.
 | --- | --- |
 | This amendment published | Current revision |
 | SP-001: All-scope arms only after bounded fact threshold in fixed window; fixed constants; no speculative pacing (`:263`/`:306`) | Planned — later sub-mission |
-| SP-002: baseline early-data denial kept; Domain/All attribution stripped without K-connection corroboration (`:32`) | Planned — later sub-mission |
+| SP-002: baseline early-data denial kept; Domain/All `block` scopes rejected at startup exit 78 (EX_CONFIG); K-connection corroboration removed (`:32`) | Implemented (this increment) |
 | SP-003: homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup exit 78 (`:513`/`:663`) | Planned — later sub-mission |
 | SP-004: sustained-negative incident class; N negatives across M windows raise `rd`-class incident in hourly summaries (`:93`) | Planned — later sub-mission |
 | SP-005: per-ordinal JA4 set up to K=16 distinct strings; overflow suppresses adds + increments count; seeding events recorded (`:922`/`:968`) | Planned — later sub-mission |
@@ -1625,3 +1626,24 @@ single `StartupDns` transport (`src/startup_dns.rs:1089`). `DNS_NAMED_BUFFER_BYT
 This supersedes the superseded `:71` bailiwick sentence and the RT-005 note at `:1335`; the
 hrdn3 recitals at `:539-549` and the prior alox blocks remain in place as historical record
 and are not individually edited.
+
+## alumina-alox11 (2026-10-26) — F-02 close: reject early_data block domain/all at startup; remove K-connection corroboration
+
+This is the narrow, user-authorized amendment closing the F-02 finding (draft
+`alox-f02b-amendment.md`). It amends only the enumerated surfaces below — the SP-002
+recital at `:1192`, the schema annotation at `:1036`, and the Status table row at `:1377` —
+and appends this block; every other clause of this document remains binding and unchanged.
+
+#### F-02 — Upstream-sourced early data cannot select a Domain/All block
+
+The K-connection corroboration gate proposed by SP-002 is removed as permanently
+ineligible. The resolution is structural: `early_data = { action = "block", scope = "domain" | "all" }`
+is invalid configuration, rejected at startup with exit 78 (EX_CONFIG); the only legal
+`block` scope for `early_data` is `connection`. The baseline mandatory denial is kept
+(terminate setup on early upstream data while the gate is closed, rp2e `:255`), and the
+corroboration state and gate are removed from the enforcement path. Because Domain/All
+block scopes are unreachable from configuration, the upstream-sourced signal can no longer
+fire the per-domain latch or a process-wide latch; the `connection` scope terminates only
+the originating setup. The fixed profile is preserved: single boot owner and single serving
+owner, two reused 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no
+runtime-surface expansion.

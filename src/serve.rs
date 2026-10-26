@@ -1288,7 +1288,6 @@ mod tests {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
             secs,
-            None,
         );
         assert!(
             storage.report_monitor_if_due(origin, false),
@@ -1316,7 +1315,6 @@ mod tests {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
             secs,
-            None,
         );
         assert!(
             storage.report_monitor_if_due(one_second, false),
@@ -1337,7 +1335,6 @@ mod tests {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
             secs,
-            None,
         );
         assert!(
             storage.report_monitor_if_due(next, false),
@@ -1410,7 +1407,6 @@ mod tests {
                     &mut FirstSlot::new(),
                     Violation::AnyIllegal { cause },
                     DNS_EPOCH,
-                    None,
                 );
             }
         });

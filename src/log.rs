@@ -2221,7 +2221,7 @@ mod tests {
         for i in 0..ALLOWLIST_MAX {
             let _ = writeln!(
                 doc,
-                "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"block\", scope = \"all\" }}\n",
+                "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"block\", scope = \"connection\" }}\n",
                 name = widest_name(i)
             );
         }
