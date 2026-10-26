@@ -1373,22 +1373,22 @@ this package; this amendment records the binding semantics.
 | Surface | Status |
 | --- | --- |
 | This amendment published | Current revision |
-| SP-001: All-scope arms only after bounded fact threshold in fixed window; fixed constants; no speculative pacing (`:263`/`:306`) | Planned — later sub-mission |
+| SP-001: All-scope arms only after bounded fact threshold in fixed window; fixed constants; no speculative pacing (`:263`/`:306`) | Implemented (this increment) |
 | SP-002: baseline early-data denial kept; Domain/All `block` scopes rejected at startup exit 78 (EX_CONFIG); K-connection corroboration removed (`:32`) | Implemented (this increment) |
-| SP-003: homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup exit 78 (`:513`/`:663`) | Planned — later sub-mission |
-| SP-004: sustained-negative incident class; N negatives across M windows raise `rd`-class incident in hourly summaries (`:93`) | Planned — later sub-mission |
-| SP-005: per-ordinal JA4 set up to K=16 distinct strings; overflow suppresses adds + increments count; seeding events recorded (`:922`/`:968`) | Planned — later sub-mission |
+| SP-003: homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup exit 78 (`:513`/`:663`) | Implemented (this increment) |
+| SP-004: sustained-negative incident class; N negatives across M windows raise `rd`-class incident in hourly summaries (`:93`) | Implemented (this increment) |
+| SP-005: per-ordinal JA4 set up to K=16 distinct strings; overflow suppresses adds + increments count; seeding events recorded (`:922`/`:968`) | Implemented (this increment) |
 | SP-006: >64 sigalgs rejected as AnyIllegal profile violation (not JA4 admit/reject, `:908`); `count:02` overflow saturates at 99 (no literal marker) | Implemented (this increment) |
-| RT-001: sigalg-list bound at 64; no silent truncation of the JA4 hash input | Planned — later sub-mission |
+| RT-001: sigalg-list bound at 64; no silent truncation of the JA4 hash input | Implemented (this increment) |
 | SP-007: profile rows `:177`/`:178` folded in place to 5/900 and 30/900 | Implemented (this revision) |
 | SP-008: CONNECT response-corpus oracle acknowledged at `:43` (doc-only, no behavior change) | Implemented (this revision) |
-| SP-009: probe-relocation counter disjoint from `dp=`; re-measured vs 8192-B slot (`:774`/`:829`/`:1120`) | Planned — later sub-mission |
-| SP-010: log-queue priority classes; latch/event records reserved; drop newest-lowest first (`:199`/`:290`) | Planned — later sub-mission |
+| SP-009: probe-relocation counter disjoint from `dp=`; re-measured vs 8192-B slot (`:774`/`:829`/`:1120`) | Implemented (this increment) |
+| SP-010: log-queue priority classes; latch/event records reserved; drop newest-lowest first (`:199`/`:290`) | Implemented (this increment) |
 | SP-012: conflict predicates enumerated at `:58` (doc clarification, no new validation) | Implemented (this revision) |
 | SP-013: latest-change JA4 keyed per-ordinal (per-ordinal first-seen baseline, `Ja4BaselineTable` — no per-(ordinal, IP) baseline) + triggering peer source address as fixed tagged IPv4/IPv6 union in flare/monitor record; re-measured vs 8192-B slot (`:955`/`:1120`, 8170 B / 22 B margin) | Implemented (this increment) |
 | RT-005: parent-zone bailiwick note; require nothing more today | Implemented (this revision) |
-| RT-006: independent stale-serving window, distinct from 259200 s retention; new profile deadline (`:310`) | Planned — later sub-mission |
-| RT-007: pin-branch Not-Before/Not-After check non-blocking + distinct expired-cert warning fact (`:675`) | Planned — later sub-mission |
+| RT-006: independent stale-serving window, distinct from 259200 s retention; new profile deadline (`:310`) | Implemented (this increment) |
+| RT-007: pin-branch Not-Before/Not-After check non-blocking + distinct expired-cert warning fact (`:675`) | Implemented (this increment) |
 
 ### Explicitly unchanged (non-negotiable)
 
@@ -1717,6 +1717,80 @@ Tests: `Fqdn::parse("1.2.3.4:443").is_err()` and `Fqdn::parse("93.184.216.34:443
 the accepted-entries list at `src/config.rs:353-356`; and `rejects_bare_fqdn_key`
 (`src/config.rs:1365`) confirming the only allowlist-key rejection is a missing `:port`,
 not a label count.
+
+The fixed profile is preserved: single boot owner and single serving owner, two reused
+128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
+
+## alumina-alox14 (2026-10-26) — Register fold: SP-001/003/004/005, RT-001, SP-009/010, RT-006/007 implemented
+
+This is the narrow, user-authorized amendment folding the register-fold sub-mission of the
+`alox-info` package into this document. It amends only the enumerated Status rows below —
+SP-001, SP-003, SP-004, SP-005, RT-001, SP-009, SP-010, RT-006, and RT-007 at
+`:1376`/`:1378`/`:1379`/`:1380`/`:1382`/`:1385`/`:1386`/`:1390`/`:1391` (SP-006 was folded
+by `alumina-alox12`) — and appends this block; every other clause of this document remains
+binding and unchanged. Each item below is implemented in code with live tests; this
+amendment only records that state.
+
+#### SP-001 — bounded fact threshold; fixed constants; no speculative pacing
+
+All-scope latch arms fire only after a bounded fact counter crosses a fixed threshold within
+a fixed window, with fixed constants and no speculative pacing (`src/enforcement/state.rs:16`,
+`decide` `src/enforcement/state.rs:132`). Tests: `any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once`
+(`src/enforcement/state.rs:397`), `single_any_illegal_never_latches_all`
+(`src/enforcement/state.rs:766`), `three_any_illegal_facts_within_the_window_latch_all`
+(`src/enforcement/state.rs:787`).
+
+#### SP-003 — homogeneous-trust resolver arrays
+
+A resolver array must be trust-homogeneous; a mixed plain (bare-IP) and DoT (`IP#fqdn`) set
+is rejected at startup exit 78 (`src/config.rs:661`). Test: `resolver_mixed_plain_and_dot_trust_rejected`
+(`src/config.rs:1973`).
+
+#### SP-004 — sustained-negative incident class
+
+`INCIDENT_N` negatives across `INCIDENT_M` windows raise an `rd`-class incident in hourly
+summaries (`src/schedule.rs:22`/`:26`/`:29`). Test: `sustained_negative_streak_opens_incident_at_n_across_m_windows`
+(`src/schedule.rs:1202`).
+
+#### SP-005 — per-ordinal JA4 set up to K=16
+
+Each ordinal holds a set of up to `MAX_ADDRESSES` (16) distinct JA4 strings; overflow
+suppresses adds and increments a count; seeding events are recorded (`src/serving.rs:564`,
+`src/serving.rs:576`, `src/cache.rs:7`). Test: `ja4_baseline_set_overflow_suppresses_and_dedups_unchanged`
+(`src/serving/tests.rs:7368`).
+
+#### RT-001 — sigalg-list bound at 64
+
+The `signature_algorithms` list is bounded at `MAX_SIGALGS = 64` with no silent truncation
+of the JA4 hash input (`src/client_hello.rs:40`, `TooManySigAlgs` `src/client_hello.rs:183`,
+`src/client_hello.rs:805-806`). Tests: `sigalgs_over_max_sigalgs_rejected`
+(`src/client_hello.rs:2032`), `sigalgs_at_max_sigalgs_accepted` (`src/client_hello.rs:2041`).
+
+#### SP-009 — probe-relocation counter disjoint from `dp=`
+
+The probe-relocation counter (`probe_relocations` → `pr=`) is disjoint from the serving
+`downgrade_to_plain` (`dp=`) downgrade surface (`src/startup_dns.rs:1152`/`:1146`). Test:
+`src/startup_dns/tests.rs:3163-3165`.
+
+#### SP-010 — log-queue priority classes; reserved records; drop newest-lowest
+
+Latch/event records are reserved and drop newest-lowest first (`is_reserved`
+`src/log.rs:280`, `enqueue_reserved` `src/log.rs:1940`). Tests: `logging_reserved_startup_final_displaces_newest_normal_when_full`
+(`src/log.rs:3369`), `logging_reserved_records_survive_normal_overflow` (`src/log.rs:3411`),
+`logging_all_reserved_full_drops_newest_reserved` (`src/log.rs:3448`).
+
+#### RT-006 — independent stale-serving window
+
+`STALE_SERVING_WINDOW` (3600 s) is independent of the 259200 s retention deadline
+(`src/cache.rs:15`, `src/cache.rs:145`). Tests: `src/cache.rs:706`, `:710`, `:740-741`,
+`src/serving/tests.rs:6958-6977`.
+
+#### RT-007 — pin-branch validity check non-blocking + distinct expired-cert fact
+
+The pin-branch Not-Before/Not-After check is non-blocking and emits a distinct expired-cert
+warning fact (`cert_outside_validity_window` `src/startup_dns.rs:1029`, `expired_pin_certs`
+`src/startup_dns.rs:795-796`). Tests: `pinned_dot_accepts_expired_cert_with_matching_pin`
+(`src/startup_dns/dot_tests.rs:1012`), `:1040-1042`, `:1067-1078`.
 
 The fixed profile is preserved: single boot owner and single serving owner, two reused
 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.

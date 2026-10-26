@@ -22,7 +22,7 @@ Not re-raised here (accepted residuals / by design — prior voter adjudication 
 - rustls per-record heap allocations on the warm DoT path are a documented exempt bounded seam (`alumina-zai`, `:788-808`); first-party allocs allowed only at boot + the `build_tls_connection` DoT setup seam.
 - `Block All` as an operator-configured fail-closed isolation control is deliberate design (F-01 HELD); only its current code state is reported.
 
-Known-open register (spec-authorized, status "Planned — later sub-mission" in `alumina-redtm`/`alox7` tables; each is verified below for live code state and cataloged as OPEN-CONFIRMED, not as a new discovery): SP-001, SP-002, SP-003, SP-004, SP-006+RT-001, SP-009, SP-010, RT-007.
+Known-open register (spec-authorized, status "Planned — later sub-mission" in `alumina-redtm`/`alox7` tables; each is verified below for live code state and cataloged as OPEN-CONFIRMED, not as a new discovery): SP-001, SP-003, SP-004, SP-006+RT-001, SP-009, SP-010, RT-007.
 
 ## Findings summary
 
