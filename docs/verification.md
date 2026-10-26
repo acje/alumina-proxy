@@ -15,8 +15,8 @@ Host-run selectors and gates (all `sh scripts/verify.sh …` selectors and host
 Cargo commands):
 
 ```
-cargo +1.99.0 atest -p alumina --locked                   # full suite, witness-off — gated on Linux via `mid full` (reached via `sh scripts/verify.sh boundary phase1`); listed here as a manual reference
-cargo +1.99.0 atest -p alumina --locked --features alloc-witness   # full suite, alloc-witness — gated on Linux via `mid full`; listed here as a manual reference
+cargo +1.99.0 atest -p alumina --locked --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall   # gate-only suite (lib units + 5 gate-only binaries), witness-off — gated on Linux via `mid full` (reached via `sh scripts/verify.sh boundary phase1`); listed here as a manual reference
+cargo +1.99.0 atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall   # gate-only suite, alloc-witness — gated on Linux via `mid full`; listed here as a manual reference
 cargo +1.99.0 fmt --check
 cargo +1.99.0 aclippy -p alumina --locked --all-targets -- -D warnings
 sh scripts/verify.sh inner check                # INNER tier: cargo check only; host-runnable (compiles on macOS)
@@ -24,7 +24,7 @@ sh scripts/verify.sh mid foundations            # MID tier (Linux-only, fail clo
 sh scripts/verify.sh mid boot                   # MID tier (Linux-only): behavior-proof + fmt/whitespace (fast loop)
 sh scripts/verify.sh mid clippy                 # MID tier (Linux-only): clippy -D warnings (production + alloc-witness harness)
 sh scripts/verify.sh mid union                  # MID tier (Linux-only): release + static-ELF + closure metadata + clippy
-sh scripts/verify.sh mid full                   # MID tier (Linux-only): full suite witness-off then witness-on
+sh scripts/verify.sh mid full                   # MID tier (Linux-only): gate-only suite (lib units + 5 gate-only binaries) witness-off then witness-on
 sh scripts/verify.sh docs                       # native offline docs link gate
 sh scripts/verify.sh fixtures boot              # host Podman coordinator; Darwin allowed
 sh scripts/verify.sh e2e relay                  # host-runnable; auto-dispatches Linux build on Darwin
@@ -39,10 +39,14 @@ dispatch writes the same aliases into its throwaway container config — the rep
 does not duplicate them). Most gate selectors run a filtered scope: their
 `verify.sh` `atest` invocations carry `--test foundations` or `--test boot`
 (optionally with `--features alloc-witness`). The `mid full` selector is the
-exception: it runs the UNFILTERED full suite (lib unit tests + all 7
-integration test binaries) witness-off then witness-on (alloc-witness, incl.
-the eligibility witness and the alloc-witness-only mio_matrix binary), on Linux
-via `sh scripts/verify.sh boundary phase1`.
+exception: it runs the gate-only test surface — lib unit tests + the 5
+integration binaries that run in no other selector (eligibility, mio_matrix,
+main_thread_stack, monitor_stdout, stdout_stall) — witness-off then witness-on
+(alloc-witness, incl. the eligibility witness and the alloc-witness-only
+mio_matrix binary), on Linux via `sh scripts/verify.sh boundary phase1`.
+foundations and boot are deliberately not re-run there: `mid union` already
+runs them in the same BOUNDARY dispatch (and the `mid foundations` / `mid boot`
+inner loops run them during development).
 
 ### Three-tier guarantee contract
 
@@ -56,8 +60,9 @@ Verification is tiered; each tier backs a different claim:
   static-ELF/clippy/release/closure proofs moved to `mid union`); `mid
   clippy` runs clippy `-D warnings` for production and the alloc-witness
   test harness; `mid union` carries release + static-ELF + closure metadata
-  + clippy; `mid full` runs the unfiltered full suite witness-off then
-  witness-on. MID backs per-sub-mission done-claims.
+  + clippy; `mid full` runs the gate-only suite (lib units + the 5
+  gate-only binaries) witness-off then witness-on. MID backs per-sub-mission
+  done-claims.
 - **BOUNDARY** — split into a fast tier and a slow tier; both exit 1
   `BLOCKED` by design and neither ever executes E2E:
   - `sh scripts/verify.sh boundary phase1-fast`: identity BEFORE snapshot,

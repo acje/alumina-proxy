@@ -92,12 +92,16 @@ claim), and this repo never provisions VMs, connections or images.
   builder image; requires `podman`, a reachable `flock-vm` and the pinned
   image present).
 - `mid full` — **Linux-only**; fail closed on any non-Linux host. Runs the
-  UNFILTERED full suite (lib unit tests + all 7 integration test binaries)
-  witness-off then witness-on (`--features alloc-witness`, incl. the
-  eligibility witness and the alloc-witness-only mio_matrix binary); atest-only
-  (no clippy/fmt). On macOS it runs through `boundary phase1` (Linux dispatch
-  via the rootless `flock-vm` connection, `--pull=never`, pinned builder image;
-  requires `podman`, a reachable `flock-vm` and the pinned image present).
+  gate-only test surface (lib unit tests + the 5 integration binaries that run
+  in no other selector: eligibility, mio_matrix, main_thread_stack,
+  monitor_stdout, stdout_stall) witness-off then witness-on
+  (`--features alloc-witness`, incl. the eligibility witness and the
+  alloc-witness-only mio_matrix binary); atest-only (no clippy/fmt).
+  foundations and boot are not re-run here — `mid union` already runs them in
+  the same BOUNDARY dispatch. On macOS it runs through `boundary phase1`
+  (Linux dispatch via the rootless `flock-vm` connection, `--pull=never`,
+  pinned builder image; requires `podman`, a reachable `flock-vm` and the
+  pinned image present).
 - `fixtures boot` — **host Podman coordinator (Darwin allowed by source)**;
   requires existing rootless `flock-vm` and rootful `flock-vm-root`
   connections with the pinned builder image present on both (`--pull=never`),

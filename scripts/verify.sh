@@ -260,28 +260,34 @@ mid_clippy() {
     echo "CLIPPY-MID-OK"
 }
 
-# G8-C02 test-coverage closure: runs the UNFILTERED full suite (lib unit tests
-# + all 7 integration test binaries) witness-off then witness-on, closing the
-# gate coverage hole where lib units and 5 of 7 binaries never ran in any gate
-# selector (all 9 prior atest invocations carried --test foundations|boot).
+# G8-C02 test-coverage closure: runs the gate-only test surface — lib unit tests
+# + the 5 integration binaries that run in NO other selector (eligibility,
+# mio_matrix, main_thread_stack, monitor_stdout, stdout_stall) — witness-off
+# then witness-on, closing the gate coverage hole where lib units and these 5
+# binaries never ran in any gate selector (all prior atest invocations carried
+# --test foundations|boot). foundations and boot are NOT re-run here: they
+# already run in mid union within the same BOUNDARY dispatch (and in the mid
+# foundations / mid boot inner loops), so re-running them here would duplicate
+# work without adding coverage.
 # atest-only — no clippy/fmt/whitespace (those are mid_union's job) — so there
 # is no E0463 hazard within this selector itself. The cross-run interaction is
 # with a LATER mid_union's alloc-witness clippy over the shared target dir:
-# mid_full's witness-on run builds the aw boot tests, whose fingerprints could
-# meet mid_union's aw-clippy adjacency. Disposition (cross-run-safe verified or
-# isolated via --target-dir) recorded in the sub-mission back-brief.
+# mid_full's witness-on run builds the aw gate-only test binaries, whose
+# fingerprints could meet mid_union's aw-clippy adjacency. Disposition
+# (cross-run-safe verified or isolated via --target-dir) recorded in the
+# sub-mission back-brief.
 mid_full() {
     [ "$(uname -s)" = "Linux" ] || {
         echo "mid full requires Linux execution" >&2
         exit 1
     }
-    echo "FULL-SUITE (lib units + all 7 integration binaries, witness-off):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked
-    echo "FULL-SUITE-WITNESS-OFF-OK"
-    echo "FULL-SUITE-WITNESS (lib units + all 7 binaries incl. mio_matrix + eligibility witness, alloc-witness):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness
-    echo "FULL-SUITE-WITNESS-ON-OK"
-    echo "FULL-SUITE-MID-OK"
+    echo "GATE-ONLY-SUITE (lib units + 5 gate-only binaries, witness-off):"
+    cargo +${TOOLCHAIN} atest -p alumina --locked --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall
+    echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
+    echo "GATE-ONLY-SUITE-WITNESS (lib units + 5 gate-only binaries incl. mio_matrix + eligibility witness, alloc-witness):"
+    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall
+    echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
+    echo "GATE-ONLY-SUITE-MID-OK"
 }
 
 # Linux kernel privilege fixtures. The proof-only `fixture-facts` feature build
@@ -1047,6 +1053,7 @@ command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1 || true
         -e CARGO_INCREMENTAL=0 \
         -e CARGO_TERM_PROGRESS_WHEN=never \
         -e TOOLCHAIN="$TOOLCHAIN" \
+        -e RUST_MIN_STACK=16777216 \
         -w /app \
         "$IMAGE" sh -c "$prov$inner" || drc=$?
     [ "$drc" -eq 0 ] || {
