@@ -241,9 +241,8 @@ The first-iteration target is 1-10 Gbps aggregate relayed payload throughput acr
 - **Runtime surface and deployment prerequisites:** Verify that startup fails as root, with nonempty effective, permitted, or ambient capability sets, or without `no_new_privs`. Verify that the running process has exactly one listening socket and no other inbound interface. Verify that SIGTERM performs bounded shutdown and that catchable administrative signals cannot reload configuration or change policy. Verify that the image contains only the specified files.
 - **Performance:** Measure aggregate forwarded payload bytes once, not once on read and again on write. Benchmark 1-10 Gbps bursts where CPU and network capacity permit, and report burst duration, concurrency, payload sizes, CPU utilization, queueing, and sustained throughput separately. Include slow-peer backpressure and verify DNS and deadline progress under load. These targets and deployment behaviors are unverified until measured.
 
-## Tripwire actions, monitoring, and pacing — user-authorized amendment
+## Tripwire actions, monitoring, and pacing
 
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-rp2e`, 2026-10-14). It defines a configuration tripwire/action/monitoring/pacing surface and resolves its semantics. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. Specification publication precedes implementation; the status table at the end assigns each surface an honest planned/implemented/deferred status.
 
 ### Action catalog and attribution
 
@@ -306,63 +305,28 @@ All added enforcement and monitoring storage is boot-time allocated from the exi
 
 The planned additional enforcement and monitoring control storage (the five non-JA4 rows above) totals approximately 9–10 KiB against the existing 128 MiB traffic storage and 512 KiB log queue. The two JA4 rows (first-seen baseline ~21 KiB and ClientHello retention ~8.2 MiB) are additional and separately accounted in the JA4 client-fingerprint tripwire amendment section. Exact sizes are fixed at implementation with `sizeof`-verified types. No pacing credit/burst storage is reserved or preallocated while Tarpit is deferred (no speculative reserved pacing allocation); it is added to this table only if a genuine trigger-catalog decision authorizes Tarpit. Per-turn enforcement work composes with the existing 16-op/64 KiB per-visit budget and at-most-256-visit timer recheck; the per-turn control-step count is a fixed value derived from that native per-visit I/O budget at implementation, not an invented range. Block All's bounded physical closure is the only path that walks the slot table.
 
-### Explicitly unchanged (non-negotiable)
+## Security hardening — CONNECT, TLS identity, DNS cache, scheduling, and logging
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8/3600 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob.
-
-### Status
-
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Configuration: exact reserved schema (`[any_illegal]` + positional `[actions]`), AnyIllegal first-slot `Block` `Connection`/`All`, Tarpit deferred rejection, unknown/missing keys exit 78, force-mandatory group, at most 4 KiB | Implemented (this increment) |
-| Typed detection-fact capture before erasure; early upstream data validated-domain attribution; EOF/reset operational Unknown | Implemented (this increment) |
-| Enforcement: `Block` Connection/Domain/All synchronous latch + bounded closure at the runtime detection sites; `FlareOnly` reporting context (aggregate capture counters, fold on close) | Implemented (this increment) |
-| Monitoring: new stdout log kinds + correlated aggregates, drop+count, saturation + overflow, fold | Implemented (this increment) |
-| Tarpit pacing | Deferred — no real establishment-allowed predicate; configuration selecting it fails with an explicit deferred-status diagnostic |
-| Pacing credit/burst storage | None reserved (no speculative pacing allocation) |
-
-## Security hardening — CONNECT, TLS identity, DNS cache, scheduling, and logging — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-sechd`, 2026-10-17). It pins the exact parser, DNS-cache, scheduling, and logging semantics of the security-review findings whose root cause in spec is a spec weakness or underspecification: L3, L6, L8, L9, L10, L11, L12, L13, L16, L17, and L18. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. Specification publication precedes implementation; the status table at the end assigns each surface an honest planned/implemented/deferred status.
-
-### Amended surfaces and status
-
-| Finding | Amended surface | Spec record | Code enforcement |
-| --- | --- | --- | --- |
-| L3 | CONNECT bare-CR rejection | implemented | implemented |
-| L6 | Startup positive-by-eligibility classification | implemented | planned |
-| L8 | Non-`host_name` `server_name` rejection | implemented | implemented |
-| L9 | Initial TLS record minimum payload | implemented | already in code; pinned |
-| L10 | SNI trailing-dot normalization | implemented | already in code; pinned |
-| L11 | Extension/version caps in the resource profile | implemented | already in code; pinned |
-| L12 | DNS TTL cap 86400 s (max auth lifetime 345600 s) | implemented | planned |
-| L13 | Binding-address deduplication | implemented | planned |
-| L16 | Whole-second scheduling granularity | implemented | already in code; pinned |
-| L17 | Four parser fuzz targets | implemented | planned |
-| L18 | Sink-failure drop accounting | implemented | planned |
-
-All eleven surfaces are recorded by this amendment (spec record: implemented). Code enforcement for the behavioral findings lands in later hardening groups (code status: planned); L9, L10, L11, and L16 document caps and behavior already present in the codebase.
 
 ### L3 — CONNECT bare-CR rejection
 
-Add to the CONNECT **Reject** list (spec `:41`): reject a bare CR — an ASCII `0x0d` not immediately followed by `0x0a` — as a header line ending. Only the CRLF pair (`0x0d 0x0a`) is an accepted line ending within the CONNECT head; a `0x0d` observed without an immediately following `0x0a` is rejected as a malformed line ending. This tightens the existing bare-LF rejection to a strict CRLF-only rule. (The code fix arrives in a later hardening group; this amendment records the requirement.)
+Add to the CONNECT **Reject** list (spec §CONNECT request): reject a bare CR — an ASCII `0x0d` not immediately followed by `0x0a` — as a header line ending. Only the CRLF pair (`0x0d 0x0a`) is an accepted line ending within the CONNECT head; a `0x0d` observed without an immediately following `0x0a` is rejected as a malformed line ending. This tightens the existing bare-LF rejection to a strict CRLF-only rule. (The code fix arrives in a later hardening group; this amendment records the requirement.)
 
 ### L6 — Startup positive classification uses eligible bindings
 
-The startup readiness/usable classification (spec `:65`) and the startup diagnostics state: a positive startup classification requires an eligible, non-retired positive binding for the record type — matching the "usable" predicate at `:65` — not merely a non-empty set of bindings. An entry whose bindings are all ineligible or retired does not count as a startup positive and is treated as unresolved for the allowance computation.
+The startup readiness/usable classification (spec §Configuration & DNS) and the startup diagnostics state: a positive startup classification requires an eligible, non-retired positive binding for the record type — matching the "usable" predicate at §Configuration & DNS — not merely a non-empty set of bindings. An entry whose bindings are all ineligible or retired does not count as a startup positive and is treated as unresolved for the allowance computation.
 
 ### L8 — Reject non-`host_name` `server_name` entries
 
-Per RFC 6066 §3, the `server_name` extension's name list must contain exactly one entry and that entry's `NameType` must be `host_name` (0). Any entry whose `NameType` is not `host_name` (0) is rejected as malformed or ambiguous identity (spec `:48`) — never silently ignored or skipped by length.
+Per RFC 6066 §3, the `server_name` extension's name list must contain exactly one entry and that entry's `NameType` must be `host_name` (0). Any entry whose `NameType` is not `host_name` (0) is rejected as malformed or ambiguous identity (spec §TLS ClientHello profile) — never silently ignored or skipped by length.
 
 ### L9 — Initial TLS record minimum payload
 
-The initial TLS record carrying the ClientHello handshake must have a handshake payload of at least 4 bytes: 1 byte handshake type (`0x01`, ClientHello) plus 3 bytes handshake length. A first record whose handshake payload is fewer than 4 bytes is rejected as malformed framing. This is stricter than the bare maximum payload bound (16 KiB, `:47`/`:48`) and is pinned here because the deployed parser already enforces the minimum.
+The initial TLS record carrying the ClientHello handshake must have a handshake payload of at least 4 bytes: 1 byte handshake type (`0x01`, ClientHello) plus 3 bytes handshake length. A first record whose handshake payload is fewer than 4 bytes is rejected as malformed framing. This is stricter than the bare maximum payload bound (16 KiB, §TLS ClientHello profile) and is pinned here because the deployed parser already enforces the minimum.
 
 ### L10 — SNI trailing-dot normalization
 
-SNI handling must satisfy RFC 6066 `host_name` and resolve trailing-dot normalization consistently with config/CONNECT normalization at `:61`: a single trailing dot in the SNI `server_name` is normalized (trailing dot removed) before comparison against the approved CONNECT hostname, and the normalized name is compared case-insensitively. An SNI `host_name` that is empty, an IP literal, or otherwise fails TLS hostname syntax is rejected as invalid identity.
+SNI handling must satisfy RFC 6066 `host_name` and resolve trailing-dot normalization consistently with config/CONNECT normalization at §Configuration & DNS: a single trailing dot in the SNI `server_name` is normalized (trailing dot removed) before comparison against the approved CONNECT hostname, and the normalized name is compared case-insensitively. An SNI `host_name` that is empty, an IP literal, or otherwise fails TLS hostname syntax is rejected as invalid identity.
 
 ### L11 — Extension/version caps promoted into the resource profile
 
@@ -376,70 +340,40 @@ The code-invented hard caps are promoted to spec resource-profile limits, keepin
 | ClientHello distinct extensions tracked (duplicate rejection) | 64 |
 | ClientHello offered supported_versions entries retained | 32 |
 
-The first two rows already exist in the Initial resource profile (`:163`/`:164`); the record-payload, extension, and version rows are new to the profile. No existing profile row is loosened or otherwise altered; the caps are pinned exactly as the code enforces them today.
+The first two rows already exist in the Initial resource profile (§Initial resource profile); the record-payload, extension, and version rows are new to the profile. No existing profile row is loosened or otherwise altered; the caps are pinned exactly as the code enforces them today.
 
 ### L12 — DNS TTL cap (deliberate new bound)
 
-Spec `:74` is amended to cap the honored DNS TTL at a fixed maximum of **86400 seconds (24 hours)**. The entry freshness deadline uses `min`(earliest supporting CNAME/address TTL, 86400); a TTL of 0 remains treated as 1 second (RFC 1035 deviation preserved). With the fixed 259200-second stale grace (`:75`), the maximum authorization lifetime is 86400 + 259200 = **345600 seconds**. This is a new deliberate deviation from "honor the received TTL without raising it": the cap only ever lowers honored TTLs, never raises one, so authorization lifetime is bounded. Recorded here as a decision; flagged for user confirmation.
+Spec §Configuration & DNS is amended to cap the honored DNS TTL at a fixed maximum of **86400 seconds (24 hours)**. The entry freshness deadline uses `min`(earliest supporting CNAME/address TTL, 86400); a TTL of 0 remains treated as 1 second (RFC 1035 deviation preserved). With the fixed 259200-second stale grace (§Configuration & DNS), the maximum authorization lifetime is 86400 + 259200 = **345600 seconds**. This is a new deliberate deviation from "honor the received TTL without raising it": the cap only ever lowers honored TTLs, never raises one, so authorization lifetime is bounded. Recorded here as a decision; flagged for user confirmation.
 
 ### L13 — Binding-address deduplication
 
-Spec `:73`/`:74` are amended to require deduplicating identical addresses (compared as parsed numeric addresses, never textual forms) at staging/publication: a record type's published eligible bindings contain no duplicate addresses. Deduplication precedes publication so the per-family attempt budget (spec `:82`) is never wasted on duplicate candidates — within a family, address index `n` always selects a distinct address.
+Spec §Configuration & DNS are amended to require deduplicating identical addresses (compared as parsed numeric addresses, never textual forms) at staging/publication: a record type's published eligible bindings contain no duplicate addresses. Deduplication precedes publication so the per-family attempt budget (spec §Configuration & DNS) is never wasted on duplicate candidates — within a family, address index `n` always selects a distinct address.
 
 ### L16 — Whole-second scheduling granularity
 
-The refresh/backoff scheduling clauses (spec `:76`–`:78`) are amended to specify that all due times, the per-second start-rate guard, and backoff-stage comparisons use whole-second resolution from a single monotonic anchor. Due-time and not-before guards compare at whole-second truncation (documenting the existing code at `src/schedule.rs:381-384`); no sub-second due times or fractions influence scheduling, so refresh/backoff spacing is captured to whole seconds only.
+The refresh/backoff scheduling clauses (spec §Configuration & DNS) are amended to specify that all due times, the per-second start-rate guard, and backoff-stage comparisons use whole-second resolution from a single monotonic anchor. Due-time and not-before guards compare at whole-second truncation (documenting the existing code at `src/schedule.rs:381-384`); no sub-second due times or fractions influence scheduling, so refresh/backoff spacing is captured to whole seconds only.
 
 ### L17 — Four named parser fuzz targets
 
-The Verification requirement at `:226` ("parser fuzzing") is sharpened to name the four parser targets that must be driven by a real fuzz loop before serving qualification: (1) ClientHello inspection (`ChInspector::feed`), (2) CONNECT headers (`ConnectParser`), (3) DNS wire (answer/record parsing), and (4) log-record encoding. Scaffold-only harnesses that do not drive the parsers do not satisfy the requirement.
+The Verification requirement at §IV. Protocol & State Machine Invariants ("parser fuzzing") is sharpened to name the four parser targets that must be driven by a real fuzz loop before serving qualification: (1) ClientHello inspection (`ChInspector::feed`), (2) CONNECT headers (`ConnectParser`), (3) DNS wire (answer/record parsing), and (4) log-record encoding. Scaffold-only harnesses that do not drive the parsers do not satisfy the requirement.
 
 ### L18 — Sink-failure drop accounting
 
-Spec `:197` (Log delivery) — and the DNS reporting/log-drop accounting it shares — is amended to specify that records stranded when the sink fails or stalls (queue-accepted records that cannot be drained before the failure) are counted as dropped under the existing whole-record drop accounting, never silently lost. A stalled or failing sink increments the drop count for stranded records; it must not cause them to be retained indefinitely, nor block rejection, tunnel I/O, DNS, or deadlines.
+Spec §Lifecycle (Log delivery) — and the DNS reporting/log-drop accounting it shares — is amended to specify that records stranded when the sink fails or stalls (queue-accepted records that cannot be drained before the failure) are counted as dropped under the existing whole-record drop accounting, never silently lost. A stalled or failing sink increments the drop count for stranded records; it must not cause them to be retained indefinitely, nor block rejection, tunnel I/O, DNS, or deadlines.
 
-### Explicitly unchanged (non-negotiable)
+## CONNECT, configuration, and DNS destination-address hardening
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently; only L11 adds cap rows that reflect caps already enforced in the code, and L12 adds the new 86400-second TTL cap recorded as a deliberate bound above.
+The Protocol contract restricts CONNECT to plaintext HTTP/1.1 and declares HTTP/1.0 CONNECT unsupported. Configuration declares an IP literal-shaped allowlist entry — a name whose labels are all-numeric, e.g. `1.2.3.4:443` — invalid configuration. The Addresses clause clarifies that the AS112 anycast `192.31.196.0/24`, AMT `192.52.193.0/24`, and direct-delegation AS112 `192.175.48.0/24` ranges are deliberately not excluded because they are globally routable and can legitimately host internet services.
 
-## CONNECT, configuration, and DNS destination-address hardening — user-authorized amendment
+## CONNECT Content-Length canonical digits
 
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-skhc`, 2026-10-17). It records the user authorization for three spec-body hardening edits applied together in one review-driven increment: (1) the Protocol contract restricts CONNECT to plaintext HTTP/1.1 and declares HTTP/1.0 CONNECT unsupported; (2) Configuration declares an IP literal-shaped allowlist entry — a name whose labels are all-numeric, e.g. `1.2.3.4:443` — invalid configuration; and (3) the Addresses clause clarifies that the AS112 anycast `192.31.196.0/24`, AMT `192.52.193.0/24`, and direct-delegation AS112 `192.175.48.0/24` ranges are deliberately not excluded because they are globally routable and can legitimately host internet services. It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already committed in the body clauses above; this section records only their user authorization.
+On the CONNECT Accept/Reject surface, a leading-zero `Content-Length` value is invalid and is rejected fail-closed, consistent with the canonical-digit rule already applied to the CONNECT target port. Literal `Content-Length: 0` is the only accepted value; nonzero `Content-Length` is rejected; and a leading-zero spelling of the accepted literal is itself rejected as malformed rather than accepted.
 
-### Status
+## Memory accounting — retained serving workspace
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Protocol contract: plaintext HTTP/1.1 CONNECT only; HTTP/1.0 CONNECT unsupported | Implemented (this increment) |
-| Configuration: IP literal-shaped allowlist entries (all-numeric labels) invalid configuration | Implemented (this increment) |
-| Addresses: AS112 anycast / AMT / direct-delegation AS112 ranges deliberately not excluded (globally routable) | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## CONNECT Content-Length canonical digits — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-icdl`, 2026-10-17). It records the user authorization for the canonical-digit `Content-Length` rule on the CONNECT Accept/Reject surface: a leading-zero `Content-Length` value is invalid on that surface and is rejected fail-closed, consistent with the canonical-digit rule already applied to the CONNECT target port (`:41`). It applies to the `Content-Length` field of an accepted CONNECT request (`:40`/`:41` region): literal `Content-Length: 0` is the only accepted value (`:40`); nonzero `Content-Length` is rejected (`:41`); and a leading-zero spelling of the accepted literal is itself rejected as malformed rather than accepted. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already committed in the CONNECT head parser at `src/connect.rs:363-365`; this section records only its user authorization.
-
-### Status
-
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| CONNECT Accept/Reject: canonical-digit `Content-Length`; literal `Content-Length: 0` is the only accepted value | Implemented (this increment) |
-| Leading-zero `Content-Length` rejected fail-closed, consistent with the CONNECT target-port canonical-digit rule | Implemented (this increment) |
-
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Memory accounting — retained serving workspace — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-mema`, 2026-10-18). It corrects the memory accounting so the documentation is consistent with the structure currently used in code. The Initial resource profile and the traffic-storage budget note (`:161`-`:186`) are amended to record the **retained serving workspace** — a fixed, boot-time allocation that the code has always made but the prior accounting omitted. It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile limits, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding.
-
-### Amended surface
+### Retained serving workspace
 
 The retained serving workspace is a fixed per-slot allocation, made once at boot for the process lifetime and reused across connections, **outside** the 128 MiB tunnel-traffic-storage budget:
 
@@ -455,209 +389,121 @@ The DNS transport's fixed 512-byte query buffer (`QUERY_BUF_LEN`, `src/startup_d
 
 This amendment is a **clarification of the existing fixed profile, not a change to any limit**: the serving workspace was already allocated and retained by the code; the prior resource table understated the retained footprint by ~68 MiB. No profile row is loosened or altered.
 
-### Status
+## Hardening: DNS wrong-family records, ClientHello handshake bound, CONNECT discriminant split
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Initial resource profile: retained serving workspace row added (`:162`) | Implemented (this increment) |
-| Traffic-storage budget note: serving workspace added to the outside-budget list (`:186`) | Implemented (this increment) |
-| DNS 512-byte query buffer accounted with DNS named buffers | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Hardening: DNS wrong-family records, ClientHello handshake bound, CONNECT discriminant split — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-hrdn`, 2026-10-19). It records the user authorization for three hardening increments applied together in one review-driven increment: (1) DNS wrong-family A/AAAA records at a chain owner are truly ignored — discarded without ever marking the owner as carrying address data — so a positive answer can never be satisfied by wrong-family records and a chain yielding only them terminates in a validated negative outcome (`:71`); (2) the ClientHello inspection profile bounds the TLS handshake message length, 4-byte header plus body, to 16 KiB — the same bound already applied to plaintext record payloads during inspection (`:47`/`:48`, resource profile `:165`/`:166`); and (3) the CONNECT parse surface splits the coarse rejection into exact finite discriminants — method not CONNECT, unsupported HTTP version, target not authority-form `host:port`, malformed request line — and removes the coarse `NotHttp` catch-all from both `ConnectError` and `ConnectHeadReason` (`:40`/`:41`). It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
-
-### Amended surface
+### Wrong-family DNS records, handshake bound, and CONNECT discriminant split
 
 #### Vec 33 — DNS wrong-family records are truly ignored
 
-Spec `:71` (DNS provenance) already rejects coexistence of CNAME and A/AAAA records at a chain owner (`CnameCoexist`). This increment hardens the independent wrong-family path: an answer to an A query containing AAAA records at a chain owner — or an AAAA query containing A records — is discarded as wrong-family without setting the owner's has-address-data flag (`src/dns.rs:824-830`, `:847-853`). Wrong-family records therefore never register as address data, cannot satisfy the positive-answer terminal requirement, and cannot corrupt a same-family CNAME chain into a misleading has-data outcome. A chain whose queries yield only wrong-family records terminates in the validated negative outcome `EmptyNoerrorWithoutSoa` — a clean, consistent NODATA-class result — and an NXDOMAIN carrying a wrong-family record at the terminal owner remains a clean `NxDomain`, never `TerminalWithoutData` (tests `ignored_opposite_family_*_then_cname_*` at `src/dns.rs:1847-1893`; `nxdomain_with_opposite_family_*` at `:1937`-`:1969`). The pre-existing reverse-direction artifact — a wrong-family address arriving before a same-family CNAME counting as address data — is eliminated with it; that path now also yields `EmptyNoerrorWithoutSoa`.
+Spec §Configuration & DNS (DNS provenance) already rejects coexistence of CNAME and A/AAAA records at a chain owner (`CnameCoexist`). This increment hardens the independent wrong-family path: an answer to an A query containing AAAA records at a chain owner — or an AAAA query containing A records — is discarded as wrong-family without setting the owner's has-address-data flag (`src/dns.rs:824-830`, `:847-853`). Wrong-family records therefore never register as address data, cannot satisfy the positive-answer terminal requirement, and cannot corrupt a same-family CNAME chain into a misleading has-data outcome. A chain whose queries yield only wrong-family records terminates in the validated negative outcome `EmptyNoerrorWithoutSoa` — a clean, consistent NODATA-class result — and an NXDOMAIN carrying a wrong-family record at the terminal owner remains a clean `NxDomain`, never `TerminalWithoutData` (tests `ignored_opposite_family_*_then_cname_*` at `src/dns.rs:1847-1893`; `nxdomain_with_opposite_family_*` at `:1937`-`:1969`). The pre-existing reverse-direction artifact — a wrong-family address arriving before a same-family CNAME counting as address data — is eliminated with it; that path now also yields `EmptyNoerrorWithoutSoa`.
 
 #### Vec 34 — ClientHello handshake-message length bound
 
-Spec `:47` bounds each plaintext record payload to 16 KiB (`:166`). This increment adds the matching bound on the TLS handshake message length at 16 KiB (`MAX_HANDSHAKE_LEN`, 4-byte header plus body, `src/client_hello.rs:12`). A handshake whose declared length exceeds the bound is rejected as `ChError::HandshakeTooLarge { got }` at the scan gate (`src/client_hello.rs:394-395`) instead of being buffered toward the 64 KiB `MAX_CLIENT_HELLO` inspection total (`:165`). This is a content-level classification bound, not a buffer change: the retained serving workspace (`SLOT_WORKSPACE_BYTES`, `src/inventory.rs`, resource profile `:163`) and the two reused 64 KiB inspector buffers are unchanged. The TLS profile fold maps the new cause to the existing `Profile` reject kind (`src/client_hello.rs:198-220`), and a claim exactly at the 16 KiB cap is a complete-at-bound, not a length rejection (`src/client_hello.rs:1115-1128`).
+Spec §TLS ClientHello profile bounds each plaintext record payload to 16 KiB (§Initial resource profile). This increment adds the matching bound on the TLS handshake message length at 16 KiB (`MAX_HANDSHAKE_LEN`, 4-byte header plus body, `src/client_hello.rs:12`). A handshake whose declared length exceeds the bound is rejected as `ChError::HandshakeTooLarge { got }` at the scan gate (`src/client_hello.rs:394-395`) instead of being buffered toward the 64 KiB `MAX_CLIENT_HELLO` inspection total (§Initial resource profile). This is a content-level classification bound, not a buffer change: the retained serving workspace (`SLOT_WORKSPACE_BYTES`, `src/inventory.rs`, resource profile §Initial resource profile) and the two reused 64 KiB inspector buffers are unchanged. The TLS profile fold maps the new cause to the existing `Profile` reject kind (`src/client_hello.rs:198-220`), and a claim exactly at the 16 KiB cap is a complete-at-bound, not a length rejection (`src/client_hello.rs:1115-1128`).
 
 #### Vec 36 — Split CONNECT error discriminants and remove the `NotHttp` catch-all
 
-Spec `:40`/`:41` govern the CONNECT Accept/Reject surface. This increment replaces the coarse parse-failure classification with exact, finite discriminants: a request line that is not exactly three whitespace-separated tokens is `MalformedRequestLine`; a method other than `CONNECT` is `MethodNotConnect`; an HTTP version other than `HTTP/1.1` is `UnsupportedVersion`; and a target that is not authority-form `host:port` — starting with `/`, `*`, or a `scheme://` prefix (e.g. `windows(3)://`), or lacking a colon — is `TargetNotAuthorityForm` (`src/connect.rs:321-341`, `:384-400`). The coarse `NotHttp` variant is removed from both `ConnectError` and `ConnectHeadReason` (`src/connect.rs:42-56`, `:102-116`); `ConnectHeadReason::COUNT` is now 13 (`src/connect.rs:148`) and `AnyIllegalCause::KIND_COUNT` is 18 (`src/enforcement/policy.rs:21`). The monitoring grammar's fixed kind labels follow (`c13`, `a13`; `src/log.rs:1846`, `:1850`, `:1937`). The eliminated `NotHttp` row is deliberately not re-added: every prior `NotHttp` rejection is now attributable to exactly one of the new discriminants, so the coarser catch-all carried no additional information.
+Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment replaces the coarse parse-failure classification with exact, finite discriminants: a request line that is not exactly three whitespace-separated tokens is `MalformedRequestLine`; a method other than `CONNECT` is `MethodNotConnect`; an HTTP version other than `HTTP/1.1` is `UnsupportedVersion`; and a target that is not authority-form `host:port` — starting with `/`, `*`, or a `scheme://` prefix (e.g. `windows(3)://`), or lacking a colon — is `TargetNotAuthorityForm` (`src/connect.rs:321-341`, `:384-400`). The coarse `NotHttp` variant is removed from both `ConnectError` and `ConnectHeadReason` (`src/connect.rs:42-56`, `:102-116`); `ConnectHeadReason::COUNT` is now 13 (`src/connect.rs:148`) and `AnyIllegalCause::KIND_COUNT` is 18 (`src/enforcement/policy.rs:21`). The monitoring grammar's fixed kind labels follow (`c13`, `a13`; `src/log.rs:1846`, `:1850`, `:1937`). The eliminated `NotHttp` row is deliberately not re-added: every prior `NotHttp` rejection is now attributable to exactly one of the new discriminants, so the coarser catch-all carried no additional information.
 
-### Status
+## Hardening: CONNECT header-line count bound, passive resolver degraded signaling, widened refresh band
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| DNS: wrong-family A/AAAA records truly ignored; no has-address-data flag; clean validated negative (`:71`) | Implemented (this increment) |
-| ClientHello: handshake-message length bound 16 KiB; `HandshakeTooLarge` rejection (`:47`/`:48`) | Implemented (this increment) |
-| CONNECT: exact finite discriminants (`MethodNotConnect`, `UnsupportedVersion`, `TargetNotAuthorityForm`, `MalformedRequestLine`); `NotHttp` removed (`:40`/`:41`) | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Hardening: CONNECT header-line count bound, passive resolver degraded signaling, widened refresh band — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-hrdn2`, 2026-10-19). It records the user authorization for three hardening increments applied together in one review-driven increment: (1) the CONNECT header-line count is bounded to at most 16 header fields, with a new exact `TooManyHeaderLines` discriminant on the Accept/Reject surface (`:40`/`:41`); (2) the passive resolver gain a consecutive-failure degradation state machine that emits one distinct degraded fact per enter/exit crossing rather than per failure, folded into the `alumina-rp2e` enforcement monitor's fact vocabulary; and (3) the normal DNS refresh band widens from 30/300 seconds to 5/900 seconds with the SOA-based negative refresh keeping its own 30-second floor (`:76`/`:77`, resource profile `:176`/`:177`). It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
-
-### Amended surface
+### CONNECT header-line bound, resolver degraded signaling, and refresh band
 
 #### Vec 35 — CONNECT header-line count bound
 
-Spec `:40`/`:41` govern the CONNECT Accept/Reject surface. This increment bounds the number of header lines a CONNECT request head may carry at 16 header fields (`MAX_HEADER_LINES`, `src/connect.rs:13`). Every line the header loop yields is counted (`src/connect.rs:267-270`), incrementing before the empty-line continue as defense in depth — the head is truncated at the first CRLFCRLF delimiter, so each header field yields exactly one header-loop line and the empty line never appears in a bounded head. A request whose count exceeds 16 is rejected with the new exact discriminant `ConnectError::TooManyHeaderLines`, mapped to `ConnectHeadReason::TooManyHeaderLines` (`src/connect.rs:61`, `:126`, `:149`). `ConnectHeadReason::COUNT` is now 14 (`src/connect.rs:160`), `AnyIllegalCause::KIND_COUNT` is 19 (`src/enforcement/policy.rs:21`), and the monitoring grammar's fixed kind labels follow (`c14`, `a14`; `src/log.rs:1846`, `:1850`, `:1937`). The bound is a parse-classification bound, not a buffer change: the fixed request-head buffer and its size limits are unchanged, and a head of exactly 16 fields is accepted at the boundary.
+Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment bounds the number of header lines a CONNECT request head may carry at 16 header fields (`MAX_HEADER_LINES`, `src/connect.rs:13`). Every line the header loop yields is counted (`src/connect.rs:267-270`), incrementing before the empty-line continue as defense in depth — the head is truncated at the first CRLFCRLF delimiter, so each header field yields exactly one header-loop line and the empty line never appears in a bounded head. A request whose count exceeds 16 is rejected with the new exact discriminant `ConnectError::TooManyHeaderLines`, mapped to `ConnectHeadReason::TooManyHeaderLines` (`src/connect.rs:61`, `:126`, `:149`). `ConnectHeadReason::COUNT` is now 14 (`src/connect.rs:160`), `AnyIllegalCause::KIND_COUNT` is 19 (`src/enforcement/policy.rs:21`), and the monitoring grammar's fixed kind labels follow (`c14`, `a14`; `src/log.rs:1846`, `:1850`, `:1937`). The bound is a parse-classification bound, not a buffer change: the fixed request-head buffer and its size limits are unchanged, and a head of exactly 16 fields is accepted at the boundary.
 
 #### Vec 19 — Passive resolver degraded signaling
 
-The startup-resolution and refresh clauses (`:62`–`:78`) govern the resolver stub. This increment adds a passive degradation state machine: after three consecutive counted exchange failures the resolver relocates into `Degraded` mode (`DEGRADED_AFTER`, `src/startup_dns.rs:550`; the `ResolverDegradation` state at `:536-546` makes the count-degradation boundary structural — `Healthy` can never hold three consecutive failures), and any subsequently successful publication relocates it back to healthy, restarting the consecutive-failure count from zero (`note_success`). A valid negative response counts as a successful exchange. The state machine emits exactly one enter crossing on relocation into degraded and exactly one exit crossing on recovery — never one per individual failure — accumulated as a drainable transition count (`record_resolver_failure`/`record_resolver_success`, `src/startup_dns.rs:1804-1821`; drained via `take_resolver_transitions`). The shared serving owner drains pending crossings each turn and after the startup window (`drain_resolver_transitions`, `src/serve.rs:381`, `:585`) into enforcement via `Enforcement::note_fact_resolver_degraded()` (`src/enforcement/state.rs`), landing in the saturating `FactCounters::resolver_degraded` (`src/enforcement/monitor.rs`). The monitor grammar folds the counter into `facts_total()`, surfaces it as the zero-suppressed `rd=` key, and counts its overflow into `ofacts` (`src/log.rs`). The fact is edge-triggered, so an operator observing `rd=` sees each degraded-mode transition instead of a per-failure flood, at zero new allocations and zero new log surfaces.
+The startup-resolution and refresh clauses (§Configuration & DNS) govern the resolver stub. This increment adds a passive degradation state machine: after three consecutive counted exchange failures the resolver relocates into `Degraded` mode (`DEGRADED_AFTER`, `src/startup_dns.rs:550`; the `ResolverDegradation` state at `:536-546` makes the count-degradation boundary structural — `Healthy` can never hold three consecutive failures), and any subsequently successful publication relocates it back to healthy, restarting the consecutive-failure count from zero (`note_success`). A valid negative response counts as a successful exchange. The state machine emits exactly one enter crossing on relocation into degraded and exactly one exit crossing on recovery — never one per individual failure — accumulated as a drainable transition count (`record_resolver_failure`/`record_resolver_success`, `src/startup_dns.rs:1804-1821`; drained via `take_resolver_transitions`). The shared serving owner drains pending crossings each turn and after the startup window (`drain_resolver_transitions`, `src/serve.rs:381`, `:585`) into enforcement via `Enforcement::note_fact_resolver_degraded()` (`src/enforcement/state.rs`), landing in the saturating `FactCounters::resolver_degraded` (`src/enforcement/monitor.rs`). The monitor grammar folds the counter into `facts_total()`, surfaces it as the zero-suppressed `rd=` key, and counts its overflow into `ofacts` (`src/log.rs`). The fact is edge-triggered, so an operator observing `rd=` sees each degraded-mode transition instead of a per-failure flood, at zero new allocations and zero new log surfaces.
 
 #### Vec 14 — Widened refresh band with a split negative floor
 
-Spec `:76` (refresh scheduling) and `:77` (negative refresh scheduling), with the profile rows `:176`/`:177`, are amended. The normal refresh band widens to `min(900 seconds, max(5 seconds, entry TTL))` (`REFRESH_MIN = 5`, `REFRESH_MAX = 900`, `src/schedule.rs:5`, `:8`; `normal_refresh_interval` clamp `:42-44`). The SOA-based negative refresh band becomes `min(900 seconds, max(30 seconds, min(SOA TTL, SOA.MINIMUM)))` with its own 30-second floor (`NEGATIVE_REFRESH_MIN`, `src/schedule.rs:11`; `negative_refresh_interval` clamp `:50-52`), preserving the established 30-second negative floor while the cap rises to 900 with the normal band. The per-second start-rate guard of `:76` is unchanged and is verified to still hold at the 5-second cadence the widened floor makes plausible (test `start_rate_guard_holds_within_a_five_second_refresh_cadence`). The cache-level TTL cap at `src/cache.rs:328` is explicitly unchanged: a received TTL is never raised above its validated value on the way into the cache; the widened scheduling bounds affect only refresh due times.
+Spec §Configuration & DNS (refresh scheduling) and §Configuration & DNS (negative refresh scheduling), with the profile rows §Initial resource profile, are amended. The normal refresh band widens to `min(900 seconds, max(5 seconds, entry TTL))` (`REFRESH_MIN = 5`, `REFRESH_MAX = 900`, `src/schedule.rs:5`, `:8`; `normal_refresh_interval` clamp `:42-44`). The SOA-based negative refresh band becomes `min(900 seconds, max(30 seconds, min(SOA TTL, SOA.MINIMUM)))` with its own 30-second floor (`NEGATIVE_REFRESH_MIN`, `src/schedule.rs:11`; `negative_refresh_interval` clamp `:50-52`), preserving the established 30-second negative floor while the cap rises to 900 with the normal band. The per-second start-rate guard of §Configuration & DNS is unchanged and is verified to still hold at the 5-second cadence the widened floor makes plausible (test `start_rate_guard_holds_within_a_five_second_refresh_cadence`). The cache-level TTL cap at `src/cache.rs:328` is explicitly unchanged: a received TTL is never raised above its validated value on the way into the cache; the widened scheduling bounds affect only refresh due times.
 
-### Status
+## Hardening: CNAME bailiwick enforcement, DNS anomaly fact surface, resolver peer assertion
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| CONNECT: header-line count bound at 16; exact `TooManyHeaderLines` discriminant (`:40`/`:41`) | Implemented (this increment) |
-| Resolver: consecutive-failure `Degraded` state machine; one fact per enter/exit crossing; `rd=` monitor key (`:62`–`:78`) | Implemented (this increment) |
-| Refresh: normal band 5/900 seconds; SOA-based negative floor 30/900 seconds (`:76`/`:77`, `:176`/`:177`) | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Hardening: CNAME bailiwick enforcement, DNS anomaly fact surface, resolver peer assertion — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-hrdn3`, 2026-10-19). It records the user authorization for four hardening increments applied together in one review-driven increment: (1) a followed CNAME link target must land inside an allowlist bailiwick zone or the exchange fails with the distinct `BailiwickViolation` discriminant (`:71`); (2) an answer carrying a resource-record TTL above 96 hours is detected and counted (`:74`); (3) those two detections plus the resolver-peer assertion surface as a typed, saturating DNS-anomaly fact vocabulary (`bv`/`rpm`/`xttl`) folded into the `alumina-rp2e` enforcement monitor; and (4) a completed connect landing on a peer other than the configured nameserver fails the exchange with the distinct `ResolverPeerMismatch` anomaly (`:68`). It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
-
-### Amended surface
+### CNAME bailiwick, DNS anomaly facts, and resolver peer assertion
 
 #### Vec 11 — CNAME bailiwick enforcement
 
-Spec `:71` governs the response-provenance rules and the CNAME walk. This increment confines every followed CNAME link to the allowlist bailiwick zones: the resolver derives a deduplicated zone set from the allowlist once per resolve (`BailiwickZones::from_allowlist`, `src/dns.rs:787`), a hostname with more than two labels contributing its parent domain and a two-label apex contributing itself (`zone_of`, `src/dns.rs:821`); `covers` then decides membership on label boundaries via `soa_covers` (`src/dns.rs:811`, `:1175`). The check is placed after the existing CNAME-provenance rules in the followed-link walk (`src/dns.rs:1142`), so the ≤8-link bound, loop detection, and no-conflicting-target rules still apply and bailiwick is the final gate on where a link may land. A target outside every zone fails the exchange with the distinct `DnsError::BailiwickViolation` (`src/dns.rs:247`), never silently routing into an attacker zone. `BailiwickZones` uses the fixed `ALLOWLIST_MAX` `DnsName` slots (`src/dns.rs:769`) with no heap allocation, preserving the fixed profile; the wire-parser fuzz target that holds no allowlist carries its own single-zone set (`BailiwickZones::single`, `src/dns.rs:802`).
+Spec §Configuration & DNS governs the response-provenance rules and the CNAME walk. This increment confines every followed CNAME link to the allowlist bailiwick zones: the resolver derives a deduplicated zone set from the allowlist once per resolve (`BailiwickZones::from_allowlist`, `src/dns.rs:787`), a hostname with more than two labels contributing its parent domain and a two-label apex contributing itself (`zone_of`, `src/dns.rs:821`); `covers` then decides membership on label boundaries via `soa_covers` (`src/dns.rs:811`, `:1175`). The check is placed after the existing CNAME-provenance rules in the followed-link walk (`src/dns.rs:1142`), so the ≤8-link bound, loop detection, and no-conflicting-target rules still apply and bailiwick is the final gate on where a link may land. A target outside every zone fails the exchange with the distinct `DnsError::BailiwickViolation` (`src/dns.rs:247`), never silently routing into an attacker zone. `BailiwickZones` uses the fixed `ALLOWLIST_MAX` `DnsName` slots (`src/dns.rs:769`) with no heap allocation, preserving the fixed profile; the wire-parser fuzz target that holds no allowlist carries its own single-zone set (`BailiwickZones::single`, `src/dns.rs:802`).
 
 #### Vec 32 — CNAME-chain pinning to known-good zones
 
-Spec `:71` governs the response-provenance rules and the CNAME walk, and vector 32's "known-good zones" pinning is realized by the same gate as Vec 11: every followed CNAME link is confined to the allowlist bailiwick zones derived above (`BailiwickZones::from_allowlist`, `src/dns.rs:787`; `covers`/`soa_covers`, `:811`/`:1175`), so a chain can never pass through or terminate in an attacker zone. The chain-pinning intent of vector 32 — chaining into attacker zones — is thereby fully covered: a target outside every zone fails the exchange with `DnsError::BailiwickViolation` (`src/dns.rs:247`) rather than being followed. The two vectors differ only in vantage (bailiwick membership vs. pinning to known-good zones) and share one implementation seam; both are promoted out of candidate research together.
+Spec §Configuration & DNS governs the response-provenance rules and the CNAME walk, and vector 32's "known-good zones" pinning is realized by the same gate as Vec 11: every followed CNAME link is confined to the allowlist bailiwick zones derived above (`BailiwickZones::from_allowlist`, `src/dns.rs:787`; `covers`/`soa_covers`, `:811`/`:1175`), so a chain can never pass through or terminate in an attacker zone. The chain-pinning intent of vector 32 — chaining into attacker zones — is thereby fully covered: a target outside every zone fails the exchange with `DnsError::BailiwickViolation` (`src/dns.rs:247`) rather than being followed. The two vectors differ only in vantage (bailiwick membership vs. pinning to known-good zones) and share one implementation seam; both are promoted out of candidate research together.
 
 #### Vec 21 — DNS anomaly fact surface
 
-The startup-resolution and refresh clauses (`:62`–`:78`) and the `alumina-rp2e` monitoring vocabulary govern the resolver stub and monitor, and vector 21's "detect unexpected TTLs" is realized as one of the anomaly kinds. This increment adds a typed DNS-anomaly surface to the monitor: `DnsAnomalyKind` with the three variants `BailiwickViolation`, `ResolverPeerMismatch`, and `ExtremeTtl` and a structural `COUNT`/`index`/`from_index` (`src/enforcement/monitor.rs:22-47`), carried as `FactCounters::dns_anomaly: [SaturatingCounter; 3]` (`src/enforcement/monitor.rs:14`). The `ExtremeTtl` variant is fed by a per-exchange detection for an answer whose address- or CNAME-carrying resource-record TTL exceeds the threshold `EXTREME_TTL_THRESHOLD = 345_600` (96 h; `src/dns.rs:25`): the flag lives on the reused `ResponseWorkspace` (`extreme_ttl`, `src/dns.rs:712`, `:725`), reset at each parse start (`:857`), set in the answer loop when an A/AAAA/CNAME record's TTL crosses the threshold (`:912`), read back through the `extreme_ttl()` accessor (`:734`), and noted once per affected exchange after a successful publish (`src/startup_dns.rs:1412-1414`). The existing honored-TTL cap at `src/cache.rs:328` is unchanged: a received TTL is never raised on its way into the cache; this increment only observes and counts the extreme value. The transport retains a matching fixed `dns_anomalies: [u32; 3]` (`src/startup_dns.rs:622`), notes each detection saturatingly (`note_dns_anomaly`, `:1022`), and drains it once with `mem::take` so a drain never double-counts (`take_dns_anomalies`, `:1028`). The shared serving owner drains pending anomalies each turn and after the startup window (`drain_dns_anomalies`, `src/serve.rs:383`, `:603`) into enforcement via `Enforcement::note_fact_dns_anomaly()` (`src/enforcement/state.rs`), landing in the saturating monitor counter. The monitor grammar folds the counters into `facts_total()`, counts any overflow into `ofacts` (`src/log.rs:490`), and surfaces them as the zero-suppressed, deterministic-order `bv=`/`rpm=`/`xttl=` keys emitted after the `rd=` block (`src/log.rs:527-541`), at zero new allocations and zero new log surfaces.
+The startup-resolution and refresh clauses (§Configuration & DNS) and the `alumina-rp2e` monitoring vocabulary govern the resolver stub and monitor, and vector 21's "detect unexpected TTLs" is realized as one of the anomaly kinds. This increment adds a typed DNS-anomaly surface to the monitor: `DnsAnomalyKind` with the three variants `BailiwickViolation`, `ResolverPeerMismatch`, and `ExtremeTtl` and a structural `COUNT`/`index`/`from_index` (`src/enforcement/monitor.rs:22-47`), carried as `FactCounters::dns_anomaly: [SaturatingCounter; 3]` (`src/enforcement/monitor.rs:14`). The `ExtremeTtl` variant is fed by a per-exchange detection for an answer whose address- or CNAME-carrying resource-record TTL exceeds the threshold `EXTREME_TTL_THRESHOLD = 345_600` (96 h; `src/dns.rs:25`): the flag lives on the reused `ResponseWorkspace` (`extreme_ttl`, `src/dns.rs:712`, `:725`), reset at each parse start (`:857`), set in the answer loop when an A/AAAA/CNAME record's TTL crosses the threshold (`:912`), read back through the `extreme_ttl()` accessor (`:734`), and noted once per affected exchange after a successful publish (`src/startup_dns.rs:1412-1414`). The existing honored-TTL cap at `src/cache.rs:328` is unchanged: a received TTL is never raised on its way into the cache; this increment only observes and counts the extreme value. The transport retains a matching fixed `dns_anomalies: [u32; 3]` (`src/startup_dns.rs:622`), notes each detection saturatingly (`note_dns_anomaly`, `:1022`), and drains it once with `mem::take` so a drain never double-counts (`take_dns_anomalies`, `:1028`). The shared serving owner drains pending anomalies each turn and after the startup window (`drain_dns_anomalies`, `src/serve.rs:383`, `:603`) into enforcement via `Enforcement::note_fact_dns_anomaly()` (`src/enforcement/state.rs`), landing in the saturating monitor counter. The monitor grammar folds the counters into `facts_total()`, counts any overflow into `ofacts` (`src/log.rs:490`), and surfaces them as the zero-suppressed, deterministic-order `bv=`/`rpm=`/`xttl=` keys emitted after the `rd=` block (`src/log.rs:527-541`), at zero new allocations and zero new log surfaces.
 
 #### Vec 22 — Resolver peer assertion
 
-Spec `:68` fixes one resolver per tunnel with a single transport peer. This increment adds a passive assertion at the transport: a completed nonblocking connect whose peer is not the configured nameserver fails the exchange with `FailureReason::Connect` and notes a `ResolverPeerMismatch` anomaly (`peer_matches`, `src/startup_dns.rs:1010`; the peer check in `step_connect`, `:1216-1223`). The assertion runs once per completed connect — a warm reused connection passes without re-asserting — and the configured nameserver address is the only accepted peer. Under test the seam can force a mismatch (`force_peer_mismatch`) so the branch is exercised end to end (vec-22).
+Spec §Configuration & DNS fixes one resolver per tunnel with a single transport peer. This increment adds a passive assertion at the transport: a completed nonblocking connect whose peer is not the configured nameserver fails the exchange with `FailureReason::Connect` and notes a `ResolverPeerMismatch` anomaly (`peer_matches`, `src/startup_dns.rs:1010`; the peer check in `step_connect`, `:1216-1223`). The assertion runs once per completed connect — a warm reused connection passes without re-asserting — and the configured nameserver address is the only accepted peer. Under test the seam can force a mismatch (`force_peer_mismatch`) so the branch is exercised end to end (vec-22).
 
-### Status
+## Hardening: resolver set moved into the validated TOML config, resolv.conf reader removed, V18 failover deferred
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Bailiwick + known-good-zone pinning: followed CNAME links confined to allowlist zones; outside target fails with `BailiwickViolation` (`:71`) | Implemented (this increment) |
-| Anomaly fact surface: typed saturating `bv`/`rpm`/`xttl` counters incl. extreme-TTL (>96 h) detection, folded into the rp2e monitor (`:62`–`:78`, `:74`) | Implemented (this increment) |
-| Peer assertion: connected peer ≠ configured nameserver fails connect with `ResolverPeerMismatch` (`:68`) | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
+**Authority (Stage 2, 2026-10-20).** The user additionally authorized the multi-resolver failover/failback state machine (Vec 18, `alumina-hrdn4`) to land in this same amendment section. The transport now relocates across the configured resolver array under per-resolver passive degradation, with bounded failback to the primary, while the fixed resource profile (1 DNS TCP connection / 1 outstanding query, §Initial resource profile) and the no-fallback trust boundary are preserved: a degraded resolver never causes a connect to an undeclared or unauthenticated endpoint, because the transport relays only among the addresses the validated `resolver` array declares. The peer assertion surface (§Configuration & DNS) is generalized from "the configured primary" to "the currently active resolver". This stage amends only the resolver bookkeeping and peer-assertion surfaces enumerated below; every other clause remains binding as before.
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Hardening: resolver set moved into the validated TOML config, resolv.conf reader removed, V18 failover deferred — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-hrdn4`, Stage 1, 2026-10-20). It records the user authorization to move the resolver configuration into the validated TOML config document: (1) the config gains a mandatory `resolver` array of 1 through 5 numeric unicast IPv4/IPv6 addresses, port 53, no zone identifier (`:54`/`:56`); (2) resolver selection reads the first (primary) entry of that validated array instead of a platform resolver file, deleting the `resolv.conf` reader entirely (`:62`); (3) the startup/read-once and image-surfaces are updated so the config is read once and the production image carries only `/alumina` + `/config.toml` (`:118`/`:150`); and (4) the 4 KiB document preflight is re-measured with the added key. It amends only the enumerated surfaces; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. Multi-resolver failover (Vec 18) is **out of scope for this stage** and is recorded as deferred below. The amended behavior is implemented in the code cited below; this section records only its user authorization.
-
-**Authority (Stage 2, 2026-10-20).** The user additionally authorized the multi-resolver failover/failback state machine (Vec 18, `alumina-hrdn4`) to land in this same amendment section. The transport now relocates across the configured resolver array under per-resolver passive degradation, with bounded failback to the primary, while the fixed resource profile (1 DNS TCP connection / 1 outstanding query, `:172`) and the no-fallback trust boundary are preserved: a degraded resolver never causes a connect to an undeclared or unauthenticated endpoint, because the transport relays only among the addresses the validated `resolver` array declares. The peer assertion surface (`:68`) is generalized from "the configured primary" to "the currently active resolver". This stage amends only the resolver bookkeeping and peer-assertion surfaces enumerated below; every other clause remains binding as before.
-
-### Amended surface
+### Resolver set, config surface, and failover/failback
 
 #### Resolver source and count bound
 
-Spec `:54`/`:56` govern the configuration document and its mandatory keys, and `:62` governs resolver selection. This increment adds a required `resolver` key holding an array of 1 through 5 addresses (`MAX_RESOLVERS = 5`, `src/resolver.rs:6`; re-exported as `config::MAX_RESOLVERS`). Each entry must be a numeric unicast IPv4 or IPv6 address with no zone identifier, served on the fixed port 53 (`resolver::select`, `src/resolver.rs:56-76`; `RESOLVER_PORT`, `src/resolver.rs:4`). The validated set is a fixed `[Nameserver; MAX_RESOLVERS]` array plus a length so empty and over-capacity inputs are unrepresentable at the config boundary (`ResolverSet`, `src/resolver.rs:89-131`; sole constructor `ResolverSet::from_slice` refuses zero or > 5 entries, `:99-110`); `primary()` (index 0) is structural and infallible. The platform resolver file — `read_resolver_config_file`/`parse_resolver_config` and the `Scalar`-style line scanner — no longer exists; no OS resolver file is read. The resolver endpoint remains fixed for the process lifetime; ignore search suffixes and tuning options as before.
+Spec §Configuration & DNS govern the configuration document and its mandatory keys, and §Configuration & DNS governs resolver selection. This increment adds a required `resolver` key holding an array of 1 through 5 addresses (`MAX_RESOLVERS = 5`, `src/resolver.rs:6`; re-exported as `config::MAX_RESOLVERS`). Each entry must be a numeric unicast IPv4 or IPv6 address with no zone identifier, served on the fixed port 53 (`resolver::select`, `src/resolver.rs:56-76`; `RESOLVER_PORT`, `src/resolver.rs:4`). The validated set is a fixed `[Nameserver; MAX_RESOLVERS]` array plus a length so empty and over-capacity inputs are unrepresentable at the config boundary (`ResolverSet`, `src/resolver.rs:89-131`; sole constructor `ResolverSet::from_slice` refuses zero or > 5 entries, `:99-110`); `primary()` (index 0) is structural and infallible. The platform resolver file — `read_resolver_config_file`/`parse_resolver_config` and the `Scalar`-style line scanner — no longer exists; no OS resolver file is read. The resolver endpoint remains fixed for the process lifetime; ignore search suffixes and tuning options as before.
 
 #### Config validation surface and error precedence
 
-`resolver` is now a mandatory configuration key: a document with every other key present but no `resolver` fails with `MissingField("resolver")`. Count outside 1..=5 maps to the new `ConfigError::ResolverCountOutOfRange { got }` (`src/config.rs:482`), and an invalid address to the new `ConfigError::InvalidResolver { index, value }` (`:486`, 1-based index in its diagnostic), both exiting 78 (EX_CONFIG) like every other configuration error (`:58`). The resolver is built last in `from_table` (`build_resolver_set`, `src/config.rs:699`), after enforcement/allowlist/listen/allowance validation, so every pre-existing invalid-config error keeps its established precedence and no error fixture changes; only previously-valid documents must now carry `resolver`.
+`resolver` is now a mandatory configuration key: a document with every other key present but no `resolver` fails with `MissingField("resolver")`. Count outside 1..=5 maps to the new `ConfigError::ResolverCountOutOfRange { got }` (`src/config.rs:482`), and an invalid address to the new `ConfigError::InvalidResolver { index, value }` (`:486`, 1-based index in its diagnostic), both exiting 78 (EX_CONFIG) like every other configuration error (§Configuration & DNS). The resolver is built last in `from_table` (`build_resolver_set`, `src/config.rs:699`), after enforcement/allowlist/listen/allowance validation, so every pre-existing invalid-config error keeps its established precedence and no error fixture changes; only previously-valid documents must now carry `resolver`.
 
 #### Boot, image, and read-once surfaces
 
-`run_boot(config_path)` takes a single argument; `BootReport.nameserver` is removed and the primary resolver is read from the validated config (`report.config.resolver_set().primary()`, `src/boot.rs`; `src/main.rs` prints and consumes it from the config, no `RESOLVER_PATH`). The startup order clause `:64` ("configuration and resolver reads") is satisfied by one config read carrying both allowlist and resolver set. The image clause `:118` ("its configuration file, and the platform resolver configuration") becomes: the production image holds the statically linked binary and its configuration file (validated allowlist + resolver set) and nothing else. The read-once clause `:150` is met by reading `config.toml` once; no resolver-specific file read remains.
+`run_boot(config_path)` takes a single argument; `BootReport.nameserver` is removed and the primary resolver is read from the validated config (`report.config.resolver_set().primary()`, `src/boot.rs`; `src/main.rs` prints and consumes it from the config, no `RESOLVER_PATH`). The startup order clause §Configuration & DNS ("configuration and resolver reads") is satisfied by one config read carrying both allowlist and resolver set. The image clause §Typical deployment pattern ("its configuration file, and the platform resolver configuration") becomes: the production image holds the statically linked binary and its configuration file (validated allowlist + resolver set) and nothing else. The read-once clause §Architecture is met by reading `config.toml` once; no resolver-specific file read remains.
 
 #### 4 KiB document preflight (measured, not assumed)
 
-The "A compact configuration with 32 entries of 100 ASCII bytes each" bound at `:54` was re-measured with the new key using the parser-real assertions in `src/config.rs`. The tightest 32 × 100-byte compact form (`[any_illegal]` + `[actions]`, `full_group_document`) previously measured 4061 B; adding the mandatory one-entry `resolver = ["1.1.1.1"]` (23 B including newline) yields **4084 B**, which fits the 4096 B limit — asserted in `compact_32_hundred_byte_names_measured_total_is_4084` (`src/config.rs:1204-1211`). Honest bounds with the 5-resolver maximum: a 2-entry resolver (4095 B) still fits; a 3-, 4-, or 5-entry resolver (4106/4117/4128 B) with 32 × 100-byte names **exceeds** the documented limit and is not configurable in that tightest form — the max-count 5-entry form needs shorter allowlist names. No cap expansion is made: the 4096 B document limit is unchanged, and the 5-resolver maximum trades full name-length headroom against the new surface — names short enough to leave sufficient headroom can still declare all five resolvers. The 4 KiB fit preflight therefore **passes** for the compact one-entry form this stage ships.
+The "A compact configuration with 32 entries of 100 ASCII bytes each" bound at §Configuration & DNS was re-measured with the new key using the parser-real assertions in `src/config.rs`. The tightest 32 × 100-byte compact form (`[any_illegal]` + `[actions]`, `full_group_document`) previously measured 4061 B; adding the mandatory one-entry `resolver = ["1.1.1.1"]` (23 B including newline) yields **4084 B**, which fits the 4096 B limit — asserted in `compact_32_hundred_byte_names_measured_total_is_4084` (`src/config.rs:1204-1211`). Honest bounds with the 5-resolver maximum: a 2-entry resolver (4095 B) still fits; a 3-, 4-, or 5-entry resolver (4106/4117/4128 B) with 32 × 100-byte names **exceeds** the documented limit and is not configurable in that tightest form — the max-count 5-entry form needs shorter allowlist names. No cap expansion is made: the 4096 B document limit is unchanged, and the 5-resolver maximum trades full name-length headroom against the new surface — names short enough to leave sufficient headroom can still declare all five resolvers. The 4 KiB fit preflight therefore **passes** for the compact one-entry form this stage ships.
 
 #### Multi-resolver failover and failback (Vec 18)
 
-Spec `:68` (peer assertion) and `:172` (DNS TCP transport resource row) govern this stage's incremental surface; no other clause changes. The transport owns a per-resolver `ResolverDegradation` and an `ActiveResolver` index that travels with the configured set length, so an out-of-range active index is unrepresentable (`ActiveResolver`, `src/startup_dns.rs:588-615`; `degradations: [ResolverDegradation; MAX_RESOLVERS]`, `:669`). The set is installed from the validated config at window begin (`begin_window`, `:805`; `resolve_window`, `:1649`), and the pre-window state is a guarded single-resolver (`resolvers: None`) so boot and loopback injection behave identically to the Stage-1 single-resolver surface.
+Spec §Configuration & DNS (peer assertion) and §Initial resource profile (DNS TCP transport resource row) govern this stage's incremental surface; no other clause changes. The transport owns a per-resolver `ResolverDegradation` and an `ActiveResolver` index that travels with the configured set length, so an out-of-range active index is unrepresentable (`ActiveResolver`, `src/startup_dns.rs:588-615`; `degradations: [ResolverDegradation; MAX_RESOLVERS]`, `:669`). The set is installed from the validated config at window begin (`begin_window`, `:805`; `resolve_window`, `:1649`), and the pre-window state is a guarded single-resolver (`resolvers: None`) so boot and loopback injection behave identically to the Stage-1 single-resolver surface.
 
 - **Degradation (V19, `DEGRADED_AFTER = 3`, `src/startup_dns.rs:552`).** Every counted exchange failure advances the *active* resolver's consecutive-failure state; the third consecutive failure relocates it into passive degraded mode and emits one `rd` enter crossing for the monitor. A validated published outcome resets the active resolver to healthy and emits one exit crossing when it was degraded (`on_exchange_succeeded`); a success on a degraded resolver recovers that resolver in place.
 - **Failover (`on_exchange_failed`, `src/startup_dns.rs:2012`).** Once the active resolver is degraded, the next counted failure relocates the transport to the next healthy resolver in the set, scanning forward with wrap and skipping degraded candidates (`next_healthy_after_active`), closing and re-pointing the single DNS TCP connection on relocation so the next exchange dials the new active resolver. When every configured resolver is degraded the transport stays on the last active resolver and fails closed; it never dials outside the declared set.
 - **Failback (`FAILBACK_AFTER = 900 s`, `src/startup_dns.rs:558`).** Relocation to a non-primary arms a 900-second `now0`-scale grace; the next exchange after it elapses probes the primary again (`maybe_begin_failback`, called at the top of `start_exchange`, `src/startup_dns.rs:1792`). A successful probe settles it: the primary is recovered as the active resolver with its degradation reset, and no probe remains armed. A failed probe increments the primary's consecutive-failure count (the third re-degrades it), re-seats the transport onto the backup it came from, and re-arms the grace — never cascading a probe failure into a second failover candidate search while the primary is being probed. A success on a non-primary leaves the grace armed, so the primary is still probed at the next due exchange.
-- **Peer assertion (`peer_matches`, `src/startup_dns.rs:1090`).** The `:68` resolver-peer assertion now validates against the active resolver's address only, so a failover/failback re-point never trips the `ResolverPeerMismatch` anomaly on a correctly relocated connect, and a stray connect to a resolver the transport is not currently on still fails closed with `ResolverPeerMismatch`.
-- **Transport profile (`:172`).** The failover/failback machine moves an existing 1-conn/1-query transport between configured addresses; it never opens a second connection, so the "DNS TCP connections / outstanding queries | 1 / 1" row is unchanged. Failover tests are pure state-machine tests (`src/startup_dns/tests.rs`) because `Nameserver` fixes the port at 53, so a loopback failover test would dial a real host; the existing single-resolver loopback suite remains valid and unchanged.
+- **Peer assertion (`peer_matches`, `src/startup_dns.rs:1090`).** The §Configuration & DNS resolver-peer assertion now validates against the active resolver's address only, so a failover/failback re-point never trips the `ResolverPeerMismatch` anomaly on a correctly relocated connect, and a stray connect to a resolver the transport is not currently on still fails closed with `ResolverPeerMismatch`.
+- **Transport profile (§Initial resource profile).** The failover/failback machine moves an existing 1-conn/1-query transport between configured addresses; it never opens a second connection, so the "DNS TCP connections / outstanding queries | 1 / 1" row is unchanged. Failover tests are pure state-machine tests (`src/startup_dns/tests.rs`) because `Nameserver` fixes the port at 53, so a loopback failover test would dial a real host; the existing single-resolver loopback suite remains valid and unchanged.
 
-### Status
+## Hardening: resolver endpoint as IP+FQDN (V37, Package 1 of the DoT chain)
 
-| Surface | Status |
-| --- | --- |
-| This amendment published (Stage 1) | Current revision |
-| Resolver source: `resolv.conf` reader removed; validated `resolver` array (1..=5, numeric unicast, port 53, no zone id) is the sole resolver input; `resolver_set()`/`primary()` (`:54`/`:56`/`:62`) | Implemented (this increment) |
-| Config surface: mandatory `resolver` key; `ResolverCountOutOfRange`/`InvalidResolver` exit 78; validated last, error precedence unchanged (`:54`/`:56`/`:58`) | Implemented (this increment) |
-| Boot/read-once/image: `run_boot(config_path)` single-arg; config read once; image holds `/alumina` + `/config.toml` only (`:64`/`:118`/`:150`) | Implemented (this increment) |
-| 4 KiB preflight: tight 32 × 100-byte form 4061 → 4084 B with one-entry resolver (fits); 2-entry 4095 B fits; 3+/5-entry 4128 B exceeds, honestly documented; no cap expansion (`:54`) | Implemented (this increment) |
-| Multi-resolver failover / failback (Vec 18): per-resolver degradation (DEGRADED_AFTER=3), relocating failover with wrap to next healthy, fail-closed on exhaustion, 900 s bounded failback probing the primary, peer assertion vs active resolver only, 1-conn/1-query transport preserved (`:68`/`:172`) | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The hrdn3 resolver-peer assertion (`:68`) is preserved: a completed connect still lands only on the resolver the transport is currently active on (relocated by Stage-2 failover/failback among the addresses the validated `resolver` array declares, never beyond it). Nothing in this amendment loosens any of these items or restates any profile row differently, apart from the additive "Resolver set / per-resolver state | 5 / fixed" row above.
-
-## Hardening: resolver endpoint as IP+FQDN (V37, Package 1 of the DoT chain) — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-dot-chain-v37`, Package 1, 2026-10-20). It records the user authorization for the first package of the DNS-over-TLS (DoT) chain: each `resolver` array entry may now be an `IP#fqdn` form whose FQDN is validated (DNS-name syntax, no wildcard/IDN) and carried as the SNI/SAN match target for the future DoT handshake (port 853, Package 2); IP-only entries remain valid but are a tolerated degraded trust form and emit one startup warning each (`:54`/`:56`/`:62`). It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
-
-### Amended surface
+### Resolver FQDN metadata (IP#fqdn)
 
 #### V37 — Resolver FQDN metadata (`IP#fqdn`)
 
-Spec `:54`/`:56`/`:62` govern the configuration document and resolver selection, and the `alumina-hrdn4` amendment owns the validated `resolver` array. This increment extends each resolver entry with an optional validated name identity without changing the array's shape, its 1..=5 count bound, or its address validation: an entry may be `IP#fqdn` instead of a bare IP, with the IP half validated exactly as before (numeric unicast IPv4/IPv6, no zone identifier, fixed port 53) and the FQDN half validated as a DNS name.
+Spec §Configuration & DNS govern the configuration document and resolver selection, and the `alumina-hrdn4` amendment owns the validated `resolver` array. This increment extends each resolver entry with an optional validated name identity without changing the array's shape, its 1..=5 count bound, or its address validation: an entry may be `IP#fqdn` instead of a bare IP, with the IP half validated exactly as before (numeric unicast IPv4/IPv6, no zone identifier, fixed port 53) and the FQDN half validated as a DNS name.
 
 - **FQDN validation (`Fqdn`, `src/resolver.rs:22`).** Each label is 1–63 bytes of lowercase ASCII letters, digits, and hyphens, with no leading or trailing hyphen, and the total is at most `FQDN_MAX_LEN = 253` (`src/resolver.rs:10`). A wildcard `*` anywhere maps to `WildcardFqdn`; non-ASCII/IDN characters map to `IdnFqdn`; uppercase or otherwise non-DNS characters, and leading/trailing/empty labels (a leading or trailing dot), map to `InvalidFqdn` — the three new `ResolverError` discriminants live at `src/resolver.rs:125-127` (Display `:151-163`). Digit-leading labels are allowed (RFC 1123), matching the allowlist `config::Fqdn` label rule at `src/config.rs:35`. The validated name is stored inline as `[u8; FQDN_MAX_LEN]` with a `len: u8`, so `Nameserver` (`src/resolver.rs:88`) and `ResolverSet` remain `Copy` and the fixed zero-alloc profile is preserved.
 - **Entry parse (`select`, `src/resolver.rs:180`).** `select()` splits a token once on `#`: the IP half is validated exactly as before, and the FQDN half, when present, is validated as above. A bare IP yields `fqdn: None` (`is_ip_only()`, `src/resolver.rs:113`) and remains fully valid — IP-only is the tolerated degraded-trust form. A trailing `#pin-sha256=`-style suffix is rejected as `InvalidFqdn` through the non-DNS-characters rule.
-- **Carriage and accessors.** `Nameserver` and `ResolverSet` stay `Copy`; `build_resolver_set` (`src/config.rs:699`) is structurally unchanged — the `fqdn` field rides the existing validated surface. The additions are `fqdn()` (`src/resolver.rs:104`), `is_ip_only()` (`:113`), and `ResolverSet::iter()` (`src/resolver.rs:291`) for the boot scan. `src/startup_dns.rs` carries the copied set unchanged this package: the `:68` resolver-peer assertion remains address-based (a DoT handshake is not yet performed — port 853 is Package 2), so no transport edit is needed and both the single-resolver and failover/failback surfaces are untouched.
+- **Carriage and accessors.** `Nameserver` and `ResolverSet` stay `Copy`; `build_resolver_set` (`src/config.rs:699`) is structurally unchanged — the `fqdn` field rides the existing validated surface. The additions are `fqdn()` (`src/resolver.rs:104`), `is_ip_only()` (`:113`), and `ResolverSet::iter()` (`src/resolver.rs:291`) for the boot scan. `src/startup_dns.rs` carries the copied set unchanged this package: the §Configuration & DNS resolver-peer assertion remains address-based (a DoT handshake is not yet performed — port 853 is Package 2), so no transport edit is needed and both the single-resolver and failover/failback surfaces are untouched.
 - **Startup warning.** Every IP-only resolver entry emits one stdout startup warning — `BootReport::ip_only_resolvers()` (`src/boot.rs:46`) printed from `src/main.rs:51-53` — so a degraded-trust bare-IP deployment is operator-visible immediately.
 - **Config diagnostics.** `ConfigError::InvalidResolver`'s diagnostic text now names the `IP#fqdn` form; a malformed FQDN fails the same discriminant with the established exit 78 (EX_CONFIG) and precedence (`build_resolver_set` runs last in `from_table`, so earlier invalid-config errors keep their order).
 
 #### 4 KiB document preflight (re-measured, V37 form)
 
-The 4 KiB document bound at `:54` was re-measured for the V37 golden path with parser-real assertions in `src/config.rs`. The golden-path example shape — a 3-entry allowlist and a 5-resolver `IP#fqdn` array — serializes to **437 B**, pinned by `resolver_ip_fqdn_example_fits_4kib` (`src/config.rs:1415`, asserts `len == 437` and `<= 4096` and that it parses). The honest-bounds language of the `alumina-hrdn4` clause still holds in the tightest 32 × 100-byte compact form (`full_group_document`): the bare-IP one-entry form remains 4084 B, and a single realistic `IP#fqdn` entry (18-character `cloudflare-dns.com`) measures **4103 B** — over the limit — pinned by `compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_4103` (`src/config.rs:1216`). A one-entry `IP#fqdn` with an FQDN of 11 characters or fewer still fits (e.g. `dns.google`, 10 characters, keeps 4095 B). So, as the hrdn4 clause documented, the max-count/max-name compact form trades name-length headroom against this surface and needs shorter allowlist names (or shorter FQDNs) to hold `IP#fqdn` entries; no cap expansion is made.
+The 4 KiB document bound at §Configuration & DNS was re-measured for the V37 golden path with parser-real assertions in `src/config.rs`. The golden-path example shape — a 3-entry allowlist and a 5-resolver `IP#fqdn` array — serializes to **437 B**, pinned by `resolver_ip_fqdn_example_fits_4kib` (`src/config.rs:1415`, asserts `len == 437` and `<= 4096` and that it parses). The honest-bounds language of the `alumina-hrdn4` clause still holds in the tightest 32 × 100-byte compact form (`full_group_document`): the bare-IP one-entry form remains 4084 B, and a single realistic `IP#fqdn` entry (18-character `cloudflare-dns.com`) measures **4103 B** — over the limit — pinned by `compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_4103` (`src/config.rs:1216`). A one-entry `IP#fqdn` with an FQDN of 11 characters or fewer still fits (e.g. `dns.google`, 10 characters, keeps 4095 B). So, as the hrdn4 clause documented, the max-count/max-name compact form trades name-length headroom against this surface and needs shorter allowlist names (or shorter FQDNs) to hold `IP#fqdn` entries; no cap expansion is made.
 
-### Status
+## DoT transport (V1) and strict SPKI pinning (V5), Package 2 of the DoT chain
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Resolver FQDN metadata: optional validated `IP#fqdn` per `resolver` entry; `Fqdn` newtype with `InvalidFqdn`/`WildcardFqdn`/`IdnFqdn`; bare IP remains valid (`:54`/`:56`/`:62`) | Implemented (this increment) |
-| Carriage: `Nameserver`/`ResolverSet` stay `Copy`; `fqdn()`/`is_ip_only()`/`iter()`; transport unchanged, peer assertion address-based (`:68`) | Implemented (this increment) |
-| Operator surface: one stdout startup warning per IP-only resolver via `ip_only_resolvers()` (`src/boot.rs:46`, `src/main.rs:51-53`) | Implemented (this increment) |
-| 4 KiB preflight: golden-path 5×`IP#fqdn` example 437 B (fits); tight 32 × 100-byte one-entry form 4103 B with a realistic FQDN (exceeds), honestly documented (`:54`) | Implemented (this increment) |
-| DoT transport on port 853 with SNI/SAN validation | Deferred (next package of the DoT chain) |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array, and every configured resolver still dials fixed port 53 this package (DoT port 853 arrives only with the Package-2 transport as its own user-authorized amendment). Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## DoT transport (V1) and strict SPKI pinning (V5), Package 2 of the DoT chain — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-dot-chain-v1-v5`, Package 2, 2026-10-20). It records the user authorization for the second package of the DNS-over-TLS (DoT) chain begun by `alumina-dot-chain-v37` (Package 1, resolver FQDN metadata): the DNS-over-TLS transport on port 853 and its strict SPKI pin variant. It supersedes the `alumina-dot-chain-v37` status row "DoT transport on port 853 with SNI/SAN validation — Deferred (next package of the DoT chain)" and the `#pin-sha256=` suffix rejection the Package 1 amendment recorded at `src/resolver.rs` — a pin suffix is now a valid strict-pin entry, not an `InvalidFqdn`. It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding.
-
-### Amended surface
+### DoT transport and SPKI pinning
 
 #### Directory — three resolver trust forms, per-entry dial port
 
-Spec `:54`/`:56`/`:62` and the hrdn4/V37 amendments own the validated `resolver` array. Package 2 gives each 1..=5 entry one of three dial forms selected at startup by entry grammar (never mixed mid-flight, never silently downgraded):
+Spec §Configuration & DNS and the hrdn4/V37 amendments own the validated `resolver` array. Package 2 gives each 1..=5 entry one of three dial forms selected at startup by entry grammar (never mixed mid-flight, never silently downgraded):
 
 | Resolver entry | Dial | Trust on the handshake |
 | --- | --- | --- |
@@ -685,67 +531,26 @@ TLS state and its heap allocations are confined to the per-connect DoT setup sea
 
 Hermetic loopback tests (`src/startup_dns/dot_tests.rs`) drive a rustls `ServerConnection` responder over 127.0.0.1 with deterministic embedded certificates (self-signed EC P-256, CN/SAN `dot.test`, plus a same-SPKI SAN-mismatch variant) — no real resolver is dialed. They cover: pinned success for both names × A/AAAA over one warm connection; the handshake-before-send-before-receive stage order; wrong-pin rejection; SAN-mismatch rejection; and unpinned-vs-empty-root rejection — each negative path counts 4 failed exchanges, publishes nothing, and leaves zero bindings. `dot_tests` is wired into the native verification gate (`scripts/verify.sh` INTENDED set; `mid`/`boundary phase1` clippy and the full lib test suite).
 
-### Status
+## Hardening: serving-from-stale observability level bit
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| DoT transport on port 853: `step_handshake`/`probe_tls_handshake`, `upgrade_to_tls`, TLS read/write steps, warm connection reuse; per-entry dial port via `Nameserver::port()` | Implemented (this increment) |
-| Strict SPKI pin `IP#fqdn#pin-sha256=<b64>`: `SpiPin` inline carrier, base64 decode, ring SHA-256 SPKI comparison + FQDN/SAN, pin branch skips chain validation | Implemented (this increment) |
-| CA-chain (no-pin) DoT: `verify_server_cert_signed_by_trust_anchor` against `RootCertStore::empty()` — deterministic fail-closed until trust-anchor intake | Implemented (this increment); trust-anchor intake deferred |
-| No silent plain-DNS fallback; single counted connect failure per failed exchange | Implemented (this increment) |
-| TLS/heap confined to per-connect DoT setup; bare-IP path allocation-free | Implemented (this increment) |
-| Hermetic loopback DoT tests (pinned success, wrong pin, SAN mismatch, empty-root, stage order) wired into native verification | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; the bare-IP resolver path and its fixed port-53 behavior are unchanged. Doctrine: no fallback beyond the declared `resolver` array — a DoT entry's failure is a counted connect failure with no cleartext downgrade and no dynamic pin update. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Hardening: serving-from-stale observability level bit — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-sslv`, 2026-10-21). It records the user authorization for one observability increment: the enforcement monitor surfaces the persistent "serving from a stale cache binding" state as a latched, zero-suppressed `ss=` level bit in the existing monitor record. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
-
-### Amended surface
+### Serving-from-stale level bit
 
 The `alumina-rp2e` monitoring vocabulary governs the enforcement monitor record. This increment adds a single latched level bit: `Monitor::serving_stale` (`src/enforcement/monitor.rs`), set by `note_serving_stale` (set + dirty) and cleared by `note_serving_fresh` (clear, deliberately no dirty to avoid log-volume regression), with the `serving_stale()` accessor. The shared serving owner notes the bit at peer admission (`note_peer_freshness`, `src/serving.rs`) from the cache entry state that granted the peer (Stale → set, Fresh → clear, Empty/Retired → no-op), before the slot borrow. The monitor grammar emits the zero-suppressed `ss=` key after the `rd=` block and before the `bv=` block (`src/log.rs`), only when latched (never `ss=0`), at +5 bytes when set; the all-saturated record with `ss=1` stays inside the 8192-byte slot. The bit is observability-only: serving behavior is byte-identical, with zero new allocations, zero new log surfaces, and no runtime-surface expansion.
 
-### Status
+## Hardening: failback consecutive-success hysteresis
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Monitor: latched `ss=` serving-from-stale level bit, zero-suppressed after `rd=`, observability-only (`:62`–`:78` monitoring vocabulary) | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Hardening: failback consecutive-success hysteresis — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-failbk`, 2026-10-21). It records the user authorization for one state-machine increment: the failback probe settles only after `FAILBACK_SUCCESSES = 3` consecutive successful primary probes, matching `DEGRADED_AFTER = 3` for hysteresis symmetry. It amends only the failback clause of the multi-resolver failover/failback surface (`alumina-hrdn4`); every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
-
-### Amended surface
+### Failback consecutive-success settle
 
 The `alumina-hrdn4` failback clause governs the bounded failback probe of the primary resolver. This increment adds a consecutive-success counter: `StartupDns::failback_successes` (`src/startup_dns.rs`), reset to zero when a failback probe begins (`maybe_begin_failback`) and when a probe fails (re-seating onto the backup and re-arming the 900-second grace). A successful probe increments the counter; only the third consecutive successful primary probe settles the failback — clearing the probe source and grace — so a transient primary is not re-adopted on a single success. A success on a non-primary backup leaves the counter and grace untouched. The counter is state-machine-local: zero new allocations, zero new log keys, no runtime-surface expansion, and the fixed 1-conn/1-query transport profile is unchanged.
 
-### Status
+## DoT transport: serving-lifetime warm reuse
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Failback: `FAILBACK_SUCCESSES = 3` consecutive-success settle, counter reset on probe begin/failure, backup success leaves counter untouched (`alumina-hrdn4` failback clause) | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
+### Serving-lifetime warm reuse
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## DoT transport: serving-lifetime warm reuse — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-dotrt`, 2026-10-21). It records the user authorization for one lifecycle increment to the DoT transport: the one established DoT TLS connection is retained across the serving lifetime (idle retention) rather than closed at the end of the startup window, extending the `alumina-dot-chain-v1-v5` warm-reuse clause. It amends only the warm-reuse/lifecycle surface of the DoT transport amendment enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
-
-### Amended surface
-
-The `alumina-dot-chain-v1-v5` warm-reuse clause (`:679`) retained one established TLS connection across the startup window's exchanges. This increment extends that retention to the serving lifetime: the DoT connection established during the startup window is retained (idle) across serving refreshes and reused for subsequent DNS exchanges — no rebuild, no fresh handshake, and no re-allocation of TLS state on refresh. The prior window-end close is removed: the transport is no longer torn down when the startup window settles.
+The `alumina-dot-chain-v1-v5` warm-reuse clause (§Transport confinement and lifecycle) retained one established TLS connection across the startup window's exchanges. This increment extends that retention to the serving lifetime: the DoT connection established during the startup window is retained (idle) across serving refreshes and reused for subsequent DNS exchanges — no rebuild, no fresh handshake, and no re-allocation of TLS state on refresh. The prior window-end close is removed: the transport is no longer torn down when the startup window settles.
 
 The retention mechanism is the shared registration's `armed` interest: it clears to `None` while the exchange is idle (`sync_shared`, `src/startup_dns.rs:1345`), so the owner's poll never waits on the retained socket (no spin), while the connection itself stays owned in the transport (`self.conn`). The owner re-aligns the shared registration every serving turn (`sync_dns_shared`, `src/runtime.rs:265`) and once at window end (`src/serving/startup.rs:206`); `start_exchange` (`src/startup_dns.rs`) reuses the retained connection when one is present, and `attach_shared` (`src/startup_dns.rs:1319`) accepts a retained connection (a no-op when the registration is already shared). TLS state and its heap allocations remain confined to the per-connect DoT setup seam `build_tls_connection` (`src/startup_dns.rs:766`) exactly as before.
 
@@ -753,129 +558,62 @@ The close-on-failure, close-on-relocation, and close-on-shutdown lifecycle is un
 
 A guard test proves the increment: `serving_refresh_retains_dot_transport_without_rebuild` (`src/startup_dns/dot_tests.rs:574`) drives a serving refresh over the retained DoT connection and asserts no transport rebuild occurs.
 
-### Status
+## Observability: DoT→plain downgrade counter
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Serving-lifetime warm reuse of the one established DoT connection; idle `armed` clears so the owner never waits on the retained socket; refresh reuses the retained connection with no rebuild | Implemented (this increment) |
-| Close-on-failure/relocation/shutdown lifecycle unchanged; poisoned connections never reused; single-counted-failure doctrine intact | Implemented (this increment) |
-| Guard test `serving_refresh_retains_dot_transport_without_rebuild` wired into native verification | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array — a DoT entry's failure is a counted connect failure with no cleartext downgrade, no dynamic pin update, and no silent reuse of a poisoned connection. The DoT transport's per-connect TLS confinement, handshake/identity fail-closed behavior, and the 1-conn/1-query transport profile are unchanged. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Observability: DoT→plain downgrade counter — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-dotdg`, 2026-10-21). It records the user authorization for one observability increment: the enforcement monitor surfaces the failover downgrade path as a zero-suppressed `dp=` event counter in the existing monitor record. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is already implemented in the code cited below; this section records only its user authorization.
-
-### Amended surface
+### DoT→plain downgrade counter
 
 The `alumina-rp2e` monitoring vocabulary governs the enforcement monitor record. This increment adds a single event counter: `StartupDns::downgrade_to_plain` (`src/startup_dns.rs`), incremented by the state-machine-local `note_downgrade_if_dot_to_plain` helper at both relocation choke points of `on_exchange_failed` — the failover relocation (degraded active → next healthy) and the failback re-seat (failed probe → `failback_source` backup) — exactly when the departed active resolver carried an `IP#fqdn` FQDN (port 853) and the relocated-to resolver is a bare-IP entry (port 53). A relocation that keeps or gains an FQDN is not a downgrade and is not counted. The counter is drained by the serving storage (`drain_downgrade_to_plain`, `src/serve.rs`) into `Enforcement::note_fact_downgrade_to_plain()` and the monitor's saturating `FactCounters::downgrade_to_plain` (`src/enforcement/monitor.rs`), folded into `facts_total()`. The monitor grammar emits the zero-suppressed `dp=` key after the `ss=` block and before the `bv=` block (`src/log.rs`), only when nonzero (never `dp=0`), and counts its overflow into `ofacts`. The counter is observability-only: serving behavior is byte-identical, with zero new allocations, zero new log surfaces, and no runtime-surface expansion.
 
-### Status
+## Zero-Allocation Invariant: first-party scope, rustls bounded seam
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Monitor: zero-suppressed `dp=` DoT→plain downgrade event counter, counted on failover and failback re-seat relocations, folded into `facts_total`/`ofacts`, observability-only (`:62`–`:78` monitoring vocabulary) | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
+### Zero-Allocation Invariant scope
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently.
+The Zero-Allocation Invariant (§II. Memory & Resource Invariants) previously read "proxy execution paths, including dependencies, must not allocate or deallocate heap storage." This increment narrows the invariant's binding scope to **first-party proxy execution paths**: first-party serving and DNS-refresh code must not allocate or deallocate heap storage, with boot initialization exempt and shutdown exiting without deallocating. Dependency behavior is a bounded seam outside the invariant's first-party scope.
 
-## Zero-Allocation Invariant: first-party scope, rustls bounded seam — user-authorized amendment
+The pinned rustls 0.23.46 dependency (`Cargo.toml:201`, `=0.23.46`, `default-features=false` with ring/std/tls12/logging) performs bounded per-record heap allocations on the warm DoT path once the handshake completes: inbound, each app-data message is copied into a fresh heap `Vec` (`Payload::into_vec` → `bytes.to_vec()`); outbound, each record is built into a fresh `Vec` (`PrefixedPayload::with_capacity` + `m.encode()`). These allocations are bounded per record at ≤~16-18 KiB, occur only over an established DoT connection, and are confined to the dependency — the documented seam this amendment records, not a first-party allocation. First-party DoT setup allocates only at the documented per-connect setup seam `build_tls_connection` (`alumina-dot-chain-v1-v5`, §Verifier — strict pin + FQDN/SAN, or empty-root CA-chain), which is the authorized first-party allocation point: each fresh DoT dial builds its TLS state there (rustls `Arc`s for the provider, verifier, and config, the SNI `String`, and the `Box`ed `ClientConnection`), confined to that seam. Retained-transport serving refresh allocates nothing — the established connection is reused warm across serving refreshes (`alumina-dotrt`, §DoT transport: serving-lifetime warm reuse), with no rebuild.
 
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-zai`, 2026-10-21). It records the user authorization for a scope clarification of the Zero-Allocation Invariant (`:211`): the invariant's "including dependencies" clause is narrowed to first-party proxy code paths, and the bounded per-record heap allocations of the pinned rustls 0.23.46 dependency on the warm DoT path are documented as a bounded seam outside that first-party scope. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding.
+## Hardening: post-window per-resolver probe sweep + `resolver_probe` verdict log
 
-### Amended surface
 
-The Zero-Allocation Invariant (`:211`) previously read "proxy execution paths, including dependencies, must not allocate or deallocate heap storage." This increment narrows the invariant's binding scope to **first-party proxy execution paths**: first-party serving and DNS-refresh code must not allocate or deallocate heap storage, with boot initialization exempt and shutdown exiting without deallocating. Dependency behavior is a bounded seam outside the invariant's first-party scope.
+### Post-window probe sweep
 
-The pinned rustls 0.23.46 dependency (`Cargo.toml:201`, `=0.23.46`, `default-features=false` with ring/std/tls12/logging) performs bounded per-record heap allocations on the warm DoT path once the handshake completes: inbound, each app-data message is copied into a fresh heap `Vec` (`Payload::into_vec` → `bytes.to_vec()`); outbound, each record is built into a fresh `Vec` (`PrefixedPayload::with_capacity` + `m.encode()`). These allocations are bounded per record at ≤~16-18 KiB, occur only over an established DoT connection, and are confined to the dependency — the documented seam this amendment records, not a first-party allocation. First-party DoT setup allocates only at the documented per-connect setup seam `build_tls_connection` (`alumina-dot-chain-v1-v5`, `:679`), which is the authorized first-party allocation point: each fresh DoT dial builds its TLS state there (rustls `Arc`s for the provider, verifier, and config, the SNI `String`, and the `Box`ed `ClientConnection`), confined to that seam. Retained-transport serving refresh allocates nothing — the established connection is reused warm across serving refreshes (`alumina-dotrt`, `:745`), with no rebuild.
+#### Post-decision timing
 
-### Status
+The startup deadline clause (§Configuration & DNS) governs the 90-second absolute window and its "cannot be extended or supplemented by a network-readiness phase" rule. This increment adds a **post-decision** probe sweep that runs after the startup decision (`settle_startup`, `src/serve.rs`), whether the listener opened or the process exited 75 (on exit-75 the process terminates, so the sweep is moot there). The sweep is not a readiness phase, never extends or supplements the window, never delays listener opening, and does not change the readiness evaluation at §Configuration & DNS. It is bounded, scheduled work folded into the same cooperative poll pattern as the startup window, subject to the existing round-robin scheduling and at-most-one-query-per-second guard (§Configuration & DNS) so it cannot starve background refresh.
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Zero-Allocation Invariant (`:211`): "including dependencies" narrowed to first-party proxy code paths | Implemented (this increment) |
-| rustls 0.23.46 warm-path per-record allocs (inbound `to_vec`, outbound `PrefixedPayload`/`encode`) documented as a bounded seam ≤~16-18 KiB | Implemented (this increment) |
+#### Post-window probe record and verdict vocabulary
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array; first-party DoT setup allocates only at the per-connect setup seam `build_tls_connection` (`:679`), and retained-transport refresh allocates nothing; the DoT transport's per-connect TLS confinement, handshake/identity fail-closed behavior, and the 1-conn/1-query transport profile are unchanged. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Hardening: post-window per-resolver probe sweep + `resolver_probe` verdict log — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-rbp`, 2026-10-22). It records the user authorization for one observability increment: after the startup decision, a one-time probe sweep tests every configured resolver in the validated `resolver` array (1..=5) that the startup window did not already exercise, and emits one `resolver_probe` record carrying a per-resolver verdict. It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is implemented in the code cited below; this section records only its user authorization.
-
-### Amended surface
-
-#### Post-decision timing (`:64`)
-
-The startup deadline clause (`:64`) governs the 90-second absolute window and its "cannot be extended or supplemented by a network-readiness phase" rule. This increment adds a **post-decision** probe sweep that runs after the startup decision (`settle_startup`, `src/serve.rs`), whether the listener opened or the process exited 75 (on exit-75 the process terminates, so the sweep is moot there). The sweep is not a readiness phase, never extends or supplements the window, never delays listener opening, and does not change the readiness evaluation at `:65`. It is bounded, scheduled work folded into the same cooperative poll pattern as the startup window, subject to the existing round-robin scheduling and at-most-one-query-per-second guard (`:76`) so it cannot starve background refresh.
-
-#### Post-window probe record and verdict vocabulary (`:67`)
-
-The startup diagnostics clause (`:67`) governs startup warning and final-result records. This increment adds a separate `resolver_probe` record (`Kind::ResolverProbe`, `src/log.rs`), emitted **once** after the sweep completes — separate from `startup_final` because that record is emitted at the readiness decision, before the post-window probe verdicts exist. The record carries one inline segment per resolver: index, address (with FQDN/pin presence), verdict (`ok` / `failed` / `not_probed`), and the failure reason when failed. It is encoded through the same allocation-free, bounded `encode_record_final` path into a fixed 8 KiB slot; on overflow the whole record is dropped and counted, like every other record.
+The startup diagnostics clause (§Configuration & DNS) governs startup warning and final-result records. This increment adds a separate `resolver_probe` record (`Kind::ResolverProbe`, `src/log.rs`), emitted **once** after the sweep completes — separate from `startup_final` because that record is emitted at the readiness decision, before the post-window probe verdicts exist. The record carries one inline segment per resolver: index, address (with FQDN/pin presence), verdict (`ok` / `failed` / `not_probed`), and the failure reason when failed. It is encoded through the same allocation-free, bounded `encode_record_final` path into a fixed 8 KiB slot; on overflow the whole record is dropped and counted, like every other record.
 
 #### Sweep semantics (probe state machine)
 
-The probe sweep probes each unprobed resolver exactly once, relocating the existing single DNS TCP connection sequentially — never opening a second connection, so the "DNS TCP connections / outstanding queries | 1 / 1" row (`:172`) is unchanged. The probe target is the primary allowlisted name (ordinal 0), A family, an already-approved query target (`:71`), with the standard 5-second exchange deadline (`:82`).
+The probe sweep probes each unprobed resolver exactly once, relocating the existing single DNS TCP connection sequentially — never opening a second connection, so the "DNS TCP connections / outstanding queries | 1 / 1" row (§Initial resource profile) is unchanged. The probe target is the primary allowlisted name (ordinal 0), A family, an already-approved query target (§Configuration & DNS), with the standard 5-second exchange deadline (§Configuration & DNS).
 
 - **State.** `StartupDns::probe_sweep: Option<ProbeSweep>` (`src/startup_dns.rs`) with `ProbeSweep { remaining: [bool; MAX_RESOLVERS], active_before: ActiveResolver, verdicts: [ProbeVerdict; MAX_RESOLVERS], current: Option<usize> }`; `ProbeVerdict` is `Ok | Failed(FailureReason) | NotProbed`. All fixed-size, no heap.
 - **Trigger.** The sweep begins after the startup decision only when `probe_sweep.is_none() && failback_source.is_none() && resolvers.is_some() && set_len() > 1`; a single-resolver set (`set_len() == 1`) short-circuits — nothing to probe. The active resolver is already exercised by the window and is skipped, receiving verdict `not_probed` in the record.
-- **Probe.** For each unprobed index: relocate temporarily (`close_connection` + `active_resolver = probe_target` + `repoint_to_active`, `src/startup_dns.rs`), keeping the dial target and `active_resolver` in sync so the `:68` resolver-peer assertion is preserved; run one exchange; then settle and restore `active_resolver = active_before` + `repoint_to_active`. A DoT→plain probe relocation records the existing `dp=` downgrade counter (`note_downgrade_if_dot_to_plain`).
+- **Probe.** For each unprobed index: relocate temporarily (`close_connection` + `active_resolver = probe_target` + `repoint_to_active`, `src/startup_dns.rs`), keeping the dial target and `active_resolver` in sync so the §Configuration & DNS resolver-peer assertion is preserved; run one exchange; then settle and restore `active_resolver = active_before` + `repoint_to_active`. A DoT→plain probe relocation records the existing `dp=` downgrade counter (`note_downgrade_if_dot_to_plain`).
 - **Probe-mode branches.** While a sweep probe is in flight, `on_exchange_failed` (`src/startup_dns.rs`) advances the **probed** resolver's consecutive-failure degradation (the third consecutive failure emits the existing edge-triggered `rd=` enter fact at `DEGRADED_AFTER = 3`) but **suppresses the relocation branch and failback arming**, restoring `active_before` instead — the active transport is healthy and must not move. `on_exchange_succeeded` resets the probed resolver to healthy and restores `active_before`. Zero new enforcement surface.
 - **Mutual exclusion with failback.** The sweep runs only when `failback_source.is_none()`; a sweep probe never arms or consumes the failback grace, and a sweep probe relocating to a non-primary is never hijacked into a failback probe.
 - **DoT fail-closed.** An unpinned `IP#fqdn` entry fails its handshake deterministically against the empty root store (`src/startup_dns.rs`); its probe verdict is `failed` with the handshake reason — the honest, operator-visible answer. No silent plain-DNS fallback (V5 doctrine).
 - **Shutdown.** The sweep aborts cleanly on shutdown; partial verdicts are dropped (bounded, best-effort, same as all logging).
 
-### Status
+## DNS exchange deadline raised to 5 seconds
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Post-window probe sweep: probes each unprobed resolver exactly once after the startup decision, never extending the window or delaying the listener (`:64`/`:65`) | Implemented (this increment) |
-| Probe-mode semantics: probed-resolver degradation advanced on failure (`rd=` at `DEGRADED_AFTER=3`), relocation suppressed, `active_before` restored; success resets; mutually exclusive with failback; `set_len()==1` short-circuits; clean abort on shutdown | Implemented (this increment) |
-| `resolver_probe` record: `Kind::ResolverProbe`, one inline segment per resolver (index, address + FQDN/pin presence, verdict, failure reason), allocation-free into the fixed 8 KiB slot, drop-whole-and-count on overflow (`:67`) | Implemented (this increment) |
-| Transport profile: 1 conn / 1 outstanding query preserved; sweep relocates the single connection (`:172`) | Implemented (this increment) |
 
-### Explicitly unchanged (non-negotiable)
+### DNS exchange deadline and profile table
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array; the probe sweep is not a readiness gate, a second DNS connection, a new query target, or a runtime-surface expansion beyond one new log record kind; the 90-second startup window and its readiness semantics are unchanged. Nothing in this amendment loosens any of these items or restates any profile row differently.
+#### DNS exchange deadline
 
-## DNS exchange deadline raised to 5 seconds — user-authorized amendment
+The bounds-and-retries clause (§Configuration & DNS) governs DNS exchange bounds and retries. This amendment changes the single sentence "Each DNS exchange has a 2-second deadline" to "Each DNS exchange has a 5-second deadline". The deadline is the single constant `EXCHANGE_DEADLINE_SECS` (`src/startup_dns.rs`), shared by the startup window exchanges and the serving-time refresh path; raising it to 5 seconds applies uniformly. The startup budget invariant still holds: `MAX_RESOLVERS (5) × DEGRADED_AFTER (3) × EXCHANGE_DEADLINE_SECS (5) = 75 ≤ STARTUP_WINDOW_SECS (90)`, so the 90-second startup window (§Configuration & DNS) is unchanged and never exceeded.
 
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-5sx`, 2026-10-22). It records the user authorization for one constant change: the DNS exchange deadline is raised from 2 seconds to 5 seconds via the single constant `EXCHANGE_DEADLINE_SECS` (`src/startup_dns.rs`). It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. The amended behavior is implemented in the code cited below; this section records only its user authorization.
+#### Profile table
 
-### Amended surface
+The resource-profile table row "DNS exchange deadline | 2 seconds" (§Initial resource profile) is amended to "DNS exchange deadline | 5 seconds".
 
-#### DNS exchange deadline (`:82`)
+## JA4 client-fingerprint tripwire
 
-The bounds-and-retries clause (`:82`) governs DNS exchange bounds and retries. This amendment changes the single sentence "Each DNS exchange has a 2-second deadline" to "Each DNS exchange has a 5-second deadline". The deadline is the single constant `EXCHANGE_DEADLINE_SECS` (`src/startup_dns.rs`), shared by the startup window exchanges and the serving-time refresh path; raising it to 5 seconds applies uniformly. The startup budget invariant still holds: `MAX_RESOLVERS (5) × DEGRADED_AFTER (3) × EXCHANGE_DEADLINE_SECS (5) = 75 ≤ STARTUP_WINDOW_SECS (90)`, so the 90-second startup window (`:64`) is unchanged and never exceeded.
-
-#### Profile table (`:176`)
-
-The resource-profile table row "DNS exchange deadline | 2 seconds" (`:176`) is amended to "DNS exchange deadline | 5 seconds".
-
-### Status
-
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| DNS exchange deadline raised 2s → 5s via single constant `EXCHANGE_DEADLINE_SECS` (`src/startup_dns.rs`), applied to startup and serving-time refresh uniformly | Implemented (this increment) |
-| Startup budget invariant `5 × 3 × EXCHANGE_DEADLINE_SECS ≤ STARTUP_WINDOW_SECS` holds (75 ≤ 90) | Implemented (this increment) |
-
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Doctrine: no fallback beyond the declared `resolver` array; the individual upstream connect deadline remains 2 seconds (`:174`); the 90-second startup window and its readiness semantics are unchanged; no runtime surface is expanded — the change is a single constant value. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## JA4 client-fingerprint tripwire — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-xfbq8`, 2026-10-22). It defines the JA4 client-fingerprint tripwire surface: the canonical FoxIO JA4 string format, the fixed ClientHello retention and first-seen baseline storage it requires, and its reconciliation with the existing cipher/ALPN policy ban and the initial-ClientHello inspection scope. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. Specification publication precedes implementation; the status table at the end assigns each surface an honest planned/implemented/deferred status.
 
 ### JA4 format clause
 
@@ -887,7 +625,7 @@ The tripwire computes the canonical FoxIO JA4 client fingerprint as the fixed 36
 
 - `t/q/d`: transport — `t` TLS, `q` QUIC, `d` DTLS.
 - `ver`: the HIGHEST value in the `supported_versions` extension (`0x002b`) if present, ignoring GREASE values; else the Protocol Version. The `legacy_version` (handshake version) is ignored.
-- `sni d/i`: `d` if the SNI extension (`0x0000`) is present, `i` if it is absent (presence-based per the canonical rule: a present SNI — even an IP-literal one — yields `d`; only an absent SNI yields `i`). In Alumina's context (`:48` requires exactly one SNI for accepted connections and the config rejects IP-literal allowlist entries), the common case is present → `d`; rejected or malformed initial ClientHellos with no SNI must yield `i`.
+- `sni d/i`: `d` if the SNI extension (`0x0000`) is present, `i` if it is absent (presence-based per the canonical rule: a present SNI — even an IP-literal one — yields `d`; only an absent SNI yields `i`). In Alumina's context (§TLS ClientHello profile requires exactly one SNI for accepted connections and the config rejects IP-literal allowlist entries), the common case is present → `d`; rejected or malformed initial ClientHellos with no SNI must yield `i`.
 - `cipher_count:02`: two-digit count of offered cipher suites, including SCSV `0x00ff` and `0x5600` and experimental/reserved `0xFE00`-`0xFEFF`, after GREASE filtering.
 - `ext_count:02`: two-digit count of extension types, after GREASE filtering.
 - `alpn_first_last`: the first and last ASCII alphanumeric characters of the first ALPN value, per the verbatim rule below.
@@ -904,17 +642,17 @@ The tripwire computes the canonical FoxIO JA4 client fingerprint as the fixed 36
 
 The spec mandates the hex-fallback; the FoxIO reference implementations (`python/ja4.py` and `rust/ja4`) instead keep ASCII bytes as-is and substitute `'9'` for non-ASCII bytes, and do not implement the hex-fallback. **Alumina follows the spec** (user-confirmed 2026-10-22): a first or last ALPN byte outside `0x30-0x39`, `0x41-0x5A`, or `0x61-0x7A` triggers the hex-fallback.
 
-### Reconciliation with the cipher/ALPN policy ban (`:48`)
+### Reconciliation with the cipher/ALPN policy ban
 
-Spec `:48` ("do not introduce cipher-suite or ALPN policy") is unchanged. The JA4 tripwire OBSERVES and RETAINS cipher-suite, extension, and ALPN data from the initial ClientHello for fingerprinting only: it introduces NO cipher-suite or ALPN policy, makes no acceptance/rejection decision on them, and exerts no negotiation influence. The retained data is never used to admit, reject, or modify a connection.
+Spec §TLS ClientHello profile ("do not introduce cipher-suite or ALPN policy") is unchanged. The JA4 tripwire OBSERVES and RETAINS cipher-suite, extension, and ALPN data from the initial ClientHello for fingerprinting only: it introduces NO cipher-suite or ALPN policy, makes no acceptance/rejection decision on them, and exerts no negotiation influence. The retained data is never used to admit, reject, or modify a connection.
 
-### Reconciliation with the inspection scope (`:50`)
+### Reconciliation with the inspection scope
 
-Spec `:50` is unchanged. JA4 computes the fingerprint from the INITIAL ClientHello only, matching the existing inspection-scope clause; later handshake messages (including a second ClientHello following a HelloRetryRequest) and encrypted application traffic remain opaque and are never fingerprinted.
+Spec §TLS ClientHello profile is unchanged. JA4 computes the fingerprint from the INITIAL ClientHello only, matching the existing inspection-scope clause; later handshake messages (including a second ClientHello following a HelloRetryRequest) and encrypted application traffic remain opaque and are never fingerprinted.
 
 ### Fixed storage
 
-#### Control-storage table (`:292`-`:304`)
+#### Control-storage table
 
 The "Planned fixed control storage" table gains two rows:
 
@@ -925,100 +663,28 @@ The "Planned fixed control storage" table gains two rows:
 
 The first-seen JA4 baseline table holds 512 fixed entries (32 ordinals × 16 addresses = `MAX_ADDRESSES`), each storing the full 36-character JA4 string plus a 1-character present flag plus the 4-byte IP address: ~41 B/entry × 512 ≈ 21 KiB total (design estimate ~21-27 KiB). The ClientHello JA4 retention is the fixed per-slot storage retained in `ClientHello` inside each `ChInspector` by the parser-retention increment: `[u16; 8192]` (16 KiB) + `[u8; 255]` (255 B) + `[u16; 64]` (128 B) + `[u16; 64]` sigalgs (128 B) = 16,895 B ≈ 16.5 KiB/slot; 512 × 16,895 B ≈ 8.2 MiB. Both figures are design estimates, not measured, consistent with the table header; exact sizes are fixed at implementation with `sizeof`-verified types.
 
-#### Retained serving workspace reconciliation (`:163`/`:188`)
+#### Retained serving workspace reconciliation
 
-The retained serving workspace figure is reconciled to account for the new ~16.5 KiB/slot ClientHello JA4 retention (linus review Info I1): 512 × (136 KiB + ~16.5 KiB) ≈ 512 × ~152.5 KiB ≈ 76 MiB (design estimate), replacing the previous 512 × 136 KiB = 68 MiB at `:163`/`:188` (the 68 MiB figure recorded in the `alumina-mema` amendment describes that amendment's surface and is superseded for the live profile by this reconciled figure). The added retention is boot-time fixed storage with zero heap allocation or deallocation after boot, consistent with the fixed profile.
+The retained serving workspace figure is reconciled to account for the new ~16.5 KiB/slot ClientHello JA4 retention (linus review Info I1): 512 × (136 KiB + ~16.5 KiB) ≈ 512 × ~152.5 KiB ≈ 76 MiB (design estimate), replacing the previous 512 × 136 KiB = 68 MiB at §Initial resource profile (the 68 MiB figure recorded in the `alumina-mema` amendment describes that amendment's surface and is superseded for the live profile by this reconciled figure). The added retention is boot-time fixed storage with zero heap allocation or deallocation after boot, consistent with the fixed profile.
 
-### Status
+## C1 JA4 change-signal value
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| JA4 format published (canonical FoxIO string + ALPN hex-fallback verbatim rule) | Current revision |
-| ClientHello retention (ciphers/extensions/ALPN retained in `ChInspector`) | Implemented (commit c6493d5) |
-| JA4 computation (canonical string byte-for-byte per spec vectors) | Planned — xfbq8.5 |
-| First-seen baseline table (512 entries, zero heap) | Planned — xfbq8.2 |
-| Per-ordinal JA4 monitor counter | Planned — xfbq8.7 |
-| Integration tests | Planned — xfbq8.8 |
-| Boundary verification | Planned — xfbq8.1 |
-| Deploy to gh-report-ops + log watch | Planned — xfbq8.6 |
 
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The JA4 tripwire adds no cipher-suite or ALPN policy (`:48`), inspects only the initial ClientHello (`:50`), and performs zero heap allocation or deallocation after boot. Nothing in this amendment loosens any of these items or restates any profile row differently, except the enumerated serving-workspace reconciliation at `:163`/`:188` (512 × ~152.4 KiB ≈ 76 MiB, replacing the prior 68 MiB figure).
-
-## C1 JA4 change-signal value — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-c1-1023`, 2026-10-23). It extends the JA4 client-fingerprint tripwire surface to carry the 36-byte JA4 value of the latest changed fingerprint into the JA4 change signal, so a Changed flare emits `d<j>j=N d<j>v="<36-char-ja4>"` in the `level=info kind=monitor` record, zero-suppressed together. It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. Specification publication precedes implementation; the status table at the end assigns each surface an honest planned/implemented/deferred status.
-
-### Amended surface
+### JA4 change-signal value
 
 The per-ordinal JA4 change signal (JA4 amendment, the `d<j>j` counter) gains a companion 36-byte value: when a Changed baseline outcome flares the per-ordinal counter, the serving path also stores the full 36-byte JA4 of the changed fingerprint as the latest changed JA4 for that ordinal. The monitor record emits both fields together, zero-suppressed as a unit: `d<j>j=N d<j>v="<36-char-ja4>"` appears only when the ordinal's change counter is nonzero; a no-change ordinal emits neither. The value is retained per ordinal in a fixed `[[u8; 36]; ALLOWLIST_MAX]` table (32 × 36 = 1,152 B), boot-time fixed storage with zero heap allocation or deallocation after boot, consistent with the fixed profile.
 
-### Status
+## Post-window probe sweep exchange-deadline citation
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Per-ordinal 36-byte JA4 value table (`[[u8; 36]; ALLOWLIST_MAX]`, zero heap) | Implemented (this revision) |
-| Changed flare emits `d<j>j=N d<j>v="<36-char-ja4>"` (zero-suppressed together) | Implemented (this revision) |
-| No-change ordinal emits neither `d<j>j` nor `d<j>v` | Implemented (this revision) |
 
-### Explicitly unchanged (non-negotiable)
+### Probe sweep exchange-deadline citation
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The C1 value table is boot-time fixed storage (32 × 36 = 1,152 B) with zero heap allocation or deallocation after boot; the baseline table semantics are unchanged (a baseline is never updated after first-seen). Nothing in this amendment loosens any of these items or restates any profile row differently.
+#### Post-window probe sweep exchange deadline
 
-## Post-window probe sweep exchange-deadline citation — user-authorized amendment
+The post-window probe sweep clause (§Sweep semantics (probe state machine)) governs the startup probe sweep. This amendment refreshes the exchange-deadline citation at §Sweep semantics (probe state machine) from the stale 2-second value to the 5-second value, aligning §Sweep semantics (probe state machine) with the alumina-5sx 5-second deadline (single constant `EXCHANGE_DEADLINE_SECS`, `src/startup_dns.rs`); no other text on the line changes.
 
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alumina-rf5x`, 2026-10-24). It records the user authorization for one citation refresh: the post-window probe sweep clause (`:825`) cited the DNS exchange deadline as "2-second", stale after the alumina-5sx amendment raised it to 5 seconds; the citation now reads "5-second exchange deadline (`:82`)". It amends only the surface enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. This is a doc-only citation refresh; this section records only its user authorization and changes no code.
+## Keyed configuration schema
 
-### Amended surface
-
-#### Post-window probe sweep exchange deadline (`:825`)
-
-The post-window probe sweep clause (`:825`) governs the startup probe sweep. This amendment refreshes the exchange-deadline citation at `:825` from the stale 2-second value to the 5-second value, aligning `:825` with the alumina-5sx 5-second deadline (single constant `EXCHANGE_DEADLINE_SECS`, `src/startup_dns.rs`); no other text on the line changes.
-
-### Status
-
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Post-window probe sweep exchange-deadline citation refreshed 2s → 5s at `:825`, aligned with `alumina-5sx` | Implemented (this increment) |
-
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 x 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. The alumina-5sx 5-second DNS exchange deadline and all other deadlines are unchanged; this amendment only refreshes a stale citation at `:825` and changes no deadline, no constant, and no code. Nothing in this amendment loosens any of these items or restates any profile row differently.
-
-## Keyed configuration schema — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification
-(`alumina-cfgk`, 2026-10-24). It replaces the positional configuration layout — the
-`allowlist` string array plus the index-aligned `[actions]` kind/scope arrays — with
-idiomatic TOML keyed tables, and raises the configuration document bound from 4 KiB to
-16 KiB. It amends only the configuration surface enumerated here: the configuration clause
-(`:54`-`:58`) and the rp2e exact-schema and capacity clauses (`:270`-`:286`). It supersedes
-the rp2e exact-schema subsection (`:270`-`:283`) and its capacity clause (`:286`), which
-remain in place as the historical record of the superseded positional layout, and updates
-the two consequential bound citations it depends on: the resource-profile row (`:158`) and
-the verification requirement (`:235`). It also supersedes, on the document-bound claim only,
-the rp2e status-table row `:317` ("at most 4 KiB") and the two historical 4 KiB document
-preflight subsections — `alumina-hrdn4` (`:587`-`:589`) and `alumina-dot-chain-v37`
-(`:632`-`:634`, with its status row `:644`) — all of which remain in place as the historical
-record of the superseded 4 KiB bound. Every other
-clause of this document — the fixed resource profile, lifecycle deadlines, invariants,
-logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains
-binding. Specification publication precedes implementation; the status table at the end
-assigns each surface an honest planned/implemented/deferred status.
-
-**Second authorization (2026-10-24).** A separate user authorization extends this same
-`alumina-cfgk` amendment to the startup-final record shape only. The single final result at
-`:67` is split into one `startup_name` record per unresolved name — full, never-truncated
-FQDN, its outcome, and its reason — followed by one `startup_final` summary record carrying
-the canonical counts plus `names_dropped`. This extension amends the startup diagnostics
-clause (`:67`) and, consequently, the logging verification requirement (`:236`), and nothing
-else. The log queue geometry is unchanged: 256 x 8 KiB slots (`:183`, `:310`), one slot per
-record exactly as before, no additional storage, no new queue, and no runtime-surface
-expansion.
 
 ### Keyed allowlist tables
 
@@ -1054,31 +720,31 @@ early_data = { action = "flare_only" | "block", scope = "connection" | "domain" 
   is an inline table with exactly `action` and `scope`; missing `early_data` or an unknown key
   is invalid configuration (exit 78); no defaults are supplied, consistent with the
   all-keys-mandatory doctrine. The `early_data` key names the existing per-domain control
-  (rp2e `:255` early upstream data); it is forward-compatible with a future `ja4` key gated
+  (rp2e §Action catalog and attribution early upstream data); it is forward-compatible with a future `ja4` key gated
   on a separate behavior amendment.
 - Per-FQDN `action` is `flare_only` or `block`; `tarpit` is a reserved keyword for a future
   action, rejected with an explicit reserved-keyword diagnostic (exit 78), never accepted as
   an implemented runtime action. Per-FQDN `scope` is `connection`, `domain`, or `all` with
-  unchanged semantics (rp2e `:261`-`:263`).
+  unchanged semantics (rp2e §Block and Flare semantics-§Block and Flare semantics).
 - `[any_illegal]` is unchanged and remains mandatory: `scope` must be `connection` or `all`
   (`domain` invalid, exit 78); an absent group is invalid configuration at enforcement
-  integration (rp2e `:284` preserved).
+  integration (rp2e §Configuration surface (implemented; exact schema) preserved).
 - All keys are mandatory with no defaults and no environment or command-line override;
   unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as today.
   Configuration validation timing and procedure are unchanged.
 
 ### Document bound
 
-`CONFIG_DOC_LIMIT` is raised from 4096 to 16384 bytes. The configuration clause (`:54`) is
+`CONFIG_DOC_LIMIT` is raised from 4096 to 16384 bytes. The configuration clause (§Configuration & DNS) is
 amended to state a single TOML document of at most 16 KiB (16384 bytes), including comments
 and whitespace, with 1 through 32 `[allowed_fqdn."..."]` tables and a required `listen` key.
 Boot-time read only; zero runtime/heap impact; no runtime-surface expansion. The capacity
-clause (rp2e `:286`) is amended to the new bound: the keyed full-schema 32-entry worst case
+clause (rp2e §Configuration surface (implemented; exact schema)) is amended to the new bound: the keyed full-schema 32-entry worst case
 is re-measured with the exact document serializer the parser reads (pinned by parser-real
 assertions in `src/config.rs`) and must fit under 16 KiB. Neither a further cap expansion,
 an alias, a silent compact migration, nor a change to the legal literal set is implied.
 
-### Startup-final record shape (second authorization)
+### Startup-final record shape
 
 The startup result is two record shapes, not one. Unresolved names are never embedded in the
 summary record:
@@ -1123,58 +789,16 @@ the fixed 2048-byte slot:
 | `monitor_domain` | 1370 B | 678 B |
 | `monitor_capture` | 1237 B | 811 B |
 
-Both startup records fit with wide margins, so the encoded-entry requirement at `:236` is met
+Both startup records fit with wide margins, so the encoded-entry requirement at §Verification requirements is met
 by measurement for every valid configuration. `resolver_probe` is now the tightest record in
 the vocabulary at 191 B of headroom against the 2048-byte slot; any future addition to any
 monitor-family record shape must re-measure against the 2048-byte slot before it is
 accepted.
 
-### Explicitly unchanged (non-negotiable)
+## Red-team remediation: 16 findings
 
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers,
-128 MiB traffic storage, the 256 × 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit
-recheck, DNS response/candidate/incident caps, the 90-second startup window, and all
-deadlines — 10/2/300/5/8 seconds); empty capability sets and `no_new_privs`; byte
-conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime
-metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI +
-ECH-reject; packet dropping is never implemented; no new dependency unless its intake
-precedes execution; no kernel pacing knob. The enforcement/monitoring surface is
-byte-identical: `Allowlist(Vec<Fqdn>)`, `Config::allowlist_position`, `ControlTable`,
-`decide()`, and the monitoring record shape (`KIND_COUNT`, `s0`/`s1`, `d<j>l`) are
-unchanged; the keyed layout is a configuration-surface change only.
 
-### Status
-
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| Keyed `[allowed_fqdn."..."]` tables replace `allowlist` array + positional `[actions]` | Implemented (this revision) |
-| 16 KiB document bound (`parser-real` 32 × 100-byte worst case 5,843 B) | Implemented (this revision) |
-| `early_data` inline table; mandatory key; duplicate/unknown/missing exit 78 | Implemented (this revision) |
-| Startup-final split: one `startup_name` record per unresolved name (full FQDN, outcome, reason) plus one `startup_final` summary carrying `names_dropped` | Implemented (this revision) |
-| `tarpit` reserved rejection; `[any_illegal]` unchanged | Implemented (this revision) |
-| Keyed-schema fixtures in the integration tests and script config emitters | Implemented (this revision) |
-
-## Red-team remediation: 16 findings — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification
-(`alumina-redtm`, 2026-10-25). It records the user authorization for the remediation of the
-16 voter-confirmed findings of the alox adversarial security analysis: the Part 2
-spec-level findings SP-001 through SP-013 (SP-011 was pruned as a 3/3 voter false positive
-and is not remediated here) and the Part 1 findings RT-001, RT-005, RT-006, and RT-007.
-RT-003 and RT-004 are not part of this amendment: they were remediated in code ahead of it
-(CONNECT parser terminal re-entry made a no-op; slot relay buffers zero-filled at reset). It
-amends only the surfaces enumerated here; every other clause of this document — the fixed
-resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 +
-SNI + ECH-reject behavior — is unchanged and remains binding. Where a finding's remediation
-is doc-only (SP-007, SP-008, SP-012, RT-005), this section records the resolution and
-applies the in-place body folds cited below. Where a finding's remediation changes behavior
-(SP-001, SP-002, SP-003, SP-004, SP-005, SP-006, SP-009, SP-010, SP-013, RT-001, RT-006,
-RT-007), this section records the binding semantics and the implementation folds into the
-later sub-missions of this package through the repository's normal red→green verification
-path; the status table at the end assigns each surface an honest planned/implemented status.
-
-### Amended surface
+### Remediated findings
 
 #### SP-001 — All-scope AnyIllegal latch arms only after a bounded fact threshold
 
@@ -1182,9 +806,9 @@ The first AnyIllegal control failure could select `Block` scope `All` and latch 
 process-wide egress outage from a single unauthenticated request, with no pacing or
 threshold between Connection and All scope and no unblock path. Resolution: `All` scope arms
 only after a bounded fact counter crosses a fixed threshold within a fixed window, using
-fixed constants; there is no speculative pacing. The rp2e `:263` property is preserved —
+fixed constants; there is no speculative pacing. The rp2e §Block and Flare semantics property is preserved —
 once armed, the latch still performs the synchronous bounded physical closure and persists
-until restart — and `:306` is respected (no speculative pacing allocation; Tarpit remains
+until restart — and §Planned fixed control storage (design estimate, not measured) is respected (no speculative pacing allocation; Tarpit remains
 deferred). The threshold and window are fixed constants, not configuration. Implementation
 folds into a later sub-mission of this package; this amendment records the binding
 semantics.
@@ -1198,7 +822,7 @@ earlier K-connection corroboration proposal is superseded (permanently ineligibl
 resolution is now structural. `early_data = { action = "block", scope = "domain" | "all" }`
 is invalid configuration, rejected at startup with exit 78 (EX_CONFIG); the only legal
 `block` scope for `early_data` is `connection`. The baseline mandatory denial is kept
-(terminate setup on early upstream data while the gate is closed, rp2e `:255`); the
+(terminate setup on early upstream data while the gate is closed, rp2e §Action catalog and attribution); the
 K-connection corroboration state and gate are removed from the enforcement path, and the
 upstream-sourced signal can no longer select a per-domain or process-wide latch because
 those scopes are unreachable from configuration. This amendment records the binding
@@ -1210,9 +834,9 @@ A resolver array mixing DoT (`IP#fqdn[^pin]`) and plain (`IP`) entries let failo
 a bare-IP entry, converting sustained DoT blocking into a silent cleartext-DNS downgrade,
 with validated negatives masking the degradation. Resolution: resolver arrays are
 homogeneous-trust — an array mixing DoT and plain entries is rejected at startup with exit
-78 (EX_CONFIG), removing the cross-entry downgrade path structurally. This respects `:513` (a
+78 (EX_CONFIG), removing the cross-entry downgrade path structurally. This respects §Vec 19 — Passive resolver degraded signaling (a
 valid negative response still counts as a successful exchange within a homogeneous array) and
-`:663` (tolerated degraded trust is scoped to a homogeneous plain array, not a mixed one).
+§Directory — three resolver trust forms, per-entry dial port (tolerated degraded trust is scoped to a homogeneous plain array, not a mixed one).
 Implementation folds into a later sub-mission of this package; this amendment records the
 binding semantics.
 
@@ -1223,7 +847,7 @@ with only one transition notification and no recurring observable — sustained 
 indistinguishable from deliberate name removal. Resolution: a sustained-negative incident
 class is added: after N consecutive validated negatives across M windows, a negative-refresh
 incident opens that participates in hourly summaries and the `rd`-class monitor facts, giving
-an operator a persistent deletion signal rather than a single event. This respects `:93`
+an operator a persistent deletion signal rather than a single event. This respects §DNS response outcomes
 (validated negatives remain successful outcomes that clear exchange-failure incidents); the
 sustained-negative incident is a distinct incident class and does not invert the
 negative-clears-incident rule. Implementation folds into a later sub-mission of this package;
@@ -1238,7 +862,7 @@ existing 512-entry table (32 ordinals × 16 slots). At set-capacity overflow, fu
 suppressed and a count is incremented (the evict-vs-suppress question is resolved as
 suppress-with-count, preserving the baseline-never-updated semantics). Baseline-seeding
 events are recorded as operator-visible facts so re-seeding churn is distinguishable from
-attacker-driven re-seed. This respects `:922`/`:968` (the fixed 512-entry table shape and the
+attacker-driven re-seed. This respects §Control-storage table/§C1 JA4 change-signal value (the fixed 512-entry table shape and the
 baseline-never-updated doctrine). Implementation folds into a later sub-mission of this
 package; this amendment records the binding semantics.
 
@@ -1249,7 +873,7 @@ The spec pinned canonical JA4 byte-for-byte fidelity while mandating sigalg rete
 the hash input; `count:02` overflow rendering was undefined. Resolution: a ClientHello
 offering more than 64 `signature_algorithms` entries is rejected as a ClientHello-profile
 violation, classified as **AnyIllegal**. This is a profile-boundary rejection, not a JA4
-admit/reject decision, so `:908` (JA4 data never used to admit, reject, or modify a
+admit/reject decision, so §Reconciliation with the cipher/ALPN policy ban (JA4 data never used to admit, reject, or modify a
 connection) is respected. `count:02` overflow rendering is bounded: the two-digit count
 saturates at 99 with no literal overflow marker (`+` would break the fixed 2-character
 canonical slot of the 36-byte JA4 string); this applies to `cipher_count`, the only count
@@ -1269,16 +893,16 @@ records the binding semantics.
 
 #### SP-007 — Resource-profile rows folded in place
 
-The body table rows `:177`/`:178` still read 30/300 while `alumina-hrdn2` (Vec 14) amended
+The body table rows §Initial resource profile still read 30/300 while `alumina-hrdn2` (Vec 14) amended
 them to 5/900 (normal) and 30/900 (negative), matching the code. Resolution: the rows are
 folded in place to the already-authorized Vec 14 values, exactly as the `alumina-5sx` and
-`alumina-cfgk` amendments did for their rows: `:177` becomes 5 seconds / 900 seconds and
-`:178` becomes 30 seconds / 900 seconds. Implemented (this revision).
+`alumina-cfgk` amendments did for their rows: §Initial resource profile becomes 5 seconds / 900 seconds and
+§Initial resource profile becomes 30 seconds / 900 seconds. Implemented (this revision).
 
 #### SP-008 — CONNECT response-corpus oracle acknowledged
 
 The CONNECT error-response taxonomy is an allowlist-enumeration and cache-state oracle,
-unacknowledged in the threat model. Resolution: threat-model acknowledgement only, at `:43`
+unacknowledged in the threat model. Resolution: threat-model acknowledgement only, at §CONNECT request
 (doc-only, no behavior change): the response corpus is an acknowledged
 allowlist/cache-state oracle — the `400`/`403` split discriminates allowlist membership from
 malformed syntax and the `502`/`503`/`504` split discriminates DNS-cache state per
@@ -1291,9 +915,9 @@ The post-window probe sweep's DoT→plain relocations incremented the same `dp=`
 counter, making real failovers indistinguishable from probe noise. Resolution: probe
 relocations are counted in a separate bounded fact disjoint from `dp=`, so the downgrade
 counter remains a clean signal; the probe record carries its own relocation segment. This
-respects `:774` (`dp=` remains the sole serving-downgrade surface) and `:829` (probe
+respects §DoT→plain downgrade counter (`dp=` remains the sole serving-downgrade surface) and §Sweep semantics (probe state machine) (probe
 relocations no longer fold into `dp=`). The new monitor field is re-measured against the
-8192-byte slot headroom (`:1120`). Implementation folds into a later sub-mission of this
+8192-byte slot headroom (§Startup-final record shape). Implementation folds into a later sub-mission of this
 package; this amendment records the binding semantics.
 
 #### SP-010 — Log-queue priority classes
@@ -1303,8 +927,8 @@ final, incident summaries) like any best-effort entry under queue pressure. Reso
 bounded priority classes are added to the log queue: latch/event records (`Block All`,
 `startup_final`, `resolver_probe`) are reserved and cannot be dropped by new unrelated
 entries; when the queue is full, the newest entry from the lowest class is dropped first.
-This respects `:199` (drop-and-count remains, now class-aware; a stalled sink still never
-delays rejection, tunnel I/O, DNS, or deadlines) and `:290` (the shutdown report remains
+This respects §Lifecycle (drop-and-count remains, now class-aware; a stalled sink still never
+delays rejection, tunnel I/O, DNS, or deadlines) and §Monitoring (the shutdown report remains
 not-guaranteed-lossless; reservation is bounded, not lossless). Implementation folds into a
 later sub-mission of this package; this amendment records the binding semantics.
 
@@ -1312,7 +936,7 @@ later sub-mission of this package; this amendment records the binding semantics.
 
 "Conflicting settings" was an unenumerated catch-all in configuration validation, against
 the exact-discriminant precedent the document set for CONNECT. Resolution: the conflict
-predicates are enumerated at `:58` (documentation clarification only; no new validation): the
+predicates are enumerated at §Configuration & DNS (documentation clarification only; no new validation): the
 mandated-set predicates — a required set of settings that must be present and consistent
 together, where a member present more than once after normalization is a conflict (duplicate
 keys, invalid table redefinitions, and duplicate allowlist names after normalization are the
@@ -1330,7 +954,7 @@ entry, no per-IP element); there is no per-(ordinal, IP) baseline. The reported 
 could belong to a different peer than the one whose change fired, so the triggering peer's
 source address is carried in the flare/monitor record as a fixed tagged IPv4/IPv6 union,
 aligning the reported fingerprint with the change that fired. The monitor record grows
-accordingly and is re-measured against the 8192-byte slot headroom (`:1120`). Implementation
+accordingly and is re-measured against the 8192-byte slot headroom (§Startup-final record shape). Implementation
 folds into sub-mission 6 of this package, fulfilled by the alox7 F-12 increment; this
 amendment records the binding semantics.
 
@@ -1343,7 +967,7 @@ SOA granularity is an accepted threat-model boundary: the anomaly surface
 (`BailiwickViolation`) continues to fire only outside the parent SOA, and the residual (a
 parent-zone delegation compromise is indistinguishable in-band) is acknowledged without
 changing the bailiwick rule. Implemented (this revision). This note is superseded and refined
-by SP-014 (alumina-alox10, `:1335`): the parent-zone granularity residual is narrowed to the
+by SP-014 (alumina-alox10, §SP-013 — Latest-change value keyed per-ordinal with triggering peer source address): the parent-zone granularity residual is narrowed to the
 operator-declared suffix union — the operator, not the derivation, now chooses the zone
 granularity, and a declared suffix is an explicit trust boundary.
 
@@ -1353,7 +977,7 @@ Stale DNS authorization grace (259200 seconds) is shared with retention, so a ca
 could keep serving up to 72 hours past TTL expiry with no independent cap. Resolution: a
 separate stale-SERVING window is introduced, independent of the 259200-second retention
 deadline: stale bindings are served only within the new stale-serving window, which is a new
-profile deadline in the fixed enumeration (`:310`). Retention (259200 seconds) is unchanged.
+profile deadline in the fixed enumeration (§Initial resource profile). Retention (259200 seconds) is unchanged.
 Implementation folds into a later sub-mission of this package; this amendment records the
 binding semantics.
 
@@ -1363,61 +987,25 @@ The strict-SPKI pin branch checked SAN and SPKI digest but never evaluated
 Not-Before/Not-After, so a pinned key retained trust indefinitely with no expiry forcing.
 Resolution: the pin branch gains a Not-Before/Not-After validity check that is non-blocking —
 it does not fail the handshake, which remains grounded in the pin match plus signature
-verification per `:675` (validity-time check only, no chain-build) — and emits a distinct
+verification per §Verifier — strict pin + FQDN/SAN, or empty-root CA-chain (validity-time check only, no chain-build) — and emits a distinct
 expired-cert warning fact when serving over an expired pinned certificate, forcing pin
 rotation with operator-visible telemetry. Implementation folds into a later sub-mission of
 this package; this amendment records the binding semantics.
 
-### Status
+## Low-risk alox hardening: probe isolation, failover ordinal, and failback reset
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| SP-001: All-scope arms only after bounded fact threshold in fixed window; fixed constants; no speculative pacing (`:263`/`:306`) | Implemented (this increment) |
-| SP-002: baseline early-data denial kept; Domain/All `block` scopes rejected at startup exit 78 (EX_CONFIG); K-connection corroboration removed (`:32`) | Implemented (this increment) |
-| SP-003: homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup exit 78 (`:513`/`:663`) | Implemented (this increment) |
-| SP-004: sustained-negative incident class; N negatives across M windows raise `rd`-class incident in hourly summaries (`:93`) | Implemented (this increment) |
-| SP-005: per-ordinal JA4 set up to K=16 distinct strings; overflow suppresses adds + increments count; seeding events recorded (`:922`/`:968`) | Implemented (this increment) |
-| SP-006: >64 sigalgs rejected as AnyIllegal profile violation (not JA4 admit/reject, `:908`); `count:02` overflow saturates at 99 (no literal marker) | Implemented (this increment) |
-| RT-001: sigalg-list bound at 64; no silent truncation of the JA4 hash input | Implemented (this increment) |
-| SP-007: profile rows `:177`/`:178` folded in place to 5/900 and 30/900 | Implemented (this revision) |
-| SP-008: CONNECT response-corpus oracle acknowledged at `:43` (doc-only, no behavior change) | Implemented (this revision) |
-| SP-009: probe-relocation counter disjoint from `dp=`; re-measured vs 8192-B slot (`:774`/`:829`/`:1120`) | Implemented (this increment) |
-| SP-010: log-queue priority classes; latch/event records reserved; drop newest-lowest first (`:199`/`:290`) | Implemented (this increment) |
-| SP-012: conflict predicates enumerated at `:58` (doc clarification, no new validation) | Implemented (this revision) |
-| SP-013: latest-change JA4 keyed per-ordinal (per-ordinal first-seen baseline, `Ja4BaselineTable` — no per-(ordinal, IP) baseline) + triggering peer source address as fixed tagged IPv4/IPv6 union in flare/monitor record; re-measured vs 8192-B slot (`:955`/`:1120`, 8170 B / 22 B margin) | Implemented (this increment) |
-| RT-005: parent-zone bailiwick note; require nothing more today | Implemented (this revision) |
-| RT-006: independent stale-serving window, distinct from 259200 s retention; new profile deadline (`:310`) | Implemented (this increment) |
-| RT-007: pin-branch Not-Before/Not-After check non-blocking + distinct expired-cert warning fact (`:675`) | Implemented (this increment) |
-
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers,
-128 MiB traffic storage, the 256 × 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit
-recheck, DNS response/candidate/incident caps, the 90-second startup window, and all
-deadlines — 10/2/300/5/8/3600 seconds); empty capability sets and `no_new_privs`; byte
-conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime
-metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI +
-ECH-reject; packet dropping is never implemented; no new dependency unless its intake
-precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these
-items or restates any profile row differently; the RT-006 stale-serving window is a new
-profile deadline added to the fixed enumeration and changes no existing deadline.
-
-## Low-risk alox hardening: probe isolation, failover ordinal, and failback reset — user-authorized amendment
-
-**Authority.** This section is a narrow, user-authorized amendment to this specification (`alox7`, 2026-10-25). It records the user authorization for the remediation of three voter-confirmed low-risk findings of the alox adversarial security analysis — F-03 (observational resolver probes are not isolated from authorization state), F-04 (failover transition count invalidates the 75-second startup budget proof), and F-05 (the failback reset wording makes the three-consecutive-success settle unreachable). It amends only the surfaces enumerated here; every other clause of this document — the fixed resource profile, lifecycle deadlines, invariants, logging vocabulary, and core TLS 1.3 + SNI + ECH-reject behavior — is unchanged and remains binding. F-03's remediation was implemented in code ahead of this record (commit `feac28f`); this section backfills its binding semantics. F-04's remediation is a clarification: the code already relocates on the same transition that records the third failure, so this section corrects the stale `:597` failover wording and records the exact-ordinal and five-resolver budget tests that prove the `5 × 3 × 5 = 75 ≤ 90` invariant corresponds to the state machine. F-05's remediation is a clarification: the code already resets the counter at arm and on probe failure, so this section refines the ambiguous `:729` reset-point wording and records the transition table and mid-regime probe-begin regression test that prove the three-success settle is reachable.
 
 #### F-03 — Probe-Isolation Invariant
 
-The post-window probe sweep (`alumina-rbp`, `:824-834`) is an observational increment, but the sweep clauses enumerate resolver-health mutations while remaining silent about name-cache, schedule, generation, retry, and incident mutations — leaving a permitted mutating reading in which a backup resolver probed once could evict or replace working bindings obtained from the active resolver. Resolution: a **Probe-Isolation Invariant** governs every sweep probe: probe responses may determine only the probe verdict and the explicitly enumerated probed-resolver health state (`ProbeVerdict`, `src/startup_dns.rs`); the name outcome is parsed and validated in staging, then discarded. Probes must not mutate any allowlist-name cache entry, generation, freshness/retirement/stale-serving deadline, refresh/retry schedule, name incident, or admission counter. This refines the `alumina-rbp` probe-mode clause (`:831`) — which already suppresses relocation and failback arming while a probe is in flight — by barring the name-authorization write path entirely. Opposite-answer tests (active and probed resolvers returning different valid outcomes) assert all name-authorization state remains byte-for-byte unchanged (`probe_exchange_publishes_no_name_authorization_state`, `src/startup_dns/tests.rs`).
+The post-window probe sweep (`alumina-rbp`, §Sweep semantics (probe state machine)) is an observational increment, but the sweep clauses enumerate resolver-health mutations while remaining silent about name-cache, schedule, generation, retry, and incident mutations — leaving a permitted mutating reading in which a backup resolver probed once could evict or replace working bindings obtained from the active resolver. Resolution: a **Probe-Isolation Invariant** governs every sweep probe: probe responses may determine only the probe verdict and the explicitly enumerated probed-resolver health state (`ProbeVerdict`, `src/startup_dns.rs`); the name outcome is parsed and validated in staging, then discarded. Probes must not mutate any allowlist-name cache entry, generation, freshness/retirement/stale-serving deadline, refresh/retry schedule, name incident, or admission counter. This refines the `alumina-rbp` probe-mode clause (§Sweep semantics (probe state machine)) — which already suppresses relocation and failback arming while a probe is in flight — by barring the name-authorization write path entirely. Opposite-answer tests (active and probed resolvers returning different valid outcomes) assert all name-authorization state remains byte-for-byte unchanged (`probe_exchange_publishes_no_name_authorization_state`, `src/startup_dns/tests.rs`).
 
 #### F-04 — Failover relocates on the third counted failure
 
-The failover clause (`:597`) states that "once the active resolver is degraded, the next counted failure relocates the transport" — implying four failures per relocation, which with five resolvers yields `4 + 4 + 4 + 4 + 3 = 19` exchanges = 95 seconds, exceeding the absolute 90-second startup window (`:64`) and invalidating the `5 × 3 × 5 = 75 ≤ 90` budget proof (`:858`). Resolution: the failover clause is corrected to state that relocation happens on the **same transition** that records the third consecutive failure and marks the active resolver degraded (`on_exchange_failed`, `src/startup_dns.rs`): the degradation advance and the relocation are one call, so each relocation away from a resolver requires three failures, not four. The complete five-resolver worst case is 15 exchanges (`5 × 3`), each bounded by the 5-second exchange deadline, giving `15 × 5 = 75 ≤ 90` — the budget proof at `:858` therefore corresponds to the state machine. The 90-second deadline (`:64`) is unchanged. Deterministic tests prove the exact failure ordinal that closes, repoints, and starts against each resolver, and the complete five-resolver startup budget (`five_resolvers_relocate_on_the_third_failure_not_the_fourth`, `five_resolver_startup_budget_fits_the_window`, `src/startup_dns/tests.rs`).
+The failover clause (§Multi-resolver failover and failback (Vec 18)) states that "once the active resolver is degraded, the next counted failure relocates the transport" — implying four failures per relocation, which with five resolvers yields `4 + 4 + 4 + 4 + 3 = 19` exchanges = 95 seconds, exceeding the absolute 90-second startup window (§Configuration & DNS) and invalidating the `5 × 3 × 5 = 75 ≤ 90` budget proof (§DNS exchange deadline). Resolution: the failover clause is corrected to state that relocation happens on the **same transition** that records the third consecutive failure and marks the active resolver degraded (`on_exchange_failed`, `src/startup_dns.rs`): the degradation advance and the relocation are one call, so each relocation away from a resolver requires three failures, not four. The complete five-resolver worst case is 15 exchanges (`5 × 3`), each bounded by the 5-second exchange deadline, giving `15 × 5 = 75 ≤ 90` — the budget proof at §DNS exchange deadline therefore corresponds to the state machine. The 90-second deadline (§Configuration & DNS) is unchanged. Deterministic tests prove the exact failure ordinal that closes, repoints, and starts against each resolver, and the complete five-resolver startup budget (`five_resolvers_relocate_on_the_third_failure_not_the_fourth`, `five_resolver_startup_budget_fits_the_window`, `src/startup_dns/tests.rs`).
 
 #### F-05 — Failback counter resets at arm and on failure, not on every probe begin
 
-The failback clause (`:729`) states the consecutive-success counter resets "when a failback probe begins" — a wording readable as resetting on every probe begin, which would make the `FAILBACK_SUCCESSES = 3` settle unreachable (each success reaches only one, the next probe begin resets it again, and the probe loops on the backup with repeated 900-second relocation cycles). Resolution: the reset points are refined to the two transitions that actually reset the counter (`maybe_begin_failback` / `on_exchange_failed`, `src/startup_dns.rs`): the counter resets to zero when failback is initially **armed** — the backup→primary transition in `maybe_begin_failback` (`:3019`) — and when a probe **fails**, re-seating onto the backup and re-arming the grace (`:3202`). It does not reset on any later probe begin: once armed, `maybe_begin_failback` is a no-op for the rest of the regime (guards `:3004-3006`), so the counter accumulates across probe begins while the transport remains on the primary. Between successful but not-yet-settling probes the transport resides on the primary with the probe armed (`failback_source` set to the backup) and the grace **not** re-armed (`failback_due` stays `None`); the grace is re-armed only by a failed probe. The counter increments on each successful primary probe and settles — clearing the probe source, grace, and counter — only at the third consecutive success (`:3270-3274`). A success on a non-primary backup leaves the counter and grace untouched (`is_primary()` guard, `:3269`). On shutdown the counter is discarded with the transport; the next boot starts unarmed with the counter at zero. The compact transition table below is the state machine; the deterministic regression test `probe_begin_mid_regime_does_not_reset_the_failback_counter` (`src/startup_dns/tests.rs`) drives `maybe_begin_failback` between successes to prove a probe begin mid-regime does not reset the counter.
+The failback clause (§Failback consecutive-success settle) states the consecutive-success counter resets "when a failback probe begins" — a wording readable as resetting on every probe begin, which would make the `FAILBACK_SUCCESSES = 3` settle unreachable (each success reaches only one, the next probe begin resets it again, and the probe loops on the backup with repeated 900-second relocation cycles). Resolution: the reset points are refined to the two transitions that actually reset the counter (`maybe_begin_failback` / `on_exchange_failed`, `src/startup_dns.rs`): the counter resets to zero when failback is initially **armed** — the backup→primary transition in `maybe_begin_failback` (`:3019`) — and when a probe **fails**, re-seating onto the backup and re-arming the grace (`:3202`). It does not reset on any later probe begin: once armed, `maybe_begin_failback` is a no-op for the rest of the regime (guards `:3004-3006`), so the counter accumulates across probe begins while the transport remains on the primary. Between successful but not-yet-settling probes the transport resides on the primary with the probe armed (`failback_source` set to the backup) and the grace **not** re-armed (`failback_due` stays `None`); the grace is re-armed only by a failed probe. The counter increments on each successful primary probe and settles — clearing the probe source, grace, and counter — only at the third consecutive success (`:3270-3274`). A success on a non-primary backup leaves the counter and grace untouched (`is_primary()` guard, `:3269`). On shutdown the counter is discarded with the transport; the next boot starts unarmed with the counter at zero. The compact transition table below is the state machine; the deterministic regression test `probe_begin_mid_regime_does_not_reset_the_failback_counter` (`src/startup_dns/tests.rs`) drives `maybe_begin_failback` between successes to prove a probe begin mid-regime does not reset the counter.
 
 | Transition | Counter | Transport | Grace (`failback_due`) | Probe source (`failback_source`) |
 | --- | --- | --- | --- | --- |
@@ -1431,44 +1019,27 @@ The failback clause (`:729`) states the consecutive-success counter resets "when
 
 #### F-08 — JA4 baseline overflow suppresses detail, never the deviation decision
 
-The per-ordinal JA4 set baseline (SP-005, `:1229-1240`) stores up to K=16 distinct observed JA4 strings per ordinal and suppresses every further add until restart. A compromised application can deliberately generate 16 syntactically accepted ClientHello variants, fill the set, and then make subsequent profile changes collapse into the overflow count: the overflow count reveals saturation, but the set can no longer provide distinct change detail for later attacker profiles or legitimate clients, and because the baseline is never updated this blindness persists for the process lifetime. Resolution: the deviation decision is separated from the bounded detail set. The 16-entry set remains the immutable comparison reference (`Ja4BaselineTable`, `src/serving.rs`); every first-seen JA4 beyond set capacity fires the per-ordinal JA4-change deviation signal (`d<j>j` count, `d<j>v` latest overflowed value, `d<j>p` triggering peer), regardless of set capacity — the 17th and every later distinct JA4 each fire the decision. Overflow suppresses detail only, never the decision: the overflowed value is not added to the set (the set is never updated, preserving the SP-005 baseline-never-updated doctrine), only the latest overflowed value is retained, and the per-ordinal detail-loss flag `d<j>x` latches to signal the operator that detail was suppressed. The loss flag is a latched boolean, not a counted fact, and does not fold into `facts_total`. This refines SP-005's suppress-with-count semantics: the count and the loss flag are the operator-visible overflow surface, and the decision is capacity-independent. Deterministic tests prove a 17th distinct JA4 fires the decision and latches the loss flag, and an 18th distinct JA4 fires the decision again with the retained value following the newest overflow (`ja4_set_overflow_fires_decision_on_each_new_distinct_beyond_capacity`, `src/serving/tests.rs`).
+The per-ordinal JA4 set baseline (SP-005, §SP-005 — Per-ordinal JA4 set baseline) stores up to K=16 distinct observed JA4 strings per ordinal and suppresses every further add until restart. A compromised application can deliberately generate 16 syntactically accepted ClientHello variants, fill the set, and then make subsequent profile changes collapse into the overflow count: the overflow count reveals saturation, but the set can no longer provide distinct change detail for later attacker profiles or legitimate clients, and because the baseline is never updated this blindness persists for the process lifetime. Resolution: the deviation decision is separated from the bounded detail set. The 16-entry set remains the immutable comparison reference (`Ja4BaselineTable`, `src/serving.rs`); every first-seen JA4 beyond set capacity fires the per-ordinal JA4-change deviation signal (`d<j>j` count, `d<j>v` latest overflowed value, `d<j>p` triggering peer), regardless of set capacity — the 17th and every later distinct JA4 each fire the decision. Overflow suppresses detail only, never the decision: the overflowed value is not added to the set (the set is never updated, preserving the SP-005 baseline-never-updated doctrine), only the latest overflowed value is retained, and the per-ordinal detail-loss flag `d<j>x` latches to signal the operator that detail was suppressed. The loss flag is a latched boolean, not a counted fact, and does not fold into `facts_total`. This refines SP-005's suppress-with-count semantics: the count and the loss flag are the operator-visible overflow surface, and the decision is capacity-independent. Deterministic tests prove a 17th distinct JA4 fires the decision and latches the loss flag, and an 18th distinct JA4 fires the decision again with the retained value following the newest overflow (`ja4_set_overflow_fires_decision_on_each_new_distinct_beyond_capacity`, `src/serving/tests.rs`).
 
 #### F-10 — Zero-TTL entries never admit stale serving; refresh at the one-second boundary
 
-A received TTL of zero is promoted to one second (`:74`), after which the ordinary stale-authorization path applies: the stale-serving window (`:75`, `STALE_SERVING_WINDOW` = 3600 seconds) does not exclude zero-TTL-derived entries, so a DNS owner explicitly requesting no caching could have its address authorize new connections for the full stale-serving window. Resolution: each entry carries a per-entry **stale-allowed** bit derived from the earliest supporting TTL — the minimum across the supporting CNAME chain and terminal A/AAAA records (`src/dns.rs`), the same TTL that fixes the entry's freshness deadline (`:74`). A zero-TTL entry keeps the specified one-second fresh usability but never admits stale serving: `servable()` gates the stale arm on the bit, so the entry is served only while `now < freshness` and is never served past its freshness deadline regardless of `STALE_SERVING_WINDOW` (`src/cache.rs`). To preserve steering availability for zero-TTL names without extending authorization, the normal refresh interval for a zero-TTL entry is the one-second boundary (`normal_refresh_interval(0) == 1`, `src/schedule.rs`) — the sole exception to the 5-second refresh floor (`:76`), scoped to zero-TTL entries only; every nonzero-TTL entry keeps `min(900 seconds, max(5 seconds, entry TTL))` unchanged. Because a zero-TTL entry is never served stale and its next revalidation is scheduled at the freshness boundary, a delayed refresh never extends authorization. This refines RT-006 (`:1341-1349`) and the refresh-scheduling clause (`:76`). Deterministic tests prove the before/at/after freshness boundary for a zero-TTL entry in `servable()` and the bit derivation at publication time (`zero_ttl_entry_never_served_stale`, `publish_positive_derives_stale_allowed_from_raw_ttl`, `src/cache.rs`; `normal_refresh_interval_honors_bounds`, `src/schedule.rs`).
+A received TTL of zero is promoted to one second (§Configuration & DNS), after which the ordinary stale-authorization path applies: the stale-serving window (§Configuration & DNS, `STALE_SERVING_WINDOW` = 3600 seconds) does not exclude zero-TTL-derived entries, so a DNS owner explicitly requesting no caching could have its address authorize new connections for the full stale-serving window. Resolution: each entry carries a per-entry **stale-allowed** bit derived from the earliest supporting TTL — the minimum across the supporting CNAME chain and terminal A/AAAA records (`src/dns.rs`), the same TTL that fixes the entry's freshness deadline (§Configuration & DNS). A zero-TTL entry keeps the specified one-second fresh usability but never admits stale serving: `servable()` gates the stale arm on the bit, so the entry is served only while `now < freshness` and is never served past its freshness deadline regardless of `STALE_SERVING_WINDOW` (`src/cache.rs`). To preserve steering availability for zero-TTL names without extending authorization, the normal refresh interval for a zero-TTL entry is the one-second boundary (`normal_refresh_interval(0) == 1`, `src/schedule.rs`) — the sole exception to the 5-second refresh floor (§Configuration & DNS), scoped to zero-TTL entries only; every nonzero-TTL entry keeps `min(900 seconds, max(5 seconds, entry TTL))` unchanged. Because a zero-TTL entry is never served stale and its next revalidation is scheduled at the freshness boundary, a delayed refresh never extends authorization. This refines RT-006 (§RT-005 — CNAME bailiwick parent-zone note) and the refresh-scheduling clause (§Configuration & DNS). Deterministic tests prove the before/at/after freshness boundary for a zero-TTL entry in `servable()` and the bit derivation at publication time (`zero_ttl_entry_never_served_stale`, `publish_positive_derives_stale_allowed_from_raw_ttl`, `src/cache.rs`; `normal_refresh_interval_honors_bounds`, `src/schedule.rs`).
 
 #### F-11 — DoT client negotiates TLS 1.3 only
 
-The DoT handshake clauses (`alumina-dot-chain-v1-v5`, `:676`, `:682`) require identity validation without specifying an allowed protocol-version set, and the recorded rustls configuration carried the `tls12` feature (`Cargo.toml`, `alumina-zai` `:796`), so the DoT specification permitted a pinned, SAN-valid TLS 1.2 session even though the tunnel ClientHello profile (`:47`) and the serving surface are TLS 1.3-only. Resolution: the DoT client negotiates TLS 1.3 only — `build_tls_connection` (`src/startup_dns.rs`) now calls `with_protocol_versions(&[&rustls::version::TLS13])`, and the `tls12` feature is removed from the rustls dependency (`Cargo.toml`), so the client contains no TLS 1.2 code at all. A DoT peer that cannot complete a TLS 1.3 handshake — including a TLS 1.2-only resolver — is deterministically refused at the handshake and counted as a connect failure; the client never negotiates down and never falls back to plain DNS. This refines the DoT handshake clauses (`:676`, `:682`) to bind the client to the same TLS 1.3-only profile as the serving surface. A consequence is recorded: a TLS 1.2-only public resolver is excluded and fails closed until it upgrades. Deterministic tests prove the client fails closed against a TLS 1.2-only peer — a raw responder answering with the TLS 1.2 `protocol_version` fatal alert (`0x46`) that such a server sends to a TLS 1.3-only offer — on both the pinned and CA-chain branches, and negotiates TLS 1.3 with a TLS 1.3-only server (`pinned_dot_rejects_tls12_only_peer`, `unpinned_dot_rejects_tls12_only_peer`, `pinned_dot_negotiates_tls13_with_tls13_only_server`, `src/startup_dns/dot_tests.rs`).
+The DoT handshake clauses (`alumina-dot-chain-v1-v5`, §Verifier — strict pin + FQDN/SAN, or empty-root CA-chain, §Transport confinement and lifecycle) require identity validation without specifying an allowed protocol-version set, and the recorded rustls configuration carried the `tls12` feature (`Cargo.toml`, `alumina-zai` §Zero-Allocation Invariant scope), so the DoT specification permitted a pinned, SAN-valid TLS 1.2 session even though the tunnel ClientHello profile (§TLS ClientHello profile) and the serving surface are TLS 1.3-only. Resolution: the DoT client negotiates TLS 1.3 only — `build_tls_connection` (`src/startup_dns.rs`) now calls `with_protocol_versions(&[&rustls::version::TLS13])`, and the `tls12` feature is removed from the rustls dependency (`Cargo.toml`), so the client contains no TLS 1.2 code at all. A DoT peer that cannot complete a TLS 1.3 handshake — including a TLS 1.2-only resolver — is deterministically refused at the handshake and counted as a connect failure; the client never negotiates down and never falls back to plain DNS. This refines the DoT handshake clauses (§Verifier — strict pin + FQDN/SAN, or empty-root CA-chain, §Transport confinement and lifecycle) to bind the client to the same TLS 1.3-only profile as the serving surface. A consequence is recorded: a TLS 1.2-only public resolver is excluded and fails closed until it upgrades. Deterministic tests prove the client fails closed against a TLS 1.2-only peer — a raw responder answering with the TLS 1.2 `protocol_version` fatal alert (`0x46`) that such a server sends to a TLS 1.3-only offer — on both the pinned and CA-chain branches, and negotiates TLS 1.3 with a TLS 1.3-only server (`pinned_dot_rejects_tls12_only_peer`, `unpinned_dot_rejects_tls12_only_peer`, `pinned_dot_negotiates_tls13_with_tls13_only_server`, `src/startup_dns/dot_tests.rs`).
 
 #### F-12 — Monitor loss-flag render compacts to a single `dx=` bitset
 
-The per-ordinal JA4-change detail-loss flag (`d<j>x`, F-08, `:1426`) is a latched boolean per ordinal, rendered by the monitor record as one `d<j>x=1` key per latched ordinal. With all 32 ordinals latched the per-ordinal renders add 214 B to the worst-case monitor record, pushing it to 8372 B — over the 8192-byte log-slot bound (`:236`), which would have made `enqueue_reserved` silently drop the record (violating the `:236` "every valid configuration" guarantee and the `:1120` headroom known risk). Resolution: the 32 latched per-ordinal flags render as a single `dx=<hex>` 32-bit bitset — bit i = ordinal i's `ja4_change_loss` latch, lowercase hex, leading zeros omitted, emitted once only when any flag is set (`encode_monitor`, `src/log.rs`). The per-ordinal latch and accessor are unchanged (`src/enforcement/monitor.rs`); only the render compacts, so the fixed profile and zero-heap record path are preserved. `saturate_all_for_test` now latches all 32 flags so the worst-case slot test exercises the bitset render. The worst-case monitor record re-measures at 8170 B against the 8192-byte slot — 22 B of headroom — restoring the `:236` guarantee and superseding the stale 8139 B / 53 B measurement (`:1120`). This supersedes the F-08 section's `d<j>x` render reference (`:1426`) and its Status row: the loss-flag vocabulary is now the single `dx=` bitset. It also corrects SP-013 (`:1322-1330`): the first-seen JA4 baseline is per-ordinal (SP-005, `Ja4BaselineTable`, `src/serving.rs` — a 36-byte JA4 per entry, no per-IP element), the latest changed JA4 is keyed per-ordinal, and the triggering peer's source address is carried in the flare/monitor record as a fixed tagged IPv4/IPv6 union — there is no per-(ordinal, IP) baseline. SP-013's forward reference ("sub-mission 6") is fulfilled by this increment. Deterministic tests prove the exact monitor grammar (`dx=1` for a single ordinal-0 latch) and the worst-case slot fit with margin (`logging_monitor_summary_exact_grammar_and_zero_suppression`, `logging_worst_case_record_per_kind_fits_the_slot_with_margin`, `src/log.rs`).
+The per-ordinal JA4-change detail-loss flag (`d<j>x`, F-08, §F-08 — JA4 baseline overflow suppresses detail, never the deviation decision) is a latched boolean per ordinal, rendered by the monitor record as one `d<j>x=1` key per latched ordinal. With all 32 ordinals latched the per-ordinal renders add 214 B to the worst-case monitor record, pushing it to 8372 B — over the 8192-byte log-slot bound (§Verification requirements), which would have made `enqueue_reserved` silently drop the record (violating the §Verification requirements "every valid configuration" guarantee and the §Startup-final record shape headroom known risk). Resolution: the 32 latched per-ordinal flags render as a single `dx=<hex>` 32-bit bitset — bit i = ordinal i's `ja4_change_loss` latch, lowercase hex, leading zeros omitted, emitted once only when any flag is set (`encode_monitor`, `src/log.rs`). The per-ordinal latch and accessor are unchanged (`src/enforcement/monitor.rs`); only the render compacts, so the fixed profile and zero-heap record path are preserved. `saturate_all_for_test` now latches all 32 flags so the worst-case slot test exercises the bitset render. The worst-case monitor record re-measures at 8170 B against the 8192-byte slot — 22 B of headroom — restoring the §Verification requirements guarantee and superseding the stale 8139 B / 53 B measurement (§Startup-final record shape). This supersedes the F-08 section's `d<j>x` render reference (§F-08 — JA4 baseline overflow suppresses detail, never the deviation decision) and its Status row: the loss-flag vocabulary is now the single `dx=` bitset. It also corrects SP-013 (§SP-013 — Latest-change value keyed per-ordinal with triggering peer source address): the first-seen JA4 baseline is per-ordinal (SP-005, `Ja4BaselineTable`, `src/serving.rs` — a 36-byte JA4 per entry, no per-IP element), the latest changed JA4 is keyed per-ordinal, and the triggering peer's source address is carried in the flare/monitor record as a fixed tagged IPv4/IPv6 union — there is no per-(ordinal, IP) baseline. SP-013's forward reference ("sub-mission 6") is fulfilled by this increment. Deterministic tests prove the exact monitor grammar (`dx=1` for a single ordinal-0 latch) and the worst-case slot fit with margin (`logging_monitor_summary_exact_grammar_and_zero_suppression`, `logging_worst_case_record_per_kind_fits_the_slot_with_margin`, `src/log.rs`).
 
-### Status
+## Lossless peer-IP hex render and 10 KiB log slot
 
-| Surface | Status |
-| --- | --- |
-| This amendment published | Current revision |
-| F-03: Probe-Isolation Invariant — probe responses determine only the probe verdict and probed-resolver health; name outcomes discarded (`alumina-rbp` `:831` refined) | Implemented (commit `feac28f`) |
-| F-04: failover relocates on the same transition that records the third failure; `5 × 3 × 5 = 75 ≤ 90` budget proof corresponds to the state machine (`:597` corrected) | Implemented (this increment) |
-| F-05: failback counter resets at arm and on probe failure, not on every probe begin; transition table + mid-regime probe-begin regression test (`:729` refined) | Implemented (this increment) |
-| F-08: JA4 baseline overflow suppresses detail only — the deviation fires on every distinct JA4 beyond the 16-entry set, the per-ordinal `d<j>x` loss flag latches, and the latest overflowed value is retained; SP-005 (`:1229-1240`) refined (reconciles the redtm SP-005 "Planned" status row) | Implemented (this increment) |
-| F-10: zero-TTL entries never admit stale serving — per-entry `stale_allowed` bit derived from the earliest supporting TTL, `servable()` gates the stale arm on the bit, and the zero-TTL refresh interval is the one-second boundary (sole exception to the 5-second floor, `:76` refined); RT-006 (`:1341-1349`) refined | Implemented (this increment) |
-| F-11: DoT client negotiates TLS 1.3 only — `build_tls_connection` binds `with_protocol_versions(&[TLS13])`, the `tls12` feature is removed from the rustls dependency, and a TLS 1.2-only peer is refused at the handshake on both pinned and CA-chain branches (DoT handshake clauses `:676`, `:682` refined) | Implemented (this increment) |
-| F-12: monitor loss-flag render compacts to a single `dx=<hex>` 32-bit bitset (bit i = ordinal i) — the per-ordinal `d<j>x` keys are gone, the worst-case monitor record re-measures at 8170 B / 22 B margin (`:1120` updated), F-08's `d<j>x` render reference (`:1426`) is superseded, and SP-013 (`:1322-1330`) is corrected to the per-ordinal baseline + per-ordinal latest changed JA4 + fixed tagged IPv4/IPv6 triggering source address (no per-IP baseline) | Implemented (this increment) |
-
-### Explicitly unchanged (non-negotiable)
-
-The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 × 8 KiB log queue, 16-op/64 KiB visits, at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup window, and all deadlines — 10/2/300/5/8/3600 seconds); empty capability sets and `no_new_privs`; byte conservation; non-decrypting; single owner; generation isolation; bounded work; no runtime metrics, control, debug, or endpoint interface; logs to stdout only; core TLS 1.3 + SNI + ECH-reject; packet dropping is never implemented; no new dependency unless its intake precedes execution; no kernel pacing knob. Nothing in this amendment loosens any of these items or restates any profile row differently; the probe sweep remains a bounded, observational increment that never expands the runtime surface. The 5-second normal-refresh floor (`:76`) is unchanged for every nonzero-TTL entry; the zero-TTL one-second refresh boundary is the sole exception, scoped to zero-TTL entries only and documented in the F-10 section above.
-
-## alumina-alox8 (2026-10-25) — lossless peer-IP hex render and 10 KiB log slot
-
-The alox7 F-12 monitor record (`:1438`) carries the latest JA4-change overflow's triggering
+The alox7 F-12 monitor record (§F-10 — Zero-TTL entries never admit stale serving; refresh at the one-second boundary) carries the latest JA4-change overflow's triggering
 peer as a fixed tagged IPv4/IPv6 union rendered through `IpAddr` Display (`d<j>p`). The
 widest legal peer — a full 16-byte IPv6 address — renders as 39 characters (`ffff:ffff:ffff:
 ffff:ffff:ffff:ffff:ffff`), and with the 8 KiB slot the all-saturated monitor worst case
-overflows the fixed 8192-byte slot (`:236`), silently dropping the record and violating the
+overflows the fixed 8192-byte slot (§Verification requirements), silently dropping the record and violating the
 "every valid configuration" guarantee. Resolution: the `d<j>p` peer-address field renders as
 raw lowercase hex of the address's fixed bytes — V4 = 8 chars, V6 = 32 chars, each byte
 zero-padded to two digits so leading zeros are never dropped (lossless; `203.0.113.1` →
@@ -1476,13 +1047,8 @@ zero-padded to two digits so leading zeros are never dropped (lossless; `203.0.1
 (`push_indexed_key_addr`, `src/log.rs`), preserving the zero-heap record path. The log slot
 is widened from 8 KiB to a fixed 10 KiB (`SLOT_BYTES = 10 * 1024`, `src/log.rs`; the queue
 stays 256 slots, `LOG_QUEUE_BYTES = 256 × 10 KiB`, `src/inventory.rs`), and the worst-case
-monitor record re-measures at 8191 B against the 10240-byte slot — 2049 B of headroom. This
-supersedes the 8 KiB geometry claims at `:1019` (log queue geometry "256 x 8 KiB slots"),
-`:1120` (the resolver_probe headroom row), `:1127` (the re-measure-against-8192-byte
-sentence), `:1381` (the SP-013 Status row "re-measured vs 8192-B slot (`:955`/`:1120`,
-8170 B / 22 B margin)"), and `:1452` (the alox7 F-12 Status row "re-measures at 8170 B /
-22 B margin (`:1120` updated)"), and the 22 B known-risk recorded at `:1126`; those remain
-in place as the historical record of the superseded 8 KiB bound. The fixed profile is restated unchanged
+monitor record re-measures at 8191 B against the 10240-byte slot — 2049 B of headroom.
+The fixed profile is restated unchanged
 except for the log queue geometry: 512 tunnels, 128 pending setups, two 128 KiB per-slot
 buffers, 128 MiB traffic storage, the 256 × 10 KiB log queue, 16-op/64 KiB visits,
 at-most-256-visit recheck, DNS response/candidate/incident caps, the 90-second startup
@@ -1492,16 +1058,8 @@ record with a full V6 max peer fits the 10240-byte slot with margin
 (`logging_monitor_summary_exact_grammar_and_zero_suppression`,
 `logging_worst_case_record_per_kind_fits_the_slot_with_margin`, `src/log.rs`).
 
-## alumina-alox9 (2026-10-25) — 2 KiB log slot and monitor family split
+## 2 KiB log slot and monitor family split
 
-This is the narrow, user-authorized amendment recording the alox9 work: the log queue
-geometry is reconciled to the live rows — 256 × 2 KiB = 512 KiB — and the monitor family is
-split into an always-emitted authoritative summary plus best-effort detail batches. It
-amends only the enumerated surfaces below (the profile row at `:184`, the monitoring
-semantics at `:291`, the log-queue figure at `:307`, and the worst-case table at
-`:1104-1129`); every other clause of this document remains binding and unchanged. The code
-landed in `01a0908..c42f9e2` (alox9-01), `251bc14`, `ca859ef`, and `f4cfb99`; this
-amendment only records it.
 
 The fixed profile is restated unchanged except for the log queue geometry: 512 tunnels,
 128 pending setups, two 128 KiB per-slot buffers, 128 MiB traffic storage, the 256 × 2 KiB
@@ -1541,32 +1099,14 @@ headroom; the monitor family measures `monitor_summary` 763 B / 1285 B, `monitor
 monitor-family record shape must re-measure against the 2048-byte slot before it is
 accepted.
 
-This supersedes every superseded geometry recital in the document, which remain in place as
-historical record and are not individually edited: the 24 `Explicitly unchanged` fixed
-resource profile recitals of the `256 × 8 KiB log queue` at `:311`, `:403`, `:420`, `:436`,
-`:469`, `:500`, `:531`, `:566`, `:615`, `:650`, `:702`, `:721`, `:740`, `:767`, `:786`,
-`:808`, `:848`, `:874`, `:948`, `:969`, `:990`, `:1133-1134`, `:1390-1391`, and `:1458`;
-the log-queue-geometry recital at `:1019` ("256 x 8 KiB slots"); the `resolver_probe`
-"fixed 8 KiB slot" recitals at `:822` and `:843`; the monitor 8192-byte-slot recitals at
-`:710`, `:1294`, `:1331`, `:1380`, `:1383`, and `:1441`; and the alox8 10 KiB geometry
-recitals within the alox8 block at `:1460`, `:1465-1466`, `:1472-1474`, `:1482`, and
-`:1486`. The alox8 block itself remains the historical record of the superseded 10 KiB
-bound.
 
 Deterministic tests prove the exact monitor grammar and the worst-case slot fit with margin
 for every record kind against the 2048-byte slot
 (`logging_monitor_summary_exact_grammar_and_zero_suppression`,
 `logging_worst_case_record_per_kind_fits_the_slot_with_margin`, `src/log.rs`).
 
-## alumina-alox10 (2026-10-26) — Explicit CNAME bailiwick: self-default zone + declared suffix union
+## Explicit CNAME bailiwick: self-default zone + declared suffix union
 
-This is the narrow, user-authorized amendment transcribing the SP-014 resolution of the F-07
-CNAME-bailiwick finding (draft `alox-f07-amendment.md`) into this document. It amends only the
-enumerated surfaces below — the `:71` bailiwick sentence, the `:452` DNS named-buffer
-accounting note (measurement only; no code change), the `:1052` cfgk exactly-one-key rule, and
-the `:1335` RT-005 note — and appends this block; every other clause of this document remains
-binding and unchanged. The code landed in the F-07 increment (linus review bead
-`alumina-kjwox.7`); this amendment only records it.
 
 #### SP-014 — Explicit CNAME bailiwick: self-default zone + declared suffix union
 
@@ -1589,16 +1129,16 @@ falls within the entry's own self-default or declared-suffix union.
 Configuration validation: `cname_bailiwick` is optional; when present it is an array of
 validated bare names — no port, no wildcard, no IP literal, at least two labels — and the
 total declared suffixes across all entries is at most `ALLOWLIST_MAX` (32), else invalid
-configuration (exit 78). This refines the cfgk exactly-one-key rule at `:1052`: an
+configuration (exit 78). This refines the cfgk exactly-one-key rule at §Keyed allowlist tables: an
 `[allowed_fqdn."..."]` table now contains the mandatory `early_data` key and an optional
 `cname_bailiwick` key; every other key remains invalid configuration (exit 78).
 
-This **supersedes and refines RT-005** (`:1335`): the parent-zone granularity note is replaced
+This **supersedes and refines RT-005** (§SP-013 — Latest-change value keyed per-ordinal with triggering peer source address): the parent-zone granularity note is replaced
 by the explicit self-default + declared-suffix model. The residual RT-005 acknowledged (a
 parent-zone compromise pivots allowlist names inside that zone) is narrowed to the
 operator-declared suffix union: the operator, not the derivation, now chooses the zone
 granularity; a declared suffix is an explicit trust boundary, and the residual is bounded to
-zones the operator declared. The `:71` bailiwick sentence is amended accordingly.
+zones the operator declared. The §Configuration & DNS bailiwick sentence is amended accordingly.
 
 Implementation: `BailiwickZones` (`src/dns.rs`) holds the allowlist entries and the declared
 suffixes in fixed `[DnsName; ALLOWLIST_MAX]` arrays (no heap), with a parallel `suffix_owner`
@@ -1613,7 +1153,7 @@ allowlist order. Allocation profile unchanged (fixed-slot storage, no post-boot 
 #### Fixed-profile accounting follow-up
 
 The `BailiwickZones` change adds no heap, but the DNS named-buffer accounting figure at
-`:452` (`BootInventory::named_fixed_buffer_bytes` ≈ 196 MiB lower bound) was re-measured once
+§Retained serving workspace (`BootInventory::named_fixed_buffer_bytes` ≈ 196 MiB lower bound) was re-measured once
 the amendment was authorized: the fixed `[DnsName; ALLOWLIST_MAX]` zone storage measures
 `size_of::<BailiwickZones>()` = 17168 B (16.77 KiB) — zones 8448 B + suffixes 8448 B +
 `suffix_owner` 256 B + len/suffix_len 16 B — with `size_of::<DnsName>()` = 264 B (256-byte
@@ -1621,18 +1161,14 @@ buffer + 8 B len) (`src/dns.rs:793-799`). One retained instance exists: the fiel
 single `StartupDns` transport (`src/startup_dns.rs:1089`). `DNS_NAMED_BUFFER_BYTES` =
 `QUERY_BUF_LEN` (512) + `RECV_BUF_LEN` (`DNS_MSG_LIMIT` + 2 = 16386) + `size_of::<ResponseWorkspace>()`
 (`src/inventory.rs:32-33`); the re-measured total ≈ 196 MiB is unchanged within rounding
-(17168 B ≈ 0.0164 MiB), so the `:452` note requires no textual edit.
+(17168 B ≈ 0.0164 MiB), so the §Retained serving workspace note requires no textual edit.
 
-This supersedes the superseded `:71` bailiwick sentence and the RT-005 note at `:1335`; the
-hrdn3 recitals at `:539-549` and the prior alox blocks remain in place as historical record
+This supersedes the superseded §Configuration & DNS bailiwick sentence and the RT-005 note at §SP-013 — Latest-change value keyed per-ordinal with triggering peer source address; the
+hrdn3 recitals at §Vec 11 — CNAME bailiwick enforcement and the prior alox blocks remain in place as historical record
 and are not individually edited.
 
-## alumina-alox11 (2026-10-26) — F-02 close: reject early_data block domain/all at startup; remove K-connection corroboration
+## F-02 close: reject early_data block domain/all at startup; remove K-connection corroboration
 
-This is the narrow, user-authorized amendment closing the F-02 finding (draft
-`alox-f02b-amendment.md`). It amends only the enumerated surfaces below — the SP-002
-recital at `:1192`, the schema annotation at `:1036`, and the Status table row at `:1377` —
-and appends this block; every other clause of this document remains binding and unchanged.
 
 #### F-02 — Upstream-sourced early data cannot select a Domain/All block
 
@@ -1640,22 +1176,14 @@ The K-connection corroboration gate proposed by SP-002 is removed as permanently
 ineligible. The resolution is structural: `early_data = { action = "block", scope = "domain" | "all" }`
 is invalid configuration, rejected at startup with exit 78 (EX_CONFIG); the only legal
 `block` scope for `early_data` is `connection`. The baseline mandatory denial is kept
-(terminate setup on early upstream data while the gate is closed, rp2e `:255`), and the
+(terminate setup on early upstream data while the gate is closed, rp2e §Action catalog and attribution), and the
 corroboration state and gate are removed from the enforcement path. Because Domain/All
 block scopes are unreachable from configuration, the upstream-sourced signal can no longer
 fire the per-domain latch or a process-wide latch; the `connection` scope terminates only
-the originating setup. The fixed profile is preserved: single boot owner and single serving
-owner, two reused 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no
-runtime-surface expansion.
+the originating setup.
 
-## alumina-alox12 (2026-10-26) — P-A6b fold: L3 bare-CR, L8 non-host_name SNI, SP-006 sigalg bound
+## P-A6b fold: L3 bare-CR, L8 non-host_name SNI, SP-006 sigalg bound
 
-This is the narrow, user-authorized amendment folding the P-A6b sub-mission of the
-`alox-info` package into this document. It amends only the enumerated surfaces below — the
-L3 and L8 Code-enforcement statuses in the `alumina-sechd` table at `:333`/`:335`, and the
-SP-006 Status row at `:1381` — and appends this block; every other clause of this document
-remains binding and unchanged. The code landed in the P-A6a/P-B7a increments (linus review
-beads `alumina-r9h2i`/`alumina-eq4il`); this amendment only records it.
 
 #### L3 — CONNECT bare-CR rejection
 
@@ -1685,16 +1213,9 @@ literal marker (`count_token` `src/client_hello.rs:874-876`). Tests:
 `sigalgs_at_max_sigalgs_accepted` (`src/client_hello.rs:2041`),
 `sigalgs_over_max_rejects_as_profile` (`src/client_hello.rs:2053`).
 
-The fixed profile is preserved: single boot owner and single serving owner, two reused
-128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
 
-## alumina-alox13 (2026-10-26) — P-B7b note: one-label allowlist names accepted (no minimum label count)
+## P-B7b note: one-label allowlist names accepted (no minimum label count)
 
-This is the narrow, user-authorized amendment recording the P-B7b sub-mission of the
-`alox-info` package: the one-label wire-name behavior of `[allowed_fqdn."<fqdn>:<port>"]`
-entries is documented here as accepted by design. It amends no existing row and adds no
-rejection code — it appends this block and every other clause of this document remains
-binding and unchanged.
 
 #### One-label allowlist names are accepted; only `cname_bailiwick` requires ≥ 2 labels
 
@@ -1718,18 +1239,9 @@ the accepted-entries list at `src/config.rs:353-356`; and `rejects_bare_fqdn_key
 (`src/config.rs:1365`) confirming the only allowlist-key rejection is a missing `:port`,
 not a label count.
 
-The fixed profile is preserved: single boot owner and single serving owner, two reused
-128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
 
-## alumina-alox14 (2026-10-26) — Register fold: SP-001/003/004/005, RT-001, SP-009/010, RT-006/007 implemented
+## Register fold: SP-001/003/004/005, RT-001, SP-009/010, RT-006/007 implemented
 
-This is the narrow, user-authorized amendment folding the register-fold sub-mission of the
-`alox-info` package into this document. It amends only the enumerated Status rows below —
-SP-001, SP-003, SP-004, SP-005, RT-001, SP-009, SP-010, RT-006, and RT-007 at
-`:1376`/`:1378`/`:1379`/`:1380`/`:1382`/`:1385`/`:1386`/`:1390`/`:1391` (SP-006 was folded
-by `alumina-alox12`) — and appends this block; every other clause of this document remains
-binding and unchanged. Each item below is implemented in code with live tests; this
-amendment only records that state.
 
 #### SP-001 — bounded fact threshold; fixed constants; no speculative pacing
 
@@ -1792,21 +1304,10 @@ warning fact (`cert_outside_validity_window` `src/startup_dns.rs:1029`, `expired
 `src/startup_dns.rs:795-796`). Tests: `pinned_dot_accepts_expired_cert_with_matching_pin`
 (`src/startup_dns/dot_tests.rs:1012`), `:1040-1042`, `:1067-1078`.
 
-The fixed profile is preserved: single boot owner and single serving owner, two reused
-128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
 
-## alumina-alox15 (2026-10-26) — Reject unknown ECH codepoint 0xffce fail-closed
+## Reject unknown ECH codepoint 0xffce fail-closed
 
-This is the narrow, user-authorized amendment folding the P-A4 sub-mission of the
-`alox-perf-ech-02` package into this document. It amends only the ECH clause at
-`:49` — extending the `encrypted_client_hello` rejection to the draft-ESNI/ECH
-codepoint `0xffce` (`encrypted_server_name`, draft-ietf-tls-esni ≤-08) — and
-appends this block; every other clause of this document remains binding and
-unchanged. The `0xffce` codepoint is treated as ECH-present and rejected
-fail-closed, consistent with the existing `0xfe0d` handling. The `0xff01`
-(`renegotiation_info`) codepoint is deliberately not folded in; it appears only
-in JA4 golden test vectors and is not an ECH signal. This amendment is
-implemented in code with a live test; this amendment only records that state.
+The `0xffce` codepoint is treated as ECH-present and rejected fail-closed, consistent with the existing `0xfe0d` handling. The `0xff01` (`renegotiation_info`) codepoint is deliberately not folded in; it appears only in JA4 golden test vectors and is not an ECH signal.
 
 The `encrypted_server_name` codepoint is folded into the same `has_ech` profile
 fact as `encrypted_client_hello` (`src/client_hello.rs:51`, match arm
@@ -1814,18 +1315,12 @@ fact as `encrypted_client_hello` (`src/client_hello.rs:51`, match arm
 (`src/client_hello.rs:1063-1065`). Test: `rejects_esni_codepoint`
 (`src/client_hello.rs:1431`).
 
-The fixed profile is preserved: single boot owner and single serving owner, two reused
-128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
 
-## alumina-alox16 (2026-10-26) — Fail-stop bailiwick suffix-slot bound
+## Fail-stop bailiwick suffix-slot bound
 
-This is the narrow, user-authorized amendment recording the B-9 fail-stop bound on the bailiwick
-suffix-slot write in the DNS layer. It amends only the `:71` bailiwick sentence surface by making
-the fixed `[DnsName; ALLOWLIST_MAX]` suffix write fail-stop in all builds, and appends this block;
-every other clause of this document remains binding and unchanged.
 
 The flat union of declared `cname_bailiwick` suffixes is bounded by the Resource-Bounds
-Invariant (`:213`): exhaustion rejects work rather than expanding storage without bound. The
+Invariant (§II. Memory & Resource Invariants): exhaustion rejects work rather than expanding storage without bound. The
 config validator already rejects a suffix total above `ALLOWLIST_MAX`
 (`CnameBailiwickTooMany`, `src/config.rs:1072-1077`; Display `src/config.rs:604`), so the
 overflow is unreachable through validated configuration — this amendment makes the defence
@@ -1836,18 +1331,9 @@ the new `StartupDnsError::BailiwickSuffixOverflow` variant (`src/startup_dns.rs`
 divergence fails loudly and typed at boot rather than as a generic index-out-of-bounds panic.
 Test: `from_allowlist_fails_stop_on_suffix_slot_overflow` (`src/dns.rs`).
 
-The fixed profile is preserved: single boot owner and single serving owner, two reused
-128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
 
-## alumina-alox17 (2026-10-26) — Capture cache generation at exchange start
+## Capture cache generation at exchange start
 
-This is the narrow, user-authorized amendment making the cache StaleGeneration guard
-(`src/cache.rs:357-359`) load-bearing for in-flight exchanges. It amends only the `:74`
-cache-lifetime sentence surface — "DNS queries and refresh results belong to cache state,
-not connection generations; obsolete results cannot overwrite newer cache state" — by
-capturing the cache entry generation into the exchange at start and using that captured
-value at apply, and appends this block; every other clause of this document remains
-binding and unchanged.
 
 Previously the apply step re-read the entry generation from the cache at the moment of
 publication, so an exchange that started against generation *G* and applied after the entry
@@ -1864,18 +1350,9 @@ state, so its exchange carries `Generation::INITIAL` and never compares
 (`src/startup_dns/tests.rs:1146`) bumps the entry generation while an exchange is in
 flight and asserts the apply is refused.
 
-The fixed profile is preserved: single boot owner and single serving owner, two reused
-128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
 
-## alumina-alox18 (2026-10-26) — Bounded corroboration on sustained-negative open
+## Bounded corroboration on sustained-negative open
 
-This is the narrow, user-authorized amendment recording the F-06 Strengthening: when a
-sustained-negative incident opens for an admitted name and the resolver set holds at least
-two configured resolvers, the serving owner cross-checks the active resolver's negative once
-against a DIFFERENT configured resolver (the next resolver after the active one, wrapping
-within the set). It amends only the `:68`-`:71` DNS/failover sentence surface by adding the
-bounded, isolated corroboration exchange, and appends this block; every other clause of this
-document remains binding and unchanged.
 
 The corroboration is a pure-sensor probe in the F-03 sense: it runs with the probe flag and
 `Generation::INITIAL` (`src/startup_dns.rs`), so the receive step returns
@@ -1903,18 +1380,9 @@ below-threshold advance leaves it in place. A failed corroboration exchange (net
 the active resolver with no degradation change and no fact. The retained corroboration
 connection is always closed so the next exchange re-dials the restored or relocated resolver.
 
-The fixed profile is preserved: single boot owner and single serving owner, two reused
-128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
 
-## alumina-alox19 (2026-10-26) — P-F09 closure: JA4 whole-monitor-record loss
+## P-F09 closure: JA4 whole-monitor-record loss
 
-This is the narrow, user-authorized amendment recording the F-09 closure: read-only
-verification (evidence bead `alumina-68byk`) confirms the JA4 whole-monitor-record loss
-surface — the fixed monitor core is always encoded, per-ordinal JA4 detail is sharded onto
-best-effort detail batches, and an explicit loss flag exists on detail suppression. It
-amends no behavioural sentence surface; it records the verified closure of the F-09
-adversarial-population concern, and appends this block; every other clause of this document
-remains binding and unchanged.
 
 Three claims are confirmed at source level. First, the fixed core is always encoded: the
 always-emitted monitor summary (`encode_monitor_summary`, `src/log.rs:835`) carries the
@@ -1949,6 +1417,3 @@ suppressed. The summary always encodes the `dx` hex bitset of loss flags when an
 `logging_monitor_summary_exact_grammar_and_zero_suppression` (`src/log.rs:3145`) asserts the
 summary carries the fixed core and the `dx` bitset while the single nonzero domain block
 rides its `monitor_domain` batch.
-
-The fixed profile is preserved: single boot owner and single serving owner, two reused
-128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
