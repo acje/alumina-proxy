@@ -330,9 +330,9 @@ The fixed resource profile (512 tunnels, 128 pending setups, two 128 KiB per-slo
 
 | Finding | Amended surface | Spec record | Code enforcement |
 | --- | --- | --- | --- |
-| L3 | CONNECT bare-CR rejection | implemented | planned |
+| L3 | CONNECT bare-CR rejection | implemented | implemented |
 | L6 | Startup positive-by-eligibility classification | implemented | planned |
-| L8 | Non-`host_name` `server_name` rejection | implemented | planned |
+| L8 | Non-`host_name` `server_name` rejection | implemented | implemented |
 | L9 | Initial TLS record minimum payload | implemented | already in code; pinned |
 | L10 | SNI trailing-dot normalization | implemented | already in code; pinned |
 | L11 | Extension/version caps in the resource profile | implemented | already in code; pinned |
@@ -1378,7 +1378,7 @@ this package; this amendment records the binding semantics.
 | SP-003: homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup exit 78 (`:513`/`:663`) | Planned — later sub-mission |
 | SP-004: sustained-negative incident class; N negatives across M windows raise `rd`-class incident in hourly summaries (`:93`) | Planned — later sub-mission |
 | SP-005: per-ordinal JA4 set up to K=16 distinct strings; overflow suppresses adds + increments count; seeding events recorded (`:922`/`:968`) | Planned — later sub-mission |
-| SP-006: >64 sigalgs rejected as AnyIllegal profile violation (not JA4 admit/reject, `:908`); `count:02` overflow saturates at 99 (no literal marker) | Planned — later sub-mission |
+| SP-006: >64 sigalgs rejected as AnyIllegal profile violation (not JA4 admit/reject, `:908`); `count:02` overflow saturates at 99 (no literal marker) | Implemented (this increment) |
 | RT-001: sigalg-list bound at 64; no silent truncation of the JA4 hash input | Planned — later sub-mission |
 | SP-007: profile rows `:177`/`:178` folded in place to 5/900 and 30/900 | Implemented (this revision) |
 | SP-008: CONNECT response-corpus oracle acknowledged at `:43` (doc-only, no behavior change) | Implemented (this revision) |
@@ -1647,3 +1647,43 @@ fire the per-domain latch or a process-wide latch; the `connection` scope termin
 the originating setup. The fixed profile is preserved: single boot owner and single serving
 owner, two reused 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no
 runtime-surface expansion.
+
+## alumina-alox12 (2026-10-26) — P-A6b fold: L3 bare-CR, L8 non-host_name SNI, SP-006 sigalg bound
+
+This is the narrow, user-authorized amendment folding the P-A6b sub-mission of the
+`alox-info` package into this document. It amends only the enumerated surfaces below — the
+L3 and L8 Code-enforcement statuses in the `alumina-sechd` table at `:333`/`:335`, and the
+SP-006 Status row at `:1381` — and appends this block; every other clause of this document
+remains binding and unchanged. The code landed in the P-A6a/P-B7a increments (linus review
+beads `alumina-r9h2i`/`alumina-eq4il`); this amendment only records it.
+
+#### L3 — CONNECT bare-CR rejection
+
+The CONNECT request head is rejected when it contains a bare carriage return (a `0x0d` not
+immediately followed by `0x0a`) or a bare line feed (`0x0a` not immediately preceded by
+`0x0d`), located incrementally while scanning for the `\r\n\r\n` head terminator
+(`src/connect.rs:274`/`:277`, `bare_line_feed` `src/connect.rs:331`, `bare_carriage_return`
+`src/connect.rs:339`). Tests: `rejects_bare_lf` (`src/connect.rs:832`),
+`rejects_bare_carriage_return_in_header_value` (`src/connect.rs:838`),
+`rejects_bare_carriage_return_before_delimiter` (`src/connect.rs:847`).
+
+#### L8 — Non-`host_name` `server_name` rejection
+
+Within the `server_name` extension, any entry whose name type is not `host_name` (0) is
+rejected as `non-host_name name type` rather than ignored (`src/client_hello.rs:737-739` in
+`parse_server_names` `src/client_hello.rs:715`). Test: `non_host_name_sni_rejected`
+(`src/client_hello.rs:1586`).
+
+#### SP-006 — >64 sigalgs rejected; `count:02` overflow saturates
+
+The `signature_algorithms` list is bounded at `MAX_SIGALGS = 64` (`src/client_hello.rs:40`);
+a list declaring more than 64 entries is rejected as `TooManySigAlgs` — an AnyIllegal profile
+violation, not a JA4 admit/reject — so the JA4 hash input is never silently truncated
+(`parse_sig_algs` `src/client_hello.rs:805-806`). The `count:02` token saturates at 99 with no
+literal marker (`count_token` `src/client_hello.rs:874-876`). Tests:
+`sigalgs_over_max_sigalgs_rejected` (`src/client_hello.rs:2032`),
+`sigalgs_at_max_sigalgs_accepted` (`src/client_hello.rs:2041`),
+`sigalgs_over_max_rejects_as_profile` (`src/client_hello.rs:2053`).
+
+The fixed profile is preserved: single boot owner and single serving owner, two reused
+128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
