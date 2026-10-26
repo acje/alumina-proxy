@@ -43,7 +43,7 @@ use crate::dns::{self, BailiwickZones, DNS_MSG_LIMIT, DnsError, ResponseWorkspac
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::log;
 use crate::resolver::{Fqdn as ResolverFqdn, MAX_RESOLVERS, ResolverSet, SpiPin};
-use crate::schedule::{ScheduleError, Schedules};
+use crate::schedule::{PerTypeTransition, ScheduleError, Schedules};
 
 pub const EXCHANGE_DEADLINE_SECS: u64 = 5;
 pub const STARTUP_WINDOW_SECS: u64 = 90;
@@ -1093,6 +1093,27 @@ fn build_tls_connection(
 /// startup-window phase so the exchange loop performs no heap allocation or
 /// deallocation: the poll registry, fixed query/recv buffers, and the response
 /// workspace all pre-exist.
+/// A per-type exchange-failure incident notification awaiting drain by the
+/// owning serving runtime into the log pipeline: either a first-failure open
+/// (warn, suppressed during startup) or a recovery (info, with the elapsed
+/// duration). At most two notes accumulate per serving turn — one exchange
+/// concludes per turn, producing either one open or up to two recoveries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IncidentNote {
+    Open {
+        ordinal: usize,
+        family: Family,
+        reason: FailureReason,
+    },
+    Recovered {
+        ordinal: usize,
+        family: Family,
+        duration: u64,
+    },
+}
+
+/// The startup-window DNS driver and, after the window, the retained serving
+/// transport owner.
 pub struct StartupDns {
     poll: Poll,
     events: Events,
@@ -1187,6 +1208,11 @@ pub struct StartupDns {
     /// positive that closes an open incident lowers the level by one; closes
     /// accumulate across the resolved set and are taken exactly once.
     incident_closes: usize,
+    /// The per-type exchange-failure incident notes awaiting drain by the
+    /// owning serving runtime into the log pipeline. Each slot holds at most
+    /// one note; the fixed two-slot buffer bounds a single serving turn, which
+    /// concludes exactly one exchange (one open, or up to two recoveries).
+    pending_incident_notes: [Option<IncidentNote>; 2],
     /// The post-window probe sweep state, present only while the sweep is in
     /// progress: which configured resolvers remain to be probed, the active
     /// resolver the sweep began from, the accumulated per-resolver verdicts,
@@ -1274,6 +1300,7 @@ impl StartupDns {
             expired_pin_certs: 0,
             incident_opens: 0,
             incident_closes: 0,
+            pending_incident_notes: [None, None],
             probe_sweep: None,
             sweep_ran: false,
             window_exercised: [false; MAX_RESOLVERS],
@@ -1343,6 +1370,25 @@ impl StartupDns {
             std::mem::take(&mut self.incident_opens),
             std::mem::take(&mut self.incident_closes),
         )
+    }
+
+    /// Drains the accumulated per-type exchange-failure incident notes for the
+    /// owning serving runtime to emit into the log pipeline, resetting the
+    /// fixed two-slot buffer to empty for the next serving turn.
+    pub(crate) fn take_incident_notes(&mut self) -> [Option<IncidentNote>; 2] {
+        std::mem::take(&mut self.pending_incident_notes)
+    }
+
+    /// Seats one incident note into the first empty slot of the fixed
+    /// two-slot buffer. The buffer never fills in a serving turn (one exchange
+    /// concludes per turn); a full buffer drops the note rather than allocate.
+    fn note_incident(&mut self, note: IncidentNote) {
+        for slot in &mut self.pending_incident_notes {
+            if slot.is_none() {
+                *slot = Some(note);
+                return;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1870,6 +1916,7 @@ impl StartupDns {
                 ex.ordinal,
                 ex.family,
                 ex.probe,
+                ex.serving,
                 schedules,
                 FailureReason::Connect,
             )?;
@@ -1882,6 +1929,7 @@ impl StartupDns {
                     ex.ordinal,
                     ex.family,
                     ex.probe,
+                    ex.serving,
                     schedules,
                     FailureReason::Connect,
                 )?;
@@ -1894,6 +1942,7 @@ impl StartupDns {
                     ex.ordinal,
                     ex.family,
                     ex.probe,
+                    ex.serving,
                     schedules,
                     FailureReason::Connect,
                 )?;
@@ -1926,6 +1975,7 @@ impl StartupDns {
                 ex.ordinal,
                 ex.family,
                 ex.probe,
+                ex.serving,
                 schedules,
                 FailureReason::Timeout,
             )?;
@@ -1994,6 +2044,7 @@ impl StartupDns {
                 ex.ordinal,
                 ex.family,
                 ex.probe,
+                ex.serving,
                 schedules,
                 FailureReason::TlsIdentity,
             )?;
@@ -2019,6 +2070,7 @@ impl StartupDns {
                     ex.ordinal,
                     ex.family,
                     ex.probe,
+                    ex.serving,
                     schedules,
                     FailureReason::TlsIdentity,
                 )?;
@@ -2031,6 +2083,7 @@ impl StartupDns {
                 ex.ordinal,
                 ex.family,
                 ex.probe,
+                ex.serving,
                 schedules,
                 FailureReason::Timeout,
             )?;
@@ -2149,6 +2202,7 @@ impl StartupDns {
                                     ex.ordinal,
                                     ex.family,
                                     ex.probe,
+                                    ex.serving,
                                     schedules,
                                     FailureReason::Send,
                                 )?;
@@ -2165,6 +2219,7 @@ impl StartupDns {
                                     ex.ordinal,
                                     ex.family,
                                     ex.probe,
+                                    ex.serving,
                                     schedules,
                                     FailureReason::Send,
                                 )?;
@@ -2184,6 +2239,7 @@ impl StartupDns {
                             ex.ordinal,
                             ex.family,
                             ex.probe,
+                            ex.serving,
                             schedules,
                             FailureReason::Send,
                         )?;
@@ -2204,6 +2260,7 @@ impl StartupDns {
                             ex.ordinal,
                             ex.family,
                             ex.probe,
+                            ex.serving,
                             schedules,
                             FailureReason::Send,
                         )?;
@@ -2216,6 +2273,7 @@ impl StartupDns {
                     ex.ordinal,
                     ex.family,
                     ex.probe,
+                    ex.serving,
                     schedules,
                     FailureReason::Send,
                 )?;
@@ -2232,6 +2290,7 @@ impl StartupDns {
                 ex.ordinal,
                 ex.family,
                 ex.probe,
+                ex.serving,
                 schedules,
                 FailureReason::Timeout,
             )?;
@@ -2279,6 +2338,7 @@ impl StartupDns {
                         ex.ordinal,
                         ex.family,
                         ex.probe,
+                        ex.serving,
                         schedules,
                         FailureReason::Timeout,
                     )?;
@@ -2293,6 +2353,7 @@ impl StartupDns {
                         ex.ordinal,
                         ex.family,
                         ex.probe,
+                        ex.serving,
                         schedules,
                         FailureReason::Timeout,
                     )?;
@@ -2319,6 +2380,7 @@ impl StartupDns {
             ex.ordinal,
             ex.family,
             ex.probe,
+            ex.serving,
             schedules,
             FailureReason::Send,
         )?;
@@ -2348,6 +2410,7 @@ impl StartupDns {
                         ex.ordinal,
                         ex.family,
                         ex.probe,
+                        ex.serving,
                         schedules,
                         FailureReason::Receive,
                     )?;
@@ -2364,6 +2427,7 @@ impl StartupDns {
                     ex.ordinal,
                     ex.family,
                     ex.probe,
+                    ex.serving,
                     schedules,
                     FailureReason::Receive,
                 )?;
@@ -2393,6 +2457,7 @@ impl StartupDns {
                             ex.ordinal,
                             ex.family,
                             ex.probe,
+                            ex.serving,
                             schedules,
                             FailureReason::Timeout,
                         )?;
@@ -2406,7 +2471,7 @@ impl StartupDns {
                         return Ok(RecvStep::Published(kind));
                     }
                     let receipt = self.now_u64();
-                    let transition = dns::apply_outcome(
+                    let incidents = dns::apply_outcome(
                         cache,
                         schedules,
                         ex.ordinal,
@@ -2415,10 +2480,24 @@ impl StartupDns {
                         self.now_u64(),
                         &outcome,
                     )?;
-                    match transition {
+                    match incidents.sustained {
                         crate::schedule::IncidentTransition::Opened => self.incident_opens += 1,
                         crate::schedule::IncidentTransition::Closed => self.incident_closes += 1,
                         crate::schedule::IncidentTransition::None => {}
+                    }
+                    if ex.serving {
+                        for (family, transition) in [Family::A, Family::Aaaa]
+                            .into_iter()
+                            .zip(incidents.per_type)
+                        {
+                            if let PerTypeTransition::Recovered { duration } = transition {
+                                self.note_incident(IncidentNote::Recovered {
+                                    ordinal: ex.ordinal,
+                                    family,
+                                    duration,
+                                });
+                            }
+                        }
                     }
                     if self.workspace.extreme_ttl() {
                         self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
@@ -2434,6 +2513,7 @@ impl StartupDns {
                         ex.ordinal,
                         ex.family,
                         ex.probe,
+                        ex.serving,
                         schedules,
                         FailureReason::Receive,
                     )?;
@@ -2447,6 +2527,7 @@ impl StartupDns {
                 ex.ordinal,
                 ex.family,
                 ex.probe,
+                ex.serving,
                 schedules,
                 FailureReason::Timeout,
             )?;
@@ -3309,6 +3390,7 @@ impl StartupDns {
         ordinal: usize,
         family: Family,
         probe: bool,
+        serving: bool,
         schedules: &mut Schedules,
         reason: FailureReason,
     ) -> Result<FailureReason, StartupDnsError> {
@@ -3325,7 +3407,14 @@ impl StartupDns {
             sweep.current = None;
         }
         if !probe {
-            schedules.note_exchange_failure(ordinal, family, now)?;
+            let transition = schedules.note_exchange_failure(ordinal, family, now, reason)?;
+            if serving && matches!(transition, PerTypeTransition::Opened) {
+                self.note_incident(IncidentNote::Open {
+                    ordinal,
+                    family,
+                    reason,
+                });
+            }
         }
         Ok(reason)
     }

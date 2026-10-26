@@ -1,5 +1,6 @@
 use crate::cache::Family;
 use crate::config::ALLOWLIST_MAX;
+use crate::startup_dns::FailureReason;
 
 /// Lower bound of the normal refresh interval, in seconds.
 pub const REFRESH_MIN: u64 = 5;
@@ -145,7 +146,43 @@ pub enum IncidentTransition {
     None,
 }
 
-const fn family_slot(family: Family) -> usize {
+/// The per-type exchange-failure incident state for one allowlist name and
+/// family: whether an incident is open, when it opened, and the reason of the
+/// most recent failure while open. The `reason` is meaningful only while
+/// `open`; the closed sentinel carries a placeholder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TypeIncident {
+    open: bool,
+    opened_at: u64,
+    reason: FailureReason,
+}
+
+const INCIDENT_CLEAR: TypeIncident = TypeIncident {
+    open: false,
+    opened_at: 0,
+    reason: FailureReason::Timeout,
+};
+
+/// The per-type incident delta one exchange failure or validated outcome
+/// produces for one family: whether a per-type incident opened, updated
+/// silently, recovered, or stayed unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerTypeTransition {
+    Opened,
+    SilentUpdate,
+    Recovered { duration: u64 },
+    None,
+}
+
+/// The incident deltas a validated outcome produces for one name: the
+/// sustained-negative delta plus the per-type deltas in A/Aaaa slot order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutcomeIncidents {
+    pub sustained: IncidentTransition,
+    pub per_type: [PerTypeTransition; 2],
+}
+
+pub(crate) const fn family_slot(family: Family) -> usize {
     match family {
         Family::A => 0,
         Family::Aaaa => 1,
@@ -170,6 +207,7 @@ pub struct Schedules {
     slots: [[Slot; 2]; ALLOWLIST_MAX],
     next_due: Option<u64>,
     negative_streaks: [NegativeStreak; ALLOWLIST_MAX],
+    exchange_incidents: [[TypeIncident; 2]; ALLOWLIST_MAX],
 }
 
 impl Schedules {
@@ -190,6 +228,7 @@ impl Schedules {
             slots: [[UNDUE; 2]; ALLOWLIST_MAX],
             next_due: None,
             negative_streaks: [STREAK_CLEAR; ALLOWLIST_MAX],
+            exchange_incidents: [[INCIDENT_CLEAR; 2]; ALLOWLIST_MAX],
         })
     }
 
@@ -356,17 +395,20 @@ impl Schedules {
 
     /// Records an exchange failure for one family, scheduling a retry from
     /// `now` at that family's current backoff stage and advancing the ladder.
+    /// The failure also advances the per-type incident for the family: the
+    /// first failure opens it, a later failure updates it silently.
     ///
     /// # Errors
     ///
     /// Returns `NameOutOfRange` or `DeadlineOverflow`; on either the slot is
-    /// unchanged.
+    /// unchanged and the incident is untouched.
     pub fn note_exchange_failure(
         &mut self,
         name: usize,
         family: Family,
         now: u64,
-    ) -> Result<(), ScheduleError> {
+        reason: FailureReason,
+    ) -> Result<PerTypeTransition, ScheduleError> {
         self.admit(name)?;
         let slot = self.slot_mut(name, family);
         let stage = slot.backoff;
@@ -377,7 +419,41 @@ impl Schedules {
         slot.backoff = advance_backoff(stage);
         slot.pending = false;
         self.recompute_next_due();
-        Ok(())
+        let incident = &mut self.exchange_incidents[name][family_slot(family)];
+        if incident.open {
+            incident.reason = reason;
+            Ok(PerTypeTransition::SilentUpdate)
+        } else {
+            *incident = TypeIncident {
+                open: true,
+                opened_at: now,
+                reason,
+            };
+            Ok(PerTypeTransition::Opened)
+        }
+    }
+
+    /// Clears an open per-type incident for one family, reporting the elapsed
+    /// duration since it opened. A closed incident clears nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NameOutOfRange` when `name` is not admitted.
+    pub fn clear_exchange_incident(
+        &mut self,
+        name: usize,
+        family: Family,
+        now: u64,
+    ) -> Result<PerTypeTransition, ScheduleError> {
+        self.admit(name)?;
+        let incident = &mut self.exchange_incidents[name][family_slot(family)];
+        if incident.open {
+            let duration = now.saturating_sub(incident.opened_at);
+            *incident = INCIDENT_CLEAR;
+            Ok(PerTypeTransition::Recovered { duration })
+        } else {
+            Ok(PerTypeTransition::None)
+        }
     }
 
     /// Records a validated NXDOMAIN for the whole name.
@@ -667,7 +743,7 @@ mod tests {
             Err(ScheduleError::NameOutOfRange)
         );
         assert_eq!(
-            schedules.note_exchange_failure(7, Family::A, 0),
+            schedules.note_exchange_failure(7, Family::A, 0, FailureReason::Timeout),
             Err(ScheduleError::NameOutOfRange)
         );
         assert_eq!(
@@ -688,7 +764,9 @@ mod tests {
             .note_positive(0, Family::A, 1000, 60, true, 0)
             .unwrap();
         assert_eq!(schedules.due_time(0, Family::A).unwrap(), Some(1060));
-        schedules.note_exchange_failure(0, Family::A, 2000).unwrap();
+        schedules
+            .note_exchange_failure(0, Family::A, 2000, FailureReason::Timeout)
+            .unwrap();
         assert_eq!(schedules.due_time(0, Family::A).unwrap(), Some(2001));
     }
 
@@ -725,7 +803,12 @@ mod tests {
                 assert!(!served[token.name()][family_slot(token.family())]);
                 served[token.name()][family_slot(token.family())] = true;
                 schedules
-                    .note_exchange_failure(token.name(), token.family(), now)
+                    .note_exchange_failure(
+                        token.name(),
+                        token.family(),
+                        now,
+                        FailureReason::Timeout,
+                    )
                     .unwrap();
             }
             for row in &served {
@@ -902,7 +985,9 @@ mod tests {
         let token = schedules.select_due(1000).unwrap().unwrap();
         assert_eq!((token.name(), token.family()), (0, Family::A));
         check(&schedules);
-        schedules.note_exchange_failure(0, Family::A, 1000).unwrap();
+        schedules
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .unwrap();
         check(&schedules);
         schedules.release_selection(0, Family::A).unwrap();
         check(&schedules);
@@ -994,7 +1079,9 @@ mod tests {
         let mut schedules = Schedules::new(1).unwrap();
         let mut dues = [0u64; 8];
         for due in dues.iter_mut() {
-            schedules.note_exchange_failure(0, Family::A, 0).unwrap();
+            schedules
+                .note_exchange_failure(0, Family::A, 0, FailureReason::Timeout)
+                .unwrap();
             *due = schedules.due_time(0, Family::A).unwrap().unwrap();
         }
         assert_eq!(&dues[..], &[1, 2, 4, 8, 16, 30, 30, 30]);
@@ -1030,17 +1117,23 @@ mod tests {
     fn soa_negatives_leave_backoff_stage_unchanged() {
         let mut schedules = Schedules::new(1).unwrap();
         for _ in 0..2 {
-            schedules.note_exchange_failure(0, Family::A, 0).unwrap();
-            schedules.note_exchange_failure(0, Family::Aaaa, 0).unwrap();
+            schedules
+                .note_exchange_failure(0, Family::A, 0, FailureReason::Timeout)
+                .unwrap();
+            schedules
+                .note_exchange_failure(0, Family::Aaaa, 0, FailureReason::Timeout)
+                .unwrap();
         }
         let soa = Soa::new(60, 60);
         schedules.note_nxdomain(0, Some(soa), 1000, 0).unwrap();
         schedules
             .note_nodata(0, Family::A, Some(soa), 2000, 0)
             .unwrap();
-        schedules.note_exchange_failure(0, Family::A, 3000).unwrap();
         schedules
-            .note_exchange_failure(0, Family::Aaaa, 4000)
+            .note_exchange_failure(0, Family::A, 3000, FailureReason::Timeout)
+            .unwrap();
+        schedules
+            .note_exchange_failure(0, Family::Aaaa, 4000, FailureReason::Timeout)
             .unwrap();
         assert_eq!(
             schedules.due_time(0, Family::A).unwrap(),
@@ -1057,7 +1150,9 @@ mod tests {
     #[test]
     fn nxdomain_without_soa_one_family_overflow_commits_nothing() {
         let mut schedules = Schedules::new(1).unwrap();
-        schedules.note_exchange_failure(0, Family::Aaaa, 0).unwrap();
+        schedules
+            .note_exchange_failure(0, Family::Aaaa, 0, FailureReason::Timeout)
+            .unwrap();
         let before = schedules;
         let near_max = u64::MAX - 1;
         assert_eq!(
@@ -1074,7 +1169,9 @@ mod tests {
         schedules.overwrite_due_at(0, Family::A, 0).unwrap();
         let token = schedules.select_due(1000).unwrap().unwrap();
         assert_eq!((token.name(), token.family()), (0, Family::A));
-        schedules.note_exchange_failure(0, Family::A, 1000).unwrap();
+        schedules
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .unwrap();
         assert_eq!(
             schedules.select_due(1000).unwrap(),
             None,
@@ -1097,19 +1194,25 @@ mod tests {
     #[test]
     fn cacheable_positive_resets_only_its_own_family_backoff() {
         let mut schedules = Schedules::new(1).unwrap();
-        schedules.note_exchange_failure(0, Family::A, 0).unwrap();
-        schedules.note_exchange_failure(0, Family::Aaaa, 0).unwrap();
+        schedules
+            .note_exchange_failure(0, Family::A, 0, FailureReason::Timeout)
+            .unwrap();
+        schedules
+            .note_exchange_failure(0, Family::Aaaa, 0, FailureReason::Timeout)
+            .unwrap();
         schedules
             .note_positive(0, Family::A, 1000, 60, true, 0)
             .unwrap();
-        schedules.note_exchange_failure(0, Family::A, 2000).unwrap();
+        schedules
+            .note_exchange_failure(0, Family::A, 2000, FailureReason::Timeout)
+            .unwrap();
         assert_eq!(
             schedules.due_time(0, Family::A).unwrap(),
             Some(2001),
             "cacheable positive resets its own backoff"
         );
         schedules
-            .note_exchange_failure(0, Family::Aaaa, 3000)
+            .note_exchange_failure(0, Family::Aaaa, 3000, FailureReason::Timeout)
             .unwrap();
         assert_eq!(
             schedules.due_time(0, Family::Aaaa).unwrap(),
@@ -1166,7 +1269,12 @@ mod tests {
             for now in [0u64, 1] {
                 while let Some(token) = schedules.select_due(now).unwrap() {
                     schedules
-                        .note_exchange_failure(token.name(), token.family(), now)
+                        .note_exchange_failure(
+                            token.name(),
+                            token.family(),
+                            now,
+                            FailureReason::Timeout,
+                        )
                         .unwrap();
                 }
             }
@@ -1188,7 +1296,12 @@ mod tests {
                 .unwrap();
             while let Some(token) = schedules.select_due(3000).unwrap() {
                 schedules
-                    .note_exchange_failure(token.name(), token.family(), 3000)
+                    .note_exchange_failure(
+                        token.name(),
+                        token.family(),
+                        3000,
+                        FailureReason::Timeout,
+                    )
                     .unwrap();
             }
         });
@@ -1239,7 +1352,9 @@ mod tests {
     fn sustained_negative_streak_ignores_nodata_and_exchange_failures() {
         let mut schedules = Schedules::new(1).unwrap();
         schedules.note_nodata(0, Family::A, None, 0, 0).unwrap();
-        schedules.note_exchange_failure(0, Family::A, 0).unwrap();
+        schedules
+            .note_exchange_failure(0, Family::A, 0, FailureReason::Timeout)
+            .unwrap();
         assert_eq!(
             schedules.note_negative_streak(0, 0),
             IncidentTransition::None,
@@ -1249,6 +1364,78 @@ mod tests {
             schedules.reset_negative_streak(0),
             IncidentTransition::None,
             "a positive without an open incident closes nothing"
+        );
+    }
+
+    #[test]
+    fn exchange_failure_opens_then_silently_updates_incident() {
+        let mut schedules = Schedules::new(1).unwrap();
+        assert_eq!(
+            schedules
+                .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+                .unwrap(),
+            PerTypeTransition::Opened,
+            "the first failure opens the per-type incident"
+        );
+        assert_eq!(
+            schedules
+                .note_exchange_failure(0, Family::A, 1001, FailureReason::Connect)
+                .unwrap(),
+            PerTypeTransition::SilentUpdate,
+            "a later failure updates the open incident silently"
+        );
+    }
+
+    #[test]
+    fn clear_exchange_incident_reports_recovery_duration() {
+        let mut schedules = Schedules::new(1).unwrap();
+        schedules
+            .note_exchange_failure(0, Family::A, 5000, FailureReason::Timeout)
+            .unwrap();
+        assert_eq!(
+            schedules
+                .clear_exchange_incident(0, Family::A, 5012)
+                .unwrap(),
+            PerTypeTransition::Recovered { duration: 12 },
+            "clearing an open incident reports the elapsed duration"
+        );
+        assert_eq!(
+            schedules
+                .clear_exchange_incident(0, Family::A, 5099)
+                .unwrap(),
+            PerTypeTransition::None,
+            "a second clear on a closed incident is a no-op"
+        );
+    }
+
+    #[test]
+    fn incident_state_is_per_family() {
+        let mut schedules = Schedules::new(1).unwrap();
+        schedules
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .unwrap();
+        assert_eq!(
+            schedules
+                .clear_exchange_incident(0, Family::Aaaa, 1001)
+                .unwrap(),
+            PerTypeTransition::None,
+            "clearing one family never touches the other"
+        );
+        assert_eq!(
+            schedules
+                .clear_exchange_incident(0, Family::A, 1005)
+                .unwrap(),
+            PerTypeTransition::Recovered { duration: 5 },
+            "the open family clears with the elapsed duration"
+        );
+    }
+
+    #[test]
+    fn clear_exchange_incident_out_of_range_errs() {
+        let mut schedules = Schedules::new(2).unwrap();
+        assert_eq!(
+            schedules.clear_exchange_incident(7, Family::A, 0),
+            Err(ScheduleError::NameOutOfRange)
         );
     }
 }

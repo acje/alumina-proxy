@@ -252,6 +252,8 @@ enum Kind {
     Monitor,
     ResolverProbe,
     ExchangeFailed,
+    IncidentOpen,
+    IncidentRecovered,
 }
 
 impl Kind {
@@ -271,6 +273,8 @@ impl Kind {
             Kind::Monitor => "monitor",
             Kind::ResolverProbe => "resolver_probe",
             Kind::ExchangeFailed => "exchange_failed",
+            Kind::IncidentOpen => "incident_open",
+            Kind::IncidentRecovered => "incident_recovered",
         }
     }
 
@@ -1523,6 +1527,47 @@ impl LogStore {
         self.enqueue(Level::Warn, Kind::ExchangeFailed, &fields);
     }
 
+    /// One warn per per-type exchange-failure incident open in the serving loop
+    /// (docs/alumina-proxy.md:79): the allowlist FQDN, the family, and the
+    /// structural failure reason. Startup-window failures never emit this
+    /// record; only serving failures do.
+    pub(crate) fn incident_open(
+        &mut self,
+        secs: u64,
+        name: &str,
+        family: Family,
+        reason: &'static str,
+    ) {
+        self.set_now(secs);
+        let fields = [
+            Field::new("secs", Val::U64(secs)),
+            Field::new("name", Val::Str(name)),
+            Field::new("family", Val::Family(family)),
+            Field::new("reason", Val::Str(reason)),
+        ];
+        self.enqueue(Level::Warn, Kind::IncidentOpen, &fields);
+    }
+
+    /// One info per per-type exchange-failure incident recovery in the serving
+    /// loop (docs/alumina-proxy.md:79): the allowlist FQDN, the family, and the
+    /// elapsed duration the incident stayed open.
+    pub(crate) fn incident_recovered(
+        &mut self,
+        secs: u64,
+        name: &str,
+        family: Family,
+        duration: u64,
+    ) {
+        self.set_now(secs);
+        let fields = [
+            Field::new("secs", Val::U64(secs)),
+            Field::new("name", Val::Str(name)),
+            Field::new("family", Val::Family(family)),
+            Field::new("duration", Val::U64(duration)),
+        ];
+        self.enqueue(Level::Info, Kind::IncidentRecovered, &fields);
+    }
+
     /// One `startup_name` record for a single unresolved name: `secs`, the
     /// allowlist `ordinal`, the full FQDN, the outcome and (when the outcome
     /// carries one) the reason. Returns `true` when the record was enqueued;
@@ -2160,6 +2205,38 @@ mod tests {
     }
 
     #[test]
+    fn logging_encoder_frames_incident_open_with_family_and_reason() {
+        let (mut store, mut file) = file_logstore();
+        store.incident_open(7, "sub.example.org", Family::Aaaa, "tls_identity");
+        flush_all(&mut store);
+        let out = read_all(&mut file);
+        let text = String::from_utf8(out).expect("ascii record");
+        let line = text.lines().next().expect("one record");
+        assert!(
+            line.starts_with(
+                "level=warn kind=incident_open secs=7 name=\"sub.example.org\" family=Aaaa reason=\"tls_identity\""
+            ),
+            "got: {line}"
+        );
+    }
+
+    #[test]
+    fn logging_encoder_frames_incident_recovered_with_family_and_duration() {
+        let (mut store, mut file) = file_logstore();
+        store.incident_recovered(9, "sub.example.org", Family::A, 42);
+        flush_all(&mut store);
+        let out = read_all(&mut file);
+        let text = String::from_utf8(out).expect("ascii record");
+        let line = text.lines().next().expect("one record");
+        assert!(
+            line.starts_with(
+                "level=info kind=incident_recovered secs=9 name=\"sub.example.org\" family=A duration=42"
+            ),
+            "got: {line}"
+        );
+    }
+
+    #[test]
     fn logging_encoder_escapes_quote_backslash_and_control_bytes() {
         let mut name = String::new();
         name.push_str("a\"b");
@@ -2439,6 +2516,30 @@ mod tests {
             encode_record(&mut slot, Level::Warn, Kind::ExchangeFailed, &exchange).expect("fits"),
         ));
 
+        let incident_open = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("name", Val::Str(name)),
+            Field::new("family", Val::Family(Family::Aaaa)),
+            Field::new("reason", Val::Str("tls_identity")),
+        ];
+        worst.push((
+            "incident_open",
+            encode_record(&mut slot, Level::Warn, Kind::IncidentOpen, &incident_open)
+                .expect("fits"),
+        ));
+
+        let incident_recovered = [
+            Field::new("secs", Val::U64(u64::MAX)),
+            Field::new("name", Val::Str(name)),
+            Field::new("family", Val::Family(Family::Aaaa)),
+            Field::new("duration", Val::U64(u64::MAX)),
+        ];
+        worst.push((
+            "incident_recovered",
+            encode_record(&mut slot, Level::Info, Kind::IncidentRecovered, &incident_recovered)
+                .expect("fits"),
+        ));
+
         let mut monitor = Monitor::new();
         monitor.saturate_all_for_test();
         monitor.set_peer_ip_v6_max_for_test();
@@ -2484,7 +2585,7 @@ mod tests {
             encode_record_probe(&mut slot, u64::MAX, &segments).expect("fits"),
         ));
 
-        assert_eq!(worst.len(), 16, "every record kind is measured");
+        assert_eq!(worst.len(), 18, "every record kind is measured");
         for (kind_name, len) in &worst {
             eprintln!(
                 "worst-case {kind_name:<16} {len:>5} B record, {:>5} B margin",

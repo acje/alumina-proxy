@@ -2740,7 +2740,14 @@ fn probe_sweep_skips_every_resolver_the_window_exercised() {
     );
     let mut schedules = Schedules::new(2).unwrap();
     transport
-        .note_failure(0, Family::A, true, &mut schedules, FailureReason::Connect)
+        .note_failure(
+            0,
+            Family::A,
+            true,
+            false,
+            &mut schedules,
+            FailureReason::Connect,
+        )
         .expect("failure noted");
     let sweep = transport.probe_sweep.expect("sweep still active");
     assert_eq!(
@@ -3136,7 +3143,14 @@ fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
     transport.repoint_to_active();
     let mut schedules = Schedules::new(2).unwrap();
     transport
-        .note_failure(0, Family::A, true, &mut schedules, FailureReason::Connect)
+        .note_failure(
+            0,
+            Family::A,
+            true,
+            false,
+            &mut schedules,
+            FailureReason::Connect,
+        )
         .expect("failure noted");
     let sweep = transport.probe_sweep.expect("sweep still active");
     assert_eq!(sweep.current, None, "the verdict recording clears current");
@@ -3149,6 +3163,111 @@ fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
         transport.active_resolver,
         ActiveResolver::at(0, 3),
         "note_failure flows through the probe-mode restore"
+    );
+}
+
+#[test]
+fn note_failure_serving_accumulates_open_note_on_first_failure() {
+    let set = resolver_set_of(&["1.1.1.1"]);
+    let mut transport = seeded_transport(set);
+    let mut schedules = Schedules::new(2).unwrap();
+    transport
+        .note_failure(
+            0,
+            Family::A,
+            false,
+            true,
+            &mut schedules,
+            FailureReason::Connect,
+        )
+        .expect("failure noted");
+    assert_eq!(
+        transport.take_incident_notes(),
+        [
+            Some(IncidentNote::Open {
+                ordinal: 0,
+                family: Family::A,
+                reason: FailureReason::Connect,
+            }),
+            None,
+        ],
+        "a serving first failure accumulates exactly one open note"
+    );
+}
+
+#[test]
+fn note_failure_startup_suppresses_open_note_but_tracks_state() {
+    let set = resolver_set_of(&["1.1.1.1"]);
+    let mut transport = seeded_transport(set);
+    let mut schedules = Schedules::new(2).unwrap();
+    transport
+        .note_failure(
+            0,
+            Family::A,
+            false,
+            false,
+            &mut schedules,
+            FailureReason::Connect,
+        )
+        .expect("startup failure noted");
+    assert_eq!(
+        transport.take_incident_notes(),
+        [None, None],
+        "a startup first failure emits no open note"
+    );
+    transport
+        .note_failure(
+            0,
+            Family::A,
+            false,
+            true,
+            &mut schedules,
+            FailureReason::Timeout,
+        )
+        .expect("serving failure noted");
+    assert_eq!(
+        transport.take_incident_notes(),
+        [None, None],
+        "the incident opened during startup, so the serving failure is a silent update"
+    );
+}
+
+#[test]
+fn note_failure_silent_update_does_not_accumulate_second_note() {
+    let set = resolver_set_of(&["1.1.1.1"]);
+    let mut transport = seeded_transport(set);
+    let mut schedules = Schedules::new(2).unwrap();
+    transport
+        .note_failure(
+            0,
+            Family::A,
+            false,
+            true,
+            &mut schedules,
+            FailureReason::Connect,
+        )
+        .expect("first failure noted");
+    transport
+        .note_failure(
+            0,
+            Family::A,
+            false,
+            true,
+            &mut schedules,
+            FailureReason::Timeout,
+        )
+        .expect("second failure noted");
+    assert_eq!(
+        transport.take_incident_notes(),
+        [
+            Some(IncidentNote::Open {
+                ordinal: 0,
+                family: Family::A,
+                reason: FailureReason::Connect,
+            }),
+            None,
+        ],
+        "a silent update while open emits no second note"
     );
 }
 

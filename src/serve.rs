@@ -17,8 +17,8 @@ use crate::log::{LogStore, ResolverProbeSegment};
 use crate::resolver::MAX_RESOLVERS;
 use crate::schedule::Schedules;
 use crate::startup_dns::{
-    FailureReason, ProbeVerdict, STARTUP_WINDOW_SECS, StartupDns, StartupDnsError, StartupReport,
-    TurnResult,
+    FailureReason, IncidentNote, ProbeVerdict, STARTUP_WINDOW_SECS, StartupDns, StartupDnsError,
+    StartupReport, TurnResult,
 };
 use crate::worker::{
     AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, SlotIndex, TunnelIndex,
@@ -408,6 +408,7 @@ impl ServeStorage {
         self.drain_probe_relocations();
         self.drain_expired_pin_certs();
         self.drain_incident_transitions();
+        self.drain_incident_notes();
         Ok(Some(result))
     }
 
@@ -494,6 +495,40 @@ impl ServeStorage {
         }
         for _ in 0..closes {
             self.enforcement.note_incident_close();
+        }
+    }
+
+    /// Emits the per-type exchange-failure incident open and recovery records
+    /// the DNS transport accumulated (docs/alumina-proxy.md:79): the allowlist
+    /// FQDN is recovered from the ordinal captured before the exchange settled.
+    /// Startup suppression already filtered the notes, so every note drained
+    /// here is a serving incident. The transport drains to zero, so a later
+    /// drain never re-emits an earlier note.
+    fn drain_incident_notes(&mut self) {
+        let secs = self.cache_secs(Instant::now());
+        for note in self.dns.take_incident_notes() {
+            let Some(note) = note else {
+                continue;
+            };
+            let (ordinal, family) = match note {
+                IncidentNote::Open {
+                    ordinal, family, ..
+                }
+                | IncidentNote::Recovered {
+                    ordinal, family, ..
+                } => (ordinal, family),
+            };
+            let Some(fqdn) = self.config.allowlist().get(ordinal) else {
+                continue;
+            };
+            match note {
+                IncidentNote::Open { reason, .. } => {
+                    self.logs.incident_open(secs, fqdn.as_str(), family, reason.as_str());
+                }
+                IncidentNote::Recovered { duration, .. } => {
+                    self.logs.incident_recovered(secs, fqdn.as_str(), family, duration);
+                }
+            }
         }
     }
 
