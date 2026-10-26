@@ -2464,6 +2464,183 @@ mod tests {
     }
 
     #[test]
+    fn apply_nxdomain_recovers_both_exchange_incidents() {
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let name = cache.name_index(0).expect("index");
+        let generation = cache.entry(name, Family::A).expect("entry").generation();
+        schedules
+            .note_exchange_failure(
+                0,
+                Family::A,
+                1000,
+                crate::startup_dns::FailureReason::Connect,
+            )
+            .expect("open the A incident");
+        schedules
+            .note_exchange_failure(
+                0,
+                Family::Aaaa,
+                1000,
+                crate::startup_dns::FailureReason::Connect,
+            )
+            .expect("open the AAAA incident");
+        let incidents = apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            generation,
+            1000,
+            1012,
+            &Outcome::NxDomain { soa: None },
+        )
+        .expect("apply");
+        assert_eq!(
+            incidents.per_type,
+            [
+                PerTypeTransition::Recovered { duration: 12 },
+                PerTypeTransition::Recovered { duration: 12 },
+            ],
+            "an NXDOMAIN clears both per-type exchange incidents"
+        );
+    }
+
+    #[test]
+    fn apply_positive_recovers_only_its_own_family_incident() {
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let name = cache.name_index(0).expect("index");
+        let gen_a = cache.entry(name, Family::A).expect("entry").generation();
+        let gen_aaaa = cache.entry(name, Family::Aaaa).expect("entry").generation();
+        schedules
+            .note_exchange_failure(
+                0,
+                Family::A,
+                1000,
+                crate::startup_dns::FailureReason::Connect,
+            )
+            .expect("open the A incident");
+        schedules
+            .note_exchange_failure(
+                0,
+                Family::Aaaa,
+                1000,
+                crate::startup_dns::FailureReason::Connect,
+            )
+            .expect("open the AAAA incident");
+        let a_incidents = apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            gen_a,
+            1000,
+            1012,
+            &Outcome::Positive {
+                family: Family::A,
+                bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(
+                    93, 184, 216, 34,
+                ))])
+                .expect("bindings"),
+                ttl: 120,
+            },
+        )
+        .expect("apply the A positive");
+        assert_eq!(
+            a_incidents.per_type,
+            [
+                PerTypeTransition::Recovered { duration: 12 },
+                PerTypeTransition::None,
+            ],
+            "a positive A clears only the A incident, leaving AAAA open"
+        );
+        let aaaa_incidents = apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            gen_aaaa,
+            1000,
+            1020,
+            &Outcome::Positive {
+                family: Family::Aaaa,
+                bindings: BindingList::from_slice(&[NumericAddr::V6(Ipv6Addr::new(
+                    0x2606, 0x2800, 0x0220, 0x0001, 0, 0, 0, 0x0248,
+                ))])
+                .expect("bindings"),
+                ttl: 120,
+            },
+        )
+        .expect("apply the AAAA positive");
+        assert_eq!(
+            aaaa_incidents.per_type,
+            [
+                PerTypeTransition::None,
+                PerTypeTransition::Recovered { duration: 20 },
+            ],
+            "a later positive AAAA clears only the still-open AAAA incident"
+        );
+    }
+
+    #[test]
+    fn apply_nodata_leaves_exchange_incidents_untouched() {
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let name = cache.name_index(0).expect("index");
+        let generation = cache.entry(name, Family::A).expect("entry").generation();
+        schedules
+            .note_exchange_failure(
+                0,
+                Family::A,
+                1000,
+                crate::startup_dns::FailureReason::Connect,
+            )
+            .expect("open the A incident");
+        schedules
+            .note_exchange_failure(
+                0,
+                Family::Aaaa,
+                1000,
+                crate::startup_dns::FailureReason::Connect,
+            )
+            .expect("open the AAAA incident");
+        let incidents = apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            generation,
+            1000,
+            1012,
+            &Outcome::NoData {
+                family: Family::A,
+                soa: None,
+            },
+        )
+        .expect("apply");
+        assert_eq!(
+            incidents.per_type,
+            [PerTypeTransition::None, PerTypeTransition::None],
+            "a NODATA touches no per-type exchange incident"
+        );
+        let nxdomain = apply_outcome(
+            &mut cache,
+            &mut schedules,
+            0,
+            generation,
+            1000,
+            1020,
+            &Outcome::NxDomain { soa: None },
+        )
+        .expect("apply");
+        assert_eq!(
+            nxdomain.per_type,
+            [
+                PerTypeTransition::Recovered { duration: 20 },
+                PerTypeTransition::Recovered { duration: 20 },
+            ],
+            "the incidents survived NODATA untouched and an NXDOMAIN later clears them"
+        );
+    }
+
+    #[test]
     fn nodata_through_cname_target_without_owner_is_negative() {
         let mut msg = header(20, true, 0, 1, 1, 1, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));

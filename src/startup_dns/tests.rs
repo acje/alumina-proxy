@@ -3272,6 +3272,89 @@ fn note_failure_silent_update_does_not_accumulate_second_note() {
 }
 
 #[test]
+fn serving_positive_emits_recovered_note_for_open_incident() {
+    let cfg = config();
+    let responder = spawn_responder(vec![vec![
+        Step::PositiveA {
+            ttl: 120,
+            octets: [93, 184, 216, 34],
+        },
+        Step::Close,
+    ]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1"]));
+    transport.addr = ns(responder.port());
+    transport
+        .note_failure(
+            0,
+            Family::A,
+            false,
+            true,
+            &mut schedules,
+            FailureReason::Connect,
+        )
+        .expect("open a serving A incident");
+    assert_eq!(
+        transport.take_incident_notes(),
+        [
+            Some(IncidentNote::Open {
+                ordinal: 0,
+                family: Family::A,
+                reason: FailureReason::Connect,
+            }),
+            None,
+        ],
+        "the serving failure accumulates the open note before the exchange"
+    );
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
+        .unwrap();
+    transport.mark_serving_started();
+    let mut result = None;
+    for _ in 0..256 {
+        match transport
+            .advance_exchange(fqdn, &mut cache, &mut schedules)
+            .unwrap()
+        {
+            TurnResult::Pending => {
+                if transport
+                    .exchange_deadline()
+                    .is_some_and(|d| Instant::now() >= d)
+                {
+                    continue;
+                }
+                let _ = transport.wait_dns_readiness(deadline).unwrap();
+            }
+            term => {
+                result = Some(term);
+                break;
+            }
+        }
+    }
+    assert!(
+        matches!(result, Some(TurnResult::Published(_))),
+        "a serving positive must publish, got {result:?}"
+    );
+    let notes = transport.take_incident_notes();
+    assert!(
+        matches!(
+            notes[0],
+            Some(IncidentNote::Recovered {
+                ordinal: 0,
+                family: Family::A,
+                ..
+            })
+        ),
+        "the serving positive must emit a Recovered note for the open A incident, got {notes:?}"
+    );
+    assert_eq!(notes[1], None, "no AAAA note is emitted");
+    drop(responder);
+}
+
+#[test]
 fn sweep_probe_to_non_primary_is_never_hijacked_into_a_failback_probe() {
     let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
     let mut transport = seeded_transport(set);
