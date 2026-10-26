@@ -981,21 +981,22 @@ fn hash12_finish(ctx: ring::digest::Context) -> [u8; 12] {
 }
 
 fn cipher_hash12(ciphers: &[u16]) -> [u8; 12] {
-    let mut sorted = [0u16; MAX_CIPHERS];
+    let mut sorted = [const { MaybeUninit::uninit() }; MAX_CIPHERS];
     let mut n = 0usize;
     for &c in ciphers {
         if !is_grease(c) {
-            sorted[n] = c;
+            sorted[n].write(c);
             n += 1;
         }
     }
     if n == 0 {
         return [b'0'; 12];
     }
-    sorted[..n].sort_unstable();
+    let sorted = crate::alloc::u16_slice_from_raw_parts_mut(&mut sorted, n);
+    sorted.sort_unstable();
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
     let mut first = true;
-    for &c in &sorted[..n] {
+    for &c in &*sorted {
         if !first {
             ctx.update(b",");
         }
