@@ -74,7 +74,10 @@ impl Counts {
 /// and length misuse are unrepresentable.
 #[must_use]
 pub(crate) const fn u16_slice_from_raw_parts(slots: &[MaybeUninit<u16>], len: usize) -> &[u16] {
-    assert!(len <= slots.len(), "u16 slice length exceeds the slot count");
+    assert!(
+        len <= slots.len(),
+        "u16 slice length exceeds the slot count"
+    );
     // SAFETY: the caller contract — the first `len` slots are initialized `u16`
     // values; `MaybeUninit<u16>` has the same layout as `u16`, so the
     // reinterpretation is sound; `len <= slots.len()` is asserted above, so the
@@ -94,7 +97,10 @@ pub(crate) fn u16_slice_from_raw_parts_mut(
     slots: &mut [MaybeUninit<u16>],
     len: usize,
 ) -> &mut [u16] {
-    assert!(len <= slots.len(), "u16 slice length exceeds the slot count");
+    assert!(
+        len <= slots.len(),
+        "u16 slice length exceeds the slot count"
+    );
     // SAFETY: the caller contract — the first `len` slots are initialized `u16`
     // values; `MaybeUninit<u16>` has the same layout as `u16`, so the
     // reinterpretation is sound; `len <= slots.len()` is asserted above, so the
