@@ -42,7 +42,10 @@ specification, not feature growth.
   low-risk alox hardening amendment (probe isolation, failover ordinal,
   failback reset, JA4 baseline overflow, zero-TTL stale serving, DoT TLS
   1.3-only, monitor loss-flag bitset), and the `alox8` (2026-10-25)
-  lossless peer-IP hex render and 10 KiB log-slot amendment, all
+  lossless peer-IP hex render and 10 KiB log-slot amendment, the `alox9`
+  (2026-10-25) 2 KiB log slot and monitor family split amendment, and the
+  `alox10` (2026-10-26) explicit CNAME bailiwick (self-default zone +
+  declared suffix union) amendment, all
   recorded in the document; no further amendment authority is implied.
 - Status is a scoped local testQA candidate — not production-qualified;
   serving-qualification gates stay open (`docs/build-plan.md` owns them).

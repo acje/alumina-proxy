@@ -68,7 +68,7 @@ Missing or unreadable configuration, invalid TOML (including duplicate keys or i
 - **Transport:** Each resolver entry dials its declared form: plain DNS over TCP on port 53 for a bare-IP entry, or DNS over TLS (DoT) on port 853 for an entry carrying an `#fqdn` identity, with one reusable connection and one outstanding query. DoT validates the server identity against the entry's FQDN as SNI/SAN and, for a strict-pinned entry, the server's SPKI digest against its `#pin-sha256=` suffix; an unpinned DoT entry validates against an empty root store and fails closed. There is no UDP or alternate-resolver fallback, and a DoT handshake or identity failure never downgrades to cleartext plain DNS. Validate the response flag, opcode, transaction ID, and question name, type, and class against the outstanding query; draw each transaction ID from the OS CSPRNG (`getrandom`). Close the DNS connection on timeout, malformed or mismatched responses, truncation, or an oversized message; do not publish partial results. Plain DNS over TCP is not cryptographic authentication of the resolver or DNS data.
 - **Wire parsing:** Require QDCOUNT 1, exact section counts with no trailing bytes, and RDLENGTH equal to the parsed RDATA (4 for A, 16 for AAAA). Follow compression pointers only to strictly earlier offsets, and only in owner names and CNAME/SOA names. Reject reserved label types, labels over 63 octets, and decoded names over 255 octets.
 - **DNS control traffic:** DNS sockets may reach only the selected resolver endpoint. This control traffic is separate from tunnel destination authorization and may use a private, loopback, or link-local resolver address; it never makes that address eligible as a CONNECT destination.
-- **DNS provenance:** Issue only IN-class A/AAAA queries for the exact approved hostname, with recursion desired, through the selected recursive resolver. Do not perform local recursion, CNAME follow-up queries, or alternate-resolver fallback. Accept direct addresses or a complete CNAME chain rooted at the queried hostname, with at most eight links and no loops. Require one unambiguous target per chain owner; reject conflicting targets and coexistence of CNAME and A/AAAA records at a chain owner. For a positive answer, every candidate must be an IN-class record of the requested type in the answer section, owned by the queried hostname or the terminal name of the rooted chain. All supporting CNAME records must also be in the answer section. Unrelated records and all authority/additional-section addresses must never become candidates. A chain may instead terminate in a validated negative outcome without terminal addresses, as specified below; a chain lacking either terminal addresses or a validated negative outcome is an exchange failure. CNAME targets need not be allowlisted, but every followed CNAME link must land inside an allowlist bailiwick zone — the deduplicated parent-zone set derived from the allowlist, matched at label boundaries — or the exchange fails with the distinct `BailiwickViolation` outcome rather than silently routing into an attacker zone; they locate an approved name's addresses but never authorize additional CONNECT names. CONNECT and SNI remain the original approved hostname. DNAME records in the answer section are unsupported and cause an exchange failure, even if a synthesized CNAME is present; never implement DNAME substitution.
+- **DNS provenance:** Issue only IN-class A/AAAA queries for the exact approved hostname, with recursion desired, through the selected recursive resolver. Do not perform local recursion, CNAME follow-up queries, or alternate-resolver fallback. Accept direct addresses or a complete CNAME chain rooted at the queried hostname, with at most eight links and no loops. Require one unambiguous target per chain owner; reject conflicting targets and coexistence of CNAME and A/AAAA records at a chain owner. For a positive answer, every candidate must be an IN-class record of the requested type in the answer section, owned by the queried hostname or the terminal name of the rooted chain. All supporting CNAME records must also be in the answer section. Unrelated records and all authority/additional-section addresses must never become candidates. A chain may instead terminate in a validated negative outcome without terminal addresses, as specified below; a chain lacking either terminal addresses or a validated negative outcome is an exchange failure. CNAME targets need not be allowlisted, but every followed CNAME link must land inside an allowlist bailiwick zone — the per-entry union of the allowlist name's self-default zone (the name and its subdomains) and that entry's declared `cname_bailiwick` suffix union, each matched at label boundaries — or the exchange fails with the distinct `BailiwickViolation` outcome rather than silently routing into an attacker zone; they locate an approved name's addresses but never authorize additional CONNECT names. CONNECT and SNI remain the original approved hostname. DNAME records in the answer section are unsupported and cause an exchange failure, even if a synthesized CNAME is present; never implement DNAME substitution.
 - **Service discovery:** HTTPS/SVCB endpoint substitution is unsupported. These records must not change the CONNECT target, destination port, or transport. Clients must use the origin hostname on its allowlisted entry's port as the CONNECT target and supply matching SNI, rather than substitute an alternative endpoint.
 - **Addresses:** As defense-in-depth against resolver or zone misconfiguration, only globally routable unicast destinations are eligible. Compare parsed numeric addresses, never textual forms. IPv4 candidates must not fall within `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`, `192.88.99.0/24`, `192.168.0.0/16`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4`, or `240.0.0.0/4`. IPv6 candidates must lie within `2000::/3` and outside `2001::/23`, `2001:db8::/32`, `2002::/16`, and `3fff::/20`. Prefixes that embed or translate IPv4 addresses are ineligible regardless of the embedded address, including IPv4-mapped, IPv4-compatible, NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`), 6to4, and Teredo; Alumina never extracts an embedded IPv4 address to check it. NAT64/DNS64 deployments are outside the golden path. The table is fixed at build time; changing it requires a design revision. The IPv4 exclusion table is deliberately scoped to private, loopback, link-local, benchmark, documentation, and other non-globally-routable space; public special-use ranges — AS112 anycast `192.31.196.0/24`, AMT `192.52.193.0/24`, and direct-delegation AS112 `192.175.48.0/24` — are intentionally not excluded because they are globally routable and can legitimately host internet services, so their absence is not an omission. Validate every A/AAAA candidate before publication and again before each connection attempt.
 - **Cache lifetime:** Each configured name holds one cache entry per record type: its eligible addresses (bindings), one freshness deadline, one retirement deadline, and a generation. The entry TTL is the earliest TTL of any supporting CNAME or address record in the answer (RFC 2181 §5.2), measured from receipt with a monotonic clock; all bindings in an entry share its deadlines. Fresh, stale, and retired are computed from the entry deadlines and the current monotonic time, never stored: only validated DNS outcomes mutate an entry, and timers only drive refresh and notifications. Honor the received TTL without raising it to the minimum refresh interval, except that a TTL of 0 is treated as 1 second, deviating from RFC 1035 so zero-TTL steering services remain usable. A validated positive answer replaces the cached addresses for its record type and establishes new freshness and retirement deadlines. A validated recursive negative answer evicts immediately without stale grace: NXDOMAIN is name-wide for the queried allowlisted hostname, including when its CNAME terminal name is nonexistent; NODATA is specific to the queried record type and must not evict addresses of another type. Apply a validated NXDOMAIN to both record types as though each had received it: evict both entries, update both schedules, and clear both exchange-failure incidents. Neither outcome requires the AA bit. DNS queries and refresh results belong to cache state, not connection generations; obsolete results cannot overwrite newer cache state.
@@ -1049,8 +1049,9 @@ early_data = { action = "flare_only" | "block", scope = "connection" | "domain" 
   ordinal numbering carried in logs matches that same 0-based numbering. The allowlist and
   its actions are built from the same table, so enforcement pairing is unaffected by the
   ordering.
-- Every `[allowed_fqdn."..."]` table contains exactly one key, `early_data`, an inline table
-  with exactly `action` and `scope`. Missing `early_data`, an extra key, or an unknown key
+- Every `[allowed_fqdn."..."]` table contains the mandatory `early_data` key and an optional
+  `cname_bailiwick` key; every other key remains invalid configuration (exit 78). `early_data`
+  is an inline table with exactly `action` and `scope`; missing `early_data` or an unknown key
   is invalid configuration (exit 78); no defaults are supplied, consistent with the
   all-keys-mandatory doctrine. The `early_data` key names the existing per-domain control
   (rp2e `:255` early upstream data); it is forward-compatible with a future `ja4` key gated
@@ -1340,7 +1341,10 @@ a code defect. Resolution: spec-text note only — require nothing more today. T
 SOA granularity is an accepted threat-model boundary: the anomaly surface
 (`BailiwickViolation`) continues to fire only outside the parent SOA, and the residual (a
 parent-zone delegation compromise is indistinguishable in-band) is acknowledged without
-changing the bailiwick rule. Implemented (this revision).
+changing the bailiwick rule. Implemented (this revision). This note is superseded and refined
+by SP-014 (alumina-alox10, `:1335`): the parent-zone granularity residual is narrowed to the
+operator-declared suffix union — the operator, not the derivation, now chooses the zone
+granularity, and a declared suffix is an explicit trust boundary.
 
 #### RT-006 — Independent stale-serving window
 
@@ -1552,3 +1556,72 @@ Deterministic tests prove the exact monitor grammar and the worst-case slot fit 
 for every record kind against the 2048-byte slot
 (`logging_monitor_summary_exact_grammar_and_zero_suppression`,
 `logging_worst_case_record_per_kind_fits_the_slot_with_margin`, `src/log.rs`).
+
+## alumina-alox10 (2026-10-26) — Explicit CNAME bailiwick: self-default zone + declared suffix union
+
+This is the narrow, user-authorized amendment transcribing the SP-014 resolution of the F-07
+CNAME-bailiwick finding (draft `alox-f07-amendment.md`) into this document. It amends only the
+enumerated surfaces below — the `:71` bailiwick sentence, the `:452` DNS named-buffer
+accounting note (measurement only; no code change), the `:1052` cfgk exactly-one-key rule, and
+the `:1335` RT-005 note — and appends this block; every other clause of this document remains
+binding and unchanged. The code landed in the F-07 increment (linus review bead
+`alumina-kjwox.7`); this amendment only records it.
+
+#### SP-014 — Explicit CNAME bailiwick: self-default zone + declared suffix union
+
+The implicit parent-zone derivation is replaced by an explicit two-part bailiwick:
+
+- **Self-default zone**: each allowlisted name's own zone is itself — the allowlist name and
+  its subdomains only, matched at label boundaries. A CNAME chain rooted at an allowlisted
+  name may land on the name itself or any subdomain of it.
+- **Declared suffix union**: an optional per-entry `cname_bailiwick` array of bare-name
+  suffixes (`[allowed_fqdn."<fqdn>:<port>"].cname_bailiwick = ["<suffix>", ...]`) widens the
+  bailiwick for that entry to the union of the self-default zone and every declared suffix,
+  each matched at label boundaries. A declared suffix covers itself and its subdomains.
+
+A followed CNAME link must land inside the entry's union (self-default zone or a declared
+suffix) or the exchange fails with the distinct `BailiwickViolation` outcome, unchanged. The
+union is per-entry: an entry with no declared suffixes is restricted to its self-default zone
+only. Cross-allowlist coverage is preserved only to the extent another allowlisted name's zone
+falls within the entry's own self-default or declared-suffix union.
+
+Configuration validation: `cname_bailiwick` is optional; when present it is an array of
+validated bare names — no port, no wildcard, no IP literal, at least two labels — and the
+total declared suffixes across all entries is at most `ALLOWLIST_MAX` (32), else invalid
+configuration (exit 78). This refines the cfgk exactly-one-key rule at `:1052`: an
+`[allowed_fqdn."..."]` table now contains the mandatory `early_data` key and an optional
+`cname_bailiwick` key; every other key remains invalid configuration (exit 78).
+
+This **supersedes and refines RT-005** (`:1335`): the parent-zone granularity note is replaced
+by the explicit self-default + declared-suffix model. The residual RT-005 acknowledged (a
+parent-zone compromise pivots allowlist names inside that zone) is narrowed to the
+operator-declared suffix union: the operator, not the derivation, now chooses the zone
+granularity; a declared suffix is an explicit trust boundary, and the residual is bounded to
+zones the operator declared. The `:71` bailiwick sentence is amended accordingly.
+
+Implementation: `BailiwickZones` (`src/dns.rs`) holds the allowlist entries and the declared
+suffixes in fixed `[DnsName; ALLOWLIST_MAX]` arrays (no heap), with a parallel `suffix_owner`
+slot index so every suffix is attributed to the allowlist entry that declared it.
+`covers_for(root, name)` accepts `name` only when it falls inside `root`'s own self-default
+zone (the allowlist entry and its label-boundary subdomains) or inside one of that same
+entry's declared suffixes, via the existing `soa_covers` label-boundary match — a neighbour
+entry's zone never widens the bailiwick. `Config::cname_bailiwick()` returns the validated
+per-entry suffix lists; `from_allowlist(allowlist, &suffix_lists)` builds the zones in
+allowlist order. Allocation profile unchanged (fixed-slot storage, no post-boot heap).
+
+#### Fixed-profile accounting follow-up
+
+The `BailiwickZones` change adds no heap, but the DNS named-buffer accounting figure at
+`:452` (`BootInventory::named_fixed_buffer_bytes` ≈ 196 MiB lower bound) was re-measured once
+the amendment was authorized: the fixed `[DnsName; ALLOWLIST_MAX]` zone storage measures
+`size_of::<BailiwickZones>()` = 17168 B (16.77 KiB) — zones 8448 B + suffixes 8448 B +
+`suffix_owner` 256 B + len/suffix_len 16 B — with `size_of::<DnsName>()` = 264 B (256-byte
+buffer + 8 B len) (`src/dns.rs:793-799`). One retained instance exists: the field of the
+single `StartupDns` transport (`src/startup_dns.rs:1089`). `DNS_NAMED_BUFFER_BYTES` =
+`QUERY_BUF_LEN` (512) + `RECV_BUF_LEN` (`DNS_MSG_LIMIT` + 2 = 16386) + `size_of::<ResponseWorkspace>()`
+(`src/inventory.rs:32-33`); the re-measured total ≈ 196 MiB is unchanged within rounding
+(17168 B ≈ 0.0164 MiB), so the `:452` note requires no textual edit.
+
+This supersedes the superseded `:71` bailiwick sentence and the RT-005 note at `:1335`; the
+hrdn3 recitals at `:539-549` and the prior alox blocks remain in place as historical record
+and are not individually edited.

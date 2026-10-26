@@ -28,38 +28,12 @@ impl Fqdn {
         let (host, port) = input
             .rsplit_once(':')
             .ok_or_else(|| "allowlist entry lacks a <fqdn>:<port> port".to_string())?;
-        let name = normalize_trailing_dot(host)?;
-        if name.is_empty() {
-            return Err("empty hostname".into());
-        }
-        if name.len() > FQDN_MAX_LEN {
-            return Err("hostname exceeds 253 bytes".into());
-        }
-        for label in name.split('.') {
-            if label.is_empty() {
-                return Err("empty label".into());
-            }
-            if label.len() > 63 {
-                return Err("label exceeds 63 bytes".into());
-            }
-            if label.starts_with('-') || label.ends_with('-') {
-                return Err("label starts or ends with hyphen".into());
-            }
-            if !label
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            {
-                return Err(format!("label {label:?} not lowercase ASCII [a-z0-9-]"));
-            }
-        }
+        let name = validate_bare_name(host)?;
         if is_ip_literal_shape(name.as_bytes()) {
             return Err("allowlist entry is an IP literal; use a DNS hostname".into());
         }
         let port = parse_config_port(port)?;
-        Ok(Fqdn {
-            name: name.to_owned(),
-            port,
-        })
+        Ok(Fqdn { name, port })
     }
 
     /// The normalized bare `<fqdn>` (no port, no trailing dot): the key used
@@ -75,6 +49,59 @@ impl Fqdn {
     pub const fn port(&self) -> u16 {
         self.port
     }
+}
+
+/// Validates one DNS label against the shared lowercase-ASCII rules: non-empty,
+/// ≤63 bytes, no leading/trailing hyphen, only `[a-z0-9-]`.
+fn validate_label(label: &str) -> Result<(), String> {
+    if label.is_empty() {
+        return Err("empty label".into());
+    }
+    if label.len() > 63 {
+        return Err("label exceeds 63 bytes".into());
+    }
+    if label.starts_with('-') || label.ends_with('-') {
+        return Err("label starts or ends with hyphen".into());
+    }
+    if !label
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(format!("label {label:?} not lowercase ASCII [a-z0-9-]"));
+    }
+    Ok(())
+}
+
+/// Validates a bare DNS name (no port): normalizes a single trailing dot,
+/// enforces the shared label rules and the `FQDN_MAX_LEN` byte bound, and
+/// returns the normalized name. Shape-specific checks (IP-literal rejection,
+/// minimum label count) are the caller's responsibility.
+fn validate_bare_name(name: &str) -> Result<String, String> {
+    let name = normalize_trailing_dot(name)?;
+    if name.is_empty() {
+        return Err("empty hostname".into());
+    }
+    if name.len() > FQDN_MAX_LEN {
+        return Err("hostname exceeds 253 bytes".into());
+    }
+    for label in name.split('.') {
+        validate_label(label)?;
+    }
+    Ok(name.to_owned())
+}
+
+/// Parses one declared `cname_bailiwick` suffix: a bare DNS zone name (no
+/// port) validated by the shared bare-name rules plus the F-07 requirement of
+/// at least two labels (a one-label suffix like `com` cannot be a safe zone).
+fn parse_cname_bailiwick_suffix(input: &str) -> Result<String, String> {
+    let name = validate_bare_name(input)?;
+    if is_ip_literal_shape(name.as_bytes()) {
+        return Err("declared suffix is an IP literal; use a DNS zone name".into());
+    }
+    if name.split('.').count() < 2 {
+        return Err("declared suffix must have at least 2 labels".into());
+    }
+    Ok(name)
 }
 
 fn parse_config_port(port: &str) -> Result<u16, String> {
@@ -383,12 +410,22 @@ pub struct Config {
     startup_unresolved_allowance: u8,
     control: ControlTable,
     resolver: ResolverSet,
+    cname_bailiwick: Vec<Vec<String>>,
 }
 
 impl Config {
     #[must_use]
     pub const fn allowlist(&self) -> &Allowlist {
         &self.allowlist
+    }
+
+    /// Per-allowlist declared `cname_bailiwick` suffixes, parallel to
+    /// `allowlist()` order. An entry's list is empty when the key is absent or
+    /// `[]` (the self-only default). The flat union across entries is derived
+    /// in the DNS layer, not here.
+    #[must_use]
+    pub fn cname_bailiwick(&self) -> &[Vec<String>] {
+        &self.cname_bailiwick
     }
 
     /// The allowlist position of an exact `<fqdn>:<port>` pair, or `None` when
@@ -456,6 +493,17 @@ pub enum ConfigError {
         name: String,
         reason: String,
     },
+    InvalidCnameBailiwick {
+        name: String,
+        reason: String,
+    },
+    CnameBailiwickTooMany {
+        got: usize,
+    },
+    DivergentCnameBailiwick {
+        name: String,
+        reason: String,
+    },
     InvalidListen {
         value: String,
     },
@@ -496,6 +544,10 @@ impl ConfigError {
 }
 
 impl fmt::Display for ConfigError {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exhaustive one-line Display arm per ConfigError variant kept inline"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::Unreadable { path, source } => {
@@ -539,6 +591,21 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::InvalidFqdn { name, reason } => {
                 write!(f, "config invalid FQDN {name:?}: {reason}")
+            }
+            ConfigError::InvalidCnameBailiwick { name, reason } => {
+                write!(f, "config invalid cname_bailiwick {name:?}: {reason}")
+            }
+            ConfigError::CnameBailiwickTooMany { got } => {
+                write!(
+                    f,
+                    "config cname_bailiwick suffix total {got} exceeds the {ALLOWLIST_MAX} ceiling"
+                )
+            }
+            ConfigError::DivergentCnameBailiwick { name, reason } => {
+                write!(
+                    f,
+                    "config divergent cname_bailiwick on same bare name {name:?} across ports: {reason}"
+                )
             }
             ConfigError::InvalidListen { value } => {
                 write!(
@@ -668,25 +735,26 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
     let any_illegal = table
         .get("any_illegal")
         .ok_or_else(|| ConfigError::MissingField("any_illegal".to_owned()))?;
-    let (allowlist, domain_actions) = build_allowlist(table)?;
+    let parsed = build_allowlist(table)?;
     let listen = parse_listen(&listen)?;
     let allowance = u8::try_from(allowance)
         .map_err(|_| ConfigError::AllowanceOutOfRange { value: allowance })?;
-    if allowance as usize >= allowlist.len() {
+    if allowance as usize >= parsed.allowlist.len() {
         return Err(ConfigError::AllowanceOutOfRange {
             value: allowance.into(),
         });
     }
     let any_scope = parse_any_illegal(any_illegal)?;
-    let control = ControlTable::new(any_scope, &domain_actions)
+    let control = ControlTable::new(any_scope, &parsed.actions)
         .expect("build_allowlist validated 1..=32 entries, so ControlTable::new cannot fail");
     let resolver = build_resolver_set(table)?;
     Ok(Config {
-        allowlist,
+        allowlist: parsed.allowlist,
         listen,
         startup_unresolved_allowance: allowance,
         control,
         resolver,
+        cname_bailiwick: parsed.bailiwicks,
     })
 }
 
@@ -750,25 +818,61 @@ fn parse_any_illegal(value: &toml::Value) -> Result<AnyIllegalScope, ConfigError
 fn parse_allowed_fqdn_table(
     value: &toml::Value,
     fqdn_key: &str,
-) -> Result<DomainAction, ConfigError> {
+) -> Result<(DomainAction, Vec<String>), ConfigError> {
     let toml::Value::Table(table) = value else {
         return Err(ConfigError::WrongType(format!(
             "allowed_fqdn.{fqdn_key}: expected table"
         )));
     };
     let mut early_data = None;
+    let mut bailiwick = Vec::new();
     for key in table.keys() {
-        if key == "early_data" {
-            early_data = Some(table.get(key).expect("key present in iteration"));
-        } else {
-            return Err(ConfigError::UnknownKey(format!(
-                "allowed_fqdn.{fqdn_key}.{key}"
-            )));
+        match key.as_str() {
+            "early_data" => {
+                early_data = Some(table.get(key).expect("key present in iteration"));
+            }
+            "cname_bailiwick" => {
+                bailiwick = parse_cname_bailiwick(table, fqdn_key)?;
+            }
+            _ => {
+                return Err(ConfigError::UnknownKey(format!(
+                    "allowed_fqdn.{fqdn_key}.{key}"
+                )));
+            }
         }
     }
     let early_data = early_data
         .ok_or_else(|| ConfigError::MissingField(format!("allowed_fqdn.{fqdn_key}.early_data")))?;
-    parse_early_data(early_data, fqdn_key)
+    let action = parse_early_data(early_data, fqdn_key)?;
+    Ok((action, bailiwick))
+}
+
+fn parse_cname_bailiwick(table: &toml::Table, fqdn_key: &str) -> Result<Vec<String>, ConfigError> {
+    let value = table
+        .get("cname_bailiwick")
+        .expect("key present in iteration");
+    let toml::Value::Array(items) = value else {
+        return Err(ConfigError::WrongType(format!(
+            "allowed_fqdn.{fqdn_key}.cname_bailiwick: expected array of strings"
+        )));
+    };
+    let mut suffixes = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let toml::Value::String(name) = item else {
+            return Err(ConfigError::WrongType(format!(
+                "allowed_fqdn.{fqdn_key}.cname_bailiwick[{index}]: expected string, got {}",
+                value_kind(item)
+            )));
+        };
+        let normalized = parse_cname_bailiwick_suffix(name).map_err(|reason| {
+            ConfigError::InvalidCnameBailiwick {
+                name: name.clone(),
+                reason,
+            }
+        })?;
+        suffixes.push(normalized);
+    }
+    Ok(suffixes)
 }
 
 fn parse_early_data(value: &toml::Value, fqdn_key: &str) -> Result<DomainAction, ConfigError> {
@@ -892,7 +996,15 @@ const fn value_kind(value: &toml::Value) -> &'static str {
     }
 }
 
-fn build_allowlist(table: &toml::Table) -> Result<(Allowlist, Vec<DomainAction>), ConfigError> {
+/// Parsed `[allowed_fqdn]` table: ordered entries plus their per-entry
+/// `cname_bailiwick` suffix lists, kept parallel to allowlist order.
+struct ParsedAllowlist {
+    allowlist: Allowlist,
+    actions: Vec<DomainAction>,
+    bailiwicks: Vec<Vec<String>>,
+}
+
+fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> {
     let Some(allowed) = table.get("allowed_fqdn") else {
         return Err(ConfigError::AllowlistEmpty);
     };
@@ -908,8 +1020,12 @@ fn build_allowlist(table: &toml::Table) -> Result<(Allowlist, Vec<DomainAction>)
         return Err(ConfigError::AllowlistTooMany { got: entries.len() });
     }
     let mut seen = std::collections::HashSet::new();
+    let mut bailiwick_by_name: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     let mut allowlist = Vec::with_capacity(entries.len());
     let mut actions = Vec::with_capacity(entries.len());
+    let mut bailiwicks = Vec::with_capacity(entries.len());
+    let mut total_suffixes = 0usize;
     for (key, value) in entries {
         let fqdn = Fqdn::parse(key).map_err(|reason| ConfigError::InvalidFqdn {
             name: key.clone(),
@@ -923,11 +1039,40 @@ fn build_allowlist(table: &toml::Table) -> Result<(Allowlist, Vec<DomainAction>)
                 fqdn.port()
             )));
         }
-        let action = parse_allowed_fqdn_table(value, key)?;
+        let (action, suffixes) = parse_allowed_fqdn_table(value, key)?;
+        // Same bare name on different ports collapses to the first entry's
+        // suffix list at runtime (covers_for first-match position), so every
+        // same-bare-name entry must declare byte-identical lists — any
+        // divergence would silently narrow or widen the effective bailiwick.
+        if let Some(prior) = bailiwick_by_name.get(fqdn.as_str()) {
+            if prior != &suffixes {
+                return Err(ConfigError::DivergentCnameBailiwick {
+                    name: fqdn.as_str().to_owned(),
+                    reason: format!(
+                        "{}:{} declares cname_bailiwick {suffixes:?} but the first same-bare-name entry declares {prior:?}",
+                        fqdn.as_str(),
+                        fqdn.port()
+                    ),
+                });
+            }
+        } else {
+            bailiwick_by_name.insert(fqdn.as_str().to_owned(), suffixes.clone());
+        }
+        total_suffixes += suffixes.len();
+        if total_suffixes > ALLOWLIST_MAX {
+            return Err(ConfigError::CnameBailiwickTooMany {
+                got: total_suffixes,
+            });
+        }
         allowlist.push(fqdn);
         actions.push(action);
+        bailiwicks.push(suffixes);
     }
-    Ok((Allowlist(allowlist), actions))
+    Ok(ParsedAllowlist {
+        allowlist: Allowlist(allowlist),
+        actions,
+        bailiwicks,
+    })
 }
 
 fn parse_listen(listen: &str) -> Result<ListenAddr, ConfigError> {
@@ -1331,6 +1476,266 @@ mod enforcement_config_tests {
         let cfg = parse_config_document(&doc).expect("fits and parses");
         assert_eq!(cfg.allowlist().len(), 29);
         assert_eq!(cfg.control().len(), 29);
+    }
+}
+
+#[cfg(test)]
+mod cname_bailiwick_config_tests {
+    use super::*;
+
+    fn base() -> String {
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n"
+            .to_owned()
+    }
+
+    fn group(entries: &str) -> String {
+        format!(
+            "{base}[any_illegal]\nscope = \"connection\"\n{entries}",
+            base = base()
+        )
+    }
+
+    fn entry(key: &str) -> String {
+        format!(
+            "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+        )
+    }
+
+    fn entry_with_bailiwick(key: &str, suffixes: &str) -> String {
+        format!(
+            "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\ncname_bailiwick = {suffixes}\n"
+        )
+    }
+
+    #[test]
+    fn accepts_optional_cname_bailiwick_and_exposes_per_entry_lists() {
+        let doc = group(&format!(
+            "{}{}",
+            entry_with_bailiwick(
+                "www.example.com:443",
+                "[\"example.com\", \"cdn.example.com\"]"
+            ),
+            entry("other.test:443"),
+        ));
+        let cfg = parse_config_document(&doc).expect("valid config with cname_bailiwick");
+        assert_eq!(
+            cfg.allowlist().get(0).expect("entry").as_str(),
+            "other.test"
+        );
+        assert_eq!(
+            cfg.allowlist().get(1).expect("entry").as_str(),
+            "www.example.com"
+        );
+        assert_eq!(
+            cfg.cname_bailiwick(),
+            &[
+                Vec::<String>::new(),
+                vec!["example.com".to_owned(), "cdn.example.com".to_owned()]
+            ]
+        );
+    }
+
+    #[test]
+    fn absent_cname_bailiwick_defaults_to_self_only() {
+        let doc = group(&entry("a.example:443"));
+        let cfg = parse_config_document(&doc).expect("valid config");
+        assert_eq!(cfg.cname_bailiwick(), &[Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn empty_cname_bailiwick_array_defaults_to_self_only() {
+        let doc = group(&entry_with_bailiwick("a.example:443", "[]"));
+        let cfg = parse_config_document(&doc).expect("valid config");
+        assert_eq!(cfg.cname_bailiwick(), &[Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn normalizes_single_trailing_dot_in_declared_suffix() {
+        let doc = group(&entry_with_bailiwick(
+            "www.example.com:443",
+            "[\"example.com.\"]",
+        ));
+        let cfg = parse_config_document(&doc).expect("single trailing dot normalized");
+        assert_eq!(cfg.cname_bailiwick(), &[vec!["example.com".to_owned()]]);
+    }
+
+    #[test]
+    fn early_data_only_configs_parse_identically() {
+        let doc = group(&format!(
+            "{}{}",
+            entry("a.example:443"),
+            entry("b.example:443")
+        ));
+        let cfg = parse_config_document(&doc).expect("backward-compatible");
+        assert_eq!(cfg.allowlist().len(), 2);
+        assert_eq!(cfg.control().len(), 2);
+        assert_eq!(
+            cfg.cname_bailiwick(),
+            &[Vec::<String>::new(), Vec::<String>::new()]
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_key_besides_early_data_and_cname_bailiwick() {
+        let doc = group(
+            "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\ncname_bailiwick = [\"example.com\"]\nja4 = \"x\"\n",
+        );
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::UnknownKey(k) if k == "allowed_fqdn.a.example:443.ja4"),
+            "expected UnknownKey, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_more_than_32_total_declared_suffixes() {
+        let suffixes: Vec<String> = (0..33).map(|i| format!("cdn{i}.example.com")).collect();
+        let list = format!("[\"{}\"]", suffixes.join("\", \""));
+        let doc = group(&entry_with_bailiwick("www.example.com:443", &list));
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::CnameBailiwickTooMany { got: 33 }),
+            "expected CnameBailiwickTooMany, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_exactly_32_total_declared_suffixes() {
+        let suffixes: Vec<String> = (0..32).map(|i| format!("cdn{i}.example.com")).collect();
+        let list = format!("[\"{}\"]", suffixes.join("\", \""));
+        let doc = group(&entry_with_bailiwick("www.example.com:443", &list));
+        let cfg = parse_config_document(&doc).expect("32 total suffixes is the budget ceiling");
+        assert_eq!(cfg.cname_bailiwick()[0].len(), 32);
+    }
+
+    #[test]
+    fn accepts_same_bare_name_different_ports_with_identical_bailiwick() {
+        let doc = group(&format!(
+            "{}{}",
+            entry_with_bailiwick("www.example.com:443", "[\"example.com\"]"),
+            entry_with_bailiwick("www.example.com:8443", "[\"example.com\"]"),
+        ));
+        let cfg = parse_config_document(&doc).expect("identical bailiwick lists accepted");
+        assert_eq!(cfg.allowlist().len(), 2);
+        assert_eq!(
+            cfg.cname_bailiwick(),
+            &[
+                vec!["example.com".to_owned()],
+                vec!["example.com".to_owned()]
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_same_bare_name_different_ports_with_divergent_bailiwick() {
+        let doc = group(&format!(
+            "{}{}",
+            entry_with_bailiwick("www.example.com:443", "[\"example.com\"]"),
+            entry("www.example.com:8443"),
+        ));
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::DivergentCnameBailiwick { name, .. } if name == "www.example.com"),
+            "expected DivergentCnameBailiwick, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_same_bare_name_different_ports_with_divergent_bailiwick_reverse() {
+        let doc = group(&format!(
+            "{}{}",
+            entry("www.example.com:443"),
+            entry_with_bailiwick("www.example.com:8443", "[\"example.com\"]"),
+        ));
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::DivergentCnameBailiwick { name, .. } if name == "www.example.com"),
+            "expected DivergentCnameBailiwick, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_declared_suffixes() {
+        for (suffix, reason_fragment) in [
+            ("", "empty"),
+            ("com", "at least 2 labels"),
+            ("-bad.example.com", "hyphen"),
+            ("bad-.example.com", "hyphen"),
+            ("double..dot.example.com", "empty label"),
+            ("under_score.example.com", "not lowercase ASCII"),
+            ("Bücher.example.com", "not lowercase ASCII"),
+            ("1.2.3.4", "IP literal"),
+            ("example.com..", "trailing dots"),
+        ] {
+            let doc = group(&entry_with_bailiwick(
+                "www.example.com:443",
+                &format!("[\"{suffix}\"]"),
+            ));
+            let err = parse_config_document(&doc).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::InvalidCnameBailiwick { name, reason }
+                    if name == suffix && reason.contains(reason_fragment)),
+                "expected InvalidCnameBailiwick for {suffix:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_overlong_labels_and_names() {
+        let long_label = format!("{}.example.com", "a".repeat(64));
+        let doc = group(&entry_with_bailiwick(
+            "www.example.com:443",
+            &format!("[\"{long_label}\"]"),
+        ));
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidCnameBailiwick { reason, .. }
+                if reason.contains("63")),
+            "expected label-over-63 rejection, got {err:?}"
+        );
+
+        let long_name = format!(
+            "{}.{}.{}.{}.{}",
+            "a".repeat(60),
+            "b".repeat(60),
+            "c".repeat(60),
+            "d".repeat(60),
+            "e".repeat(60),
+        );
+        let doc = group(&entry_with_bailiwick(
+            "www.example.com:443",
+            &format!("[\"{long_name}\"]"),
+        ));
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::InvalidCnameBailiwick { reason, .. }
+                if reason.contains("253")),
+            "expected over-253-byte rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_type_for_cname_bailiwick() {
+        let doc = group(
+            "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\ncname_bailiwick = \"example.com\"\n",
+        );
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::WrongType(m) if m.contains("cname_bailiwick")),
+            "expected WrongType, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_string_suffix_element() {
+        let doc = group(
+            "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\ncname_bailiwick = [\"example.com\", 42]\n",
+        );
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::WrongType(m) if m.contains("cname_bailiwick[1]")),
+            "expected WrongType for element 1, got {err:?}"
+        );
     }
 }
 

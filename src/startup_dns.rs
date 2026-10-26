@@ -2566,7 +2566,7 @@ impl StartupDns {
                 pin: config.resolver_set().primary().pin().copied(),
             });
         let allowlist = config.allowlist();
-        self.bailiwick = BailiwickZones::from_allowlist(allowlist);
+        self.bailiwick = BailiwickZones::from_allowlist(allowlist, config.cname_bailiwick());
         let names = allowlist.len();
         let mut report = StartupReport::default();
         let mut resolved = [false; ALLOWLIST_MAX];
@@ -2673,7 +2673,7 @@ impl StartupDns {
                 pin: config.resolver_set().primary().pin().copied(),
             });
         let allowlist = config.allowlist();
-        self.bailiwick = BailiwickZones::from_allowlist(allowlist);
+        self.bailiwick = BailiwickZones::from_allowlist(allowlist, config.cname_bailiwick());
         let names = allowlist.len();
         let mut report = StartupReport::default();
         let mut resolved = [false; ALLOWLIST_MAX];
