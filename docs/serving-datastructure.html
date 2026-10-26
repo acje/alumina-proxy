@@ -60,8 +60,8 @@
   (<code>docs/alumina-proxy.md</code> § Initial resource profile + <code>alumina-mema</code> amendment; <code>src/inventory.rs</code>).</p>
 
   <div class="grid">
-    <div class="stat"><div class="k">Retained footprint</div><div class="v">≈ 206 MiB</div>
-      <div class="n">128 traffic + ≈ 76 serving + DNS + 2 log</div></div>
+    <div class="stat"><div class="k">Retained footprint</div><div class="v">≈ 204.5 MiB</div>
+      <div class="n">128 traffic + ≈ 76 serving + DNS + 0.5 log</div></div>
     <div class="stat"><div class="k">Tunnel slots</div><div class="v">512</div>
       <div class="n">MAX_TUNNELS = TUNNEL_SLOTS</div></div>
     <div class="stat"><div class="k">Pending setups</div><div class="v">128</div>
@@ -76,7 +76,7 @@
     <span><span class="swatch" style="background:var(--traffic)"></span>Traffic storage (128 MiB)</span>
     <span><span class="swatch" style="background:var(--serving)"></span>Serving workspace (≈ 76 MiB)</span>
     <span><span class="swatch" style="background:var(--dns)"></span>DNS named buffers</span>
-    <span><span class="swatch" style="background:var(--log)"></span>Log queue (2 MiB)</span>
+    <span><span class="swatch" style="background:var(--log)"></span>Log queue (512 KiB)</span>
     <span><span class="swatch" style="background:var(--kernel)"></span>Outside budget (kernel/exec/stacks)</span>
   </div>
 
@@ -111,7 +111,7 @@
       <div class="box dns"><div class="t">DNS query</div><div class="s">512 B · QUERY_BUF_LEN</div></div>
       <div class="box dns"><div class="t">DNS recv</div><div class="s">16 KiB + 2 · RECV_BUF_LEN</div></div>
       <div class="box dns"><div class="t">Response workspace</div><div class="s">fixed owners table</div></div>
-      <div class="box log"><div class="t">Log queue</div><div class="s">256 × 8 KiB = 2 MiB</div></div>
+      <div class="box log"><div class="t">Log queue</div><div class="s">256 × 2 KiB = 512 KiB</div></div>
       <div class="box kernel"><div class="t">Exec / stacks / kernel</div><div class="s">outside budget</div></div>
     </div>
   </div>
@@ -141,12 +141,13 @@
       <tbody>
         <tr><td>Tunnel traffic buffers</td><td class="num">512 × 2</td><td class="num">128 KiB</td><td class="num">128 MiB</td></tr>
         <tr><td>Retained serving workspace (CONNECT head + 2×64 KiB ClientHello + JA4 retention)</td><td class="num">512</td><td class="num">~152.5 KiB</td><td class="num">≈ 76 MiB</td></tr>
+        <tr><td>JA4 baseline table (first-seen, 32 ordinals × 16 addresses)</td><td class="num">512</td><td class="num">~41 B</td><td class="num">≈ 21 KiB</td></tr>
         <tr><td>DNS named buffers (query + recv + workspace)</td><td class="num">1</td><td class="num">≈16.5 KiB</td><td class="num">&lt; 1 MiB</td></tr>
-        <tr><td>Log queue</td><td class="num">256</td><td class="num">8 KiB</td><td class="num">2 MiB</td></tr>
-        <tr><td><b>Retained total</b></td><td class="num"></td><td class="num"></td><td class="num"><b>≈ 206 MiB</b></td></tr>
+        <tr><td>Log queue</td><td class="num">256</td><td class="num">2 KiB</td><td class="num">512 KiB</td></tr>
+        <tr><td><b>Retained total</b></td><td class="num"></td><td class="num"></td><td class="num"><b>≈ 204.5 MiB</b></td></tr>
       </tbody>
     </table>
-    <div class="foot">Observed VmRSS ≈ 204 MiB on the e2-micro (docs/benchmarks/e2micro-workload.md), consistent with the retained total (≈ 206 MiB design estimate) within measurement tolerance.</div>
+    <div class="foot">Observed VmRSS ≈ 204 MiB on the e2-micro (benchmarks/e2micro-workload.md), consistent with the retained total (≈ 204.5 MiB design estimate) within measurement tolerance.</div>
   </div>
 
   <div class="foot">Generated from the alumina-proxy source structure (<code>src/inventory.rs</code>, <code>src/serving.rs</code>, <code>src/client_hello.rs</code>, <code>src/startup_dns.rs</code>, <code>src/log.rs</code>) and the fixed resource profile in <code>docs/alumina-proxy.md</code>.</div>
