@@ -45,7 +45,7 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | L152–185 | Initial resource profile (full row matrix §3) | arch §6 | artifact |
 | L187–194 | Lifecycle: setup/connect/idle deadlines, closure drain, shutdown, capacity/logging | arch §4/§7 | designed → gate; L192 verified-local (e2e shutdown; ucxi) |
 | L196–221 | Invariants I–IV (13) | arch §1 | designed → gate (§2) |
-| L223–236 | Verification requirements (12 categories) | build-plan Slices 1–7 | gate (§4); measured in docs/harness-evaluation.md |
+| L223–236 | Verification requirements (12 categories) | build-plan Slices 1–7 | gate (§4) |
 | L238–263 | rp2e tripwire/action/monitoring/pacing amendment: trigger/action catalog & attribution (AnyIllegal/early-upstream/EOF-reset), Block/Flare semantics, Tarpit **deferred** | arch §2 (`enforcement`) | designed → gate; Tarpit deferred |
 | L265–281 (schema superseded by the `alumina-cfgk` amendment, L991–1153) | Mandatory `[any_illegal]` + keyed `[allowed_fqdn."<fqdn>:<port>"]` config schema (`alumina-cfgk`): keyed tables replacing the index-aligned arrays, mandatory `early_data`, force-mandatory group, Tarpit-deferred rejection, 16 KiB capacity (parser-real 32 × 100-byte worst case 5,843 B) | arch §2 (`enforcement`); `src/config.rs` | verified-local (rp2e config surface; keyed schema 2026-10-24) |
 | L283–303 | Bounded stdout monitoring (per-ordinal/global correlated aggregates, drop+count/saturate, no new sink) & planned fixed control-storage bounds (~9–10 KiB) | arch §2 (`enforcement`)/§6 | designed → artifact → gate |

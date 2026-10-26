@@ -25,7 +25,7 @@ deployment/release gates (Slice 7).
 
 Exact-input Linux MID (`mid foundations`/`mid boot`) and `fixtures boot`
 already passed **natively at recorded candidates** (`1538a1b`/`579b9ce`/HEAD;
-receipts in README "Native proofs", docs/harness-evaluation.md and bd
+receipts in README "Native proofs" and bd
 `alumina-ucxi`) — scoped exact-candidate proofs, not fresh current-input
 execution, and they do not cover the open BOUNDARY. No product-wide zero-alloc
 claim from focused parser tests alone.

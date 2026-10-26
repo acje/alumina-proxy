@@ -14,8 +14,7 @@ external deployment** and contains **no secrets**.
 
 The repository is a **scoped testQA-ready candidate**, not a
 production-qualified or externally-deployed system (qualification gates in
-[../build-plan.md](../build-plan.md); measured harness fitness in
-[../harness-evaluation.md](../harness-evaluation.md)).
+[../build-plan.md](../build-plan.md)).
 
 ## Package contents
 
