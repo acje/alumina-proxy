@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::parse_config_document;
 use crate::enforcement::monitor::DnsAnomalyKind;
+use crate::schedule::{INCIDENT_N, INCIDENT_WINDOW};
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -455,7 +456,7 @@ fn extreme_ttl_positive_is_counted_as_a_dns_anomaly() {
     assert_eq!(anomalies[DnsAnomalyKind::ResolverPeerMismatch.index()], 0);
     assert_eq!(
         transport.take_dns_anomalies(),
-        [0, 0, 0],
+        [0, 0, 0, 0],
         "a drained anomaly is never double-counted"
     );
 }
@@ -500,7 +501,7 @@ fn connected_peer_mismatch_fails_connect_and_counts_the_anomaly() {
     assert_eq!(anomalies[DnsAnomalyKind::ExtremeTtl.index()], 0);
     assert_eq!(
         transport.take_dns_anomalies(),
-        [0, 0, 0],
+        [0, 0, 0, 0],
         "a drained anomaly is never double-counted"
     );
 }
@@ -3460,4 +3461,407 @@ fn relocate_for_probe_counts_a_probe_relocation_and_restores_without_extra() {
         0,
         "restoring the pre-sweep resolver counts no additional probe relocation"
     );
+}
+
+// ===== Sustained-negative corroboration (P-F06 Strengthening, alox18) =====
+
+#[test]
+fn corroboration_latches_only_on_sustained_negative_open_with_two_resolvers() {
+    // A single-resolver set has no different resolver to cross-check against,
+    // so the latch is a no-op regardless of the incident state.
+    let single = resolver_set_of(&["1.1.1.1"]);
+    let mut transport = seeded_transport(single);
+    transport.latch_corroboration(0, Family::A);
+    assert_eq!(
+        transport.corroboration_pending, None,
+        "a single-resolver set never latches a corroboration request"
+    );
+
+    // A multi-resolver set latches on the sustained-negative open for an
+    // admitted name.
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    transport.latch_corroboration(0, Family::A);
+    assert_eq!(
+        transport.corroboration_pending,
+        Some(CorroborationPending {
+            ordinal: 0,
+            family: Family::A,
+        }),
+        "the sustained-negative open for an admitted name latches a corroboration request"
+    );
+
+    // A second open while a request is pending never stacks or overwrites.
+    transport.latch_corroboration(1, Family::Aaaa);
+    assert_eq!(
+        transport.corroboration_pending,
+        Some(CorroborationPending {
+            ordinal: 0,
+            family: Family::A,
+        }),
+        "a pending request is never overwritten or stacked"
+    );
+}
+
+#[test]
+fn sustained_negative_open_on_the_apply_path_latches_corroboration() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let responder = spawn_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    // Pre-seed the sustained-negative streak to just below the incident
+    // threshold so this single validated NXDOMAIN opens the incident on the
+    // apply path (the trigger call site).
+    for _ in 0..(INCIDENT_N - 2) {
+        schedules.note_negative_streak(0, 0);
+    }
+    schedules.note_negative_streak(0, INCIDENT_WINDOW);
+    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8"]));
+    transport.addr = ns(responder.port());
+    run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {
+        matches!(t, TurnResult::Published(PublishedKind::Negative))
+    });
+    assert_eq!(
+        transport.corroboration_pending,
+        Some(CorroborationPending {
+            ordinal: 0,
+            family: Family::A,
+        }),
+        "the sustained-negative open on the apply path latches a corroboration request"
+    );
+    drop(responder);
+}
+
+#[test]
+fn step_corroboration_begins_single_exchange_against_the_next_resolver() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
+    transport.corroboration_pending = Some(CorroborationPending {
+        ordinal: 0,
+        family: Family::A,
+    });
+    let done = transport
+        .step_corroboration(&fqdn)
+        .expect("corroboration begins");
+    assert!(!done, "a pending request begins a corroboration");
+    let corr = transport.corroboration.expect("corroboration in flight");
+    assert_eq!(
+        corr.target,
+        ActiveResolver::at(1, 2),
+        "the corroboration targets the next configured resolver, not the active one"
+    );
+    assert_eq!(
+        corr.active_before,
+        ActiveResolver::at(0, 2),
+        "the active resolver at trigger time is remembered for restore"
+    );
+    assert_eq!(
+        corr.ordinal, 0,
+        "the corroboration carries the admitted name ordinal"
+    );
+    assert_eq!(
+        corr.family,
+        Family::A,
+        "the corroboration carries the queried family"
+    );
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(1, 2),
+        "the transport relocates onto the corroboration target"
+    );
+    assert_eq!(
+        transport.corroboration_pending, None,
+        "the pending request is consumed exactly once"
+    );
+    assert!(
+        transport.has_active_exchange(),
+        "a single corroboration exchange is in flight"
+    );
+    assert!(
+        transport.active.as_ref().is_some_and(|ex| ex.probe),
+        "the corroboration exchange is a pure-sensor probe"
+    );
+    assert!(
+        transport
+            .active
+            .as_ref()
+            .is_some_and(|ex| ex.generation == Generation::INITIAL),
+        "the corroboration exchange carries the initial generation so it never applies cache state"
+    );
+    // A second begin after the request was consumed is a no-op: the single
+    // exchange is bounded and never re-begins while it is in flight.
+    let done = transport.step_corroboration(&fqdn).expect("no-op");
+    assert!(done, "a consumed corroboration request never re-begins");
+}
+
+#[test]
+fn step_corroboration_defers_while_another_exchange_or_probe_is_in_flight() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
+    transport.corroboration_pending = Some(CorroborationPending {
+        ordinal: 0,
+        family: Family::A,
+    });
+    // A normal exchange is in flight: the corroboration defers.
+    transport
+        .start_exchange(
+            &fqdn,
+            Family::A,
+            0,
+            Instant::now() + Duration::from_secs(5),
+            Generation::INITIAL,
+        )
+        .unwrap();
+    let done = transport.step_corroboration(&fqdn).expect("defers");
+    assert!(!done, "a busy transport defers the corroboration");
+    assert_eq!(
+        transport.corroboration_pending,
+        Some(CorroborationPending {
+            ordinal: 0,
+            family: Family::A,
+        }),
+        "the pending request is preserved while another exchange is in flight"
+    );
+    assert_eq!(
+        transport.corroboration, None,
+        "no corroboration begins while the transport is busy"
+    );
+    // A post-window probe sweep in flight also defers the corroboration
+    // (single-active guard), preserving the pending request.
+    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8"]));
+    transport.corroboration_pending = Some(CorroborationPending {
+        ordinal: 0,
+        family: Family::A,
+    });
+    transport.probe_sweep = Some(ProbeSweep {
+        remaining: [false, true, false, false, false],
+        active_before: ActiveResolver::at(0, 2),
+        verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
+        current: Some(ActiveResolver::at(1, 2)),
+    });
+    let done = transport.step_corroboration(&fqdn).expect("defers");
+    assert!(!done, "an in-flight probe sweep defers the corroboration");
+    assert_eq!(
+        transport.corroboration_pending,
+        Some(CorroborationPending {
+            ordinal: 0,
+            family: Family::A,
+        }),
+        "the pending request is preserved while a probe sweep is in flight"
+    );
+}
+
+#[test]
+fn step_corroboration_clears_pending_for_a_single_resolver_set() {
+    let set = resolver_set_of(&["1.1.1.1"]);
+    let mut transport = seeded_transport(set);
+    let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
+    transport.corroboration_pending = Some(CorroborationPending {
+        ordinal: 0,
+        family: Family::A,
+    });
+    let done = transport.step_corroboration(&fqdn).expect("clears pending");
+    assert!(done, "a single-resolver set has no corroboration target");
+    assert_eq!(
+        transport.corroboration_pending, None,
+        "the stale pending request is cleared for a single-resolver set"
+    );
+    assert_eq!(
+        transport.corroboration, None,
+        "no corroboration begins for a single-resolver set"
+    );
+}
+
+#[test]
+fn corroboration_consistent_negative_restores_active_and_leaves_cache_unchanged() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    // Connection 1: the corroboration exchange against the target returns a
+    // negative (consistent with the active resolver's negative).
+    let responder = spawn_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8"]));
+    transport.resolvers = None;
+    transport.corroboration = Some(Corroboration {
+        target: ActiveResolver::at(1, 2),
+        active_before: ActiveResolver::at(0, 2),
+        ordinal: 0,
+        family: Family::A,
+    });
+    transport.active_resolver = ActiveResolver::at(1, 2);
+    transport.addr = ns(responder.port());
+    let bindings_before = bindings_of(&cache, 0, Family::A);
+    let due_before = schedules.due_time(0, Family::A).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(200);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
+        .unwrap();
+    transport.mark_probe_started();
+    assert!(
+        matches!(
+            run_exchange_to_terminal(&mut transport, fqdn, &mut cache, &mut schedules, deadline),
+            TurnResult::Published(_)
+        ),
+        "the corroboration exchange publishes its outcome"
+    );
+    assert_eq!(
+        transport.corroboration, None,
+        "the corroboration concludes and clears its state"
+    );
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(0, 2),
+        "consistent negatives restore the active resolver with no relocation"
+    );
+    assert_eq!(
+        transport.degradations[0],
+        ResolverDegradation::default(),
+        "a consistent negative never advances the active resolver's degradation"
+    );
+    assert_eq!(
+        transport.take_dns_anomalies()[DnsAnomalyKind::CorroborationConflict.index()],
+        0,
+        "a consistent negative emits no conflict fact"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        bindings_before,
+        "the corroboration never mutates the name cache (byte-for-byte)"
+    );
+    assert_eq!(
+        schedules.due_time(0, Family::A).unwrap(),
+        due_before,
+        "the corroboration never commits a refresh schedule"
+    );
+    // The concluded corroboration never re-begins: no pending request remains
+    // and a later begin is a no-op (bounded single exchange, no retries).
+    let done = transport
+        .step_corroboration(fqdn)
+        .expect("no-op after conclusion");
+    assert!(done, "a concluded corroboration never re-begins");
+    drop(responder);
+}
+
+#[test]
+fn corroboration_conflict_advances_degradation_and_relocates_when_degraded() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    // Connection 1: the corroboration exchange against the target returns a
+    // positive with eligible bindings while the active resolver returned a
+    // negative — a conflict.
+    let responder = spawn_responder(vec![vec![Step::PositiveA {
+        ttl: 120,
+        octets: [93, 184, 216, 34],
+    }]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]));
+    transport.resolvers = None;
+    transport.corroboration = Some(Corroboration {
+        target: ActiveResolver::at(1, 3),
+        active_before: ActiveResolver::at(0, 3),
+        ordinal: 0,
+        family: Family::A,
+    });
+    transport.active_resolver = ActiveResolver::at(1, 3);
+    // The active resolver is two failures from degraded; the conflict advance
+    // crosses the threshold and relocates to the next healthy resolver.
+    transport.degradations[0] = ResolverDegradation::Healthy { consecutive: 2 };
+    transport.addr = ns(responder.port());
+    let deadline = Instant::now() + Duration::from_millis(200);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
+        .unwrap();
+    transport.mark_probe_started();
+    assert!(
+        matches!(
+            run_exchange_to_terminal(&mut transport, fqdn, &mut cache, &mut schedules, deadline),
+            TurnResult::Published(_)
+        ),
+        "the corroboration exchange publishes its outcome"
+    );
+    assert_eq!(
+        transport.take_dns_anomalies()[DnsAnomalyKind::CorroborationConflict.index()],
+        1,
+        "a positive/negative conflict emits exactly one distinct conflict fact"
+    );
+    assert_eq!(
+        transport.degradations[0],
+        ResolverDegradation::Degraded,
+        "the conflict advance crosses the degraded threshold"
+    );
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(1, 3),
+        "a degraded active resolver relocates to the next healthy resolver"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        1,
+        "the degraded enter crossing is emitted exactly once"
+    );
+    assert_eq!(
+        transport.corroboration, None,
+        "the corroboration concludes and clears its state"
+    );
+    drop(responder);
+}
+
+#[test]
+fn corroboration_conflict_below_threshold_advances_without_relocating() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let responder = spawn_responder(vec![vec![Step::PositiveA {
+        ttl: 120,
+        octets: [93, 184, 216, 34],
+    }]]);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]));
+    transport.resolvers = None;
+    transport.corroboration = Some(Corroboration {
+        target: ActiveResolver::at(1, 3),
+        active_before: ActiveResolver::at(0, 3),
+        ordinal: 0,
+        family: Family::A,
+    });
+    transport.active_resolver = ActiveResolver::at(1, 3);
+    transport.addr = ns(responder.port());
+    let deadline = Instant::now() + Duration::from_millis(200);
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
+        .unwrap();
+    transport.mark_probe_started();
+    assert!(
+        matches!(
+            run_exchange_to_terminal(&mut transport, fqdn, &mut cache, &mut schedules, deadline),
+            TurnResult::Published(_)
+        ),
+        "the corroboration exchange publishes its outcome"
+    );
+    assert_eq!(
+        transport.take_dns_anomalies()[DnsAnomalyKind::CorroborationConflict.index()],
+        1,
+        "a positive/negative conflict emits exactly one distinct conflict fact"
+    );
+    assert_eq!(
+        transport.degradations[0],
+        ResolverDegradation::Healthy { consecutive: 1 },
+        "a below-threshold conflict advances the degradation by exactly one"
+    );
+    assert_eq!(
+        transport.active_resolver,
+        ActiveResolver::at(0, 3),
+        "a below-threshold advance leaves the active resolver in place"
+    );
+    assert_eq!(
+        transport.take_resolver_transitions(),
+        0,
+        "no degraded crossing below the threshold"
+    );
+    drop(responder);
 }

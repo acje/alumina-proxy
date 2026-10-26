@@ -936,6 +936,10 @@ fn encode_monitor_summary(
     if extreme_ttl > 0 && !push_u64(&mut w, b"xttl", u64::from(extreme_ttl)) {
         return None;
     }
+    let corroboration_conflict = monitor.facts_dns_anomaly(DnsAnomalyKind::CorroborationConflict);
+    if corroboration_conflict > 0 && !push_u64(&mut w, b"cc", u64::from(corroboration_conflict)) {
+        return None;
+    }
     for index in 0..AnyIllegalCause::KIND_COUNT {
         let value = monitor.facts_any_illegal_by_index(index);
         if value > 0

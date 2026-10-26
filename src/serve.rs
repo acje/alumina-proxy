@@ -817,6 +817,34 @@ impl ServeStorage {
         Ok(())
     }
 
+    /// Advances the bounded corroboration exchange one step on the retained
+    /// transport: begins the single cross-check against a different configured
+    /// resolver when a sustained-negative incident opened for an admitted name
+    /// and the transport is idle. The corroboration is a pure-sensor probe that
+    /// never mutates the cache or schedule; a conflict advances the active
+    /// resolver's degradation and relocates a degraded active resolver, while a
+    /// consistent negative restores it (alox18). Runs before refresh scheduling
+    /// so the corroboration owns the transport between exchanges.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying fatal DNS exchange or transport error.
+    pub(crate) fn step_corroboration(&mut self) -> Result<(), StartupDnsError> {
+        if self.dns.has_active_exchange() {
+            return Ok(());
+        }
+        let Some(ordinal) = self.dns.corroboration_pending_ordinal() else {
+            return Ok(());
+        };
+        let fqdn = self
+            .config
+            .allowlist()
+            .get(ordinal)
+            .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
+        self.dns.step_corroboration(fqdn)?;
+        Ok(())
+    }
+
     /// Emits the single `resolver_probe` record once the sweep concludes: one
     /// inline segment per configured resolver in index order, carrying its
     /// address and FQDN/pin presence plus the accumulated verdict. The record

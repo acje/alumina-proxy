@@ -50,7 +50,7 @@ impl Default for FactCounters {
 /// The typed DNS anomaly surface folded into the monitor alongside the
 /// resolver-degraded state: every variant is a per-exchange detection noted on
 /// the transport, drained by the serving storage into one counter per kind, and
-/// zero-suppressed in the monitor record (`bv`, `rpm`, `xttl`).
+/// zero-suppressed in the monitor record (`bv`, `rpm`, `xttl`, `cc`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DnsAnomalyKind {
     /// A followed CNAME link target escaped every allowlist bailiwick zone.
@@ -61,10 +61,14 @@ pub(crate) enum DnsAnomalyKind {
     /// A published answer carried a resource-record TTL above the extreme
     /// threshold (96 h).
     ExtremeTtl,
+    /// A corroboration exchange against a different configured resolver
+    /// returned a positive with eligible bindings while the active resolver
+    /// returned a negative (a sustained-negative conflict, alox18).
+    CorroborationConflict,
 }
 
 impl DnsAnomalyKind {
-    pub(crate) const COUNT: usize = 3;
+    pub(crate) const COUNT: usize = 4;
 
     pub(crate) const fn index(self) -> usize {
         self as usize
@@ -75,6 +79,7 @@ impl DnsAnomalyKind {
             0 => Some(DnsAnomalyKind::BailiwickViolation),
             1 => Some(DnsAnomalyKind::ResolverPeerMismatch),
             2 => Some(DnsAnomalyKind::ExtremeTtl),
+            3 => Some(DnsAnomalyKind::CorroborationConflict),
             _ => None,
         }
     }

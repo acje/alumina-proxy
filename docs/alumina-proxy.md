@@ -1866,3 +1866,42 @@ flight and asserts the apply is refused.
 
 The fixed profile is preserved: single boot owner and single serving owner, two reused
 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
+
+## alumina-alox18 (2026-10-26) — Bounded corroboration on sustained-negative open
+
+This is the narrow, user-authorized amendment recording the F-06 Strengthening: when a
+sustained-negative incident opens for an admitted name and the resolver set holds at least
+two configured resolvers, the serving owner cross-checks the active resolver's negative once
+against a DIFFERENT configured resolver (the next resolver after the active one, wrapping
+within the set). It amends only the `:68`-`:71` DNS/failover sentence surface by adding the
+bounded, isolated corroboration exchange, and appends this block; every other clause of this
+document remains binding and unchanged.
+
+The corroboration is a pure-sensor probe in the F-03 sense: it runs with the probe flag and
+`Generation::INITIAL` (`src/startup_dns.rs`), so the receive step returns
+`RecvStep::Published` before any cache apply and the corroboration never mutates the name
+cache or the refresh schedule — byte-for-byte unchanged on both a consistent and a conflict
+outcome. It is latched exactly once on the apply path when the sustained-negative incident
+opens (`IncidentTransition::Opened`, `src/startup_dns.rs`), only for a set of at least two
+resolvers, and is never overwritten or stacked. The serving owner begins it when the
+transport is idle (`ServeStorage::step_corroboration`, `src/serve.rs`, driven from
+`Runtime::turn` after the post-window probe sweep and before refresh scheduling,
+`src/runtime.rs`); while any exchange or probe is in flight the begin defers, and a pending
+request is never hijacked into a failback probe (`maybe_begin_failback` guard,
+`src/startup_dns.rs`). The exchange is bounded: one begin consumes the pending request, and
+no re-begin or retry follows its conclusion.
+
+On conclusion, a consistent negative (or a positive with no eligible bindings) restores the
+active resolver with no degradation change, no relocation, and no fact. A conflict — the
+different resolver returned a positive with eligible bindings while the active resolver
+returned a negative — emits the distinct `cc=` anomaly fact
+(`DnsAnomalyKind::CorroborationConflict`, `src/enforcement/monitor.rs`, rendered in the
+monitor record `src/log.rs`), advances the active resolver's degradation by exactly one
+counted failure, and relocates a degraded active resolver to the next healthy resolver
+(arming failback grace on a non-primary, mirroring the failover choke point) while a
+below-threshold advance leaves it in place. A failed corroboration exchange (network) restores
+the active resolver with no degradation change and no fact. The retained corroboration
+connection is always closed so the next exchange re-dials the restored or relocated resolver.
+
+The fixed profile is preserved: single boot owner and single serving owner, two reused
+128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.

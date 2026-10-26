@@ -748,6 +748,28 @@ struct ProbeSweep {
     current: Option<ActiveResolver>,
 }
 
+/// A latched corroboration request: a sustained-negative incident opened for an
+/// admitted name and the resolver set holds at least two resolvers, so a
+/// different configured resolver must be cross-checked once against the active
+/// resolver's negative. Set on the apply path when the incident opens and
+/// consumed by the serving owner when the transport is idle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CorroborationPending {
+    ordinal: usize,
+    family: Family,
+}
+
+/// The in-flight corroboration exchange state: the target resolver being
+/// cross-checked and the active resolver the transport must restore (or advance
+/// its degradation on a conflict). All fixed-size; no heap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Corroboration {
+    target: ActiveResolver,
+    active_before: ActiveResolver,
+    ordinal: usize,
+    family: Family,
+}
+
 /// The `DoT` identity the transport hands the rustls client for one connection:
 /// the resolver FQDN used as SNI and validated against the presented
 /// certificate's SAN, plus an optional strict SPKI pin. Carried only for
@@ -1229,6 +1251,20 @@ pub struct StartupDns {
     /// skips these as already exercised, probing only resolvers the window
     /// never touched (docs/alumina-proxy.md:826).
     window_exercised: [bool; MAX_RESOLVERS],
+    /// The latched corroboration request awaiting the serving owner: present
+    /// only while a sustained-negative incident has opened for an admitted name
+    /// and the corroboration has not yet begun. Consumed exactly once when the
+    /// corroboration exchange starts (alox18).
+    corroboration_pending: Option<CorroborationPending>,
+    /// The in-flight corroboration exchange state, present only while the
+    /// corroboration probe is in flight. The exchange is a pure-sensor probe
+    /// that never applies cache state; on conclusion the active resolver is
+    /// restored or its degradation advanced (alox18).
+    corroboration: Option<Corroboration>,
+    /// The corroboration outcome captured at the receive step (probe path),
+    /// read by the conclusion handler to decide conflict vs consistent. `None`
+    /// while no corroboration exchange is in flight or after it concludes.
+    corroboration_outcome: Option<PublishedKind>,
     #[cfg(test)]
     poll_ticks: u64,
     #[cfg(test)]
@@ -1304,6 +1340,9 @@ impl StartupDns {
             probe_sweep: None,
             sweep_ran: false,
             window_exercised: [false; MAX_RESOLVERS],
+            corroboration_pending: None,
+            corroboration: None,
+            corroboration_outcome: None,
             #[cfg(test)]
             poll_ticks: 0,
             #[cfg(test)]
@@ -1528,6 +1567,9 @@ impl StartupDns {
         self.written = 0;
         self.msglen = None;
         self.probe_sweep = None;
+        self.corroboration = None;
+        self.corroboration_outcome = None;
+        self.corroboration_pending = None;
     }
 
     /// Marks the outstanding exchange as a serving-runtime refresh, so the
@@ -1684,6 +1726,13 @@ impl StartupDns {
     /// recover the query name from the configuration and cache.
     pub(crate) fn active_ordinal(&self) -> Option<usize> {
         self.active.as_ref().map(|ex| ex.ordinal)
+    }
+
+    /// The allowlist ordinal of a latched corroboration request, for the
+    /// serving owner to recover the query name from the configuration before
+    /// beginning the corroboration exchange (alox18).
+    pub(crate) fn corroboration_pending_ordinal(&self) -> Option<usize> {
+        self.corroboration_pending.map(|pending| pending.ordinal)
     }
 
     /// The stage of the outstanding exchange, for the shared owner to observe
@@ -2468,6 +2517,9 @@ impl StartupDns {
                         if self.workspace.extreme_ttl() {
                             self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
                         }
+                        if self.corroboration.is_some() {
+                            self.corroboration_outcome = Some(kind);
+                        }
                         return Ok(RecvStep::Published(kind));
                     }
                     let receipt = self.now_u64();
@@ -2481,7 +2533,10 @@ impl StartupDns {
                         &outcome,
                     )?;
                     match incidents.sustained {
-                        crate::schedule::IncidentTransition::Opened => self.incident_opens += 1,
+                        crate::schedule::IncidentTransition::Opened => {
+                            self.incident_opens += 1;
+                            self.latch_corroboration(ex.ordinal, ex.family);
+                        }
                         crate::schedule::IncidentTransition::Closed => self.incident_closes += 1,
                         crate::schedule::IncidentTransition::None => {}
                     }
@@ -3106,6 +3161,8 @@ impl StartupDns {
     /// never a background or timer-owned action.
     fn maybe_begin_failback(&mut self) -> Result<(), StartupDnsError> {
         if self.probe_sweep.is_some()
+            || self.corroboration_pending.is_some()
+            || self.corroboration.is_some()
             || self.active_resolver.is_primary()
             || self.failback_source.is_some()
         {
@@ -3239,6 +3296,72 @@ impl StartupDns {
         Ok(false)
     }
 
+    /// Latches a corroboration request when a sustained-negative incident opens
+    /// for an admitted name and the resolver set holds at least two resolvers:
+    /// the serving owner later cross-checks the active resolver's negative
+    /// against a different configured resolver exactly once (alox18). A
+    /// single-resolver set has no different resolver to cross-check, and a
+    /// pending request is never overwritten or stacked.
+    const fn latch_corroboration(&mut self, ordinal: usize, family: Family) {
+        if self.corroboration_pending.is_some() {
+            return;
+        }
+        let Some(set) = self.resolvers else {
+            return;
+        };
+        if set.len() <= 1 {
+            return;
+        }
+        self.corroboration_pending = Some(CorroborationPending { ordinal, family });
+    }
+
+    /// Begins the single corroboration exchange when a latched request is
+    /// pending and the transport is idle, returning `true` when there is
+    /// nothing to do (no pending request, a single-resolver set, or a stale
+    /// request already concluded). The corroboration targets the next
+    /// configured resolver after the active one and runs as a pure-sensor
+    /// probe (initial generation, probe flag) so it never applies cache state;
+    /// on conclusion the active resolver is restored or its degradation
+    /// advanced (alox18). While any exchange or probe is in flight the call
+    /// defers and preserves the pending request (single-active guard).
+    pub(crate) fn step_corroboration(&mut self, fqdn: &Fqdn) -> Result<bool, StartupDnsError> {
+        let Some(pending) = self.corroboration_pending else {
+            return Ok(true);
+        };
+        if self.active.is_some() || self.probe_sweep.is_some() {
+            return Ok(false);
+        }
+        let Some(set) = self.resolvers else {
+            self.corroboration_pending = None;
+            return Ok(true);
+        };
+        if set.len() <= 1 {
+            self.corroboration_pending = None;
+            return Ok(true);
+        }
+        let active = self.active_resolver;
+        let target = ActiveResolver::at((active.index() + 1) % set.len(), set.len());
+        self.corroboration_pending = None;
+        self.corroboration = Some(Corroboration {
+            target,
+            active_before: active,
+            ordinal: pending.ordinal,
+            family: pending.family,
+        });
+        self.corroboration_outcome = None;
+        self.relocate_for_corroboration(target)?;
+        let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+        self.start_exchange(
+            fqdn,
+            pending.family,
+            pending.ordinal,
+            deadline,
+            Generation::INITIAL,
+        )?;
+        self.mark_probe_started();
+        Ok(false)
+    }
+
     /// Relocates the retained transport onto a probe target: the connection is
     /// closed so the next exchange dials the target, the probe relocation is
     /// counted, and the active resolver is re-seated. Used by the post-window
@@ -3247,6 +3370,22 @@ impl StartupDns {
     fn relocate_for_probe(&mut self, target: ActiveResolver) -> Result<(), StartupDnsError> {
         self.close_connection()?;
         self.probe_relocations = self.probe_relocations.saturating_add(1);
+        self.active_resolver = target;
+        self.repoint_to_active();
+        Ok(())
+    }
+
+    /// Relocates the retained transport onto the corroboration target: the
+    /// connection is closed so the next exchange dials the target, and the
+    /// active resolver is re-seated. Unlike a probe-sweep relocation this is
+    /// never counted as a probe relocation — the corroboration is a
+    /// serving-owner cross-check against a different configured resolver, not
+    /// a post-window probe (alox18).
+    fn relocate_for_corroboration(
+        &mut self,
+        target: ActiveResolver,
+    ) -> Result<(), StartupDnsError> {
+        self.close_connection()?;
         self.active_resolver = target;
         self.repoint_to_active();
         Ok(())
@@ -3265,6 +3404,58 @@ impl StartupDns {
             })
     }
 
+    /// Concludes the in-flight corroboration exchange from its captured
+    /// outcome: a positive with eligible bindings from the different
+    /// configured resolver while the active resolver returned a negative is a
+    /// conflict — a distinct anomaly fact is emitted, the active resolver's
+    /// degradation advances by exactly one counted failure, and a degraded
+    /// active resolver relocates to the next healthy resolver (arming failback
+    /// grace on a non-primary) while a below-threshold advance leaves it in
+    /// place. A consistent negative (or a positive with no eligible bindings)
+    /// restores the active resolver with no degradation change and no fact.
+    /// The retained corroboration connection is always closed so the next
+    /// exchange re-dials the restored or relocated resolver (alox18).
+    ///
+    /// # Errors
+    ///
+    /// Returns a lifecycle `Transport` error when the retained corroboration
+    /// connection cannot be deregistered; the restore/relocation and any fact
+    /// are already recorded before the close is attempted.
+    fn conclude_corroboration(&mut self) -> Result<(), StartupDnsError> {
+        let Some(corr) = self.corroboration.take() else {
+            return Ok(());
+        };
+        let conflict = self.corroboration_outcome.take() == Some(PublishedKind::ResolvedPositive);
+        if conflict {
+            self.note_dns_anomaly(DnsAnomalyKind::CorroborationConflict);
+            let active_index = corr.active_before.index();
+            let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
+            self.degradations[active_index] = self.degradations[active_index].note_failure();
+            if !was_degraded && self.degradations[active_index] == ResolverDegradation::Degraded {
+                self.resolver_transitions += 1;
+            }
+            if self.degradations[active_index] == ResolverDegradation::Degraded
+                && let Some(next) = self.next_healthy_after_active(corr.active_before)
+            {
+                self.note_downgrade_if_dot_to_plain(corr.active_before, next);
+                self.active_resolver = next;
+                self.mark_window_exercised(self.active_resolver);
+                if !next.is_primary() {
+                    self.failback_due = Some(self.now_u64().saturating_add(FAILBACK_AFTER_SECS));
+                }
+                self.repoint_to_active();
+            } else {
+                self.active_resolver = corr.active_before;
+                self.repoint_to_active();
+            }
+        } else {
+            self.active_resolver = corr.active_before;
+            self.repoint_to_active();
+        }
+        self.close_connection()?;
+        Ok(())
+    }
+
     /// Advances the failover/failback state machine at the single recognized
     /// failure choke point. Every counted failure degrades the active resolver,
     /// recording exactly one enter crossing when healthy resolves cross the
@@ -3280,6 +3471,16 @@ impl StartupDns {
     /// resolver is restored with relocation/failback arming suppressed
     /// entirely.
     fn on_exchange_failed(&mut self, now: u64) {
+        if let Some(corr) = self.corroboration.take() {
+            // A failed corroboration exchange is a pure-sensor cross-check that
+            // never advances the active resolver's degradation and never emits a
+            // fact: the transport simply restores the active resolver it left
+            // (alox18).
+            self.corroboration_outcome = None;
+            self.active_resolver = corr.active_before;
+            self.repoint_to_active();
+            return;
+        }
         let probe = self.probe_sweep.as_ref().and_then(|sweep| {
             sweep
                 .current
@@ -3348,6 +3549,9 @@ impl StartupDns {
     /// connection cannot be deregistered; the probe verdict and restore are
     /// already recorded before the close is attempted.
     fn on_exchange_succeeded(&mut self) -> Result<(), StartupDnsError> {
+        if self.corroboration.is_some() {
+            return self.conclude_corroboration();
+        }
         let probe = self.probe_sweep.as_ref().and_then(|sweep| {
             sweep
                 .current
