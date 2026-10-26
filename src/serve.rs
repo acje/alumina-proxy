@@ -1236,6 +1236,15 @@ mod tests {
         ServeStorage::boot(&config_with_allowance(count, allowance)).expect("boot serving storage")
     }
 
+    fn with_boot_stack(body: impl FnOnce() + Send + 'static) {
+        let t = std::thread::Builder::new()
+            .name("boot-test".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(body)
+            .expect("spawn boot thread");
+        t.join().expect("boot thread");
+    }
+
     fn publish_a(cache: &mut Cache, ordinal: usize, receipt: u64, ttl: u64) {
         let name = cache.name_index(ordinal).expect("admitted name ordinal");
         let addrs = [v4([1, 1, 1, 1])];
@@ -1384,28 +1393,32 @@ mod tests {
 
     #[test]
     fn trailing_unresolved_name_counts_against_allowance() {
-        let mut strict = booted(2, 0);
-        publish_a(&mut strict.cache, 0, FRESH, TTL);
-        let decision = strict.startup_decision(FRESH + 5).unwrap();
-        assert_eq!(decision, StartupDecision::Exit75 { unresolved: 1 });
-        let mut tolerant = booted(2, 1);
-        publish_a(&mut tolerant.cache, 0, FRESH, TTL);
-        let decision = tolerant.startup_decision(FRESH + 5).unwrap();
-        assert_eq!(decision, StartupDecision::Serve(ServingMode::Degraded));
+        with_boot_stack(|| {
+            let mut strict = booted(2, 0);
+            publish_a(&mut strict.cache, 0, FRESH, TTL);
+            let decision = strict.startup_decision(FRESH + 5).unwrap();
+            assert_eq!(decision, StartupDecision::Exit75 { unresolved: 1 });
+            let mut tolerant = booted(2, 1);
+            publish_a(&mut tolerant.cache, 0, FRESH, TTL);
+            let decision = tolerant.startup_decision(FRESH + 5).unwrap();
+            assert_eq!(decision, StartupDecision::Serve(ServingMode::Degraded));
+        });
     }
 
     #[test]
     fn trailing_last_name_unresolved_is_counted() {
-        let mut strict = booted(3, 0);
-        publish_a(&mut strict.cache, 0, FRESH, TTL);
-        publish_a(&mut strict.cache, 1, FRESH, TTL);
-        let decision = strict.startup_decision(FRESH + 5).unwrap();
-        assert_eq!(decision, StartupDecision::Exit75 { unresolved: 1 });
-        let mut tolerant = booted(3, 1);
-        publish_a(&mut tolerant.cache, 0, FRESH, TTL);
-        publish_a(&mut tolerant.cache, 1, FRESH, TTL);
-        let decision = tolerant.startup_decision(FRESH + 5).unwrap();
-        assert_eq!(decision, StartupDecision::Serve(ServingMode::Degraded));
+        with_boot_stack(|| {
+            let mut strict = booted(3, 0);
+            publish_a(&mut strict.cache, 0, FRESH, TTL);
+            publish_a(&mut strict.cache, 1, FRESH, TTL);
+            let decision = strict.startup_decision(FRESH + 5).unwrap();
+            assert_eq!(decision, StartupDecision::Exit75 { unresolved: 1 });
+            let mut tolerant = booted(3, 1);
+            publish_a(&mut tolerant.cache, 0, FRESH, TTL);
+            publish_a(&mut tolerant.cache, 1, FRESH, TTL);
+            let decision = tolerant.startup_decision(FRESH + 5).unwrap();
+            assert_eq!(decision, StartupDecision::Serve(ServingMode::Degraded));
+        });
     }
 
     #[test]
