@@ -553,6 +553,10 @@ fn read_name(msg: &[u8], at: usize, strict: bool) -> Result<(DnsName, usize), Dn
             0x00 => {
                 let len = usize::from(byte);
                 if len == 0 {
+                    total += 1;
+                    if total > MAX_NAME_BYTES {
+                        return Err(DnsError::NameTooLong);
+                    }
                     return Ok((out, if closed_by_pointer { field } else { field + 1 }));
                 }
                 if len > 63 {
@@ -2944,6 +2948,33 @@ mod tests {
             parse_response_ws("sub.example.org", Family::A, 38, &msg),
             Err(DnsError::NameTooLong)
         );
+    }
+
+    #[test]
+    fn rejects_256_octet_wire_name_including_root() {
+        let mut msg = Vec::new();
+        for _ in 0..3 {
+            msg.push(63);
+            msg.extend_from_slice(&[b'a'; 63]);
+        }
+        msg.push(62);
+        msg.extend_from_slice(&[b'a'; 62]);
+        msg.push(0);
+        assert_eq!(read_name(&msg, 0, false), Err(DnsError::NameTooLong));
+    }
+
+    #[test]
+    fn accepts_255_octet_wire_name_including_root() {
+        let mut msg = Vec::new();
+        for _ in 0..3 {
+            msg.push(63);
+            msg.extend_from_slice(&[b'a'; 63]);
+        }
+        msg.push(61);
+        msg.extend_from_slice(&[b'a'; 61]);
+        msg.push(0);
+        let (_, used) = read_name(&msg, 0, false).expect("255-octet wire name must decode");
+        assert_eq!(used, 255);
     }
 
     #[test]
