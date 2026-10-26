@@ -1687,3 +1687,36 @@ literal marker (`count_token` `src/client_hello.rs:874-876`). Tests:
 
 The fixed profile is preserved: single boot owner and single serving owner, two reused
 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
+
+## alumina-alox13 (2026-10-26) — P-B7b note: one-label allowlist names accepted (no minimum label count)
+
+This is the narrow, user-authorized amendment recording the P-B7b sub-mission of the
+`alox-info` package: the one-label wire-name behavior of `[allowed_fqdn."<fqdn>:<port>"]`
+entries is documented here as accepted by design. It amends no existing row and adds no
+rejection code — it appends this block and every other clause of this document remains
+binding and unchanged.
+
+#### One-label allowlist names are accepted; only `cname_bailiwick` requires ≥ 2 labels
+
+An allowlist entry key is parsed by `Fqdn::parse` (`src/config.rs:27-37`): it requires a
+`<fqdn>:<port>` shape (`rsplit_once(':')`, `src/config.rs:28-30`), rejects an IP-literal
+host shape (`is_ip_literal_shape`, `src/config.rs:32-34`), and validates the bare name via
+`validate_bare_name` (`src/config.rs:79-91`). `validate_bare_name` enforces the shared
+lowercase-ASCII label rules (`validate_label`, `src/config.rs:56-71`) and the 253-byte
+`FQDN_MAX_LEN` bound, but imposes no minimum label count — the contract note at
+`src/config.rs:77-78` leaves shape-specific checks such as minimum label count to the
+caller, and `Fqdn::parse` never applies one. The only configuration surface that requires
+at least two labels is the declared `cname_bailiwick` zone suffix
+(`parse_cname_bailiwick_suffix`, `src/config.rs:96-105`, ≥ 2-label check at
+`src/config.rs:101-103`), a distinct F-07 safety rule; it never constrains the allowlist
+name itself. The allowlist key path is `parse_allowed_fqdn_table` (`src/config.rs:825`),
+which parses each key through `Fqdn::parse`.
+
+Tests: `Fqdn::parse("1.2.3.4:443").is_err()` and `Fqdn::parse("93.184.216.34:443").is_err()`
+(IP literals rejected) with `Fqdn::parse("4example.com:443").is_ok()` (`src/config.rs:322-324`);
+the accepted-entries list at `src/config.rs:353-356`; and `rejects_bare_fqdn_key`
+(`src/config.rs:1365`) confirming the only allowlist-key rejection is a missing `:port`,
+not a label count.
+
+The fixed profile is preserved: single boot owner and single serving owner, two reused
+128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
