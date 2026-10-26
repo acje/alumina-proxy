@@ -55,6 +55,7 @@ pub enum ConnectError {
     ObsFold,
     InvalidHostname { detail: &'static str },
     WrongPort { got: u16 },
+    PortOutOfRange { got: u32 },
     TransferEncoding,
     NonzeroContentLength { got: u64 },
     DuplicateContentLength,
@@ -85,6 +86,9 @@ impl fmt::Display for ConnectError {
             }
             ConnectError::WrongPort { got } => {
                 write!(f, "CONNECT port {got} denied; port must be 1..=65535")
+            }
+            ConnectError::PortOutOfRange { got } => {
+                write!(f, "CONNECT port {got} out of range; port must be 1..=65535")
             }
             ConnectError::TransferEncoding => write!(
                 f,
@@ -120,6 +124,7 @@ pub enum ConnectHeadReason {
     ObsFold,
     InvalidHostname,
     WrongPort,
+    PortOutOfRange,
     TransferEncoding,
     NonzeroContentLength,
     DuplicateContentLength,
@@ -143,6 +148,7 @@ impl ConnectHeadReason {
             E::ObsFold => ConnectHeadReason::ObsFold,
             E::InvalidHostname { .. } => ConnectHeadReason::InvalidHostname,
             E::WrongPort { .. } => ConnectHeadReason::WrongPort,
+            E::PortOutOfRange { .. } => ConnectHeadReason::PortOutOfRange,
             E::TransferEncoding => ConnectHeadReason::TransferEncoding,
             E::NonzeroContentLength { .. } => ConnectHeadReason::NonzeroContentLength,
             E::DuplicateContentLength => ConnectHeadReason::DuplicateContentLength,
@@ -157,7 +163,7 @@ impl ConnectHeadReason {
     }
 
     /// The number of finite CONNECT-head discriminants.
-    pub const COUNT: usize = 14;
+    pub const COUNT: usize = 15;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -456,15 +462,17 @@ fn parse_target(target: &[u8]) -> Result<ConnectRequest, ConnectError> {
             detail: "port has a leading zero",
         });
     }
-    let parsed_port: u16 = std::str::from_utf8(port)
+    let port_u32: u32 = std::str::from_utf8(port)
         .ok()
         .and_then(|p| p.parse().ok())
         .ok_or(ConnectError::MalformedRequestLine {
             detail: "port is not numeric",
         })?;
-    if parsed_port == 0 {
+    if port_u32 == 0 {
         return Err(ConnectError::WrongPort { got: 0 });
     }
+    let port =
+        u16::try_from(port_u32).map_err(|_| ConnectError::PortOutOfRange { got: port_u32 })?;
     if host.contains(&b':') && !host.starts_with(b"[") {
         return Err(ConnectError::InvalidHostname {
             detail: "IPv6 literal rejected",
@@ -480,7 +488,7 @@ fn parse_target(target: &[u8]) -> Result<ConnectRequest, ConnectError> {
     })?;
     Ok(ConnectRequest {
         hostname: normalized,
-        port: parsed_port,
+        port,
     })
 }
 
@@ -620,9 +628,7 @@ mod tests {
         let head = "CONNECT sub.example.org:65536 HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
         assert_eq!(
             parse_full(head.as_bytes()),
-            Err(ConnectError::MalformedRequestLine {
-                detail: "port is not numeric",
-            })
+            Err(ConnectError::PortOutOfRange { got: 65536 })
         );
     }
 

@@ -394,6 +394,7 @@ mod tests {
             AnyIllegalCause::ConnectParse(ConnectHeadReason::ObsFold),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::InvalidHostname),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
+            AnyIllegalCause::ConnectParse(ConnectHeadReason::PortOutOfRange),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::TransferEncoding),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::NonzeroContentLength),
             AnyIllegalCause::ConnectParse(ConnectHeadReason::DuplicateContentLength),
@@ -429,8 +430,8 @@ mod tests {
         assert_eq!(UnknownReason::Unattributed.index(), 3);
         assert_eq!(
             AnyIllegalCause::KIND_COUNT,
-            14 + 1 + 4,
-            "14 CONNECT-head + HostNotAllowlisted + 4 hello-reject discriminants"
+            15 + 1 + 4,
+            "15 CONNECT-head + HostNotAllowlisted + 4 hello-reject discriminants"
         );
     }
 

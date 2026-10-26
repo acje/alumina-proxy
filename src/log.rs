@@ -2883,7 +2883,7 @@ mod tests {
             "level=info kind=monitor secs=7 facts_total=9 actions_total=3 refusals_total=0 \
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
              ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 ep=1 js=1 bv=1 \
-             c14=2 unk3=1 dx=1\n\
+             c15=2 unk3=1 dx=1\n\
              level=info kind=monitor_domain secs=7 part=1/1 d0f=1 d0b=1 d0l=1 d0j=1 \
              d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"cb007101\"\n",
             "exact monitor grammar: the summary carries the fixed core and dx bitset, the single nonzero domain block rides its monitor_domain batch"
@@ -2925,8 +2925,8 @@ mod tests {
             "a zero ExtremeTtl fold stays suppressed: {text}"
         );
         assert!(
-            text.contains(" c14=2"),
-            "the AnyIllegal cause index 14 (HostNotAllowlisted) carries its fold: {text}"
+            text.contains(" c15=2"),
+            "the AnyIllegal cause index 15 (HostNotAllowlisted) carries its fold: {text}"
         );
         assert!(
             text.contains("unk3=1"),
@@ -3314,7 +3314,7 @@ mod tests {
             "H1': both slots share the equal per-slot generation: {text}"
         );
         assert!(
-            text.contains("x0t=a14") && text.contains("x1t=a14"),
+            text.contains("x0t=a15") && text.contains("x1t=a15"),
             "H1': both captures emit their typed fact: {text}"
         );
         assert!(
