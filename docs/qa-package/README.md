@@ -206,6 +206,47 @@ speaks a TLS 1.3 `ClientHello` first matches the contract exactly.
   resolvable name → EX_TEMPFAIL 75 — bounded intentional failure, never a hang
   or false clean.
 
+## JA4-flare verification (TLS 1.3-only)
+
+A JA4 change-signal flare is verified with **two TLS 1.3-only ClientHellos** whose
+JA4 fingerprints differ; it is a **fact**, never a block. The client must be pinned
+to TLS 1.3 on both offers — the version-offer gate (`docs/alumina-proxy.md:47`;
+`validate_versions` at `src/client_hello.rs:652-665`) requires `supported_versions`
+with `0x0304` as the only non-GREASE version, so a TLS 1.2-capable offer is
+`InvalidVersionOffer` → `any_illegal` → **Block**, not a flare.
+
+Procedure (Go client pinned to TLS 1.3):
+
+1. Dial the allowlisted `<fqdn>:<port>` via HTTP CONNECT to the proxy, then send the
+   baseline ClientHello with `tls.Config{ MinVersion: tls.VersionTLS13,
+   MaxVersion: tls.VersionTLS13, NextProtos: []string{...} }` and SNI `<fqdn>`.
+   The baseline is **silent**: it records the first-seen JA4 baseline and emits no
+   JA4 change fact.
+2. Open a second tunnel to the same ordinal and send a ClientHello yielding a
+   **distinct JA4** (e.g. a different ALPN set in `NextProtos`). The serving path
+   records `note_fact_ja4_change` (`src/serving.rs:2737`) — a **fact**, not an
+   action.
+3. Read the monitor records. The `kind=monitor_domain` detail batch carries the
+   change signal — `d0j=1` (per-ordinal change counter) with
+   `d0v="<36-char-ja4>"` (the latest changed JA4, 36 chars), zero-suppressed
+   together per the C1 amendment (`docs/alumina-proxy.md:950-964`). The
+   `kind=monitor` summary carries the globals `actions_total=0` and
+   `refusals_total=0` — a JA4 change is a fact, so no action or refusal fires.
+
+Expected signal (flare_only, no block):
+
+| Record | Field | Expected |
+| --- | --- | --- |
+| `kind=monitor` summary | `actions_total` | `0` |
+| `kind=monitor` summary | `refusals_total` | `0` |
+| `kind=monitor_domain` batch | `d0j` | `1` |
+| `kind=monitor_domain` batch | `d0v` | `"<36-char-ja4>"` |
+
+Anti-pattern: **curl and `openssl s_client` default to offering TLS 1.2**, so their
+ClientHellos trip `InvalidVersionOffer` → `any_illegal` → **Block** (incrementing
+`actions_total`/`refusals_total`), never a flare. A JA4 flare is only observable
+with a TLS 1.3-only client.
+
 ## Validating the package
 
 ```sh
