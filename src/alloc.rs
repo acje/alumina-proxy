@@ -1,5 +1,6 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::mem::MaybeUninit;
 
 pub const NAMED_PHASES: usize = 5;
 
@@ -64,18 +65,21 @@ impl Counts {
     }
 }
 
-/// Reinterprets `len` consecutive `u16` values at `ptr` as a slice.
+/// Reinterprets the first `len` slots of `slots` as a slice of `u16`.
 ///
-/// Sound only when the caller guarantees `ptr` references `len` initialized
-/// `u16` values that remain valid for the returned lifetime. `MaybeUninit<u16>`
-/// has the same layout as `u16`, so initialized `MaybeUninit<u16>` slots read
-/// as `u16` are sound.
+/// Sound only when the caller guarantees the first `len` slots hold initialized
+/// `u16` values; `MaybeUninit<u16>` has the same layout as `u16`, so initialized
+/// `MaybeUninit<u16>` slots read as `u16` are sound. The returned lifetime is
+/// tied to the `slots` borrow and `len` is asserted within bounds, so lifetime
+/// and length misuse are unrepresentable.
 #[must_use]
-pub(crate) const fn u16_slice_from_raw_parts<'a>(ptr: *const u16, len: usize) -> &'a [u16] {
-    // SAFETY: the caller contract — `ptr` references `len` initialized `u16`
-    // values for the returned lifetime; `MaybeUninit<u16>` has the same layout
-    // as `u16`, so the reinterpretation is sound.
-    unsafe { std::slice::from_raw_parts(ptr, len) }
+pub(crate) const fn u16_slice_from_raw_parts(slots: &[MaybeUninit<u16>], len: usize) -> &[u16] {
+    assert!(len <= slots.len(), "u16 slice length exceeds the slot count");
+    // SAFETY: the caller contract — the first `len` slots are initialized `u16`
+    // values; `MaybeUninit<u16>` has the same layout as `u16`, so the
+    // reinterpretation is sound; `len <= slots.len()` is asserted above, so the
+    // slice stays within the borrow.
+    unsafe { std::slice::from_raw_parts(slots.as_ptr().cast::<u16>(), len) }
 }
 
 type PhaseCounts = [[u64; 3]; NAMED_PHASES];

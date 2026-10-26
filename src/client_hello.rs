@@ -106,14 +106,7 @@ impl ClientHello {
     /// GREASE, unfiltered. Bounded by the 16 KiB handshake cap.
     #[must_use]
     pub const fn ciphers(&self) -> &[u16] {
-        // SAFETY: `parse_cipher_list` writes every slot in `ciphers[..ciphers_len]`
-        // before the `ClientHello` is constructed, so the first `ciphers_len`
-        // elements are initialized; `MaybeUninit<u16>` has the same layout as
-        // `u16`, and the uninitialized tail is never read here.
-        crate::alloc::u16_slice_from_raw_parts(
-            self.ciphers.as_ptr().cast::<u16>(),
-            self.ciphers_len,
-        )
+        crate::alloc::u16_slice_from_raw_parts(self.ciphers.as_slice(), self.ciphers_len)
     }
 
     /// The distinct extension types present in wire order, including ALPN (16)
