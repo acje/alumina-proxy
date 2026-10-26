@@ -3696,6 +3696,8 @@ fn corroboration_consistent_negative_restores_active_and_leaves_cache_unchanged(
     transport.addr = ns(responder.port());
     let bindings_before = bindings_of(&cache, 0, Family::A);
     let due_before = schedules.due_time(0, Family::A).unwrap();
+    let cache_before = cache;
+    let schedules_before = schedules;
     let deadline = Instant::now() + Duration::from_millis(200);
     transport
         .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
@@ -3737,6 +3739,14 @@ fn corroboration_consistent_negative_restores_active_and_leaves_cache_unchanged(
         due_before,
         "the corroboration never commits a refresh schedule"
     );
+    assert_eq!(
+        cache, cache_before,
+        "the corroboration leaves the entire name-cache state unchanged (full-state byte-for-byte)"
+    );
+    assert_eq!(
+        schedules, schedules_before,
+        "the corroboration leaves the entire refresh-schedule state unchanged (full-state byte-for-byte)"
+    );
     // The concluded corroboration never re-begins: no pending request remains
     // and a later begin is a no-op (bounded single exchange, no retries).
     let done = transport
@@ -3772,6 +3782,8 @@ fn corroboration_conflict_advances_degradation_and_relocates_when_degraded() {
     // crosses the threshold and relocates to the next healthy resolver.
     transport.degradations[0] = ResolverDegradation::Healthy { consecutive: 2 };
     transport.addr = ns(responder.port());
+    let cache_before = cache;
+    let schedules_before = schedules;
     let deadline = Instant::now() + Duration::from_millis(200);
     transport
         .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
@@ -3808,6 +3820,14 @@ fn corroboration_conflict_advances_degradation_and_relocates_when_degraded() {
         transport.corroboration, None,
         "the corroboration concludes and clears its state"
     );
+    assert_eq!(
+        cache, cache_before,
+        "a conflict corroboration leaves the entire name-cache state unchanged (full-state byte-for-byte)"
+    );
+    assert_eq!(
+        schedules, schedules_before,
+        "a conflict corroboration leaves the entire refresh-schedule state unchanged (full-state byte-for-byte)"
+    );
     drop(responder);
 }
 
@@ -3831,6 +3851,8 @@ fn corroboration_conflict_below_threshold_advances_without_relocating() {
     });
     transport.active_resolver = ActiveResolver::at(1, 3);
     transport.addr = ns(responder.port());
+    let cache_before = cache;
+    let schedules_before = schedules;
     let deadline = Instant::now() + Duration::from_millis(200);
     transport
         .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
@@ -3862,6 +3884,14 @@ fn corroboration_conflict_below_threshold_advances_without_relocating() {
         transport.take_resolver_transitions(),
         0,
         "no degraded crossing below the threshold"
+    );
+    assert_eq!(
+        cache, cache_before,
+        "a conflict corroboration leaves the entire name-cache state unchanged (full-state byte-for-byte)"
+    );
+    assert_eq!(
+        schedules, schedules_before,
+        "a conflict corroboration leaves the entire refresh-schedule state unchanged (full-state byte-for-byte)"
     );
     drop(responder);
 }
