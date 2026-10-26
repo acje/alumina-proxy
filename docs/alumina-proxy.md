@@ -190,6 +190,8 @@ Preallocate 512 tunnel slots with two 128 KiB directional buffers each: `512 * 2
 
 The first-iteration target is 1-10 Gbps aggregate relayed payload throughput across both directions, subject to CPU speed, workload, and network limits. At these rates, 128 MiB represents approximately 1.07 seconds to 107 milliseconds of aggregate payload, not a throughput guarantee. Storage is partitioned by tunnel and direction and cannot all absorb a burst on one connection; a 128 KiB directional buffer represents approximately 1.05 milliseconds at 1 Gbps or 0.10 milliseconds at 10 Gbps. Use socket backpressure rather than buffer growth. Benchmark sustained relay and bursts separately; application buffer capacity is not a substitute for TCP window sizing or a measured CPU budget.
 
+**Fixed profile (non-negotiable).** The resource-profile rows above, the lifecycle deadlines, and the invariants are fixed and non-negotiable; no amendment loosens them. The following constraints also hold: packet dropping is never implemented; no new dependency is added unless its intake (source review) precedes execution; and no kernel pacing knob is used.
+
 ## Lifecycle
 
 - **Setup:** Start the setup deadline at successful client accept; it ends when the forwarding gate opens and is never reset. Each upstream connect deadline starts when its attempt is initiated, ends on success or failure, and is clipped to the setup deadline.
@@ -447,7 +449,7 @@ Spec §Configuration & DNS fixes one resolver per tunnel with a single transport
 ## Hardening: resolver set moved into the validated TOML config, resolv.conf reader removed, V18 failover deferred
 
 
-**Authority (Stage 2, 2026-10-20).** The user additionally authorized the multi-resolver failover/failback state machine (Vec 18, `alumina-hrdn4`) to land in this same amendment section. The transport now relocates across the configured resolver array under per-resolver passive degradation, with bounded failback to the primary, while the fixed resource profile (1 DNS TCP connection / 1 outstanding query, §Initial resource profile) and the no-fallback trust boundary are preserved: a degraded resolver never causes a connect to an undeclared or unauthenticated endpoint, because the transport relays only among the addresses the validated `resolver` array declares. The peer assertion surface (§Configuration & DNS) is generalized from "the configured primary" to "the currently active resolver". This stage amends only the resolver bookkeeping and peer-assertion surfaces enumerated below; every other clause remains binding as before.
+**Failover/failback (Stage 2).** The transport relocates across the configured resolver array under per-resolver passive degradation, with bounded failback to the primary, while the fixed resource profile (1 DNS TCP connection / 1 outstanding query, §Initial resource profile) and the no-fallback trust boundary are preserved: a degraded resolver never causes a connect to an undeclared or unauthenticated endpoint, because the transport relays only among the addresses the validated `resolver` array declares. The peer assertion surface (§Configuration & DNS) is generalized from "the configured primary" to "the currently active resolver".
 
 ### Resolver set, config surface, and failover/failback
 
