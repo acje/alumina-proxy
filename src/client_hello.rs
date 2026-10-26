@@ -48,6 +48,7 @@ const HANDSHAKE_CLIENT_HELLO: u8 = 1;
 const SUPPORTED_VERSIONS: u16 = 43;
 const SERVER_NAME: u16 = 0;
 const ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
+const ENCRYPTED_SERVER_NAME: u16 = 0xffce;
 const ALPN: u16 = 16;
 const SIGNATURE_ALGORITHMS: u16 = 13;
 
@@ -665,7 +666,7 @@ fn parse_body(body: &[u8], record_version: u16) -> Result<ClientHello, ChError> 
             SERVER_NAME => {
                 parse_server_names(ext_data, &mut sni, &mut sni_len, &mut sni_entries)?;
             }
-            ENCRYPTED_CLIENT_HELLO => {
+            ENCRYPTED_CLIENT_HELLO | ENCRYPTED_SERVER_NAME => {
                 has_ech = true;
             }
             ALPN => {
@@ -1420,6 +1421,21 @@ mod tests {
     fn rejects_ech() {
         let msg = hello_msg(TLS12, &[TLS13], &["sub.example.org"], true);
         let ch = parse_one(&msg).expect("parse");
+        assert_eq!(
+            validate(&ch, &approved("sub.example.org")),
+            Err(ChError::EchPresent)
+        );
+    }
+
+    #[test]
+    fn rejects_esni_codepoint() {
+        let msg = hello_with_extensions(&[
+            (SUPPORTED_VERSIONS, &[0x02, 0x03, 0x04]),
+            (SERVER_NAME, &server_name_ext(&[(0, b"sub.example.org")])),
+            (ENCRYPTED_SERVER_NAME, &[]),
+        ]);
+        let ch = parse_one(&msg).expect("parse");
+        assert!(ch.has_ech());
         assert_eq!(
             validate(&ch, &approved("sub.example.org")),
             Err(ChError::EchPresent)

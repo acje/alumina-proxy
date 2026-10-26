@@ -1794,3 +1794,25 @@ warning fact (`cert_outside_validity_window` `src/startup_dns.rs:1029`, `expired
 
 The fixed profile is preserved: single boot owner and single serving owner, two reused
 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
+
+## alumina-alox15 (2026-10-26) — Reject unknown ECH codepoint 0xffce fail-closed
+
+This is the narrow, user-authorized amendment folding the P-A4 sub-mission of the
+`alox-perf-ech-02` package into this document. It amends only the ECH clause at
+`:49` — extending the `encrypted_client_hello` rejection to the draft-ESNI/ECH
+codepoint `0xffce` (`encrypted_server_name`, draft-ietf-tls-esni ≤-08) — and
+appends this block; every other clause of this document remains binding and
+unchanged. The `0xffce` codepoint is treated as ECH-present and rejected
+fail-closed, consistent with the existing `0xfe0d` handling. The `0xff01`
+(`renegotiation_info`) codepoint is deliberately not folded in; it appears only
+in JA4 golden test vectors and is not an ECH signal. This amendment is
+implemented in code with a live test; this amendment only records that state.
+
+The `encrypted_server_name` codepoint is folded into the same `has_ech` profile
+fact as `encrypted_client_hello` (`src/client_hello.rs:51`, match arm
+`src/client_hello.rs:669`), so `validate` rejects it with `ChError::EchPresent`
+(`src/client_hello.rs:1063-1065`). Test: `rejects_esni_codepoint`
+(`src/client_hello.rs:1431`).
+
+The fixed profile is preserved: single boot owner and single serving owner, two reused
+128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
