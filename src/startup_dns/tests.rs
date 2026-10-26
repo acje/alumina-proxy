@@ -1757,7 +1757,8 @@ fn out_of_bailiwick_cname_is_recorded_as_a_transport_anomaly() {
     transport.addr = ns(responder.port());
     // StartupDns::new() leaves the bailiwick empty; set the real allowlist
     // zone so the CNAME escape is a genuine violation, not an empty-zone one.
-    transport.bailiwick = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick());
+    transport.bailiwick = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick())
+        .expect("validated config keeps suffix count within ALLOWLIST_MAX");
     transport.now0 = 1_000_000;
     let fqdn = cfg.allowlist().get(0).unwrap();
     run_exchange_expecting(&mut transport, fqdn, &mut cache, &mut schedules, |t| {

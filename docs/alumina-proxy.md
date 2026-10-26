@@ -1816,3 +1816,25 @@ fact as `encrypted_client_hello` (`src/client_hello.rs:51`, match arm
 
 The fixed profile is preserved: single boot owner and single serving owner, two reused
 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
+
+## alumina-alox16 (2026-10-26) — Fail-stop bailiwick suffix-slot bound
+
+This is the narrow, user-authorized amendment recording the B-9 fail-stop bound on the bailiwick
+suffix-slot write in the DNS layer. It amends only the `:71` bailiwick sentence surface by making
+the fixed `[DnsName; ALLOWLIST_MAX]` suffix write fail-stop in all builds, and appends this block;
+every other clause of this document remains binding and unchanged.
+
+The flat union of declared `cname_bailiwick` suffixes is bounded by the Resource-Bounds
+Invariant (`:213`): exhaustion rejects work rather than expanding storage without bound. The
+config validator already rejects a suffix total above `ALLOWLIST_MAX`
+(`CnameBailiwickTooMany`, `src/config.rs:1072-1077`; Display `src/config.rs:604`), so the
+overflow is unreachable through validated configuration — this amendment makes the defence
+structural. `from_allowlist` (`src/dns.rs:826`) now returns `Result<BailiwickZones, DnsError>`
+and replaces the debug-only assert on the suffix slot with the typed
+`DnsError::BailiwickSuffixOverflow { got, max }` fail-stop check, propagated at boot through
+the new `StartupDnsError::BailiwickSuffixOverflow` variant (`src/startup_dns.rs`) so any future
+divergence fails loudly and typed at boot rather than as a generic index-out-of-bounds panic.
+Test: `from_allowlist_fails_stop_on_suffix_slot_overflow` (`src/dns.rs`).
+
+The fixed profile is preserved: single boot owner and single serving owner, two reused
+128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.

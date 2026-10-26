@@ -80,6 +80,13 @@ pub enum StartupDnsError {
     /// The monotonic clock cannot represent the startup window deadline; the
     /// window is not extended, shortened, or clamped.
     DeadlineOverflow,
+    /// The flat union of declared `cname_bailiwick` suffixes exceeds the fixed
+    /// `ALLOWLIST_MAX` slot bound; boot fails loudly and typed rather than
+    /// panicking out of bounds.
+    BailiwickSuffixOverflow {
+        got: usize,
+        max: usize,
+    },
     /// The cooperative driver was asked to advance an exchange that is not in
     /// progress; start one first.
     ExchangeInactive,
@@ -114,6 +121,10 @@ impl fmt::Display for StartupDnsError {
                 f,
                 "startup DNS window deadline not representable on this clock"
             ),
+            StartupDnsError::BailiwickSuffixOverflow { got, max } => write!(
+                f,
+                "startup DNS declared cname_bailiwick suffix count {got} exceeds the {max} slot bound"
+            ),
             StartupDnsError::ExchangeInactive => {
                 write!(f, "startup DNS exchange not in progress")
             }
@@ -136,7 +147,12 @@ impl From<log::LogStoreError> for StartupDnsError {
 
 impl From<DnsError> for StartupDnsError {
     fn from(err: DnsError) -> Self {
-        StartupDnsError::Dns(err)
+        match err {
+            DnsError::BailiwickSuffixOverflow { got, max } => {
+                StartupDnsError::BailiwickSuffixOverflow { got, max }
+            }
+            other => StartupDnsError::Dns(other),
+        }
     }
 }
 
@@ -2566,7 +2582,7 @@ impl StartupDns {
                 pin: config.resolver_set().primary().pin().copied(),
             });
         let allowlist = config.allowlist();
-        self.bailiwick = BailiwickZones::from_allowlist(allowlist, config.cname_bailiwick());
+        self.bailiwick = BailiwickZones::from_allowlist(allowlist, config.cname_bailiwick())?;
         let names = allowlist.len();
         let mut report = StartupReport::default();
         let mut resolved = [false; ALLOWLIST_MAX];
@@ -2673,7 +2689,7 @@ impl StartupDns {
                 pin: config.resolver_set().primary().pin().copied(),
             });
         let allowlist = config.allowlist();
-        self.bailiwick = BailiwickZones::from_allowlist(allowlist, config.cname_bailiwick());
+        self.bailiwick = BailiwickZones::from_allowlist(allowlist, config.cname_bailiwick())?;
         let names = allowlist.len();
         let mut report = StartupReport::default();
         let mut resolved = [false; ALLOWLIST_MAX];

@@ -206,6 +206,10 @@ pub enum DnsError {
         total: usize,
         limit: usize,
     },
+    BailiwickSuffixOverflow {
+        got: usize,
+        max: usize,
+    },
     BadClass {
         got: u16,
     },
@@ -270,6 +274,10 @@ impl fmt::Display for DnsError {
             DnsError::ExcessiveRecords { total, limit } => write!(
                 f,
                 "DNS record count {total} exceeds the {limit} inspection bound"
+            ),
+            DnsError::BailiwickSuffixOverflow { got, max } => write!(
+                f,
+                "declared cname_bailiwick suffix count {got} exceeds the {max} slot bound"
             ),
             DnsError::BadClass { got } => write!(f, "DNS record class {got} is not IN"),
             DnsError::BadType { got } => write!(f, "DNS unsupported record type {got}"),
@@ -823,10 +831,16 @@ impl BailiwickZones {
     /// own self-default zone or one of that root entry's own declared
     /// suffixes; another allowlist entry's zone never widens a neighbour's
     /// bailiwick (alox-f07 SP-014).
+    ///
+    /// # Errors
+    ///
+    /// Returns `DnsError::BailiwickSuffixOverflow` when the flat union of
+    /// declared suffixes exceeds the fixed `ALLOWLIST_MAX` slot bound; the
+    /// write is fail-stop rather than an out-of-bounds panic.
     pub(crate) fn from_allowlist(
         allowlist: &Allowlist,
         suffixes: &[Vec<String>],
-    ) -> BailiwickZones {
+    ) -> Result<BailiwickZones, DnsError> {
         debug_assert_eq!(
             suffixes.len(),
             allowlist.len(),
@@ -847,23 +861,25 @@ impl BailiwickZones {
                 let already = (0..suffix_len)
                     .any(|j| suffix_owner[j] == index && suffix_slots[j].eq_bytes(bytes));
                 if !already {
-                    debug_assert!(
-                        suffix_len < ALLOWLIST_MAX,
-                        "config bounds total declared suffixes to ALLOWLIST_MAX"
-                    );
+                    if suffix_len >= ALLOWLIST_MAX {
+                        return Err(DnsError::BailiwickSuffixOverflow {
+                            got: suffix_len + 1,
+                            max: ALLOWLIST_MAX,
+                        });
+                    }
                     suffix_slots[suffix_len] = DnsName::from_exact(bytes);
                     suffix_owner[suffix_len] = index;
                     suffix_len += 1;
                 }
             }
         }
-        BailiwickZones {
+        Ok(BailiwickZones {
             zones,
             len,
             suffixes: suffix_slots,
             suffix_owner,
             suffix_len,
-        }
+        })
     }
 
     /// A single-zone set covering one allowlist hostname's bailiwick, used by
@@ -1421,7 +1437,8 @@ mod tests {
     ) -> Result<Outcome, DnsError> {
         let mut ws = ResponseWorkspace::default();
         let zones =
-            BailiwickZones::from_allowlist(config().allowlist(), config().cname_bailiwick());
+            BailiwickZones::from_allowlist(config().allowlist(), config().cname_bailiwick())
+                .expect("validated config keeps suffix count within ALLOWLIST_MAX");
         parse_response(&mut ws, &zones, &fqdn(name), family, tid, msg)
     }
 
@@ -1649,7 +1666,8 @@ mod tests {
         msg: &[u8],
     ) -> Result<Outcome, DnsError> {
         let mut ws = ResponseWorkspace::default();
-        let zones = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick());
+        let zones = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick())
+            .expect("validated config keeps suffix count within ALLOWLIST_MAX");
         parse_response(&mut ws, &zones, &fqdn_in(cfg, name), family, tid, msg)
     }
 
@@ -1747,7 +1765,8 @@ mod tests {
     #[test]
     fn covers_label_boundary_union() {
         let cfg = bailiwick_config("sub.example.org", &["example.org"]);
-        let zones = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick());
+        let zones = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick())
+            .expect("validated config keeps suffix count within ALLOWLIST_MAX");
         let root = DnsName::from_exact(b"sub.example.org");
         for covered in ["edge.example.org", "a.example.org", "example.org"] {
             assert!(
@@ -1761,6 +1780,38 @@ mod tests {
                 "{uncovered} must not be covered across a label boundary"
             );
         }
+    }
+
+    /// Drives the fixed suffix-slot write past `ALLOWLIST_MAX` with input that
+    /// bypasses config validation (a hand-built parallel suffix list), proving
+    /// the write is fail-stop and typed rather than an out-of-bounds panic.
+    #[test]
+    fn from_allowlist_fails_stop_on_suffix_slot_overflow() {
+        let mut doc = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n"
+            .to_string();
+        for i in 0..ALLOWLIST_MAX {
+            writeln!(
+                doc,
+                "[allowed_fqdn.\"host{i}.example.com:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}"
+            )
+            .expect("write into String");
+        }
+        let cfg = parse_config_document(&doc).expect("valid config");
+        let suffixes: Vec<Vec<String>> = (0..ALLOWLIST_MAX)
+            .map(|i| vec![format!("s{i}a.example.net"), format!("s{i}b.example.net")])
+            .collect();
+        let err = BailiwickZones::from_allowlist(cfg.allowlist(), &suffixes)
+            .expect_err("suffix slot overflow must be a typed error");
+        assert!(
+            matches!(
+                err,
+                DnsError::BailiwickSuffixOverflow { got, max }
+                    if got == ALLOWLIST_MAX + 1 && max == ALLOWLIST_MAX
+            ),
+            "expected BailiwickSuffixOverflow {{ got: {}, max: {} }}, got {err:?}",
+            ALLOWLIST_MAX + 1,
+            ALLOWLIST_MAX
+        );
     }
 
     #[test]
@@ -1889,7 +1940,8 @@ mod tests {
     ) -> (Result<Outcome, DnsError>, bool) {
         let mut ws = ResponseWorkspace::default();
         let zones =
-            BailiwickZones::from_allowlist(config().allowlist(), config().cname_bailiwick());
+            BailiwickZones::from_allowlist(config().allowlist(), config().cname_bailiwick())
+                .expect("validated config keeps suffix count within ALLOWLIST_MAX");
         let outcome = parse_response(&mut ws, &zones, &fqdn(name), family, tid, msg);
         (outcome, ws.extreme_ttl())
     }
