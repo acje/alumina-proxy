@@ -1905,3 +1905,50 @@ connection is always closed so the next exchange re-dials the restored or reloca
 
 The fixed profile is preserved: single boot owner and single serving owner, two reused
 128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
+
+## alumina-alox19 (2026-10-26) — P-F09 closure: JA4 whole-monitor-record loss
+
+This is the narrow, user-authorized amendment recording the F-09 closure: read-only
+verification (evidence bead `alumina-68byk`) confirms the JA4 whole-monitor-record loss
+surface — the fixed monitor core is always encoded, per-ordinal JA4 detail is sharded onto
+best-effort detail batches, and an explicit loss flag exists on detail suppression. It
+amends no behavioural sentence surface; it records the verified closure of the F-09
+adversarial-population concern, and appends this block; every other clause of this document
+remains binding and unchanged.
+
+Three claims are confirmed at source level. First, the fixed core is always encoded: the
+always-emitted monitor summary (`encode_monitor_summary`, `src/log.rs:835`) carries the
+aggregate counters and ALL aggregate overflow flags folded into `ofacts`
+(`src/log.rs:858-864`: any-illegal, early-data, unknown, resolver-degraded, dns-anomaly,
+downgrade-to-plain, probe-relocations, expired-pin-cert, ja4-change, ja4-seed) plus the
+per-ordinal `dx` hex loss bitset (`src/log.rs:969-978`). The adversarial-population
+worst-case test `logging_monitor_all_saturated_record_fits_the_2k_slot`
+(`src/log.rs:3277`) saturates the whole Monitor (`saturate_all_for_test`) and asserts every
+emitted record fits the 2 KiB slot, carrying `ofacts=1` / `ocapture_drops=1` / `sn=32` /
+`js=4294967295` / `d31p` — the fixed core is never dropped. Family-split variants assert the
+same worst case with serving-stale latched (`src/log.rs:3464`) and exactly one summary plus
+3 domain and 3 capture batches each under the 2048 B cap (`src/log.rs:3499`).
+
+Second, JA4 detail is sharded: per-ordinal `d<i>j` (change count), `d<i>v` (36-byte JA4
+value), and `d<i>p` (latest-overflow peer IP) ride the best-effort `monitor_domain` detail
+batches (`src/log.rs:1030-1060`), packed `DOMAIN_BATCH=11` ordinals per batch so 32
+ordinals span 3 batches, never the fixed core. The counters live in
+`FactCounters` (`src/enforcement/monitor.rs:12-27`): `ja4_change`
+`[SaturatingCounter; ALLOWLIST_MAX]`, `ja4_change_loss` `[bool; ALLOWLIST_MAX]`, `ja4_value`
+`[[u8; 36]; ALLOWLIST_MAX]`, `ja4_seed`, `ja4_peer_ip` `NumericAddr`, `ja4_peer_ordinal`
+`Option<DomainOrdinal>`. The serving path keeps a fixed 512-entry zero-heap
+`Ja4BaselineTable` (`src/serving.rs:557-582`, `ALLOWLIST_MAX` × `MAX_ADDRESSES` = 32 × 16)
+with `BaselineOutcome { FirstSeen, Unchanged, Overflow }`; overflow counts as a change signal.
+
+Third, an explicit loss flag exists on detail suppression:
+`note_fact_ja4_change` (`src/enforcement/monitor.rs:272-284`) latches the per-ordinal
+`ja4_change_loss` flag on overflow — the deviation decision fires regardless of set
+capacity, but the overflowed value is not added to the set, so the operator sees detail was
+suppressed. The summary always encodes the `dx` hex bitset of loss flags when any is set
+(`src/log.rs:969-978`); the exact-grammar test
+`logging_monitor_summary_exact_grammar_and_zero_suppression` (`src/log.rs:3145`) asserts the
+summary carries the fixed core and the `dx` bitset while the single nonzero domain block
+rides its `monitor_domain` batch.
+
+The fixed profile is preserved: single boot owner and single serving owner, two reused
+128 KiB per-tunnel buffers, no post-boot heap alloc/dealloc, and no runtime-surface expansion.
