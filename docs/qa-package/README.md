@@ -1,16 +1,10 @@
 # Alumina — local static native QA package (testQA candidate)
 
 This is the **local, isolated** static native QA package for the `alumina`
-resolver. The identity below — HEAD `bbda19f` with the approved
-serde-removal manifest/lock diff and the native verification consolidation
-diff applied (canonical `docs/alumina-proxy.md` byte-unchanged) — is the
-**historical `bbda19f` receipt provenance**, dated 2026-10-13, and is scoped to
-that candidate, **not** a current-HEAD claim after the rp2e
-tripwire/action/monitoring/pacing amendment (`docs/alumina-proxy.md:238-315`).
-The exercised fixture-facts variant is built from the exact current source
-in-run by `validate.sh`. It bundles run/validation instructions, a non-secret
-example configuration, and an artifact/source identity record. It makes **no
-external deployment** and contains **no secrets**.
+resolver. The exercised fixture-facts variant is built from the exact current
+source in-run by `validate.sh`. It bundles run/validation instructions, a
+non-secret example configuration, and an artifact/source identity record. It
+makes **no external deployment** and contains **no secrets**.
 
 The repository is a **scoped testQA-ready candidate**, not a
 production-qualified or externally-deployed system (qualification gates in
@@ -32,7 +26,7 @@ command, scope and digest — not interchangeable, no artificial shared identity
 |---|---|---|
 | Exercised smoke artifact (fixture-facts) | `target/fixture-facts/release/alumina` | built by the `fixtures boot` gate from exact source in-run; static-ELF + executed under privilege profile (typed-terminated positive + exit-78 negatives); sha + non-setid + `security.capability` absence proven in-run (`METADATA-OK`) |
 | Production release (MID) | `target/release/alumina` | built by `mid union` (via `boundary phase1` slow tier); static-ELF + whitespace + witness gates; **not executed** by this wrapper |
-| Production release (e2e musl) | `target/aarch64-unknown-linux-musl/release/alumina` | native relay/shutdown gates green (`sh scripts/verify.sh e2e relay`: 11/11; `e2e shutdown`: 10/10; harness image `localhost/alumina-e2e:e2e-20261011`, immutable ID `9191d288…`) — **historical `bbda19f`-era receipt provenance**, dated/scoped to that candidate, not a current-HEAD claim after rp2e; **not executed by this wrapper** |
+| Production release (e2e musl) | `target/aarch64-unknown-linux-musl/release/alumina` | production release target for the native `e2e relay` / `e2e shutdown` host selectors; **not executed by this wrapper** |
 
 `validate.sh` records per-run: source `HEAD`, working-tree status-list identity
 (changed-path list, not content), and sha256 + static-ELF of the exercised
@@ -275,12 +269,3 @@ sh docs/qa-package/validate.sh
      `QA-PACKAGE-VALIDATE-OK` is never emitted.
    - **FAIL** (non-zero) — genuine gate failure (non-zero boundary without the
      coordination markers, or any probe/identity/freshness failure).
-
-## Known-open items (not claims of completion)
-
-- F3 current-serving completeness witness open (matrix implemented —
-  `tests/mio_matrix.rs`).
-- F4 parser-fuzzing campaigns not shipped.
-- Deployment confinement, external validation, production qualification out of
-  scope; `RELEASE-NOT-READY` stays the honest boundary
-  diagnostic — never converted to a release clean.

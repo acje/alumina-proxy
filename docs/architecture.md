@@ -3,17 +3,14 @@
 **Status:** design statement for the as-built implementation (foundation, boot,
 wired single-owner serving runtime; provisional parser layer). This document is
 **not** runtime proof — qualification is gated on the
-Linux acceptance gates in [verification.md](verification.md) and the proof matrix
-in [traceability.md](traceability.md). **Canonical source:** `docs/alumina-proxy.md` is
+Linux acceptance gates in [verification.md](verification.md). **Canonical source:** `docs/alumina-proxy.md` is
 the sole governing specification (no accepted ADRs). Where this document
 defines a boundary the spec leaves open, it is a **named design decision
 (D1…Dn)**, never a policy change or security relaxation.
 
 ## 1. Governing invariants (invariant-led design)
 
-The fixed-profile invariants I-1…IV-5 name the design element each enforces;
-the full invariant → design-element/proof-status matrix is owned by
-[traceability.md §2](traceability.md#2-invariant-matrix-all-13).
+The fixed-profile invariants I-1…IV-5 name the design element each enforces.
 
 ## 2. Module & ownership decomposition
 
@@ -140,7 +137,7 @@ with construction-and-reuse proof as a future gate.
 **Outside the 128 MiB budget** (separately accounted): the retained serving
 workspace (512 × ~152.5 KiB ≈ 76 MiB, design estimate — JA4 ClientHello
 retention reconciled at spec `:929`), DNS storage, metadata, stacks, executable,
-kernel socket buffers (T3; traceability U7).
+kernel socket buffers (T3).
 **Dependency seam (T2/G4):** `mio`+epoll mandated (`:147`); pin version,
 enumerate operations, gate each on source review + allocator instrumentation
 (verification.md F3) — mio steady-state alloc-freedom is not assumed.
@@ -199,5 +196,4 @@ fallback (`:19,49,63,71,72,97,144,149`).
 
 Cross-map: [verification.md](verification.md) and
 [qa-package/README.md](qa-package/README.md) for gate execution and the open
-qualification gates; [traceability.md](traceability.md) for the complete
-matrix and unresolved-evidence ledger.
+qualification gates.

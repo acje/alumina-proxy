@@ -87,15 +87,15 @@ Verification is tiered; each tier backs a different claim:
 
 ### Full affected-corpus offline check
 
-`verify.sh docs` runs the offline link gate on the **6-root canonical set**
+`verify.sh docs` runs the offline link gate on the **5-root canonical set**
 (`DOCSLINK_ROOTS` in `scripts/verify.sh`): `README.md`, `docs/alumina-proxy.md`,
-`docs/architecture.md`, `docs/traceability.md`,
+`docs/architecture.md`,
 `docs/verification.md`, `docs/qa-package/README.md`. The full retained Markdown
-corpus — all **7** docs — is checked with the explicit nonempty
+corpus — all **6** docs — is checked with the explicit nonempty
 argv command:
 
 ```
-node scripts/docs_check/check.mjs README.md AGENTS.md docs/alumina-proxy.md docs/architecture.md docs/traceability.md docs/verification.md docs/qa-package/README.md
+node scripts/docs_check/check.mjs README.md AGENTS.md docs/alumina-proxy.md docs/architecture.md docs/verification.md docs/qa-package/README.md
 ```
 
 Selector host context / prerequisites (incl. `mid` Linux-only fail-closed and

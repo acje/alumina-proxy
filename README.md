@@ -27,7 +27,6 @@ bounded stdout monitoring (`docs/alumina-proxy.md:243-323`, rp2e amendment).
 | --- | --- |
 | [alumina-proxy.md](docs/alumina-proxy.md) | **Canonical spec** — sole governing requirements |
 | [docs/architecture.md](docs/architecture.md) | Conceptual design + as-built single-owner mapping (decisions D1–D7) |
-| [docs/traceability.md](docs/traceability.md) | Requirement → design → proof matrix + unresolved-evidence ledger |
 | [docs/qa-package/README.md](docs/qa-package/README.md) | Local testQA run/validation instructions |
 | [docs/verification.md](docs/verification.md) | Verification instructions, command set + offline link checker |
 
@@ -208,16 +207,6 @@ serving/parser core; `src/serving/{policy,reject,startup,tests}.rs`,
 `src/runtime/tests.rs`, `src/startup_dns/tests.rs` serving/startup decomposition
 and sibling test modules; `src/{alloc,fault,fuzz}.rs` F1/F2/F4 scaffolds;
 `scripts/` verification owners; `tests/` integration corpus.
-
-## Known limitations / not implemented (honest)
-
-- Deployment confinement, initial deployment, remaining native E2E profiles,
-  fuzz campaign receipts, platform/confinement/performance qualification —
-  **open** (traceability §5).
-- F3 serving completeness witness and full BOUNDARY remain open; exact
-  candidates above are proven for relay/shutdown, never a blanket claim.
-- `getrandom` intake complete; `cargo deny`/`cargo audit` clean; no
-  product-wide zero-alloc claim is made.
 
 ## License
 
