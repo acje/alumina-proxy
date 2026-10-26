@@ -1595,12 +1595,19 @@ impl StartupDns {
 
     /// Cancels a retained startup exchange whose window already expired: the
     /// serving runtime must never advance or publish it
-    /// (docs/alumina-proxy.md:64-65). A serving-runtime refresh is never
-    /// cancelled by this path, and the refresh schedule is left untouched —
-    /// the startup window already released the in-flight selection on the
-    /// expiry path, so no stuck-pending slot can block a later refresh.
+    /// (docs/alumina-proxy.md:64-65). The discriminator targets only a
+    /// genuinely-startup exchange — one that is neither a serving refresh nor a
+    /// post-window probe — so a serving-runtime refresh, a probe-sweep probe,
+    /// and a corroboration exchange (all owned by the serving path) are never
+    /// cancelled here, and the refresh schedule is left untouched — the startup
+    /// window already released the in-flight selection on the expiry path, so
+    /// no stuck-pending slot can block a later refresh.
     pub(crate) fn cancel_retained_startup_exchange(&mut self) {
-        if self.active.as_ref().is_some_and(|ex| !ex.serving) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|ex| !ex.serving && !ex.probe)
+        {
             self.cancel_for_shutdown();
         }
     }
@@ -3259,6 +3266,34 @@ impl StartupDns {
             verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
             current: Some(self.active_resolver),
         });
+    }
+
+    /// Test-only seam seeding an in-flight corroboration exchange directly, so
+    /// a serving-loop test can exercise the corroboration lifecycle through
+    /// `Runtime::turn` without a real sustained-negative incident or a real
+    /// dial. The corroboration targets the next resolver after the active one
+    /// (a two-resolver set); the peer is overridden separately with
+    /// [`Self::set_peer_for_test`], and `resolvers` stays `None` so
+    /// `repoint_to_active` never overrides that peer.
+    #[cfg(test)]
+    pub(crate) fn seed_corroboration_for_test(
+        &mut self,
+        fqdn: &Fqdn,
+    ) -> Result<(), StartupDnsError> {
+        let active = ActiveResolver::primary(2);
+        let target = ActiveResolver::at(1, 2);
+        self.active_resolver = target;
+        self.corroboration = Some(Corroboration {
+            target,
+            active_before: active,
+            ordinal: 0,
+            family: Family::A,
+        });
+        self.corroboration_outcome = None;
+        let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+        self.start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)?;
+        self.mark_probe_started();
+        Ok(())
     }
 
     /// Starts the next probe of the sweep when idle, returning `true` when the

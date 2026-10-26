@@ -1626,6 +1626,77 @@ fn retained_startup_exchange_cannot_advance() {
     t.join().expect("retained-startup-exchange witness thread");
 }
 
+/// F1 regression (alox18): the corroboration exchange must conclude through the
+/// real serving path. The corroboration is a pure-sensor probe exchange started
+/// by the serving owner; if `cancel_retained_startup_exchange` cancelled it at
+/// the start of the next serving turn (its `!serving` discriminator), the
+/// conflict/consistent logic would never run and the incident latch would be
+/// lost. This test seeds an in-flight corroboration exchange and drives it
+/// through `Runtime::turn`, asserting the conflict outcome fires.
+fn corroboration_concludes_through_serving_turns_body() {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+    let (responder_addr, responder) = spawn_responder_keep_alive();
+
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    let fqdn = crate::config::Fqdn::parse("sub.example.org:443").expect("fqdn");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .seed_corroboration_for_test(&fqdn)
+        .expect("seed corroboration");
+
+    assert!(
+        runtime.serving.storage().dns().has_active_exchange(),
+        "the corroboration exchange must be in flight after seeding"
+    );
+
+    let mut conflict = false;
+    for _ in 0..200 {
+        runtime
+            .turn(Some(Duration::from_millis(5)))
+            .expect("owner turn");
+        if runtime
+            .serving
+            .storage()
+            .enforcement()
+            .monitor()
+            .facts_dns_anomaly(crate::enforcement::monitor::DnsAnomalyKind::CorroborationConflict)
+            > 0
+        {
+            conflict = true;
+            break;
+        }
+        if !runtime.serving.storage().dns().has_active_exchange() {
+            break;
+        }
+    }
+    assert!(
+        conflict,
+        "the corroboration exchange must conclude through the serving turns and emit the conflict fact"
+    );
+    drop(responder);
+}
+
+#[test]
+fn corroboration_concludes_through_serving_turns() {
+    let t = thread::Builder::new()
+        .name("runtime-corroboration-concludes".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(corroboration_concludes_through_serving_turns_body)
+        .expect("spawn corroboration-concludes thread");
+    t.join().expect("corroboration-concludes thread");
+}
+
 enum SessionGate {
     Answer(Box<dyn FnMut(Vec<u8>) -> Option<Vec<u8>>>),
     AnswerThenSilent(Box<dyn FnMut(Vec<u8>) -> Option<Vec<u8>>>),
