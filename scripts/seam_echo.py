@@ -2708,7 +2708,7 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     check("f3-failed-probe-unknown",
           w3p["unknown"], "unknown=%r reason=%r" % (w3p["unknown"], w3p["reason"]))
 
-    # --- direct-proxy (qryg.9 native runner): opaque-proxy route sampling. The
+    # --- direct-proxy: opaque-proxy route sampling. The
     # route carries direct TLS to the proxy (no CONNECT handshake) yet the proxy
     # remains a required CPU subject, reported under a neutral label distinct
     # from via-proxy and proxyless. ---
