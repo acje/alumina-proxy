@@ -64,6 +64,20 @@ impl Counts {
     }
 }
 
+/// Reinterprets `len` consecutive `u16` values at `ptr` as a slice.
+///
+/// Sound only when the caller guarantees `ptr` references `len` initialized
+/// `u16` values that remain valid for the returned lifetime. `MaybeUninit<u16>`
+/// has the same layout as `u16`, so initialized `MaybeUninit<u16>` slots read
+/// as `u16` are sound.
+#[must_use]
+pub(crate) const fn u16_slice_from_raw_parts<'a>(ptr: *const u16, len: usize) -> &'a [u16] {
+    // SAFETY: the caller contract — `ptr` references `len` initialized `u16`
+    // values for the returned lifetime; `MaybeUninit<u16>` has the same layout
+    // as `u16`, so the reinterpretation is sound.
+    unsafe { std::slice::from_raw_parts(ptr, len) }
+}
+
 type PhaseCounts = [[u64; 3]; NAMED_PHASES];
 
 thread_local! {
