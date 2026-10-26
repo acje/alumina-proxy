@@ -45,7 +45,19 @@ specification, not feature growth.
   lossless peer-IP hex render and 10 KiB log-slot amendment, the `alox9`
   (2026-10-25) 2 KiB log slot and monitor family split amendment, and the
   `alox10` (2026-10-26) explicit CNAME bailiwick (self-default zone +
-  declared suffix union) amendment, all
+  declared suffix union) amendment, the `alox11` (2026-10-26) F-02 close:
+  reject early_data block domain/all at startup; remove K-connection
+  corroboration amendment, the `alox12` (2026-10-26) P-A6b fold: L3
+  bare-CR, L8 non-host_name SNI, SP-006 sigalg bound amendment, the
+  `alox13` (2026-10-26) P-B7b note: one-label allowlist names accepted (no
+  minimum label count) amendment, the `alox14` (2026-10-26) Register fold:
+  SP-001/003/004/005, RT-001, SP-009/010, RT-006/007 implemented amendment,
+  the `alox15` (2026-10-26) Reject unknown ECH codepoint 0xffce fail-closed
+  amendment, the `alox16` (2026-10-26) Fail-stop bailiwick suffix-slot
+  bound amendment, the `alox17` (2026-10-26) Capture cache generation at
+  exchange start amendment, the `alox18` (2026-10-26) Bounded corroboration
+  on sustained-negative open amendment, and the `alox19` (2026-10-26)
+  P-F09 closure: JA4 whole-monitor-record loss amendment, all
   recorded in the document; no further amendment authority is implied.
 - Status is a scoped local testQA candidate — not production-qualified;
   serving-qualification gates stay open (`docs/verification.md` +
