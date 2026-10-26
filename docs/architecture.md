@@ -3,7 +3,7 @@
 **Status:** design statement for the as-built implementation (foundation, boot,
 wired single-owner serving runtime; provisional parser layer). This document is
 **not** runtime proof — qualification is gated on the
-Linux acceptance gates in [build-plan.md](build-plan.md) and the proof matrix
+Linux acceptance gates in [verification.md](verification.md) and the proof matrix
 in [traceability.md](traceability.md). **Canonical source:** `docs/alumina-proxy.md` is
 the sole governing specification (no accepted ADRs). Where this document
 defines a boundary the spec leaves open, it is a **named design decision
@@ -143,7 +143,7 @@ retention reconciled at spec `:929`), DNS storage, metadata, stacks, executable,
 kernel socket buffers (T3; traceability U7).
 **Dependency seam (T2/G4):** `mio`+epoll mandated (`:147`); pin version,
 enumerate operations, gate each on source review + allocator instrumentation
-(build-plan F3) — mio steady-state alloc-freedom is not assumed.
+(verification.md F3) — mio steady-state alloc-freedom is not assumed.
 
 ## 7. Startup, logging, shutdown
 
@@ -197,6 +197,7 @@ queries, multi-worker data paths, control plane / readiness / metrics surface,
 DNS64/NAT64 compatibility, upstream auth or cert verification, automatic
 fallback (`:19,49,63,71,72,97,144,149`).
 
-Cross-map: [build-plan.md](build-plan.md) for slice/gate execution and the
-open qualification gates; [traceability.md](traceability.md) for the complete
+Cross-map: [verification.md](verification.md) and
+[qa-package/README.md](qa-package/README.md) for gate execution and the open
+qualification gates; [traceability.md](traceability.md) for the complete
 matrix and unresolved-evidence ledger.

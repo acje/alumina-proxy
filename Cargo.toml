@@ -159,7 +159,7 @@ path = "src/main.rs"
 # enters on the true process main thread. It probes the main-order serving
 # path (preallocate -> accept -> reset) under the deployment stack rlimit,
 # evidence for M2: the inline serving workspaces must not overflow the
-# deployment main thread's RLIMIT_STACK (see docs/build-plan.md stack bound).
+# deployment main thread's RLIMIT_STACK (see tests/main_thread_stack.rs).
 [[test]]
 name = "main_thread_stack"
 path = "tests/main_thread_stack.rs"

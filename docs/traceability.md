@@ -3,7 +3,7 @@
 **Status:** traceability matrix — the single map from every specification
 section, invariant, resource row, and verification requirement to its design
 home ([architecture.md](architecture.md)), execution plan
-([build-plan.md](build-plan.md)), and proof status. Canonical source:
+([verification.md](verification.md)), and proof status. Canonical source:
 `docs/alumina-proxy.md` (all sections, including amendments). The repository is
 a **scoped testQA-ready candidate** (scoped status owner AGENTS.md): an implemented and
 correctness-tested subset carries local runtime evidence, while external
@@ -16,7 +16,7 @@ locally with raw exit-0 evidence on an exact candidate — e.g. `verify.sh mid
 foundations`/`mid boot`, `fixtures boot`, `e2e relay`, `e2e shutdown`, deny/
 audit, docs — scoped to that exact candidate, never a production or deployment
 claim); **external** (deployment/operator obligation); **out-of-scope**
-(architecture §9 / build-plan §7).
+(architecture §9 / verification.md).
 
 ## 1. Section matrix (all `docs/alumina-proxy.md` sections)
 
@@ -45,7 +45,7 @@ claim); **external** (deployment/operator obligation); **out-of-scope**
 | L152–185 | Initial resource profile (full row matrix §3) | arch §6 | artifact |
 | L187–194 | Lifecycle: setup/connect/idle deadlines, closure drain, shutdown, capacity/logging | arch §4/§7 | designed → gate; L192 verified-local (e2e shutdown; ucxi) |
 | L196–221 | Invariants I–IV (13) | arch §1 | designed → gate (§2) |
-| L223–236 | Verification requirements (12 categories) | build-plan Slices 1–7 | gate (§4) |
+| L223–236 | Verification requirements (12 categories) | verification.md Slices 1–7 | gate (§4) |
 | L238–263 | rp2e tripwire/action/monitoring/pacing amendment: trigger/action catalog & attribution (AnyIllegal/early-upstream/EOF-reset), Block/Flare semantics, Tarpit **deferred** | arch §2 (`enforcement`) | designed → gate; Tarpit deferred |
 | L265–281 (schema superseded by the `alumina-cfgk` amendment, L991–1153) | Mandatory `[any_illegal]` + keyed `[allowed_fqdn."<fqdn>:<port>"]` config schema (`alumina-cfgk`): keyed tables replacing the index-aligned arrays, mandatory `early_data`, force-mandatory group, Tarpit-deferred rejection, 16 KiB capacity (parser-real 32 × 100-byte worst case 5,843 B) | arch §2 (`enforcement`); `src/config.rs` | verified-local (rp2e config surface; keyed schema 2026-10-24) |
 | L283–303 | Bounded stdout monitoring (per-ordinal/global correlated aggregates, drop+count/saturate, no new sink) & planned fixed control-storage bounds (~9–10 KiB) | arch §2 (`enforcement`)/§6 | designed → artifact → gate |
@@ -124,20 +124,20 @@ conditional per-direction — encoded in arch §6 / Slice 7.
 
 | # | Gap | Evidence needed (future) | Where tracked | Status |
 |---|---|---|---|---|
-| U1 | mio/transitive alloc-freedom | pinned version + op matrix + source review + Linux allocator witnesses | build-plan F3 | gate |
+| U1 | mio/transitive alloc-freedom | pinned version + op matrix + source review + Linux allocator witnesses | verification.md F3 | gate |
 | U2 | Generation/window-id non-reuse | width/exhaustion design + construction-and-reuse proof | arch §5 (G1/G4) | artifact → gate |
-| U3 | Gate-ordering online proof | F2 fault-injection runs on the real dispatcher (q28 schedule) | build-plan F2/Slice 4 | gate |
+| U3 | Gate-ordering online proof | F2 fault-injection runs on the real dispatcher (q28 schedule) | verification.md F2/Slice 4 | gate |
 | U4 | Stack bound | measured worst-case parse-path stack on Linux | arch §6 G2 | artifact |
-| U5 | Linux serving/refresh alloc evidence | allocation witnesses for all named phases on Linux (incl. serving completeness) | build-plan Slice 6; F1; F3 | gate |
-| U6 | Throughput + confinement | conditional 1–10 Gbps benchmark; deployment confinement | build-plan Slice 7 | external |
+| U5 | Linux serving/refresh alloc evidence | allocation witnesses for all named phases on Linux (incl. serving completeness) | verification.md Slice 6; F1; F3 | gate |
+| U6 | Throughput + confinement | conditional 1–10 Gbps benchmark; deployment confinement | verification.md Slice 7 | external |
 | U7 | Boot allocation inventory sum (G1) | container-size accounting incl. outside-budget items; 128 MiB traffic-only + RSS split | arch §6 | artifact |
-| U8 | Parser-fuzz corpus ownership | checked-in corpus/inputs/seed/hashes; crashes resolved before done-claim | build-plan F4 | gate |
+| U8 | Parser-fuzz corpus ownership | checked-in corpus/inputs/seed/hashes; crashes resolved before done-claim | verification.md F4 | gate |
 
 ## 6. Named decisions (pointers)
 
 Design decisions D1–D7 and the state machine: `docs/architecture.md` §3/§4.
-Gates F0–F4: `docs/build-plan.md` §2. Storage/boot and generation domains
-(T1/T2/T3, G1–G4): `docs/architecture.md` §5/§6.
+Gates F0–F4: `docs/verification.md` (gate owner). Storage/boot and generation
+domains (T1/T2/T3, G1–G4): `docs/architecture.md` §5/§6.
 
 No ADR has been required: the documents restate the spec, no policy change.
 The planning documents are committed and maintained alongside the

@@ -14,7 +14,7 @@ external deployment** and contains **no secrets**.
 
 The repository is a **scoped testQA-ready candidate**, not a
 production-qualified or externally-deployed system (qualification gates in
-[../build-plan.md](../build-plan.md)).
+[../verification.md](../verification.md)).
 
 ## Package contents
 
@@ -279,7 +279,7 @@ sh docs/qa-package/validate.sh
 ## Known-open items (not claims of completion)
 
 - F3 current-serving completeness witness open (matrix implemented —
-  `tests/mio_matrix.rs`; build-plan §0).
+  `tests/mio_matrix.rs`).
 - F4 parser-fuzzing campaigns not shipped.
 - Deployment confinement, external validation, production qualification out of
   scope; `RELEASE-NOT-READY` stays the honest boundary

@@ -94,7 +94,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
 
 /// Bounded re-arm backoff after a transient accept failure (e.g. EMFILE).
 /// No canonical capacity number is invented; this only stops a hot re-arm loop
-/// (xz3f N6; alumina-refinement.md factual note).
+/// (xz3f N6 factual note).
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// The canonical complete-visit I/O budget (docs/alumina-proxy.md:146): at

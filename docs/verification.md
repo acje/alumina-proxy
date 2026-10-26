@@ -4,10 +4,9 @@ Verification here is **scoped and exact-input**: proofs are recorded for
 specific candidates, never blanket, and a completed check at one candidate is
 not reused for another unless the inputs are identical. Repository status and
 known limitations are the README; qualification gates stay open and are owned
-by [docs/build-plan.md](build-plan.md) (status owner
-[docs/qa-package/README.md](qa-package/README.md)). This file is the
-verification **instruction / command-set** authority (relocated from the README
-"Verification" section).
+by this file — the verification **instruction / command-set** authority
+(relocated from the README "Verification" section; status owner
+[docs/qa-package/README.md](qa-package/README.md)).
 
 ## Command set
 
@@ -88,16 +87,15 @@ Verification is tiered; each tier backs a different claim:
 
 ### Full affected-corpus offline check
 
-`verify.sh docs` runs the offline link gate on the **8-root canonical set**
+`verify.sh docs` runs the offline link gate on the **6-root canonical set**
 (`DOCSLINK_ROOTS` in `scripts/verify.sh`): `README.md`, `docs/alumina-proxy.md`,
-`docs/architecture.md`, `docs/build-plan.md`, `docs/traceability.md`,
-`docs/verification.md`, `docs/qa-package/README.md`,
-`docs/future-hardening-vectors.md`. The full retained Markdown
-corpus — all **11** docs — is checked with the explicit nonempty
+`docs/architecture.md`, `docs/traceability.md`,
+`docs/verification.md`, `docs/qa-package/README.md`. The full retained Markdown
+corpus — all **9** docs — is checked with the explicit nonempty
 argv command:
 
 ```
-node scripts/docs_check/check.mjs README.md AGENTS.md docs/alumina-proxy.md docs/architecture.md docs/build-plan.md docs/traceability.md docs/benchmarks/100mbps-comparison.md docs/benchmarks/feature-match-matrix.md docs/verification.md docs/qa-package/README.md docs/future-hardening-vectors.md
+node scripts/docs_check/check.mjs README.md AGENTS.md docs/alumina-proxy.md docs/architecture.md docs/traceability.md docs/benchmarks/100mbps-comparison.md docs/benchmarks/feature-match-matrix.md docs/verification.md docs/qa-package/README.md
 ```
 
 Selector host context / prerequisites (incl. `mid` Linux-only fail-closed and

@@ -1,7 +1,7 @@
 # Security Review: Alumina code + spec (alox-sec1)
 
 **Mode**: security / adversarial red-team (code + spec)
-**Scope**: full first-party surface — `src/` (all modules), `docs/alumina-proxy.md` (byte-canonical governing spec, amendments through `alox9`), `Cargo.toml`/`deny.toml`/`rust-toolchain.toml`, prior alox artifacts (`alox-redteam2.md`, `alox-spec-review.md`, `alox-vote-results.md`).
+**Scope**: full first-party surface — `src/` (all modules), `docs/alumina-proxy.md` (byte-canonical governing spec, amendments through `alox9`), `Cargo.toml`/`deny.toml`/`rust-toolchain.toml`, prior alox artifacts (`alox-spec-review.md`).
 **Method**: source-level adversarial review by module cluster (CONNECT/ClientHello, DNS core, DoT transport, serving core/gate, event loop, logging/enforcement, config/boot/deps), each adjudicated against the governing spec's threat model and deployment idioms to suppress false positives. No builds/tests/fuzzers run (mechanical verification is out of scope for this review; execution-owned gates stay with their owners).
 **Status**: IN PROGRESS — sections appended as cluster reviews complete.
 
@@ -99,7 +99,7 @@ All live with tests: L3 bare-CR (`connect.rs:333-335`, tests `:826-847`); L8 non
 #### B-5 [NEW][Medium|observability — OPEN, planned slice] Spec `:79-81` DNS incident-notification surface is not implemented
 
 - Files: absent from `src/` — only the alox7 sustained-negative incident (`schedule.rs:457-489`, `startup_dns.rs:1159-1323`, `enforcement/state.rs:316-321`) and the per-exchange `exchange_failed` log record exist; there is no per-type exchange-failure incident state, no first-failure warn, no 3600 s per-hostname error summary, no immediate error on the has-bindings→none transition, no recovery info notification, and no 512 per-slot window-marker activity accounting from `:81`.
-- Spec: `:74` ("clear both exchange-failure incidents" — nothing to clear), `:79-81`, `:235`; `docs/build-plan.md:85` (Slice 2 lists `:79-81` — unlanded increment).
+- Spec: `:74` ("clear both exchange-failure incidents" — nothing to clear), `:79-81`, `:235` (`:79-81` — unlanded increment).
 - Witness: grep of `src/` for the `:79` vocabulary finds only sustained-negative + `exchange_failed`; the NXDOMAIN apply arm (`dns.rs:368-375`) has no incident surface to clear.
 - Impact: security (observability) — operators are blind to the per-type incident narrative and activity-window summaries during resolver attacks/eviction storms; no authorization impact. Repo status is a scoped testQA candidate with serving-qualification gates open, so this is an open planned-slice item, not a regression.
 - Fix: land Slice 2's `:79-81` increment before serving qualification; wire the NXDOMAIN arm to clear both per-type incidents per `:74`.

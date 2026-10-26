@@ -48,7 +48,8 @@ specification, not feature growth.
   declared suffix union) amendment, all
   recorded in the document; no further amendment authority is implied.
 - Status is a scoped local testQA candidate — not production-qualified;
-  serving-qualification gates stay open (`docs/build-plan.md` owns them).
+  serving-qualification gates stay open (`docs/verification.md` +
+  `docs/qa-package/README.md` own them).
 - Native verification entry point, QA run and prerequisite ownership are
   `docs/qa-package/README.md`; the verify command set is in
   `docs/verification.md`.

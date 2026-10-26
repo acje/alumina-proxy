@@ -27,11 +27,9 @@ bounded stdout monitoring (`docs/alumina-proxy.md:243-323`, rp2e amendment).
 | --- | --- |
 | [alumina-proxy.md](docs/alumina-proxy.md) | **Canonical spec** — sole governing requirements |
 | [docs/architecture.md](docs/architecture.md) | Conceptual design + as-built single-owner mapping (decisions D1–D7) |
-| [docs/build-plan.md](docs/build-plan.md) | Qualification owner — gates F0–F4, seven slices, current status |
 | [docs/traceability.md](docs/traceability.md) | Requirement → design → proof matrix + unresolved-evidence ledger |
 | [docs/qa-package/README.md](docs/qa-package/README.md) | Local testQA run/validation instructions |
 | [docs/verification.md](docs/verification.md) | Verification instructions, command set + offline link checker |
-| [docs/future-hardening-vectors.md](docs/future-hardening-vectors.md) | Non-canonical TLS & DNS hardening research register — possible code/spec enhancements |
 | [docs/benchmarks/100mbps-comparison.md](docs/benchmarks/100mbps-comparison.md) | 100 Mbps matched comparison — Alumina 8dbbec8 vs HAProxy 3.2.25 vs Envoy 1.39.4 (tables-only; workload parameters + durable receipts) |
 | [docs/benchmarks/feature-match-matrix.md](docs/benchmarks/feature-match-matrix.md) | Feature match matrix across the three benchmark candidates |
 
@@ -217,7 +215,7 @@ and sibling test modules; `src/{alloc,fault,fuzz}.rs` F1/F2/F4 scaffolds;
 
 - Deployment confinement, initial deployment, remaining native E2E profiles,
   fuzz campaign receipts, platform/confinement/performance qualification —
-  **open** (build-plan §7; traceability §5).
+  **open** (traceability §5).
 - F3 serving completeness witness and full BOUNDARY remain open; exact
   candidates above are proven for relay/shutdown, never a blanket claim.
 - `getrandom` intake complete; `cargo deny`/`cargo audit` clean; no
