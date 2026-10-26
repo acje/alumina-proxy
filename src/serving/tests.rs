@@ -6987,6 +6987,113 @@ fn peer_admission_freshness_folds_serving_stale_level_bit() {
 }
 
 #[test]
+/// The serving-path wiring seam for tunnel activity (M2): a committed relay
+/// peer's forwarded bytes are attributed to the name's incident window through
+/// `note_incident_tunnel_bytes`, and the boundary rotation emits them in the
+/// summary. Only `Stage::Relay` writes with a committed `report_name` count.
+fn incident_tunnel_bytes_counted_through_real_path() {
+    use crate::cache::Family;
+    use crate::startup_dns::FailureReason;
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        let origin = Instant::now();
+        serving.storage_mut().mount_clock(origin, 1000);
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .expect("open A incident");
+        serving.storage_mut().report_incident_if_due(origin);
+        // A committed relay peer attributes tunnel bytes to the name window.
+        serving.slots[0].report_name = Some(0);
+        serving.slots[0].stage = Stage::Relay;
+        serving.note_incident_tunnel_bytes(0, 100, 1010);
+        serving.note_incident_tunnel_bytes(0, 50, 1020);
+        // The 3600s boundary rotation emits the summary with the counted
+        // tunnel activity through the real path.
+        serving
+            .storage_mut()
+            .report_incident_if_due(origin + Duration::from_secs(3600));
+        let record = serving
+            .storage()
+            .logs()
+            .last_record_bytes()
+            .expect("incident summary record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=incident_summary")
+                && text.contains("tunnels=1")
+                && text.contains("bytes=150"),
+            "the summary must count the distinct tunnel and its bytes: {text}"
+        );
+    });
+}
+
+#[test]
+/// The stale-admission wiring seam (M2): a first `Peer` admission on a stale
+/// entry records one stale admission in the name's incident window through
+/// `note_peer_freshness`; a retry (the slot already carries a `connect_family`)
+/// is not a new admission and must not double-count.
+fn stale_admission_counted_once_per_connection_through_real_path() {
+    use crate::cache::Family;
+    use crate::connect::Feed;
+    use crate::eligibility::NumericAddr;
+    use crate::startup_dns::FailureReason;
+    use std::net::Ipv4Addr;
+    let port = ephemeral_port();
+    let upstream_port = ephemeral_port();
+    let cfg = config_pair(port, upstream_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let origin = Instant::now();
+        serving.storage_mut().mount_clock(origin, 1000);
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .expect("open A incident");
+        serving.storage_mut().report_incident_if_due(origin);
+        // A binding with receipt ~1000 and TTL 600: stale past secs 1600.
+        serving.storage_mut().publish_test_addr(
+            0,
+            NumericAddr::V4(Ipv4Addr::from([1, 1, 1, 1])),
+            Family::A,
+        );
+        serving.storage_mut().mount_clock(origin, 1601);
+        let mut parser = crate::connect::ConnectParser::new();
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match parser.feed(head.as_bytes()).expect("head feed") {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("head should parse to completion"),
+        }
+        let request = parser
+            .result()
+            .copied()
+            .expect("parsed request")
+            .expect("valid request");
+        // First admission on the stale entry: counted once.
+        serving.note_peer_freshness(&request, Family::A, origin, 0);
+        // A retry (the slot already carries a connect_family) is not a new
+        // admission and must not double-count.
+        serving.slots[0].connect_family = Some(Family::A);
+        serving.note_peer_freshness(&request, Family::A, origin, 0);
+        // The boundary rotation emits the summary with stale=1.
+        serving
+            .storage_mut()
+            .report_incident_if_due(origin + Duration::from_secs(3600));
+        let record = serving
+            .storage()
+            .logs()
+            .last_record_bytes()
+            .expect("incident summary record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=incident_summary") && text.contains("stale=1"),
+            "the summary must count the stale admission once per connection: {text}"
+        );
+    });
+}
+
+#[test]
 fn ja4_first_seen_records_baseline_without_signal() {
     with_serving_stack(ephemeral_port(), |serving| {
         let wire = hello_wire(b"sub.example.org", false);
