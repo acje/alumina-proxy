@@ -31,7 +31,7 @@ sh scripts/seam_echo.sh head <smoke|timed> e2microrstorm50      # 50 sessions/s
 ```
 
 An empty 3rd argument keeps the legacy fixed 100 Mbps contract (backward
-compatible, as used by `docs/benchmarks/100mbps-comparison.md`). `smoke` uses
+compatible). `smoke` uses
 2 s warmup / 0 s measure; `timed` uses 5 s warmup / 60 s measure. Receipts are
 written to `.ooda/benchmarks/<stamp>-…Z.json` where `<stamp>` is the
 `<short-head>-seam-head-<workload>-<kind>-<ISO-time>` prefix.
@@ -269,5 +269,4 @@ over TCP responder with CONNECT allowlist + `[any_illegal] flare_only` memo
 
 Receipt JSON files live under `.ooda/benchmarks/` (gitignored local evidence);
 the numbers above are extracted from the cited receipt fields, not from the
-rounded brief. The 100 Mbps matched comparison is documented separately in
-[docs/benchmarks/100mbps-comparison.md](100mbps-comparison.md).
+rounded brief.

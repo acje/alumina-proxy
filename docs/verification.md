@@ -91,11 +91,11 @@ Verification is tiered; each tier backs a different claim:
 (`DOCSLINK_ROOTS` in `scripts/verify.sh`): `README.md`, `docs/alumina-proxy.md`,
 `docs/architecture.md`, `docs/traceability.md`,
 `docs/verification.md`, `docs/qa-package/README.md`. The full retained Markdown
-corpus — all **9** docs — is checked with the explicit nonempty
+corpus — all **7** docs — is checked with the explicit nonempty
 argv command:
 
 ```
-node scripts/docs_check/check.mjs README.md AGENTS.md docs/alumina-proxy.md docs/architecture.md docs/traceability.md docs/benchmarks/100mbps-comparison.md docs/benchmarks/feature-match-matrix.md docs/verification.md docs/qa-package/README.md
+node scripts/docs_check/check.mjs README.md AGENTS.md docs/alumina-proxy.md docs/architecture.md docs/traceability.md docs/verification.md docs/qa-package/README.md
 ```
 
 Selector host context / prerequisites (incl. `mid` Linux-only fail-closed and
