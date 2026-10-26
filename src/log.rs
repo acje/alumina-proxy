@@ -2536,8 +2536,13 @@ mod tests {
         ];
         worst.push((
             "incident_recovered",
-            encode_record(&mut slot, Level::Info, Kind::IncidentRecovered, &incident_recovered)
-                .expect("fits"),
+            encode_record(
+                &mut slot,
+                Level::Info,
+                Kind::IncidentRecovered,
+                &incident_recovered,
+            )
+            .expect("fits"),
         ));
 
         let mut monitor = Monitor::new();

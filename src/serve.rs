@@ -523,10 +523,12 @@ impl ServeStorage {
             };
             match note {
                 IncidentNote::Open { reason, .. } => {
-                    self.logs.incident_open(secs, fqdn.as_str(), family, reason.as_str());
+                    self.logs
+                        .incident_open(secs, fqdn.as_str(), family, reason.as_str());
                 }
                 IncidentNote::Recovered { duration, .. } => {
-                    self.logs.incident_recovered(secs, fqdn.as_str(), family, duration);
+                    self.logs
+                        .incident_recovered(secs, fqdn.as_str(), family, duration);
                 }
             }
         }
