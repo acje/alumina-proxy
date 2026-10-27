@@ -137,6 +137,12 @@ impl ClientHello {
     /// `alumina-xfbq8` amendment (docs/alumina-proxy.md:879-895). When no
     /// non-GREASE `supported_versions` is offered the record-layer protocol
     /// version supplies the `ver` token. Allocation-free.
+    ///
+    /// # Panics
+    ///
+    /// Never on any reachable path: the parser bounds `ciphers` to
+    /// `MAX_CIPHERS` and `extensions` to `MAX_EXTENSIONS`, so the internal
+    /// capacity checks in [`ja4_fingerprint`] cannot fire.
     #[must_use]
     pub fn ja4(&self) -> [u8; 36] {
         let version = self
@@ -153,6 +159,7 @@ impl ClientHello {
             self.alpn_first_value(),
             self.sigalgs(),
         )
+        .expect("parser-bounded: ciphers <= MAX_CIPHERS and extensions <= MAX_EXTENSIONS")
     }
 }
 
@@ -860,6 +867,36 @@ fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> Result<usize, Ch
     Ok(count)
 }
 
+/// Error returned when JA4 fingerprinting input exceeds a fixed capacity.
+///
+/// The public [`ja4_fingerprint`] boundary is fallible so an out-of-contract
+/// caller passing more non-GREASE ciphers than `MAX_CIPHERS` or more
+/// non-GREASE, non-SNI, non-ALPN extensions than `MAX_EXTENSIONS` receives an
+/// explicit error instead of an out-of-bounds panic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Ja4Error {
+    /// More than `MAX_CIPHERS` non-GREASE cipher suites were offered.
+    TooManyCiphers,
+    /// More than `MAX_EXTENSIONS` non-GREASE, non-SNI, non-ALPN extensions were
+    /// offered.
+    TooManyExtensions,
+}
+
+impl fmt::Display for Ja4Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Ja4Error::TooManyCiphers => {
+                write!(f, "more than MAX_CIPHERS non-GREASE cipher suites offered")
+            }
+            Ja4Error::TooManyExtensions => write!(
+                f,
+                "more than MAX_EXTENSIONS non-GREASE, non-SNI, non-ALPN extensions offered"
+            ),
+        }
+    }
+}
+
 /// Computes the canonical `FoxIO` `JA4` client fingerprint as the fixed 36-byte
 /// ASCII string `t{ver}{sni}{cc:02}{ec:02}{alpn}_{chash}_{ehash}` per the
 /// `alumina-xfbq8` amendment (docs/alumina-proxy.md:879-895). Pure and
@@ -872,14 +909,20 @@ fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> Result<usize, Ch
 /// ALPN value; `sigalgs` the retained `signature_algorithms` values in wire
 /// order. SNI presence (`d`/`i`) is derived from `extensions` containing
 /// extension `0x0000`.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns [`Ja4Error::TooManyCiphers`] when `ciphers` holds more than
+/// `MAX_CIPHERS` non-GREASE suites and [`Ja4Error::TooManyExtensions`] when
+/// `extensions` holds more than `MAX_EXTENSIONS` non-GREASE, non-SNI, non-ALPN
+/// types, rather than indexing out of bounds.
 pub fn ja4_fingerprint(
     version: u16,
     ciphers: &[u16],
     extensions: &[u16],
     alpn: &[u8],
     sigalgs: &[u16],
-) -> [u8; 36] {
+) -> Result<[u8; 36], Ja4Error> {
     let ver = version_token(version);
     let sni = if extensions.contains(&SERVER_NAME) {
         b'd'
@@ -889,8 +932,8 @@ pub fn ja4_fingerprint(
     let cc = count_token(non_grease_count(ciphers));
     let ec = count_token(non_grease_count(extensions));
     let alpn = alpn_token(alpn);
-    let chash = cipher_hash12(ciphers);
-    let ehash = ehash12(extensions, sigalgs);
+    let chash = cipher_hash12(ciphers)?;
+    let ehash = ehash12(extensions, sigalgs)?;
 
     let mut out = [0u8; 36];
     out[0] = b't';
@@ -903,7 +946,7 @@ pub fn ja4_fingerprint(
     out[11..23].copy_from_slice(&chash);
     out[23] = b'_';
     out[24..36].copy_from_slice(&ehash);
-    out
+    Ok(out)
 }
 
 const fn version_token(version: u16) -> [u8; 2] {
@@ -980,17 +1023,20 @@ fn hash12_finish(ctx: ring::digest::Context) -> [u8; 12] {
     out
 }
 
-fn cipher_hash12(ciphers: &[u16]) -> [u8; 12] {
+fn cipher_hash12(ciphers: &[u16]) -> Result<[u8; 12], Ja4Error> {
     let mut sorted = [const { MaybeUninit::uninit() }; MAX_CIPHERS];
     let mut n = 0usize;
     for &c in ciphers {
         if !is_grease(c) {
+            if n == MAX_CIPHERS {
+                return Err(Ja4Error::TooManyCiphers);
+            }
             sorted[n].write(c);
             n += 1;
         }
     }
     if n == 0 {
-        return [b'0'; 12];
+        return Ok([b'0'; 12]);
     }
     let sorted = crate::alloc::u16_slice_from_raw_parts_mut(&mut sorted, n);
     sorted.sort_unstable();
@@ -1003,20 +1049,23 @@ fn cipher_hash12(ciphers: &[u16]) -> [u8; 12] {
         first = false;
         feed_u16_hex(&mut ctx, c);
     }
-    hash12_finish(ctx)
+    Ok(hash12_finish(ctx))
 }
 
-fn ehash12(extensions: &[u16], sigalgs: &[u16]) -> [u8; 12] {
+fn ehash12(extensions: &[u16], sigalgs: &[u16]) -> Result<[u8; 12], Ja4Error> {
     let mut sorted = [0u16; MAX_EXTENSIONS];
     let mut n = 0usize;
     for &e in extensions {
         if !is_grease(e) && e != SERVER_NAME && e != ALPN {
+            if n == MAX_EXTENSIONS {
+                return Err(Ja4Error::TooManyExtensions);
+            }
             sorted[n] = e;
             n += 1;
         }
     }
     if n == 0 {
-        return [b'0'; 12];
+        return Ok([b'0'; 12]);
     }
     sorted[..n].sort_unstable();
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
@@ -1042,7 +1091,7 @@ fn ehash12(extensions: &[u16], sigalgs: &[u16]) -> [u8; 12] {
         first = false;
         feed_u16_hex(&mut ctx, s);
     }
-    hash12_finish(ctx)
+    Ok(hash12_finish(ctx))
 }
 
 /// Validates the parsed `ClientHello` against the TLS 1.3-only golden path and
@@ -1941,7 +1990,8 @@ mod tests {
             (0x0300, b"00"),
             (0x0400, b"00"),
         ] {
-            let out = ja4_fingerprint(version, &[], &[], &[], &[]);
+            let out = ja4_fingerprint(version, &[], &[], &[], &[])
+                .expect("empty JA4 input fits fixed capacities");
             assert_eq!(&out[1..3], token, "version token for {version:#06x}");
         }
     }
@@ -1992,7 +2042,8 @@ mod tests {
         let exts: Vec<u16> = std::iter::once(0x0000)
             .chain((0..7u16).map(|i| 0x1000 + i))
             .collect();
-        let out = ja4_fingerprint(0x0303, &ciphers, &exts, &[], &[]);
+        let out = ja4_fingerprint(0x0303, &ciphers, &exts, &[], &[])
+            .expect("test JA4 input fits fixed capacities");
         assert_eq!(
             out, *b"t12d190800_e5f6c4506bb0_04d33385c057",
             "empty sigalgs must omit the e-hash underscore (JA4.md: no sigalgs -> string ends without underscore)"
@@ -2034,7 +2085,8 @@ mod tests {
             0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0201, 0x0403, 0x0503, 0x0203, 0x0202, 0x0601,
             0x0603,
         ];
-        let out = ja4_fingerprint(0x0303, &ciphers, &exts, &[], &sigalgs);
+        let out = ja4_fingerprint(0x0303, &ciphers, &exts, &[], &sigalgs)
+            .expect("test JA4 input fits fixed capacities");
         assert_eq!(out, *b"t12d190800_d83cc789557e_7af1ed941c26");
     }
 
@@ -2055,14 +2107,88 @@ mod tests {
             0x0601, 0x0603, 0xefef, 0x0501, 0x0503, 0x0401, 0x0403, 0xeeee, 0xeded, 0x0301, 0x0303,
             0x0201, 0x0203,
         ];
-        let out = ja4_fingerprint(0x0303, &ciphers, &exts, b"h2", &sigalgs);
+        let out = ja4_fingerprint(0x0303, &ciphers, &exts, b"h2", &sigalgs)
+            .expect("test JA4 input fits fixed capacities");
         assert_eq!(out, *b"t12d4605h2_85626a9a5f7f_aaf95bb78ec9");
     }
 
     #[test]
     fn ja4_empty_lists_use_sentinel_hashes() {
-        let out = ja4_fingerprint(0x0304, &[], &[], &[], &[]);
+        let out = ja4_fingerprint(0x0304, &[], &[], &[], &[])
+            .expect("empty JA4 input fits fixed capacities");
         assert_eq!(out, *b"t13i000000_000000000000_000000000000");
+    }
+
+    #[test]
+    fn ja4_hashed_extensions_at_max_capacity_ok() {
+        let extensions: Vec<u16> = (0..MAX_EXTENSIONS)
+            .map(|i| 0x1000 + u16::try_from(i).expect("extension index fits u16"))
+            .collect();
+        let out = ja4_fingerprint(0x0304, &[], &extensions, &[], &[])
+            .expect("64 hashed extensions fit the fixed capacity");
+        assert_eq!(out.len(), 36);
+    }
+
+    #[test]
+    fn ja4_hashed_extensions_over_max_capacity_err() {
+        let extensions: Vec<u16> = (0..=MAX_EXTENSIONS)
+            .map(|i| 0x1000 + u16::try_from(i).expect("extension index fits u16"))
+            .collect();
+        assert_eq!(
+            ja4_fingerprint(0x0304, &[], &extensions, &[], &[]),
+            Err(Ja4Error::TooManyExtensions)
+        );
+    }
+
+    #[test]
+    fn ja4_grease_sni_alpn_extensions_do_not_consume_capacity() {
+        let mut extensions: Vec<u16> = (0..MAX_EXTENSIONS)
+            .map(|i| 0x1000 + u16::try_from(i).expect("extension index fits u16"))
+            .collect();
+        extensions.push(SERVER_NAME);
+        extensions.push(ALPN);
+        extensions.extend([0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a]);
+        let out = ja4_fingerprint(0x0304, &[], &extensions, &[], &[])
+            .expect("GREASE/SNI/ALPN extensions are filtered before the capacity check");
+        assert_eq!(out.len(), 36);
+    }
+
+    #[test]
+    fn ja4_hashed_ciphers_at_max_capacity_ok() {
+        let ciphers: Vec<u16> = (0..MAX_CIPHERS + 2)
+            .map(|i| 0x0100 + u16::try_from(i).expect("cipher index fits u16"))
+            .filter(|&c| !is_grease(c))
+            .take(MAX_CIPHERS)
+            .collect();
+        let out = ja4_fingerprint(0x0304, &ciphers, &[], &[], &[])
+            .expect("8192 hashed ciphers fit the fixed capacity");
+        assert_eq!(out.len(), 36);
+    }
+
+    #[test]
+    fn ja4_hashed_ciphers_over_max_capacity_err() {
+        let ciphers: Vec<u16> = (0..MAX_CIPHERS + 3)
+            .map(|i| 0x0100 + u16::try_from(i).expect("cipher index fits u16"))
+            .filter(|&c| !is_grease(c))
+            .take(MAX_CIPHERS + 1)
+            .collect();
+        assert_eq!(
+            ja4_fingerprint(0x0304, &ciphers, &[], &[], &[]),
+            Err(Ja4Error::TooManyCiphers)
+        );
+    }
+
+    #[test]
+    fn ja4_grease_ciphers_do_not_consume_capacity() {
+        let mut ciphers: Vec<u16> = (0..MAX_CIPHERS + 2)
+            .map(|i| 0x0100 + u16::try_from(i).expect("cipher index fits u16"))
+            .filter(|&c| !is_grease(c))
+            .take(MAX_CIPHERS)
+            .collect();
+        ciphers.extend([0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a]);
+        let out = ja4_fingerprint(0x0304, &ciphers, &[], &[], &[])
+            .expect("GREASE ciphers are filtered before the capacity check");
+        assert_eq!(out.len(), 36);
     }
 
     #[test]
@@ -2175,7 +2301,8 @@ mod tests {
         ];
 
         let (out, counts) = alloc::run_phase(Phase::Serving, || {
-            let pure = ja4_fingerprint(0x0304, &ciphers, &full_exts, b"h2", &sigalgs);
+            let pure = ja4_fingerprint(0x0304, &ciphers, &full_exts, b"h2", &sigalgs)
+                .expect("test JA4 input fits fixed capacities");
             let method = ch.ja4();
             (pure, method)
         });

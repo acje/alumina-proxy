@@ -218,7 +218,8 @@ fn bench_ja4(hello: &[u8], iterations: u64) -> (u128, [u8; 36], [u8; 36]) {
     let extensions = ch.extensions();
     let alpn = ch.alpn_first_value();
     let sigalgs = ch.sigalgs();
-    let fingerprint = ja4_fingerprint(version, ciphers, extensions, alpn, sigalgs);
+    let fingerprint = ja4_fingerprint(version, ciphers, extensions, alpn, sigalgs)
+        .expect("parser-bounded JA4 input fits fixed capacities");
 
     let mut acc = [0u8; 36];
     let start = Instant::now();
@@ -229,7 +230,8 @@ fn bench_ja4(hello: &[u8], iterations: u64) -> (u128, [u8; 36], [u8; 36]) {
             black_box(extensions),
             black_box(alpn),
             black_box(sigalgs),
-        );
+        )
+        .expect("parser-bounded JA4 input fits fixed capacities");
         for (slot, byte) in acc.iter_mut().zip(fp) {
             *slot = slot.wrapping_add(byte);
         }
