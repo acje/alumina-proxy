@@ -24,8 +24,12 @@ compromise and **protect against further exploitation** purely through egress �
 the limit of its visibility and responsibility.
 
 From that task follows the core promise: **no silent acceptance of adversarial
-behavior**. Every deviation from the configured golden path is detected and
-acted on; there is no tolerated rate of bad behavior. The tripwires are
+behavior**. In the idiomatic deployment the only client is the trusted-at-rest
+application on a fixed golden path, so a correctly-configured, healthy workload
+produces zero deviations. A tripwire firing is therefore a **high-value
+signal**: it is highly unexpected and almost certainly caused by either
+operator misconfiguration or adversarial activity. Every deviation is detected
+and acted on; there is no tolerated rate of bad behavior. The tripwires are
 trigger-happy by design — they react on the first sign of deviation — and
 highly accurate. The action taken (flare, block, or tarpit) is the operator's
 configuration choice; the proxy does not always panic by blocking all egress.

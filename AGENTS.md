@@ -16,8 +16,11 @@ Every change must preserve:
 
 - **No silent acceptance.** Every deviation from the configured golden path is
   detected and acted on (flare / block / tarpit); there is no tolerated rate of
-  bad behavior. Tripwires are trigger-happy: react on the first sign of
-  deviation.
+  bad behavior. In the idiomatic deployment the only client is the
+  trusted-at-rest app on a fixed golden path, so a tripwire firing is a
+  high-value signal — highly unexpected, almost certainly operator
+  misconfiguration or adversarial activity. Tripwires are trigger-happy: react
+  on the first sign of deviation.
 - **Operator chooses the action; the proxy owns the semantics.** The action for
   a context is operator configuration; security semantics are fixed constants
   (the allowlist is the operator's, enforcement is the proxy's).

@@ -36,12 +36,15 @@ an application is compromised, the proxy's job is to **identify** the
 compromise and **protect against further exploitation** purely through egress —
 the limit of its visibility and responsibility.
 
-The core promise: **no silent acceptance of adversarial behavior**. Every
-deviation from the configured golden path is detected and acted on; there is no
-tolerated rate of bad behavior. Tripwires are trigger-happy by design — they
-react on the first sign of deviation — and highly accurate. The action taken
-(flare, block, or tarpit) is your configuration choice; Alumina does not always
-panic by blocking all egress.
+The core promise: **no silent acceptance of adversarial behavior**. In the
+idiomatic deployment the only client is your trusted-at-rest application on a
+fixed golden path, so a healthy workload produces zero deviations. A tripwire
+firing is therefore a **high-value signal**: highly unexpected, and almost
+certainly operator misconfiguration or adversarial activity. Every deviation is
+detected and acted on; there is no tolerated rate of bad behavior. Tripwires
+are trigger-happy by design — they react on the first sign of deviation — and
+highly accurate. The action taken (flare, block, or tarpit) is your
+configuration choice; Alumina does not always panic by blocking all egress.
 
 > "There will be no silent acceptance of adversarial behavior without action
 > taken. The action may be flare, block, or tarpitting. We will not always
