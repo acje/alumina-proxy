@@ -173,7 +173,7 @@ impl ServeStorage {
         let dns = StartupDns::new()?;
         let origin = Instant::now();
         let worker = Worker::boot(WorkerClock::new(origin, 0));
-        let enforcement = Enforcement::new(*config.control());
+        let enforcement = Enforcement::new(*config.control(), config.all_scope_gate());
         Ok(ServeStorage {
             cache,
             schedules,

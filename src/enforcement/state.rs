@@ -4,30 +4,71 @@ use super::action::{ControlTable, DomainOrdinal, FirstSlot, Scope};
 use super::monitor::{DnsAnomalyKind, Monitor, SlotCapture};
 use super::policy::{Effect, UnknownReason, Violation, decide as pure_decide};
 
-/// The fixed number of `AnyIllegal` facts that must cross within the fixed
-/// window before the All-scope latch may arm (SP-001; fixed constants, no
-/// speculative pacing).
-pub const ANY_ILLEGAL_THRESHOLD: u32 = 3;
+/// The default All-scope gate threshold: at the default the FIRST deviation
+/// arms the All-scope block, sticky until restart. Operator-configurable via
+/// `[all_scope_gate]`.
+pub const ALL_SCOPE_GATE_DEFAULT_THRESHOLD: u32 = 1;
 
-/// The fixed whole-second window within which the threshold facts must arrive
-/// (SP-001).
-pub const ANY_ILLEGAL_WINDOW_SECS: u64 = 60;
+/// The default All-scope gate window: the whole-second window within which the
+/// threshold facts must arrive. Operator-configurable via `[all_scope_gate]`.
+pub const ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS: u64 = 900;
 
-/// A bounded fact counter that arms once the fixed threshold is crossed within
-/// the fixed window. The armed state is sticky until restart (rp2e :263).
+/// Operator-configurable SP-001 All-scope gate parameters: the threshold of
+/// `AnyIllegal` facts that must cross within `window_secs` before the
+/// All-scope latch may arm. The defaults are trigger-happy — at threshold 1
+/// the FIRST deviation arms the All-scope block, sticky until restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllScopeGate {
+    threshold: u32,
+    window_secs: u64,
+}
+
+impl AllScopeGate {
+    pub const fn new(threshold: u32, window_secs: u64) -> AllScopeGate {
+        AllScopeGate {
+            threshold,
+            window_secs,
+        }
+    }
+
+    pub const fn threshold(self) -> u32 {
+        self.threshold
+    }
+
+    pub const fn window_secs(self) -> u64 {
+        self.window_secs
+    }
+}
+
+impl Default for AllScopeGate {
+    fn default() -> Self {
+        Self::new(
+            ALL_SCOPE_GATE_DEFAULT_THRESHOLD,
+            ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS,
+        )
+    }
+}
+
+/// A bounded fact counter that arms once the configured threshold is crossed
+/// within the configured window. The armed state is sticky until restart
+/// (rp2e :263).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowedCounter {
     count: u32,
     window_start: u64,
     armed: bool,
+    threshold: u32,
+    window_secs: u64,
 }
 
 impl WindowedCounter {
-    pub const fn new() -> WindowedCounter {
+    pub const fn new(threshold: u32, window_secs: u64) -> WindowedCounter {
         WindowedCounter {
             count: 0,
             window_start: 0,
             armed: false,
+            threshold,
+            window_secs,
         }
     }
 
@@ -37,12 +78,12 @@ impl WindowedCounter {
         if self.armed {
             return true;
         }
-        if secs.saturating_sub(self.window_start) >= ANY_ILLEGAL_WINDOW_SECS {
+        if secs.saturating_sub(self.window_start) >= self.window_secs {
             self.count = 0;
             self.window_start = secs;
         }
         self.count += 1;
-        if self.count >= ANY_ILLEGAL_THRESHOLD {
+        if self.count >= self.threshold {
             self.armed = true;
         }
         self.armed
@@ -51,7 +92,10 @@ impl WindowedCounter {
 
 impl Default for WindowedCounter {
     fn default() -> Self {
-        Self::new()
+        Self::new(
+            ALL_SCOPE_GATE_DEFAULT_THRESHOLD,
+            ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS,
+        )
     }
 }
 
@@ -107,13 +151,13 @@ pub struct Enforcement {
 }
 
 impl Enforcement {
-    pub fn new(control: ControlTable) -> Enforcement {
+    pub fn new(control: ControlTable, gate: AllScopeGate) -> Enforcement {
         Enforcement {
             control,
             block_all: false,
             blocked: 0,
             monitor: Monitor::new(),
-            any_illegal_gate: WindowedCounter::new(),
+            any_illegal_gate: WindowedCounter::new(gate.threshold(), gate.window_secs()),
         }
     }
 
@@ -339,6 +383,14 @@ mod tests {
         ControlTable::new(any, &per_fqdn(early), &per_fqdn(ja4)).expect("in-bound test table")
     }
 
+    fn en(t: ControlTable) -> Enforcement {
+        Enforcement::new(t, AllScopeGate::default())
+    }
+
+    fn en_gated(t: ControlTable, threshold: u32, window: u64) -> Enforcement {
+        Enforcement::new(t, AllScopeGate::new(threshold, window))
+    }
+
     #[test]
     fn saturating_counter_reports_wrapped_value_and_overflow() {
         let mut c = SaturatingCounter::new();
@@ -359,7 +411,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         en.note_fact_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
         assert_eq!(
             en.counters()
@@ -380,7 +432,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         en.note_fact_downgrade_to_plain();
         assert_eq!(en.counters().facts_downgrade_to_plain(), 1);
         assert_eq!(
@@ -397,7 +449,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         en.note_fact_probe_relocation();
         en.note_fact_probe_relocation();
         assert_eq!(en.counters().facts_probe_relocations(), 2);
@@ -415,7 +467,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         en.note_fact_expired_pin_cert();
         assert_eq!(en.counters().facts_expired_pin_certs(), 1);
         assert_eq!(
@@ -432,7 +484,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en_gated(t, 3, 60);
         let first = en.decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
@@ -512,7 +564,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         let mut latch = FirstSlot::new();
         en.decide(
             &mut latch,
@@ -552,7 +604,7 @@ mod tests {
             &[(ActionKind::Block, Scope::Domain)],
             &[(ActionKind::Block, Scope::Domain)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         let ordinal = t.ordinal(0).expect("ordinal");
         let effect = en.decide(
             &mut FirstSlot::new(),
@@ -578,7 +630,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         let mut latch = FirstSlot::new();
         let ordinal = t.ordinal(0).expect("ordinal");
         assert_eq!(
@@ -598,7 +650,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en_gated(t, 3, 60);
         for i in 0..3u64 {
             en.decide(
                 &mut FirstSlot::new(),
@@ -628,7 +680,7 @@ mod tests {
             &[(ActionKind::Block, Scope::All); 2],
             &[(ActionKind::Block, Scope::All); 2],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en_gated(t, 3, 60);
         let ordinal = t.ordinal(0).expect("big table ordinal");
         for i in 0..3u64 {
             en.decide(
@@ -663,7 +715,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(small);
+        let mut en = en(small);
         let mut latch = FirstSlot::new();
         let big = table(
             any_controls(ActionKind::Block, Scope::Connection),
@@ -701,7 +753,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(small);
+        let mut en = en(small);
         let mut latch = FirstSlot::new();
         let big = table(
             any_controls(ActionKind::Block, Scope::All),
@@ -752,7 +804,7 @@ mod tests {
             &[(ActionKind::Block, Scope::All)],
             &[(ActionKind::Block, Scope::All)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         let mut latch = FirstSlot::new();
         let effect = en.decide(&mut latch, Violation::MissingParseResult, 0);
         assert_eq!(
@@ -787,7 +839,7 @@ mod tests {
 
     #[test]
     fn windowed_counter_arms_at_threshold_within_window_and_stays_armed() {
-        let mut c = WindowedCounter::new();
+        let mut c = WindowedCounter::new(3, 60);
         assert!(!c.note(0), "below the fixed threshold");
         assert!(!c.note(1), "below the fixed threshold");
         assert!(c.note(2), "the threshold is crossed within the window");
@@ -800,7 +852,7 @@ mod tests {
 
     #[test]
     fn windowed_counter_rebases_when_the_window_expires() {
-        let mut c = WindowedCounter::new();
+        let mut c = WindowedCounter::new(3, 60);
         assert!(!c.note(0));
         assert!(!c.note(1));
         assert!(
@@ -815,13 +867,34 @@ mod tests {
     }
 
     #[test]
-    fn single_any_illegal_never_latches_all() {
+    fn windowed_counter_uses_configured_window() {
+        let mut c = WindowedCounter::new(2, 10);
+        assert!(!c.note(0), "below the configured threshold");
+        assert!(
+            c.note(5),
+            "the configured threshold is crossed within the configured window"
+        );
+        assert!(c.note(6), "once armed the counter stays armed");
+        let mut rebased = WindowedCounter::new(2, 10);
+        assert!(!rebased.note(0));
+        assert!(
+            !rebased.note(11),
+            "11 - 0 >= 10: the expired configured window rebases the count"
+        );
+        assert!(
+            rebased.note(12),
+            "two facts in the fresh window cross the configured threshold"
+        );
+    }
+
+    #[test]
+    fn single_any_illegal_below_threshold_never_latches_all() {
         let t = table(
             any_controls(ActionKind::Block, Scope::All),
             &[(ActionKind::Block, Scope::All)],
             &[(ActionKind::Block, Scope::All)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en_gated(t, 3, 60);
         let effect = en.decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
@@ -846,7 +919,7 @@ mod tests {
             &[(ActionKind::Block, Scope::All)],
             &[(ActionKind::Block, Scope::All)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en_gated(t, 3, 60);
         assert_eq!(
             en.decide(
                 &mut FirstSlot::new(),
@@ -882,13 +955,37 @@ mod tests {
     }
 
     #[test]
+    fn single_any_illegal_arms_all_scope_at_default_threshold() {
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Block, Scope::All)],
+        );
+        let mut en = en(t);
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::HostNotAllowlisted,
+            },
+            0,
+        );
+        assert_eq!(
+            effect,
+            Effect::Block { scope: Scope::All },
+            "SP-001 default: the FIRST deviation arms the All-scope block"
+        );
+        assert!(en.block_all());
+        assert_eq!(en.counters().actions_block_all(), 1);
+    }
+
+    #[test]
     fn per_control_any_illegal_notify_is_recorded_as_first_slot_action() {
         let t = table(
             any_controls(ActionKind::Notify, Scope::Connection),
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         let effect = en.decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
@@ -918,7 +1015,7 @@ mod tests {
             &[(ActionKind::Block, Scope::All)],
             &[(ActionKind::Block, Scope::All)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en_gated(t, 3, 60);
         let ordinal = t.ordinal(0).expect("ordinal");
         let effect = en.decide(
             &mut FirstSlot::new(),
@@ -962,7 +1059,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Block, Scope::Domain)],
         );
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         let ordinal = t.ordinal(0).expect("ordinal");
         let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, 0);
         assert_eq!(
@@ -990,7 +1087,7 @@ mod tests {
         )];
         let ja4 = vec![PerFqdnControl::Ignore];
         let t = ControlTable::new(any, &early, &ja4).expect("in-bound test table");
-        let mut en = Enforcement::new(t);
+        let mut en = en(t);
         let ordinal = t.ordinal(0).expect("ordinal");
         let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, 0);
         assert_eq!(

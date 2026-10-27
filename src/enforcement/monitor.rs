@@ -698,7 +698,7 @@ pub(crate) mod tests {
         ActionKind, AnyIllegalControl, Control, FirstSlot, PerFqdnControl, Scope,
     };
     use crate::enforcement::policy::{Effect, Violation};
-    use crate::enforcement::state::Enforcement;
+    use crate::enforcement::state::{AllScopeGate, Enforcement};
 
     fn any_controls(kind: ActionKind, scope: Scope) -> [Control; AnyIllegalControl::COUNT] {
         [Control::new(kind, scope); AnyIllegalControl::COUNT]
@@ -880,11 +880,14 @@ pub(crate) mod tests {
     #[test]
     fn split_facts_actions_and_refusals_through_enforcement() {
         let mut latch = FirstSlot::new();
-        let mut en = Enforcement::new(table(
-            any_controls(ActionKind::Block, Scope::Connection),
-            &[(ActionKind::Notify, Scope::Connection)],
-            &[(ActionKind::Notify, Scope::Connection)],
-        ));
+        let mut en = Enforcement::new(
+            table(
+                any_controls(ActionKind::Block, Scope::Connection),
+                &[(ActionKind::Notify, Scope::Connection)],
+                &[(ActionKind::Notify, Scope::Connection)],
+            ),
+            AllScopeGate::default(),
+        );
         let cause = AnyIllegalCause::HostNotAllowlisted;
         let v = en.decide(&mut latch, Violation::AnyIllegal { cause }, 0);
         assert_eq!(
@@ -910,11 +913,14 @@ pub(crate) mod tests {
     #[test]
     fn domain_block_action_and_later_refusal_are_distinct_channels() {
         let actions = [(ActionKind::Block, Scope::Domain)];
-        let mut en = Enforcement::new(table(
-            any_controls(ActionKind::Block, Scope::Connection),
-            &actions,
-            &actions,
-        ));
+        let mut en = Enforcement::new(
+            table(
+                any_controls(ActionKind::Block, Scope::Connection),
+                &actions,
+                &actions,
+            ),
+            AllScopeGate::default(),
+        );
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         let v = en.decide(
             &mut FirstSlot::new(),
