@@ -325,28 +325,76 @@ Method choices are grounded in primary sources captured by the evidence pass
 
 ---
 
-## 9. Results (placeholder — filled by boundary run, SM-4)
+## 9. Results (SM-4 boundary run, 2026-10-27)
 
-Results are recorded by the SM-4 boundary run, which rebuilds alumina from repo
-HEAD (sha-pinned fail-closed), runs the interleaved matrix below on the pinned
-bench image, and back-fills this section with receipt-cited numbers (plus the
-F1 `achieved_client_payload_mbps` + `workload_fulfilled` columns per run).
+Recorded from the SM-4 boundary run: alumina rebuilt from repo HEAD `656c41c`
+(sha-pinned fail-closed `9abca2dd…ee7cf`), interleaved A-E-H per profile on the
+pinned bench image `7c3937c1…b449c` (Envoy v1.40.2, HAProxy 3.4.7). Every
+receipt: `dirty_count=0`, `valid=True`, `source_head=656c41c`, `host_cpus=8`
+(measured, §2). All nine timed runs (SECONDS 60 / WARMUP 5) are cited below by
+receipt filename; the JSON receipts in `.ooda/benchmarks/` are the source of
+truth. Latency columns report the frame data path
+(`latency.actual_send_to_echo`, p50/p95/p99 in µs — the cross-subject comparable
+measure, §1).
 
 | Profile | Subject | achieved_client_payload_mbps | workload_fulfilled | latency p50 / p95 / p99 (µs) | CPU mean / peak | RSS mean / peak (KiB) | Receipt |
 |---|---|---|---|---|---|---|---|
-| 1gbps steady | alumina | (pending) | (pending) | (pending) | (pending) | (pending) | (pending) |
-| 1gbps steady | envoy | (pending) | (pending) | (pending) | (pending) | (pending) | (pending) |
-| 1gbps steady | haproxy | (pending) | (pending) | (pending) | (pending) | (pending) | (pending) |
-| storm150 | alumina | n/a (storm) | (pending) | (pending) | (pending) | (pending) | (pending) |
-| storm150 | envoy | n/a (storm) | (pending) | (pending) | (pending) | (pending) | (pending) |
-| storm150 | haproxy | n/a (storm) | (pending) | (pending) | (pending) | (pending) | (pending) |
-| storm50 | alumina | n/a (storm) | (pending) | (pending) | (pending) | (pending) | (pending) |
-| storm50 | envoy | n/a (storm) | (pending) | (pending) | (pending) | (pending) | (pending) |
-| storm50 | haproxy | (pending) | (pending) | (pending) | (pending) | (pending) | (pending) |
+| 1gbps steady | alumina | 830.0 | false | 53650 / 246450 / 361250 | 0.21 / 0.28 | 211188 / 211188 | `656c41c-bench-alumina-1gbps-timed-20261027T234221Z` |
+| 1gbps steady | envoy | 826.3 | false | 44050 / 288550 / 430250 | 0.23 / 0.32 | 66280 / 66296 | `656c41c-bench-envoy-1gbps-timed-20261027T234344Z` |
+| 1gbps steady | haproxy | 825.7 | false | 48350 / 266450 / 433750 | 0.19 / 0.24 | 24972 / 24972 | `656c41c-bench-haproxy-1gbps-timed-20261027T234453Z` |
+| storm150 | alumina | n/a (storm) | true | 40850 / 42150 / 42550 | 0.04 / 0.08 | 210891 / 210892 | `656c41c-bench-alumina-storm150-timed-20261027T234604Z` |
+| storm150 | envoy | n/a (storm) | true | 550 / 42050 / 42550 | 0.06 / 0.12 | 65315 / 65372 | `656c41c-bench-envoy-storm150-timed-20261027T234712Z` |
+| storm150 | haproxy | n/a (storm) | true | 40650 / 42050 / 42350 | 0.04 / 0.08 | 25326 / 25508 | `656c41c-bench-haproxy-storm150-timed-20261027T234820Z` |
+| storm50 | alumina | n/a (storm) | true | 40950 / 42650 / 44050 | 0.02 / 0.08 | 210834 / 210836 | `656c41c-bench-alumina-storm50-timed-20261027T234929Z` |
+| storm50 | envoy | n/a (storm) | true | 1050 / 42550 / 44050 | 0.04 / 0.08 | 64864 / 64892 | `656c41c-bench-envoy-storm50-timed-20261027T235037Z` |
+| storm50 | haproxy | n/a (storm) | true | 40750 / 42450 / 44150 | 0.03 / 0.20 | 25142 / 25344 | `656c41c-bench-haproxy-storm50-timed-20261027T235146Z` |
 
-Storm `setup_latency` will be reported per subject **with the F8 caveat** (not
-cross-subject comparable); storm data-path latency uses `actual_send_to_echo`.
-Placeholders deliberately assert no measurement.
+Storm per-subject establishment latency (µs, `latency.setup_latency`) — reported
+**with the F8 caveat (§1)**: the receipt semantics "CONNECT start → handshake
+complete" cover different path lengths per subject (relay+origin answer+TLS for
+Envoy/HAProxy vs CONNECT+TLS for alumina), so these are properties of each
+subject's own path, never an apples-to-apples comparison.
+
+| Profile | Subject | setup_latency p50 / p95 / p99 (µs) |
+|---|---|---|
+| storm150 | alumina | 1950 / 2450 / 2650 |
+| storm150 | envoy | 2050 / 2450 / 2750 |
+| storm150 | haproxy | 1950 / 2450 / 2650 |
+| storm50 | alumina | 2950 / 4750 / 5150 |
+| storm50 | envoy | 3150 / 5250 / 5750 |
+| storm50 | haproxy | 3050 / 4950 / 5450 |
+
+### Honest readings (SM-4)
+
+- **1gbps: all three subjects landed 826–830 Mbps against the 1000 Mbps open-loop
+  target and are `workload_fulfilled=false`.** The flag (steady) means the target
+  rate was not fully absorbed in-window: a small frame tail spilled into the 5 s
+  drain (alumina 2024 / envoy 2047 / haproxy 2042 of ~1.51–1.52 M in-window sent
+  frames, ≈0.13% each). The cross-subject achieved spread is <0.6% (830.0 vs 826.3
+  vs 825.7 Mbps), so the 1000 Mbps ceiling is a shared open-loop-generator /
+  outstanding-cap effect on this harness (F1 generator ceiling, §5), not a
+  per-proxy throughput differentiator. No proxy is certified to hit 1000 Mbps
+  here; the honest recording is the achieved rate + the fulfilled flag.
+- **Storms: `workload_fulfilled=true` for all six runs** — every planned session
+  established exactly (storm150 9000/9000, storm50 3000/3000), 0 session /
+  protocol / send-failed errors, and frames echoed 1:1 (`storm.frames_echoed ==
+  frames_sent`). Data-path p50 for alumina and haproxy ≈ 40.7–40.9 ms; envoy ≈
+  0.55–1.05 ms, yet **p95/p99 tails are uniform across all six runs (~42.0 / ~42.5
+  ms)**. The uniform tail is a harness-scheduler quanta shared by all subjects;
+  the envoy low-p50 is recorded verbatim from its receipt and is not cross-
+  compared as a proxy claim without that tail context.
+- **Identity/fidelity**: every receipt records `dirty_count=0` (tracked tree
+  clean; untracked alox docs excluded), `image_id=7c3937c1…b449c`,
+  `executed_binary_sha256` = `9abca2dd…` (alumina) / pinned image binary (envoy
+  `b9d6d1e0…`, haproxy `d2e03232…`), `host_cpus=8`, `host_mem_gib=14` (§2).
+- **RSS note**: alumina ≈ 206 MiB current-RSS matches its fixed named-buffer pool
+  (128 MiB traffic + 68 MiB serving workspace + DNS buffers), consistent across
+  profiles; envoy ≈ 63–65 MiB, haproxy ≈ 24–25 MiB. Per-subject CPU mean/peak
+  reflects the disclosed worker asymmetry (Envoy `--concurrency 2` / HAProxy
+  `nbthread 2` vs alumina single serving owner, §1).
+- **No BLOCKED cells**: all nine timed runs completed `valid=True` under the
+  pinned image with `BENCH-OK` supervision; no proxy failed or produced an invalid
+  session after documented attempts.
 
 ---
 
