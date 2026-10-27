@@ -2,8 +2,10 @@
 """bench_workload.py -- open-loop CONNECT workload driver for the e2-micro suite.
 
 Open-loop paced framer + real TLS1.3 byte-exact echo validator and endpoint for
-the fresh e2-micro benchmark suite (bench-suite-20261027, replacing the deleted
-seam_echo.py). One stdlib selectors readiness loop owns every client TLS
+the fresh e2-micro benchmark suite (bench-suite-20261027; the legacy
+seam_echo.py suite it replaces is deleted -- see
+docs/benchmarks/e2micro-suite.md). One stdlib selectors readiness loop owns
+every client TLS
 partial operation (WANT read/write), schedule advancement, admission and
 measurement state. No async, no third-party deps. The echo backend is a
 separate peer role (thread-per-connection, admission-capped) so the client,
@@ -1502,7 +1504,7 @@ def _e2micro_model_note():
             "cgroup CPU/memory cap is applied because the shared harness "
             "container also runs the client, backend and DNS responder -- "
             "capping it would starve the measurement generator and be mis-read "
-            "as proxy deficit. Harness host: 4 CPU / 14 GiB loopback VM. "
+            "as proxy deficit. Harness host: 8 CPU / 14 GiB loopback VM. "
             "e2-micro target: 2 shared vCPU / 1 GB. Proxy worker concurrency "
             "is matched to the 2-vCPU target (envoy --concurrency 2, haproxy "
             "nbthread 2); alumina's worker model is a fixed single serving "
@@ -1514,7 +1516,7 @@ def e2micro_model_block():
         "model": "workload-parameter model (rate + connection churn); no "
                  "container cgroup CPU/mem cap applied",
         "note": _e2micro_model_note(),
-        "host_cpus": 4,
+        "host_cpus": 8,
         "host_mem_gib": 14,
         "modeled_vcpu": "2 shared",
         "modeled_mem_gib": 1,
@@ -3073,7 +3075,7 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     # CONNECT/admit/DNS/teardown inside the harness container) are excluded from
     # this unit selftest because they require the podman flock-vm-root harness,
     # the pinned image and a retained/proxied alumina binary; they are exercised
-    # by scripts/seam_echo.sh head smoke <profile> (kind=smoke) and validated by
+    # by scripts/bench_run.sh <proxy> smoke <profile> (kind=smoke) and validated by
     # their JSON receipts. The logic below unit-covers the arg surface, the
     # outstanding-cap override, storm scheduling and the report schema instead.
     ns = argparse.Namespace(
@@ -3286,9 +3288,8 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
                   "resp-len=%r" % (len(tcp_pt) if tcp_pt is not None else None))
         finally:
             try:
-                dns.udp.close()
-                dns.tcp.close()
-                dns.sel.close()
+                dns.sock.close()
+                dns.udpsock.close()
             except Exception:  # noqa: BLE001
                 pass
             dns_thread.join(timeout=2.0)

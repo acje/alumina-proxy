@@ -7,7 +7,7 @@
 # scripts/bench/run.sh (mounted read-only at /app/scripts/bench/run.sh).
 # Writes a JSON receipt to .ooda/benchmarks/.
 #
-# Topology (mirrors the deleted seam_echo.sh harness topology; fresh suite):
+# Topology (fresh e2-micro suite; see docs/benchmarks/e2micro-suite.md §3):
 # native Linux via rootful podman flock-vm-root, --network none, loopback
 # global-unicast alias, DNS responder (UDP+TCP) on 127.0.0.1:53, TLS1.3
 # byte-exact framed echo backend on 8.8.8.8:443, client ->
@@ -77,7 +77,7 @@ id=$(podman --connection "$CONN" image inspect "$IMAGE" --format '{{.Id}}' 2>/de
 }
 
 BENCH_SOURCE_HEAD="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-BENCH_DIRTY_COUNT="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+BENCH_DIRTY_COUNT="$(git status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')"
 BENCH_RUST_TARGET="aarch64-unknown-linux-musl"
 BENCH_BINARY_SHA256=""
 

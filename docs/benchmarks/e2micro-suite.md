@@ -97,7 +97,7 @@ container cgroup CPU/mem cap applied"`.
 
 ### Host-vs-target disclosure
 
-- Host: arm64 Apple VM, 4 CPU / 14 GiB memory, Linux via rootful podman
+- Host: arm64 Apple VM, 8 CPU / 14 GiB memory, Linux via rootful podman
   (`flock-vm-root`), `--network none`, everything on a loopback global-unicast
   alias (`8.8.8.8/32`). All client, backend, DNS responder, and proxy processes
   run inside the single pinned bench container, so CPU sampling is uniform over
