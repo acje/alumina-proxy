@@ -4,8 +4,10 @@
 > (steady 1 Gbit/s + connection-churn storms at 150/s and 50/s), the baseline
 > measured at HEAD `dc54638` (harness commits `117a224`/`b1de21c`/`dc54638`,
 > proxy release binary `b441a5ae…`), the R1 optimized result (commit `b3b1ebc`),
-> a tried-and-reverted negative result (G8 read-pacing group), and the WS-A
-> R2–R4 follow-up (tried/blocked, none retained; R5/R6 not executed). e2-micro
+> a tried-and-reverted negative result (G8 read-pacing group), the WS-A
+> R2–R4 follow-up (tried/blocked, none retained; R5/R6 not executed), and the
+> unsafe-cleanup A/B on the legacy 100 Mbps contract (before `867dd43` vs after
+> `435eb66`, Option A cipher storage). e2-micro
 > equivalence is modeled by **workload parameters only** — never by capping the
 > shared harness container's CPU/memory, because the client, backend and DNS
 > responder run inside the same container and a cap would confound client
@@ -239,6 +241,93 @@ Only R1 (`b3b1ebc`, ~2% CPU) was kept; every follow-on parser/micro-opt
 candidate (R2/R3/R4) was neutral-or-worse and is being closed out (D1). WS-A
 halts at this proxy-headroom conclusion rather than a new optimization.
 
+## Unsafe-cleanup A/B — legacy 100 Mbps contract (Option A)
+
+The unsafe-cleanup roadmap (`docs/alox-unsafe-plan.md`) removed the `unsafe`
+surface from two files down to one (`src/alloc.rs`, kept by design). The perf
+guard for the Option A cipher-storage change (inc2, `03f70c1`) specifies a
+Linux `perf stat -e cycles` A/B arbiter, but the shared `flock-vm` exposes
+**no hardware counters** (emulated CPU, empty `perf list hw`; `cycles` and
+`instructions` are unsupported even with `--privileged`), so the cycles gate is
+unmeasurable in this environment. The recorded proxy is this same-session
+interleaved A/B on the **legacy fixed 100 Mbps contract** — 8 conns, 4096 B
+frame + 12 B header counted separately, open-loop 100 decimal Mbps client
+payload, 5 s warmup / 60 s measure, setup/drain 5 s each (`seam_echo.sh head
+timed`, empty workload selector).
+
+Binaries are pinned by sha256 and verified by the harness's fail-closed sha
+gate before measurement:
+
+| Side | Source commit | Binary sha256 |
+| --- | --- | --- |
+| A (before) | `867dd43` (parent of Option A, inc2) | `40c7209207c2…` |
+| B (after) | `435eb66` (current HEAD, all five increments) | `b80c39e6fb60…` |
+
+Interleaved order A1, B1, A2, B2, A3, B3, A4, B4 (n = 4 per side). Every
+session is `valid=True / verdict=valid` with byte-exact echo
+(`echoed == sent == admitted`) and 0 protocol / missing-byte / send-failed /
+timeout / connection errors. Receipts are stamped with the harness's
+current-HEAD `435eb66` regardless of measured binary; binary identity is
+carried in `executed_binary_sha256`:
+
+| Session | Binary | Achieved Mbps | Echo p50 / p95 / p99 / max (µs) | Proxy CPU mean / peak | Receipt |
+| --- | --- | --- | --- | --- | --- |
+| A1 | `40c72092…` | 99.8048 | 2850 / 3650 / 3950 / 58299 | 0.0620 / 0.1200 | `435eb66-…-140820Z.json` |
+| B1 | `b80c39e6…` | 99.9457 | 2850 / 3750 / 4150 / 15076 | 0.0690 / 0.1600 | `435eb66-…-140934Z.json` |
+| A2 | `40c72092…` | 99.9987 | 2750 / 3050 / 3250 / 4105 | 0.0365 / 0.0800 | `435eb66-…-141043Z.json` |
+| B2 | `b80c39e6…` | 99.8457 | 2850 / 3950 / 4450 / 23808 | 0.1322 / 0.1998 | `435eb66-…-141152Z.json` |
+| A3 | `40c72092…` | 99.9020 | 2850 / 3950 / 4450 / 21724 | 0.1348 / 0.2000 | `435eb66-…-141348Z.json` |
+| B3 | `b80c39e6…` | 99.8976 | 2850 / 3950 / 4550 / 17321 | 0.1316 / 0.1999 | `435eb66-…-141459Z.json` |
+| A4 | `40c72092…` | 99.8064 | 2850 / 3950 / 4550 / 30815 | 0.1328 / 0.2000 | `435eb66-…-141607Z.json` |
+| B4 | `b80c39e6…` | 99.9522 | 2850 / 3950 / 4450 / 14047 | 0.1342 / 0.2000 | `435eb66-…-141716Z.json` |
+
+Result (medians, n = 4):
+
+- **Throughput flat** — achieved median 99.8542 (A) vs 99.9216 (B) Mbps; every
+  session 99.80–100.00 Mbps. No regression at the 100 Mbps contract.
+- **Latency flat** — echo p50 2850 µs on both sides; p99 4200 (A) vs 4450 (B)
+  µs, inside the 3250–4550 µs interleaved band.
+- **CPU mean is host-contention noise, not a change signal** — median 0.0974
+  (A) vs 0.1319 (B) cores, but the before-side lows sit only in the first two
+  sessions (A1 0.0620, A2 0.0365) before the shared host busied up; from B2
+  onward every session is ~0.13 cores. The co-located pairs are flat (A3 0.1348
+  vs B3 0.1316; A4 0.1328 vs B4 0.1342). Absolute magnitude is ≤ 0.13 cores on
+  a 4-core host — the same proxy-headroom regime as the R1 / WS-A sections.
+- **RSS flat** — 210 556 KB in every session, both trees (no A/B delta; ~1.2
+  MiB above the `dc54638` baseline's 209 316–209 324 KB, present in both trees
+  and not attributable to the A/B).
+
+Honest notes:
+
+- `workload_fulfilled=False` in every session because the open-loop client
+  briefly hit the 4 MiB outstanding cap (`backpressure_unsent` 0–357,
+  `offered_unsent` 0–3 in the measure phase). This is client-side open-loop
+  backpressure, not a proxy deficit — echo integrity is byte-exact and no
+  failure counter is non-zero.
+- This A/B is the recorded proxy for the unmeasurable Linux `cycles` gate; it
+  does not resolve the memset-cost question (the plan's macOS fallback is
+  "smoke only, never a gate"). The noise-free falsifier — memsets survive at
+  opt3 as `_bzero` and the JA4 fingerprint is byte-identical before/after — is
+  satisfied independently of this benchmark.
+
+## Feature comparison — before/after unsafe-cleanup
+
+| Feature / result | Before (`867dd43`) | After (`435eb66`) |
+| --- | --- | --- |
+| `unsafe` surface | 2 files: `src/alloc.rs` (9), `src/log.rs` (3) | 1 file: `src/alloc.rs` (7, S2 kept by design) |
+| Cipher storage (Option A, inc2) | `MaybeUninit<u16>` + raw-parts helpers | initialized `[u16; MAX_CIPHERS]` + length; helpers deleted |
+| Log sink (Option D, inc4) | libc `writev` FFI, raw fd, `set_fd_nonblocking` | std-only `SinkIo::write_vectored`, owned `UnixStream` |
+| DoT reuse identity (S7, inc5) | `&*conn.tls as *const _ as usize` | typed `std::ptr::addr_eq` |
+| `libc` dependency | runtime `[dependencies]` | `[dev-dependencies]` only |
+| **100 Mbps achieved (new result)** | **99.8542 Mbps median** | **99.9216 Mbps median** |
+| **100 Mbps echo p50 (new result)** | **2850 µs** | **2850 µs** |
+| **100 Mbps proxy CPU mean (new result)** | **0.0974 cores (host-noise band)** | **0.1319 cores (host-noise band)** |
+| RSS | 210 556 KB | 210 556 KB |
+
+The pre-roadmap state (parent `598cbf5`) had `unsafe` in four files; inc1 (F5,
+`867dd43`) had already removed `src/client_hello.rs`, so the A/B before side
+starts at two files.
+
 ## Workload & measurement parameters
 
 | Parameter | e2micro1gbps | e2microrstorm150 | e2microrstorm50 |
@@ -260,12 +349,12 @@ Shared harness/host: pinned `localhost/alumina-e2e:e2e-20261011`
 over TCP responder with CONNECT allowlist + `[any_illegal] flare_only` memo
 (cfg `b00d4c32…`).
 
-| Attribute | Baseline | R1 candidate | G8 candidate (reverted) |
-| --- | --- | --- | --- |
-| Binary | `b441a5ae8947…` (deterministic release build) | `fa47cfbc37e6…` (clean rebuild of `b3b1ebc`) | `fbf47e4c74b5…` (uncommitted G8 diff on `b3b1ebc`) |
-| Measured receipts | `dc54638-…-timed-20261018T144707Z` (storm150), `…T144247Z` (storm50 smoke), `…T144820Z` (1gbps) | storm150 `…T150536Z` / `…T150755Z`, 1gbps `…T150905Z` | six `b3b1ebc-…-e2micro1gbps-timed-20261018T152…Z` receipts |
-| Landing commit | — | `b3b1ebc` (perf, linus adversarial APPROVE `alumina-psbj`) | none (reverted, tree restored) |
-| RSS (all) | 209 316–209 324 KB ≈ 204 MiB | same | same |
+| Attribute | Baseline | R1 candidate | G8 candidate (reverted) | Unsafe A (before) | Unsafe B (after) |
+| --- | --- | --- | --- | --- | --- |
+| Binary | `b441a5ae8947…` (deterministic release build) | `fa47cfbc37e6…` (clean rebuild of `b3b1ebc`) | `fbf47e4c74b5…` (uncommitted G8 diff on `b3b1ebc`) | `40c7209207c2…` (rebuild of `867dd43`) | `b80c39e6fb60…` (rebuild of `435eb66`) |
+| Measured receipts | `dc54638-…-timed-20261018T144707Z` (storm150), `…T144247Z` (storm50 smoke), `…T144820Z` (1gbps) | storm150 `…T150536Z` / `…T150755Z`, 1gbps `…T150905Z` | six `b3b1ebc-…-e2micro1gbps-timed-20261018T152…Z` receipts | four `435eb66-…-140820Z` / `…141043Z` / `…141348Z` / `…141607Z` (100 Mbps timed) | four `435eb66-…-140934Z` / `…141152Z` / `…141459Z` / `…141716Z` (100 Mbps timed) |
+| Landing commit | — | `b3b1ebc` (perf, linus adversarial APPROVE `alumina-psbj`) | none (reverted, tree restored) | `867dd43` (before Option A) | `435eb66` (HEAD) |
+| RSS (all) | 209 316–209 324 KB ≈ 204 MiB | same | same | 210 556 KB | 210 556 KB |
 
 Receipt JSON files live under `.ooda/benchmarks/` (gitignored local evidence);
 the numbers above are extracted from the cited receipt fields, not from the
