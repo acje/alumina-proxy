@@ -45,8 +45,10 @@ impl AnyIllegalCause {
 
 /// The 0-based offset of a hello-reject reason within the `tls_profile`
 /// control's three discriminants. `EchPresent` is excluded by construction
-/// (`from_hello_reject` routes it to the `ech` control); the mapping is total
-/// so a stray direct construction still folds into a distinct slot.
+/// (`from_hello_reject` routes it to the `ech` control); the mapping is total,
+/// so a stray direct `TlsProfile(EchPresent)` would collide with the `ech`
+/// control's slot — unreachable, since `from_hello_reject` is the sole
+/// production constructor.
 const fn tls_profile_index(reason: HelloRejectReason) -> usize {
     match reason {
         HelloRejectReason::ServerNameMismatch => 0,

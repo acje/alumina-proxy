@@ -152,9 +152,13 @@ printf '%s\n' \
     'startup_unresolved_allowance = 0' \
     'resolver = ["127.0.0.1"]' \
     '[any_illegal]' \
-    'scope = "connection"' \
+    'connect_parse = { action = "notify", scope = "connection" }' \
+    'host_not_allowlisted = { action = "notify", scope = "connection" }' \
+    'tls_profile = { action = "notify", scope = "connection" }' \
+    'ech = { action = "notify", scope = "connection" }' \
     '[allowed_fqdn."example.com:443"]' \
-    'early_data = { action = "flare_only", scope = "connection" }' > /work/config.toml
+    'early_data = { action = "notify", scope = "connection" }' \
+    'ja4 = { action = "notify", scope = "connection" }' > /work/config.toml
 # genuine CA + endpoint cert: client validates chain and SAN=example.com
 openssl req -x509 -newkey rsa:2048 -keyout /work/ca.key -out /work/ca.pem \
     -days 2 -nodes -subj "/CN=bench-ca" >/dev/null 2>&1

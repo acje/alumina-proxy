@@ -85,11 +85,16 @@ printf '%s\n' \
     'startup_unresolved_allowance = 0' \
     'resolver = ["127.0.0.1"]' \
     '[any_illegal]' \
-    'scope = "connection"' \
+    'connect_parse = { action = "notify", scope = "connection" }' \
+    'host_not_allowlisted = { action = "notify", scope = "connection" }' \
+    'tls_profile = { action = "notify", scope = "connection" }' \
+    'ech = { action = "notify", scope = "connection" }' \
     '[allowed_fqdn."drain.example.org:443"]' \
-    'early_data = { action = "flare_only", scope = "connection" }' \
+    'early_data = { action = "notify", scope = "connection" }' \
+    'ja4 = { action = "notify", scope = "connection" }' \
     '[allowed_fqdn."force.example.org:443"]' \
-    'early_data = { action = "flare_only", scope = "connection" }' > /work/config.toml
+    'early_data = { action = "notify", scope = "connection" }' \
+    'ja4 = { action = "notify", scope = "connection" }' > /work/config.toml
 chown -R 65534:65534 /work
 SNIP
 )
