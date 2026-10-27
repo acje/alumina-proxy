@@ -43,11 +43,22 @@ connect_parse = { action = "notify", scope = "connection" }
 host_not_allowlisted = { action = "notify", scope = "connection" }
 tls_profile = { action = "notify", scope = "connection" }
 ech = { action = "notify", scope = "connection" }
-# Optional SP-001 all-scope gate bar (docs/alumina-proxy.md): absent -> defaults
-# threshold = 1 (the FIRST deviation arms all-scope block, sticky until restart),
-# window_secs = 900. Raising the threshold is the operator's deliberate choice to
-# tolerate a bounded burst — never a hidden tolerated rate.
-[all_scope_gate]
+# Optional SP-001 per-class all-scope gate bars (docs/alumina-proxy.md): each section
+# absent -> defaults threshold = 1 (the FIRST deviation of that class arms all-scope
+# block, sticky until restart), window_secs = 900. Raising a threshold is the
+# operator's deliberate choice to tolerate a bounded burst — never a hidden tolerated
+# rate. bad_handshake counts ConnectParse/TlsProfile/Ech facts; illegal_fqdn counts
+# HostNotAllowlisted facts; early_data/ja4 count only their Block-All facts.
+[bad_handshake]
+threshold   = 1
+window_secs = 900
+[illegal_fqdn]
+threshold   = 1
+window_secs = 900
+[early_data]
+threshold   = 1
+window_secs = 900
+[ja4]
 threshold   = 1
 window_secs = 900
 [allowed_fqdn."api.github.com:443"]

@@ -24,7 +24,8 @@ Every change must preserve:
 - **Operator chooses the action; the proxy owns the semantics.** The action for
   a context is operator configuration; security semantics are fixed constants
   (the allowlist is the operator's, enforcement is the proxy's). The all-scope
-  block bar (threshold and window, `[all_scope_gate]`) is operator configuration
+  block bar (threshold and window, the four per-class gate sections
+  `[bad_handshake]`/`[illegal_fqdn]`/`[early_data]`/`[ja4]`) is operator configuration
   too; the gate mechanism itself is a fixed constant.
 - **More is less.** Narrow scope is the mechanism for provable invariants. The
   fixed profile — single boot owner and single serving owner, two reused 128 KiB

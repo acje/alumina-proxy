@@ -146,7 +146,8 @@ claim), and this repo never provisions VMs, connections or images.
 `early_data = { action = "notify", scope = "connection" }` and
 `ja4 = { action = "notify", scope = "connection" }` under `[any_illegal]` with
 the four per-control keys `connect_parse`, `host_not_allowlisted`, `tls_profile`,
-`ech`, and the optional `[all_scope_gate]` bar (`threshold = 1`, `window_secs = 900`,
+`ech`, and the four optional per-class SP-001 gate bars `[bad_handshake]`,
+`[illegal_fqdn]`, `[early_data]`, `[ja4]` (each `threshold = 1`, `window_secs = 900`,
 the SP-001 defaults) — resolver
 `["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 "8.8.8.8#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
