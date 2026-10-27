@@ -34,7 +34,11 @@ trigger-happy by design — they react on the first sign of deviation — and
 highly accurate. The action taken (notify, block, or the reserved tarpit) is the operator's
 configuration choice; the proxy does not always panic by blocking all egress.
 Alumina's promise is highly accurate tripwires; the operator decides the
-appropriate action for their context.
+appropriate action for their context. The all-scope block bar is operator-configurable too —
+`[all_scope_gate]`, default threshold 1, so the first deviation arms all-scope block, sticky
+until restart. The operator chooses the action AND the bar; the gate mechanism itself stays
+fixed. Raising the threshold is a deliberate operator choice to tolerate a bounded burst,
+never a hidden tolerated rate.
 
 Narrowness is the mechanism, not a compromise: a single purpose, a fixed
 resource profile, and fixed security semantics make the proxy's invariants
@@ -89,7 +93,9 @@ Alumina's own configuration is strict; client input is accepted where variants h
 
 Configuration is a single TOML document of at most 16 KiB (16384 bytes), including comments and whitespace, with a required set of 1 through 32 `[allowed_fqdn."<fqdn>:<port>"]` keyed tables — each carrying the mandatory per-FQDN `early_data` and `ja4` controls (each an inline `{ action, scope }` table or the bare `"ignore"` opt-out) — and a required `listen` key. Each table key is a literal `<fqdn>:<port>` spelling naming a lowercase ASCII DNS hostname (an IP literal-shaped entry — a name whose labels are all-numeric, e.g. `1.2.3.4:443` — is invalid configuration) with a canonical decimal port from 1 through 65535 and no leading zero; a bare FQDN without `:port`, an empty or non-numeric port, port `0`, a port above `65535`, or a leading-zero port is invalid configuration. Table keys are unique after normalization (lowercase FQDN plus canonical port); a duplicate after normalization is invalid configuration. Both limits apply: 32 maximum-length DNS names need not fit. A compact configuration with 32 entries of 100 ASCII bytes each (including the `:port` suffix) and a listener fits within the document limit. Bound the configuration read and reject oversized input without truncating it. Load and fully validate configuration and local prerequisites before opening listeners or issuing DNS queries. There is no runtime policy update interface; see the [runtime surface](#architecture).
 
-`startup_unresolved_allowance` is required and must be an integer from `0` through the number of configured `[allowed_fqdn."..."]` tables minus one; `0` requires every hostname to be usable at startup. An empty table set is invalid configuration. The allowance affects startup availability, never destination authorization. All configuration keys are mandatory; no defaults are supplied.
+`startup_unresolved_allowance` is required and must be an integer from `0` through the number of configured `[allowed_fqdn."..."]` tables minus one; `0` requires every hostname to be usable at startup. An empty table set is invalid configuration. The allowance affects startup availability, never destination authorization. All configuration keys are mandatory; no defaults are supplied. The one exception is the
+optional `[all_scope_gate]` section, which defaults to `threshold = 1` / `window_secs = 900`
+(§Keyed configuration schema).
 
 Missing or unreadable configuration, invalid TOML (including duplicate keys or invalid table redefinitions), missing required fields, unknown keys or tables, incorrect types, out-of-range values, conflicting settings, and unmet local prerequisites cause immediate startup failure with exit status 78 (EX_CONFIG) and a diagnostic identifying the field or source location where available. The conflicting-settings class is enumerated here for auditability (documentation clarification only; no new validation): the mandated-set predicates — a required set of settings that must be present and consistent together, where a member present more than once after normalization is a conflict (duplicate keys, invalid table redefinitions, and duplicate allowlist names after normalization are the enumerated instances) — and the forbidden-pair predicates — two settings that cannot legally coexist under this document's schema, where the schema's enumerated scope values are exclusive (a scope value outside the enumerated set for its surface is invalid configuration rather than a silent override). Reject duplicate allowlist names after normalization. Do not coerce types, discard invalid entries, or supply missing required values from defaults, environment variables, or command-line overrides. After startup resolution, DNS timeouts, negative answers, and other network failures are expected runtime outcomes governed by the cache rules below, not configuration errors.
 
@@ -744,6 +750,10 @@ host_not_allowlisted = { action = "notify" | "block", scope = "connection" | "al
 tls_profile          = { action = "notify" | "block", scope = "connection" | "all" }
 ech                  = { action = "notify" | "block", scope = "connection" | "all" }
 
+[all_scope_gate]   # optional; absent -> defaults threshold = 1, window_secs = 900
+threshold   = 1    # integer >= 1; the fact count that arms all-scope block
+window_secs = 900  # integer >= 1; whole-second window within which the facts must arrive
+
 [allowed_fqdn."<fqdn>:<port>"]
 early_data = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
 ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
@@ -780,14 +790,24 @@ ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all
   `action` is `notify`|`block` (tarpit reserved, `ignore` invalid), `scope` is
   `connection`|`all` (`fqdn`/`domain` invalid, exit 78); an absent group or a missing/unknown
   key is invalid configuration (rp2e §Configuration surface (implemented; exact schema) preserved).
+- `[all_scope_gate]` is optional; when present it carries exactly the two keys `threshold`
+  and `window_secs`, each an integer >= 1; a missing, unknown, or out-of-range key is invalid
+  configuration (exit 78); when absent the defaults `threshold = 1` and `window_secs = 900`
+  apply. The gate is process-wide (a single counter), never per-scope/per-domain. The default
+  threshold of 1 is trigger-happy: the first deviation arms all-scope block, sticky until
+  restart; raising the threshold is the operator's deliberate choice to tolerate a bounded
+  burst (§Design philosophy — the exit gate). This section is the ONE deliberate exception to
+  the no-defaults doctrine.
 - **Breaking change:** the old `[any_illegal] scope = "..."` single-key form, the positional
   `[actions]` arrays, and the `flare_only` literal are removed; the `ja4` control is new and
   mandatory. SP-002's early-data `block` scope restriction is superseded (per-FQDN scope is
   uniformly `connection`|`fqdn`|`all` for both `early_data` and `ja4`; the SP-001 gate
   mitigates the upstream-sourced process-wide-latch concern).
 - All keys are mandatory with no defaults and no environment or command-line override;
-  unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as today.
-  Configuration validation timing and procedure are unchanged.
+  unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as today — except the
+  optional `[all_scope_gate]` section, which carries the defaults `threshold = 1` /
+  `window_secs = 900` (§Keyed configuration schema). Configuration validation timing and
+  procedure are unchanged.
 
 ### Document bound
 
@@ -920,9 +940,12 @@ rejected). `ignore` is invalid on `any_illegal` at parse, so `decide()` never re
 
 **SP-001 preservation.** The SP-001 gate applies to ANY effect projecting to Block All, from
 any control: the `WindowedCounter` counts every `AnyIllegal` fact PLUS every per-FQDN fact
-projecting to Block All; a not-yet-crossed Block All downgrades to BaselineOnly. The single
-first-slot latch (Option A) gates the mandatory first-AnyIllegal action; per-control action
-selection fires each control's action on its first occurrence.
+projecting to Block All; a not-yet-crossed Block All downgrades to BaselineOnly. The gate's
+threshold and window are operator-configurable via the optional `[all_scope_gate]` section
+(§Keyed configuration schema), defaulting to `threshold = 1` / `window_secs = 900`; at the
+default, the first Block-All projection arms the latch (trigger-happy, sticky until restart).
+The single first-slot latch (Option A) gates the mandatory first-AnyIllegal action;
+per-control action selection fires each control's action on its first occurrence.
 
 ## Red-team remediation: 16 findings
 
@@ -941,6 +964,15 @@ until restart — and §Planned fixed control storage (design estimate, not meas
 deferred). The threshold and window are fixed constants, not configuration. Implementation
 folds into a later sub-mission of this package; this amendment records the binding
 semantics.
+
+**Superseded (operator-configurable gate, SP-001 amendment).** The fixed-constants claim
+above is superseded: the threshold and window are operator-configurable via the optional
+`[all_scope_gate]` section (§Keyed configuration schema), defaulting to `threshold = 1` /
+`window_secs = 900` (`parse_all_scope_gate`, `src/config.rs:943`; `Enforcement::new`,
+`src/serve.rs:176`). At the default the gate is trigger-happy — the first deviation arms
+all-scope block, sticky until restart — so the "no tolerated rate" guarantee is preserved;
+raising the threshold is the operator's deliberate choice to tolerate a bounded burst. The
+no-speculative-pacing and sticky-until-restart properties are unchanged.
 
 #### SP-002 — Upstream-sourced early data: baseline denial kept; Domain/All block scopes rejected at startup
 
@@ -962,10 +994,11 @@ is superseded by the per-control schema: per-FQDN `scope` is uniformly
 `connection` | `fqdn` | `all` for BOTH `early_data` and `ja4` (§Keyed configuration schema,
 §Per-control enforcement schema T6). The upstream-sourced process-wide-latch concern that
 motivated the restriction is mitigated structurally instead: the SP-001 gate (§SP-001) arms
-Block All only after a bounded fact threshold within a fixed window, counting every
-per-FQDN fact projecting to Block All, so a single upstream-sourced early-data fact can no
-longer latch a process-wide outage. The baseline mandatory denial (terminate setup on early
-upstream data while the gate is closed) is unchanged.
+Block All only after the CONFIGURED fact threshold within the CONFIGURED window, counting
+every per-FQDN fact projecting to Block All; at the default threshold = 1 the first such
+fact arms the latch (trigger-happy), and the operator may raise the bar via
+`[all_scope_gate]` (§Keyed configuration schema). The baseline mandatory denial (terminate
+setup on early upstream data while the gate is closed) is unchanged.
 
 #### SP-003 — Homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup
 
@@ -1381,28 +1414,34 @@ not a label count.
 ## Register fold: SP-001/003/004/005, RT-001, SP-009/010, RT-006/007 implemented
 
 
-#### SP-001 — bounded fact threshold; fixed constants; no speculative pacing
+#### SP-001 — bounded fact threshold; operator-configurable bar; no speculative pacing
 
-All-scope latch arms fire only after a bounded fact counter crosses a fixed threshold within
-a fixed window, with fixed constants and no speculative pacing (`src/enforcement/state.rs:16`,
-`decide` `src/enforcement/state.rs:132`). The constants are `ANY_ILLEGAL_THRESHOLD = 3` facts
-within `ANY_ILLEGAL_WINDOW_SECS = 60` seconds (`src/enforcement/state.rs:10,14`). The values
-are deliberate under the design philosophy (§Design philosophy — the exit gate): in the
-idiomatic deployment the only client is the trusted-at-rest application on a fixed golden
-path, so a tripwire firing is a high-value signal — almost certainly operator misconfiguration
-or adversarial activity. Detection is trigger-happy (every deviation is acted on at its first
-occurrence); the catastrophic all-scope action is gated so a single transient event does not
-panic-shut the exit gate. A false positive costs a trusted-operator restart; a false negative
-costs exfiltration. Tests: `any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once`
-(`src/enforcement/state.rs:397`), `single_any_illegal_never_latches_all`
-(`src/enforcement/state.rs:766`), `three_any_illegal_facts_within_the_window_latch_all`
-(`src/enforcement/state.rs:787`).
+All-scope latch arms fire only after a bounded fact counter crosses the CONFIGURED threshold
+within the CONFIGURED window, with no speculative pacing (`WindowedCounter`
+`src/enforcement/state.rs:64`, `decide` `src/enforcement/state.rs:184`). The threshold and
+window are operator-configurable via the optional `[all_scope_gate]` section (§Keyed
+configuration schema), with defaults `threshold = 1` fact within `window_secs = 900` seconds
+(`ALL_SCOPE_GATE_DEFAULT_THRESHOLD`/`ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS`,
+`src/enforcement/state.rs:12,16`). The values are deliberate under the design philosophy
+(§Design philosophy — the exit gate): in the idiomatic deployment the only client is the
+trusted-at-rest application on a fixed golden path, so a tripwire firing is a high-value
+signal — almost certainly operator misconfiguration or adversarial activity. At the default
+threshold the gate is trigger-happy: the FIRST deviation arms all-scope block, sticky until
+restart. The gate is the operator's chosen bar, not a tolerated rate of bad behavior —
+raising the threshold is the operator's deliberate choice to tolerate a bounded burst, never
+a hidden tolerated rate. No speculative pacing is retained; the window only binds when
+`threshold > 1`. A false positive costs a trusted-operator restart; a false negative costs
+exfiltration. Tests: `single_any_illegal_arms_all_scope_at_default_threshold`
+(`src/enforcement/state.rs:994`), `single_any_illegal_below_threshold_never_latches_all`
+(`src/enforcement/state.rs:927`), `three_any_illegal_facts_within_the_window_latch_all`
+(`src/enforcement/state.rs:952`), `any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once`
+(`src/enforcement/state.rs:517`).
 
 The gate applies to ANY effect projecting to Block All, from any control, not only
 `any_illegal`: the `WindowedCounter` folds every `AnyIllegal` fact PLUS every per-FQDN fact
 (`EarlyUpstreamData`, `Ja4Change`) projecting to Block All, so a per-FQDN `block`/`all`
-control also arms only through the bounded threshold (§Per-control enforcement schema T6 —
-SP-001 preservation).
+control also arms only through the configured threshold within the configured window
+(§Per-control enforcement schema T6 — SP-001 preservation).
 
 #### SP-003 — homogeneous-trust resolver arrays
 
