@@ -6,6 +6,38 @@ Alumina is a non-terminating forward proxy for HTTPS over TCP, admitting connect
 
 The typical use case is a cloud-hosted server whose outbound integrations call a small set of approved third-party HTTPS services. Alumina is a niche alternative to a managed secure web proxy for this profile, not a feature-equivalent replacement. Clients explicitly use Alumina; deployment-enforced network isolation blocks alternate HTTPS egress even when clients ignore proxy settings. Together, these controls are analogous to positive locking: default-deny egress with explicit destination authorization, enforced independently of application cooperation. The analogy describes confinement, not a guarantee against misuse of approved endpoints. This pattern is independent of cloud provider or compute platform.
 
+## Design philosophy — the exit gate
+
+Alumina is deliberately narrow: it is the castle's **exit gate**, nothing more.
+It does not guard the interior, wall off attackers, or police ingress — it
+guards the single exit through which the workload reaches the outside world,
+and it guards that exit with a fixed, opinionated design rather than a surface
+of configuration choices. This narrowness is a permanent commitment, not
+current state: scope never grows to ingress control, payload inspection, or
+adjacent capabilities.
+
+The trust model is not distrust of the system. The application and the operator
+are trusted at rest; the operator holds full privilege over both application
+and proxy configuration. Alumina exists because compromise is inevitable: when
+an application is compromised, the proxy's task is to **identify** the
+compromise and **protect against further exploitation** purely through egress —
+the limit of its visibility and responsibility.
+
+From that task follows the core promise: **no silent acceptance of adversarial
+behavior**. Every deviation from the configured golden path is detected and
+acted on; there is no tolerated rate of bad behavior. The tripwires are
+trigger-happy by design — they react on the first sign of deviation — and
+highly accurate. The action taken (flare, block, or tarpit) is the operator's
+configuration choice; the proxy does not always panic by blocking all egress.
+Alumina's promise is highly accurate tripwires; the operator decides the
+appropriate action for their context.
+
+Narrowness is the mechanism, not a compromise: a single purpose, a fixed
+resource profile, and fixed security semantics make the proxy's invariants
+provable — no post-boot allocation, a single boot and serving owner, bounded
+buffers, no runtime-surface expansion. The fixed profile is the inviolable
+contract; it never yields to a feature.
+
 ## Threat model
 
 Alumina must resist attempts by a compromised application in the same VPC to alter its integrity, control, or destination enforcement. It restricts the egress it provides to reduce opportunities for data exfiltration and command and control (C2), not to provide comprehensive prevention.

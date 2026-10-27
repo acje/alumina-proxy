@@ -21,6 +21,40 @@ opportunities for establishing egress; policy violations and early-upstream-data
 events trigger configurable tripwire actions (`flare_only` / `block`) with
 bounded stdout monitoring (`docs/alumina-proxy.md:243-323`, rp2e amendment).
 
+## Design philosophy
+
+Alumina is deliberately narrow: it is the **exit gate** of the castle, nothing
+more. It does not guard the interior, wall off attackers, or police ingress —
+it guards the single exit through which your workload reaches the outside
+world, and it guards that exit with a fixed, opinionated design rather than a
+surface of configuration choices.
+
+The trust model is not distrust of the system. Your application and you (the
+operator) are trusted at rest; you hold full privilege over both application
+and proxy configuration. Alumina exists because compromise is inevitable: when
+an application is compromised, the proxy's job is to **identify** the
+compromise and **protect against further exploitation** purely through egress —
+the limit of its visibility and responsibility.
+
+The core promise: **no silent acceptance of adversarial behavior**. Every
+deviation from the configured golden path is detected and acted on; there is no
+tolerated rate of bad behavior. Tripwires are trigger-happy by design — they
+react on the first sign of deviation — and highly accurate. The action taken
+(flare, block, or tarpit) is your configuration choice; Alumina does not always
+panic by blocking all egress.
+
+> "There will be no silent acceptance of adversarial behavior without action
+> taken. The action may be flare, block, or tarpitting. We will not always
+> panic by blocking all meaningful egress automation — that is an operator
+> configuration choice. Alumina promises to deliver highly accurate tripwires.
+> The operator decides what the appropriate action will be for their context."
+
+Narrowness is the mechanism, not a compromise: a single purpose, a fixed
+resource profile, and fixed security semantics make the proxy's invariants
+provable — no post-boot allocation, a single boot and serving owner, bounded
+buffers, no runtime-surface expansion. The fixed profile is the inviolable
+contract; it never yields to a feature.
+
 ## Documents
 
 | Document | Role |
@@ -147,6 +181,7 @@ ENTRYPOINT ["/alumina"]
   declared in `config.toml` at image build; the unit configures the registry
   credential helper, opens the narrow VPC ingress rule, pins the image by
   digest, and runs the container with the hardened profile:
+
   ```yaml
   #cloud-config
   write_files:
@@ -178,6 +213,7 @@ ENTRYPOINT ["/alumina"]
     - systemctl daemon-reload
     - systemctl enable --now alumina-proxy.service
   ```
+
   `--user 65534:65534`, `--cap-drop ALL`, and `--security-opt no-new-privileges`
   satisfy `src/preflight.rs` (`UID != 0`, `CapEff == CapPrm == CapAmb == 0`,
   `no_new_privs == 1`); `--network host` binds `0.0.0.0:5353` directly on the
