@@ -34,8 +34,11 @@
 
 use std::fmt;
 use std::io;
+use std::io::IoSlice;
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
-use std::os::unix::io::RawFd;
+use std::os::fd::AsFd;
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use crate::cache::Family;
@@ -1292,14 +1295,28 @@ enum Edge {
     Low { used: u64, cap: u64 },
 }
 
-/// The sink write target. `Stdout` is the production path (fd 1, made
-/// nonblocking once at construction); `Fd` is the test seam over a real file
-/// or pipe owned by the caller, written through the same unbuffered syscall
-/// path so file/pipe behaviour is exercised on the actual descriptor.
+/// The sink write target. `Stdout` is the production path: an owned clone of
+/// fd 1, made nonblocking once by [`LogStore::prepare_stdout`]; `Fd` is the
+/// test seam over an owned duplicate of a caller's file or pipe descriptor,
+/// written through the same `write_vectored` path so file/pipe/socket
+/// behaviour is exercised on a real descriptor.
 enum SinkIo {
-    Stdout,
+    Stdout(UnixStream),
     #[cfg(test)]
-    Fd(RawFd),
+    Fd(UnixStream),
+}
+
+impl SinkIo {
+    /// Writes the gathered fragments in a single nonblocking `write_vectored`
+    /// call (the std `writev` equivalent). Returns the total bytes accepted or
+    /// the first error, exactly as the underlying descriptor would report.
+    fn write_vectored(&mut self, iovs: &[IoSlice<'_>]) -> io::Result<usize> {
+        match self {
+            SinkIo::Stdout(stream) => stream.write_vectored(iovs),
+            #[cfg(test)]
+            SinkIo::Fd(stream) => stream.write_vectored(iovs),
+        }
+    }
 }
 
 struct SinkState {
@@ -1322,6 +1339,8 @@ struct SinkState {
 pub enum LogStoreError {
     /// The 512 KiB backing queue could not be reserved.
     Reserve,
+    /// The sink descriptor could not be duplicated into an owned handle.
+    SinkClone,
     /// fd 1 could not be made nonblocking.
     StdoutNonblocking,
 }
@@ -1402,24 +1421,36 @@ pub(crate) struct ResolverProbeSegment<'a> {
 }
 
 impl LogStore {
-    /// Builds the full queue over the production stdout sink and makes fd 1
-    /// nonblocking, so a full or absent stdout pipe can never stall serving.
+    /// Builds the full queue over an owned clone of the production stdout
+    /// descriptor (fd 1). The clone shares the underlying file description, so
+    /// a later [`LogStore::prepare_stdout`] making it nonblocking also flips
+    /// the process's real stdout — a full or absent stdout pipe can never
+    /// stall serving.
     ///
     /// # Errors
     ///
     /// Returns [`LogStoreError`] when the 512 KiB backing queue cannot be
-    /// reserved or the stdout descriptor cannot be made nonblocking.
+    /// reserved or fd 1 cannot be duplicated into an owned handle.
     pub(crate) fn new() -> Result<LogStore, LogStoreError> {
-        Self::with_io(SinkIo::Stdout)
+        let owned = std::io::stdout()
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|_| LogStoreError::SinkClone)?;
+        Self::with_io(SinkIo::Stdout(UnixStream::from(owned)))
     }
 
     /// Test construction over a caller-owned descriptor: a real file (never
     /// `WouldBlock` at this volume) or a nonblocking pipe writer (`WouldBlock`
-    /// once full). The caller keeps the descriptor alive for the store's
-    /// lifetime; the store never owns or closes it.
+    /// once full). The store duplicates the descriptor into an owned handle
+    /// sharing the file description (so the caller's nonblocking flag and file
+    /// offset apply); the caller keeps the original for its own use.
     #[cfg(test)]
-    pub(crate) fn with_fd(fd: RawFd) -> Result<LogStore, LogStoreError> {
-        Self::with_io(SinkIo::Fd(fd))
+    pub(crate) fn with_fd(fd: &impl AsFd) -> Result<LogStore, LogStoreError> {
+        let owned = fd
+            .as_fd()
+            .try_clone_to_owned()
+            .map_err(|_| LogStoreError::SinkClone)?;
+        Self::with_io(SinkIo::Fd(UnixStream::from(owned)))
     }
 
     fn with_io(io: SinkIo) -> Result<LogStore, LogStoreError> {
@@ -1451,13 +1482,19 @@ impl LogStore {
         })
     }
 
-    /// Arms the production stdout sink: makes fd 1 nonblocking so a full or
-    /// absent stdout pipe can never stall serving. Only the process that owns
-    /// stdout (the binary) calls this once after boot, so tests and the
-    /// library never flip the descriptor.
+    /// Arms the production stdout sink: makes the owned stdout clone
+    /// nonblocking so a full or absent stdout pipe can never stall serving.
+    /// Because the clone shares the file description with fd 1, this also
+    /// flips the process's real stdout. Only the process that owns stdout (the
+    /// binary) calls this once after boot, so tests and the library never flip
+    /// the descriptor.
     pub(crate) fn prepare_stdout(&mut self) -> Result<(), LogStoreError> {
-        if matches!(self.sink.io, SinkIo::Stdout) {
-            set_fd_nonblocking(1).map_err(|_| LogStoreError::StdoutNonblocking)?;
+        match &self.sink.io {
+            SinkIo::Stdout(stream) => stream
+                .set_nonblocking(true)
+                .map_err(|_| LogStoreError::StdoutNonblocking)?,
+            #[cfg(test)]
+            SinkIo::Fd(_) => {}
         }
         Ok(())
     }
@@ -1915,7 +1952,7 @@ impl LogStore {
 
     /// Drains the queue through the nonblocking stdout sink under the
     /// per-turn work budget: at most [`SINK_MAX_OPS`] gathered fragments or
-    /// [`SINK_MAX_BYTES`] bytes, emitted in a single `writev` syscall per
+    /// [`SINK_MAX_BYTES`] bytes, emitted in a single `write_vectored` call per
     /// turn. A `WouldBlock` retains the partial cursor and yields
     /// immediately; a write/close failure latches the sink failed so no later
     /// drain spins or blocks.
@@ -1942,10 +1979,7 @@ impl LogStore {
                 self.advance_front();
                 continue;
             }
-            let mut iovs = [libc::iovec {
-                iov_base: std::ptr::null_mut(),
-                iov_len: 0,
-            }; SINK_MAX_OPS];
+            let mut iovs: [IoSlice<'_>; SINK_MAX_OPS] = [IoSlice::new(&[]); SINK_MAX_OPS];
             let mut remain = SINK_MAX_BYTES - bytes_out;
             let mut gathered = 0usize;
             while gathered < self.count && gathered < SINK_MAX_OPS && remain > 0 {
@@ -1953,17 +1987,11 @@ impl LogStore {
                 let start = if gathered == 0 { off } else { 0 };
                 let end = self.slots[fi].bytes;
                 let part = (end - start).min(remain);
-                let base = self.slots[fi].buf[start..start + part]
-                    .as_ptr()
-                    .cast_mut()
-                    .cast::<libc::c_void>();
-                iovs[gathered].iov_base = base;
-                iovs[gathered].iov_len = part;
+                iovs[gathered] = IoSlice::new(&self.slots[fi].buf[start..start + part]);
                 gathered += 1;
                 remain -= part;
             }
-            let fd = self.sink_fd();
-            let written = writev_bytes(fd, &iovs[..gathered]);
+            let written = self.sink.io.write_vectored(&iovs[..gathered]);
             match written {
                 Err(ref err)
                     if err.kind() == io::ErrorKind::WouldBlock
@@ -2040,14 +2068,6 @@ impl LogStore {
 
     const fn write_index(&self) -> usize {
         (self.front + self.count) & QUEUE_MASK
-    }
-
-    const fn sink_fd(&self) -> RawFd {
-        match self.sink.io {
-            SinkIo::Stdout => 1,
-            #[cfg(test)]
-            SinkIo::Fd(fd) => fd,
-        }
     }
 
     fn enqueue(&mut self, level: Level, kind: Kind, fields: &[Field<'_>]) {
@@ -2181,52 +2201,6 @@ const fn note_usage(wm: &mut Watermark, used: usize, cap: usize) -> Option<Edge>
     }
 }
 
-fn set_fd_nonblocking(fd: RawFd) -> io::Result<()> {
-    // SAFETY: `fcntl(F_GETFL)` reads only the descriptor status flags of a
-    // valid open fd and dereferences no pointers. The sole production caller
-    // (`prepare_stdout`) invokes this once post-boot on fd 1 — the binary's
-    // own stdout — and tests call it on a caller-owned pipe fd they keep
-    // open; no other thread closes the fd concurrently with this call.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: same valid-open-fd invariant as the `F_GETFL` call above (the
-    // `flags < 0` check confirms the fd is open and its flags were just read).
-    // On this platform `fcntl(F_SETFL, flags | O_NONBLOCK)` takes only scalar
-    // arguments and dereferences no pointers, so passing the preserved flags
-    // with `O_NONBLOCK` added is sound.
-    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Writes `iovs` in a single nonblocking `writev` syscall. Returns the total
-/// number of bytes accepted, or the first error via `last_os_error` exactly
-/// as `write` would have.
-fn writev_bytes(fd: RawFd, iovs: &[libc::iovec]) -> io::Result<usize> {
-    let iovcnt = libc::c_int::try_from(iovs.len()).expect("iov count is at most SINK_MAX_OPS = 16");
-    // SAFETY: every `iov_base`/`iov_len` pair in `iovs` is built by
-    // `drain_sink` from a live `&mut [u8]` slab slice (`self.slots[..].buf`),
-    // so each base is a valid readable region of exactly `iov_len` bytes for
-    // the duration of this call, and `libc::writev` reads at most those
-    // lengths without retaining the pointers. `fd` is the sink descriptor
-    // (stdout, or a caller-owned pipe/file/socket fd kept open for the
-    // `LogStore` lifetime) with no concurrent close on another thread. The
-    // returned byte count never exceeds the gathered length, and the `-1`
-    // return is checked and mapped to `last_os_error`. `iovcnt` is positive
-    // (the caller gathers at least one fragment) and bounded by
-    // [`SINK_MAX_OPS`] (16), far below `IOV_MAX`.
-    let n = unsafe { libc::writev(fd, iovs.as_ptr(), iovcnt) };
-    if n < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(usize::try_from(n).expect("writev returned a non-negative byte count"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2237,7 +2211,6 @@ mod tests {
 
     use std::fs::File;
     use std::io::{Read, Seek};
-    use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2260,8 +2233,7 @@ mod tests {
 
     fn file_logstore() -> (LogStore, File) {
         let file = temp_file();
-        let fd = file.as_raw_fd();
-        let store = LogStore::with_fd(fd).expect("file sink store");
+        let store = LogStore::with_fd(&file).expect("file sink store");
         (store, file)
     }
 
@@ -3801,7 +3773,7 @@ mod tests {
     fn logging_stalled_pipe_yields_retains_cursor_and_counts_drops() {
         let (reader, writer) = UnixStream::pair().expect("socketpair");
         writer.set_nonblocking(true).expect("writer nonblocking");
-        let mut store = LogStore::with_fd(writer.as_raw_fd()).expect("pipe sink store");
+        let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
         let big = "p".repeat(1000);
         let mut turns = 0;
         while turns < 8 * QUEUE_SLOTS && store.len() < QUEUE_SLOTS {
@@ -3898,9 +3870,8 @@ mod tests {
     #[test]
     fn logging_sink_failure_latches_and_never_blocks() {
         let (reader, writer) = UnixStream::pair().expect("socketpair");
-        let writer_fd = writer.as_raw_fd();
         drop(reader);
-        let mut store = LogStore::with_fd(writer_fd).expect("pipe sink store");
+        let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
         store.startup_warning(1, "sub.example.org", Family::A);
         store.drain_sink();
         assert!(
@@ -3929,9 +3900,8 @@ mod tests {
     #[test]
     fn logging_sink_failure_counts_stranded_records_as_dropped() {
         let (reader, writer) = UnixStream::pair().expect("socketpair");
-        let writer_fd = writer.as_raw_fd();
         drop(reader);
-        let mut store = LogStore::with_fd(writer_fd).expect("pipe sink store");
+        let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
         let big = "p".repeat(1000);
         let mut guard = 0;
         while guard < 8 * QUEUE_SLOTS && store.len() < QUEUE_SLOTS {
@@ -3977,11 +3947,9 @@ mod tests {
         );
 
         {
-            use std::os::fd::AsRawFd;
             let (reader, writer) = UnixStream::pair().expect("socketpair");
-            let writer_fd = writer.as_raw_fd();
             drop(reader);
-            let mut epipe = LogStore::with_fd(writer_fd).expect("pipe sink store");
+            let mut epipe = LogStore::with_fd(&writer).expect("pipe sink store");
             epipe.startup_warning(1, "sub.example.org", Family::A);
             epipe.drain_sink();
             assert!(epipe.sink_has_failed());
@@ -3995,7 +3963,7 @@ mod tests {
 
         let (reader, writer) = UnixStream::pair().expect("socketpair");
         writer.set_nonblocking(true).expect("writer nonblocking");
-        let mut store = LogStore::with_fd(writer.as_raw_fd()).expect("pipe sink store");
+        let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
         let big = "p".repeat(1000);
         for _ in 0..QUEUE_SLOTS {
             store.startup_warning(1, &big, Family::A);
@@ -4058,7 +4026,7 @@ mod tests {
         let (mut reader, writer) = UnixStream::pair().expect("socketpair");
         writer.set_nonblocking(true).expect("writer nonblocking");
         reader.set_nonblocking(true).expect("reader nonblocking");
-        let mut subject = LogStore::with_fd(writer.as_raw_fd()).expect("pipe sink store");
+        let mut subject = LogStore::with_fd(&writer).expect("pipe sink store");
         let big = "p".repeat(1000);
         for _ in 0..40 {
             subject.startup_warning(1, &big, Family::A);

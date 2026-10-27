@@ -189,10 +189,6 @@ getrandom = { version = "=0.4.3" }
 # allocation in the signal path (evidence jvlx). mio os-ext unlocks SourceFd so
 # the retained self-pipe read end registers on the single serving poll.
 signal-hook = { version = "=0.4.5", default-features = false }
-# Promoted from the already-resolved closure (mio/getrandom pull libc 0.2.190):
-# minimal nonblocking-stdout fcntl + write boundary for the log sink. Pinned to
-# the exact resolved version; no new closure node (contract intent 26l1.21.3).
-libc = "=0.2.190"
 # DoT (V1) TLS client + SPKI pinning (V5): rustls with the ring provider.
 # GATED behind rust-dep-intake (T3 build-time surface review) — no build/test
 # before the closure's build-time surface is read. ring chosen over aws-lc-rs
@@ -208,6 +204,13 @@ rustls-webpki = { version = "=0.103.16", default-features = false, features = ["
 # ring 0.17.14 is already in the resolved closure (the rustls ring provider's
 # own dependency); promoting it to a direct dependency adds no closure node.
 ring = "=0.17.14"
+
+[dev-dependencies]
+# Promoted from the already-resolved closure (mio/getrandom pull libc 0.2.190):
+# retained for test-only use; the production log sink no longer calls libc
+# directly (std write_vectored). Pinned to the exact resolved version; no new
+# closure node (contract intent 26l1.21.3).
+libc = "=0.2.190"
 
 [features]
 # F1 counting allocator is opt-in so normal production releases are never

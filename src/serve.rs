@@ -2393,7 +2393,6 @@ mod startup_integration {
         std::os::unix::net::UnixStream,
     ) {
         use std::io::Write;
-        use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream;
         let (reader, mut writer) = UnixStream::pair().expect("socketpair");
         writer.set_nonblocking(true).expect("writer nonblocking");
@@ -2408,7 +2407,7 @@ mod startup_integration {
             }
         }
         assert!(accepted > 0, "the socket buffer accepted the filler");
-        let store = LogStore::with_fd(writer.as_raw_fd()).expect("stalled sink store");
+        let store = LogStore::with_fd(&writer).expect("stalled sink store");
         (store, reader, writer)
     }
 
@@ -2421,14 +2420,12 @@ mod startup_integration {
     fn startup_emission_over_widest_config_reaches_the_real_sink_before_exit75() {
         use crate::config::ALLOWLIST_MAX;
         use std::io::{Read, Seek};
-        use std::os::unix::io::AsRawFd;
-
         let config = widest_allowlist_config();
         let allowlist = config.allowlist();
         assert_eq!(allowlist.len(), ALLOWLIST_MAX);
         let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
         let mut file = temp_sink_file();
-        storage.logs = LogStore::with_fd(file.as_raw_fd()).expect("file sink store");
+        storage.logs = LogStore::with_fd(&file).expect("file sink store");
         storage.emit_startup_records(
             9,
             &all_unresolved_report(),

@@ -2681,7 +2681,6 @@ impl StartupDns {
         nameserver: SocketAddr,
         now0: u64,
     ) -> Result<StartupReport, StartupDnsError> {
-        use std::os::fd::AsRawFd;
         let null = std::fs::OpenOptions::new()
             .write(true)
             .open("/dev/null")
@@ -2689,7 +2688,7 @@ impl StartupDns {
                 kind: std::io::ErrorKind::Other,
                 detail: "test null sink",
             })?;
-        let mut logs = log::LogStore::with_fd(null.as_raw_fd()).expect("null sink store");
+        let mut logs = log::LogStore::with_fd(&null).expect("null sink store");
         self.resolve_body(config, cache, schedules, nameserver, now0, &mut logs)
     }
 
