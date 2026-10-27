@@ -973,7 +973,7 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
         "a concluded serving-refresh exchange must retain its DoT transport for the next refresh"
     );
     let first_addr = match transport.conn.as_ref().expect("retained DoT transport") {
-        DnsConn::Tls(conn) => &*conn.tls as *const _ as usize,
+        DnsConn::Tls(conn) => &*conn.tls as *const _,
         DnsConn::Plain(_) => panic!("a pinned DoT exchange must retain a TLS transport"),
     };
 
@@ -997,11 +997,11 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
         "the second serving-refresh exchange must publish over the retained transport, got {second:?}"
     );
     let second_addr = match transport.conn.as_ref().expect("retained DoT transport") {
-        DnsConn::Tls(conn) => &*conn.tls as *const _ as usize,
+        DnsConn::Tls(conn) => &*conn.tls as *const _,
         DnsConn::Plain(_) => panic!("a pinned DoT exchange must retain a TLS transport"),
     };
-    assert_eq!(
-        first_addr, second_addr,
+    assert!(
+        std::ptr::addr_eq(first_addr, second_addr),
         "the serving refresh must reuse the same rustls client allocation, not rebuild it"
     );
     transport.cancel_for_shutdown();
