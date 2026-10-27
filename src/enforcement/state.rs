@@ -1,3 +1,5 @@
+use std::num::{NonZeroU32, NonZeroU64};
+
 use crate::eligibility::NumericAddr;
 
 use super::action::{ControlTable, DomainOrdinal, FirstSlot, Scope};
@@ -16,15 +18,17 @@ pub const ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS: u64 = 900;
 /// Operator-configurable SP-001 All-scope gate parameters: the threshold of
 /// `AnyIllegal` facts that must cross within `window_secs` before the
 /// All-scope latch may arm. The defaults are trigger-happy — at threshold 1
-/// the FIRST deviation arms the All-scope block, sticky until restart.
+/// the FIRST deviation arms the All-scope block, sticky until restart. Both
+/// fields are `NonZero`, so the `threshold >= 1` / `window_secs >= 1`
+/// invariant is type-enforced: a gate that could never arm is unrepresentable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AllScopeGate {
-    threshold: u32,
-    window_secs: u64,
+    threshold: NonZeroU32,
+    window_secs: NonZeroU64,
 }
 
 impl AllScopeGate {
-    pub const fn new(threshold: u32, window_secs: u64) -> AllScopeGate {
+    pub const fn new(threshold: NonZeroU32, window_secs: NonZeroU64) -> AllScopeGate {
         AllScopeGate {
             threshold,
             window_secs,
@@ -32,26 +36,30 @@ impl AllScopeGate {
     }
 
     pub const fn threshold(self) -> u32 {
-        self.threshold
+        self.threshold.get()
     }
 
     pub const fn window_secs(self) -> u64 {
-        self.window_secs
+        self.window_secs.get()
     }
 }
 
 impl Default for AllScopeGate {
     fn default() -> Self {
         Self::new(
-            ALL_SCOPE_GATE_DEFAULT_THRESHOLD,
-            ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS,
+            NonZeroU32::new(ALL_SCOPE_GATE_DEFAULT_THRESHOLD)
+                .expect("default threshold 1 is nonzero"),
+            NonZeroU64::new(ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS)
+                .expect("default window 900 is nonzero"),
         )
     }
 }
 
 /// A bounded fact counter that arms once the configured threshold is crossed
 /// within the configured window. The armed state is sticky until restart
-/// (rp2e :263).
+/// (rp2e :263). The counter assumes `threshold >= 1` and `window_secs >= 1`,
+/// guaranteed by construction from an `AllScopeGate` whose `NonZero` fields
+/// make zero unrepresentable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowedCounter {
     count: u32,
@@ -388,7 +396,35 @@ mod tests {
     }
 
     fn en_gated(t: ControlTable, threshold: u32, window: u64) -> Enforcement {
-        Enforcement::new(t, AllScopeGate::new(threshold, window))
+        Enforcement::new(
+            t,
+            AllScopeGate::new(
+                NonZeroU32::new(threshold).expect("nonzero threshold"),
+                NonZeroU64::new(window).expect("nonzero window"),
+            ),
+        )
+    }
+
+    #[test]
+    fn all_scope_gate_zero_is_unrepresentable_at_the_type_boundary() {
+        assert!(
+            NonZeroU32::new(0).is_none(),
+            "threshold 0 is unrepresentable: AllScopeGate::new requires NonZeroU32"
+        );
+        assert!(
+            NonZeroU64::new(0).is_none(),
+            "window_secs 0 is unrepresentable: AllScopeGate::new requires NonZeroU64"
+        );
+        assert_eq!(
+            NonZeroU32::new(1).expect("1 is nonzero").get(),
+            1,
+            "the minimum threshold is 1"
+        );
+        assert_eq!(
+            NonZeroU64::new(1).expect("1 is nonzero").get(),
+            1,
+            "the minimum window is 1"
+        );
     }
 
     #[test]

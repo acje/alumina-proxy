@@ -2,6 +2,8 @@ use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::num::NonZeroU32;
+use std::num::NonZeroU64;
 use std::ops::Range;
 
 use crate::enforcement::action::{
@@ -643,7 +645,10 @@ impl fmt::Display for ConfigError {
                 "config {key} value {value:?} invalid: any_illegal scope is connection or all only"
             ),
             ConfigError::AllScopeGateOutOfRange { key, value } => {
-                write!(f, "config {key} {value} out of range: must be >= 1")
+                write!(
+                    f,
+                    "config {key} {value} out of range: must be an integer >= 1"
+                )
             }
             ConfigError::InvalidScope { key, value } => write!(
                 f,
@@ -956,12 +961,10 @@ fn parse_all_scope_gate(table: &toml::Table) -> Result<AllScopeGate, ConfigError
         key: "all_scope_gate.threshold".to_owned(),
         value: threshold,
     })?;
-    if threshold == 0 {
-        return Err(ConfigError::AllScopeGateOutOfRange {
-            key: "all_scope_gate.threshold".to_owned(),
-            value: 0,
-        });
-    }
+    let threshold = NonZeroU32::new(threshold).ok_or(ConfigError::AllScopeGateOutOfRange {
+        key: "all_scope_gate.threshold".to_owned(),
+        value: 0,
+    })?;
     let window_secs = require_integer(section, "window_secs")
         .map_err(|err| prefix_group_error(prefix, "window_secs", err))?;
     let window_secs =
@@ -969,12 +972,10 @@ fn parse_all_scope_gate(table: &toml::Table) -> Result<AllScopeGate, ConfigError
             key: "all_scope_gate.window_secs".to_owned(),
             value: window_secs,
         })?;
-    if window_secs == 0 {
-        return Err(ConfigError::AllScopeGateOutOfRange {
-            key: "all_scope_gate.window_secs".to_owned(),
-            value: 0,
-        });
-    }
+    let window_secs = NonZeroU64::new(window_secs).ok_or(ConfigError::AllScopeGateOutOfRange {
+        key: "all_scope_gate.window_secs".to_owned(),
+        value: 0,
+    })?;
     Ok(AllScopeGate::new(threshold, window_secs))
 }
 
@@ -1300,6 +1301,7 @@ mod enforcement_config_tests {
     use super::*;
     use crate::enforcement::action::{ActionKind, AnyIllegalControl, PerFqdnControl, Scope};
     use std::fmt::Write as _;
+    use std::num::{NonZeroU32, NonZeroU64};
 
     fn base() -> String {
         "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n"
@@ -2039,7 +2041,13 @@ mod enforcement_config_tests {
     fn all_scope_gate_custom_values() {
         let doc = gate_doc("[all_scope_gate]\nthreshold = 5\nwindow_secs = 300\n");
         let cfg = parse_config_document(&doc).expect("valid all_scope_gate section");
-        assert_eq!(cfg.all_scope_gate(), AllScopeGate::new(5, 300));
+        assert_eq!(
+            cfg.all_scope_gate(),
+            AllScopeGate::new(
+                NonZeroU32::new(5).expect("5 is nonzero"),
+                NonZeroU64::new(300).expect("300 is nonzero"),
+            )
+        );
         assert_eq!(cfg.all_scope_gate().threshold(), 5);
         assert_eq!(cfg.all_scope_gate().window_secs(), 300);
     }
