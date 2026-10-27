@@ -17,8 +17,8 @@ pub const ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS: u64 = 900;
 
 /// Operator-configurable SP-001 All-scope gate parameters: the threshold of
 /// `AnyIllegal` facts that must cross within `window_secs` before the
-/// All-scope latch may arm. The defaults are trigger-happy — at threshold 1
-/// the FIRST deviation arms the All-scope block, sticky until restart. Both
+/// All-scope latch may arm. At the default threshold of 1 the FIRST deviation
+/// arms the All-scope block, sticky until restart. Both
 /// fields are `NonZero`, so the `threshold >= 1` / `window_secs >= 1`
 /// invariant is type-enforced: a gate that could never arm is unrepresentable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

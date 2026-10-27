@@ -29,9 +29,8 @@ application on a fixed golden path, so a correctly-configured, healthy workload
 produces zero deviations. A tripwire firing is therefore a **high-value
 signal**: it is highly unexpected and almost certainly caused by either
 operator misconfiguration or adversarial activity. Every deviation is detected
-and acted on; there is no tolerated rate of bad behavior. The tripwires are
-trigger-happy by design — they react on the first sign of deviation — and
-highly accurate. The action taken (notify, block, or the reserved tarpit) is the operator's
+and acted on; there is no tolerated rate of bad behavior. The tripwires react
+on the first sign of deviation and are highly accurate. The action taken (notify, block, or the reserved tarpit) is the operator's
 configuration choice; the proxy does not always panic by blocking all egress.
 Alumina's promise is highly accurate tripwires; the operator decides the
 appropriate action for their context. The all-scope block bar is operator-configurable too —
@@ -793,9 +792,9 @@ ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all
 - `[all_scope_gate]` is optional; when present it carries exactly the two keys `threshold`
   and `window_secs`, each an integer >= 1; a missing, unknown, or out-of-range key is invalid
   configuration (exit 78); when absent the defaults `threshold = 1` and `window_secs = 900`
-  apply. The gate is process-wide (a single counter), never per-scope/per-domain. The default
-  threshold of 1 is trigger-happy: the first deviation arms all-scope block, sticky until
-  restart; raising the threshold is the operator's deliberate choice to tolerate a bounded
+  apply. The gate is process-wide (a single counter), never per-scope/per-domain. At the
+  default threshold of 1 the first deviation arms all-scope block, sticky until restart;
+  raising the threshold is the operator's deliberate choice to tolerate a bounded
   burst (§Design philosophy — the exit gate). This section is the ONE deliberate exception to
   the no-defaults doctrine.
 - **Breaking change:** the old `[any_illegal] scope = "..."` single-key form, the positional
@@ -943,7 +942,7 @@ any control: the `WindowedCounter` counts every `AnyIllegal` fact PLUS every per
 projecting to Block All; a not-yet-crossed Block All downgrades to BaselineOnly. The gate's
 threshold and window are operator-configurable via the optional `[all_scope_gate]` section
 (§Keyed configuration schema), defaulting to `threshold = 1` / `window_secs = 900`; at the
-default, the first Block-All projection arms the latch (trigger-happy, sticky until restart).
+default, the first Block-All projection arms the latch (sticky until restart).
 The single first-slot latch (Option A) gates the mandatory first-AnyIllegal action;
 per-control action selection fires each control's action on its first occurrence.
 
@@ -969,8 +968,8 @@ semantics.
 above is superseded: the threshold and window are operator-configurable via the optional
 `[all_scope_gate]` section (§Keyed configuration schema), defaulting to `threshold = 1` /
 `window_secs = 900` (`parse_all_scope_gate`, `src/config.rs:943`; `Enforcement::new`,
-`src/serve.rs:176`). At the default the gate is trigger-happy — the first deviation arms
-all-scope block, sticky until restart — so the "no tolerated rate" guarantee is preserved;
+`src/serve.rs:176`). At the default the first deviation arms all-scope block, sticky until
+restart, so the "no tolerated rate" guarantee is preserved;
 raising the threshold is the operator's deliberate choice to tolerate a bounded burst. The
 no-speculative-pacing and sticky-until-restart properties are unchanged.
 
@@ -996,7 +995,7 @@ is superseded by the per-control schema: per-FQDN `scope` is uniformly
 motivated the restriction is mitigated structurally instead: the SP-001 gate (§SP-001) arms
 Block All only after the CONFIGURED fact threshold within the CONFIGURED window, counting
 every per-FQDN fact projecting to Block All; at the default threshold = 1 the first such
-fact arms the latch (trigger-happy), and the operator may raise the bar via
+fact arms the latch, and the operator may raise the bar via
 `[all_scope_gate]` (§Keyed configuration schema). The baseline mandatory denial (terminate
 setup on early upstream data while the gate is closed) is unchanged.
 
@@ -1426,8 +1425,8 @@ configuration schema), with defaults `threshold = 1` fact within `window_secs = 
 (§Design philosophy — the exit gate): in the idiomatic deployment the only client is the
 trusted-at-rest application on a fixed golden path, so a tripwire firing is a high-value
 signal — almost certainly operator misconfiguration or adversarial activity. At the default
-threshold the gate is trigger-happy: the FIRST deviation arms all-scope block, sticky until
-restart. The gate is the operator's chosen bar, not a tolerated rate of bad behavior —
+threshold the FIRST deviation arms all-scope block, sticky until restart. The gate is the
+operator's chosen bar, not a tolerated rate of bad behavior —
 raising the threshold is the operator's deliberate choice to tolerate a bounded burst, never
 a hidden tolerated rate. No speculative pacing is retained; the window only binds when
 `threshold > 1`. A false positive costs a trusted-operator restart; a false negative costs

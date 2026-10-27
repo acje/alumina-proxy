@@ -19,11 +19,13 @@ Every change must preserve:
   bad behavior. In the idiomatic deployment the only client is the
   trusted-at-rest app on a fixed golden path, so a tripwire firing is a
   high-value signal — highly unexpected, almost certainly operator
-  misconfiguration or adversarial activity. Tripwires are trigger-happy: react
+  misconfiguration or adversarial activity. Tripwires react
   on the first sign of deviation.
 - **Operator chooses the action; the proxy owns the semantics.** The action for
   a context is operator configuration; security semantics are fixed constants
-  (the allowlist is the operator's, enforcement is the proxy's).
+  (the allowlist is the operator's, enforcement is the proxy's). The all-scope
+  block bar (threshold and window, `[all_scope_gate]`) is operator configuration
+  too; the gate mechanism itself is a fixed constant.
 - **More is less.** Narrow scope is the mechanism for provable invariants. The
   fixed profile — single boot owner and single serving owner, two reused 128 KiB
   per-tunnel buffers, no post-boot heap alloc/dealloc, no runtime-surface

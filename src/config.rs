@@ -461,7 +461,7 @@ impl Config {
     }
 
     /// The operator-configurable SP-001 All-scope gate (threshold/window);
-    /// defaults to the trigger-happy (1, 900) bar when `[all_scope_gate]` is
+    /// defaults to threshold 1 / window 900s when `[all_scope_gate]` is
     /// absent.
     #[must_use]
     pub const fn all_scope_gate(&self) -> AllScopeGate {
@@ -938,8 +938,8 @@ fn parse_per_fqdn_scope(scope: &str, key: &str) -> Result<Scope, ConfigError> {
 
 /// Parses the optional `[all_scope_gate]` table: `threshold` (1..=`u32::MAX`)
 /// and `window_secs` (1..=`u64::MAX`), both mandatory when the section is
-/// present (all-or-nothing). An absent section yields the trigger-happy
-/// default (threshold 1, window 900s).
+/// present (all-or-nothing). An absent section yields the default (threshold 1,
+/// window 900s).
 fn parse_all_scope_gate(table: &toml::Table) -> Result<AllScopeGate, ConfigError> {
     let Some(value) = table.get("all_scope_gate") else {
         return Ok(AllScopeGate::default());

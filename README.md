@@ -42,9 +42,12 @@ fixed golden path, so a healthy workload produces zero deviations. A tripwire
 firing is therefore a **high-value signal**: highly unexpected, and almost
 certainly operator misconfiguration or adversarial activity. Every deviation is
 detected and acted on; there is no tolerated rate of bad behavior. Tripwires
-are trigger-happy by design — they react on the first sign of deviation — and
-highly accurate. The action taken (flare, block, or tarpit) is your
-configuration choice; Alumina does not always panic by blocking all egress.
+react on the first sign of deviation and are highly accurate. The action taken
+(flare, block, or tarpit) is your configuration choice; Alumina does not always
+panic by blocking all egress. The all-scope block bar is operator-configurable
+too: by default the first deviation arms all-scope block, and raising the bar
+is your deliberate choice to tolerate a bounded burst — never a hidden
+tolerated rate.
 
 > "There will be no silent acceptance of adversarial behavior without action
 > taken. The action may be flare, block, or tarpitting. We will not always
