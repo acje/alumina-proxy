@@ -39,7 +39,7 @@ use std::os::unix::io::RawFd;
 use std::time::{Duration, Instant};
 
 use crate::cache::Family;
-use crate::enforcement::action::{AnyIllegalScope, DomainOrdinal, Scope};
+use crate::enforcement::action::{DomainOrdinal, Scope};
 use crate::enforcement::monitor::{CapturedFact, DnsAnomalyKind, Monitor};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason};
 use crate::incident_report::IncidentSummary;
@@ -801,11 +801,11 @@ fn encode_record_probe(
 }
 
 /// True when a per-ordinal domain block carries at least one `d<i>*` field
-/// (early-data, block, flare, refusal, or ja4-change fold).
+/// (early-data, block, notify, refusal, or ja4-change fold).
 const fn domain_block_nonzero(monitor: &Monitor, ordinal: DomainOrdinal) -> bool {
     monitor.facts_early_data(ordinal) > 0
         || monitor.actions_domain_block(ordinal) > 0
-        || monitor.actions_flare(ordinal) > 0
+        || monitor.actions_notify(ordinal) > 0
         || monitor.refusals_blocked_domain(ordinal) > 0
         || monitor.facts_ja4_change(ordinal) > 0
 }
@@ -884,11 +884,11 @@ fn encode_monitor_summary(
         ),
         (
             &b"s0"[..],
-            u64::from(monitor.actions_first_slot_block(AnyIllegalScope::Connection)),
+            u64::from(monitor.actions_first_slot_block(Scope::Connection)),
         ),
         (
             &b"s1"[..],
-            u64::from(monitor.actions_first_slot_block(AnyIllegalScope::All)),
+            u64::from(monitor.actions_first_slot_block(Scope::All)),
         ),
         (&b"ba"[..], u64::from(monitor.actions_block_all())),
     ];
@@ -1020,7 +1020,7 @@ fn encode_monitor_domain_batch(
             let index32 = u32::try_from(index).expect("allowlist ordinal fits u32");
             let facts = monitor.facts_early_data(ordinal);
             let blocks = monitor.actions_domain_block(ordinal);
-            let flares = monitor.actions_flare(ordinal);
+            let notifies = monitor.actions_notify(ordinal);
             let refusals = monitor.refusals_blocked_domain(ordinal);
             if facts > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"f", u64::from(facts)) {
                 return None;
@@ -1028,7 +1028,9 @@ fn encode_monitor_domain_batch(
             if blocks > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"b", u64::from(blocks)) {
                 return None;
             }
-            if flares > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"l", u64::from(flares)) {
+            if notifies > 0
+                && !push_indexed_key_u64(&mut w, b"d", index32, b"n", u64::from(notifies))
+            {
                 return None;
             }
             if refusals > 0
@@ -1217,7 +1219,7 @@ fn push_fact_token(w: &mut Entry<'_>, fact: CapturedFact) -> bool {
 fn push_effect_token(w: &mut Entry<'_>, effect: Effect) -> bool {
     match effect {
         Effect::BaselineOnly => w.push(b"none"),
-        Effect::FlareOnly { scope } => push_scope_token(w, b"flr", scope),
+        Effect::Notify { scope } => push_scope_token(w, b"ntf", scope),
         Effect::Block { scope } => push_scope_token(w, b"blk", scope),
         Effect::Unknown { reason } => {
             if !w.push(b"unk") {
@@ -2407,11 +2409,13 @@ mod tests {
                 pin_name = widest_name(i)
             );
         }
-        doc.push_str("]\n[any_illegal]\nscope = \"all\"\n");
+        doc.push_str(
+            "]\n[any_illegal]\nconnect_parse = { action = \"block\", scope = \"all\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"all\" }\n",
+        );
         for i in 0..ALLOWLIST_MAX {
             let _ = writeln!(
                 doc,
-                "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"block\", scope = \"connection\" }}\n",
+                "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"block\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"connection\" }}\n",
                 name = widest_name(i)
             );
         }
@@ -2931,7 +2935,7 @@ mod tests {
         use crate::startup_dns::FailureReason;
         let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
         let doc = format!(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#one.one.one.one\", \"9.9.9.9#dns.quad9.net\", \"8.8.8.8#dns.google#pin-sha256={b64}\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#one.one.one.one\", \"9.9.9.9#dns.quad9.net\", \"8.8.8.8#dns.google#pin-sha256={b64}\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
         );
         let config = crate::config::parse_config_document(&doc).expect("valid config");
         let resolvers = config.resolver_set();
@@ -2977,7 +2981,7 @@ mod tests {
     #[test]
     fn logging_oversize_probe_record_is_dropped_whole_and_counted() {
         use crate::startup_dns::FailureReason;
-        let doc = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#dns.google\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
+        let doc = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#dns.google\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
         let config = crate::config::parse_config_document(doc).expect("valid config");
         let fqdn = config
             .resolver_set()
@@ -3144,7 +3148,7 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn logging_monitor_summary_exact_grammar_and_zero_suppression() {
         use crate::eligibility::NumericAddr;
-        use crate::enforcement::action::{AnyIllegalScope, DomainOrdinal};
+        use crate::enforcement::action::{DomainOrdinal, Scope};
         use crate::enforcement::monitor::{DnsAnomalyKind, Monitor};
         use crate::enforcement::policy::UnknownReason;
         use std::net::Ipv4Addr;
@@ -3163,9 +3167,9 @@ mod tests {
             *b"t13d1516h2_8daaf6152771_02713d6af862",
             NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
         );
-        m.note_action_first_slot_block(AnyIllegalScope::Connection);
+        m.note_action_first_slot_block(Scope::Connection);
         m.note_action_domain_block(ordinal);
-        m.note_action_flare(ordinal);
+        m.note_action_notify(ordinal);
         let (mut store, mut file) = file_logstore();
         assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
@@ -3176,7 +3180,7 @@ mod tests {
              ofacts=0 oactions=0 orefusals=0 report_drops=0 oreport_drops=0 capture_drops=0 \
              ocapture_drops=0 s0=1 s1=0 ba=0 rd=1 ep=1 js=1 bv=1 \
              c15=2 unk3=1 dx=1\n\
-             level=info kind=monitor_domain secs=7 part=1/1 d0f=1 d0b=1 d0l=1 d0j=1 \
+             level=info kind=monitor_domain secs=7 part=1/1 d0f=1 d0b=1 d0n=1 d0j=1 \
              d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"cb007101\"\n",
             "exact monitor grammar: the summary carries the fixed core and dx bitset, the single nonzero domain block rides its monitor_domain batch"
         );

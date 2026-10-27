@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use super::action::{AnyIllegalScope, DomainOrdinal};
+use super::action::{DomainOrdinal, Scope};
 use super::policy::{AnyIllegalCause, Effect, UnknownReason};
 use super::state::SaturatingCounter;
 use crate::config::ALLOWLIST_MAX;
@@ -87,9 +87,9 @@ impl DnsAnomalyKind {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ActionCounters {
-    pub(crate) first_slot_block: [SaturatingCounter; AnyIllegalScope::COUNT],
+    pub(crate) first_slot_block: [SaturatingCounter; Scope::COUNT],
     pub(crate) domain_block: [SaturatingCounter; ALLOWLIST_MAX],
-    pub(crate) flare: [SaturatingCounter; ALLOWLIST_MAX],
+    pub(crate) notify: [SaturatingCounter; ALLOWLIST_MAX],
     pub(crate) block_all: SaturatingCounter,
 }
 
@@ -292,7 +292,7 @@ impl Monitor {
         self.dirty = true;
     }
 
-    pub(crate) const fn note_action_first_slot_block(&mut self, scope: AnyIllegalScope) {
+    pub(crate) const fn note_action_first_slot_block(&mut self, scope: Scope) {
         self.actions.first_slot_block[scope as usize].bump();
         self.dirty = true;
     }
@@ -302,8 +302,8 @@ impl Monitor {
         self.dirty = true;
     }
 
-    pub(crate) const fn note_action_flare(&mut self, ordinal: DomainOrdinal) {
-        self.actions.flare[ordinal.get()].bump();
+    pub(crate) const fn note_action_notify(&mut self, ordinal: DomainOrdinal) {
+        self.actions.notify[ordinal.get()].bump();
         self.dirty = true;
     }
 
@@ -511,7 +511,7 @@ impl Monitor {
         self.refusals.blocked_domain[ordinal.get()].value()
     }
 
-    pub(crate) const fn actions_first_slot_block(&self, scope: AnyIllegalScope) -> u32 {
+    pub(crate) const fn actions_first_slot_block(&self, scope: Scope) -> u32 {
         self.actions.first_slot_block[scope as usize].value()
     }
 
@@ -523,7 +523,7 @@ impl Monitor {
             .sum::<u64>()
             + self
                 .actions
-                .flare
+                .notify
                 .iter()
                 .map(|c| u64::from(c.value()))
                 .sum::<u64>()
@@ -535,8 +535,8 @@ impl Monitor {
                 .sum::<u64>()
     }
 
-    pub(crate) const fn actions_flare(&self, ordinal: DomainOrdinal) -> u32 {
-        self.actions.flare[ordinal.get()].value()
+    pub(crate) const fn actions_notify(&self, ordinal: DomainOrdinal) -> u32 {
+        self.actions.notify[ordinal.get()].value()
     }
 
     pub(crate) fn refusals_total(&self) -> u64 {
@@ -601,7 +601,7 @@ impl Monitor {
     pub(crate) fn actions_overflow(&self) -> bool {
         self.actions.first_slot_block.iter().any(|c| c.overflow())
             || self.actions.domain_block.iter().any(|c| c.overflow())
-            || self.actions.flare.iter().any(|c| c.overflow())
+            || self.actions.notify.iter().any(|c| c.overflow())
             || self.actions.block_all.overflow()
     }
 
@@ -653,7 +653,7 @@ impl Monitor {
         for c in &mut self.actions.domain_block {
             c.saturate_for_test();
         }
-        for c in &mut self.actions.flare {
+        for c in &mut self.actions.notify {
             c.saturate_for_test();
         }
         self.actions.block_all.saturate_for_test();
@@ -694,20 +694,31 @@ pub(crate) mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
-    use crate::enforcement::action::{ActionKind, DomainAction, FirstSlot, Scope};
+    use crate::enforcement::action::{
+        ActionKind, AnyIllegalControl, Control, FirstSlot, PerFqdnControl, Scope,
+    };
     use crate::enforcement::policy::{Effect, Violation};
     use crate::enforcement::state::Enforcement;
 
+    fn any_controls(kind: ActionKind, scope: Scope) -> [Control; AnyIllegalControl::COUNT] {
+        [Control::new(kind, scope); AnyIllegalControl::COUNT]
+    }
+
     fn table(
-        any_illegal: AnyIllegalScope,
-        actions: &[(ActionKind, Scope)],
+        any: [Control; AnyIllegalControl::COUNT],
+        early: &[(ActionKind, Scope)],
+        ja4: &[(ActionKind, Scope)],
     ) -> crate::enforcement::action::ControlTable {
         use crate::enforcement::action::ControlTable;
-        let entries: Vec<DomainAction> = actions
+        let early: Vec<PerFqdnControl> = early
             .iter()
-            .map(|&(kind, scope)| DomainAction::new(kind, scope))
+            .map(|&(kind, scope)| PerFqdnControl::control(kind, scope))
             .collect();
-        ControlTable::new(any_illegal, &entries).expect("in-bound test table")
+        let ja4: Vec<PerFqdnControl> = ja4
+            .iter()
+            .map(|&(kind, scope)| PerFqdnControl::control(kind, scope))
+            .collect();
+        ControlTable::new(any, &early, &ja4).expect("in-bound test table")
     }
 
     #[test]
@@ -870,8 +881,9 @@ pub(crate) mod tests {
     fn split_facts_actions_and_refusals_through_enforcement() {
         let mut latch = FirstSlot::new();
         let mut en = Enforcement::new(table(
-            AnyIllegalScope::Connection,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         ));
         let cause = AnyIllegalCause::HostNotAllowlisted;
         let v = en.decide(&mut latch, Violation::AnyIllegal { cause }, 0);
@@ -888,8 +900,7 @@ pub(crate) mod tests {
             "every detection folds a fact independent of the spent first-slot latch (ogot B3b)"
         );
         assert_eq!(
-            en.counters()
-                .actions_first_slot_block(AnyIllegalScope::Connection),
+            en.counters().actions_first_slot_block(Scope::Connection),
             1,
             "the Block action applies exactly once per connection"
         );
@@ -899,7 +910,11 @@ pub(crate) mod tests {
     #[test]
     fn domain_block_action_and_later_refusal_are_distinct_channels() {
         let actions = [(ActionKind::Block, Scope::Domain)];
-        let mut en = Enforcement::new(table(AnyIllegalScope::Connection, &actions));
+        let mut en = Enforcement::new(table(
+            any_controls(ActionKind::Block, Scope::Connection),
+            &actions,
+            &actions,
+        ));
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         let v = en.decide(
             &mut FirstSlot::new(),

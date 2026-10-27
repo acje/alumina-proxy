@@ -41,18 +41,23 @@ listen = "0.0.0.0:8080"
 startup_unresolved_allowance = 1
 resolver = ["1.1.1.1"]
 [any_illegal]
-scope = "connection"
+connect_parse = { action = "notify", scope = "connection" }
+host_not_allowlisted = { action = "block", scope = "all" }
+tls_profile = { action = "block", scope = "all" }
+ech = { action = "block", scope = "connection" }
 [allowed_fqdn."example.com:443"]
-early_data = { action = "flare_only", scope = "connection" }
+early_data = { action = "notify", scope = "connection" }
+ja4 = { action = "notify", scope = "connection" }
 [allowed_fqdn."sub.example.org.:443"]
-early_data = { action = "flare_only", scope = "connection" }
+early_data = { action = "notify", scope = "connection" }
+ja4 = { action = "notify", scope = "connection" }
 # trailing comment line: the document-bound test pads this line to the exact limit
 "#;
 
 /// One keyed `[allowed_fqdn."<fqdn>:<port>"]` table per allowlisted name.
 fn keyed_entry(fqdn: &str) -> String {
     format!(
-        "[allowed_fqdn.\"{fqdn}\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+        "[allowed_fqdn.\"{fqdn}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
     )
 }
 
@@ -110,11 +115,11 @@ fn config_all_mandatory_fields_fail_when_missing() {
         ),
         (
             "resolver",
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
         ),
         (
             "any_illegal",
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
         ),
     ] {
         assert!(
@@ -125,7 +130,7 @@ fn config_all_mandatory_fields_fail_when_missing() {
             "config missing {field} must fail with MissingField({field})"
         );
     }
-    let absent_allowlist = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n";
+    let absent_allowlist = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n";
     assert!(
         matches!(
             config::parse_config_document(absent_allowlist),
@@ -152,7 +157,7 @@ fn config_unknown_key_and_unknown_table_fail() {
     assert!(
         matches!(
             config::parse_config_document(
-                "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[actions]\nkind = [\"flare_only\"]\nscope = [\"connection\"]\n"
+                "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[actions]\nkind = [\"notify\"]\nscope = [\"connection\"]\n"
             ),
             Err(ConfigError::UnknownTable(_))
         ),
@@ -172,7 +177,7 @@ fn config_duplicate_key_and_duplicate_table_fail() {
         }) if !message.is_empty()
     ));
 
-    let dup_table = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
+    let dup_table = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
     assert!(
         matches!(
             config::parse_config_document(dup_table),
@@ -194,19 +199,19 @@ fn config_wrong_types_fail_without_coercion() {
         ),
         (
             "allowed-fqdn-string",
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\nallowed_fqdn = \"a.example\"\n[any_illegal]\nscope = \"connection\"\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\nallowed_fqdn = \"a.example\"\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
         ),
         (
             "allowed-fqdn-integer-entry",
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn]\n\"a.example:443\" = 1\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn]\n\"a.example:443\" = 1\n",
         ),
         (
             "allowed-fqdn-boolean-entry",
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn]\n\"a.example:443\" = true\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn]\n\"a.example:443\" = true\n",
         ),
         (
-            "early-data-string",
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = \"flare_only\"\n",
+            "early-data-integer",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = 123\nja4 = { action = \"notify\", scope = \"connection\" }\n",
         ),
         (
             "listen-integer",
@@ -225,7 +230,7 @@ fn config_wrong_types_fail_without_coercion() {
 
 #[test]
 fn config_allowlist_empty_and_over_32_fail() {
-    let empty = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn]\n";
+    let empty = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn]\n";
     assert!(matches!(
         config::parse_config_document(empty),
         Err(ConfigError::AllowlistEmpty)
@@ -235,7 +240,7 @@ fn config_allowlist_empty_and_over_32_fail() {
         entries.push_str(&keyed_entry(&format!("n{i}.example:443")));
     }
     let doc = format!(
-        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n{entries}"
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{entries}"
     );
     assert!(matches!(
         config::parse_config_document(&doc),
@@ -245,7 +250,7 @@ fn config_allowlist_empty_and_over_32_fail() {
 
 #[test]
 fn config_allowlist_dedup_by_full_pair_same_host_different_port_distinct() {
-    let dup_exact = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
+    let dup_exact = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
     assert!(
         matches!(
             config::parse_config_document(dup_exact),
@@ -253,7 +258,7 @@ fn config_allowlist_dedup_by_full_pair_same_host_different_port_distinct() {
         ),
         "an exact duplicate table key is a TOML parse error: table keys are unique"
     );
-    let dup_normalized = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n[allowed_fqdn.\"a.example.:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
+    let dup_normalized = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"a.example.:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
     assert!(
         matches!(
             config::parse_config_document(dup_normalized),
@@ -261,7 +266,7 @@ fn config_allowlist_dedup_by_full_pair_same_host_different_port_distinct() {
         ),
         "distinct keys whose names normalize to the same <fqdn>:<port> pair are a duplicate"
     );
-    let dup_same_host_different_port = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
+    let dup_same_host_different_port = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
     let cfg = config::parse_config_document(dup_same_host_different_port)
         .expect("dedup is by the full <fqdn>:<port> pair, so the same host at a second port is a distinct entry");
     assert_eq!(cfg.allowlist().len(), 2);
@@ -282,7 +287,7 @@ fn config_invalid_fqdn_rejected() {
         ),
     ] {
         let doc = format!(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n{}",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{}",
             keyed_entry(fqdn)
         );
         assert!(
@@ -303,7 +308,7 @@ fn config_allowlist_requires_fqdn_port_else_invalid_fqdn_exit78() {
         ("port-empty", "a.example:"),
     ] {
         let doc = format!(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n{}",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{}",
             keyed_entry(entry)
         );
         let doc_name = format!("allowlist entry {name:?} must be rejected");
@@ -315,7 +320,7 @@ fn config_allowlist_requires_fqdn_port_else_invalid_fqdn_exit78() {
         assert_eq!(err.exit_status(), 78, "InvalidFqdn must exit 78");
     }
     let ok_doc = format!(
-        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n{}{}",
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{}{}",
         keyed_entry("a.example:1"),
         keyed_entry("b.example:65535")
     );
@@ -328,7 +333,7 @@ fn config_allowlist_requires_fqdn_port_else_invalid_fqdn_exit78() {
 #[test]
 fn config_allowance_out_of_range_fails() {
     let eq_len = format!(
-        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\n[any_illegal]\nscope = \"connection\"\n{}",
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{}",
         keyed_entry("a.example:443")
     );
     assert!(matches!(
@@ -336,7 +341,7 @@ fn config_allowance_out_of_range_fails() {
         Err(ConfigError::AllowanceOutOfRange { .. })
     ));
     let negative = format!(
-        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = -1\n[any_illegal]\nscope = \"connection\"\n{}",
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = -1\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{}",
         keyed_entry("a.example:443")
     );
     assert!(matches!(
@@ -344,7 +349,7 @@ fn config_allowance_out_of_range_fails() {
         Err(ConfigError::AllowanceOutOfRange { .. })
     ));
     let zero_ok = format!(
-        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n{}",
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{}",
         keyed_entry("a.example:443")
     );
     assert!(config::parse_config_document(&zero_ok).is_ok());
@@ -363,7 +368,7 @@ fn config_listen_variants() {
         ("empty", ""),
     ] {
         let doc = format!(
-            "listen = \"{listen}\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n{}",
+            "listen = \"{listen}\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{}",
             keyed_entry("a.example:443")
         );
         assert!(
@@ -372,7 +377,7 @@ fn config_listen_variants() {
         );
     }
     let ipv6_ok = format!(
-        "listen = \"[2001:db8::1]:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n{}",
+        "listen = \"[2001:db8::1]:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{}",
         keyed_entry("a.example:443")
     );
     let cfg = config::parse_config_document(&ipv6_ok).expect("bracketed IPv6 listen");
@@ -387,7 +392,7 @@ fn config_allowlist_32_max_fits_document_bound() {
         entries.push_str(&keyed_entry(&format!("{i}.example.com:443")));
     }
     let doc = format!(
-        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n{entries}"
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{entries}"
     );
     assert!(
         doc.len() <= config::CONFIG_DOC_LIMIT,
@@ -422,7 +427,7 @@ fn config_non_utf8_document_fails_with_dedicated_encoding_error() {
 
 fn resolver_doc(resolver_key: &str) -> String {
     format!(
-        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n{resolver_key}[any_illegal]\nscope = \"connection\"\n{}",
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n{resolver_key}[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n{}",
         keyed_entry("a.example:443")
     )
 }
@@ -464,7 +469,7 @@ fn resolver_invalid_first_cannot_skip_to_later() {
 
 #[test]
 fn resolver_missing_empty_and_oversize_rejected() {
-    let no_key = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
+    let no_key = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
     assert!(matches!(
         config::parse_config_document(no_key),
         Err(ConfigError::MissingField(f)) if f == "resolver"

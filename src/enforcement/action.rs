@@ -1,11 +1,11 @@
 //! Legal configuration values for the tripwire/action control surface
-//! (docs/alumina-proxy.md tripwire amendment): scopes, per-domain actions,
+//! (docs/alumina-proxy.md tripwire amendment): scopes, per-control actions,
 //! the fixed per-ordinal table, and the per-connection first-AnyIllegal
-//! latch. Tarpit is deferred and has no type here.
+//! latch. Tarpit is reserved and has no type here.
 
 use crate::config::ALLOWLIST_MAX;
 
-/// Block/Flare supplement scope; the legal per-domain action scopes.
+/// Block/Notify supplement scope; the legal action scopes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Scope {
@@ -14,41 +14,33 @@ pub enum Scope {
     All = 2,
 }
 
-/// The legal scope of the `AnyIllegal` first-slot `Block`. `Domain` is invalid
-/// configuration for the `AnyIllegal` action and is therefore not representable
-/// here (docs/alumina-proxy.md tripwire amendment).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum AnyIllegalScope {
-    Connection = 0,
-    All = 1,
+impl Scope {
+    /// The number of scopes; the fixed index bound of any per-scope counter
+    /// array.
+    pub const COUNT: usize = 3;
 }
 
-impl AnyIllegalScope {
-    pub const COUNT: usize = 2;
-}
-
-/// Per-domain action kind. `Tarpit` is deferred and is not a legal
+/// Per-control action kind. `Tarpit` is reserved and is not a legal
 /// operational action; configuration selecting it is rejected at parse with
-/// an explicit deferred-status diagnostic.
+/// an explicit reserved-keyword diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ActionKind {
-    FlareOnly = 0,
+    Notify = 0,
     Block = 1,
 }
 
-/// Exactly one configured per-domain action: one kind and one scope.
+/// Exactly one configured control: one action kind and one scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DomainAction {
+pub struct Control {
     kind: ActionKind,
     scope: Scope,
 }
 
-impl DomainAction {
-    /// Build a domain action from a kind and scope.
-    pub const fn new(kind: ActionKind, scope: Scope) -> DomainAction {
-        DomainAction { kind, scope }
+impl Control {
+    /// Build a control from a kind and scope.
+    pub const fn new(kind: ActionKind, scope: Scope) -> Control {
+        Control { kind, scope }
     }
 
     /// The action kind.
@@ -57,11 +49,50 @@ impl DomainAction {
     }
 
     /// The action scope: enforcement scope for `Block`, reporting scope for
-    /// `FlareOnly`. An implicit Flare for an applied `Block` inherits that
+    /// `Notify`. An implicit Notify for an applied `Block` inherits that
     /// Block's scope.
     pub const fn scope(self) -> Scope {
         self.scope
     }
+}
+
+/// A per-FQDN control value: either a configured action/scope or the
+/// per-FQDN-only `ignore` opt-out (no action, no flare; the JA4 baseline is
+/// still recorded, the change signal is suppressed). `ignore` is never a
+/// global default and is invalid on `any_illegal` controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerFqdnControl {
+    Ignore,
+    Control(Control),
+}
+
+impl PerFqdnControl {
+    /// The per-FQDN `ignore` opt-out.
+    pub const fn ignore() -> PerFqdnControl {
+        PerFqdnControl::Ignore
+    }
+
+    /// A configured per-FQDN control from a kind and scope.
+    pub const fn control(kind: ActionKind, scope: Scope) -> PerFqdnControl {
+        PerFqdnControl::Control(Control::new(kind, scope))
+    }
+}
+
+/// The four `any_illegal` controls, keyed by attribution surface: they fire
+/// before a domain is validated, so no ordinal is attributable. No `ignore`
+/// is representable here: the suspicious class is always observable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AnyIllegalControl {
+    ConnectParse = 0,
+    HostNotAllowlisted = 1,
+    TlsProfile = 2,
+    Ech = 3,
+}
+
+impl AnyIllegalControl {
+    /// The number of `any_illegal` controls.
+    pub const COUNT: usize = 4;
 }
 
 /// A 0-based configured-allowlist ordinal whose range is bound by the table
@@ -123,43 +154,65 @@ impl FirstSlot {
     }
 }
 
-/// Boot-fixed per-ordinal domain-action table plus the `AnyIllegal` special
-/// scope. Storage is a fixed `[DomainAction; ALLOWLIST_MAX]` with the exact
-/// configured count; construction rejects an empty or over-limit set, `at` is
-/// checked against that count, and ordinals are minted only from the table, so
-/// no unconfigured position carries a fabricated configured action.
+/// Boot-fixed control table: the four `any_illegal` controls plus per-ordinal
+/// `early_data` and `ja4` per-FQDN controls. Storage is fixed
+/// (`[Control; 4]` plus two `[PerFqdnControl; ALLOWLIST_MAX]`), with the exact
+/// configured count; construction rejects an empty or over-limit set and
+/// ordinals are minted only from the table, so no unconfigured position
+/// carries a fabricated configured action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ControlTable {
-    any_illegal: AnyIllegalScope,
-    per_domain: [DomainAction; ALLOWLIST_MAX],
+    any_illegal: [Control; AnyIllegalControl::COUNT],
+    early_data: [PerFqdnControl; ALLOWLIST_MAX],
+    ja4: [PerFqdnControl; ALLOWLIST_MAX],
     count: usize,
 }
 
 impl ControlTable {
-    /// Build the table from the configured per-domain actions (crate-internal;
-    /// the config path supplies exactly the allowlist count, within bound).
-    /// `None` when the set is empty or exceeds the allowlist bound.
+    /// Build the table from the configured controls (crate-internal; the
+    /// config path supplies exactly the allowlist count, within bound).
+    /// `None` when the set is empty, exceeds the allowlist bound, or the
+    /// `early_data` and `ja4` counts disagree.
     pub(crate) fn new(
-        any_illegal: AnyIllegalScope,
-        actions: &[DomainAction],
+        any_illegal: [Control; AnyIllegalControl::COUNT],
+        early_data: &[PerFqdnControl],
+        ja4: &[PerFqdnControl],
     ) -> Option<ControlTable> {
-        let count = actions.len();
-        if count == 0 || count > ALLOWLIST_MAX {
+        let count = early_data.len();
+        if count == 0 || count > ALLOWLIST_MAX || ja4.len() != count {
             return None;
         }
-        let mut per_domain =
-            [DomainAction::new(ActionKind::FlareOnly, Scope::Connection); ALLOWLIST_MAX];
-        per_domain[..count].copy_from_slice(actions);
+        let mut early = [PerFqdnControl::Ignore; ALLOWLIST_MAX];
+        early[..count].copy_from_slice(early_data);
+        let mut j4 = [PerFqdnControl::Ignore; ALLOWLIST_MAX];
+        j4[..count].copy_from_slice(ja4);
         Some(ControlTable {
             any_illegal,
-            per_domain,
+            early_data: early,
+            ja4: j4,
             count,
         })
     }
 
-    /// The `AnyIllegal` first-slot scope.
-    pub const fn any_illegal(&self) -> AnyIllegalScope {
-        self.any_illegal
+    /// The configured control for one `any_illegal` control key.
+    pub const fn any_illegal(&self, control: AnyIllegalControl) -> Control {
+        self.any_illegal[control as usize]
+    }
+
+    /// The configured per-FQDN `early_data` control for an ordinal, or `None`
+    /// when the ordinal is not within this table's configured count (including
+    /// an ordinal minted by a different, larger table). A filler entry is
+    /// never reachable.
+    pub fn early_data(&self, ordinal: DomainOrdinal) -> Option<PerFqdnControl> {
+        (ordinal.get() < self.count).then(|| self.early_data[ordinal.get()])
+    }
+
+    /// The configured per-FQDN `ja4` control for an ordinal, or `None` when
+    /// the ordinal is not within this table's configured count (including an
+    /// ordinal minted by a different, larger table). A filler entry is never
+    /// reachable.
+    pub fn ja4(&self, ordinal: DomainOrdinal) -> Option<PerFqdnControl> {
+        (ordinal.get() < self.count).then(|| self.ja4[ordinal.get()])
     }
 
     /// Number of configured domain entries.
@@ -167,17 +220,10 @@ impl ControlTable {
         self.count
     }
 
-    /// The configured action position (0-based) for this table, or `None`
+    /// The configured ordinal position (0-based) for this table, or `None`
     /// when the index is not within this table's configured count.
     pub fn ordinal(&self, index: usize) -> Option<DomainOrdinal> {
         DomainOrdinal::mint(index, self.count)
-    }
-
-    /// The configured action for an ordinal, or `None` when the ordinal is not
-    /// within this table's configured count (including an ordinal minted by a
-    /// different, larger table). A filler entry is never reachable.
-    pub fn at(&self, ordinal: DomainOrdinal) -> Option<&DomainAction> {
-        (ordinal.get() < self.count).then(|| &self.per_domain[ordinal.get()])
     }
 }
 
@@ -185,27 +231,41 @@ impl ControlTable {
 mod tests {
     use super::*;
 
-    fn entry(i: usize) -> DomainAction {
+    fn entry(i: usize) -> PerFqdnControl {
         let kind = if i.is_multiple_of(2) {
-            ActionKind::FlareOnly
+            ActionKind::Notify
         } else {
             ActionKind::Block
         };
-        DomainAction::new(kind, Scope::Connection)
+        PerFqdnControl::control(kind, Scope::Connection)
     }
 
     fn table(count: usize) -> ControlTable {
-        let actions: Vec<DomainAction> = (0..count).map(entry).collect();
-        ControlTable::new(AnyIllegalScope::All, &actions).expect("in-bound test table")
+        let any_illegal = [Control::new(ActionKind::Block, Scope::All); AnyIllegalControl::COUNT];
+        let early: Vec<PerFqdnControl> = (0..count).map(entry).collect();
+        let ja4: Vec<PerFqdnControl> = (0..count).map(entry).collect();
+        ControlTable::new(any_illegal, &early, &ja4).expect("in-bound test table")
     }
 
     #[test]
     fn new_rejects_empty_and_over_limit_sets() {
-        assert!(ControlTable::new(AnyIllegalScope::All, &[]).is_none());
-        let over: Vec<DomainAction> = (0..=ALLOWLIST_MAX).map(entry).collect();
-        assert!(ControlTable::new(AnyIllegalScope::All, &over).is_none());
-        let max: Vec<DomainAction> = (0..ALLOWLIST_MAX).map(entry).collect();
-        assert!(ControlTable::new(AnyIllegalScope::All, &max).is_some());
+        let any_illegal = [Control::new(ActionKind::Block, Scope::All); AnyIllegalControl::COUNT];
+        assert!(ControlTable::new(any_illegal, &[], &[]).is_none());
+        let over: Vec<PerFqdnControl> = (0..=ALLOWLIST_MAX).map(entry).collect();
+        assert!(ControlTable::new(any_illegal, &over, &over).is_none());
+        let max: Vec<PerFqdnControl> = (0..ALLOWLIST_MAX).map(entry).collect();
+        assert!(ControlTable::new(any_illegal, &max, &max).is_some());
+    }
+
+    #[test]
+    fn new_rejects_mismatched_per_fqdn_counts() {
+        let any_illegal = [Control::new(ActionKind::Block, Scope::All); AnyIllegalControl::COUNT];
+        let early: Vec<PerFqdnControl> = (0..2).map(entry).collect();
+        let ja4: Vec<PerFqdnControl> = (0..1).map(entry).collect();
+        assert!(
+            ControlTable::new(any_illegal, &early, &ja4).is_none(),
+            "early_data and ja4 counts must agree"
+        );
     }
 
     #[test]
@@ -221,29 +281,45 @@ mod tests {
     }
 
     #[test]
-    fn at_is_none_for_ordinal_outside_this_tables_count() {
+    fn per_fqdn_controls_are_read_back_by_ordinal() {
         let t = table(2);
-        let out = DomainOrdinal::mint(5, ALLOWLIST_MAX).expect("lawful in a bound-level table");
+        let zero = t.ordinal(0).expect("in table range");
+        let one = t.ordinal(1).expect("in table range");
+        assert_eq!(t.early_data(zero), Some(entry(0)));
+        assert_eq!(t.early_data(one), Some(entry(1)));
+        assert_eq!(t.ja4(zero), Some(entry(0)));
+        assert_eq!(t.ja4(one), Some(entry(1)));
         assert_eq!(
-            t.at(out),
-            None,
-            "no fabricated configured action for an unconfigured ordinal"
+            t.any_illegal(AnyIllegalControl::ConnectParse),
+            Control::new(ActionKind::Block, Scope::All)
         );
-        let in_range = t.ordinal(1).expect("in table range");
-        assert_eq!(t.at(in_range), Some(&entry(1)));
+        assert_eq!(
+            t.any_illegal(AnyIllegalControl::Ech),
+            Control::new(ActionKind::Block, Scope::All)
+        );
     }
 
     #[test]
-    fn at_rejects_a_cross_table_ordinal() {
-        let small = table(2);
-        let big = table(ALLOWLIST_MAX);
-        let cross = big
-            .ordinal(5)
-            .expect("index 5 configured in a 32-entry table");
+    fn unconfigured_ordinal_reads_no_configured_control() {
+        let t = table(1);
+        let unbound = DomainOrdinal::from_index(ALLOWLIST_MAX - 1).expect("bound-level ordinal");
         assert_eq!(
-            small.at(cross),
+            t.early_data(unbound),
             None,
-            "an ordinal minted by another table must not index this one"
+            "an unconfigured position exposes no control, never a fabricated action"
         );
+        assert_eq!(t.ja4(unbound), None);
+    }
+
+    #[test]
+    fn control_table_storage_fits_planned_bound() {
+        let t = table(1);
+        assert!(
+            core::mem::size_of_val(&t) <= 256,
+            "data table at {} bytes",
+            core::mem::size_of_val(&t)
+        );
+        assert_eq!(core::mem::size_of::<Control>(), 2);
+        assert_eq!(t.len(), 1);
     }
 }

@@ -1221,12 +1221,12 @@ mod tests {
             _ => panic!("test allowlist helper supports 1..=3 names"),
         };
         let mut doc = format!(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n"
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n"
         );
         for name in names {
             let _ = write!(
                 doc,
-                "[allowed_fqdn.\"{name}\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+                "[allowed_fqdn.\"{name}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
             );
         }
         crate::config::parse_config_document(&doc).expect("valid test config")
@@ -1659,12 +1659,12 @@ mod tests {
         use crate::config::ALLOWLIST_MAX;
         use crate::startup_dns::{FailureReason, NameOutcome, StartupReport};
         let mut doc = String::from(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
         );
         for ordinal in 0..ALLOWLIST_MAX {
             let _ = write!(
                 doc,
-                "[allowed_fqdn.\"n{ordinal}.example.org:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+                "[allowed_fqdn.\"n{ordinal}.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
             );
         }
         let config = crate::config::parse_config_document(&doc).expect("32-name config");
@@ -1952,13 +1952,13 @@ mod startup_integration {
 
     fn config_with(names: &str, allowance: u8, listen_port: u16) -> Config {
         let mut doc = format!(
-            "listen = \"127.0.0.1:{listen_port}\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n"
+            "listen = \"127.0.0.1:{listen_port}\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n"
         );
         for name in names.split(", ") {
             let name = name.trim_matches('"');
             let _ = write!(
                 doc,
-                "[allowed_fqdn.\"{name}\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+                "[allowed_fqdn.\"{name}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
             );
         }
         parse_config_document(&doc).expect("valid test config")
@@ -2313,7 +2313,7 @@ mod startup_integration {
     fn widest_allowlist_config() -> Config {
         use crate::config::{ALLOWLIST_MAX, CONFIG_DOC_LIMIT, FQDN_MAX_LEN};
         let mut doc = String::from(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
         );
         for ordinal in 0..ALLOWLIST_MAX {
             let mut first = format!("n{ordinal}");
@@ -2329,7 +2329,7 @@ mod startup_integration {
             assert_eq!(name.len(), FQDN_MAX_LEN, "the widest legal FQDN");
             let _ = write!(
                 doc,
-                "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+                "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
             );
         }
         assert!(

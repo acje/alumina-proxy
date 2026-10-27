@@ -48,7 +48,7 @@ use crate::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
 use crate::config::{ALLOWLIST_MAX, FixedHostname};
 use crate::connect::{ConnectHeadReason, ConnectParser, ConnectRequest, Feed};
 use crate::eligibility::NumericAddr;
-use crate::enforcement::action::{DomainOrdinal, FirstSlot, Scope};
+use crate::enforcement::action::{DomainOrdinal, FirstSlot, PerFqdnControl, Scope};
 use crate::enforcement::monitor::{CapturedDetail, CapturedFact, SlotCapture};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason, Violation};
 use crate::gate::{Activity, TunnelGate, UpstreamWrite, ValidatedHello};
@@ -2323,7 +2323,9 @@ impl Serving {
             Effect::Block {
                 scope: Scope::Domain,
             } => {
-                if let Violation::EarlyUpstreamData { ordinal } = violation {
+                if let Violation::EarlyUpstreamData { ordinal } | Violation::Ja4Change { ordinal } =
+                    violation
+                {
                     self.stop_domain_block(ordinal, index);
                 }
             }
@@ -2777,9 +2779,13 @@ impl Serving {
                 self.storage.enforcement_mut().note_fact_ja4_seed();
             }
             BaselineOutcome::Overflow => {
-                self.storage
-                    .enforcement_mut()
-                    .note_fact_ja4_change(ordinal, ja4, dest_ip);
+                let control = self.storage.enforcement().control().ja4(ordinal);
+                if control != Some(PerFqdnControl::Ignore) {
+                    self.storage
+                        .enforcement_mut()
+                        .note_fact_ja4_change(ordinal, ja4, dest_ip);
+                    self.project_tripwire(index, Violation::Ja4Change { ordinal });
+                }
             }
             BaselineOutcome::Unchanged => {}
         }
@@ -3321,7 +3327,7 @@ const fn captured_fact(violation: Violation) -> Option<CapturedFact> {
         Violation::MissingParseResult => {
             Some(CapturedFact::Unknown(UnknownReason::MissingParseResult))
         }
-        Violation::AnyIllegal { .. } => None,
+        Violation::AnyIllegal { .. } | Violation::Ja4Change { .. } => None,
     }
 }
 

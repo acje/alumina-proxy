@@ -67,7 +67,7 @@ impl Serving {
 
     pub(super) fn reject_hello(&mut self, index: usize, reason: HelloRejectReason) {
         self.slots[index].gate.on_hello_rejected();
-        self.any_illegal(index, AnyIllegalCause::TlsProfile(reason));
+        self.any_illegal(index, AnyIllegalCause::from_hello_reject(reason));
         self.emit_reject(
             index,
             RejectReason::TlsValidation,

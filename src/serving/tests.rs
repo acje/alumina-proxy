@@ -9,7 +9,7 @@ const RETAINED_OFFSET: usize = 137;
 
 fn config(port: u16) -> crate::config::Config {
     let doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
     );
     crate::config::parse_config_document(&doc).expect("valid test config")
 }
@@ -4342,7 +4342,7 @@ fn serve_on_cfg(port: u16, cfg: &crate::config::Config) -> Serving {
 
 fn cfg_doc1(port: u16, any_scope: &str, kind: &str, action_scope: &str) -> crate::config::Config {
     let doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"{any_scope}\"\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"{any_scope}\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"{any_scope}\" }}\ntls_profile = {{ action = \"block\", scope = \"{any_scope}\" }}\nech = {{ action = \"block\", scope = \"{any_scope}\" }}\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\n"
     );
     crate::config::parse_config_document(&doc).expect("valid enforcement test config")
 }
@@ -4352,7 +4352,7 @@ fn cfg_doc1(port: u16, any_scope: &str, kind: &str, action_scope: &str) -> crate
 /// (H1, alumina-qwzns).
 fn cfg_two_ports(port: u16, kind: &str, action_scope: &str) -> crate::config::Config {
     let doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\n"
     );
     crate::config::parse_config_document(&doc).expect("valid two-port enforcement test config")
 }
@@ -4376,7 +4376,7 @@ fn with_serving_stack_cfg(
 #[test]
 fn any_illegal_all_latches_before_further_io_stops_admission_and_closes_pending() {
     let port = ephemeral_port();
-    let cfg = cfg_doc1(port, "all", "flare_only", "connection");
+    let cfg = cfg_doc1(port, "all", "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let mut a = connect(port);
         a.write_all(b"CONNECT sub.example.org:44")
@@ -4562,7 +4562,7 @@ fn fire_early_data(serving: &mut Serving, index: usize, test_data: Option<usize>
 #[test]
 fn validated_early_data_flare_is_reporting_only_and_setup_still_terminates() {
     let port = ephemeral_port();
-    let cfg = cfg_doc1(port, "connection", "flare_only", "connection");
+    let cfg = cfg_doc1(port, "connection", "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let _client = connect(port);
         pump(serving, 20);
@@ -4584,7 +4584,7 @@ fn validated_early_data_flare_is_reporting_only_and_setup_still_terminates() {
         assert_eq!(
             serving.storage().occupied(),
             0,
-            "FlareOnly never delays the mandatory denial"
+            "Notify never delays the mandatory denial"
         );
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
         let ordinal = serving
@@ -4596,7 +4596,7 @@ fn validated_early_data_flare_is_reporting_only_and_setup_still_terminates() {
                 .storage()
                 .enforcement()
                 .counters()
-                .actions_flare(ordinal),
+                .actions_notify(ordinal),
             1
         );
         assert_eq!(
@@ -4609,7 +4609,7 @@ fn validated_early_data_flare_is_reporting_only_and_setup_still_terminates() {
         );
         assert!(
             !serving.storage().enforcement().is_blocked(ordinal),
-            "FlareOnly must not mark the domain blocked"
+            "Notify must not mark the domain blocked"
         );
         assert_eq!(
             serving
@@ -4713,7 +4713,7 @@ fn non443_connect_dials_the_entry_port_then_resets_approved_port_on_close_slot()
         "the loopback listener port must be non-443 for this regression"
     );
     let cfg_doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"sub.example.org:{dial_port}\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:{dial_port}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
     );
     let cfg = crate::config::parse_config_document(&cfg_doc).expect("valid non-443 config");
     with_serving_stack_cfg(port, cfg, move |serving| {
@@ -4859,7 +4859,7 @@ fn early_data_on_unconfigured_pair_folds_unattributed() {
 #[test]
 fn block_all_guard_refuses_pending_relay_write_after_latch() {
     let port = ephemeral_port();
-    let cfg = cfg_doc1(port, "all", "flare_only", "connection");
+    let cfg = cfg_doc1(port, "all", "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let mut relay_client = connect(port);
         pump(serving, 20);
@@ -4955,7 +4955,7 @@ fn block_all_guard_refuses_pending_relay_write_after_latch() {
 #[test]
 fn client_writable_latch_guard_closes_live_relay_without_draining() {
     let port = ephemeral_port();
-    let cfg = cfg_doc1(port, "all", "flare_only", "connection");
+    let cfg = cfg_doc1(port, "all", "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         for _ in 0..3 {
             let mut evil = connect(port);
@@ -5029,7 +5029,7 @@ fn client_writable_latch_guard_closes_live_relay_without_draining() {
 #[test]
 fn accept_all_latch_guard_holds_with_listener_re_attached() {
     let port = ephemeral_port();
-    let cfg = cfg_doc1(port, "all", "flare_only", "connection");
+    let cfg = cfg_doc1(port, "all", "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         for _ in 0..3 {
             let mut evil = connect(port);
@@ -5077,7 +5077,7 @@ fn accept_all_latch_guard_holds_with_listener_re_attached() {
 #[test]
 fn internal_missing_approval_is_unknown_closes_locally_and_unrelated_flow_survives() {
     let port = ephemeral_port();
-    let cfg = cfg_doc1(port, "all", "flare_only", "connection");
+    let cfg = cfg_doc1(port, "all", "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let wire = hello_wire(b"sub.example.org", false);
         {
@@ -5136,7 +5136,7 @@ fn internal_missing_approval_is_unknown_closes_locally_and_unrelated_flow_surviv
 #[test]
 fn internal_missing_complete_hello_is_unknown_and_never_latches() {
     let port = ephemeral_port();
-    let cfg = cfg_doc1(port, "all", "flare_only", "connection");
+    let cfg = cfg_doc1(port, "all", "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         {
             let ws = &mut serving.slots[0];
@@ -5180,7 +5180,7 @@ fn internal_missing_complete_hello_is_unknown_and_never_latches() {
 #[test]
 fn genuine_malformed_hello_still_projects_any_illegal_and_latches_scope_all() {
     let port = ephemeral_port();
-    let cfg = cfg_doc1(port, "all", "flare_only", "connection");
+    let cfg = cfg_doc1(port, "all", "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let wire = hello_wire(b"evil.example.net", false);
         let mut insp = ChInspector::new();
@@ -5236,7 +5236,7 @@ fn enforcement_witness_thread(body: impl FnOnce() + Send + 'static) {
 fn block_all_latch_closure_spends_zero_allocations() {
     enforcement_witness_thread(|| {
         let port = ephemeral_port();
-        let cfg = cfg_doc1(port, "all", "flare_only", "connection");
+        let cfg = cfg_doc1(port, "all", "notify", "connection");
         let mut serving = serve_on_cfg(port, &cfg);
         let mut pending = connect(port);
         pending
@@ -5363,7 +5363,7 @@ fn early_data_projection_spends_zero_allocations() {
 fn block_all_storm_sweeps_128_slots_alloc_free() {
     enforcement_witness_thread(|| {
         let port = ephemeral_port();
-        let cfg = cfg_doc1(port, "all", "flare_only", "connection");
+        let cfg = cfg_doc1(port, "all", "notify", "connection");
         let mut serving = serve_on_cfg(port, &cfg);
         let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
         for ws in serving.slots.iter_mut() {
@@ -5594,7 +5594,7 @@ fn refused_wire_bodies_are_pinned_plain_text() {
 /// missing hostname field.
 fn pre_peer_refusals_carry_requested_hostname_in_reject_record() {
     let port = ephemeral_port();
-    let cfg = cfg_doc1(port, "connection", "flare_only", "connection");
+    let cfg = cfg_doc1(port, "connection", "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let mut forbidden = connect(port);
         forbidden
@@ -6285,7 +6285,7 @@ fn allowlisted_unresolved_connect_refusal_is_wire_pinned_through_run_once() {
 /// controllable (possibly closed) upstream port.
 fn config_pair(port: u16, upstream_port: u16) -> crate::config::Config {
     let doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"sub.example.org:{upstream_port}\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:{upstream_port}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
     );
     crate::config::parse_config_document(&doc).expect("valid retry test config")
 }
@@ -7142,7 +7142,7 @@ fn ja4_first_seen_records_baseline_without_signal() {
 /// never the first entry's (H1, alumina-qwzns).
 fn ja4_baseline_keys_second_port_ordinal() {
     let port = ephemeral_port();
-    let cfg = cfg_two_ports(port, "flare_only", "connection");
+    let cfg = cfg_two_ports(port, "notify", "connection");
     with_serving_stack_cfg(port, cfg, move |serving| {
         let wire = hello_wire(b"a.example", false);
         serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));

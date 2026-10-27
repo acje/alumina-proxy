@@ -1,6 +1,6 @@
 use crate::eligibility::NumericAddr;
 
-use super::action::{AnyIllegalScope, ControlTable, DomainOrdinal, FirstSlot, Scope};
+use super::action::{ControlTable, DomainOrdinal, FirstSlot, Scope};
 use super::monitor::{DnsAnomalyKind, Monitor, SlotCapture};
 use super::policy::{Effect, UnknownReason, Violation, decide as pure_decide};
 
@@ -131,48 +131,31 @@ impl Enforcement {
 
     pub fn decide(&mut self, latch: &mut FirstSlot, violation: Violation, secs: u64) -> Effect {
         let raw = pure_decide(&self.control, latch, violation);
-        let effect = match violation {
-            Violation::AnyIllegal { cause: _ } => {
-                let crossed = self.any_illegal_gate.note(secs);
-                match raw {
-                    Effect::Block { scope: Scope::All } if !crossed => Effect::BaselineOnly,
-                    _ => raw,
+        let crossed = match violation {
+            Violation::AnyIllegal { .. } => self.any_illegal_gate.note(secs),
+            Violation::EarlyUpstreamData { .. } | Violation::Ja4Change { .. } => {
+                if matches!(raw, Effect::Block { scope: Scope::All }) {
+                    self.any_illegal_gate.note(secs)
+                } else {
+                    false
                 }
             }
+            _ => false,
+        };
+        let effect = match raw {
+            Effect::Block { scope: Scope::All } if !crossed => Effect::BaselineOnly,
             _ => raw,
         };
         match violation {
             Violation::AnyIllegal { cause } => {
                 self.monitor.note_fact_any_illegal(cause);
                 match effect {
-                    Effect::Block {
-                        scope: Scope::Connection,
-                    } => {
-                        self.monitor
-                            .note_action_first_slot_block(AnyIllegalScope::Connection);
-                    }
-                    Effect::Block { scope: Scope::All } => {
-                        let was_latched = self.block_all;
-                        self.block_all = true;
-                        self.monitor
-                            .note_action_first_slot_block(AnyIllegalScope::All);
-                        if !was_latched {
-                            self.monitor.note_block_all();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Violation::EarlyUpstreamData { ordinal } => {
-                self.monitor.note_fact_early_data(ordinal);
-                match effect {
-                    Effect::FlareOnly { .. } => {
-                        self.monitor.note_action_flare(ordinal);
+                    Effect::Notify { scope } => {
+                        self.monitor.note_action_first_slot_block(scope);
                     }
                     Effect::Block { scope } => {
-                        self.monitor.note_action_domain_block(ordinal);
+                        self.monitor.note_action_first_slot_block(scope);
                         match scope {
-                            Scope::Domain => self.blocked |= 1 << ordinal.get(),
                             Scope::All => {
                                 let was_latched = self.block_all;
                                 self.block_all = true;
@@ -180,11 +163,18 @@ impl Enforcement {
                                     self.monitor.note_block_all();
                                 }
                             }
-                            Scope::Connection => {}
+                            Scope::Connection | Scope::Domain => {}
                         }
                     }
-                    Effect::Unknown { .. } | Effect::BaselineOnly => {}
+                    _ => {}
                 }
+            }
+            Violation::EarlyUpstreamData { ordinal } => {
+                self.monitor.note_fact_early_data(ordinal);
+                self.apply_per_fqdn_action(effect, ordinal);
+            }
+            Violation::Ja4Change { ordinal } => {
+                self.apply_per_fqdn_action(effect, ordinal);
             }
             Violation::EvidenceInsufficient => {
                 self.monitor
@@ -199,6 +189,33 @@ impl Enforcement {
             }
         }
         effect
+    }
+
+    /// Applies a per-FQDN effect (from `early_data` or `ja4`) to the monitor
+    /// and the blocked-domain bitset. `BaselineOnly` and `Unknown` apply
+    /// nothing; `Notify` counts the per-ordinal notify action; `Block` counts
+    /// the domain block and latches the `Domain`/`All` scope.
+    const fn apply_per_fqdn_action(&mut self, effect: Effect, ordinal: DomainOrdinal) {
+        match effect {
+            Effect::Notify { .. } => {
+                self.monitor.note_action_notify(ordinal);
+            }
+            Effect::Block { scope } => {
+                self.monitor.note_action_domain_block(ordinal);
+                match scope {
+                    Scope::Domain => self.blocked |= 1 << ordinal.get(),
+                    Scope::All => {
+                        let was_latched = self.block_all;
+                        self.block_all = true;
+                        if !was_latched {
+                            self.monitor.note_block_all();
+                        }
+                    }
+                    Scope::Connection => {}
+                }
+            }
+            Effect::Unknown { .. } | Effect::BaselineOnly => {}
+        }
     }
 
     pub const fn note_domain_block(&mut self, ordinal: DomainOrdinal) {
@@ -299,16 +316,27 @@ mod tests {
     use super::*;
     use crate::client_hello::HelloRejectReason;
     use crate::connect::ConnectHeadReason;
-    use crate::enforcement::action::{ActionKind, AnyIllegalScope, DomainAction};
+    use crate::enforcement::action::{ActionKind, AnyIllegalControl, Control, PerFqdnControl};
     use crate::enforcement::monitor::DnsAnomalyKind;
     use crate::enforcement::policy::{AnyIllegalCause, UnknownReason};
 
-    fn table(any_illegal: AnyIllegalScope, actions: &[(ActionKind, Scope)]) -> ControlTable {
-        let entries: Vec<DomainAction> = actions
+    fn any_controls(kind: ActionKind, scope: Scope) -> [Control; AnyIllegalControl::COUNT] {
+        [Control::new(kind, scope); AnyIllegalControl::COUNT]
+    }
+
+    fn per_fqdn(actions: &[(ActionKind, Scope)]) -> Vec<PerFqdnControl> {
+        actions
             .iter()
-            .map(|&(kind, scope)| DomainAction::new(kind, scope))
-            .collect();
-        ControlTable::new(any_illegal, &entries).expect("in-bound test table")
+            .map(|&(kind, scope)| PerFqdnControl::control(kind, scope))
+            .collect()
+    }
+
+    fn table(
+        any: [Control; AnyIllegalControl::COUNT],
+        early: &[(ActionKind, Scope)],
+        ja4: &[(ActionKind, Scope)],
+    ) -> ControlTable {
+        ControlTable::new(any, &per_fqdn(early), &per_fqdn(ja4)).expect("in-bound test table")
     }
 
     #[test]
@@ -327,8 +355,9 @@ mod tests {
     #[test]
     fn note_fact_dns_anomaly_passes_through_to_the_monitor() {
         let t = table(
-            AnyIllegalScope::Connection,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
         en.note_fact_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
@@ -347,8 +376,9 @@ mod tests {
     #[test]
     fn note_fact_downgrade_to_plain_passes_through_to_the_monitor() {
         let t = table(
-            AnyIllegalScope::Connection,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
         en.note_fact_downgrade_to_plain();
@@ -363,8 +393,9 @@ mod tests {
     #[test]
     fn note_fact_probe_relocation_passes_through_to_the_monitor() {
         let t = table(
-            AnyIllegalScope::Connection,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
         en.note_fact_probe_relocation();
@@ -380,8 +411,9 @@ mod tests {
     #[test]
     fn note_fact_expired_pin_cert_passes_through_to_the_monitor() {
         let t = table(
-            AnyIllegalScope::Connection,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
         en.note_fact_expired_pin_cert();
@@ -396,8 +428,9 @@ mod tests {
     #[test]
     fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
         let t = table(
-            AnyIllegalScope::All,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
         let first = en.decide(
@@ -475,8 +508,9 @@ mod tests {
     #[test]
     fn wrong_port_and_transfer_encoding_fold_into_distinct_cause_counters() {
         let t = table(
-            AnyIllegalScope::All,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
         let mut latch = FirstSlot::new();
@@ -514,7 +548,8 @@ mod tests {
     #[test]
     fn early_data_block_domain_sets_bitset_and_counts() {
         let t = table(
-            AnyIllegalScope::Connection,
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Block, Scope::Domain)],
             &[(ActionKind::Block, Scope::Domain)],
         );
         let mut en = Enforcement::new(t);
@@ -537,29 +572,31 @@ mod tests {
     }
 
     #[test]
-    fn early_data_flare_counts_per_ordinal() {
+    fn early_data_notify_counts_per_ordinal() {
         let t = table(
-            AnyIllegalScope::Connection,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
         let mut latch = FirstSlot::new();
         let ordinal = t.ordinal(0).expect("ordinal");
         assert_eq!(
             en.decide(&mut latch, Violation::EarlyUpstreamData { ordinal }, 0),
-            Effect::FlareOnly {
+            Effect::Notify {
                 scope: Scope::Connection
             }
         );
-        assert_eq!(en.counters().actions_flare(ordinal), 1);
+        assert_eq!(en.counters().actions_notify(ordinal), 1);
         assert_eq!(en.counters().actions_domain_block(ordinal), 0);
     }
 
     #[test]
     fn all_transition_is_a_derived_latch_count_not_a_duplicate_action_total() {
         let t = table(
-            AnyIllegalScope::All,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(t);
         for i in 0..3u64 {
@@ -586,7 +623,11 @@ mod tests {
 
     #[test]
     fn block_all_latch_counts_the_transition_once_not_every_all_application() {
-        let t = table(AnyIllegalScope::All, &[(ActionKind::Block, Scope::All); 2]);
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All); 2],
+            &[(ActionKind::Block, Scope::All); 2],
+        );
         let mut en = Enforcement::new(t);
         let ordinal = t.ordinal(0).expect("big table ordinal");
         for i in 0..3u64 {
@@ -618,13 +659,15 @@ mod tests {
     #[test]
     fn early_data_unknown_outcome_is_one_detection_fact_not_two() {
         let small = table(
-            AnyIllegalScope::Connection,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(small);
         let mut latch = FirstSlot::new();
         let big = table(
-            AnyIllegalScope::Connection,
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Block, Scope::All); 2],
             &[(ActionKind::Block, Scope::All); 2],
         );
         let unbound = big.ordinal(1).expect("big table ordinal");
@@ -654,12 +697,17 @@ mod tests {
     #[test]
     fn unbound_and_insufficient_evidence_fold_unknown_by_reason_not_baseline() {
         let small = table(
-            AnyIllegalScope::All,
-            &[(ActionKind::FlareOnly, Scope::Connection)],
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut en = Enforcement::new(small);
         let mut latch = FirstSlot::new();
-        let big = table(AnyIllegalScope::All, &[(ActionKind::Block, Scope::All); 2]);
+        let big = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All); 2],
+            &[(ActionKind::Block, Scope::All); 2],
+        );
         let unbound = big.ordinal(1).expect("big table ordinal");
         let effect = en.decide(
             &mut latch,
@@ -699,7 +747,11 @@ mod tests {
 
     #[test]
     fn missing_result_and_unattributed_fold_distinct_unknown_never_block() {
-        let t = table(AnyIllegalScope::All, &[(ActionKind::Block, Scope::All)]);
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Block, Scope::All)],
+        );
         let mut en = Enforcement::new(t);
         let mut latch = FirstSlot::new();
         let effect = en.decide(&mut latch, Violation::MissingParseResult, 0);
@@ -764,7 +816,11 @@ mod tests {
 
     #[test]
     fn single_any_illegal_never_latches_all() {
-        let t = table(AnyIllegalScope::All, &[(ActionKind::Block, Scope::All)]);
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Block, Scope::All)],
+        );
         let mut en = Enforcement::new(t);
         let effect = en.decide(
             &mut FirstSlot::new(),
@@ -785,7 +841,11 @@ mod tests {
 
     #[test]
     fn three_any_illegal_facts_within_the_window_latch_all() {
-        let t = table(AnyIllegalScope::All, &[(ActionKind::Block, Scope::All)]);
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Block, Scope::All)],
+        );
         let mut en = Enforcement::new(t);
         assert_eq!(
             en.decide(
@@ -819,5 +879,127 @@ mod tests {
             "the third AnyIllegal fact within the window crosses the threshold"
         );
         assert!(en.block_all());
+    }
+
+    #[test]
+    fn per_control_any_illegal_notify_is_recorded_as_first_slot_action() {
+        let t = table(
+            any_controls(ActionKind::Notify, Scope::Connection),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
+        );
+        let mut en = Enforcement::new(t);
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::HostNotAllowlisted,
+            },
+            0,
+        );
+        assert_eq!(
+            effect,
+            Effect::Notify {
+                scope: Scope::Connection
+            },
+            "a notify-configured any_illegal control fires Notify on its first occurrence"
+        );
+        assert_eq!(
+            en.counters().actions_first_slot_block(Scope::Connection),
+            1,
+            "the first-slot action is recorded by scope regardless of kind"
+        );
+        assert!(!en.block_all());
+    }
+
+    #[test]
+    fn per_fqdn_all_scope_block_is_gated_by_sp001() {
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Block, Scope::All)],
+        );
+        let mut en = Enforcement::new(t);
+        let ordinal = t.ordinal(0).expect("ordinal");
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::EarlyUpstreamData { ordinal },
+            0,
+        );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "SP-001: a single per-FQDN All-scope block must not arm the All latch"
+        );
+        assert!(!en.block_all());
+        assert_eq!(en.counters().actions_domain_block(ordinal), 0);
+        for i in 1..3u64 {
+            en.decide(
+                &mut FirstSlot::new(),
+                Violation::AnyIllegal {
+                    cause: AnyIllegalCause::HostNotAllowlisted,
+                },
+                i,
+            );
+        }
+        assert!(en.block_all(), "the AnyIllegal facts arm the All latch");
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::EarlyUpstreamData { ordinal },
+            10,
+        );
+        assert_eq!(
+            effect,
+            Effect::Block { scope: Scope::All },
+            "once armed, a per-FQDN All-scope block applies"
+        );
+        assert_eq!(en.counters().actions_domain_block(ordinal), 1);
+    }
+
+    #[test]
+    fn ja4_change_projects_the_per_fqdn_action() {
+        let t = table(
+            any_controls(ActionKind::Block, Scope::Connection),
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Block, Scope::Domain)],
+        );
+        let mut en = Enforcement::new(t);
+        let ordinal = t.ordinal(0).expect("ordinal");
+        let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, 0);
+        assert_eq!(
+            effect,
+            Effect::Block {
+                scope: Scope::Domain
+            },
+            "a ja4 change projects the per-FQDN ja4 control's action"
+        );
+        assert_eq!(en.counters().actions_domain_block(ordinal), 1);
+        assert!(en.test_blocked(ordinal));
+        assert_eq!(
+            en.counters().facts_total(),
+            0,
+            "the ja4-change fact itself is noted by the serving path, not here"
+        );
+    }
+
+    #[test]
+    fn ja4_change_ignore_is_baseline_only() {
+        let any = any_controls(ActionKind::Block, Scope::Connection);
+        let early = vec![PerFqdnControl::control(
+            ActionKind::Notify,
+            Scope::Connection,
+        )];
+        let ja4 = vec![PerFqdnControl::Ignore];
+        let t = ControlTable::new(any, &early, &ja4).expect("in-bound test table");
+        let mut en = Enforcement::new(t);
+        let ordinal = t.ordinal(0).expect("ordinal");
+        let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, 0);
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "ja4 ignore suppresses the change signal to no action"
+        );
+        assert_eq!(en.counters().actions_domain_block(ordinal), 0);
+        assert_eq!(en.counters().actions_notify(ordinal), 0);
+        assert!(!en.test_blocked(ordinal));
     }
 }

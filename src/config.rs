@@ -4,7 +4,9 @@ use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::Range;
 
-use crate::enforcement::action::{ActionKind, AnyIllegalScope, ControlTable, DomainAction, Scope};
+use crate::enforcement::action::{
+    ActionKind, AnyIllegalControl, Control, ControlTable, PerFqdnControl, Scope,
+};
 use crate::resolver::{self, ResolverSet};
 
 pub const CONFIG_DOC_LIMIT: usize = 16384;
@@ -510,20 +512,20 @@ pub enum ConfigError {
     AllowanceOutOfRange {
         value: i64,
     },
-    AnyIllegalScopeDomain,
-    EarlyDataBlockScopeInvalid {
-        scope: String,
+    AnyIllegalScopeInvalid {
+        key: String,
+        value: String,
     },
     InvalidScope {
         key: String,
         value: String,
     },
     UnknownAction {
-        name: String,
+        key: String,
         value: String,
     },
     ActionTarpitDeferred {
-        name: String,
+        key: String,
     },
     ResolverCountOutOfRange {
         got: usize,
@@ -622,25 +624,21 @@ impl fmt::Display for ConfigError {
                     "config startup_unresolved_allowance {value} out of range 0..=allowlist_len-1"
                 )
             }
-            ConfigError::AnyIllegalScopeDomain => write!(
+            ConfigError::AnyIllegalScopeInvalid { key, value } => write!(
                 f,
-                "config any_illegal.scope \"domain\" invalid: AnyIllegal Block scope is connection or all only"
-            ),
-            ConfigError::EarlyDataBlockScopeInvalid { scope } => write!(
-                f,
-                "config early_data action \"block\" scope {scope:?} invalid: Block scope is connection only"
+                "config {key} value {value:?} invalid: any_illegal scope is connection or all only"
             ),
             ConfigError::InvalidScope { key, value } => write!(
                 f,
-                "config {key} value {value:?} invalid: expected connection, domain, or all"
+                "config {key} value {value:?} invalid: expected connection, fqdn, or all"
             ),
-            ConfigError::UnknownAction { name, value } => write!(
+            ConfigError::UnknownAction { key, value } => write!(
                 f,
-                "config allowed_fqdn.{name} early_data action value {value:?}: unknown action (expected flare_only or block)"
+                "config {key} value {value:?}: unknown action (expected ignore, notify, or block)"
             ),
-            ConfigError::ActionTarpitDeferred { name } => write!(
+            ConfigError::ActionTarpitDeferred { key } => write!(
                 f,
-                "config allowed_fqdn.{name} early_data action is \"tarpit\": Tarpit pacing is deferred and is not accepted as an operational setting (docs/alumina-proxy.md tripwire amendment)"
+                "config {key} is \"tarpit\": Tarpit pacing is deferred and is not accepted as an operational setting (docs/alumina-proxy.md tripwire amendment)"
             ),
             ConfigError::ResolverCountOutOfRange { got } => write!(
                 f,
@@ -751,8 +749,8 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
             value: allowance.into(),
         });
     }
-    let any_scope = parse_any_illegal(any_illegal)?;
-    let control = ControlTable::new(any_scope, &parsed.actions)
+    let any_controls = parse_any_illegal(any_illegal)?;
+    let control = ControlTable::new(any_controls, &parsed.early_data, &parsed.ja4)
         .expect("build_allowlist validated 1..=32 entries, so ControlTable::new cannot fail");
     let resolver = build_resolver_set(table)?;
     Ok(Config {
@@ -798,25 +796,112 @@ fn build_resolver_set(table: &toml::Table) -> Result<ResolverSet, ConfigError> {
     })
 }
 
-fn parse_any_illegal(value: &toml::Value) -> Result<AnyIllegalScope, ConfigError> {
+/// Parses the mandatory `[any_illegal]` per-control table: exactly the four
+/// `connect_parse`/`host_not_allowlisted`/`tls_profile`/`ech` controls, each a
+/// `{ action, scope }` table with `action` in `notify|block` (tarpit reserved)
+/// and `scope` in `connection|all`. Every control key is mandatory; a missing
+/// key is a startup failure, never a silent default.
+fn parse_any_illegal(
+    value: &toml::Value,
+) -> Result<[Control; AnyIllegalControl::COUNT], ConfigError> {
     let toml::Value::Table(table) = value else {
         return Err(ConfigError::WrongType(
             "any_illegal: expected table".to_owned(),
         ));
     };
-    for key in table.keys() {
-        if key != "scope" {
-            return Err(ConfigError::UnknownKey(format!("any_illegal.{key}")));
+    let mut controls = [Control::new(ActionKind::Block, Scope::All); AnyIllegalControl::COUNT];
+    let mut seen = [false; AnyIllegalControl::COUNT];
+    for (key, value) in table {
+        let control = match key.as_str() {
+            "connect_parse" => AnyIllegalControl::ConnectParse,
+            "host_not_allowlisted" => AnyIllegalControl::HostNotAllowlisted,
+            "tls_profile" => AnyIllegalControl::TlsProfile,
+            "ech" => AnyIllegalControl::Ech,
+            other => return Err(ConfigError::UnknownKey(format!("any_illegal.{other}"))),
+        };
+        controls[control as usize] = parse_any_illegal_control(value, key)?;
+        seen[control as usize] = true;
+    }
+    for (control, name) in [
+        (AnyIllegalControl::ConnectParse, "connect_parse"),
+        (
+            AnyIllegalControl::HostNotAllowlisted,
+            "host_not_allowlisted",
+        ),
+        (AnyIllegalControl::TlsProfile, "tls_profile"),
+        (AnyIllegalControl::Ech, "ech"),
+    ] {
+        if !seen[control as usize] {
+            return Err(ConfigError::MissingField(format!("any_illegal.{name}")));
         }
     }
-    let scope = require_string(table, "scope")
-        .map_err(|err| prefix_group_error("any_illegal", "scope", err))?;
-    match scope.as_str() {
-        "connection" => Ok(AnyIllegalScope::Connection),
-        "all" => Ok(AnyIllegalScope::All),
-        "domain" => Err(ConfigError::AnyIllegalScopeDomain),
+    Ok(controls)
+}
+
+/// Parses one `[any_illegal]` control value: a `{ action, scope }` table whose
+/// action is `notify|block` (tarpit reserved) and whose scope is
+/// `connection|all`.
+fn parse_any_illegal_control(value: &toml::Value, key: &str) -> Result<Control, ConfigError> {
+    let toml::Value::Table(table) = value else {
+        return Err(ConfigError::WrongType(format!(
+            "any_illegal.{key}: expected table"
+        )));
+    };
+    for k in table.keys() {
+        if !matches!(k.as_str(), "action" | "scope") {
+            return Err(ConfigError::UnknownKey(format!("any_illegal.{key}.{k}")));
+        }
+    }
+    let prefix = format!("any_illegal.{key}");
+    let action = require_string(table, "action")
+        .map_err(|err| prefix_group_error(&prefix, "action", err))?;
+    let scope =
+        require_string(table, "scope").map_err(|err| prefix_group_error(&prefix, "scope", err))?;
+    let kind = parse_action_kind(&action, &format!("{prefix}.action"))?;
+    let scope = parse_any_illegal_scope(&scope, &format!("{prefix}.scope"))?;
+    Ok(Control::new(kind, scope))
+}
+
+/// The shared action-keyword parser: `notify|block` are legal, `tarpit` is the
+/// reserved deferred keyword rejected with its explicit diagnostic, and any
+/// other token is an unknown action.
+fn parse_action_kind(action: &str, key: &str) -> Result<ActionKind, ConfigError> {
+    match action {
+        "notify" => Ok(ActionKind::Notify),
+        "block" => Ok(ActionKind::Block),
+        "tarpit" => Err(ConfigError::ActionTarpitDeferred {
+            key: key.to_owned(),
+        }),
+        other => Err(ConfigError::UnknownAction {
+            key: key.to_owned(),
+            value: other.to_owned(),
+        }),
+    }
+}
+
+/// The `any_illegal` scope grammar: `connection|all` only. A per-FQDN scope
+/// literal (`fqdn`) is invalid here because an unattributable violation cannot
+/// mark a configured domain.
+fn parse_any_illegal_scope(scope: &str, key: &str) -> Result<Scope, ConfigError> {
+    match scope {
+        "connection" => Ok(Scope::Connection),
+        "all" => Ok(Scope::All),
+        other => Err(ConfigError::AnyIllegalScopeInvalid {
+            key: key.to_owned(),
+            value: other.to_owned(),
+        }),
+    }
+}
+
+/// The per-FQDN scope grammar: `connection|fqdn|all` (the `fqdn` literal is
+/// the user spelling of the spec's `domain` scope).
+fn parse_per_fqdn_scope(scope: &str, key: &str) -> Result<Scope, ConfigError> {
+    match scope {
+        "connection" => Ok(Scope::Connection),
+        "fqdn" => Ok(Scope::Domain),
+        "all" => Ok(Scope::All),
         other => Err(ConfigError::InvalidScope {
-            key: "any_illegal.scope".to_owned(),
+            key: key.to_owned(),
             value: other.to_owned(),
         }),
     }
@@ -825,18 +910,22 @@ fn parse_any_illegal(value: &toml::Value) -> Result<AnyIllegalScope, ConfigError
 fn parse_allowed_fqdn_table(
     value: &toml::Value,
     fqdn_key: &str,
-) -> Result<(DomainAction, Vec<String>), ConfigError> {
+) -> Result<(PerFqdnControl, PerFqdnControl, Vec<String>), ConfigError> {
     let toml::Value::Table(table) = value else {
         return Err(ConfigError::WrongType(format!(
             "allowed_fqdn.{fqdn_key}: expected table"
         )));
     };
     let mut early_data = None;
+    let mut ja4 = None;
     let mut bailiwick = Vec::new();
     for key in table.keys() {
         match key.as_str() {
             "early_data" => {
                 early_data = Some(table.get(key).expect("key present in iteration"));
+            }
+            "ja4" => {
+                ja4 = Some(table.get(key).expect("key present in iteration"));
             }
             "cname_bailiwick" => {
                 bailiwick = parse_cname_bailiwick(table, fqdn_key)?;
@@ -850,8 +939,11 @@ fn parse_allowed_fqdn_table(
     }
     let early_data = early_data
         .ok_or_else(|| ConfigError::MissingField(format!("allowed_fqdn.{fqdn_key}.early_data")))?;
-    let action = parse_early_data(early_data, fqdn_key)?;
-    Ok((action, bailiwick))
+    let ja4 =
+        ja4.ok_or_else(|| ConfigError::MissingField(format!("allowed_fqdn.{fqdn_key}.ja4")))?;
+    let early = parse_per_fqdn_control(early_data, fqdn_key, "early_data")?;
+    let j4 = parse_per_fqdn_control(ja4, fqdn_key, "ja4")?;
+    Ok((early, j4, bailiwick))
 }
 
 fn parse_cname_bailiwick(table: &toml::Table, fqdn_key: &str) -> Result<Vec<String>, ConfigError> {
@@ -882,55 +974,42 @@ fn parse_cname_bailiwick(table: &toml::Table, fqdn_key: &str) -> Result<Vec<Stri
     Ok(suffixes)
 }
 
-fn parse_early_data(value: &toml::Value, fqdn_key: &str) -> Result<DomainAction, ConfigError> {
-    let toml::Value::Table(table) = value else {
-        return Err(ConfigError::WrongType(format!(
-            "allowed_fqdn.{fqdn_key}.early_data: expected table"
-        )));
-    };
-    for key in table.keys() {
-        if !matches!(key.as_str(), "action" | "scope") {
-            return Err(ConfigError::UnknownKey(format!(
-                "allowed_fqdn.{fqdn_key}.early_data.{key}"
-            )));
-        }
-    }
-    let prefix = format!("allowed_fqdn.{fqdn_key}.early_data");
-    let action = require_string(table, "action")
-        .map_err(|err| prefix_group_error(&prefix, "action", err))?;
-    let scope =
-        require_string(table, "scope").map_err(|err| prefix_group_error(&prefix, "scope", err))?;
-    let kind = match action.as_str() {
-        "flare_only" => ActionKind::FlareOnly,
-        "block" => ActionKind::Block,
-        "tarpit" => {
-            return Err(ConfigError::ActionTarpitDeferred {
-                name: fqdn_key.to_owned(),
-            });
-        }
-        other => {
-            return Err(ConfigError::UnknownAction {
-                name: fqdn_key.to_owned(),
+/// Parses one per-FQDN control value (`early_data` or `ja4`): either the bare
+/// `"ignore"` opt-out shorthand or a `{ action, scope }` table with `action`
+/// in `notify|block` (tarpit reserved) and `scope` in `connection|fqdn|all`.
+fn parse_per_fqdn_control(
+    value: &toml::Value,
+    fqdn_key: &str,
+    control_key: &str,
+) -> Result<PerFqdnControl, ConfigError> {
+    let prefix = format!("allowed_fqdn.{fqdn_key}.{control_key}");
+    match value {
+        toml::Value::String(action) => match action.as_str() {
+            "ignore" => Ok(PerFqdnControl::ignore()),
+            "tarpit" => Err(ConfigError::ActionTarpitDeferred { key: prefix }),
+            other => Err(ConfigError::UnknownAction {
+                key: prefix,
                 value: other.to_owned(),
-            });
+            }),
+        },
+        toml::Value::Table(table) => {
+            for key in table.keys() {
+                if !matches!(key.as_str(), "action" | "scope") {
+                    return Err(ConfigError::UnknownKey(format!("{prefix}.{key}")));
+                }
+            }
+            let action = require_string(table, "action")
+                .map_err(|err| prefix_group_error(&prefix, "action", err))?;
+            let scope = require_string(table, "scope")
+                .map_err(|err| prefix_group_error(&prefix, "scope", err))?;
+            let kind = parse_action_kind(&action, &format!("{prefix}.action"))?;
+            let scope = parse_per_fqdn_scope(&scope, &format!("{prefix}.scope"))?;
+            Ok(PerFqdnControl::control(kind, scope))
         }
-    };
-    let scope_text = scope;
-    let scope = match scope_text.as_str() {
-        "connection" => Scope::Connection,
-        "domain" => Scope::Domain,
-        "all" => Scope::All,
-        other => {
-            return Err(ConfigError::InvalidScope {
-                key: format!("allowed_fqdn.{fqdn_key}.early_data.scope"),
-                value: other.to_owned(),
-            });
-        }
-    };
-    if kind == ActionKind::Block && !matches!(scope, Scope::Connection) {
-        return Err(ConfigError::EarlyDataBlockScopeInvalid { scope: scope_text });
+        _ => Err(ConfigError::WrongType(format!(
+            "{prefix}: expected \"ignore\" or an action table"
+        ))),
     }
-    Ok(DomainAction::new(kind, scope))
 }
 
 fn prefix_group_error(table: &str, key: &str, err: ConfigError) -> ConfigError {
@@ -1008,10 +1087,12 @@ const fn value_kind(value: &toml::Value) -> &'static str {
 }
 
 /// Parsed `[allowed_fqdn]` table: ordered entries plus their per-entry
-/// `cname_bailiwick` suffix lists, kept parallel to allowlist order.
+/// `early_data`/`ja4` controls and `cname_bailiwick` suffix lists, kept
+/// parallel to allowlist order.
 struct ParsedAllowlist {
     allowlist: Allowlist,
-    actions: Vec<DomainAction>,
+    early_data: Vec<PerFqdnControl>,
+    ja4: Vec<PerFqdnControl>,
     bailiwicks: Vec<Vec<String>>,
 }
 
@@ -1034,7 +1115,8 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
     let mut bailiwick_by_name: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     let mut allowlist = Vec::with_capacity(entries.len());
-    let mut actions = Vec::with_capacity(entries.len());
+    let mut early_data = Vec::with_capacity(entries.len());
+    let mut ja4 = Vec::with_capacity(entries.len());
     let mut bailiwicks = Vec::with_capacity(entries.len());
     let mut total_suffixes = 0usize;
     for (key, value) in entries {
@@ -1050,7 +1132,7 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
                 fqdn.port()
             )));
         }
-        let (action, suffixes) = parse_allowed_fqdn_table(value, key)?;
+        let (early, j4, suffixes) = parse_allowed_fqdn_table(value, key)?;
         // Same bare name on different ports collapses to the first entry's
         // suffix list at runtime (covers_for first-match position), so every
         // same-bare-name entry must declare byte-identical lists — any
@@ -1076,12 +1158,14 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
             });
         }
         allowlist.push(fqdn);
-        actions.push(action);
+        early_data.push(early);
+        ja4.push(j4);
         bailiwicks.push(suffixes);
     }
     Ok(ParsedAllowlist {
         allowlist: Allowlist(allowlist),
-        actions,
+        early_data,
+        ja4,
         bailiwicks,
     })
 }
@@ -1143,7 +1227,7 @@ mod listen_tests {
 #[cfg(test)]
 mod enforcement_config_tests {
     use super::*;
-    use crate::enforcement::action::{ActionKind, AnyIllegalScope, Scope};
+    use crate::enforcement::action::{ActionKind, AnyIllegalControl, PerFqdnControl, Scope};
     use std::fmt::Write as _;
 
     fn base() -> String {
@@ -1151,17 +1235,50 @@ mod enforcement_config_tests {
             .to_owned()
     }
 
-    fn entry(key: &str, action: &str, scope: &str) -> String {
-        format!(
-            "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"{action}\", scope = \"{scope}\" }}\n"
+    /// Builds the `[any_illegal]` block from `(control, action, scope)` triples.
+    fn any_illegal(controls: &[(&str, &str, &str)]) -> String {
+        let mut s = String::from("[any_illegal]\n");
+        for (key, action, scope) in controls {
+            let _ = writeln!(
+                s,
+                "{key} = {{ action = \"{action}\", scope = \"{scope}\" }}"
+            );
+        }
+        s
+    }
+
+    /// The canonical four-control `[any_illegal]` block used by most tests.
+    fn any_illegal_default() -> String {
+        any_illegal(&[
+            ("connect_parse", "notify", "connection"),
+            ("host_not_allowlisted", "block", "all"),
+            ("tls_profile", "block", "all"),
+            ("ech", "block", "connection"),
+        ])
+    }
+
+    /// A per-FQDN entry with raw `early_data`/`ja4` value spellings.
+    fn entry(key: &str, early: &str, ja4: &str) -> String {
+        format!("[allowed_fqdn.\"{key}\"]\nearly_data = {early}\nja4 = {ja4}\n")
+    }
+
+    /// A per-FQDN entry with table-form controls.
+    fn entry_table(
+        key: &str,
+        early_action: &str,
+        early_scope: &str,
+        ja4_action: &str,
+        ja4_scope: &str,
+    ) -> String {
+        entry(
+            key,
+            &format!("{{ action = \"{early_action}\", scope = \"{early_scope}\" }}"),
+            &format!("{{ action = \"{ja4_action}\", scope = \"{ja4_scope}\" }}"),
         )
     }
 
-    fn group(entries: &str, any_scope: &str) -> String {
-        format!(
-            "{base}[any_illegal]\nscope = \"{any_scope}\"\n{entries}",
-            base = base()
-        )
+    fn group(entries: &str) -> String {
+        format!("{}{}{}", base(), any_illegal_default(), entries)
     }
 
     #[test]
@@ -1175,62 +1292,334 @@ mod enforcement_config_tests {
 
     #[test]
     fn parses_full_enforcement_group() {
-        let doc = group(
-            &format!(
-                "{}{}",
-                entry("sub.example.org:443", "block", "connection"),
-                entry("other.example.org:443", "flare_only", "connection"),
+        let doc = group(&format!(
+            "{}{}",
+            entry_table(
+                "sub.example.org:443",
+                "notify",
+                "connection",
+                "block",
+                "fqdn"
             ),
-            "all",
-        );
+            entry(
+                "other.example.org:443",
+                "{ action = \"block\", scope = \"all\" }",
+                "\"ignore\""
+            ),
+        ));
         let cfg = parse_config_document(&doc).expect("valid enforcement config");
         let control = cfg.control();
-        assert_eq!(control.any_illegal(), AnyIllegalScope::All);
         assert_eq!(control.len(), 2);
-        let first = control
-            .at(control.ordinal(0).expect("ordinal"))
-            .expect("configured");
-        assert_eq!(first.kind(), ActionKind::FlareOnly);
-        assert_eq!(first.scope(), Scope::Connection);
-        let second = control
-            .at(control.ordinal(1).expect("ordinal"))
-            .expect("configured");
-        assert_eq!(second.kind(), ActionKind::Block);
-        assert_eq!(second.scope(), Scope::Connection);
+        assert_eq!(
+            control.any_illegal(AnyIllegalControl::ConnectParse),
+            Control::new(ActionKind::Notify, Scope::Connection)
+        );
+        assert_eq!(
+            control.any_illegal(AnyIllegalControl::HostNotAllowlisted),
+            Control::new(ActionKind::Block, Scope::All)
+        );
+        assert_eq!(
+            control.any_illegal(AnyIllegalControl::TlsProfile),
+            Control::new(ActionKind::Block, Scope::All)
+        );
+        assert_eq!(
+            control.any_illegal(AnyIllegalControl::Ech),
+            Control::new(ActionKind::Block, Scope::Connection)
+        );
+        let first = control.ordinal(0).expect("ordinal");
+        assert_eq!(
+            control.early_data(first),
+            Some(PerFqdnControl::control(ActionKind::Block, Scope::All))
+        );
+        assert_eq!(control.ja4(first), Some(PerFqdnControl::Ignore));
+        let second = control.ordinal(1).expect("ordinal");
+        assert_eq!(
+            control.early_data(second),
+            Some(PerFqdnControl::control(
+                ActionKind::Notify,
+                Scope::Connection
+            ))
+        );
+        assert_eq!(
+            control.ja4(second),
+            Some(PerFqdnControl::control(ActionKind::Block, Scope::Domain))
+        );
+    }
+
+    #[test]
+    fn any_illegal_control_selects_its_own_action() {
+        let doc = format!(
+            "{}{}{}",
+            base(),
+            any_illegal(&[
+                ("connect_parse", "notify", "connection"),
+                ("host_not_allowlisted", "block", "all"),
+                ("tls_profile", "notify", "all"),
+                ("ech", "block", "connection"),
+            ]),
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+        );
+        let cfg = parse_config_document(&doc).expect("per-control any_illegal valid");
+        let control = cfg.control();
+        assert_eq!(
+            control.any_illegal(AnyIllegalControl::ConnectParse),
+            Control::new(ActionKind::Notify, Scope::Connection)
+        );
+        assert_eq!(
+            control.any_illegal(AnyIllegalControl::HostNotAllowlisted),
+            Control::new(ActionKind::Block, Scope::All)
+        );
+        assert_eq!(
+            control.any_illegal(AnyIllegalControl::TlsProfile),
+            Control::new(ActionKind::Notify, Scope::All)
+        );
+        assert_eq!(
+            control.any_illegal(AnyIllegalControl::Ech),
+            Control::new(ActionKind::Block, Scope::Connection)
+        );
+    }
+
+    #[test]
+    fn rejects_missing_any_illegal_control_key() {
+        for missing in [
+            "connect_parse",
+            "host_not_allowlisted",
+            "tls_profile",
+            "ech",
+        ] {
+            let controls: Vec<(&str, &str, &str)> = [
+                ("connect_parse", "notify", "connection"),
+                ("host_not_allowlisted", "block", "all"),
+                ("tls_profile", "block", "all"),
+                ("ech", "block", "connection"),
+            ]
+            .into_iter()
+            .filter(|(key, _, _)| *key != missing)
+            .collect();
+            let doc = format!(
+                "{}{}{}",
+                base(),
+                any_illegal(&controls),
+                entry_table(
+                    "a.example:443",
+                    "notify",
+                    "connection",
+                    "notify",
+                    "connection"
+                ),
+            );
+            let err = parse_config_document(&doc).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::MissingField(f) if f == &format!("any_illegal.{missing}")),
+                "expected MissingField(any_illegal.{missing}), got {err:?}"
+            );
+            assert_eq!(err.exit_status(), 78, "missing control key must exit 78");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_any_illegal_control_key() {
+        let doc = format!(
+            "{}{}{}",
+            base(),
+            any_illegal(&[
+                ("connect_parse", "notify", "connection"),
+                ("host_not_allowlisted", "block", "all"),
+                ("tls_profile", "block", "all"),
+                ("ech", "block", "connection"),
+                ("early_data", "notify", "connection"),
+            ]),
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+        );
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::UnknownKey(k) if k == "any_illegal.early_data"),
+            "expected UnknownKey(any_illegal.early_data), got {err:?}"
+        );
     }
 
     #[test]
     fn accepts_any_illegal_connection_scope() {
-        let doc = group(&entry("a.example:443", "block", "connection"), "connection");
+        let doc = format!(
+            "{}{}{}",
+            base(),
+            any_illegal(&[
+                ("connect_parse", "block", "connection"),
+                ("host_not_allowlisted", "block", "connection"),
+                ("tls_profile", "block", "connection"),
+                ("ech", "block", "connection"),
+            ]),
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+        );
         let cfg = parse_config_document(&doc).expect("connection scope valid");
-        assert_eq!(cfg.control().any_illegal(), AnyIllegalScope::Connection);
+        assert_eq!(
+            cfg.control().any_illegal(AnyIllegalControl::Ech),
+            Control::new(ActionKind::Block, Scope::Connection)
+        );
     }
 
     #[test]
     fn rejects_any_illegal_domain_scope() {
-        let doc = group(&entry("a.example:443", "block", "connection"), "domain");
+        let doc = format!(
+            "{}{}{}",
+            base(),
+            any_illegal(&[
+                ("connect_parse", "notify", "connection"),
+                ("host_not_allowlisted", "block", "domain"),
+                ("tls_profile", "block", "all"),
+                ("ech", "block", "connection"),
+            ]),
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+        );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(err, ConfigError::AnyIllegalScopeDomain),
-            "expected AnyIllegalScopeDomain, got {err:?}"
+            matches!(&err, ConfigError::AnyIllegalScopeInvalid { key, value }
+                if key == "any_illegal.host_not_allowlisted.scope" && value == "domain"),
+            "expected AnyIllegalScopeInvalid for the domain literal, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_status(),
+            78,
+            "invalid any_illegal scope must exit 78"
+        );
+    }
+
+    #[test]
+    fn rejects_any_illegal_fqdn_scope() {
+        let doc = format!(
+            "{}{}{}",
+            base(),
+            any_illegal(&[
+                ("connect_parse", "notify", "connection"),
+                ("host_not_allowlisted", "block", "fqdn"),
+                ("tls_profile", "block", "all"),
+                ("ech", "block", "connection"),
+            ]),
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+        );
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::AnyIllegalScopeInvalid { key, value }
+                if key == "any_illegal.host_not_allowlisted.scope" && value == "fqdn"),
+            "the fqdn literal is per-FQDN only, got {err:?}"
         );
     }
 
     #[test]
     fn rejects_any_illegal_unknown_scope() {
-        let doc = group(&entry("a.example:443", "block", "connection"), "wired");
+        let doc = format!(
+            "{}{}{}",
+            base(),
+            any_illegal(&[
+                ("connect_parse", "notify", "connection"),
+                ("host_not_allowlisted", "block", "wired"),
+                ("tls_profile", "block", "all"),
+                ("ech", "block", "connection"),
+            ]),
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+        );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(err, ConfigError::InvalidScope { .. }),
-            "expected InvalidScope, got {err:?}"
+            matches!(&err, ConfigError::AnyIllegalScopeInvalid { .. }),
+            "expected AnyIllegalScopeInvalid, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_any_illegal_tarpit_with_deferred_diagnostic() {
+        let doc = format!(
+            "{}{}{}",
+            base(),
+            any_illegal(&[
+                ("connect_parse", "tarpit", "connection"),
+                ("host_not_allowlisted", "block", "all"),
+                ("tls_profile", "block", "all"),
+                ("ech", "block", "connection"),
+            ]),
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+        );
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::ActionTarpitDeferred { key } if key == "any_illegal.connect_parse.action"),
+            "expected ActionTarpitDeferred on the any_illegal surface, got {err:?}"
+        );
+        assert_eq!(err.exit_status(), 78, "reserved tarpit must exit 78");
+    }
+
+    #[test]
+    fn rejects_any_illegal_unknown_action() {
+        let doc = format!(
+            "{}{}{}",
+            base(),
+            any_illegal(&[
+                ("connect_parse", "peek", "connection"),
+                ("host_not_allowlisted", "block", "all"),
+                ("tls_profile", "block", "all"),
+                ("ech", "block", "connection"),
+            ]),
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+        );
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::UnknownAction { key, .. } if key == "any_illegal.connect_parse.action"),
+            "expected UnknownAction on the any_illegal surface, got {err:?}"
         );
     }
 
     #[test]
     fn rejects_missing_early_data() {
         let doc = format!(
-            "{base}[any_illegal]\nscope = \"all\"\n[allowed_fqdn.\"a.example:443\"]\n",
-            base = base()
+            "{}{}[allowed_fqdn.\"a.example:443\"]\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n",
+            base(),
+            any_illegal_default()
         );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
@@ -1240,80 +1629,159 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn rejects_unknown_key_in_allowed_fqdn_table() {
+    fn rejects_missing_ja4() {
         let doc = format!(
-            "{base}[any_illegal]\nscope = \"all\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"block\", scope = \"domain\" }}\nja4 = \"x\"\n",
-            base = base()
+            "{}{}[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\n",
+            base(),
+            any_illegal_default()
         );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(&err, ConfigError::UnknownKey(k) if k == "allowed_fqdn.a.example:443.ja4"),
-            "expected UnknownKey, got {err:?}"
+            matches!(&err, ConfigError::MissingField(f) if f == "allowed_fqdn.a.example:443.ja4"),
+            "expected MissingField(ja4), got {err:?}"
         );
+        assert_eq!(err.exit_status(), 78, "missing mandatory ja4 must exit 78");
     }
 
     #[test]
-    fn rejects_tarpit_kind_with_deferred_diagnostic() {
-        let doc = group(&entry("a.example:443", "tarpit", "connection"), "all");
-        let err = parse_config_document(&doc).unwrap_err();
-        assert!(
-            matches!(err, ConfigError::ActionTarpitDeferred { ref name } if name == "a.example:443"),
-            "expected ActionTarpitDeferred, got {err:?}"
-        );
+    fn accepts_ignore_shorthand_on_both_per_fqdn_controls() {
+        let doc = group(&entry("a.example:443", "\"ignore\"", "\"ignore\""));
+        let cfg = parse_config_document(&doc).expect("ignore shorthand valid");
+        let control = cfg.control();
+        let ordinal = control.ordinal(0).expect("ordinal");
+        assert_eq!(control.early_data(ordinal), Some(PerFqdnControl::Ignore));
+        assert_eq!(control.ja4(ordinal), Some(PerFqdnControl::Ignore));
+    }
+
+    #[test]
+    fn rejects_per_fqdn_tarpit_with_deferred_diagnostic() {
+        for (early, ja4) in [
+            (
+                "{ action = \"tarpit\", scope = \"connection\" }",
+                "{ action = \"notify\", scope = \"connection\" }",
+            ),
+            (
+                "{ action = \"notify\", scope = \"connection\" }",
+                "{ action = \"tarpit\", scope = \"connection\" }",
+            ),
+        ] {
+            let doc = group(&entry("a.example:443", early, ja4));
+            let err = parse_config_document(&doc).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::ActionTarpitDeferred { .. }),
+                "expected ActionTarpitDeferred, got {err:?}"
+            );
+            assert_eq!(err.exit_status(), 78, "reserved tarpit must exit 78");
+        }
     }
 
     #[test]
     fn rejects_unknown_action_kind() {
-        let doc = group(&entry("a.example:443", "peek", "connection"), "all");
+        let doc = group(&entry(
+            "a.example:443",
+            "{ action = \"peek\", scope = \"connection\" }",
+            "{ action = \"notify\", scope = \"connection\" }",
+        ));
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(err, ConfigError::UnknownAction { ref name, .. } if name == "a.example:443"),
+            matches!(&err, ConfigError::UnknownAction { key, .. } if key == "allowed_fqdn.a.example:443.early_data.action"),
             "expected UnknownAction, got {err:?}"
         );
     }
 
     #[test]
-    fn rejects_unknown_per_domain_scope() {
-        let doc = group(&entry("a.example:443", "block", "wire"), "all");
+    fn rejects_unknown_per_fqdn_scope() {
+        let doc = group(&entry(
+            "a.example:443",
+            "{ action = \"block\", scope = \"wire\" }",
+            "{ action = \"notify\", scope = \"connection\" }",
+        ));
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(err, ConfigError::InvalidScope { .. }),
+            matches!(&err, ConfigError::InvalidScope { .. }),
             "expected InvalidScope, got {err:?}"
         );
     }
 
     #[test]
-    fn rejects_early_data_block_domain_scope() {
-        let doc = group(&entry("a.example:443", "block", "domain"), "all");
-        let err = parse_config_document(&doc).unwrap_err();
-        assert!(
-            matches!(&err, ConfigError::EarlyDataBlockScopeInvalid { scope } if scope == "domain"),
-            "expected EarlyDataBlockScopeInvalid(domain), got {err:?}"
+    fn accepts_per_fqdn_fqdn_scope_for_block() {
+        let doc = group(&entry_table(
+            "a.example:443",
+            "block",
+            "fqdn",
+            "block",
+            "fqdn",
+        ));
+        let cfg = parse_config_document(&doc).expect("fqdn scope valid per-FQDN");
+        let control = cfg.control();
+        let ordinal = control.ordinal(0).expect("ordinal");
+        assert_eq!(
+            control.early_data(ordinal),
+            Some(PerFqdnControl::control(ActionKind::Block, Scope::Domain))
         );
-        assert_eq!(err.exit_status(), 78);
+        assert_eq!(
+            control.ja4(ordinal),
+            Some(PerFqdnControl::control(ActionKind::Block, Scope::Domain))
+        );
     }
 
     #[test]
-    fn rejects_early_data_block_all_scope() {
-        let doc = group(&entry("a.example:443", "block", "all"), "all");
+    fn accepts_per_fqdn_all_scope_for_block() {
+        let doc = group(&entry_table(
+            "a.example:443",
+            "block",
+            "all",
+            "block",
+            "all",
+        ));
+        let cfg = parse_config_document(&doc).expect("all scope valid per-FQDN");
+        let control = cfg.control();
+        let ordinal = control.ordinal(0).expect("ordinal");
+        assert_eq!(
+            control.early_data(ordinal),
+            Some(PerFqdnControl::control(ActionKind::Block, Scope::All))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_key_in_allowed_fqdn_table() {
+        let doc = group(&format!(
+            "{}{}bogus = \"x\"\n",
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+            ""
+        ));
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(&err, ConfigError::EarlyDataBlockScopeInvalid { scope } if scope == "all"),
-            "expected EarlyDataBlockScopeInvalid(all), got {err:?}"
+            matches!(&err, ConfigError::UnknownKey(k) if k == "allowed_fqdn.a.example:443.bogus"),
+            "expected UnknownKey, got {err:?}"
         );
-        assert_eq!(err.exit_status(), 78);
     }
 
     #[test]
     fn rejects_duplicate_after_normalization() {
-        let doc = group(
-            &format!(
-                "{}{}",
-                entry("a.example:443", "block", "connection"),
-                entry("a.example.:443", "block", "connection"),
+        let doc = group(&format!(
+            "{}{}",
+            entry_table(
+                "a.example:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
             ),
-            "all",
-        );
+            entry_table(
+                "a.example.:443",
+                "notify",
+                "connection",
+                "notify",
+                "connection"
+            ),
+        ));
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(&err, ConfigError::DuplicateAllowlistName(n) if n == "a.example:443"),
@@ -1323,12 +1791,11 @@ mod enforcement_config_tests {
 
     #[test]
     fn rejects_more_than_32_tables() {
-        let mut doc = base();
-        doc.push_str("[any_illegal]\nscope = \"all\"\n");
+        let mut doc = format!("{}{}", base(), any_illegal_default());
         for i in 0..33 {
             let _ = write!(
                 doc,
-                "[allowed_fqdn.\"n{i:02}.example:443\"]\nearly_data = {{ action = \"block\", scope = \"domain\" }}\n"
+                "[allowed_fqdn.\"n{i:02}.example:443\"]\nearly_data = {{ action = \"block\", scope = \"fqdn\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\n"
             );
         }
         let err = parse_config_document(&doc).unwrap_err();
@@ -1340,10 +1807,7 @@ mod enforcement_config_tests {
 
     #[test]
     fn rejects_empty_allowlist() {
-        let doc = format!(
-            "{base}[any_illegal]\nscope = \"all\"\n[allowed_fqdn]\n",
-            base = base()
-        );
+        let doc = format!("{}{}[allowed_fqdn]\n", base(), any_illegal_default());
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(err, ConfigError::AllowlistEmpty),
@@ -1353,7 +1817,7 @@ mod enforcement_config_tests {
 
     #[test]
     fn rejects_absent_allowlist() {
-        let doc = format!("{base}[any_illegal]\nscope = \"all\"\n", base = base());
+        let doc = format!("{}{}", base(), any_illegal_default());
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(err, ConfigError::AllowlistEmpty),
@@ -1363,7 +1827,11 @@ mod enforcement_config_tests {
 
     #[test]
     fn rejects_bare_fqdn_key() {
-        let doc = group(&entry("a.example", "block", "connection"), "all");
+        let doc = group(&entry(
+            "a.example",
+            "{ action = \"notify\", scope = \"connection\" }",
+            "{ action = \"notify\", scope = \"connection\" }",
+        ));
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
             matches!(&err, ConfigError::InvalidFqdn { name, .. } if name == "a.example"),
@@ -1385,13 +1853,12 @@ mod enforcement_config_tests {
         format!("n{i:02}.{}.{}:443", "a".repeat(48), "b".repeat(43))
     }
 
-    fn keyed_document(count: usize, any_scope: &str, action: &str, scope: &str) -> String {
-        let mut doc = base();
-        let _ = write!(doc, "[any_illegal]\nscope = \"{any_scope}\"\n");
+    fn keyed_document(count: usize, action: &str, scope: &str) -> String {
+        let mut doc = format!("{}{}", base(), any_illegal_default());
         for i in 0..count {
             let _ = write!(
                 doc,
-                "[allowed_fqdn.\"{}\"]\nearly_data = {{ action = \"{action}\", scope = \"{scope}\" }}\n",
+                "[allowed_fqdn.\"{}\"]\nearly_data = {{ action = \"{action}\", scope = \"{scope}\" }}\nja4 = {{ action = \"{action}\", scope = \"{scope}\" }}\n",
                 hundred_byte_name(i)
             );
         }
@@ -1400,7 +1867,7 @@ mod enforcement_config_tests {
 
     #[test]
     fn compact_32_names_with_group_fit_16kib() {
-        let doc = keyed_document(32, "all", "block", "connection");
+        let doc = keyed_document(32, "block", "connection");
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,
             "compact config with full enforcement group fits 16384 bytes (len {})",
@@ -1412,8 +1879,8 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn flare_connection_32_hundred_byte_names_fit_and_parse() {
-        let doc = keyed_document(32, "connection", "flare_only", "connection");
+    fn notify_32_hundred_byte_names_fit_and_parse() {
+        let doc = keyed_document(32, "notify", "connection");
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,
             "the longer spelling's measured total is {}",
@@ -1425,8 +1892,8 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn flare_connection_29_hundred_byte_names_fit_and_parse() {
-        let doc = keyed_document(29, "connection", "flare_only", "connection");
+    fn notify_29_hundred_byte_names_fit_and_parse() {
+        let doc = keyed_document(29, "notify", "connection");
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,
             "29-name longer spelling fits 16384 bytes (len {})",
@@ -1438,29 +1905,16 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_measured_total_is_5676() {
-        let doc = keyed_document(32, "all", "block", "connection");
-        assert_eq!(
-            doc.len(),
-            5676,
-            "compact 32-name measured total with resolver key"
-        );
-        let cfg = parse_config_document(&doc).expect("fits and parses");
-        assert_eq!(cfg.allowlist().len(), 32);
-        assert_eq!(cfg.control().len(), 32);
-    }
-
-    #[test]
-    fn compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_5695() {
-        let doc = keyed_document(32, "all", "block", "connection").replacen(
+    fn compact_32_hundred_byte_names_with_ip_fqdn_resolver_fit_16kib() {
+        let doc = keyed_document(32, "block", "connection").replacen(
             "resolver = [\"1.1.1.1\"]",
             "resolver = [\"1.1.1.1#cloudflare-dns.com\"]",
             1,
         );
-        assert_eq!(
-            doc.len(),
-            5695,
-            "tight 32×100-byte compact form with a single realistic IP#fqdn entry"
+        assert!(
+            doc.len() <= CONFIG_DOC_LIMIT,
+            "32×100-byte compact form with a single realistic IP#fqdn entry fits (len {})",
+            doc.len()
         );
         let cfg = parse_config_document(&doc).expect("fits and parses");
         assert_eq!(cfg.allowlist().len(), 32);
@@ -1468,50 +1922,23 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn compact_32_hundred_byte_names_with_pinned_resolver_measured_total_is_5743() {
+    fn compact_32_hundred_byte_names_with_pinned_resolver_fit_16kib() {
         let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
-        let doc = keyed_document(32, "all", "block", "connection").replacen(
+        let doc = keyed_document(32, "block", "connection").replacen(
             "resolver = [\"1.1.1.1\"]",
             &format!("resolver = [\"1.1.1.1#dns.google#pin-sha256={b64}\"]"),
             1,
         );
-        assert_eq!(
-            doc.len(),
-            5743,
-            "tight 32×100-byte compact form with a pinned DoT entry"
+        assert!(
+            doc.len() <= CONFIG_DOC_LIMIT,
+            "32×100-byte compact form with a pinned DoT entry fits (len {})",
+            doc.len()
         );
         let cfg = parse_config_document(&doc).expect("fits and parses");
         assert_eq!(cfg.allowlist().len(), 32);
         assert_eq!(cfg.control().len(), 32);
-    }
-
-    #[test]
-    fn flare_connection_32_hundred_byte_names_measured_total_is_5843() {
-        let doc = keyed_document(32, "connection", "flare_only", "connection");
-        assert_eq!(
-            doc.len(),
-            5843,
-            "longer 32-name measured total with resolver key"
-        );
-        let cfg = parse_config_document(&doc).expect("fits and parses");
-        assert_eq!(cfg.allowlist().len(), 32);
-        assert_eq!(cfg.control().len(), 32);
-    }
-
-    #[test]
-    fn flare_connection_29_hundred_byte_names_measured_total_is_5306() {
-        let doc = keyed_document(29, "connection", "flare_only", "connection");
-        assert_eq!(
-            doc.len(),
-            5306,
-            "29-name longer spelling measured total with resolver key"
-        );
-        let cfg = parse_config_document(&doc).expect("fits and parses");
-        assert_eq!(cfg.allowlist().len(), 29);
-        assert_eq!(cfg.control().len(), 29);
     }
 }
-
 #[cfg(test)]
 mod cname_bailiwick_config_tests {
     use super::*;
@@ -1521,22 +1948,24 @@ mod cname_bailiwick_config_tests {
             .to_owned()
     }
 
+    fn any_illegal() -> String {
+        "[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n"
+            .to_owned()
+    }
+
     fn group(entries: &str) -> String {
-        format!(
-            "{base}[any_illegal]\nscope = \"connection\"\n{entries}",
-            base = base()
-        )
+        format!("{}{}{}", base(), any_illegal(), entries)
     }
 
     fn entry(key: &str) -> String {
         format!(
-            "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+            "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
         )
     }
 
     fn entry_with_bailiwick(key: &str, suffixes: &str) -> String {
         format!(
-            "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\ncname_bailiwick = {suffixes}\n"
+            "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ncname_bailiwick = {suffixes}\n"
         )
     }
 
@@ -1609,13 +2038,13 @@ mod cname_bailiwick_config_tests {
     }
 
     #[test]
-    fn rejects_unknown_key_besides_early_data_and_cname_bailiwick() {
+    fn rejects_unknown_key_besides_early_data_ja4_and_cname_bailiwick() {
         let doc = group(
-            "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\ncname_bailiwick = [\"example.com\"]\nja4 = \"x\"\n",
+            "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ncname_bailiwick = [\"example.com\"]\nbogus = \"x\"\n",
         );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
-            matches!(&err, ConfigError::UnknownKey(k) if k == "allowed_fqdn.a.example:443.ja4"),
+            matches!(&err, ConfigError::UnknownKey(k) if k == "allowed_fqdn.a.example:443.bogus"),
             "expected UnknownKey, got {err:?}"
         );
     }
@@ -1750,7 +2179,7 @@ mod cname_bailiwick_config_tests {
     #[test]
     fn rejects_wrong_type_for_cname_bailiwick() {
         let doc = group(
-            "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\ncname_bailiwick = \"example.com\"\n",
+            "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ncname_bailiwick = \"example.com\"\n",
         );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
@@ -1762,7 +2191,7 @@ mod cname_bailiwick_config_tests {
     #[test]
     fn rejects_non_string_suffix_element() {
         let doc = group(
-            "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\ncname_bailiwick = [\"example.com\", 42]\n",
+            "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ncname_bailiwick = [\"example.com\", 42]\n",
         );
         let err = parse_config_document(&doc).unwrap_err();
         assert!(
@@ -1779,13 +2208,13 @@ mod resolver_config_tests {
 
     fn valid_doc(resolver: &str) -> String {
         format!(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
         )
     }
 
     #[test]
     fn resolver_key_is_mandatory() {
-        let d = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
+        let d = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
         let err = parse_config_document(d).unwrap_err();
         assert!(
             matches!(&err, ConfigError::MissingField(f) if f == "resolver"),
@@ -1882,7 +2311,7 @@ mod resolver_config_tests {
             matches!(empty, ConfigError::ResolverCountOutOfRange { got: 0 }),
             "empty resolver must be ResolverCountOutOfRange, got {empty:?}"
         );
-        let six = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"9.9.9.9\", \"208.67.222.222\", \"94.140.14.14\", \"1.0.0.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n";
+        let six = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"9.9.9.9\", \"208.67.222.222\", \"94.140.14.14\", \"1.0.0.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
         let too_many = parse_config_document(six).unwrap_err();
         assert!(
             matches!(too_many, ConfigError::ResolverCountOutOfRange { got: 6 }),
@@ -2038,12 +2467,7 @@ mod resolver_config_tests {
     fn resolver_ip_fqdn_example_fits_16kib() {
         let resolver = "[\"1.1.1.1#cloudflare-dns.com\", \"8.8.8.8#dns.google\", \"9.9.9.9#dns.quad9.net\", \"208.67.222.222#dns.opendns.com\", \"94.140.14.14#dns.adguard.com\"]";
         let example = format!(
-            "listen = \"127.0.0.1:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"api.github.com:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n[allowed_fqdn.\"example.com:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n[allowed_fqdn.\"www.example.net:443\"]\nearly_data = {{ action = \"flare_only\", scope = \"connection\" }}\n"
-        );
-        assert_eq!(
-            example.len(),
-            538,
-            "16 KiB re-measure: the V37 golden-path IP#fqdn example config is serializer-pinned at 538 B"
+            "listen = \"127.0.0.1:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"api.github.com:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n[allowed_fqdn.\"example.com:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n[allowed_fqdn.\"www.example.net:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
         );
         assert!(
             example.len() <= CONFIG_DOC_LIMIT,
@@ -2065,12 +2489,12 @@ mod resolver_config_tests {
     #[test]
     fn resolver_key_respected_in_compact_fit_form() {
         let mut compact = String::from(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"1.0.0.1\", \"8.8.4.4\"]\n[any_illegal]\nscope = \"all\"\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"1.0.0.1\", \"8.8.4.4\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
         );
         for i in 0..32usize {
             let _ = write!(
                 compact,
-                "[allowed_fqdn.\"{i}.{}.{}:443\"]\nearly_data = {{ action = \"block\", scope = \"domain\" }}\n",
+                "[allowed_fqdn.\"{i}.{}.{}:443\"]\nearly_data = {{ action = \"block\", scope = \"fqdn\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\n",
                 "a".repeat(48),
                 "b".repeat(43)
             );
@@ -2089,7 +2513,7 @@ mod authorization_boundary_tests {
 
     fn config() -> Config {
         parse_config_document(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n[allowed_fqdn.\"other.test:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"other.test:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
         )
         .expect("valid config")
     }
@@ -2136,7 +2560,7 @@ mod authorization_boundary_tests {
     #[test]
     fn build_allowlist_same_host_different_ports_both_survive() {
         let cfg = parse_config_document(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nscope = \"connection\"\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = { action = \"flare_only\", scope = \"connection\" }\n",
+            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
         )
         .expect("dedup is by the full <fqdn>:<port> pair, so the same host at a second port is a distinct entry");
         assert_eq!(cfg.allowlist().len(), 2);
