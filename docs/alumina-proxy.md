@@ -31,7 +31,7 @@ signal**: it is highly unexpected and almost certainly caused by either
 operator misconfiguration or adversarial activity. Every deviation is detected
 and acted on; there is no tolerated rate of bad behavior. The tripwires are
 trigger-happy by design — they react on the first sign of deviation — and
-highly accurate. The action taken (flare, block, or tarpit) is the operator's
+highly accurate. The action taken (notify, block, or the reserved tarpit) is the operator's
 configuration choice; the proxy does not always panic by blocking all egress.
 Alumina's promise is highly accurate tripwires; the operator decides the
 appropriate action for their context.
@@ -87,7 +87,7 @@ Alumina's own configuration is strict; client input is accepted where variants h
 
 ## Configuration & DNS
 
-Configuration is a single TOML document of at most 16 KiB (16384 bytes), including comments and whitespace, with a required set of 1 through 32 `[allowed_fqdn."<fqdn>:<port>"]` keyed tables — each carrying exactly one `early_data` inline table with that entry's `action` and `scope` — and a required `listen` key. Each table key is a literal `<fqdn>:<port>` spelling naming a lowercase ASCII DNS hostname (an IP literal-shaped entry — a name whose labels are all-numeric, e.g. `1.2.3.4:443` — is invalid configuration) with a canonical decimal port from 1 through 65535 and no leading zero; a bare FQDN without `:port`, an empty or non-numeric port, port `0`, a port above `65535`, or a leading-zero port is invalid configuration. Table keys are unique after normalization (lowercase FQDN plus canonical port); a duplicate after normalization is invalid configuration. Both limits apply: 32 maximum-length DNS names need not fit. A compact configuration with 32 entries of 100 ASCII bytes each (including the `:port` suffix) and a listener fits within the document limit. Bound the configuration read and reject oversized input without truncating it. Load and fully validate configuration and local prerequisites before opening listeners or issuing DNS queries. There is no runtime policy update interface; see the [runtime surface](#architecture).
+Configuration is a single TOML document of at most 16 KiB (16384 bytes), including comments and whitespace, with a required set of 1 through 32 `[allowed_fqdn."<fqdn>:<port>"]` keyed tables — each carrying the mandatory per-FQDN `early_data` and `ja4` controls (each an inline `{ action, scope }` table or the bare `"ignore"` opt-out) — and a required `listen` key. Each table key is a literal `<fqdn>:<port>` spelling naming a lowercase ASCII DNS hostname (an IP literal-shaped entry — a name whose labels are all-numeric, e.g. `1.2.3.4:443` — is invalid configuration) with a canonical decimal port from 1 through 65535 and no leading zero; a bare FQDN without `:port`, an empty or non-numeric port, port `0`, a port above `65535`, or a leading-zero port is invalid configuration. Table keys are unique after normalization (lowercase FQDN plus canonical port); a duplicate after normalization is invalid configuration. Both limits apply: 32 maximum-length DNS names need not fit. A compact configuration with 32 entries of 100 ASCII bytes each (including the `:port` suffix) and a listener fits within the document limit. Bound the configuration read and reject oversized input without truncating it. Load and fully validate configuration and local prerequisites before opening listeners or issuing DNS queries. There is no runtime policy update interface; see the [runtime surface](#architecture).
 
 `startup_unresolved_allowance` is required and must be an integer from `0` through the number of configured `[allowed_fqdn."..."]` tables minus one; `0` requires every hostname to be usable at startup. An empty table set is invalid configuration. The allowance affects startup availability, never destination authorization. All configuration keys are mandatory; no defaults are supplied.
 
@@ -284,22 +284,22 @@ The first-iteration target is 1-10 Gbps aggregate relayed payload throughput acr
 
 ### Action catalog and attribution
 
-Each configured allowlist ordinal (1 through 32) carries exactly one Action from `FlareOnly`, `Block`, or `Tarpit`. A per-domain action applies only to failures attributable to that specific validated configured-domain identity, keyed by the fixed allowlist ordinal set. A per-domain action never overrides a mandatory-denial class.
+Enforcement is configured per control key, not per ordinal. Each control key carries exactly one `{ action, scope }` pair from the shared vocabulary `notify` | `block` (T3); `tarpit` is a reserved keyword that is not configurable. Control keys are surface-specific by attribution (T2): the four `any_illegal` controls (`connect_parse`, `host_not_allowlisted`, `tls_profile`, `ech`) fire before a domain is validated and are never attributed to a configured domain; the per-FQDN controls (`early_data`, `ja4`) apply only to failures attributable to that specific validated configured-domain identity, keyed by the fixed allowlist ordinal set. A per-FQDN control never overrides a mandatory-denial class.
 
 Attribution and precedence rules:
 
-- **AnyIllegal class:** CONNECT parse failure, hostname not allowlisted, missing, malformed, or unsupported SNI, ECH, TLS-profile rejection, and any other recognizable control failure from the enumerated CONNECT-head and ClientHello-profile catalogs are fixed, connection-scoped, terminal mandatory denials, unchanged from the baseline contract. They are attributed to the AnyIllegal class, never to a configured domain. Operational failures (upstream dial failure, unavailable or retired DNS binding, capacity refusal, setup deadline expiry, shutdown-phase activity) and absent internal evidence are never AnyIllegal and never select an Action.
-- **AnyIllegal first-slot action:** the first AnyIllegal control failure on a connection selects a configured `Block` action with scope `Connection` or `All` only; a `Domain` scope for the AnyIllegal action is invalid configuration (startup failure, exit 78, EX_CONFIG). An unknown or unattributable identity thus maps through the AnyIllegal channel with its configured Connection/All scope; there is no permissive default and no unconfigured latch.
-- **Early upstream data:** upstream Data observed through actual I/O after a matching, validated ClientHello but before the forwarding gate opens is attributed to the validated configured domain (approved CONNECT ordinal plus matching SNI proof). It remains a mandatory baseline denial — terminate setup, forward nothing; in addition the configured per-domain Action (`FlareOnly` or a scoped `Block`) may apply.
+- **AnyIllegal class:** CONNECT parse failure, hostname not allowlisted, missing, malformed, or unsupported SNI, ECH, TLS-profile rejection, and any other recognizable control failure from the enumerated CONNECT-head and ClientHello-profile catalogs are fixed, connection-scoped, terminal mandatory denials, unchanged from the baseline contract. They are attributed to the AnyIllegal class — mapped onto the four `any_illegal` controls `connect_parse`, `host_not_allowlisted`, `tls_profile`, `ech` (T2) — never to a configured domain. Operational failures (upstream dial failure, unavailable or retired DNS binding, capacity refusal, setup deadline expiry, shutdown-phase activity) and absent internal evidence are never AnyIllegal and never select an Action.
+- **AnyIllegal first-slot action:** the first AnyIllegal control failure on a connection fires its own control's configured action (`notify` or `block`) exactly once — the single connection-level first-AnyIllegal latch (T6, Option A); every later AnyIllegal on the same connection is BaselineOnly. The `any_illegal` scope is `Connection` or `All` only; a per-FQDN scope literal (`fqdn`/`domain`) for an `any_illegal` control is invalid configuration (startup failure, exit 78, EX_CONFIG). An unknown or unattributable identity thus maps through the AnyIllegal channel with its configured Connection/All scope; there is no permissive default and no unconfigured latch.
+- **Early upstream data:** upstream Data observed through actual I/O after a matching, validated ClientHello but before the forwarding gate opens is attributed to the validated configured domain (approved CONNECT ordinal plus matching SNI proof). It remains a mandatory baseline denial — terminate setup, forward nothing; in addition the configured per-FQDN `early_data` control (`notify` or a scoped `block`) may apply.
 - **EOF and reset** observed while the gate is closed are operational Unknown: never policy violations, never domain-attributed, never selecting an Action. They keep their baseline handling.
 - Only the configured allowlist ordinal set is ever keyed for per-domain effects; no attacker-controlled hostname or IP table is introduced.
 
-### Block and Flare semantics
+### Block and Notify semantics
 
 - **Block Connection:** terminates the offender connection only; no scope history.
 - **Block Domain:** a fixed ordinal table (at most 32 entries) marks the configured domain blocked; it affects current and future flows matching that ordinal until restart.
 - **Block All:** synchronously prevents all subsequent application I/O, including pending writes and new admission, before any further I/O, then performs bounded physical closure of at most 512 slots. It persists until restart; there is no runtime unblock interface.
-- **FlareOnly:** a notification and aggregation context only. It never authorizes forwarding, never delays baseline denial, and never widens scope. Implicit Flare for an applied Block inherits that Block's scope (reporting scope equals enforcement scope).
+- **Notify** (renamed from `flare_only`): a notification and aggregation context only. It never authorizes forwarding, never delays baseline denial, and never widens scope. Implicit Notify for an applied Block inherits that Block's scope (reporting scope equals enforcement scope).
 
 ### Tarpit (deferred)
 
@@ -307,21 +307,26 @@ Tarpit is `Connection`-scope, post-gate, byte-preserving time-only pacing/backpr
 
 ### Configuration surface (implemented; exact schema)
 
-The reserved surface keys each Action to the fixed allowlist ordinal set (1 through 32) positionally, by index-aligned arrays, so no attacker-controlled name table and no second mapping are introduced. The exact schema is:
+The implemented configuration surface is the per-control schema (T2/T3): the `[any_illegal]` table carries exactly the four unattributable controls, and each `[allowed_fqdn."<fqdn>:<port>"]` table carries its per-FQDN `early_data` and `ja4` controls. No attacker-controlled name table and no second mapping are introduced. The exact schema is:
 
 ```
 [any_illegal]
-scope = "connection" | "all"          # AnyIllegal first-slot Block scope; "domain" is invalid configuration
+connect_parse        = { action = "notify" | "block", scope = "connection" | "all" }
+host_not_allowlisted = { action = "notify" | "block", scope = "connection" | "all" }
+tls_profile          = { action = "notify" | "block", scope = "connection" | "all" }
+ech                  = { action = "notify" | "block", scope = "connection" | "all" }
 
-[actions]
-kind  = ["flare_only" | "block", ...]  # one literal per allowlist entry, in allowlist order
-scope = ["connection" | "domain" | "all", ...]  # one literal per allowlist entry, in allowlist order
+[allowed_fqdn."<fqdn>:<port>"]
+early_data = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
+ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
 ```
 
-- The group is reserved and validated when present: `[any_illegal]` scope must be `connection` or `all` (a `domain` scope is invalid configuration, exit 78); `[actions]` `kind` and `scope` arrays are mandatory and their length must equal the allowlist length (one entry per configured ordinal); `kind = "tarpit"` for any ordinal is rejected with an explicit Tarpit-deferred diagnostic and is never accepted as an implemented runtime action; any other `kind` or `scope` literal is unknown (exit 78). A partial group (one table without the other, or mismatched lengths) is also exit 78.
-- An absent group is invalid configuration at enforcement integration (landed this increment): a document without the full `[any_illegal]` + positional `[actions]` group fails startup with exit 78 (EX_CONFIG). There is no absent-group baseline fallback; the pre-existing offender-scoped mandatory-denial semantics are reproduced by configuring `[any_illegal] scope = "connection"` with per-domain `flare_only`/`connection` entries.
-- All keys are mandatory with no defaults within the group and no environment or command-line override; unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as today. `Block` and `Flare` scopes are configurable (`Connection`, `Domain`, `All`); the `Tarpit` scope is fixed at `Connection`. The `Tarpit` rate is an integer bytes-per-second plus an explicit `Unlimited` variant, with checked representability. Configuration validation timing and procedure are unchanged.
-- Capacity: the enforcement group counts toward the existing 4 KiB document bound; no full-schema combination is guaranteed to fit beyond a measured example. Measured with the exact document serializer the parser reads (pinned by parser-real assertions in `src/config.rs`) at 32 allowlist entries of 100 ASCII bytes each (each an `<fqdn>:<port>` spelling, including the `:port` suffix): the compact `block`/`domain` full arrays with `[any_illegal] scope = "all"` total 4061 bytes (including the trailing newline) and fit; the longer `flare_only`/`connection` full arrays with `[any_illegal] scope = "connection"` total 4356 bytes and are rejected by the byte cap (OversizedDocument, exit 78). The `kind`/`scope` length must equal the allowlist length, so a max-count config at the longer spelling exceeds the bound and is rejected at startup. Each total is the exact serialized document length and is serialization- and layout-dependent (whitespace, listen spelling, trailing newline); only the compact form at the measured 32 × 100-byte `<fqdn>:<port>` entries is shown to fit under the preserved 4 KiB cap and 32-entry count. Neither a cap expansion, an alias, a silent compact migration, nor a change to the legal literal set is implied.
+- `[any_illegal]` has exactly the four mandatory keys `connect_parse`, `host_not_allowlisted`, `tls_profile`, `ech`, each an inline `{ action, scope }` table; a missing or unknown key is invalid configuration (exit 78). `action` is `notify` or `block`; `tarpit` is the reserved deferred keyword rejected with its explicit reserved-keyword diagnostic (exit 78), and `ignore` is invalid on the `any_illegal` surface — the suspicious class is always observable, so there is no silent denial. `scope` is `connection` or `all` only; a per-FQDN scope literal (`fqdn`/`domain`) is invalid configuration (exit 78) because an unattributable violation cannot mark a configured domain.
+- `[allowed_fqdn."<fqdn>:<port>"]` carries the mandatory `early_data` and `ja4` keys (plus the optional `cname_bailiwick`, unchanged); a missing or unknown key is invalid configuration (exit 78). Each per-FQDN control is either an inline `{ action, scope }` table (`action` `notify`|`block`, `tarpit` reserved → exit 78; `scope` `connection`|`fqdn`|`all`) or the bare `"ignore"` shorthand — the explicit per-FQDN opt-out: no action, no notification; the JA4 baseline is still recorded and the change signal is suppressed.
+- The action vocabulary is `notify` | `block` (T3). `notify` is the renamed `flare_only`: a notification and aggregation context only — it never authorizes forwarding, never delays baseline denial, and never widens scope; implicit Notify for an applied Block inherits that Block's scope. `block` is a scoped Block with the §Block and Notify semantics above. `tarpit` is reserved for a future action and is not configurable.
+- **Breaking change:** the pre-per-control grammar is removed. The old `[any_illegal] scope = "..."` single-key form, the positional `[actions]` `kind`/`scope` arrays, and the `flare_only` literal are gone; a document using them fails startup with exit 78. The old `flare_only`/`connection` semantics are reproduced by `action = "notify", scope = "connection"`. The `ja4` control is new and mandatory on every allowlist entry.
+- Every control key is mandatory with no defaults and no environment or command-line override; unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as before. Configuration validation timing and procedure are unchanged.
+- Capacity: the enforcement group counts toward the 16 KiB document bound (CONFIG_DOC_LIMIT, §Keyed configuration schema). Measured with the exact document serializer the parser reads (pinned by parser-real assertions in `src/config.rs`), the 32-entry × 100-byte `<fqdn>:<port>` worst case with the full per-control group fits under 16 KiB in both the `block`/`connection` and `notify`/`connection` spellings, with and without a realistic `IP#fqdn`/pinned resolver entry (`compact_32_names_with_group_fit_16kib`, `notify_32_hundred_byte_names_fit_and_parse`, `compact_32_hundred_byte_names_with_ip_fqdn_resolver_fit_16kib`, `compact_32_hundred_byte_names_with_pinned_resolver_fit_16kib`). Each total is serialization- and layout-dependent; neither a cap expansion, an alias, a silent compact migration, nor a change to the legal literal set is implied.
 
 ### Monitoring
 
@@ -333,7 +338,7 @@ All added enforcement and monitoring storage is boot-time allocated from the exi
 
 | Planned structure | Count | Unit size (bound) | Bound total |
 | --- | --- | --- | --- |
-| Per-ordinal DomainAction table (`FlareOnly`/`Block` + scope) | 32 | 2 B | 64 B |
+| Per-control table (4 `any_illegal` controls + per-ordinal `early_data`/`ja4` controls) | 4 + 2×32 | 2 B / 3 B | ≤ 256 B |
 | Domain-blocked ordinal bitset + All latch | 32 bits + flag | — | 5 B |
 | Per-slot latched tripwire fact (phase, class, validated ordinal, generation) | 512 | 8 B | 4096 B |
 | Per-ordinal saturated aggregate counters + overflow + window state | 32 | 32 B | 1024 B |
@@ -682,7 +687,7 @@ The spec mandates the hex-fallback; the FoxIO reference implementations (`python
 
 ### Reconciliation with the cipher/ALPN policy ban
 
-Spec §TLS ClientHello profile ("do not introduce cipher-suite or ALPN policy") is unchanged. The JA4 tripwire OBSERVES and RETAINS cipher-suite, extension, and ALPN data from the initial ClientHello for fingerprinting only: it introduces NO cipher-suite or ALPN policy, makes no acceptance/rejection decision on them, and exerts no negotiation influence. The retained data is never used to admit, reject, or modify a connection.
+Spec §TLS ClientHello profile ("do not introduce cipher-suite or ALPN policy") is unchanged. The JA4 tripwire OBSERVES and RETAINS cipher-suite, extension, and ALPN data from the initial ClientHello for fingerprinting only: it introduces NO cipher-suite or ALPN policy, makes no acceptance/rejection decision on them, and exerts no negotiation influence. The prior "never action-selecting" clause is REVERSED (T4): the retained data is never used to admit, reject, or modify a connection on its own, but on a CHANGE signal — a JA4 that deviates from the per-ordinal+address baseline — the tripwire selects the configured per-FQDN `ja4` action (`notify` or `block`) through the unified `decide()` (§T6). First-seen JA4 values only establish the baseline (recording, never an action); `ignore` suppresses the change signal only, never the baseline recording. JA4 still introduces no cipher-suite or ALPN policy and exerts no negotiation influence.
 
 ### Reconciliation with the inspection scope
 
@@ -728,16 +733,20 @@ The post-window probe sweep clause (§Sweep semantics (probe state machine)) gov
 
 The `allowlist` array and the positional `[actions]` kind/scope arrays are removed. The sole
 allowlist mapping is the set of `[allowed_fqdn."<fqdn>:<port>"]` table keys: each configured
-domain is defined exactly once, with its action co-located in the same table. This
+domain is defined exactly once, with its per-FQDN controls co-located in the same table. This
 eliminates the index-alignment error class and the second mapping; no attacker-controlled
 name table is introduced. The exact schema is:
 
 ```
 [any_illegal]
-scope = "connection" | "all"          # AnyIllegal first-slot Block scope; "domain" is invalid configuration
+connect_parse        = { action = "notify" | "block", scope = "connection" | "all" }
+host_not_allowlisted = { action = "notify" | "block", scope = "connection" | "all" }
+tls_profile          = { action = "notify" | "block", scope = "connection" | "all" }
+ech                  = { action = "notify" | "block", scope = "connection" | "all" }
 
 [allowed_fqdn."<fqdn>:<port>"]
-early_data = { action = "flare_only" | "block", scope = "connection" | "domain" | "all" }  # block scope "domain"/"all" is invalid configuration (exit 78)
+early_data = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
+ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
 ```
 
 - The allowlist is the set of `[allowed_fqdn."..."]` table keys, 1 through 32 tables; empty
@@ -751,22 +760,31 @@ early_data = { action = "flare_only" | "block", scope = "connection" | "domain" 
   ascending table-key order, not document order (the TOML parser iterates tables in sorted
   key order), and `Config::allowlist_position` returns `Some(0)` for the first table; the
   ordinal numbering carried in logs matches that same 0-based numbering. The allowlist and
-  its actions are built from the same table, so enforcement pairing is unaffected by the
+  its controls are built from the same table, so enforcement pairing is unaffected by the
   ordering.
-- Every `[allowed_fqdn."..."]` table contains the mandatory `early_data` key and an optional
-  `cname_bailiwick` key; every other key remains invalid configuration (exit 78). `early_data`
-  is an inline table with exactly `action` and `scope`; missing `early_data` or an unknown key
-  is invalid configuration (exit 78); no defaults are supplied, consistent with the
-  all-keys-mandatory doctrine. The `early_data` key names the existing per-domain control
-  (rp2e §Action catalog and attribution early upstream data); it is forward-compatible with a future `ja4` key gated
-  on a separate behavior amendment.
-- Per-FQDN `action` is `flare_only` or `block`; `tarpit` is a reserved keyword for a future
+- Every `[allowed_fqdn."..."]` table contains the mandatory `early_data` and `ja4` keys and
+  an optional `cname_bailiwick` key; every other key remains invalid configuration (exit 78).
+  Each per-FQDN control is an inline `{ action, scope }` table or the bare `"ignore"`
+  shorthand; missing `early_data`/`ja4` or an unknown key is invalid configuration (exit 78);
+  no defaults are supplied, consistent with the all-keys-mandatory doctrine. The `early_data`
+  key names the existing per-domain control (rp2e §Action catalog and attribution early upstream data); the `ja4` key names the
+  JA4 change-selecting control (T4).
+- Per-FQDN `action` is `notify` or `block`; `tarpit` is a reserved keyword for a future
   action, rejected with an explicit reserved-keyword diagnostic (exit 78), never accepted as
-  an implemented runtime action. Per-FQDN `scope` is `connection`, `domain`, or `all` with
-  unchanged semantics (rp2e §Block and Flare semantics-§Block and Flare semantics).
-- `[any_illegal]` is unchanged and remains mandatory: `scope` must be `connection` or `all`
-  (`domain` invalid, exit 78); an absent group is invalid configuration at enforcement
-  integration (rp2e §Configuration surface (implemented; exact schema) preserved).
+  an implemented runtime action. Per-FQDN `scope` is `connection`, `fqdn`, or `all` with
+  unchanged semantics (rp2e §Block and Notify semantics). The bare `"ignore"` shorthand is
+  the explicit per-FQDN opt-out: no action, no notification; the JA4 baseline is still recorded and
+  the change signal is suppressed.
+- `[any_illegal]` is mandatory with exactly the four keys `connect_parse`,
+  `host_not_allowlisted`, `tls_profile`, `ech`, each an inline `{ action, scope }` table;
+  `action` is `notify`|`block` (tarpit reserved, `ignore` invalid), `scope` is
+  `connection`|`all` (`fqdn`/`domain` invalid, exit 78); an absent group or a missing/unknown
+  key is invalid configuration (rp2e §Configuration surface (implemented; exact schema) preserved).
+- **Breaking change:** the old `[any_illegal] scope = "..."` single-key form, the positional
+  `[actions]` arrays, and the `flare_only` literal are removed; the `ja4` control is new and
+  mandatory. SP-002's early-data `block` scope restriction is superseded (per-FQDN scope is
+  uniformly `connection`|`fqdn`|`all` for both `early_data` and `ja4`; the SP-001 gate
+  mitigates the upstream-sourced process-wide-latch concern).
 - All keys are mandatory with no defaults and no environment or command-line override;
   unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as today.
   Configuration validation timing and procedure are unchanged.
@@ -833,6 +851,79 @@ the vocabulary at 191 B of headroom against the 2048-byte slot; any future addit
 monitor-family record shape must re-measure against the 2048-byte slot before it is
 accepted.
 
+## Per-control enforcement schema (T2/T3/T4/T6)
+
+This amendment documents the implemented per-control enforcement schema: the symmetry model
+(T2), the action vocabulary and scopes (T3), JA4 action-selecting (T4), and behavior symmetry
+through the unified `decide()` (T6). It is the governing description of the implemented
+schema in `src/config.rs` and `src/enforcement/{action,policy,state}.rs`; the Configuration
+surface (implemented; exact schema) and Keyed configuration schema sections carry the exact
+grammar.
+
+### T2 — Symmetry model (control keys by attribution)
+
+Control keys are surface-specific BY ATTRIBUTION:
+
+- **any_illegal** (unattributable): `connect_parse`, `host_not_allowlisted`, `tls_profile`,
+  `ech` — fire BEFORE a domain is validated, so no ordinal is attributable. There is no
+  per-FQDN `tls_profile`/`ech` and no `any_illegal` `early_data`/`ja4`.
+- **Per-FQDN** (attributable): `early_data`, `ja4` — fire AFTER a validated ordinal exists.
+
+Symmetry is LAYOUT-level: both surfaces are `control = { action, scope }` tables with the
+SAME action vocabulary and the SAME scope set; the key sets differ where attribution
+requires it.
+
+### T3 — Action vocabulary & scopes
+
+- **ignore** — per-FQDN opt-out only: no action, no notification; the JA4 baseline is still
+  recorded and the change signal is suppressed. Never a global default; invalid on
+  `any_illegal` controls (parse-rejected, exit 78; `decide()` never receives it).
+- **notify** — renamed from `flare_only`: a notification/aggregation context only. Never
+  authorizes forwarding, never delays baseline denial, never widens scope; implicit Notify
+  for an applied Block inherits that Block's scope.
+- **block** — scoped Block (Connection/FQDN/All).
+- **tarpit** — RESERVED keyword for a future action. NOT configurable; parse-rejected
+  (exit 78) with a reserved-keyword diagnostic. `ActionKind` has no Tarpit variant.
+
+Scope legality:
+
+- `any_illegal`: `connection` | `all` (`fqdn`/`domain` INVALID, exit 78).
+- per-FQDN: `connection` | `fqdn` | `all`.
+
+Every control key is MANDATORY and always present; `ignore` is the explicit per-FQDN
+opt-out. Expression syntax: inline table `{ action, scope }` for `notify`/`block`; bare
+`"ignore"` shorthand for the per-FQDN opt-out.
+
+### T4 — JA4 action-selecting
+
+The JA4 action vocabulary is the FULL per-FQDN set: `ignore` | `notify` | `block` (+
+`tarpit` reserved when it ships). The trigger is CHANGE-ONLY: a delta from the
+per-ordinal+address baseline. First-seen establishes the baseline (recording, never an
+action); `ignore` suppresses the change signal only — the baseline is still recorded. The
+prior "never action-selecting" clause (§Reconciliation with the cipher/ALPN policy ban) is
+REVERSED; the "no cipher-suite/ALPN policy" and "no negotiation influence" guarantees are
+preserved — JA4 still introduces no cipher/ALPN policy and exerts no negotiation influence;
+it merely selects an action on a CHANGE signal.
+
+### T6 — Behavior symmetry (unified decide())
+
+`decide()` (`src/enforcement/policy.rs:113`) projects violations to effects uniformly in
+shape/vocabulary/scopes for both surfaces; control keys are surface-specific by attribution
+(T2). `Violation::AnyIllegal` fires its own control's action on the first occurrence (the
+single connection-level first-AnyIllegal latch, Option A); every later AnyIllegal on the
+connection is BaselineOnly. `Violation::EarlyUpstreamData` and `Violation::Ja4Change` select
+their per-FQDN `early_data`/`ja4` control; `ignore` yields BaselineOnly. Per-FQDN violations
+never consume the first-slot latch (strict per-control latch independence, Option B, is
+rejected). `ignore` is invalid on `any_illegal` at parse, so `decide()` never receives it;
+`fqdn`/`domain` scope is invalid for `any_illegal` controls (exit 78 at parse).
+`ActionKind` = Notify/Block (Tarpit reserved — not a variant).
+
+**SP-001 preservation.** The SP-001 gate applies to ANY effect projecting to Block All, from
+any control: the `WindowedCounter` counts every `AnyIllegal` fact PLUS every per-FQDN fact
+projecting to Block All; a not-yet-crossed Block All downgrades to BaselineOnly. The single
+first-slot latch (Option A) gates the mandatory first-AnyIllegal action; per-control action
+selection fires each control's action on its first occurrence.
+
 ## Red-team remediation: 16 findings
 
 
@@ -865,6 +956,16 @@ K-connection corroboration state and gate are removed from the enforcement path,
 upstream-sourced signal can no longer select a per-domain or process-wide latch because
 those scopes are unreachable from configuration. This amendment records the binding
 semantics.
+
+**Superseded (per-control schema, T2/T3/T6).** SP-002's early-data `block` scope restriction
+is superseded by the per-control schema: per-FQDN `scope` is uniformly
+`connection` | `fqdn` | `all` for BOTH `early_data` and `ja4` (§Keyed configuration schema,
+§Per-control enforcement schema T6). The upstream-sourced process-wide-latch concern that
+motivated the restriction is mitigated structurally instead: the SP-001 gate (§SP-001) arms
+Block All only after a bounded fact threshold within a fixed window, counting every
+per-FQDN fact projecting to Block All, so a single upstream-sourced early-data fact can no
+longer latch a process-wide outage. The baseline mandatory denial (terminate setup on early
+upstream data while the gate is closed) is unchanged.
 
 #### SP-003 — Homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup
 
@@ -911,8 +1012,7 @@ The spec pinned canonical JA4 byte-for-byte fidelity while mandating sigalg rete
 the hash input; `count:02` overflow rendering was undefined. Resolution: a ClientHello
 offering more than 64 `signature_algorithms` entries is rejected as a ClientHello-profile
 violation, classified as **AnyIllegal**. This is a profile-boundary rejection, not a JA4
-admit/reject decision, so §Reconciliation with the cipher/ALPN policy ban (JA4 data never used to admit, reject, or modify a
-connection) is respected. `count:02` overflow rendering is bounded: the two-digit count
+admit/reject decision, so §Reconciliation with the cipher/ALPN policy ban (JA4 introduces no cipher/ALPN policy and exerts no negotiation influence) is respected. `count:02` overflow rendering is bounded: the two-digit count
 saturates at 99 with no literal overflow marker (`+` would break the fixed 2-character
 canonical slot of the 36-byte JA4 string); this applies to `cipher_count`, the only count
 that can exceed 99 under the 64-extension cap. Implementation folds into a later sub-mission of
@@ -1297,6 +1397,12 @@ costs exfiltration. Tests: `any_illegal_folds_every_fact_by_exact_cause_and_latc
 (`src/enforcement/state.rs:397`), `single_any_illegal_never_latches_all`
 (`src/enforcement/state.rs:766`), `three_any_illegal_facts_within_the_window_latch_all`
 (`src/enforcement/state.rs:787`).
+
+The gate applies to ANY effect projecting to Block All, from any control, not only
+`any_illegal`: the `WindowedCounter` folds every `AnyIllegal` fact PLUS every per-FQDN fact
+(`EarlyUpstreamData`, `Ja4Change`) projecting to Block All, so a per-FQDN `block`/`all`
+control also arms only through the bounded threshold (§Per-control enforcement schema T6 —
+SP-001 preservation).
 
 #### SP-003 — homogeneous-trust resolver arrays
 

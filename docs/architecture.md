@@ -28,7 +28,7 @@ post-boot state is preallocated** (§6).
 | `worker` / `Runtime` | The single owner loop: readiness demux, scheduling, timers, gate transitions — realized as the shared-readiness `Runtime` | `:138,144,146,147,149` |
 | `log` | 256×8 KiB preallocated queue; allocation-free encode; nonblocking sink; drop+count | `:149,178-179,193-194` |
 | `lifecycle` | SIGTERM, shutdown grace, drain; exit without deallocating | `:149,150,181,192` |
-| `enforcement` | rp2e tripwire/action/monitoring surface (`[any_illegal]` + keyed `[allowed_fqdn."<fqdn>:<port>"]` tables with `early_data`), per-domain Action, bounded stdout monitoring, control state | §Tripwire actions, monitoring, and pacing, §Keyed configuration schema |
+| `enforcement` | rp2e tripwire/action/monitoring surface (per-control schema: `[any_illegal]` with the four controls `connect_parse`, `host_not_allowlisted`, `tls_profile`, `ech` + keyed `[allowed_fqdn."<fqdn>:<port>"]` tables with per-FQDN `early_data`/`ja4` controls), per-control Action (`notify`|`block`), bounded stdout monitoring, control state | §Tripwire actions, monitoring, and pacing, §Keyed configuration schema, §Per-control enforcement schema |
 
 > **As-built realization.** `src/main.rs` is the single boot owner: preallocate
 > serving workspaces → startup DNS window (`run_startup`) → on a Serve decision
@@ -38,8 +38,10 @@ post-boot state is preallocated** (§6).
 > `runtime.rs:246-280`). Provisional parsers live in
 > `src/{dns,connect,client_hello,startup_dns}.rs`; the rp2e tripwire/action/
 > monitoring surface lives in `src/enforcement/{mod,action,monitor,policy,state}.rs`
-> with the validated `[any_illegal]` + keyed `[allowed_fqdn."<fqdn>:<port>"]`
-> config schema (`alumina-cfgk`; 16 KiB document bound) enforced in
+> with the validated per-control schema — `[any_illegal]` (`connect_parse`,
+> `host_not_allowlisted`, `tls_profile`, `ech`) plus keyed
+> `[allowed_fqdn."<fqdn>:<port>"]` per-FQDN `early_data`/`ja4` controls
+> (`alumina-cfgk`; 16 KiB document bound) enforced in
 > `src/config.rs`. The serving owner is decomposed as `src/serving/{policy,reject,startup,tests}.rs`
 > (fixed Refusal policy mapping, rejection effects, startup window, sibling
 > test module) and the shared-readiness/runtime and startup-DNS test modules live

@@ -28,18 +28,27 @@ startup_unresolved_allowance = 0
 # Bare-IP entries remain valid but each emits one startup warning (degraded
 # trust form).
 resolver = ["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "8.8.8.8#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "9.9.9.9#dns.quad9.net#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "208.67.222.222#dns.opendns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "94.140.14.14#dns.adguard.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
-# Mandatory keyed allowlist tables (docs/alumina-proxy.md:991-1153, alumina-cfgk
+# Mandatory keyed allowlist tables (docs/alumina-proxy.md:729-853, alumina-cfgk
 # 2026-10-24): the [allowed_fqdn."<fqdn>:<port>"] table keys ARE the allowlist
 # (1..=32 tables, each a literal <fqdn>:<port>, unique after normalization);
-# [any_illegal] scope is the AnyIllegal first-slot Block scope ("connection"|"all").
-# Every table carries exactly one early_data inline table holding that entry's
-# action ("flare_only"|"block") and scope ("connection"|"domain"|"all"); every
-# key is mandatory, a missing/extra/unknown key or table is exit 78.
+# [any_illegal] carries exactly the four per-control keys connect_parse,
+# host_not_allowlisted, tls_profile, ech, each an inline { action, scope } table
+# (action "notify"|"block"; scope "connection"|"all").
+# Every [allowed_fqdn] table carries the mandatory early_data and ja4 inline
+# tables, each { action = "notify"|"block", scope = "connection"|"fqdn"|"all" }
+# or the bare "ignore" opt-out; every key is mandatory, a missing/extra/unknown
+# key or table is exit 78.
 [any_illegal]
-scope = "connection"
+connect_parse = { action = "notify", scope = "connection" }
+host_not_allowlisted = { action = "notify", scope = "connection" }
+tls_profile = { action = "notify", scope = "connection" }
+ech = { action = "notify", scope = "connection" }
 [allowed_fqdn."api.github.com:443"]
-early_data = { action = "flare_only", scope = "connection" }
+early_data = { action = "notify", scope = "connection" }
+ja4 = { action = "notify", scope = "connection" }
 [allowed_fqdn."example.com:443"]
-early_data = { action = "flare_only", scope = "connection" }
+early_data = { action = "notify", scope = "connection" }
+ja4 = { action = "notify", scope = "connection" }
 [allowed_fqdn."www.example.net:443"]
-early_data = { action = "flare_only", scope = "connection" }
+early_data = { action = "notify", scope = "connection" }
+ja4 = { action = "notify", scope = "connection" }

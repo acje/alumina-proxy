@@ -143,8 +143,10 @@ claim), and this repo never provisions VMs, connections or images.
 
 `config.example.toml` (`[allowed_fqdn."<fqdn>:<port>"]` keyed tables —
 `api.github.com:443`, `example.com:443`, `www.example.net:443`, each carrying
-`early_data = { action = "flare_only", scope = "connection" }` under
-`[any_illegal] scope = "connection"` — resolver
+`early_data = { action = "notify", scope = "connection" }` and
+`ja4 = { action = "notify", scope = "connection" }` under `[any_illegal]` with
+the four per-control keys `connect_parse`, `host_not_allowlisted`, `tls_profile`,
+`ech` — resolver
 `["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 "8.8.8.8#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 "9.9.9.9#dns.quad9.net#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -200,14 +202,18 @@ speaks a TLS 1.3 `ClientHello` first matches the contract exactly.
   resolvable name → EX_TEMPFAIL 75 — bounded intentional failure, never a hang
   or false clean.
 
-## JA4-flare verification (TLS 1.3-only)
+## JA4 change-signal verification (TLS 1.3-only)
 
-A JA4 change-signal flare is verified with **two TLS 1.3-only ClientHellos** whose
-JA4 fingerprints differ; it is a **fact**, never a block. The client must be pinned
+A JA4 change signal is verified with **two TLS 1.3-only ClientHellos** whose JA4
+fingerprints differ. The change is a **fact** that selects the configured per-FQDN
+`ja4` control action through `decide()` (§T6, §Per-control enforcement schema):
+with the example config's `ja4 = { action = "notify", scope = "connection" }` the
+change fires a **Notify** — never a Block. The client must be pinned
 to TLS 1.3 on both offers — the version-offer gate (`docs/alumina-proxy.md:47`;
 `validate_versions` at `src/client_hello.rs:652-665`) requires `supported_versions`
 with `0x0304` as the only non-GREASE version, so a TLS 1.2-capable offer is
-`InvalidVersionOffer` → `any_illegal` → **Block**, not a flare.
+`InvalidVersionOffer` → `any_illegal` → the configured `any_illegal` action
+(**Block** in the example config), not a JA4 change signal.
 
 Procedure (Go client pinned to TLS 1.3):
 
@@ -218,28 +224,28 @@ Procedure (Go client pinned to TLS 1.3):
    JA4 change fact.
 2. Open a second tunnel to the same ordinal and send a ClientHello yielding a
    **distinct JA4** (e.g. a different ALPN set in `NextProtos`). The serving path
-   records `note_fact_ja4_change` (`src/serving.rs:2737`) — a **fact**, not an
-   action.
+   records `note_fact_ja4_change` (`src/serving.rs:2786-2787`) — the change fact
+   that selects the per-FQDN `ja4` control action.
 3. Read the monitor records. The `kind=monitor_domain` detail batch carries the
    change signal — `d0j=1` (per-ordinal change counter) with
    `d0v="<36-char-ja4>"` (the latest changed JA4, 36 chars), zero-suppressed
-   together per the C1 amendment (`docs/alumina-proxy.md:950-964`). The
-   `kind=monitor` summary carries the globals `actions_total=0` and
-   `refusals_total=0` — a JA4 change is a fact, so no action or refusal fires.
+   together per the C1 amendment (`docs/alumina-proxy.md:713-718`). The
+   `kind=monitor` summary carries the globals `actions_total=1` (the Notify) and
+   `refusals_total=0` (no Block).
 
-Expected signal (flare_only, no block):
+Expected signal (notify, no block):
 
 | Record | Field | Expected |
 | --- | --- | --- |
-| `kind=monitor` summary | `actions_total` | `0` |
+| `kind=monitor` summary | `actions_total` | `1` (the Notify) |
 | `kind=monitor` summary | `refusals_total` | `0` |
 | `kind=monitor_domain` batch | `d0j` | `1` |
 | `kind=monitor_domain` batch | `d0v` | `"<36-char-ja4>"` |
 
 Anti-pattern: **curl and `openssl s_client` default to offering TLS 1.2**, so their
 ClientHellos trip `InvalidVersionOffer` → `any_illegal` → **Block** (incrementing
-`actions_total`/`refusals_total`), never a flare. A JA4 flare is only observable
-with a TLS 1.3-only client.
+`actions_total`/`refusals_total`), never a JA4 change signal. A JA4 change signal
+is only observable with a TLS 1.3-only client.
 
 ## Validating the package
 
