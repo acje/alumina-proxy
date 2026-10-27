@@ -1,0 +1,60 @@
+# Envoy v1.40.2 CONNECT forward-proxy config for the e2-micro benchmark suite
+# (bench-suite-20261027, evidence bead alumina-d59gq).
+#
+# Canonical CONNECT building blocks (per Envoy docs + configs/proxy_connect.yaml):
+#   - HCM http2_protocol_options.allow_connect: true
+#   - route match connect_matcher {} (CONNECT has no path; status otherwise 404)
+#   - route upgrade_configs: [{ upgrade_type: CONNECT }]  (CONNECT is 403 by default
+#     without this upgrade)
+#
+# The upstream cluster is STATIC at 8.8.8.8:443 = example.com (the backend bound
+# on the loopback global-unicast alias in the harness). Every measured request is
+# a CONNECT to example.com:443, the allowlisted host, so the static target is
+# equivalent to resolving the CONNECT authority for this measurement path.
+#
+# Envoy is a plain CONNECT forward proxy here; there is no allowlist in Envoy
+# (the allowlist is alumina-specific and does not affect the measured golden
+# path). --concurrency 2 matches the e2-micro 2-vCPU target per Envoy's own
+# benchmarking FAQ (one worker thread per target core).
+static_resources:
+  listeners:
+  - name: connect_listener
+    address:
+      socket_address: { address: 127.0.0.1, port_value: 8080 }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: bench_connect
+          codec_type: AUTO
+          http2_protocol_options:
+            allow_connect: true
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: connect_vhost
+              domains: ["*"]
+              routes:
+              - match:
+                  connect_matcher: {}
+                route:
+                  cluster: connect_target
+                  upgrade_configs:
+                  - upgrade_type: CONNECT
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+  - name: connect_target
+    connect_timeout: 2s
+    type: STATIC
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: connect_target
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: 8.8.8.8, port_value: 443 }
