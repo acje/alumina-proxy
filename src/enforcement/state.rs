@@ -4,15 +4,16 @@ use crate::eligibility::NumericAddr;
 
 use super::action::{ControlTable, DomainOrdinal, FirstSlot, Scope};
 use super::monitor::{DnsAnomalyKind, Monitor, SlotCapture};
-use super::policy::{Effect, UnknownReason, Violation, decide as pure_decide};
+use super::policy::{AnyIllegalCause, Effect, UnknownReason, Violation, decide as pure_decide};
 
-/// The default All-scope gate threshold: at the default the FIRST deviation
-/// arms the All-scope block, sticky until restart. Operator-configurable via
-/// `[all_scope_gate]`.
+/// The default per-class All-scope gate threshold: at the default the FIRST
+/// deviation of a class arms that class's All-scope block, sticky until
+/// restart. Operator-configurable per class via the four gate sections.
 pub const ALL_SCOPE_GATE_DEFAULT_THRESHOLD: u32 = 1;
 
-/// The default All-scope gate window: the whole-second window within which the
-/// threshold facts must arrive. Operator-configurable via `[all_scope_gate]`.
+/// The default per-class All-scope gate window: the whole-second window within
+/// which the threshold facts of a class must arrive. Operator-configurable per
+/// class via the four gate sections.
 pub const ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS: u64 = 900;
 
 /// Operator-configurable SP-001 All-scope gate parameters: the threshold of
@@ -51,6 +52,64 @@ impl Default for AllScopeGate {
                 .expect("default threshold 1 is nonzero"),
             NonZeroU64::new(ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS)
                 .expect("default window 900 is nonzero"),
+        )
+    }
+}
+
+/// The four per-class SP-001 All-scope gate parameter sets, one per violation
+/// class: `bad_handshake` (`ConnectParse`/`TlsProfile`/`Ech`), `illegal_fqdn`
+/// (`HostNotAllowlisted`), `early_data` (`EarlyUpstreamData`), and `ja4`
+/// (`Ja4Change`). Each class's gate counts only that class's facts, so the
+/// operator chooses the action AND the bar per class. Each field is an
+/// [`AllScopeGate`] whose `NonZero` fields make a never-arming gate
+/// unrepresentable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateSet {
+    bad_handshake: AllScopeGate,
+    illegal_fqdn: AllScopeGate,
+    early_data: AllScopeGate,
+    ja4: AllScopeGate,
+}
+
+impl GateSet {
+    pub const fn new(
+        bad_handshake: AllScopeGate,
+        illegal_fqdn: AllScopeGate,
+        early_data: AllScopeGate,
+        ja4: AllScopeGate,
+    ) -> GateSet {
+        GateSet {
+            bad_handshake,
+            illegal_fqdn,
+            early_data,
+            ja4,
+        }
+    }
+
+    pub const fn bad_handshake(self) -> AllScopeGate {
+        self.bad_handshake
+    }
+
+    pub const fn illegal_fqdn(self) -> AllScopeGate {
+        self.illegal_fqdn
+    }
+
+    pub const fn early_data(self) -> AllScopeGate {
+        self.early_data
+    }
+
+    pub const fn ja4(self) -> AllScopeGate {
+        self.ja4
+    }
+}
+
+impl Default for GateSet {
+    fn default() -> Self {
+        Self::new(
+            AllScopeGate::default(),
+            AllScopeGate::default(),
+            AllScopeGate::default(),
+            AllScopeGate::default(),
         )
     }
 }
@@ -155,17 +214,32 @@ pub struct Enforcement {
     block_all: bool,
     blocked: u32,
     monitor: Monitor,
-    any_illegal_gate: WindowedCounter,
+    bad_handshake_gate: WindowedCounter,
+    illegal_fqdn_gate: WindowedCounter,
+    early_data_gate: WindowedCounter,
+    ja4_gate: WindowedCounter,
 }
 
 impl Enforcement {
-    pub fn new(control: ControlTable, gate: AllScopeGate) -> Enforcement {
+    pub fn new(control: ControlTable, gates: GateSet) -> Enforcement {
         Enforcement {
             control,
             block_all: false,
             blocked: 0,
             monitor: Monitor::new(),
-            any_illegal_gate: WindowedCounter::new(gate.threshold(), gate.window_secs()),
+            bad_handshake_gate: WindowedCounter::new(
+                gates.bad_handshake().threshold(),
+                gates.bad_handshake().window_secs(),
+            ),
+            illegal_fqdn_gate: WindowedCounter::new(
+                gates.illegal_fqdn().threshold(),
+                gates.illegal_fqdn().window_secs(),
+            ),
+            early_data_gate: WindowedCounter::new(
+                gates.early_data().threshold(),
+                gates.early_data().window_secs(),
+            ),
+            ja4_gate: WindowedCounter::new(gates.ja4().threshold(), gates.ja4().window_secs()),
         }
     }
 
@@ -184,10 +258,22 @@ impl Enforcement {
     pub fn decide(&mut self, latch: &mut FirstSlot, violation: Violation, secs: u64) -> Effect {
         let raw = pure_decide(&self.control, latch, violation);
         let crossed = match violation {
-            Violation::AnyIllegal { .. } => self.any_illegal_gate.note(secs),
-            Violation::EarlyUpstreamData { .. } | Violation::Ja4Change { .. } => {
+            Violation::AnyIllegal { cause } => match cause {
+                AnyIllegalCause::ConnectParse(_)
+                | AnyIllegalCause::TlsProfile(_)
+                | AnyIllegalCause::Ech => self.bad_handshake_gate.note(secs),
+                AnyIllegalCause::HostNotAllowlisted => self.illegal_fqdn_gate.note(secs),
+            },
+            Violation::EarlyUpstreamData { .. } => {
                 if matches!(raw, Effect::Block { scope: Scope::All }) {
-                    self.any_illegal_gate.note(secs)
+                    self.early_data_gate.note(secs)
+                } else {
+                    false
+                }
+            }
+            Violation::Ja4Change { .. } => {
+                if matches!(raw, Effect::Block { scope: Scope::All }) {
+                    self.ja4_gate.note(secs)
                 } else {
                     false
                 }
@@ -391,17 +477,27 @@ mod tests {
         ControlTable::new(any, &per_fqdn(early), &per_fqdn(ja4)).expect("in-bound test table")
     }
 
-    fn en(t: ControlTable) -> Enforcement {
-        Enforcement::new(t, AllScopeGate::default())
+    fn gate(threshold: u32, window: u64) -> AllScopeGate {
+        AllScopeGate::new(
+            NonZeroU32::new(threshold).expect("nonzero threshold"),
+            NonZeroU64::new(window).expect("nonzero window"),
+        )
     }
 
-    fn en_gated(t: ControlTable, threshold: u32, window: u64) -> Enforcement {
-        Enforcement::new(
-            t,
-            AllScopeGate::new(
-                NonZeroU32::new(threshold).expect("nonzero threshold"),
-                NonZeroU64::new(window).expect("nonzero window"),
-            ),
+    fn en(t: ControlTable) -> Enforcement {
+        Enforcement::new(t, GateSet::default())
+    }
+
+    fn en_gated(t: ControlTable, gates: GateSet) -> Enforcement {
+        Enforcement::new(t, gates)
+    }
+
+    fn gates_illegal_fqdn(threshold: u32, window: u64) -> GateSet {
+        GateSet::new(
+            AllScopeGate::default(),
+            gate(threshold, window),
+            AllScopeGate::default(),
+            AllScopeGate::default(),
         )
     }
 
@@ -513,6 +609,10 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "long per-class fold + latch-once assertion spanning five decide calls"
+    )]
     #[test]
     fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
         let t = table(
@@ -520,7 +620,15 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = en_gated(t, 3, 60);
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                gate(10, 60),
+                gate(3, 60),
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+            ),
+        );
         let first = en.decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
@@ -531,7 +639,7 @@ mod tests {
         assert_eq!(
             first,
             Effect::BaselineOnly,
-            "SP-001: one AnyIllegal fact must not arm the All latch"
+            "SP-001: one HostNotAllowlisted fact must not arm the illegal_fqdn latch"
         );
         assert!(!en.block_all());
         assert_eq!(
@@ -550,7 +658,7 @@ mod tests {
         assert_eq!(second, Effect::BaselineOnly);
         assert!(
             !en.block_all(),
-            "two AnyIllegal facts are still below the fixed threshold"
+            "a bad_handshake-class fact never arms the illegal_fqdn gate"
         );
         assert_eq!(
             en.counters().facts_any_illegal(AnyIllegalCause::TlsProfile(
@@ -563,16 +671,15 @@ mod tests {
         let third = en.decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
-                cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
+                cause: AnyIllegalCause::HostNotAllowlisted,
             },
             2,
         );
         assert_eq!(
             third,
-            Effect::Block { scope: Scope::All },
-            "the third AnyIllegal fact within the window crosses the threshold"
+            Effect::BaselineOnly,
+            "two HostNotAllowlisted facts are still below the illegal_fqdn threshold"
         );
-        assert!(en.block_all());
         let fourth = en.decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
@@ -583,12 +690,30 @@ mod tests {
         assert_eq!(
             fourth,
             Effect::Block { scope: Scope::All },
-            "once armed the All latch stays armed for later AnyIllegal facts"
+            "the third HostNotAllowlisted fact within the window crosses the illegal_fqdn threshold"
+        );
+        assert!(en.block_all());
+        assert_eq!(
+            en.counters().actions_block_all(),
+            1,
+            "the All latch records one transition"
+        );
+        let fifth = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::HostNotAllowlisted,
+            },
+            4,
+        );
+        assert_eq!(
+            fifth,
+            Effect::Block { scope: Scope::All },
+            "once armed the All latch stays armed for later HostNotAllowlisted facts"
         );
         assert!(en.block_all());
         assert_eq!(
             en.counters().facts_any_illegal_total(),
-            4,
+            5,
             "every AnyIllegal fact folds regardless of the gating"
         );
     }
@@ -686,7 +811,7 @@ mod tests {
             &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
-        let mut en = en_gated(t, 3, 60);
+        let mut en = en_gated(t, gates_illegal_fqdn(3, 60));
         for i in 0..3u64 {
             en.decide(
                 &mut FirstSlot::new(),
@@ -696,7 +821,10 @@ mod tests {
                 i,
             );
         }
-        assert!(en.block_all(), "three AnyIllegal facts arm the All latch");
+        assert!(
+            en.block_all(),
+            "three HostNotAllowlisted facts arm the illegal_fqdn latch"
+        );
         assert_eq!(
             en.counters().actions_block_all(),
             1,
@@ -716,7 +844,15 @@ mod tests {
             &[(ActionKind::Block, Scope::All); 2],
             &[(ActionKind::Block, Scope::All); 2],
         );
-        let mut en = en_gated(t, 3, 60);
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                AllScopeGate::default(),
+                gate(3, 60),
+                gate(3, 60),
+                AllScopeGate::default(),
+            ),
+        );
         let ordinal = t.ordinal(0).expect("big table ordinal");
         for i in 0..3u64 {
             en.decide(
@@ -727,15 +863,23 @@ mod tests {
                 i,
             );
         }
-        assert!(en.block_all(), "three AnyIllegal facts arm the All latch");
-        en.decide(
+        assert!(
+            en.block_all(),
+            "three HostNotAllowlisted facts arm the illegal_fqdn latch"
+        );
+        let effect = en.decide(
             &mut FirstSlot::new(),
             Violation::EarlyUpstreamData { ordinal },
             10,
         );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "a single early-data All application is below the early_data gate"
+        );
         assert!(
             en.block_all(),
-            "an early-data All application keeps the latch"
+            "an early-data downgrade keeps the All latch"
         );
         assert_eq!(
             en.counters().actions_block_all(),
@@ -930,7 +1074,7 @@ mod tests {
             &[(ActionKind::Block, Scope::All)],
             &[(ActionKind::Block, Scope::All)],
         );
-        let mut en = en_gated(t, 3, 60);
+        let mut en = en_gated(t, gates_illegal_fqdn(3, 60));
         let effect = en.decide(
             &mut FirstSlot::new(),
             Violation::AnyIllegal {
@@ -941,7 +1085,7 @@ mod tests {
         assert_eq!(
             effect,
             Effect::BaselineOnly,
-            "SP-001: a single unauthenticated AnyIllegal must not arm the All latch"
+            "SP-001: a single unauthenticated HostNotAllowlisted must not arm the illegal_fqdn latch"
         );
         assert!(!en.block_all());
         assert_eq!(en.counters().actions_block_all(), 0);
@@ -955,7 +1099,7 @@ mod tests {
             &[(ActionKind::Block, Scope::All)],
             &[(ActionKind::Block, Scope::All)],
         );
-        let mut en = en_gated(t, 3, 60);
+        let mut en = en_gated(t, gates_illegal_fqdn(3, 60));
         assert_eq!(
             en.decide(
                 &mut FirstSlot::new(),
@@ -985,7 +1129,7 @@ mod tests {
                 2,
             ),
             Effect::Block { scope: Scope::All },
-            "the third AnyIllegal fact within the window crosses the threshold"
+            "the third HostNotAllowlisted fact within the window crosses the illegal_fqdn threshold"
         );
         assert!(en.block_all());
     }
@@ -1051,7 +1195,15 @@ mod tests {
             &[(ActionKind::Block, Scope::All)],
             &[(ActionKind::Block, Scope::All)],
         );
-        let mut en = en_gated(t, 3, 60);
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+                gate(3, 60),
+                AllScopeGate::default(),
+            ),
+        );
         let ordinal = t.ordinal(0).expect("ordinal");
         let effect = en.decide(
             &mut FirstSlot::new(),
@@ -1061,20 +1213,37 @@ mod tests {
         assert_eq!(
             effect,
             Effect::BaselineOnly,
-            "SP-001: a single per-FQDN All-scope block must not arm the All latch"
+            "SP-001: a single per-FQDN All-scope block must not arm the early_data latch"
         );
         assert!(!en.block_all());
         assert_eq!(en.counters().actions_domain_block(ordinal), 0);
-        for i in 1..3u64 {
-            en.decide(
-                &mut FirstSlot::new(),
-                Violation::AnyIllegal {
-                    cause: AnyIllegalCause::HostNotAllowlisted,
-                },
-                i,
-            );
-        }
-        assert!(en.block_all(), "the AnyIllegal facts arm the All latch");
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::EarlyUpstreamData { ordinal },
+            1,
+        );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "two early-data All facts still below the early_data gate"
+        );
+        assert_eq!(en.counters().actions_domain_block(ordinal), 0);
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::EarlyUpstreamData { ordinal },
+            2,
+        );
+        assert_eq!(
+            effect,
+            Effect::Block { scope: Scope::All },
+            "the third early-data All fact crosses the early_data gate"
+        );
+        assert!(en.block_all());
+        assert_eq!(
+            en.counters().actions_domain_block(ordinal),
+            1,
+            "the crossing application is the first per-FQDN All block"
+        );
         let effect = en.decide(
             &mut FirstSlot::new(),
             Violation::EarlyUpstreamData { ordinal },
@@ -1085,7 +1254,11 @@ mod tests {
             Effect::Block { scope: Scope::All },
             "once armed, a per-FQDN All-scope block applies"
         );
-        assert_eq!(en.counters().actions_domain_block(ordinal), 1);
+        assert_eq!(
+            en.counters().actions_domain_block(ordinal),
+            2,
+            "the armed application is the second per-FQDN All block"
+        );
     }
 
     #[test]
@@ -1134,5 +1307,352 @@ mod tests {
         assert_eq!(en.counters().actions_domain_block(ordinal), 0);
         assert_eq!(en.counters().actions_notify(ordinal), 0);
         assert!(!en.test_blocked(ordinal));
+    }
+
+    #[test]
+    fn bad_handshake_facts_never_arm_the_illegal_fqdn_gate() {
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Block, Scope::All)],
+        );
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                gate(10, 60),
+                gate(3, 60),
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+            ),
+        );
+        for i in 0..3u64 {
+            let effect = en.decide(
+                &mut FirstSlot::new(),
+                Violation::AnyIllegal {
+                    cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
+                },
+                i,
+            );
+            assert_eq!(
+                effect,
+                Effect::BaselineOnly,
+                "bad_handshake facts stay below the high bad_handshake gate"
+            );
+        }
+        assert!(
+            !en.block_all(),
+            "bad_handshake facts never arm the illegal_fqdn gate"
+        );
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::HostNotAllowlisted,
+            },
+            3,
+        );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "a single HostNotAllowlisted is below illegal_fqdn 3/60: bad_handshake facts did not count toward illegal_fqdn"
+        );
+        assert!(!en.block_all());
+    }
+
+    #[test]
+    fn illegal_fqdn_facts_never_arm_the_bad_handshake_gate() {
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Block, Scope::All)],
+        );
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                gate(3, 60),
+                gate(10, 60),
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+            ),
+        );
+        for i in 0..3u64 {
+            let effect = en.decide(
+                &mut FirstSlot::new(),
+                Violation::AnyIllegal {
+                    cause: AnyIllegalCause::HostNotAllowlisted,
+                },
+                i,
+            );
+            assert_eq!(
+                effect,
+                Effect::BaselineOnly,
+                "illegal_fqdn facts stay below the high illegal_fqdn gate"
+            );
+        }
+        assert!(
+            !en.block_all(),
+            "illegal_fqdn facts never arm the bad_handshake gate"
+        );
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
+            },
+            3,
+        );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "a single ConnectParse is below bad_handshake 3/60: illegal_fqdn facts did not count toward bad_handshake"
+        );
+        assert!(!en.block_all());
+    }
+
+    #[test]
+    fn early_data_and_ja4_gates_are_isolated() {
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Block, Scope::All)],
+        );
+        let ordinal = t.ordinal(0).expect("ordinal");
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+                gate(3, 60),
+                gate(10, 60),
+            ),
+        );
+        for i in 0..3u64 {
+            let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, i);
+            assert_eq!(
+                effect,
+                Effect::BaselineOnly,
+                "ja4 facts stay below the high ja4 gate"
+            );
+        }
+        assert!(!en.block_all(), "ja4 facts never arm the early_data gate");
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::EarlyUpstreamData { ordinal },
+            3,
+        );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "a single EarlyUpstreamData Block-All is below early_data 3/60: ja4 facts did not count toward early_data"
+        );
+        assert!(!en.block_all());
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+                gate(10, 60),
+                gate(3, 60),
+            ),
+        );
+        for i in 0..3u64 {
+            let effect = en.decide(
+                &mut FirstSlot::new(),
+                Violation::EarlyUpstreamData { ordinal },
+                i,
+            );
+            assert_eq!(
+                effect,
+                Effect::BaselineOnly,
+                "early_data facts stay below the high early_data gate"
+            );
+        }
+        assert!(!en.block_all(), "early_data facts never arm the ja4 gate");
+        let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, 3);
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "a single Ja4Change Block-All is below ja4 3/60: early_data facts did not count toward ja4"
+        );
+        assert!(!en.block_all());
+    }
+
+    #[test]
+    fn single_bad_handshake_fact_arms_bad_handshake_not_illegal_fqdn() {
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Block, Scope::All)],
+        );
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                AllScopeGate::default(),
+                gate(3, 60),
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+            ),
+        );
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
+            },
+            0,
+        );
+        assert_eq!(
+            effect,
+            Effect::Block { scope: Scope::All },
+            "SP-001 default: the FIRST bad_handshake fact arms the bad_handshake gate"
+        );
+        assert!(en.block_all(), "bad_handshake latches all-scope block");
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::HostNotAllowlisted,
+            },
+            1,
+        );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "a single HostNotAllowlisted is below illegal_fqdn 3/60: the bad_handshake arm did not arm illegal_fqdn"
+        );
+    }
+
+    #[test]
+    fn any_illegal_notify_still_counts_its_class_facts() {
+        let controls = [
+            Control::new(ActionKind::Notify, Scope::Connection),
+            Control::new(ActionKind::Notify, Scope::Connection),
+            Control::new(ActionKind::Block, Scope::All),
+            Control::new(ActionKind::Notify, Scope::Connection),
+        ];
+        let t = table(
+            controls,
+            &[(ActionKind::Notify, Scope::Connection)],
+            &[(ActionKind::Notify, Scope::Connection)],
+        );
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                gate(3, 60),
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+            ),
+        );
+        for i in 0..3u64 {
+            let effect = en.decide(
+                &mut FirstSlot::new(),
+                Violation::AnyIllegal {
+                    cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
+                },
+                i,
+            );
+            assert_eq!(
+                effect,
+                Effect::Notify {
+                    scope: Scope::Connection
+                },
+                "notify-configured connect_parse fires Notify"
+            );
+        }
+        assert!(!en.block_all(), "Notify never latches all-scope block");
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::AnyIllegal {
+                cause: AnyIllegalCause::TlsProfile(HelloRejectReason::ServerNameMismatch),
+            },
+            3,
+        );
+        assert_eq!(
+            effect,
+            Effect::Block { scope: Scope::All },
+            "the three notify-configured bad_handshake facts armed the bad_handshake gate, so the Block-All tls_profile fact applies"
+        );
+        assert!(en.block_all());
+    }
+
+    #[test]
+    fn early_data_and_ja4_count_only_on_block_all() {
+        let t = table(
+            any_controls(ActionKind::Block, Scope::All),
+            &[
+                (ActionKind::Notify, Scope::Connection),
+                (ActionKind::Block, Scope::All),
+            ],
+            &[
+                (ActionKind::Notify, Scope::Connection),
+                (ActionKind::Block, Scope::All),
+            ],
+        );
+        let notify_ordinal = t.ordinal(0).expect("ordinal");
+        let block_ordinal = t.ordinal(1).expect("ordinal");
+        let mut en = en_gated(
+            t,
+            GateSet::new(
+                AllScopeGate::default(),
+                AllScopeGate::default(),
+                gate(3, 60),
+                gate(3, 60),
+            ),
+        );
+        for i in 0..3u64 {
+            let effect = en.decide(
+                &mut FirstSlot::new(),
+                Violation::EarlyUpstreamData {
+                    ordinal: notify_ordinal,
+                },
+                i,
+            );
+            assert_eq!(
+                effect,
+                Effect::Notify {
+                    scope: Scope::Connection
+                },
+                "notify-configured early_data fires Notify"
+            );
+        }
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::EarlyUpstreamData {
+                ordinal: block_ordinal,
+            },
+            3,
+        );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "the three Notify early_data facts did NOT count toward early_data: a single Block-All early_data fact is below early_data 3/60"
+        );
+        assert!(!en.block_all());
+        for i in 0..3u64 {
+            let effect = en.decide(
+                &mut FirstSlot::new(),
+                Violation::Ja4Change {
+                    ordinal: notify_ordinal,
+                },
+                i,
+            );
+            assert_eq!(
+                effect,
+                Effect::Notify {
+                    scope: Scope::Connection
+                },
+                "notify-configured ja4 fires Notify"
+            );
+        }
+        let effect = en.decide(
+            &mut FirstSlot::new(),
+            Violation::Ja4Change {
+                ordinal: block_ordinal,
+            },
+            3,
+        );
+        assert_eq!(
+            effect,
+            Effect::BaselineOnly,
+            "the three Notify ja4 facts did NOT count toward ja4: a single Block-All ja4 fact is below ja4 3/60"
+        );
+        assert!(!en.block_all());
     }
 }

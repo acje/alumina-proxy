@@ -9,7 +9,7 @@ use std::ops::Range;
 use crate::enforcement::action::{
     ActionKind, AnyIllegalControl, Control, ControlTable, PerFqdnControl, Scope,
 };
-use crate::enforcement::state::AllScopeGate;
+use crate::enforcement::state::{AllScopeGate, GateSet};
 use crate::resolver::{self, ResolverSet};
 
 pub const CONFIG_DOC_LIMIT: usize = 16384;
@@ -416,7 +416,7 @@ pub struct Config {
     control: ControlTable,
     resolver: ResolverSet,
     cname_bailiwick: Vec<Vec<String>>,
-    all_scope_gate: AllScopeGate,
+    gates: GateSet,
 }
 
 impl Config {
@@ -460,12 +460,11 @@ impl Config {
         &self.control
     }
 
-    /// The operator-configurable SP-001 All-scope gate (threshold/window);
-    /// defaults to threshold 1 / window 900s when `[all_scope_gate]` is
-    /// absent.
+    /// The four per-class SP-001 All-scope gates (threshold/window per class);
+    /// each defaults to threshold 1 / window 900s when its section is absent.
     #[must_use]
-    pub const fn all_scope_gate(&self) -> AllScopeGate {
-        self.all_scope_gate
+    pub const fn gates(&self) -> GateSet {
+        self.gates
     }
 
     /// The validated repository resolver set (1..=`MAX_RESOLVERS` entries; index
@@ -756,7 +755,10 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
                 | "resolver"
                 | "any_illegal"
                 | "allowed_fqdn"
-                | "all_scope_gate"
+                | "bad_handshake"
+                | "illegal_fqdn"
+                | "early_data"
+                | "ja4"
         ) {
             return Err(match value {
                 toml::Value::Table(_) => ConfigError::UnknownTable(key.clone()),
@@ -780,7 +782,12 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
     let control = ControlTable::new(any_controls, &parsed.early_data, &parsed.ja4)
         .expect("build_allowlist validated 1..=32 entries, so ControlTable::new cannot fail");
     let resolver = build_resolver_set(table)?;
-    let all_scope_gate = parse_all_scope_gate(table)?;
+    let gates = GateSet::new(
+        parse_gate_section(table, "bad_handshake")?,
+        parse_gate_section(table, "illegal_fqdn")?,
+        parse_gate_section(table, "early_data")?,
+        parse_gate_section(table, "ja4")?,
+    );
     Ok(Config {
         allowlist: parsed.allowlist,
         listen,
@@ -788,7 +795,7 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
         control,
         resolver,
         cname_bailiwick: parsed.bailiwicks,
-        all_scope_gate,
+        gates,
     })
 }
 
@@ -936,44 +943,41 @@ fn parse_per_fqdn_scope(scope: &str, key: &str) -> Result<Scope, ConfigError> {
     }
 }
 
-/// Parses the optional `[all_scope_gate]` table: `threshold` (1..=`u32::MAX`)
-/// and `window_secs` (1..=`u64::MAX`), both mandatory when the section is
-/// present (all-or-nothing). An absent section yields the default (threshold 1,
-/// window 900s).
-fn parse_all_scope_gate(table: &toml::Table) -> Result<AllScopeGate, ConfigError> {
-    let Some(value) = table.get("all_scope_gate") else {
+/// Parses one optional per-class gate table (e.g. `[bad_handshake]`):
+/// `threshold` (1..=`u32::MAX`) and `window_secs` (1..=`u64::MAX`), both
+/// mandatory when the section is present (all-or-nothing). An absent section
+/// yields the default (threshold 1, window 900s).
+fn parse_gate_section(table: &toml::Table, name: &str) -> Result<AllScopeGate, ConfigError> {
+    let Some(value) = table.get(name) else {
         return Ok(AllScopeGate::default());
     };
     let toml::Value::Table(section) = value else {
-        return Err(ConfigError::WrongType(
-            "all_scope_gate: expected table".to_owned(),
-        ));
+        return Err(ConfigError::WrongType(format!("{name}: expected table")));
     };
     for key in section.keys() {
         if !matches!(key.as_str(), "threshold" | "window_secs") {
-            return Err(ConfigError::UnknownKey(format!("all_scope_gate.{key}")));
+            return Err(ConfigError::UnknownKey(format!("{name}.{key}")));
         }
     }
-    let prefix = "all_scope_gate";
     let threshold = require_integer(section, "threshold")
-        .map_err(|err| prefix_group_error(prefix, "threshold", err))?;
+        .map_err(|err| prefix_group_error(name, "threshold", err))?;
     let threshold = u32::try_from(threshold).map_err(|_| ConfigError::AllScopeGateOutOfRange {
-        key: "all_scope_gate.threshold".to_owned(),
+        key: format!("{name}.threshold"),
         value: threshold,
     })?;
     let threshold = NonZeroU32::new(threshold).ok_or(ConfigError::AllScopeGateOutOfRange {
-        key: "all_scope_gate.threshold".to_owned(),
+        key: format!("{name}.threshold"),
         value: 0,
     })?;
     let window_secs = require_integer(section, "window_secs")
-        .map_err(|err| prefix_group_error(prefix, "window_secs", err))?;
+        .map_err(|err| prefix_group_error(name, "window_secs", err))?;
     let window_secs =
         u64::try_from(window_secs).map_err(|_| ConfigError::AllScopeGateOutOfRange {
-            key: "all_scope_gate.window_secs".to_owned(),
+            key: format!("{name}.window_secs"),
             value: window_secs,
         })?;
     let window_secs = NonZeroU64::new(window_secs).ok_or(ConfigError::AllScopeGateOutOfRange {
-        key: "all_scope_gate.window_secs".to_owned(),
+        key: format!("{name}.window_secs"),
         value: 0,
     })?;
     Ok(AllScopeGate::new(threshold, window_secs))
@@ -1355,8 +1359,8 @@ mod enforcement_config_tests {
     }
 
     /// A valid full document (base + default enforcement + one allowlist entry)
-    /// with an optional `[all_scope_gate]` section appended.
-    fn gate_doc(gate_section: &str) -> String {
+    /// with optional per-class gate sections appended.
+    fn gate_doc(gate_sections: &str) -> String {
         format!(
             "{}{}",
             group(&entry_table(
@@ -1366,8 +1370,16 @@ mod enforcement_config_tests {
                 "notify",
                 "connection",
             )),
-            gate_section
+            gate_sections
         )
+    }
+
+    /// The four per-class gate section names in the fixed schema order.
+    const GATE_SECTIONS: [&str; 4] = ["bad_handshake", "illegal_fqdn", "early_data", "ja4"];
+
+    /// A `[<name>]` gate section with the given `threshold`/`window_secs`.
+    fn gate_section(name: &str, threshold: u32, window: u64) -> String {
+        format!("[{name}]\nthreshold = {threshold}\nwindow_secs = {window}\n")
     }
 
     #[test]
@@ -2029,113 +2041,195 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn all_scope_gate_absent_defaults() {
-        let cfg =
-            parse_config_document(&gate_doc("")).expect("valid config without all_scope_gate");
-        assert_eq!(cfg.all_scope_gate(), AllScopeGate::default());
-        assert_eq!(cfg.all_scope_gate().threshold(), 1);
-        assert_eq!(cfg.all_scope_gate().window_secs(), 900);
+    fn gates_absent_default_all_four() {
+        let cfg = parse_config_document(&gate_doc("")).expect("valid config without gate sections");
+        assert_eq!(cfg.gates(), GateSet::default());
+        assert_eq!(cfg.gates().bad_handshake().threshold(), 1);
+        assert_eq!(cfg.gates().bad_handshake().window_secs(), 900);
+        assert_eq!(cfg.gates().illegal_fqdn().threshold(), 1);
+        assert_eq!(cfg.gates().illegal_fqdn().window_secs(), 900);
+        assert_eq!(cfg.gates().early_data().threshold(), 1);
+        assert_eq!(cfg.gates().early_data().window_secs(), 900);
+        assert_eq!(cfg.gates().ja4().threshold(), 1);
+        assert_eq!(cfg.gates().ja4().window_secs(), 900);
     }
 
     #[test]
-    fn all_scope_gate_custom_values() {
-        let doc = gate_doc("[all_scope_gate]\nthreshold = 5\nwindow_secs = 300\n");
-        let cfg = parse_config_document(&doc).expect("valid all_scope_gate section");
+    fn gates_custom_values_per_section() {
+        let doc = gate_doc(&format!(
+            "{}{}{}{}",
+            gate_section("bad_handshake", 2, 120),
+            gate_section("illegal_fqdn", 5, 300),
+            gate_section("early_data", 7, 600),
+            gate_section("ja4", 11, 900),
+        ));
+        let cfg = parse_config_document(&doc).expect("valid four-section gate config");
         assert_eq!(
-            cfg.all_scope_gate(),
+            cfg.gates().bad_handshake(),
+            AllScopeGate::new(
+                NonZeroU32::new(2).expect("2 is nonzero"),
+                NonZeroU64::new(120).expect("120 is nonzero"),
+            )
+        );
+        assert_eq!(
+            cfg.gates().illegal_fqdn(),
             AllScopeGate::new(
                 NonZeroU32::new(5).expect("5 is nonzero"),
                 NonZeroU64::new(300).expect("300 is nonzero"),
             )
         );
-        assert_eq!(cfg.all_scope_gate().threshold(), 5);
-        assert_eq!(cfg.all_scope_gate().window_secs(), 300);
-    }
-
-    #[test]
-    fn all_scope_gate_threshold_zero_rejected() {
-        let doc = gate_doc("[all_scope_gate]\nthreshold = 0\nwindow_secs = 300\n");
-        let err = parse_config_document(&doc).expect_err("threshold 0 must be rejected");
-        assert!(
-            matches!(&err, ConfigError::AllScopeGateOutOfRange { key, value } if key == "all_scope_gate.threshold" && *value == 0),
-            "expected AllScopeGateOutOfRange(threshold=0), got {err:?}"
+        assert_eq!(
+            cfg.gates().early_data(),
+            AllScopeGate::new(
+                NonZeroU32::new(7).expect("7 is nonzero"),
+                NonZeroU64::new(600).expect("600 is nonzero"),
+            )
         );
-        assert_eq!(err.exit_status(), 78, "AllScopeGateOutOfRange must exit 78");
-    }
-
-    #[test]
-    fn all_scope_gate_threshold_negative_rejected() {
-        let doc = gate_doc("[all_scope_gate]\nthreshold = -1\nwindow_secs = 300\n");
-        let err = parse_config_document(&doc).expect_err("negative threshold must be rejected");
-        assert!(
-            matches!(&err, ConfigError::AllScopeGateOutOfRange { key, value } if key == "all_scope_gate.threshold" && *value == -1),
-            "expected AllScopeGateOutOfRange(threshold=-1), got {err:?}"
-        );
-        assert_eq!(err.exit_status(), 78, "AllScopeGateOutOfRange must exit 78");
-    }
-
-    #[test]
-    fn all_scope_gate_window_zero_rejected() {
-        let doc = gate_doc("[all_scope_gate]\nthreshold = 5\nwindow_secs = 0\n");
-        let err = parse_config_document(&doc).expect_err("window_secs 0 must be rejected");
-        assert!(
-            matches!(&err, ConfigError::AllScopeGateOutOfRange { key, value } if key == "all_scope_gate.window_secs" && *value == 0),
-            "expected AllScopeGateOutOfRange(window_secs=0), got {err:?}"
-        );
-        assert_eq!(err.exit_status(), 78, "AllScopeGateOutOfRange must exit 78");
-    }
-
-    #[test]
-    fn all_scope_gate_unknown_key_rejected() {
-        let doc = gate_doc("[all_scope_gate]\nthreshold = 5\nwindow_secs = 300\nbogus = 1\n");
-        let err =
-            parse_config_document(&doc).expect_err("unknown all_scope_gate key must be rejected");
-        assert!(
-            matches!(&err, ConfigError::UnknownKey(k) if k == "all_scope_gate.bogus"),
-            "expected UnknownKey(all_scope_gate.bogus), got {err:?}"
+        assert_eq!(
+            cfg.gates().ja4(),
+            AllScopeGate::new(
+                NonZeroU32::new(11).expect("11 is nonzero"),
+                NonZeroU64::new(900).expect("900 is nonzero"),
+            )
         );
     }
 
     #[test]
-    fn all_scope_gate_wrong_type_rejected() {
-        let doc = gate_doc("[all_scope_gate]\nthreshold = \"five\"\nwindow_secs = 300\n");
-        let err = parse_config_document(&doc).expect_err("string threshold must be rejected");
-        assert!(
-            matches!(&err, ConfigError::WrongType(_)),
-            "expected WrongType, got {err:?}"
+    fn gates_single_present_section_leaves_others_default() {
+        let doc = gate_doc(&gate_section("illegal_fqdn", 5, 300));
+        let cfg = parse_config_document(&doc).expect("valid single-section gate config");
+        assert_eq!(
+            cfg.gates().illegal_fqdn(),
+            AllScopeGate::new(
+                NonZeroU32::new(5).expect("5 is nonzero"),
+                NonZeroU64::new(300).expect("300 is nonzero"),
+            )
         );
+        assert_eq!(cfg.gates().bad_handshake(), AllScopeGate::default());
+        assert_eq!(cfg.gates().early_data(), AllScopeGate::default());
+        assert_eq!(cfg.gates().ja4(), AllScopeGate::default());
     }
 
     #[test]
-    fn all_scope_gate_missing_key_rejected() {
-        let doc = gate_doc("[all_scope_gate]\nwindow_secs = 300\n");
-        let err = parse_config_document(&doc).expect_err("missing threshold must be rejected");
-        assert!(
-            matches!(&err, ConfigError::MissingField(f) if f == "all_scope_gate.threshold"),
-            "expected MissingField(all_scope_gate.threshold), got {err:?}"
-        );
+    fn gate_section_threshold_zero_rejected_for_each_section() {
+        for name in GATE_SECTIONS {
+            let doc = gate_doc(&gate_section(name, 0, 300));
+            let err = parse_config_document(&doc)
+                .expect_err(&format!("{name} threshold 0 must be rejected"));
+            assert!(
+                matches!(&err, ConfigError::AllScopeGateOutOfRange { key, value } if key == &format!("{name}.threshold") && *value == 0),
+                "expected AllScopeGateOutOfRange({name}.threshold=0), got {err:?}"
+            );
+            assert_eq!(err.exit_status(), 78, "AllScopeGateOutOfRange must exit 78");
+        }
     }
 
     #[test]
-    fn all_scope_gate_not_a_table_rejected() {
-        let doc = format!(
-            "{}all_scope_gate = 5\n{}{}",
-            base(),
-            any_illegal_default(),
-            entry_table(
-                "a.example.org:443",
-                "notify",
-                "connection",
-                "notify",
-                "connection",
-            ),
-        );
-        let err =
-            parse_config_document(&doc).expect_err("non-table all_scope_gate must be rejected");
+    fn gate_section_threshold_negative_rejected_for_each_section() {
+        for name in GATE_SECTIONS {
+            let doc =
+                gate_doc(&gate_section(name, 0, 300).replace("threshold = 0", "threshold = -1"));
+            let err = parse_config_document(&doc)
+                .expect_err(&format!("{name} negative threshold must be rejected"));
+            assert!(
+                matches!(&err, ConfigError::AllScopeGateOutOfRange { key, value } if key == &format!("{name}.threshold") && *value == -1),
+                "expected AllScopeGateOutOfRange({name}.threshold=-1), got {err:?}"
+            );
+            assert_eq!(err.exit_status(), 78, "AllScopeGateOutOfRange must exit 78");
+        }
+    }
+
+    #[test]
+    fn gate_section_window_zero_rejected_for_each_section() {
+        for name in GATE_SECTIONS {
+            let doc = gate_doc(&gate_section(name, 5, 0));
+            let err = parse_config_document(&doc)
+                .expect_err(&format!("{name} window_secs 0 must be rejected"));
+            assert!(
+                matches!(&err, ConfigError::AllScopeGateOutOfRange { key, value } if key == &format!("{name}.window_secs") && *value == 0),
+                "expected AllScopeGateOutOfRange({name}.window_secs=0), got {err:?}"
+            );
+            assert_eq!(err.exit_status(), 78, "AllScopeGateOutOfRange must exit 78");
+        }
+    }
+
+    #[test]
+    fn gate_section_unknown_key_rejected_for_each_section() {
+        for name in GATE_SECTIONS {
+            let doc = gate_doc(&format!(
+                "[{name}]\nthreshold = 5\nwindow_secs = 300\nbogus = 1\n"
+            ));
+            let err = parse_config_document(&doc)
+                .expect_err(&format!("unknown {name} key must be rejected"));
+            assert!(
+                matches!(&err, ConfigError::UnknownKey(k) if k == &format!("{name}.bogus")),
+                "expected UnknownKey({name}.bogus), got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_section_wrong_type_rejected_for_each_section() {
+        for name in GATE_SECTIONS {
+            let doc = gate_doc(&format!(
+                "[{name}]\nthreshold = \"five\"\nwindow_secs = 300\n"
+            ));
+            let err = parse_config_document(&doc)
+                .expect_err(&format!("{name} string threshold must be rejected"));
+            assert!(
+                matches!(&err, ConfigError::WrongType(_)),
+                "expected WrongType, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_section_missing_key_rejected_for_each_section() {
+        for name in GATE_SECTIONS {
+            let doc = gate_doc(&format!("[{name}]\nwindow_secs = 300\n"));
+            let err = parse_config_document(&doc)
+                .expect_err(&format!("{name} missing threshold must be rejected"));
+            assert!(
+                matches!(&err, ConfigError::MissingField(f) if f == &format!("{name}.threshold")),
+                "expected MissingField({name}.threshold), got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_section_not_a_table_rejected_for_each_section() {
+        for name in GATE_SECTIONS {
+            let doc = format!(
+                "{}{name} = 5\n{}{}",
+                base(),
+                any_illegal_default(),
+                entry_table(
+                    "a.example.org:443",
+                    "notify",
+                    "connection",
+                    "notify",
+                    "connection",
+                ),
+            );
+            let err = parse_config_document(&doc)
+                .expect_err(&format!("non-table {name} must be rejected"));
+            assert!(
+                matches!(&err, ConfigError::WrongType(_)),
+                "expected WrongType, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_all_scope_gate_section_is_rejected_as_unknown_table() {
+        let doc = gate_doc("[all_scope_gate]\nthreshold = 5\nwindow_secs = 300\n");
+        let err = parse_config_document(&doc)
+            .expect_err("the legacy [all_scope_gate] section must be rejected as an unknown table");
         assert!(
-            matches!(&err, ConfigError::WrongType(_)),
-            "expected WrongType, got {err:?}"
+            matches!(&err, ConfigError::UnknownTable(t) if t == "all_scope_gate"),
+            "expected UnknownTable(all_scope_gate), got {err:?}"
         );
+        assert_eq!(err.exit_status(), 78, "the legacy section must exit 78");
     }
 }
 #[cfg(test)]

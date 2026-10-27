@@ -698,7 +698,7 @@ pub(crate) mod tests {
         ActionKind, AnyIllegalControl, Control, FirstSlot, PerFqdnControl, Scope,
     };
     use crate::enforcement::policy::{Effect, Violation};
-    use crate::enforcement::state::{AllScopeGate, Enforcement};
+    use crate::enforcement::state::{Enforcement, GateSet};
 
     fn any_controls(kind: ActionKind, scope: Scope) -> [Control; AnyIllegalControl::COUNT] {
         [Control::new(kind, scope); AnyIllegalControl::COUNT]
@@ -886,7 +886,7 @@ pub(crate) mod tests {
                 &[(ActionKind::Notify, Scope::Connection)],
                 &[(ActionKind::Notify, Scope::Connection)],
             ),
-            AllScopeGate::default(),
+            GateSet::default(),
         );
         let cause = AnyIllegalCause::HostNotAllowlisted;
         let v = en.decide(&mut latch, Violation::AnyIllegal { cause }, 0);
@@ -919,7 +919,7 @@ pub(crate) mod tests {
                 &actions,
                 &actions,
             ),
-            AllScopeGate::default(),
+            GateSet::default(),
         );
         let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
         let v = en.decide(
