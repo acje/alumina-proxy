@@ -1,6 +1,5 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::mem::MaybeUninit;
 
 pub const NAMED_PHASES: usize = 5;
 
@@ -63,49 +62,6 @@ impl Counts {
     pub const fn all_zero(self) -> bool {
         self.allocs == 0 && self.deallocs == 0 && self.reallocs == 0 && self.unphased == 0
     }
-}
-
-/// Reinterprets the first `len` slots of `slots` as a slice of `u16`.
-///
-/// Sound only when the caller guarantees the first `len` slots hold initialized
-/// `u16` values; `MaybeUninit<u16>` has the same layout as `u16`, so initialized
-/// `MaybeUninit<u16>` slots read as `u16` are sound. The returned lifetime is
-/// tied to the `slots` borrow and `len` is asserted within bounds, so lifetime
-/// and length misuse are unrepresentable.
-#[must_use]
-pub(crate) const fn u16_slice_from_raw_parts(slots: &[MaybeUninit<u16>], len: usize) -> &[u16] {
-    assert!(
-        len <= slots.len(),
-        "u16 slice length exceeds the slot count"
-    );
-    // SAFETY: the caller contract — the first `len` slots are initialized `u16`
-    // values; `MaybeUninit<u16>` has the same layout as `u16`, so the
-    // reinterpretation is sound; `len <= slots.len()` is asserted above, so the
-    // slice stays within the borrow.
-    unsafe { std::slice::from_raw_parts(slots.as_ptr().cast::<u16>(), len) }
-}
-
-/// Reinterprets the first `len` slots of `slots` as a mutable slice of `u16`.
-///
-/// Sound only when the caller guarantees the first `len` slots hold initialized
-/// `u16` values; `MaybeUninit<u16>` has the same layout as `u16`, so initialized
-/// `MaybeUninit<u16>` slots read and write as `u16` are sound. The returned
-/// lifetime is tied to the `slots` borrow and `len` is asserted within bounds,
-/// so lifetime and length misuse are unrepresentable.
-#[must_use]
-pub(crate) fn u16_slice_from_raw_parts_mut(
-    slots: &mut [MaybeUninit<u16>],
-    len: usize,
-) -> &mut [u16] {
-    assert!(
-        len <= slots.len(),
-        "u16 slice length exceeds the slot count"
-    );
-    // SAFETY: the caller contract — the first `len` slots are initialized `u16`
-    // values; `MaybeUninit<u16>` has the same layout as `u16`, so the
-    // reinterpretation is sound; `len <= slots.len()` is asserted above, so the
-    // slice stays within the borrow.
-    unsafe { std::slice::from_raw_parts_mut(slots.as_mut_ptr().cast::<u16>(), len) }
 }
 
 type PhaseCounts = [[u64; 3]; NAMED_PHASES];

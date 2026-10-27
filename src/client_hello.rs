@@ -1,5 +1,4 @@
 use std::fmt;
-use std::mem::MaybeUninit;
 
 use crate::config::{FQDN_MAX_LEN, FixedHostname};
 
@@ -67,7 +66,7 @@ pub struct ClientHello {
     sni_len: usize,
     sni_entries: u8,
     has_ech: bool,
-    ciphers: [MaybeUninit<u16>; MAX_CIPHERS],
+    ciphers: [u16; MAX_CIPHERS],
     ciphers_len: usize,
     extensions: [u16; MAX_EXTENSIONS],
     extensions_len: usize,
@@ -105,8 +104,8 @@ impl ClientHello {
     /// The offered cipher suites in wire order, including SCSV `0x00ff` and
     /// GREASE, unfiltered. Bounded by the 16 KiB handshake cap.
     #[must_use]
-    pub const fn ciphers(&self) -> &[u16] {
-        crate::alloc::u16_slice_from_raw_parts(self.ciphers.as_slice(), self.ciphers_len)
+    pub fn ciphers(&self) -> &[u16] {
+        &self.ciphers[..self.ciphers_len]
     }
 
     /// The distinct extension types present in wire order, including ALPN (16)
@@ -574,10 +573,7 @@ fn u8_at(buf: &[u8], at: usize) -> Result<u8, ChError> {
 ///
 /// Returns `MalformedBody` when the list length is odd, when it exceeds
 /// `MAX_CIPHERS` suites, or when the list overruns the body.
-fn parse_cipher_list(
-    body: &[u8],
-    at: usize,
-) -> Result<(usize, [MaybeUninit<u16>; MAX_CIPHERS]), ChError> {
+fn parse_cipher_list(body: &[u8], at: usize) -> Result<(usize, [u16; MAX_CIPHERS]), ChError> {
     let list_len = usize::from(u16_at(body, at)?);
     if list_len % 2 != 0 {
         return Err(ChError::MalformedBody {
@@ -590,9 +586,9 @@ fn parse_cipher_list(
             detail: "cipher-suite list exceeds bound",
         });
     }
-    let mut ciphers = [const { MaybeUninit::uninit() }; MAX_CIPHERS];
+    let mut ciphers = [0u16; MAX_CIPHERS];
     for (i, slot) in ciphers[..cs_count].iter_mut().enumerate() {
-        slot.write(u16_at(body, at + 2 + i * 2)?);
+        *slot = u16_at(body, at + 2 + i * 2)?;
     }
     Ok((cs_count, ciphers))
 }
@@ -1024,25 +1020,24 @@ fn hash12_finish(ctx: ring::digest::Context) -> [u8; 12] {
 }
 
 fn cipher_hash12(ciphers: &[u16]) -> Result<[u8; 12], Ja4Error> {
-    let mut sorted = [const { MaybeUninit::uninit() }; MAX_CIPHERS];
+    let mut sorted = [0u16; MAX_CIPHERS];
     let mut n = 0usize;
     for &c in ciphers {
         if !is_grease(c) {
             if n == MAX_CIPHERS {
                 return Err(Ja4Error::TooManyCiphers);
             }
-            sorted[n].write(c);
+            sorted[n] = c;
             n += 1;
         }
     }
     if n == 0 {
         return Ok([b'0'; 12]);
     }
-    let sorted = crate::alloc::u16_slice_from_raw_parts_mut(&mut sorted, n);
-    sorted.sort_unstable();
+    sorted[..n].sort_unstable();
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
     let mut first = true;
-    for &c in &*sorted {
+    for &c in &sorted[..n] {
         if !first {
             ctx.update(b",");
         }
@@ -2005,7 +2000,7 @@ mod tests {
             sni_len: 0,
             sni_entries: 0,
             has_ech: false,
-            ciphers: [const { MaybeUninit::uninit() }; MAX_CIPHERS],
+            ciphers: [0u16; MAX_CIPHERS],
             ciphers_len: 0,
             extensions: [0u16; MAX_EXTENSIONS],
             extensions_len: 0,
