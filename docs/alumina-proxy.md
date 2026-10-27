@@ -1285,7 +1285,15 @@ not a label count.
 
 All-scope latch arms fire only after a bounded fact counter crosses a fixed threshold within
 a fixed window, with fixed constants and no speculative pacing (`src/enforcement/state.rs:16`,
-`decide` `src/enforcement/state.rs:132`). Tests: `any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once`
+`decide` `src/enforcement/state.rs:132`). The constants are `ANY_ILLEGAL_THRESHOLD = 3` facts
+within `ANY_ILLEGAL_WINDOW_SECS = 60` seconds (`src/enforcement/state.rs:10,14`). The values
+are deliberate under the design philosophy (§Design philosophy — the exit gate): in the
+idiomatic deployment the only client is the trusted-at-rest application on a fixed golden
+path, so a tripwire firing is a high-value signal — almost certainly operator misconfiguration
+or adversarial activity. Detection is trigger-happy (every deviation is acted on at its first
+occurrence); the catastrophic all-scope action is gated so a single transient event does not
+panic-shut the exit gate. A false positive costs a trusted-operator restart; a false negative
+costs exfiltration. Tests: `any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once`
 (`src/enforcement/state.rs:397`), `single_any_illegal_never_latches_all`
 (`src/enforcement/state.rs:766`), `three_any_illegal_facts_within_the_window_latch_all`
 (`src/enforcement/state.rs:787`).
