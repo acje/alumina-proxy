@@ -1304,6 +1304,63 @@ enum SinkIo {
     Stdout(UnixStream),
     #[cfg(test)]
     Fd(UnixStream),
+    /// Test-only one-shot stall seam; see [`ScriptedFirst`].
+    #[cfg(test)]
+    Scripted(ScriptedSink),
+}
+
+/// A one-shot first-write outcome a scripted sink injects before turning into
+/// a faithful byte sink. The unit variants keep the injected result
+/// unambiguous: an `Interrupted` error or a zero-progress `Ok(0)`, never both.
+#[cfg(test)]
+enum ScriptedFirst {
+    /// First write answers `Err(io::ErrorKind::Interrupted)`.
+    Interrupted,
+    /// First write answers `Ok(0)`.
+    Zero,
+}
+
+/// A test-only sink seam: the first write injects the scripted [`ScriptedFirst`]
+/// outcome without consuming bytes; every later write is a faithful byte sink,
+/// appending the submitted fragments to [`ScriptedSink::out`] so the drained
+/// stream can be compared byte-for-byte against a reference store.
+#[cfg(test)]
+struct ScriptedSink {
+    /// Captured stream bytes in submission order.
+    out: Vec<u8>,
+    /// The injected first-write outcome, consumed exactly once.
+    first: ScriptedFirst,
+    /// Whether the first write has already injected; latched so the stall
+    /// happens once and the sink is faithful afterwards.
+    dispatched: bool,
+}
+
+#[cfg(test)]
+impl ScriptedSink {
+    fn new(first: ScriptedFirst) -> ScriptedSink {
+        ScriptedSink {
+            out: Vec::new(),
+            first,
+            dispatched: false,
+        }
+    }
+
+    /// The seam write path: inject the scripted first-write stall exactly
+    /// once, then record and acknowledge every submitted fragment.
+    fn write_vectored(&mut self, iovs: &[IoSlice<'_>]) -> io::Result<usize> {
+        if !self.dispatched {
+            self.dispatched = true;
+            return match self.first {
+                ScriptedFirst::Interrupted => Err(io::Error::from(io::ErrorKind::Interrupted)),
+                ScriptedFirst::Zero => Ok(0),
+            };
+        }
+        let total = iovs.iter().map(|iov| iov.len()).sum();
+        for iov in iovs {
+            self.out.extend_from_slice(iov);
+        }
+        Ok(total)
+    }
 }
 
 impl SinkIo {
@@ -1315,6 +1372,8 @@ impl SinkIo {
             SinkIo::Stdout(stream) => stream.write_vectored(iovs),
             #[cfg(test)]
             SinkIo::Fd(stream) => stream.write_vectored(iovs),
+            #[cfg(test)]
+            SinkIo::Scripted(sink) => sink.write_vectored(iovs),
         }
     }
 }
@@ -1453,6 +1512,15 @@ impl LogStore {
         Self::with_io(SinkIo::Fd(UnixStream::from(owned)))
     }
 
+    /// Test construction over a scripted sink (see [`ScriptedSink`]): the first
+    /// `drain_sink` write receives the scripted one-shot stall, then the sink
+    /// drains faithfully, so the `Interrupted` / zero-progress stall arms run
+    /// deterministically and the resumed stream can be observed.
+    #[cfg(test)]
+    fn with_scripted_sink(first: ScriptedFirst) -> Result<LogStore, LogStoreError> {
+        Self::with_io(SinkIo::Scripted(ScriptedSink::new(first)))
+    }
+
     fn with_io(io: SinkIo) -> Result<LogStore, LogStoreError> {
         let mut slots: Vec<Slot> = Vec::new();
         slots
@@ -1495,6 +1563,8 @@ impl LogStore {
                 .map_err(|_| LogStoreError::StdoutNonblocking)?,
             #[cfg(test)]
             SinkIo::Fd(_) => {}
+            #[cfg(test)]
+            SinkIo::Scripted(_) => {}
         }
         Ok(())
     }
@@ -4078,5 +4148,70 @@ mod tests {
         );
         let _ = reader;
         let _ = writer;
+    }
+
+    fn scripted_out(store: &LogStore) -> &[u8] {
+        let SinkIo::Scripted(sink) = &store.sink.io else {
+            panic!("expected a scripted sink");
+        };
+        &sink.out
+    }
+
+    fn assert_scripted_stall_preserves_cursor_and_stream(first: ScriptedFirst, label: &str) {
+        let mut subject = LogStore::with_scripted_sink(first).expect("scripted sink store");
+        let (mut reference, mut reference_file) = file_logstore();
+        for i in 0..40 {
+            let name = format!("host-{i}.sub.example.org");
+            subject.startup_warning(1, &name, Family::A);
+            reference.startup_warning(1, &name, Family::A);
+        }
+        let enqueued = subject.len();
+        subject.drain_sink();
+        assert_eq!(
+            subject.cursor.map(|cursor| cursor.off),
+            Some(0),
+            "{label}: the injected stall retains the cursor at the gather-start offset"
+        );
+        assert!(
+            subject.sink.blocked,
+            "{label}: the injected stall latches the sink blocked"
+        );
+        assert_eq!(
+            subject.len(),
+            enqueued,
+            "{label}: the stalled write advances no queued record"
+        );
+        assert_eq!(
+            subject.dropped(),
+            0,
+            "{label}: a live stalled sink never drops records"
+        );
+        flush_all(&mut reference);
+        let expected = read_all(&mut reference_file);
+        let mut turns = 0usize;
+        while subject.len() > 0 && turns < 8 * QUEUE_SLOTS {
+            subject.drain_sink();
+            turns += 1;
+        }
+        assert_eq!(subject.len(), 0, "{label}: the queue drains after the stall");
+        assert!(
+            !subject.sink.blocked,
+            "{label}: the successful resume clears the blocked latch"
+        );
+        assert_eq!(
+            scripted_out(&subject),
+            expected,
+            "{label}: the drain resumes at the exact residue and emits a byte-identical stream"
+        );
+    }
+
+    #[test]
+    fn logging_writev_interrupted_keeps_cursor_and_stream_identical() {
+        assert_scripted_stall_preserves_cursor_and_stream(ScriptedFirst::Interrupted, "Interrupted");
+    }
+
+    #[test]
+    fn logging_writev_zero_progress_keeps_cursor_and_stream_identical() {
+        assert_scripted_stall_preserves_cursor_and_stream(ScriptedFirst::Zero, "zero progress");
     }
 }
