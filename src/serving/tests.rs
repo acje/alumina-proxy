@@ -1073,6 +1073,11 @@ fn connect_deadline_expired_still_retries_through_gate() {
 }
 
 #[test]
+/// G1.R1 — a stale client token for a live slot index is dropped before any
+/// socket I/O through the real `dispatch_readiness` decode: the new
+/// connection's stage, buffered cursors, deadlines, and generation state are
+/// untouched and the seat is never released (matrix alumina-cdwui.4 §2 G1.R1,
+/// REJECT class).
 fn stale_event_for_a_reused_slot_index_is_dropped() {
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
@@ -1082,9 +1087,19 @@ fn stale_event_for_a_reused_slot_index_is_dropped() {
         serving.admit(client);
         assert_eq!(serving.storage().occupied(), 1);
         let current = serving.slots[0].slot_gen;
+        assert_eq!(current, 1, "the first admission owns generation 1");
         let stale_gen = current.wrapping_sub(1);
         let stale = Token(
             (usize::try_from(stale_gen).expect("slot generation fits usize") << GEN_SHIFT) | 1,
+        );
+        let before_stage = serving.slots[0].stage;
+        let before = (
+            serving.slots[0].buf_len,
+            serving.slots[0].fwd,
+            serving.slots[0].buf_base,
+            serving.slots[0].slot_gen,
+            serving.slots[0].setup_deadline,
+            serving.slots[0].idle_deadline,
         );
         serving
             .dispatch_readiness(
@@ -1101,7 +1116,579 @@ fn stale_event_for_a_reused_slot_index_is_dropped() {
             1,
             "a stale event for the reused slot index must not close the new connection"
         );
+        assert!(
+            serving.slots[0].stage == before_stage,
+            "a stale client token must not advance or change the connection stage"
+        );
+        assert_eq!(
+            (
+                serving.slots[0].buf_len,
+                serving.slots[0].fwd,
+                serving.slots[0].buf_base,
+                serving.slots[0].slot_gen,
+                serving.slots[0].setup_deadline,
+                serving.slots[0].idle_deadline,
+            ),
+            before,
+            "a stale client token must not mutate buffered cursors, deadlines, or generation state"
+        );
     });
+}
+
+#[test]
+/// G1.R2 — a stale upstream token is dropped before any socket I/O: after a
+/// real release/reuse of slot 0 to a new generation, the previous generation's
+/// upstream token never dispatches onto the new connection, never opens an
+/// upstream read, and never mutates cursors or release accounting; release
+/// accounting runs exactly once (typed-handle consumption).
+/// Only the current-generation upstream token drives the upstream arm (matrix
+/// alumina-cdwui.4 §2 G1.R2, REJECT class).
+#[expect(
+    clippy::too_many_lines,
+    reason = "full G1.R2 reuse then stale-drop cycle"
+)]
+fn g1_r2_stale_upstream_token_after_reuse_is_dropped_before_socket_io() {
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        // First connection occupies slot 0 at generation 1.
+        let c1 =
+            mio::net::TcpStream::connect(SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), port))
+                .expect("first client connect");
+        serving.admit(c1);
+        assert_eq!(serving.storage().occupied(), 1);
+        let first_gen = serving.slots[0].slot_gen;
+        assert_eq!(first_gen, 1, "the first admission owns generation 1");
+        let stale_up = upstream_token(first_gen.wrapping_sub(1), 0);
+
+        // Real release path: the seat returns; release accounting is exactly
+        // once per admitted slot (typed-handle consumption — a second close has
+        // no handle left to release).
+        serving.close_slot(0);
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "release frees the seat once"
+        );
+        assert_eq!(serving.storage().pending(), 0);
+        serving.close_slot(0);
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "a second close of a released slot must not double-release (handle consumed)"
+        );
+        assert_eq!(serving.storage().pending(), 0);
+
+        // Real admit path reuses slot 0 at a new generation.
+        let c2 =
+            mio::net::TcpStream::connect(SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), port))
+                .expect("second client connect");
+        serving.admit(c2);
+        assert_eq!(serving.storage().occupied(), 1);
+        let new_gen = serving.slots[0].slot_gen;
+        assert_eq!(
+            new_gen,
+            first_gen + 1,
+            "the reused slot advanced exactly one generation"
+        );
+        assert_ne!(
+            first_gen.wrapping_sub(1),
+            new_gen,
+            "the stale upstream token's generation is the prior epoch, never the live one"
+        );
+
+        // Attach a live upstream socket and arm the dialing/gate state so a
+        // real dispatch would react to early origin data (pattern tests.rs:1154).
+        let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
+        let origin_addr = origin.local_addr().expect("origin addr");
+        let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
+        let mut origin_stream = origin.accept().expect("accept origin side").0;
+        {
+            let ws = &mut serving.slots[0];
+            ws.upstream = Some(up);
+            ws.approved = FixedHostname::normalize(b"sub.example.org");
+            ws.gate.on_connect_head(7);
+            ws.gate.on_authorized();
+            ws.stage = Stage::Dialing;
+        }
+        origin_stream
+            .write_all(b"X")
+            .expect("origin writes early data");
+        let mut probe = [0u8; 1];
+        let mut waits = 0;
+        loop {
+            match serving.slots[0]
+                .upstream
+                .as_ref()
+                .expect("upstream present")
+                .peek(&mut probe)
+            {
+                Ok(1) => break,
+                Ok(_) => {}
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                Err(err) => panic!("peek upstream early data: {err}"),
+            }
+            waits += 1;
+            assert!(
+                waits < 2000,
+                "upstream early data never became readable on the socket"
+            );
+            std::thread::yield_now();
+        }
+        let before = (
+            serving.slots[0].buf_len,
+            serving.slots[0].fwd,
+            serving.slots[0].slot_gen,
+        );
+        serving
+            .dispatch_readiness(
+                stale_up,
+                Readiness {
+                    readable: true,
+                    writable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch stale upstream token");
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the stale upstream token must not dispatch or release the new connection"
+        );
+        assert!(matches!(serving.slots[0].stage, Stage::Dialing));
+        assert_eq!(
+            (
+                serving.slots[0].buf_len,
+                serving.slots[0].fwd,
+                serving.slots[0].slot_gen,
+            ),
+            before,
+            "stale upstream readiness must not mutate cursors or generation state"
+        );
+        assert!(
+            matches!(
+                serving.slots[0]
+                    .upstream
+                    .as_ref()
+                    .expect("upstream present")
+                    .peek(&mut probe),
+                Ok(1)
+            ),
+            "the stale upstream token must be dropped before any socket read (early data still queued)"
+        );
+
+        // Positive control through the real path: the current-generation
+        // upstream token does dispatch and the dialing early-data tripwire
+        // reacts (same pending byte).
+        serving
+            .dispatch_readiness(
+                upstream_token(serving.slots[0].slot_gen, 0),
+                Readiness {
+                    readable: true,
+                    writable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch live upstream token");
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the live-generation upstream token must dispatch the early-data tripwire"
+        );
+    });
+}
+
+#[test]
+/// G1.R3 — one coalesced batch re-admits a released slot index mid-batch
+/// (`accept_all` between two same-slot tokens): the stale pre-reuse generation
+/// token is skipped at the fold-time generation guard (src/serving.rs:1376)
+/// and only the new-generation token dispatches onto the reused connection.
+/// Proves batch dedup cannot resurrect a prior generation (matrix
+/// alumina-cdwui.4 §2 G1.R3, REJECT class).
+fn g1_r3_coalesced_batch_accept_between_tokens_drops_stale_gen_only_new_dispatches() {
+    const PARTIAL: &[u8] = b"CONNECT sub.example.org:443 HTTP/1.1";
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        // Seed slot 0 with the prior released epoch (the slot itself is still
+        // free); the mid-batch accept below re-admits it at epoch+1, exactly
+        // the reuse shape a released seat takes between two tokens.
+        serving.slots[0].slot_gen = 1;
+        assert_eq!(serving.storage().occupied(), 0);
+        let old_gen = serving.slots[0].slot_gen; // 1 — the released epoch
+        let new_gen = old_gen + 1; // 2 — the generation the mid-batch accept assigns
+
+        let mut second = connect(port);
+        second
+            .write_all(PARTIAL)
+            .expect("write partial head before the batch");
+        // The blocking client connect returns once the client handshake
+        // completes, but the server-side connection can still lag into the
+        // accept queue (unaccepted-backlog insertion follows the final ACK).
+        // Settle so the batch's accept_all deterministically sees the socket.
+        std::thread::sleep(Duration::from_millis(20));
+
+        serving.batch_gen = serving.batch_gen.wrapping_add(1);
+        serving.in_batch = true;
+        serving
+            .dispatch_coalesced_batch(&[
+                // First: stale pre-release generation token for slot 0.
+                (
+                    client_token(old_gen, 0),
+                    Readiness {
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                ),
+                // Mid-batch reuse: accept_all re-admits slot 0 to new_gen.
+                (Token(0), Readiness::none()),
+                // The new-generation token is the only one that may dispatch.
+                (
+                    client_token(new_gen, 0),
+                    Readiness {
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                ),
+            ])
+            .expect("coalesced batch with mid-batch reuse");
+        assert!(!serving.in_batch, "the batch resets the in-batch marker");
+
+        assert_eq!(
+            serving.slots[0].slot_gen, new_gen,
+            "the mid-batch accept reused slot 0 at the new generation"
+        );
+        assert_eq!(
+            serving.slots[0].buf_len,
+            PARTIAL.len(),
+            "only the new-generation token dispatched and read the queued head"
+        );
+        assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+        assert_eq!(serving.storage().occupied(), 1);
+    });
+}
+
+#[test]
+/// G1.R3 — with the mid-batch reuse accepted FIRST in the batch
+/// (`accept_all` before the same-slot tokens), the stale pre-reuse generation
+/// token is dropped by the fold-time generation guard (src/serving.rs:1376 —
+/// the live generation already advanced past it) and only the new-generation
+/// token dispatches. Proves batch dedup/dirty workflow cannot resurrect a
+/// prior generation even when the stale token arrives in the same poll batch
+/// as the reused connection (matrix alumina-cdwui.4 §2 G1.R3, REJECT class).
+fn g1_r3_coalesced_batch_stale_gen_token_dropped_at_fold_guard_after_reuse() {
+    const PARTIAL: &[u8] = b"CONNECT sub.example.org:443 HTTP/1.1";
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        // Seed slot 0 with the prior released epoch (slot still free); the
+        // batch's leading accept re-admits it at epoch+1, so the same-slot
+        // tokens that follow fold against the live generation.
+        serving.slots[0].slot_gen = 1;
+        assert_eq!(serving.storage().occupied(), 0);
+        let old_gen = serving.slots[0].slot_gen; // 1
+        let new_gen = old_gen + 1; // 2
+
+        let mut second = connect(port);
+        second
+            .write_all(PARTIAL)
+            .expect("write partial head before the batch");
+        // Settle the accept queue (see G1.R3 accept-between-tokens test).
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Batch: [accept -> gen 2, stale(1), new(2)]. The stale token reaches
+        // the fold-time generation guard at 1376 (live gen already 2).
+        serving.batch_gen = serving.batch_gen.wrapping_add(1);
+        serving.in_batch = true;
+        serving
+            .dispatch_coalesced_batch(&[
+                (Token(0), Readiness::none()),
+                (
+                    client_token(old_gen, 0),
+                    Readiness {
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                ),
+                (
+                    client_token(new_gen, 0),
+                    Readiness {
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                ),
+            ])
+            .expect("coalesced batch with accept-first mid-batch reuse");
+        assert!(!serving.in_batch);
+
+        assert_eq!(serving.slots[0].slot_gen, new_gen);
+        assert_eq!(
+            serving.slots[0].buf_len,
+            PARTIAL.len(),
+            "only the new-generation token dispatched and read the queued head"
+        );
+        assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+        assert_eq!(serving.storage().occupied(), 1);
+
+        // The stale pre-reuse token, re-dispatched after the batch, is still
+        // inert (dirty work never resurrects the prior generation).
+        serving
+            .dispatch_readiness(
+                client_token(old_gen, 0),
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("re-dispatch the stale pre-reuse token");
+        assert_eq!(
+            serving.slots[0].buf_len,
+            PARTIAL.len(),
+            "even after the batch the stale token cannot mutate the reused slot"
+        );
+    });
+}
+
+#[test]
+/// G1.R4 — after a full u64 wrap (slot seeded to `u64::MAX`, admit wraps the
+/// generation to 0), the wrapped connection's own generation-0 token dispatches
+/// and drives the real read/parse/decision path, while a pre-wrap `u64::MAX`
+/// epoch token is dropped before socket I/O — no false-live dispatch onto the
+/// wrapped connection. Near-wrap exhaustion, executed end-to-end through the
+/// real token encode/decode and dispatch paths (matrix alumina-cdwui.4 §2
+/// G1.R4, EXHAUST/REJECT — reachable and falsifiable).
+fn g1_r4_wrapped_generation_drops_pre_wrap_token_and_dispatches_own() {
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        serving.slots[0].slot_gen = u64::MAX;
+        let mut client = connect(port);
+        let mut reader = client.try_clone().expect("clone client socket");
+        client.write_all(b"\r\n\r\n").expect("write malformed head");
+        serving.batch_gen = serving.batch_gen.wrapping_add(1);
+        serving.in_batch = true;
+        std::thread::sleep(Duration::from_millis(20)); // settle accept queue (see G1.R3)
+        serving
+            .dispatch_coalesced_batch(&[(Token(0), Readiness::none())])
+            .expect("accept the wrapped connection");
+        assert_eq!(
+            serving.slots[0].slot_gen, 0,
+            "the accepted slot wrapped to generation 0 via wrapping_add(1)"
+        );
+
+        let pre_wrap = client_token(u64::MAX, 0);
+        assert_ne!(
+            (pre_wrap.0 >> GEN_SHIFT) as u64,
+            0,
+            "the pre-wrap token's saturated generation must not decode to the wrapped live generation"
+        );
+
+        // The pre-wrap stale token is dropped before any socket read.
+        serving
+            .dispatch_readiness(
+                pre_wrap,
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch pre-wrap stale token");
+        assert_eq!(serving.storage().occupied(), 1);
+        assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+        assert_eq!(
+            serving.slots[0].buf_len, 0,
+            "the pre-wrap stale token must not read from the wrapped connection"
+        );
+
+        // The wrapped connection's own token (generation 0, exactly what
+        // register_client encoded at admit) dispatches and drives the full
+        // read -> parse -> decision -> release path.
+        serving
+            .dispatch_readiness(
+                client_token(0, 0),
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch wrapped own token");
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the wrapped connection's own token dispatched — the malformed head was read, refused, and the seat released"
+        );
+        assert!(matches!(serving.slots[0].stage, Stage::Idle));
+        reader.set_nonblocking(true).expect("nonblocking reader");
+        let mut body = [0u8; 64];
+        let mut got = 0usize;
+        let read_start = Instant::now();
+        loop {
+            match reader.read(&mut body[got..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    got += n;
+                    if got > 0 {
+                        break;
+                    }
+                }
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(
+                        read_start.elapsed() < Duration::from_secs(5),
+                        "the wrapped connection's 400 response never became readable"
+                    );
+                    std::thread::yield_now();
+                }
+                Err(err) => panic!("read the wrapped connection's response: {err}"),
+            }
+        }
+        assert!(
+            body[..got].starts_with(b"HTTP/1.1 400"),
+            "the wrapped connection's own token drove a real decision (400), got {:?}",
+            &body[..got.min(24)]
+        );
+    });
+}
+
+#[test]
+/// G1.E1 — the 2^53 token-encoding ceiling: at/above it the connection's own
+/// registered token can never decode back to the live slot generation, so even
+/// the connection's own token fail-closes as a stale drop: never a false live
+/// dispatch, never a wrap into the local-id range, and the queued head is never
+/// read. Ground truth recorded (no production change here): `shifted_generation`
+/// (src/serving.rs:3317-3321) WRAPS the generation into its low 53 bits rather
+/// than saturating to the all-ones field its doc-comment (3307-3312) and the
+/// design row claim; the fail-closed verdict still holds because the wrapped
+/// decoded generation never equals the live ceiling generation. Executes the
+/// real encode -> `dispatch_decode` -> slot-state path (matrix alumina-cdwui.4
+/// §2 G1.E1, EXHAUST — reachable and falsifiable).
+fn g1_e1_token_ceiling_saturation_fails_closed_never_progresses() {
+    const CEILING: u64 = 1u64 << 53;
+    const LOW53: u64 = (1u64 << 53) - 1; // the packed generation's wrapped field ceiling
+    let port = ephemeral_port();
+    with_serving_stack(port, move |serving| {
+        serving.slots[0].slot_gen = CEILING;
+        // Established client flow (mirrors malformed_head_gets_400): the
+        // blocking connect completes the handshake, the malformed head is
+        // written inbound to the server end, and the accept admits the server
+        // end so admit's wrapping_add(1) lands one past the ceiling.
+        let mut client = connect(port);
+        client.write_all(b"\r\n\r\n").expect("write malformed head");
+        // Settle the accept queue (see G1.R3 accept-between-tokens test) so
+        // the accept below deterministically lands the connection.
+        std::thread::sleep(Duration::from_millis(20));
+        serving.batch_gen = serving.batch_gen.wrapping_add(1);
+        serving.in_batch = true;
+        serving
+            .dispatch_coalesced_batch(&[(Token(0), Readiness::none())])
+            .expect("accept the ceiling connection");
+        let live = serving.slots[0].slot_gen;
+        assert_eq!(live, CEILING + 1, "admission advanced one past the ceiling");
+
+        let own = client_token(live, 0); // identical to what register_client encoded
+        assert_eq!(
+            own.0 & LOCAL_MASK,
+            1,
+            "the token must keep the client local id decodable (never a wrap into the local-id range)"
+        );
+        let decoded = (own.0 >> GEN_SHIFT) as u64;
+        // Ground truth on the actual packing (recorded, not invented): the
+        // packed generation wraps to its low 53 bits — checked_shl only guards
+        // the shift amount (11 < 64), it does not detect result overflow — so a
+        // degenerate generation yields a low-bit generation field, not the
+        // all-ones field the doc-comment at serving.rs:3307-3312 and design
+        // row G1.E1 claim. The fail-closed verdict below is unchanged because
+        // the wrapped decoded generation can never equal this live ceiling.
+        assert_eq!(
+            decoded,
+            live & LOW53,
+            "the packed generation field wraps in the low 53 bits (actual encode behaviour)"
+        );
+        assert_ne!(
+            decoded, live,
+            "the wrapped decoded generation can never match the live generation at the ceiling"
+        );
+
+        serving
+            .dispatch_readiness(
+                own,
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch the connection's own saturated token (fail-closed, no panic)");
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "fail-closed: the ceiling connection must not be falsely driven or released"
+        );
+        assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+        assert_eq!(
+            serving.slots[0].buf_len, 0,
+            "fail-closed: the ceiling connection's queued head must never be read"
+        );
+    });
+}
+
+#[test]
+/// §1 domain separation lemmas (and the cross-slot lemma G1.R5 cites) — the
+/// client (1..=`MAX_TUNNELS`) and upstream (`UPSTREAM_BASE`..) local-id ranges
+/// can never alias the listener (0), `DNS_LOCAL`, or `SIGNAL_LOCAL` reserved
+/// sources, and a token for one slot can never decode to another slot's arm,
+/// even at a saturated generation. This closes only the cross-slot/cross-source
+/// lemmas; the full u64-cycle same-slot reuse row G1.R5 stays BLOCKED/Unknown
+/// (decision bead alumina-v52be) and is not invented here (matrix alumina-cdwui.4
+/// §2 G1.R5, §5.1).
+fn g1_local_id_ranges_cannot_alias_reserved_sources_or_other_slots() {
+    const _: () = assert!(
+        SIGNAL_LOCAL <= LOCAL_MASK,
+        "reserved sources fit the local-id mask"
+    );
+    for index in 0..MAX_TUNNELS {
+        let client_local = client_token(0, index).0 & LOCAL_MASK;
+        let up_local = upstream_token(0, index).0 & LOCAL_MASK;
+        assert!(
+            (1..=MAX_TUNNELS).contains(&client_local),
+            "client local ids live in 1..=MAX_TUNNELS"
+        );
+        assert!(
+            (UPSTREAM_BASE..DNS_LOCAL).contains(&up_local),
+            "upstream local ids live strictly between the client range and DNS_LOCAL"
+        );
+        for reserved in [0usize, DNS_LOCAL, SIGNAL_LOCAL] {
+            assert_ne!(client_local, reserved);
+            assert_ne!(up_local, reserved);
+        }
+        assert_ne!(
+            client_local, up_local,
+            "the two arms of one slot never alias"
+        );
+    }
+    for index in 0..MAX_TUNNELS {
+        for other in 0..MAX_TUNNELS {
+            if other == index {
+                continue;
+            }
+            assert_ne!(
+                client_token(0, index).0 & LOCAL_MASK,
+                client_token(0, other).0 & LOCAL_MASK,
+                "two slots never share a client local id"
+            );
+            assert_ne!(
+                upstream_token(0, index).0 & LOCAL_MASK,
+                upstream_token(0, other).0 & LOCAL_MASK,
+                "two slots never share an upstream local id"
+            );
+        }
+    }
+    // Even at a saturated generation the local id stays decodable and disjoint
+    // from every reserved source (G1.E1 mechanism, no local-id wrap).
+    for index in [0usize, MAX_TUNNELS - 1] {
+        let ct = client_token(u64::MAX, index);
+        assert_eq!(ct.0 & LOCAL_MASK, index + 1);
+        assert_ne!(ct.0 & LOCAL_MASK, DNS_LOCAL);
+        assert_ne!(ct.0 & LOCAL_MASK, SIGNAL_LOCAL);
+        let ut = upstream_token(u64::MAX, index);
+        assert_eq!(ut.0 & LOCAL_MASK, UPSTREAM_BASE + index);
+        assert_ne!(ut.0 & LOCAL_MASK, DNS_LOCAL);
+        assert_ne!(ut.0 & LOCAL_MASK, SIGNAL_LOCAL);
+    }
 }
 
 #[test]
