@@ -268,11 +268,12 @@ cannot observe its own unread pipe (writes succeed into a buffer nobody reads).
 
 **Proxy-owned, tested** — rely on, do not re-verify:
 
-- Nonblocking stdout: fd 1 is made nonblocking once (`src/log.rs:1319`), writes
-  are `write_vectored` against a 16-op / 64 KiB per-turn budget
-  (`src/log.rs:66-67`), and a stalled or full pipe can never stall serving
-  (`src/log.rs:1574-1582`). A `WouldBlock` retains the partial cursor and
-  retries (`src/log.rs:2049-2123`); byte conservation is exact.
+- Nonblocking stdout: fd 1 is made nonblocking once
+  ([src/log.rs](src/log.rs):1579), writes are `write_vectored` against a
+  16-op / 64 KiB per-turn budget ([src/log.rs](src/log.rs):66-67), and a
+  stalled or full pipe can never stall serving ([src/log.rs](src/log.rs):1579-1582).
+  A `WouldBlock` retains the partial cursor and retries
+  ([src/log.rs](src/log.rs):2049-2123); byte conservation is exact.
 - Bounded queue: 256 × 2 KiB (`src/log.rs:53-54`); on overflow a whole record is
   dropped and counted (`dropped`), never truncated.
 - The monitor family is split into a reserved `kind=monitor` summary whose
@@ -319,34 +320,54 @@ established 3000/3000 at 0.011/0.077 cores RSS 210,832 KiB
 (`85b7769-bench-alumina-storm50-timed-20261028T132204Z.json`).
 
 **Guidance.** Size the collector with (1) a **buffer ≥ one full proxy queue
-(512 KiB)** so a burst never backpressures the proxy into drops, and (2) a read
-rate that stays ahead of your connection-churn class — the receipts bound the
-classes at 150 new conns/s (storm150) and 50/s (storm50). Every notify-tripping
-connection emits at most bounded per-connection warn/info records (≤ 2 KiB each)
-folded into the monitor summary (reserved, ≤ 2048 B fixed core) and detail
-batches (≤ 2048 B each, up to 3+3 per dirty second, `src/log.rs:60-63`); the
-summary emits at most once per dirty whole-second (`src/enforcement/monitor.rs:351-353`).
-Budget collector CPU/RAM in the same order of magnitude as the proxy's recorded
-footprint above and never assume the proxy slows down for a slow reader.
+(512 KiB) plus pipe capacity** so it absorbs a short burst — a guarantee only
+for bursts whose volume fits pipe + queue; a sustained stall past that combined
+capacity still overflows into counted drops, so the buffer is **not** a loss
+guarantee — and (2) a read rate that stays ahead of your connection-churn class:
+the receipts bound the classes at 150 new conns/s (storm150) and 50/s (storm50).
+Every notify-tripping connection emits at most bounded per-connection
+warn/info records (≤ 2 KiB each, e.g. `reject` / `early_activity`) as **their
+own records**, plus the event-driven monitor family as a separate aggregate: a
+reserved `kind=monitor` summary (≤ 2048 B fixed core) and best-effort
+`monitor_domain` / `monitor_capture` detail batches (≤ 2048 B each, up to 3+3
+per dirty second, `src/log.rs:60-63`); the summary emits at most once per dirty
+whole-second (`src/enforcement/monitor.rs:351-353`). Budget collector CPU/RAM in
+the same order of magnitude as the proxy's recorded footprint above and never
+assume the proxy slows down for a slow reader.
 
 ### Alerting on proxy-observable loss (exact counters, units, observation point)
 
 Alert thresholds are your configuration; the semantics below are fixed
-constants. Every counter is saturating with an overflow flag; treat a nonzero
-overflow flag as "count is a floor, not a total".
+constants. The monitor-summary counters (`report_drops`, `capture_drops`) are
+saturating and expose an `o*` overflow flag (`oreport_drops`, `ocapture_drops`);
+treat a nonzero overflow flag as "count is a floor, not a total". Generic
+`dropped` is a plain saturating count with **no** overflow field in the emitted
+records (`startup_final`/`shutdown_final` carry `dropped` only) — see the
+exit-accounting note below.
 
 | Signal | Where | Unit (exact) | Means |
 | --- | --- | --- | --- |
-| `dropped` | `startup_final` ([src/log.rs](src/log.rs):1853) and `shutdown_final` (:1957) **only** — never in the monitor summary core (:883-909) | 1 per whole record lost, all classes | Whole-record loss over boot/full run. Long-run loss surfaces **only** at these two boundaries; while serving it is not refreshed in-band |
+| `dropped` | `startup_final` ([src/log.rs](src/log.rs):1853) and `shutdown_final` (:1957) **only** — never in the monitor summary core (:883-909) | 1 per whole record lost, all classes | Whole-record loss over boot/full run. Long-run loss surfaces **only** at these two boundaries while serving (not refreshed in-band); serving-exit residue after the single bounded drain is **uncounted, unobservable** (exit-accounting note below) |
 | `report_drops` / `oreport_drops` | every `kind=monitor` summary fixed core ([src/log.rs](src/log.rs):890-894) | 1 per dropped `monitor_domain` **batch** at report time (:1977; `src/enforcement/monitor.rs:320`) — a batch is up to 11 domain blocks, never per block | Queue-full refusal of a domain detail batch |
 | `capture_drops` / `ocapture_drops` | every `kind=monitor` summary fixed core ([src/log.rs](src/log.rs):895-899) | **mixed, by design**: 1 per detail at capture time (later-relation suppression [serving.rs](src/serving.rs):2341-2358; 64-detail window eviction [monitor.rs](src/enforcement/monitor.rs):335) **and** 1 per dropped `monitor_capture` batch at report time ([log.rs](src/log.rs):1988) — a batch is up to 22 details | Capture-detail loss in mixed units; a nonzero value means detail loss, never treat "1" as "one detail" |
 | `dx=` | `kind=monitor`, square brackets loss bitset, present only when nonzero ([src/log.rs](src/log.rs):984-995) | 1 bit per allowlist ordinal, hex | That ordinal's JA4-change facts overflowed the bounded detail |
 
-**Notification drop path (drain/strand).** Records already in the queue that
-cannot drain before a sink failure or at exit are counted under generic
-`dropped` (strand/drain path, [src/log.rs](src/log.rs):1668, :2094-2102) — never
-as `report_drops`/`capture_drops`. A forced shutdown summary stranded by a dead
-sink is counted but **unobservable after exit** (the process is gone).
+**Notification drop path (exit accounting — counted vs unobservable).** Queue
+residue a drain cannot deliver is accounted differently per path, never as
+`report_drops`/`capture_drops`. **Counted residue:** a sink failure drops and
+counts every remaining queued record exactly once in the shared `dropped` tally
+([src/log.rs](src/log.rs):2094-2102), and a startup-termination exit
+(`Exit75`/`Terminated`) additionally strands whatever its bounded startup drains
+did not deliver, each counted once in the same tally
+([src/serve.rs](src/serve.rs):1170, `strand_queued`'s only call site).
+**Unobservable residue:** the serving exit
+([src/runtime.rs](src/runtime.rs):388-400) reads `dropped`, enqueues
+`shutdown_final` with that snapshot, performs exactly **one** bounded drain
+(16 ops / 64 KiB, [src/log.rs](src/log.rs):64-67), then `process::exit` — records
+still queued at that moment are destroyed **uncounted**, and a stalled sink can
+make that single drain deliver nothing at all, so even `shutdown_final` itself
+is lost. Therefore any `dropped` value in `shutdown_final` is a **lower bound**,
+never proof of a lossless exit window.
 
 ### Alerting on collector-observable absence + the honest limitation
 
@@ -371,22 +392,26 @@ sink is counted but **unobservable after exit** (the process is gone).
   loss" from counter == 0 — verify the reader is actually consuming.
 - **Conservative responses, by signal:** `report_drops`/`capture_drops`/`dx`
   growth ⇒ detail is gone (summary aggregates remain authoritative) — do not try
-  to reconstruct detail, do not scale the proxy. Generic `dropped` at
-  `shutdown_final` ⇒ the run's stdout corpus is incomplete — rebuild context
-  from the collector's persisted stream and patch alerting. Silence after a
-  latched sink ⇒ rotate: repair or replace the collector, then exercise the
-  operator-controlled restart to clear the latch, expecting in-memory state
+  to reconstruct detail, do not scale the proxy. A **nonzero** generic `dropped`
+  at `shutdown_final`, or a **missing** `shutdown_final` entirely (a latched or
+  stalled sink can consume the single exit drain), ⇒ the run's stdout corpus is
+  incomplete — rebuild context from the collector's persisted stream and patch
+  alerting; never read `dropped=0` as proof of a lossless exit window. Silence
+  after a latched sink ⇒ rotate: repair or replace the collector, then exercise
+  the operator-controlled restart to clear the latch, expecting in-memory state
   reset (§ below).
 
 ### Restart semantics (state that is in-memory and does not survive)
 
-- **Proxy restart** clears all in-memory enforcement state: the per-ordinal and
-  all-scope block latches ([src/enforcement/state.rs](src/enforcement/state.rs):218,231,302-305)
-  and the JA4 first-seen baselines ([src/serving.rs](src/serving.rs):951-953,
-  "reset on restart"). A previously blocked or baselined identity is treated as
-  first-seen again, and the monitor aggregate (including the drop counters in
-  the summary) starts at zero. Treat a proxy restart as a clean-slate for block
-  and baseline state; a restarted proxy does not resume prior latches.
+- **Proxy restart** clears all in-memory enforcement state: the per-ordinal
+  domain block-latch bitset
+  ([src/enforcement/state.rs](src/enforcement/state.rs):219,232,348) and the
+  all-scope block latch (:218,231,302-305), plus the JA4 first-seen baselines
+  ([src/serving.rs](src/serving.rs):951-953, "reset on restart"). A previously
+  blocked or baselined identity is treated as first-seen again, and the monitor
+  aggregate (including the drop counters in the summary) starts at zero. Treat a
+  proxy restart as a clean-slate for block and baseline state; a restarted proxy
+  does not resume prior latches.
 - **Collector restart does not replay proxy history.** Proxy stdout is one-way
   and drained; there is no replay buffer. Records the collector missed are gone
   — either dropped and counted (queue overflow / strand) or written to a pipe
@@ -433,12 +458,15 @@ proxy never stalls serving in either branch (nonblocking sink).
 
 **Pass / Unknown criteria.** PASS if: the proxy never stalled serving; some
 subset of the events survived (pipe-buffered) and were drained after restore;
-and every counter that moved is exactly explicable by the recorded geometry —
-or, on the no-loss branch, all event records for the stall window are present
-and all counters stayed 0. **Unknown** (record as Unknown, never PASS) if: the
-collector or proxy OOM/thrashed (environment), a latched sink silently quiesced
-(no in-band evidence by design), or the stall duration versus pipe capacity was
-not measured. No direct-egress fallback is required anywhere in this drill — the
+and, **within the serving window only**, every counter that moved is exactly
+explicable by the recorded geometry — or, on the no-loss branch, all event
+records for the stall window are present and all counters stayed 0. Do **not**
+require exact reconciliation across a proxy exit: residue between the single
+exit drain and `process::exit` is uncounted and unobservable (exit-accounting
+note above). **Unknown** (record as Unknown, never PASS) if: the collector or
+proxy OOM/thrashed (environment), a latched sink silently quiesced (no in-band
+evidence by design), or the stall duration versus pipe capacity was not
+measured. No direct-egress fallback is required anywhere in this drill — the
 proxy's stdout pipe is the only path exercised.
 
 ## Repository layout
