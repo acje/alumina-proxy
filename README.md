@@ -18,8 +18,10 @@ egress traffic. The idiomatic use case is to deploy Alumina Proxy with one conta
 or workload type in a VPC that limits egress to be exclusively through the
 Alumina Proxy. In case of component compromise the attacker will have limited
 opportunities for establishing egress; policy violations and early-upstream-data
-events trigger configurable tripwire actions (`flare_only` / `block`) with
-bounded stdout monitoring (`docs/alumina-proxy.md:243-323`, rp2e amendment).
+events trigger configurable tripwire actions (`notify` / `block`) with bounded
+stdout monitoring (`src/config.rs:906-907`; `src/enforcement/action.rs:28-31`;
+spec §Tripwire actions, monitoring, and pacing → §Action catalog and
+attribution).
 
 ## Design philosophy
 
@@ -43,17 +45,20 @@ firing is therefore a **high-value signal**: highly unexpected, and almost
 certainly operator misconfiguration or adversarial activity. Every deviation is
 detected and acted on; there is no tolerated rate of bad behavior. Tripwires
 react on the first sign of deviation and are highly accurate. The action taken
-(flare, block, or tarpit) is your configuration choice; Alumina does not always
-panic by blocking all egress. The all-scope block bar is operator-configurable
+(`notify` or `block`) is your configuration choice; Alumina does not always
+panic by blocking all egress. Tarpit is reserved/deferred — it is not accepted
+as an operational setting (`src/config.rs:908,1065`; spec §Tripwire actions →
+Tarpit (deferred)). The all-scope block bar is operator-configurable
 too: by default the first deviation arms all-scope block, and raising the bar
 is your deliberate choice to tolerate a bounded burst — never a hidden
 tolerated rate.
 
 > "There will be no silent acceptance of adversarial behavior without action
-> taken. The action may be flare, block, or tarpitting. We will not always
-> panic by blocking all meaningful egress automation — that is an operator
-> configuration choice. Alumina promises to deliver highly accurate tripwires.
-> The operator decides what the appropriate action will be for their context."
+> taken. The action may be `notify` or `block` (tarpitting is reserved/deferred,
+> not accepted as an operational setting). We will not always panic by blocking
+> all meaningful egress automation — that is an operator configuration choice.
+> Alumina promises to deliver highly accurate tripwires. The operator decides
+> what the appropriate action will be for their context."
 
 Narrowness is the mechanism, not a compromise: a single purpose, a fixed
 resource profile, and fixed security semantics make the proxy's invariants
@@ -77,7 +82,7 @@ contract; it never yields to a feature.
   resolver set (1..=5 entries: bare `IP` on port 53, `IP#fqdn` on port 853, or
   `IP#fqdn#pin-sha256=<b64>` strict-pin on port 853); no `resolv.conf` read, no
   CLI args, no env overrides; one listening socket; **SIGTERM the only handled
-  lifecycle signal** (`docs/alumina-proxy.md:149`).
+  lifecycle signal** (spec §Architecture → Runtime surface).
 - Privilege preflight (non-root, empty caps, `no_new_privs`): unmet → EX_CONFIG
   78; unresolved beyond allowance → EX_TEMPFAIL 75.
 - Example config: `docs/qa-package/config.example.toml` (≤ 16384 B) shows the
@@ -90,7 +95,7 @@ contract; it never yields to a feature.
 
 ## Workload & protocol compatibility (zero proxy code changes)
 
-Alumina's wire contract (`docs/alumina-proxy.md:17-50,200-202`) is: an explicit
+Alumina's wire contract (spec §Protocol contract) is: an explicit
 plaintext `HTTP/1.1` `CONNECT <fqdn>:<port>` (the port must exactly
 match the allowlisted entry, e.g. `443`); then — after `200
 Connection established` — the **client speaks first** with a TLS 1.3
@@ -98,7 +103,8 @@ Connection established` — the **client speaks first** with a TLS 1.3
 sends **zero bytes before the validated `ClientHello` is flushed upstream**
 (Barrier B — `EarlyUpstreamData` closes the tunnel if the server speaks
 first). Once the gate opens, encrypted application bytes are relayed opaquely,
-with no ALPN or application-protocol inspection (`docs/alumina-proxy.md:19-21,48-50`).
+with no ALPN or application-protocol inspection (spec §Protocol contract,
+Inspection scope).
 
 | Workload | Transport | Compatible? |
 | --- | --- | --- |
@@ -115,11 +121,11 @@ allowlisted entry's port and speak a TLS 1.3 `ClientHello` first (`wss://` or
 
 ## Reference VPC appliance deployment pattern
 
-To enforce positive locking (`docs/alumina-proxy.md:7,103-122`), the protected
-workload and Alumina must run under **separate network-policy and runtime
-identities** so a compromised workload (RCE) cannot bypass `HTTPS_PROXY` via
-direct `connect(2)` syscalls or reset latched `Block Domain` / `Block All`
-tripwire state by crashing its own container.
+To enforce positive locking (spec §Deployment boundary → Typical deployment
+pattern), the protected workload and Alumina must run under **separate
+network-policy and runtime identities** so a compromised workload (RCE) cannot
+bypass `HTTPS_PROXY` via direct `connect(2)` syscalls or reset latched
+`Block Domain` / `Block All` tripwire state by crashing its own container.
 
 ### 1. Topology and VPC firewall confinement
 
@@ -159,8 +165,9 @@ tripwire state by crashing its own container.
 
 ### 2. Minimal `FROM scratch` container image
 
-Matches `docs/alumina-proxy.md:585` (hrdn4 restatement) — two files in the
-root filesystem (`/alumina`, `/config.toml`), zero shell or OS utilities:
+Matches spec §Deployment boundary → Typical deployment pattern (hrdn4
+restatement) — two files in the root filesystem (`/alumina`, `/config.toml`),
+zero shell or OS utilities:
 
 ```dockerfile
 FROM --platform=linux/amd64 rust:1.99.0-alpine AS builder
@@ -179,6 +186,11 @@ USER 65534:65534
 EXPOSE 5353
 ENTRYPOINT ["/alumina"]
 ```
+
+**`config.toml` note:** the `COPY config.toml /config.toml` line above
+references the operator-supplied configuration, provided at image build time —
+it is **not tracked in this repository**; see
+`docs/qa-package/config.example.toml`.
 
 ### 3. Appliance runtime invocation and TCP DNS requirement
 
@@ -228,8 +240,8 @@ ENTRYPOINT ["/alumina"]
   `--tmpfs /tmp:size=64m` scratch mount keep the root filesystem immutable at
   runtime.
 - **TCP-capable DNS resolver (via the config `resolver` entry):** Alumina
-  performs DNS over TCP exclusively (`docs/alumina-proxy.md:68`), with
-  per-entry dial port 53 (bare `IP`) or 853 (DoT `IP#fqdn` / strict-pin
+  performs DNS over TCP exclusively (spec §Configuration & DNS → Transport),
+  with per-entry dial port 53 (bare `IP`) or 853 (DoT `IP#fqdn` / strict-pin
   `IP#fqdn#pin-sha256=<b64>` forms). Where a cloud provider's link-local
   metadata DNS (`169.254.169.254:53`) answers UDP only for external records,
   the `resolver` entry in `config.toml` (baked into the image) is set to a
@@ -238,7 +250,7 @@ ENTRYPOINT ["/alumina"]
 - **Client TLS 1.3 requirement:** Client HTTPS stacks using `HTTPS_PROXY` must
   offer TLS 1.3 (`0x0304`) as their minimum protocol version so `ClientHello`
   `supported_versions` does not advertise TLS 1.2 (`0x0303`), which Alumina
-  rejects by design (`docs/alumina-proxy.md:47`).
+  rejects by design (spec §Protocol contract → Version offer).
 
 ## Repository layout
 
