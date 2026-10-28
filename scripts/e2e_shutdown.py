@@ -44,16 +44,22 @@ Cases (each exercises the ACTUAL shipped shutdown path):
                               the sink must not delay shutdown -> exit 70 on time
     SILENT-DNS-REFRESH-DRAIN
                               stalled relay; the real current AAAA due-refresh
-                              is served and its response TRANSMITTED
-                              (responder-side transmission witness, not owner
-                              consumption); a next-due serving DNS exchange
-                              (sibling AAAA-family by fixed inputs) is genuinely
-                              accepted, its query read, and left UNANSWERED
-                              (responder silent from session 3, a dead-resolver
-                              serving negative), and only then is SIGTERM
-                              delivered: the forced drain closes in the
-                              first-deadline window with that accepted/read/
-                              unanswered observation before signal.
+                              is served on the RETAINED startup connection
+                              (docs/alumina-proxy.md:603: the DoT connection
+                              established during the startup window is retained
+                              across serving refreshes and reused -- no rebuild,
+                              so the refresh arrives on the same session 1) and
+                              its response TRANSMITTED (responder-side
+                              transmission witness, not owner consumption); a
+                              next-due serving DNS exchange (sibling AAAA-family
+                              by fixed inputs, on the same retained session) is
+                              genuinely accepted, its query read, and left
+                              UNANSWERED (responder silent from the SECOND
+                              serving AAAA, a dead-resolver serving negative),
+                              and only then is SIGTERM delivered: the forced
+                              drain closes in the first-deadline window with
+                              that accepted/read/unanswered observation before
+                              signal.
                               Handled-signal DNS suppression is claimed by the
                               native owner witness (src/runtime.rs
                               sigterm_stops_due_refresh_flow), not from this
@@ -270,17 +276,23 @@ class DnsResponder:
     """Authority for the allowlist names. Modes:
     `delay_first`: sleep before answering the first accepted session's queries
         (keeps the startup window blocked so PRE-SERVING can signal mid-window).
-    `silent_after_session`: serve session N and before; accept and never answer
-        from session N+1 on (a dead, silent resolver for any later refresh).
+    `silent_after_served_aaaa`: serve the startup A exchanges and the FIRST
+        serving AAAA due-refresh on the retained connection (docs/alumina-
+        proxy.md:603 -- the DoT connection established during the startup
+        window is retained across serving refreshes and reused, so every
+        exchange shares the single startup session and this switch is query-
+        sequence based, never a session threshold), then accept and read but
+        never answer from the SECOND qtype=28 on (a dead, silent resolver for
+        the sibling's next-due serving refresh).
     `silent_always`: accept every query and never answer (a fully silent
         resolver used to hold the startup window open in Receiving)."""
 
-    def __init__(self, addr, answers, delay_first=0.0, silent_after_session=None,
+    def __init__(self, addr, answers, delay_first=0.0, silent_after_served_aaaa=False,
                  silent_always=False, hold_final=False):
         self.addr = addr
         self.answers = answers
         self.delay_first = delay_first
-        self.silent_after_session = silent_after_session
+        self.silent_after_served_aaaa = silent_after_served_aaaa
         self.silent_always = silent_always
         self.hold_final = hold_final
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -307,11 +319,16 @@ class DnsResponder:
         self._final_held = False
         self._answered = set()
         # AAAA-refresh TRANSMISSION witness: set only AFTER the responder's
-        # sendall of an AAAA NODATA answer on a serving session (>= 2) returns,
-        # so a cancelled/failed send can never publish it. It proves the
-        # responder transmitted the answer, never that the owner consumed or
-        # published the result (owner-side publication is native-witness
-        # territory, src/runtime.rs sigterm_stops_due_refresh_flow).
+        # sendall of an AAAA NODATA answer returns, so a cancelled/failed send
+        # can never publish it. It proves the responder transmitted the answer,
+        # never that the owner consumed or published the result (owner-side
+        # publication is native-witness territory, src/runtime.rs
+        # sigterm_stops_due_refresh_flow). Session numbering is NOT the
+        # discriminator: the startup window never attempts AAAA (its slots stay
+        # due) and the retained transport (docs/alumina-proxy.md:603) reuses the
+        # startup connection across serving refreshes, so ANY served qtype=28 is
+        # the post-bind serving due-refresh whether it arrives on session 1 or a
+        # later session.
         self.aaaa_refresh_sent = threading.Event()
         # Dead-resolver serving negative: set when a silent-zone serving
         # connection has been accepted AND its DNS query read while the
@@ -351,12 +368,16 @@ class DnsResponder:
                 self.sessions += 1
                 session = self.sessions
                 self.session_times.append((session, time.monotonic()))
-            silent = self.silent_always or (
-                self.silent_after_session is not None and session > self.silent_after_session
-            )
+            # Connection-level silent status (used only by `silent_always`).
+            # `silent_after_served_aaaa` is NOT a connection/session property:
+            # the retained transport (docs/alumina-proxy.md:603) reuses the
+            # startup connection for every serving exchange, so its silent
+            # switch is query-sequence based and applied per-query in _serve,
+            # never decided here.
+            silent = self.silent_always
             print(
                 f"DNS-TRACE: accepted connection session={session} t={time.monotonic():.3f} "
-                f"silent_after_session={self.silent_after_session} silent_always={self.silent_always}",
+                f"silent_after_served_aaaa={self.silent_after_served_aaaa} silent_always={self.silent_always}",
                 flush=True,
             )
             t = threading.Thread(target=self._serve, args=(conn, session, silent), daemon=True)
@@ -379,6 +400,13 @@ class DnsResponder:
         return b".".join(labels), pos
 
     def _serve(self, conn, session, silent):
+        # Per-connection state for `silent_after_served_aaaa`: the FIRST serving
+        # AAAA refresh on a serving connection is served (transmission witness
+        # fires after sendall), then any later qtype=28 on the same retained
+        # session (the sibling's next-due refresh) is accepted/read but left
+        # unanswered -- the silent switch is query-sequence based because the
+        # retained transport shares the startup session for every exchange.
+        aaaa_served = False
         try:
             conn.settimeout(5.0)
             while not self._stop:
@@ -411,16 +439,27 @@ class DnsResponder:
                         self.delay_first = 0.0
                     else:
                         delay = 0.0
+                # Effective per-query silent status. `silent_after_served_aaaa`
+                # serves the startup A exchanges and the FIRST serving AAAA
+                # due-refresh, then accepts+reads but never answers from the
+                # SECOND qtype=28 on -- that sibling is the next-due serving
+                # refresh. Because the retained transport shares session 1 for
+                # every exchange (docs/alumina-proxy.md:603), the switch is
+                # sequence-based here, never a session threshold.
+                silent_here = silent
+                if self.silent_after_served_aaaa:
+                    silent_here = qtype == 28 and aaaa_served
                 if delay:
                     time.sleep(delay)
-                if silent:
+                if silent_here:
                     print(f"DNS-TRACE: query {qname!r} qtype={qtype} t={time.monotonic():.3f} -> SILENT (no answer)", flush=True)
                     # never answer; keep the connection open (a stalled resolver).
-                    # The query was read on a silent-zone session: published as
+                    # The query was read in a silent-zone segment: published as
                     # accepted/queried-and-unanswered DNS. Observation scope only:
-                    # any query on a silent session sets the event (no per-query
-                    # qtype/qname assertion); the due-family expectation comes
-                    # from the fixture's fixed inputs, not from this event.
+                    # any query in the silent-zone segment sets the event (no
+                    # per-query qtype/qname assertion); the due-family
+                    # expectation comes from the fixture's fixed inputs, not
+                    # from this event.
                     self.silent_accept.set()
                     time.sleep(1.0)
                     continue
@@ -457,10 +496,18 @@ class DnsResponder:
                     # existing name, non-A type (the serving AAAA due-refresh:
                     # startup never attempts AAAA, its slot stays due and the
                     # owner's due-refresh re-queries it right after the
-                    # listener binds). Type-specific absence: NOERROR with zero
+                    # listener binds) -- served on the RETAINED startup
+                    # connection (docs/alumina-proxy.md:603: the DoT connection
+                    # established during the startup window is retained across
+                    # serving refreshes and reused -- no rebuild), not on a fresh
+                    # serving session. Type-specific absence: NOERROR with zero
                     # answers plus a covering SOA (RFC 2308), so only the
                     # queried family is treated absent and A survives -- never a
-                    # whole-name NXDOMAIN. On a serving session (>= 2) the
+                    # whole-name NXDOMAIN. Any served qtype=28 is, by the
+                    # fixture's fixed inputs, the post-bind serving due-refresh;
+                    # session numbering never discriminates a served refresh
+                    # (the retained transport reuses session 1, which is why the
+                    # pre-fix `session >= 2` guard could never fire). The
                     # transmitted AAAA answer is the real current-refresh
                     # witness; the event is published below only after sendall
                     # returns (B1).
@@ -469,7 +516,7 @@ class DnsResponder:
                     rcode = 0
                     nscount = 1
                     ns_rr = soa_record(qname, 300, 60)
-                    transmitted_refresh = session >= 2 and qtype == 28
+                    transmitted_refresh = qtype == 28
                 if final_answer:
                     # Withhold the final answer until the case has delivered a
                     # SIGTERM, so the startup window is provably still resolving
@@ -488,6 +535,7 @@ class DnsResponder:
                 print(f"DNS-TRACE: query {qname!r} qtype={qtype} t={time.monotonic():.3f} -> TX {resp.hex()}", flush=True)
                 conn.sendall(len(resp).to_bytes(2, "big") + resp)
                 if transmitted_refresh:
+                    aaaa_served = True
                     self.aaaa_refresh_sent.set()
         except OSError:
             return
@@ -735,10 +783,10 @@ def spawn_binary(stdout_target=None, stderr_target=None, preexec_dup2=None):
     return subprocess.Popen(argv, stdout=stdout_target, stderr=stderr_target)
 
 
-def setup_dns(answers, delay_first=0.0, silent_after_session=None, silent_always=False,
+def setup_dns(answers, delay_first=0.0, silent_after_served_aaaa=False, silent_always=False,
               hold_final=False):
     dns = DnsResponder(("127.0.0.1", 53), answers, delay_first,
-                       silent_after_session, silent_always, hold_final).start()
+                       silent_after_served_aaaa, silent_always, hold_final).start()
     return dns
 
 
@@ -1292,27 +1340,32 @@ def case_silent_dns(fixtures):
     """Stalled relay + the REAL current DNS refresh profile, honestly scoped.
     Startup resolves both A families on session 1 and never attempts AAAA (their
     slots stay due), so the serving owner's due-refresh re-queries AAAA right
-    after the listener binds. The harness SERVES the first such refresh on
-    session 2 (the responder-side TRANSMISSION witness, set only after sendall
-    returns; proves the responder sent the answer, not that the owner consumed
-    it), then a next-due serving DNS exchange on a silent-zone session (>= 3,
-    sibling AAAA-family by fixed inputs) is genuinely ACCEPTED, its query read,
-    and left UNANSWERED (the responder goes silent from session 3); the case
-    REQUIRES that responder-observed accepted/read/unanswered observation
-    BEFORE delivering SIGTERM (the sticky event asserts neither qtype nor
-    continued owner activity). The forced drain must then still close in the
-    first-deadline window with that accepted/read/unanswered serving query
-    observed before signal. Observed session counts are printed as an
-    observation
-    only: handled-SIGTERM DNS SUPPRESSION is NOT claimed from this fixture's
-    accept roster -- it is the native owner witness (src/runtime.rs
+    after the listener binds -- ON THE SAME retained startup connection
+    (docs/alumina-proxy.md:603: the DoT connection established during the
+    startup window is retained across serving refreshes and reused -- no
+    rebuild), so every exchange shares session 1. The harness SERVES the first
+    such refresh on that retained session (the responder-side TRANSMISSION
+    witness, set only after sendall returns; proves the responder sent the
+    answer, not that the owner consumed it), then the NEXT-due serving DNS
+    exchange -- the sibling AAAA-family refresh by fixed inputs, on the SAME
+    retained session -- is genuinely ACCEPTED, its query read, and left
+    UNANSWERED (the responder goes silent from the SECOND serving AAAA, a
+    dead-resolver serving negative); the case REQUIRES that
+    responder-observed accepted/read/unanswered observation BEFORE delivering
+    SIGTERM (the sticky event asserts neither qtype nor continued owner
+    activity). The forced drain must then still close in the first-deadline
+    window with that accepted/read/unanswered serving query observed before
+    signal. Observed session counts are printed as an observation only (with
+    the retained transport the count is expected to stay at the single startup
+    session): handled-SIGTERM DNS SUPPRESSION is NOT claimed from this
+    fixture's accept roster -- it is the native owner witness (src/runtime.rs
     sigterm_stops_due_refresh_flow re-arms A+AAAA due after a real self-pipe
     SIGTERM and asserts no new DNS initiation), run separately with its
     no-signal negative control."""
     name = "SILENT-DNS-REFRESH-DRAIN"
     dns = setup_dns({b"drain.example.org": bytes([8, 8, 8, 8]),
                      b"force.example.org": bytes([208, 67, 222, 220])},
-                    silent_after_session=2)
+                    silent_after_served_aaaa=True)
     fixtures.append(dns)
     silent = SilentUpstream(("208.67.222.220", 443)).start()
     fixtures.append(silent)
@@ -1329,21 +1382,24 @@ def case_silent_dns(fixtures):
         if silent.bytes_received() == 0:
             proc.kill(); proc.wait(); fail(name, "no hello bytes upstream (relay not established)"); return
         # Current-refresh transmission witness: the first due-refresh AAAA answer
-        # must actually be SENT on a serving session (event published only after
-        # sendall returns), not merely admitted or assembled.
+        # must actually be SENT (event published only after sendall returns), not
+        # merely admitted or assembled. Session numbering is not the
+        # discriminator: the retained transport (docs/alumina-proxy.md:603)
+        # brings the serving refresh over the same startup connection, so any
+        # served qtype=28 is it.
         if not dns.aaaa_refresh_sent.wait(10.0):
             proc.kill(); proc.wait()
-            fail(name, "current AAAA refresh answer never transmitted on a post-startup session (fixture premise of a real refresh violated)")
+            fail(name, "current AAAA refresh answer never transmitted on a serving connection (fixture premise of a real refresh violated)")
             return
-        # Dead-resolver serving negative: some serving DNS query must be
-        # genuinely accepted, its query read, and left unanswered on a
-        # silent-zone session (>= 3) BEFORE the signal -- a responder-observed
-        # accepted/read/unanswered serving query (sibling AAAA-family by fixed
+        # Dead-resolver serving negative: some next-due serving DNS query must be
+        # genuinely accepted, its query read, and left unanswered in a silent
+        # zone BEFORE the signal -- a responder-observed accepted/read/
+        # unanswered serving query (the sibling AAAA-family refresh by fixed
         # inputs; asserts neither qtype nor continued owner activity), not an
         # unreachable branch.
         if not dns.silent_accept.wait(10.0):
             proc.kill(); proc.wait()
-            fail(name, "next due serving DNS query was never accepted/queried-and-left-unanswered on a silent-zone session before the signal (dead-resolver serving negative premise violated)")
+            fail(name, "next due serving DNS query was never accepted/queried-and-left-unanswered in the silent-zone segment (second serving AAAA) before the signal (dead-resolver serving negative premise violated)")
             return
         t0 = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
@@ -1362,7 +1418,7 @@ def case_silent_dns(fixtures):
         elif elapsed > GRACE_HI:
             fail(name, f"DNS left a deadline that delayed the forced closure: {elapsed:.2f}s (> {GRACE_HI:.1f}s first-deadline window)")
         else:
-            pass_(name, f"current AAAA refresh answer TRANSMITTED on a post-startup serving session (responder-side witness) and a next-due serving DNS query accepted/queried-and-left-unanswered on a silent-zone serving session before the signal (dead-resolver serving negative; responder-observed, due-family scheduling from fixed inputs); {queries} queries over {sess_exit} sessions observed (timeline {[(s, f'{t:.2f}') for s, t in timeline]} rel. signal {t0:.2f}); forced exit 70 in {elapsed:.2f}s within the first-deadline window with that accepted/read/unanswered serving DNS query observed before signal (responder-observed; sibling AAAA-family by fixed inputs, asserts neither qtype nor continued owner activity). Session counts are an observation only; owner-side active-cancellation and suppression are covered natively by src/runtime.rs runtime_self_pipe_sigterm_cancels_active_receiving + sigterm_stops_due_refresh_flow (run separately), not claimed from this fixture's accept roster")
+            pass_(name, f"current AAAA refresh answer TRANSMITTED on the retained serving connection (responder-side witness) and a next-due serving DNS query accepted/queried-and-left-unanswered in the silent-zone segment (second serving AAAA) before the signal (dead-resolver serving negative; responder-observed, due-family scheduling from fixed inputs); {queries} queries over {sess_exit} session(s) observed (timeline {[(s, f'{t:.2f}') for s, t in timeline]} rel. signal {t0:.2f}; the retained transport docs/alumina-proxy.md:603 reuses the startup session, so the count is expected to stay at the single observed connection); forced exit 70 in {elapsed:.2f}s within the first-deadline window with that accepted/read/unanswered serving DNS query observed before signal (responder-observed; sibling AAAA-family by fixed inputs, asserts neither qtype nor continued owner activity). Session counts are an observation only; owner-side active-cancellation and suppression are covered natively by src/runtime.rs runtime_self_pipe_sigterm_cancels_active_receiving + sigterm_stops_due_refresh_flow (run separately), not claimed from this fixture's accept roster")
     finally:
         if s is not None:
             try:
