@@ -488,14 +488,14 @@ changes nothing in them; it is not a benchmark framework and creates no files.
 | Item | Identity (record verbatim) |
 |---|---|
 | Source SHA | `3f587e947fa8f050954b2f1fa7ec6b47012ac769` (short `3f587e9`; sole parent `ad82b77c…`; 19 commits `c27115e..HEAD`; no push) |
-| P1 base / changed set | base `eedec45`; 10 paths: `README.md`, `docs/architecture.md`, `- docs/serving-datastructure.html`, `src/config.rs`, `src/enforcement/policy.rs`, `src/incident_report.rs`, `src/log.rs`, `src/serve.rs`, `src/serving.rs`, `src/serving/tests.rs` |
+| P1 base / changed set | base `eedec45`; 10 paths: `README.md`, `docs/architecture.md`, `docs/serving-datastructure.html` (deleted), `src/config.rs`, `src/enforcement/policy.rs`, `src/incident_report.rs`, `src/log.rs`, `src/serve.rs`, `src/serving.rs`, `src/serving/tests.rs` |
 | Canonical spec digest | `e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401` (unchanged; CANONICAL-DIGEST-OK) |
 | Executed artifact sha256 | `c869192e67032597c4b490de16260cdc33b5b7a811cb7e37308f9b5d25274031` (`target/release/alumina`; production digest identical to the D4 candidate `a19d407`) |
 | Builder | podman connections `flock-vm` (rootless) / `flock-vm-root` (rootful); pinned `docker.io/library/rust@sha256:484dce…2779a` |
 | Pinned bench image (§3) | `localhost/alumina-bench:20261027`, id `7c3937c1…b449c` = `BENCH_IMAGE_ID` (fail-closed) |
 | Compiled echo backend (§5/§8) | `.ooda/echo-backend/echo-backend-musl`, `BENCH_ECHO_SHA` fail-closed; pinned sha `efa64083…72cd` (§9), but **record** the value actually used on each run |
 | Podman connection | rootful `BENCH_PODMAN_CONNECTION` (fail-closed unless reachable; `--network none`) |
-| Alumina bench binary | `.ooda/alumina-head/baseline/alumina-musl`, `aarch64-unknown-linux-musl`, `HEAD_CANDIDATE_SHA` fail-closed |
+| Alumina bench binary | `.ooda/alumina-head/baseline/alumina-musl`, `aarch64-unknown-linux-musl`, `HEAD_CANDIDATE_SHA` fail-closed; build + stage recipe in §10.5 "Alumina binary note", expected sha `c869192e…` |
 
 #### 10.2.1 Clean-identity caveat (mandatory on every P2 receipt)
 
@@ -527,7 +527,11 @@ record beside the JSON receipt:
   file on both snapshots (SOURCE-IDENTITY-STABLE discipline, as in the P1
   gate);
 - the `BENCH-ECHO-IDENTITY` / `BENCH-BINARY-IDENTITY` lines emitted by
-  `bench_run.sh` (stdout; the fail-closed pins);
+  `bench_run.sh` (stdout; the fail-closed pins). `BENCH-BINARY-IDENTITY` is
+  **alumina-only** (`bench_run.sh` emits it only under `PROXY=alumina`); on
+  envoy/haproxy the binary identity is the pinned image id + the receipt's
+  `identity.executed_binary_sha256`, so a missing binary-identity line on those
+  subjects is not an `Unknown`;
 - the rootful `BENCH_PODMAN_CONNECTION` name used.
 
 A run whose bracket does not hold (identity changed mid-run) is `Unknown`
@@ -541,7 +545,7 @@ Receipt level — decided by the JSON receipt alone:
 |---|---|
 | `valid` | `valid=true`, `reasons=[]`, `verdict="valid"`, identity attrs equal to the §10.2 pins actually used, plus a held §10.3 bracket |
 | `invalid` | `valid=false` with non-empty `reasons` (corruption, missing-bytes, protocol disorder, timeout, partial send, accounting break, unknown-cpu) — a **measurement-invalid** determination, **never a proxy finding**; re-run and retain the invalid receipt (M-04 flake precedent, §9 caveats) |
-| `Unknown` | harness/operational: `BENCH-FAIL` (exit 1), `BENCH-BLOCKED` (podman/image/pin unreachable), a sampler probe typed `sampling.*.unknown=true`/`probe_failures`, an unreadable receipt, or an un-resolvable identity — record with the observed capability; never folded into `valid`, never a clean or negative proxy verdict |
+| `Unknown` | harness/operational: `BENCH-FAIL` (in-container body) / `BENCH-HOST-FAIL` (host-side, `exit <n>`), `BENCH-BLOCKED` (podman/image/pin unreachable), a sampler probe typed `sampling.*.unknown=true`/`probe_failures`, an unreadable receipt, or an un-resolvable identity — record with the observed capability; never folded into `valid`, never a clean or negative proxy verdict |
 
 Rules every receipt MUST satisfy (cite §5/§9, do not re-derive):
 
@@ -556,6 +560,11 @@ Rules every receipt MUST satisfy (cite §5/§9, do not re-derive):
    recorded (§10.6, §10.7) — never a fabricated number and never a substitute
    candidate; `85b7769` or any pre-P1 SHA stays comparison-only (§6).
 4. A failed probe is typed `Unknown` (`sampling.*.unknown`), never folded clean.
+5. **Ceiling attribution.** `achieved < offered` with a near-saturated
+   `sampling.<client|backend>.cores_mean` (shared-harness bottleneck, e.g. the
+   GIL-bound echo backend, §9 F1) is a **shared-harness ceiling** and must be
+   labelled as such — never the proxy-path cost; only a non-saturated read path
+   attributes the delta to the proxy.
 
 E-increment level (the whole E2/E3/E4 row):
 
@@ -569,10 +578,14 @@ E-increment level (the whole E2/E3/E4 row):
 ### 10.5 E2 — reproduce 1-Gbps + connection-storm receipts
 
 **Objective.** Reproduce the §9 profile set on the exact candidate §10.2,
-producing new receipts judged by §10.4. The comparison source is
-`.ooda/benchmarks/85b7769-*.json` (interleaved A-E-H; SECONDS 60 / WARMUP 5;
-`dirty_count=0`). This candidate's numbers come only from its own new runs —
-§9 numbers are never restated as this candidate's.
+producing new receipts judged by §10.4. The comparison source is the **timed**
+receipts only — `.ooda/benchmarks/85b7769-bench-*-timed-*.json` (interleaved
+A-E-H; SECONDS 60 / WARMUP 5; `dirty_count=0`); the 2 s smoke receipts
+(`…-smoke-…json`) are never comparison inputs (§4). Before any comparison is
+claimed, show the baseline pins equal on both sides: bench image id,
+executed/retained binary sha, `identity.tool_sha256`, openssl and python
+versions. This candidate's numbers come only from its own new runs — §9 numbers
+are never restated as this candidate's.
 
 **Commands.** Timed runs interleaved **A-E-H** (alumina → envoy → haproxy),
 SECONDS 60 / WARMUP 5; smoke (2 s, WARMUP 0) is an optional fast-path
@@ -587,16 +600,50 @@ sh scripts/bench_run.sh <alumina|envoy|haproxy> timed <1gbps|storm150|storm50>
 ```
 
 Matrix: 3 subjects × 3 profiles = 9 timed runs (A-E-H per profile), each
-receipt to `.ooda/benchmarks/3f587e9-<subject>-<profile>-timed-*`.
+receipt to `.ooda/benchmarks/3f587e9-bench-<subject>-<profile>-<kind>-*`
+(`STAMP = <short-head>-bench-$PROXY-$WORKLOAD-$KIND-$TS`, `bench_run.sh`).
 
 **Alumina binary note.** `HEAD_CANDIDATE_SHA` must name the sha of a
 `aarch64-unknown-linux-musl` build of §10.2 with its builder/toolchain
-recorded. The P1-gate executed artifact is `c869192e…`
-(`target/release/alumina`). If a build from §10.2 reproduces that sha, cite it;
-if its sha differs, record the delta and the build inputs explicitly — the
-candidate stays §10.2, but the receipt names exactly what ran.
+recorded. Build and stage it exactly as follows (every step below is a pin, not
+a suggestion):
 
-**Required receipt fields** (all existing, §5):
+```sh
+# toolchain 1.99.0 (rust-toolchain.toml) via the pinned builder images
+# docker.io/library/rust@sha256:484dce…2779a (§10.2 Builder; verify.sh canary);
+# target fixed at aarch64-unknown-linux-musl (bench_run.sh BENCH_RUST_TARGET).
+cargo +1.99.0 build --locked --release --target aarch64-unknown-linux-musl --target-dir target
+# stage the statically-linked artifact where bench_run.sh mounts it
+# (host `.ooda/…` -> container `/ooda/…` -> `/work/alumina`, run.sh):
+install -m 0755 target/aarch64-unknown-linux-musl/release/alumina .ooda/alumina-head/baseline/alumina-musl
+shasum -a 256 .ooda/alumina-head/baseline/alumina-musl   # expect the §10.2 sha below
+```
+
+The P1-gate executed artifact is `c869192e…` (`target/release/alumina` —
+statically-linked aarch64 musl ELF, digest asserted equal to D4 candidate
+`a19d407`); a §10.2 (`3f587e9`) build is expected to reproduce it. **The file
+now staged at `.ooda/alumina-head/baseline/alumina-musl` is the old `85b7769`
+build (`1e173c13…ce82`)** — running the candidate `HEAD_CANDIDATE_SHA` against it
+fails closed (`BENCH-BLOCKED: alumina binary identity mismatch`,
+`bench_run.sh`), which is the intended outcome until the rebuild above lands. A
+fresh build that does **not** reproduce `c869192e…` is fail-closed too: record
+the delta and the exact build inputs, and retag the run `Unknown` (identity not
+pinned to §10.2, §10.4) — never run or number an unpinned binary. If a build
+from §10.2 reproduces the sha, cite it; if its sha differs, record the delta and
+the build inputs explicitly — the candidate stays §10.2, but the receipt names
+exactly what ran.
+
+**Required receipt fields** (all existing, §5). The steady and storm report
+schemas differ (verified against the §9 receipts
+`85b7769-bench-alumina-1gbps-timed-…json` and
+`85b7769-bench-alumina-storm50-timed-…json`): a **storm receipt has no
+`phases` block, no `interval_vs_cohort.achieved_client_payload_mbps`, no
+`interval_vs_cohort.drain_*`, and its `latency` holds only
+`actual_send_to_echo` + `setup_latency`** (no `sched_to_echo`, no `send_lag`).
+Requiring a storm-absent field would force every clean storm run to `fail`
+(§10.4), so the rows are split by profile.
+
+Steady `1gbps` runs:
 
 | Purpose | Fields |
 |---|---|
@@ -606,8 +653,21 @@ candidate stays §10.2, but the receipt names exactly what ran.
 | Fulfilment honesty | `phases.measure.backpressure_unsent`, `phases.measure.missed_at_end`, `interval_vs_cohort.drain_echoed_frames`, `phases.measure.unechoed` |
 | Latency | `latency.actual_send_to_echo` / `sched_to_echo` / `send_lag` p50/p95/p99 + `max_us` + `overflow_count` |
 | CPU / RSS | `sampling.<client\|backend\|proxy>.cores_mean` / `cores_peak` / `rss_current_mean_kb` / `rss_current_peak_kb` / `vmhwm_kb` / `unknown` / `probe_failures` |
-| Storms | `storm.{arrivals_planned, arrivals_attempted, connections_established, sessions_completed, setup_failures, frames_sent, frames_echoed, protocol_errors, send_failed_sessions, peak_live, peak_dialing}` |
 | Validity | `valid`, `reasons`, `verdict`, `kind=timed`, `mode` |
+
+Storm `storm150`/`storm50` runs:
+
+| Purpose | Fields |
+|---|---|
+| Identity / Model | (same Identity and Model rows as steady above) |
+| Storm honesty / progress | `storm.{arrivals_planned, arrivals_attempted, connections_established, sessions_completed, setup_failures, frames_sent, frames_echoed, session_errors, protocol_errors, send_failed_sessions, peak_live, peak_dialing}`, `interval_vs_cohort.{data_echo_observe_window_s, in_window_sent_frames, in_window_echoed_frames}`, `workload_fulfilled`, `params.target_mbps` |
+| Storm latency | `latency.actual_send_to_echo` + `latency.setup_latency` (each p50/p95/p99 + `max_us` + `overflow_count`) |
+| CPU / RSS | (same CPU / RSS row as steady above) |
+| Validity | `valid`, `reasons`, `verdict`, `kind=timed`, `mode` |
+
+Do **not** require `phases.measure.*`, achieved goodput, `drain_*` counters,
+`sched_to_echo`, or `send_lag` on storm receipts — those fields do not exist
+there. The storm is a connection-churn/progress test, not a goodput reading.
 
 **E2 verdict.** Per §10.4: `pass` = all 9 receipts `valid` at §10.2 with a held
 §10.3 bracket and honesty rules — whatever the goodput or `fulfilled` values.
@@ -635,7 +695,11 @@ seams):**
    saturating its own cores. Headroom is read from the E2 1gbps timed
    receipts: `e2micro_model.host_cpus` and `sampling.<client|backend>.cores_mean`
    — near-saturated sampler cores at 1 Gbps imply no honest 10× headroom.
-   Record the estimate and disclose it as an estimate.
+   Record the estimate and disclose it as an estimate. Note that
+   `e2micro_model.host_cpus` / `host_mem_gib` are **hard-coded literals** in the
+   report writer (`bench_workload.py`: 8 CPUs / 14 GiB), not observed values —
+   accurate on today's host, false on any other — so the executor must also
+   record `nproc` and `/proc/meminfo` beside any receipt that claims headroom.
 4. **Expressibility seam.** The documented invocation accepts only the
    `E2MICRO_LABELS` set `1gbps|storm150|storm50`, and `1gbps` pins
    `--target-mbps 1000` (`bench_run.sh`, `E2MICRO_LABELS` in the driver; the
@@ -644,6 +708,10 @@ seams):**
    today** without a harness seam change — which is **out of this docs-only
    protocol's authority** and must be a separate seam decision (new workload
    label / `--target-mbps 10000` wiring) before any 10-Gbps numbers.
+   Independently of the label set, `bench_workload.py` rejects
+   `--target-mbps > 2000` (`MAX_TARGET_MBPS`, "target-mbps out of range",
+   exit 3) and caps the outstanding-cap argument at `MAX_OUTSTANDING_CAP = 8192`
+   — a seam decision must lift those constants too, not just wire the label.
 
 **Determination.** If any preflight item cannot establish 10-Gbps capability,
 **or** the expressibility seam is not authorized, E3 records
@@ -670,33 +738,44 @@ No new production metrics and no new instrumentation: every field exists in
 §5, and every injection point is an existing driver seam or a measured
 constant.
 
-**a) Slow-peer / backpressure — expressible now.** Model the slow peer through
-the open-loop admission cap and read the honest backpressure fields. Command =
-the E2 `1gbps` timed alumina invocation (§10.5). Required fields:
-`phases.measure.backpressure_unsent`, `phases.measure.missed_at_end`,
-`interval_vs_cohort.drain_*_frames`, `phases.measure.unechoed`,
-`latency.send_lag`, `latency.sched_to_echo` p50/p95/p99,
-`sampling.backend.cores_mean`. Verdict: a `valid` receipt reporting these fields
-(whatever their values) passes this slice; zero backpressure with
-`missed_at_end=0` is honestly reported as such — not a failure and not
-re-reported as a smaller proxy cost than measured.
+**a) Slow-peer / backpressure — observed base captured; scenario `BLOCKED`.**
+The 1 Gbps run does **not** create a slow or stalled consumer: the only client
+mechanic is the open-loop admission cap (`--outstanding-cap`), and the §9 M-04
+receipt shows 56/1.83 M unsent frames with `missed_at_end=0` — the backend
+drained immediately. Nothing in §10.5 stalls the sink, so the E4 requirement
+("at least one slow/stalled consumer alongside active bulk tunnels and new
+CONNECT admissions; measure progress of unrelated tunnels", `alumina-cdwui.17`)
+is **never exercised**. The slow-consumer injection point is the sink-delay seam
+— the driver's `--echo-delay-s` backend knob (b) — a harness seam change, **out
+of this docs-only protocol's authority**. Until a seam decision authorizes it,
+this slice is **`BLOCKED`/`Unknown`** (§10.4); the E2 `1gbps` timed alumina run
+is retained only as the **observed base backpressure** record — command = §10.5,
+required fields `phases.measure.backpressure_unsent`,
+`phases.measure.missed_at_end`, `interval_vs_cohort.drain_*_frames`,
+`phases.measure.unechoed`, `latency.send_lag`, `latency.sched_to_echo`
+p50/p95/p99, `sampling.backend.cores_mean`. A "valid receipt reporting these
+fields" is **never** a pass predicate for a scenario the run never exercised;
+zero backpressure with `missed_at_end=0` is reported as such and the slice
+stays `BLOCKED`.
 
 **b) Slow-peer sink-drain injection — seam-gated.** The driver already exposes
 the per-echo delay knob `--echo-delay-s` (backend role; default 0.0) and the
 `BENCH_BACKEND=python` one-line fallback (§5), but `run.sh` does not currently
-pass the knob through. Wiring it is a harness seam change — **out of E1's
-docs-only authority**. Until a seam decision authorizes it, this variant is
-`BLOCKED`/`Unknown` with the observed base backpressure (slice a) + the
-deadline constants, never fabricated.
+pass the knob through. Wiring it is a harness seam change — **out of this
+docs-only protocol's authority**. Until a seam decision authorizes it, this
+variant is `BLOCKED`/`Unknown` with the observed base backpressure (slice a) +
+the deadline constants, never fabricated.
 
 **c) Full-allowlist DNS failure/recovery + deadline-progress.** The golden path
-stages the fixed full-allowlist config and a DNS responder answering
-`example.com → 8.8.8.8` (`run.sh`); the driver's responder answers NXDOMAIN
-for any name it has no answer for — an existing seam. A controlled
-failure-and-recovery phase requires pointing the responder away from
-`example.com` (or dropping its answer) then restoring it, reachable only
-through a `run.sh`/staging seam change (**out of E1's docs-only authority**).
-Until then: `BLOCKED`/`Unknown` with the observed capability recorded.
+stages **one allowlisted name** — `[allowed_fqdn."example.com:443"]` (`run.sh`)
+— and a DNS responder answering `example.com → 8.8.8.8`; the driver's
+responder answers NXDOMAIN for any name it has no answer for (an existing
+seam). E4's required **32-name allowlist** is not staged by the harness today.
+A controlled failure-and-recovery phase therefore needs two `run.sh`/staging
+seams: (1) expand the staged allowlist to the 32 names, and (2) point the
+responder away from `example.com` (or drop its answer) then restore it — both
+**out of this docs-only protocol's authority**. Until a seam decision authorizes
+them: `BLOCKED`/`Unknown` with the observed capability recorded.
 
 Deadline-**progress under load**, by contrast, is measurable now on the storm
 profiles with no seam change: the fixed constants `params.setup_deadline_s`
@@ -710,9 +789,10 @@ alumina invocations (§10.5). Verdict: §10.4 — `setup_failures={}` and
 
 ### 10.8 Frozen receipt lifecycle
 
-- New receipts land in `.ooda/benchmarks/3f587e9-<subject>-*-<ts>.json`
-  (gitignored, §3/§5 pipeline); `.ooda/benchmarks/85b7769-*.json` remain the
-  comparison source and are untouched.
+- New receipts land in `.ooda/benchmarks/3f587e9-bench-<subject>-<profile>-<kind>-<ts>.json`
+  (gitignored, §3/§5 pipeline); `.ooda/benchmarks/85b7769-bench-*-timed-*.json`
+  remain the comparison source (smoke receipts are never comparison inputs) and
+  are untouched.
 - A `valid` receipt later found to misstate its §10.3 working tree is
   reclassified `Unknown` and re-run — never amended in place.
 - Any E2–E4 row that cannot follow §10.5–§10.7 halts and reports
