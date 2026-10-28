@@ -8,7 +8,7 @@
 # Writes a JSON receipt to .ooda/benchmarks/.
 #
 # Topology (fresh e2-micro suite; see docs/benchmarks/e2micro-suite.md §3):
-# native Linux via rootful podman flock-vm-root, --network none, loopback
+# native Linux via rootful podman connection, --network none, loopback
 # global-unicast alias, DNS responder (UDP+TCP) on 127.0.0.1:53, TLS1.3
 # byte-exact framed echo backend on 8.8.8.8:443, client ->
 #     example.com -> 8.8.8.8   CONNECT proxy on 127.0.0.1:8080 -> backend.
@@ -63,7 +63,7 @@ case "$WORKLOAD" in
         echo "BENCH-BLOCKED: workload must be 1gbps, storm150 or storm50" >&2; exit 2 ;;
 esac
 
-CONN="${BENCH_PODMAN_CONNECTION:-flock-vm-root}"
+CONN="${BENCH_PODMAN_CONNECTION:?BENCH_PODMAN_CONNECTION must be set to your rootful podman connection}"
 IMAGE="${BENCH_IMAGE:-localhost/alumina-bench:20261027}"
 IMAGE_ID="${BENCH_IMAGE_ID:?BENCH_IMAGE_ID must be pinned to the built bench image}"
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # E2E CONNECT/SNI opaque-relay gate against the ACTUAL production binary.
-# Native Linux only: rootful podman (flock-vm-root) on a harness image derived
+# Native Linux only: rootful podman connection on a harness image derived
 # from the pinned rust base, no-new-privileges, --network none (fully isolated:
 # the driver, DNS responder and all upstreams live on loopback aliases inside
 # the container network namespace; nothing can reach an external host). The
@@ -26,7 +26,7 @@ ROOT="$(pwd)"
 BASE="docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a"
 BASE_ID="ad70ceb90f563e9fe2ef7064b92dc1347aeaeb71e5369ba8b242498ba030a6f8"
 E2E_IMAGE="${E2E_IMAGE:-localhost/alumina-e2e:e2e-20261011}"
-CONN="${PODMAN_ROOT_CONNECTION:-flock-vm-root}"
+CONN="${PODMAN_ROOT_CONNECTION:?PODMAN_ROOT_CONNECTION must be set to your rootful podman connection}"
 
 # R1: the executed artifact PROFILE must be the same observed native triple the
 # build used. verify.sh exports E2E_TARGET (observed from the build owner); a

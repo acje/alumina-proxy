@@ -108,7 +108,7 @@ whitespace_gate() {
     # <file>` reports under the default core.whitespace: (a) trailing
     # whitespace, (b) space-before-tab in leading indent, (c) a new blank line
     # at EOF. Per-file/per-line diagnostics; any match fails the gate. awk is
-    # required (busybox awk in the flock-vm container).
+    # required (busybox awk in the podman container).
     command -v awk >/dev/null 2>&1 || {
         echo "WHITESPACE-GATE-BLOCKED: awk required and absent (no host proof receipt consumed)" >&2
         exit 1
@@ -306,16 +306,15 @@ mid_full() {
 # executed variant via the xattr filesystem API, with probe errors kept
 # distinct from verified absence.
 # Quick reference:
-#   PODMAN_CONNECTION       rootless builder (default flock-vm)
-#   PODMAN_ROOT_CONNECTION  rootful builder for --cap-add probes (default
-#                           flock-vm-root)
+#   PODMAN_CONNECTION       rootless builder (required)
+#   PODMAN_ROOT_CONNECTION  rootful builder for --cap-add probes (required)
 boot_fixtures() {
     command -v podman >/dev/null 2>&1 || {
         echo "BOOT-FIXTURES-BLOCKED: podman required on the host" >&2
         exit 1
     }
-    CONN="${PODMAN_CONNECTION:-flock-vm}"
-    ROOTCONN="${PODMAN_ROOT_CONNECTION:-flock-vm-root}"
+    CONN="${PODMAN_CONNECTION:?PODMAN_CONNECTION must be set to your rootless podman connection}"
+    ROOTCONN="${PODMAN_ROOT_CONNECTION:?PODMAN_ROOT_CONNECTION must be set to your rootful podman connection}"
     ROOT="$(pwd)"
     podman --connection "$CONN" info >/dev/null 2>&1 || {
         echo "BOOT-FIXTURES-BLOCKED: cannot reach podman connection $CONN" >&2
@@ -873,8 +872,8 @@ identity_snapshot() {
         printf 'rustc_workspace_wrapper=%s\n' "${RUSTC_WORKSPACE_WRAPPER:-<unset>}"
         printf 'cargo_incremental=%s\n' "${CARGO_INCREMENTAL:-<unset>}"
         printf 'cargo_term_progress_when=%s\n' "${CARGO_TERM_PROGRESS_WHEN:-<unset>}"
-        printf 'podman_connection=%s\n' "${PODMAN_CONNECTION:-flock-vm}"
-        printf 'podman_root_connection=%s\n' "${PODMAN_ROOT_CONNECTION:-flock-vm-root}"
+        printf 'podman_connection=%s\n' "${PODMAN_CONNECTION:-<unset>}"
+        printf 'podman_root_connection=%s\n' "${PODMAN_ROOT_CONNECTION:-<unset>}"
         printf 'cargo_home_effective=%s\n' "$config_home"
         # G8-C10: supply-chain tool versions + advisory-DB freshness. Absent
         # tools/DB record <absent> (never a hard fail); the before/after env
@@ -1022,17 +1021,18 @@ audit_deny_owner() {
 }
 
 # Host -> existing Linux dispatch: boundary children that must run on Linux are
-# executed inside the already-provisioned flock-vm container (same exact image
+# executed inside the already-provisioned podman container (same exact image
 # and CARGO_HOME alias environment as the accepted btk/c7o runs), never by
 # calling Linux-only functions directly on a Darwin host.
 linux_dispatch() {
     inner="$1"
+    CONN="${PODMAN_CONNECTION:?PODMAN_CONNECTION must be set to your rootless podman connection}"
     command -v podman >/dev/null 2>&1 || {
         echo "LINUX-DISPATCH-BLOCKED: podman required on the host" >&2
         exit 1
     }
-    podman --connection flock-vm info >/dev/null 2>&1 || {
-        echo "LINUX-DISPATCH-BLOCKED: flock-vm connection unreachable (probe, not PASS)" >&2
+    podman --connection "$CONN" info >/dev/null 2>&1 || {
+        echo "LINUX-DISPATCH-BLOCKED: podman connection $CONN unreachable (probe, not PASS)" >&2
         exit 1
     }
     ROOT="$(pwd)"
@@ -1047,8 +1047,8 @@ command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1 || true
     # convention); a separate writable target volume keeps the build outputs
     # (host target/ feeds host-side artifact_identity and boot_fixtures) while
     # the checkout itself stays read-only. --user 0:0 matches :548; under the
-    # rootless flock-vm mapping container-root files land as the host user.
-    podman --connection flock-vm run --rm --pull=never \
+    # rootless podman mapping: container-root files land as the host user.
+    podman --connection "$CONN" run --rm --pull=never \
         -v "$ROOT:/app:ro,Z" \
         -v "$ROOT/target:/app/target:Z" \
         --user 0:0 \
@@ -1180,7 +1180,7 @@ boundary_phase1_slow() {
 }
 
 boundary_phase1() {
-    echo "phase1 boundary (owner seam H1): host sole coordinator; Linux MID via existing flock-vm dispatch"
+    echo "phase1 boundary (owner seam H1): host sole coordinator; Linux MID via existing podman dispatch"
     boundary_phase1_fast
     boundary_phase1_slow
 }
@@ -1278,22 +1278,16 @@ e2e_build_receipt() {
     _harness_py="$2"
     _harness_sh="$3"
     ROOT="$(pwd)"
-    # B3: observation and build must share one actual connection. linux_dispatch
-    # (the sole sanctioned build dispatch) hardcodes flock-vm with the pinned
-    # builder image; a PODMAN_CONNECTION override would make the probe observe a
-    # different owner than the build runs, so any value other than flock-vm is
-    # rejected BEFORE any probe/build effect.
-    case "${PODMAN_CONNECTION:-flock-vm}" in
-        flock-vm) ;;
-        *)
-            echo "E2E-$_gate-BLOCKED: unsupported PODMAN_CONNECTION override '${PODMAN_CONNECTION}' (build dispatch hardcodes flock-vm; probe would observe a different owner); unset it or use flock-vm" >&2
-            exit 1
-            ;;
-    esac
+    # B3: observation and build must share one actual connection. Both the
+    # build dispatch (linux_dispatch) and the probe below resolve the SAME
+    # PODMAN_CONNECTION, so a probe/build owner mismatch is impossible by
+    # construction; the variable is required (fail-closed) on the non-Linux
+    # dispatch route.
     if [ "$(uname -s)" = "Linux" ]; then
         _builder="native-host"
     else
-        _builder="flock-vm"
+        _builder="podman-dispatch"
+        : "${PODMAN_CONNECTION:?PODMAN_CONNECTION must be set to your rootless podman connection}"
     fi
     # R1: the artifact PROFILE is explicitly observed from the build owner (the
     # native host triple under which the release build actually runs), not
@@ -1321,7 +1315,7 @@ e2e_build_receipt() {
         _probe_buf=$(observe_build_target rustc +${TOOLCHAIN} -vV) || exit 1
     else
         _probe_buf=$(observe_build_target \
-            podman --connection "${PODMAN_CONNECTION:-flock-vm}" run --rm --pull=never \
+            podman --connection "${PODMAN_CONNECTION}" run --rm --pull=never \
             docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a \
             sh -c 'rustc -vV') || exit 1
     fi
@@ -1371,12 +1365,12 @@ e2e_build_receipt() {
     binhash=$(sha256_digest file "$ROOT/$BIN") || exit 1
     # B3/R1: resolve the ACTUAL harness-image tag + immutable ID from the
     # rootful connection the harness consumers open (e2e_relay.sh/e2e_shutdown.sh
-    # use ${PODMAN_ROOT_CONNECTION:-flock-vm-root}). An unresolvable ID is a
+    # use ${PODMAN_ROOT_CONNECTION}). An unresolvable ID is a
     # blocker. The immutable ID is EXPORTED to the consumers, which must
     # re-check that the tag still resolves to this ID on their connection and
     # then run the ID itself (R1: the receipt's image is the image executed).
     E2E_IMAGE="${E2E_IMAGE:-localhost/alumina-e2e:e2e-20261011}"
-    E2E_ROOT_CONN="${PODMAN_ROOT_CONNECTION:-flock-vm-root}"
+    E2E_ROOT_CONN="${PODMAN_ROOT_CONNECTION:?PODMAN_ROOT_CONNECTION must be set to your rootful podman connection}"
     harness_id=$(podman --connection "$E2E_ROOT_CONN" image inspect --format '{{.Id}}' "$E2E_IMAGE" 2>/dev/null) \
         || harness_id=""
     if [ -z "$harness_id" ]; then

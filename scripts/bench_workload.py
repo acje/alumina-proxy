@@ -3073,7 +3073,7 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     # ---- W (alumina-eryh): e2-micro steady/storm workload surface ----
     # VM-dependent coverage: the storm and 1gbps END-TO-END paths (real proxy
     # CONNECT/admit/DNS/teardown inside the harness container) are excluded from
-    # this unit selftest because they require the podman flock-vm-root harness,
+    # this unit selftest because they require the rootful podman harness,
     # the pinned image and a retained/proxied alumina binary; they are exercised
     # by scripts/bench_run.sh <proxy> smoke <profile> (kind=smoke) and validated by
     # their JSON receipts. The logic below unit-covers the arg surface, the

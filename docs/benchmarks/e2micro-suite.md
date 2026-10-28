@@ -98,8 +98,8 @@ container cgroup CPU/mem cap applied"`.
 
 ### Host-vs-target disclosure
 
-- Host: arm64 Apple VM, 8 CPU / 14 GiB memory, Linux via rootful podman
-  (`flock-vm-root`), `--network none`, everything on a loopback global-unicast
+- Host: arm64 Apple VM, 8 CPU / 14 GiB memory, Linux via a rootful podman
+  connection, `--network none`, everything on a loopback global-unicast
   alias (`8.8.8.8/32`). All client, backend, DNS responder, and proxy processes
   run inside the single pinned bench container, so CPU sampling is uniform over
   the measured aperture.
@@ -174,7 +174,8 @@ BENCH_IMAGE_ID=7c3937c1… sh scripts/bench_run.sh <proxy> timed <profile>
   run SM-4 rebuilds alumina from repo HEAD and pins its sha.
 - `BENCH_IMAGE_ID` is mandatory fail-closed for every subject (image id
   verified against `localhost/alumina-bench:20261027` before the session).
-- Optional `BENCH_PODMAN_CONNECTION` (default `flock-vm-root`), `BENCH_IMAGE`.
+- `BENCH_PODMAN_CONNECTION` (rootful podman connection; required),
+  `BENCH_IMAGE`.
 
 ### Selftests (driver self-check)
 

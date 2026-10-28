@@ -52,12 +52,12 @@ fixed inputs in a disposable container, bounds the child with real SIGTERM +
 release binary `target/release/alumina` must already be built — on Linux `sh
 scripts/verify.sh mid union`; on macOS run `sh scripts/verify.sh boundary
 phase1` (the `mid` selectors fail closed off-Linux) — and the existing
-rootless `flock-vm` **and** rootful `flock-vm-root` connections with the
-pinned builder image present on both are required — `verify.sh` checks them
-and fails closed otherwise. The
-only authorized execution route is the pinned builder image over the
-`flock-vm`/`flock-vm-root` connections — foreground `--rm` only, **no cloud
-start, no VM/TCP-remote target rotation, no daemon**. The wrapper
+rootless **and** rootful podman connections (named by `PODMAN_CONNECTION` /
+`PODMAN_ROOT_CONNECTION`) with the pinned builder image present on both are
+required — `verify.sh` checks them and fails closed otherwise. The only
+authorized execution route is the pinned builder image over those connections
+— foreground `--rm` only, **no cloud start, no VM/TCP-remote target rotation,
+no daemon**. The wrapper
 `validate.sh` invokes `boundary phase1` (composed: the fast tier — identity +
 change-scope classification + docs/unsafe/whitespace/audit — then the slow
 tier, which dispatches the mid union once and then fixtures), then probes the
@@ -81,9 +81,9 @@ claim), and this repo never provisions VMs, connections or images.
   (atest foundations/boot tests, fmt, whitespace): the release build,
   static-ELF, clippy, and closure-metadata proofs live at `mid union` /
   `boundary phase1`. On macOS they run through `boundary phase1` (Linux
-  dispatch via the rootless `flock-vm` connection, `--pull=never`, pinned
-  builder image; requires `podman`, a reachable `flock-vm` and the pinned
-  image present).
+  dispatch via the rootless podman connection, `--pull=never`, pinned
+  builder image; requires `podman`, a reachable rootless podman connection and
+  the pinned image present).
 - `mid full` — **Linux-only**; fail closed on any non-Linux host. Runs the
   gate-only test surface (lib unit tests + the 5 integration binaries that run
   in no other selector: eligibility, mio_matrix, main_thread_stack,
@@ -92,12 +92,12 @@ claim), and this repo never provisions VMs, connections or images.
   alloc-witness-only mio_matrix binary); atest-only (no clippy/fmt).
   foundations and boot are not re-run here — `mid union` already runs them in
   the same BOUNDARY dispatch. On macOS it runs through `boundary phase1`
-  (Linux dispatch via the rootless `flock-vm` connection, `--pull=never`,
-  pinned builder image; requires `podman`, a reachable `flock-vm` and the
-  pinned image present).
+  (Linux dispatch via the rootless podman connection, `--pull=never`,
+  pinned builder image; requires `podman`, a reachable rootless podman
+  connection and the pinned image present).
 - `fixtures boot` — **host Podman coordinator (Darwin allowed by source)**;
-  requires existing rootless `flock-vm` and rootful `flock-vm-root`
-  connections with the pinned builder image present on both (`--pull=never`),
+  requires existing rootless and rootful podman connections with the pinned
+  builder image present on both (`--pull=never`),
   prebuilt `target/release/alumina` (requires it, does not build it), and a
   SHA256 tool.
 - `e2e relay` / `e2e shutdown` — **directly host-runnable (Linux or
@@ -105,13 +105,12 @@ claim), and this repo never provisions VMs, connections or images.
   prebuilt artifact needed) and runs **host Cargo metadata** plus git/SHA
   identity receipts. Build route depends on host: on Linux the native build
   uses host `rustc +1.99.0`; on Darwin the target probe and rebuild run
-  `podman --connection flock-vm run --rm --pull=never
-  <pinned rust image>` — **only `flock-vm` is accepted; any
-  `PODMAN_CONNECTION` override is rejected by `e2e_build_receipt` before any
-  probe/build effect** (the leftover-rootless-builder alternative is not a
-  supported route) — then `linux_dispatch` hardcodes `flock-vm` +
-  `--pull=never`. Gate execution then needs the **rootful** connection
-  (`${PODMAN_ROOT_CONNECTION:-flock-vm-root}`) and `E2E_IMAGE` default
+  `podman --connection "$PODMAN_CONNECTION" run --rm --pull=never
+  <pinned rust image>` — `PODMAN_CONNECTION` is **required** (fail-closed) and
+  both the probe and the build dispatch resolve the **same** connection, so a
+  probe/build owner mismatch is impossible by construction. Gate execution
+  then needs the **rootful** connection (`$PODMAN_ROOT_CONNECTION`, required)
+  and `E2E_IMAGE` default
   `localhost/alumina-e2e:e2e-20261011`: the immutable harness image ID is
   resolved on that rootful connection, recorded in the receipt, and the
   consumers re-verify the tag resolves to it and run the ID itself.
@@ -129,7 +128,8 @@ claim), and this repo never provisions VMs, connections or images.
   full` unfiltered full suite once (witness-off + witness-on), then fixtures,
   identity AFTER/compare and artifact identity. The composed selector runs the
   fast tier then the slow tier unless the scope is docs-only. Host
-  tools required and fail closed when absent: `podman` + reachable `flock-vm`;
+  tools required and fail closed when absent: `podman` + a reachable rootless
+  podman connection;
   Node with **`NODE_OPTIONS`/`NODE_PATH` unset** and
   `scripts/docs_check/check.mjs`; `git`; `sha256sum` (or `shasum`);
   `python3` (config-candidate observation); `cargo-audit` + `cargo-deny`.
