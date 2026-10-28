@@ -1093,6 +1093,7 @@ fn stale_event_for_a_reused_slot_index_is_dropped() {
             (usize::try_from(stale_gen).expect("slot generation fits usize") << GEN_SHIFT) | 1,
         );
         let before_stage = serving.slots[0].stage;
+        let visits_before = serving.slots[0].visits;
         let before = (
             serving.slots[0].buf_len,
             serving.slots[0].fwd,
@@ -1131,6 +1132,11 @@ fn stale_event_for_a_reused_slot_index_is_dropped() {
             ),
             before,
             "a stale client token must not mutate buffered cursors, deadlines, or generation state"
+        );
+        assert_eq!(
+            serving.slots[0].visits - visits_before,
+            0,
+            "a stale client token opens no visit (dropped at the src/serving.rs:1473 generation guard)"
         );
     });
 }
@@ -1299,9 +1305,10 @@ fn g1_r2_stale_upstream_token_after_reuse_is_dropped_before_socket_io() {
 
 #[test]
 /// G1.R3 — one coalesced batch re-admits a released slot index mid-batch
-/// (`accept_all` between two same-slot tokens): the stale pre-reuse generation
-/// token is skipped at the fold-time generation guard (src/serving.rs:1376)
-/// and only the new-generation token dispatches onto the reused connection.
+/// (`accept_all` between two same-slot tokens): the slot is still free
+/// (`Stage::Idle`) when the stale pre-reuse token folds, so it is dropped by
+/// the fold-time idle guard (src/serving.rs:1373) before it can claim the
+/// slot; only the new-generation token dispatches onto the reused connection.
 /// Proves batch dedup cannot resurrect a prior generation (matrix
 /// alumina-cdwui.4 §2 G1.R3, REJECT class).
 fn g1_r3_coalesced_batch_accept_between_tokens_drops_stale_gen_only_new_dispatches() {
@@ -1323,34 +1330,41 @@ fn g1_r3_coalesced_batch_accept_between_tokens_drops_stale_gen_only_new_dispatch
         // The blocking client connect returns once the client handshake
         // completes, but the server-side connection can still lag into the
         // accept queue (unaccepted-backlog insertion follows the final ACK).
-        // Settle so the batch's accept_all deterministically sees the socket.
-        std::thread::sleep(Duration::from_millis(20));
-
-        serving.batch_gen = serving.batch_gen.wrapping_add(1);
-        serving.in_batch = true;
-        serving
-            .dispatch_coalesced_batch(&[
-                // First: stale pre-release generation token for slot 0.
-                (
-                    client_token(old_gen, 0),
-                    Readiness {
-                        readable: true,
-                        ..Readiness::none()
-                    },
-                ),
-                // Mid-batch reuse: accept_all re-admits slot 0 to new_gen.
-                (Token(0), Readiness::none()),
-                // The new-generation token is the only one that may dispatch.
-                (
-                    client_token(new_gen, 0),
-                    Readiness {
-                        readable: true,
-                        ..Readiness::none()
-                    },
-                ),
-            ])
-            .expect("coalesced batch with mid-batch reuse");
-        assert!(!serving.in_batch, "the batch resets the in-batch marker");
+        // Retry the batch until the mid-batch accept lands: while the slot is
+        // still free the stale and new tokens fold-skip harmlessly, so a
+        // pre-landing run leaves nothing behind (bounded retry, no timers).
+        let batch = [
+            // First: stale pre-release generation token for slot 0.
+            (
+                client_token(old_gen, 0),
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            ),
+            // Mid-batch reuse: accept_all re-admits slot 0 to new_gen.
+            (Token(0), Readiness::none()),
+            // The new-generation token is the only one that may dispatch.
+            (
+                client_token(new_gen, 0),
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            ),
+        ];
+        for _ in 0..10_000 {
+            serving.batch_gen = serving.batch_gen.wrapping_add(1);
+            serving.in_batch = true;
+            serving
+                .dispatch_coalesced_batch(&batch)
+                .expect("coalesced batch with mid-batch reuse");
+            assert!(!serving.in_batch, "the batch resets the in-batch marker");
+            if serving.slots[0].slot_gen == new_gen {
+                break;
+            }
+            std::thread::yield_now();
+        }
 
         assert_eq!(
             serving.slots[0].slot_gen, new_gen,
@@ -1390,33 +1404,40 @@ fn g1_r3_coalesced_batch_stale_gen_token_dropped_at_fold_guard_after_reuse() {
         second
             .write_all(PARTIAL)
             .expect("write partial head before the batch");
-        // Settle the accept queue (see G1.R3 accept-between-tokens test).
-        std::thread::sleep(Duration::from_millis(20));
-
-        // Batch: [accept -> gen 2, stale(1), new(2)]. The stale token reaches
-        // the fold-time generation guard at 1376 (live gen already 2).
-        serving.batch_gen = serving.batch_gen.wrapping_add(1);
-        serving.in_batch = true;
-        serving
-            .dispatch_coalesced_batch(&[
-                (Token(0), Readiness::none()),
-                (
-                    client_token(old_gen, 0),
-                    Readiness {
-                        readable: true,
-                        ..Readiness::none()
-                    },
-                ),
-                (
-                    client_token(new_gen, 0),
-                    Readiness {
-                        readable: true,
-                        ..Readiness::none()
-                    },
-                ),
-            ])
-            .expect("coalesced batch with accept-first mid-batch reuse");
-        assert!(!serving.in_batch);
+        // Retry the batch until the leading accept lands: before it does the
+        // slot is still free and the same-slot tokens fold-skip harmlessly, so
+        // a pre-landing run leaves nothing behind (bounded retry, no timers).
+        let batch = [
+            (Token(0), Readiness::none()),
+            (
+                client_token(old_gen, 0),
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            ),
+            (
+                client_token(new_gen, 0),
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            ),
+        ];
+        for _ in 0..10_000 {
+            // Batch: [accept -> gen 2, stale(1), new(2)]. The stale token
+            // reaches the fold-time generation guard at 1376 (live gen already 2).
+            serving.batch_gen = serving.batch_gen.wrapping_add(1);
+            serving.in_batch = true;
+            serving
+                .dispatch_coalesced_batch(&batch)
+                .expect("coalesced batch with accept-first mid-batch reuse");
+            assert!(!serving.in_batch);
+            if serving.slots[0].slot_gen == new_gen {
+                break;
+            }
+            std::thread::yield_now();
+        }
 
         assert_eq!(serving.slots[0].slot_gen, new_gen);
         assert_eq!(
@@ -1428,7 +1449,11 @@ fn g1_r3_coalesced_batch_stale_gen_token_dropped_at_fold_guard_after_reuse() {
         assert_eq!(serving.storage().occupied(), 1);
 
         // The stale pre-reuse token, re-dispatched after the batch, is still
-        // inert (dirty work never resurrects the prior generation).
+        // inert (dirty work never resurrects the prior generation). The visit
+        // count is the strong witness: an unguarded dispatch would pass the
+        // generation guard, open a visit, and bump `visits` (src/serving.rs:1473
+        // before :1498) even while the socket read WouldBlocks.
+        let visits_before = serving.slots[0].visits;
         serving
             .dispatch_readiness(
                 client_token(old_gen, 0),
@@ -1438,6 +1463,11 @@ fn g1_r3_coalesced_batch_stale_gen_token_dropped_at_fold_guard_after_reuse() {
                 },
             )
             .expect("re-dispatch the stale pre-reuse token");
+        assert_eq!(
+            serving.slots[0].visits - visits_before,
+            0,
+            "the stale post-batch re-dispatch opens no visit (generation guard held)"
+        );
         assert_eq!(
             serving.slots[0].buf_len,
             PARTIAL.len(),
@@ -1461,12 +1491,20 @@ fn g1_r4_wrapped_generation_drops_pre_wrap_token_and_dispatches_own() {
         let mut client = connect(port);
         let mut reader = client.try_clone().expect("clone client socket");
         client.write_all(b"\r\n\r\n").expect("write malformed head");
-        serving.batch_gen = serving.batch_gen.wrapping_add(1);
-        serving.in_batch = true;
-        std::thread::sleep(Duration::from_millis(20)); // settle accept queue (see G1.R3)
-        serving
-            .dispatch_coalesced_batch(&[(Token(0), Readiness::none())])
-            .expect("accept the wrapped connection");
+        // Bounded accept retry (no timers): until the accept lands, accept_all
+        // WouldBlocks and the batch is a no-op, so re-running is idempotent.
+        let accept_batch = [(Token(0), Readiness::none())];
+        for _ in 0..10_000 {
+            serving.batch_gen = serving.batch_gen.wrapping_add(1);
+            serving.in_batch = true;
+            serving
+                .dispatch_coalesced_batch(&accept_batch)
+                .expect("accept the wrapped connection");
+            if serving.slots[0].slot_gen == 0 {
+                break;
+            }
+            std::thread::yield_now();
+        }
         assert_eq!(
             serving.slots[0].slot_gen, 0,
             "the accepted slot wrapped to generation 0 via wrapping_add(1)"
@@ -1569,14 +1607,20 @@ fn g1_e1_token_ceiling_saturation_fails_closed_never_progresses() {
         // end so admit's wrapping_add(1) lands one past the ceiling.
         let mut client = connect(port);
         client.write_all(b"\r\n\r\n").expect("write malformed head");
-        // Settle the accept queue (see G1.R3 accept-between-tokens test) so
-        // the accept below deterministically lands the connection.
-        std::thread::sleep(Duration::from_millis(20));
-        serving.batch_gen = serving.batch_gen.wrapping_add(1);
-        serving.in_batch = true;
-        serving
-            .dispatch_coalesced_batch(&[(Token(0), Readiness::none())])
-            .expect("accept the ceiling connection");
+        // Bounded accept retry (no timers): until the accept lands, accept_all
+        // WouldBlocks and the batch is a no-op, so re-running is idempotent.
+        let accept_batch = [(Token(0), Readiness::none())];
+        for _ in 0..10_000 {
+            serving.batch_gen = serving.batch_gen.wrapping_add(1);
+            serving.in_batch = true;
+            serving
+                .dispatch_coalesced_batch(&accept_batch)
+                .expect("accept the ceiling connection");
+            if serving.slots[0].slot_gen == CEILING + 1 {
+                break;
+            }
+            std::thread::yield_now();
+        }
         let live = serving.slots[0].slot_gen;
         assert_eq!(live, CEILING + 1, "admission advanced one past the ceiling");
 
@@ -1630,11 +1674,15 @@ fn g1_e1_token_ceiling_saturation_fails_closed_never_progresses() {
 /// §1 domain separation lemmas (and the cross-slot lemma G1.R5 cites) — the
 /// client (1..=`MAX_TUNNELS`) and upstream (`UPSTREAM_BASE`..) local-id ranges
 /// can never alias the listener (0), `DNS_LOCAL`, or `SIGNAL_LOCAL` reserved
-/// sources, and a token for one slot can never decode to another slot's arm,
-/// even at a saturated generation. This closes only the cross-slot/cross-source
-/// lemmas; the full u64-cycle same-slot reuse row G1.R5 stays BLOCKED/Unknown
-/// (decision bead alumina-v52be) and is not invented here (matrix alumina-cdwui.4
-/// §2 G1.R5, §5.1).
+/// sources, and two slots never share a local id, even at a saturated
+/// generation. This is the static (encode-side) complement of the decode map
+/// (src/serving.rs:1456-1469: local id -> slot index is a bijection, so disjoint
+/// encode ids never decode to another slot's arm); decode-side routing of real
+/// client/upstream tokens through `dispatch_readiness` is exercised end-to-end
+/// by G1.R1–G1.R4. This closes only the cross-slot/cross-source lemmas; the
+/// full u64-cycle same-slot reuse row G1.R5 stays BLOCKED/Unknown (decision
+/// bead alumina-v52be) and is not invented here (matrix alumina-cdwui.4 §2
+/// G1.R5, §5.1).
 fn g1_local_id_ranges_cannot_alias_reserved_sources_or_other_slots() {
     const _: () = assert!(
         SIGNAL_LOCAL <= LOCAL_MASK,
