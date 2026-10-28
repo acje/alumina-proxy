@@ -21,7 +21,7 @@ usage() {
 
 TOOLCHAIN="1.99.0"
 
-INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/fault.rs src/fuzz.rs src/config.rs src/resolver.rs src/preflight.rs src/inventory.rs src/boot.rs src/cache.rs src/client_hello.rs src/connect.rs src/dns.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/policy.rs src/enforcement/state.rs src/gate.rs src/log.rs src/runtime.rs src/schedule.rs src/serve.rs src/serving.rs src/startup_dns.rs src/worker.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs"
+INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/fault.rs src/fuzz.rs src/config.rs src/resolver.rs src/preflight.rs src/inventory.rs src/boot.rs src/cache.rs src/client_hello.rs src/connect.rs src/dns.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/policy.rs src/enforcement/state.rs src/gate.rs src/incident_report.rs src/log.rs src/runtime.rs src/schedule.rs src/serve.rs src/serving.rs src/startup_dns.rs src/worker.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs"
 
 # docslink gate roots: the exact nonempty argv docslink_check consumes. Shared
 # with the identity snapshot so the boundary content identity covers precisely
@@ -689,8 +689,8 @@ docslink_check() {
 
 unsafe_surface_gate() {
     # F3 (08-tooling-ci-scripts): file-level unsafe-surface confinement. The
-    # `unsafe` keyword is allowed ONLY in the production surface — src/alloc.rs,
-    # src/log.rs, and files under tests/ — and in #[cfg(test)] unit-test modules
+    # `unsafe` keyword is allowed ONLY in the production surface — src/alloc.rs
+    # and files under tests/ — and in #[cfg(test)] unit-test modules
     # under src/ (src/*/tests.rs, src/*/dot_tests.rs), whose test-only `unsafe`
     # never compiles into the production binary. Any other *.rs file containing
     # the keyword fails closed, naming the offender(s). Read-only host-side
@@ -716,15 +716,98 @@ unsafe_surface_gate() {
     bad=""
     for f in $offenders; do
         case "$f" in
-            src/alloc.rs|src/log.rs|tests/*|src/*/tests.rs|src/*/dot_tests.rs) ;;
+            src/alloc.rs|tests/*|src/*/tests.rs|src/*/dot_tests.rs) ;;
             *) bad="$bad $f" ;;
         esac
     done
     if [ -n "$bad" ]; then
-        echo "UNSAFE-SURFACE-FAIL: 'unsafe' outside allowlist (prod: src/alloc.rs, src/log.rs, tests/*; cfg(test) unit modules: src/*/tests.rs, src/*/dot_tests.rs):$bad" >&2
+        echo "UNSAFE-SURFACE-FAIL: 'unsafe' outside allowlist (prod surface: src/alloc.rs, tests/*; cfg(test) unit modules: src/*/tests.rs, src/*/dot_tests.rs):$bad" >&2
         exit 1
     fi
-    echo "UNSAFE-SURFACE-OK: unsafe confined to prod surface src/alloc.rs, src/log.rs, tests/* and cfg(test) unit modules src/*/tests.rs, src/*/dot_tests.rs"
+    echo "UNSAFE-SURFACE-OK: unsafe confined to prod surface src/alloc.rs, tests/* and cfg(test) unit modules src/*/tests.rs, src/*/dot_tests.rs"
+}
+
+# F-new (gate-surface-truth M1): the reviewed identity set (INTENDED) must cover
+# EVERY tracked src/**/*.rs and tests/*.rs file. A tracked file absent from
+# INTENDED sits outside every identity snapshot and can drift (accumulate
+# unsafe, behaviour, …) while the boundary identity checks stay green. Producer
+# is git ls-files with its exit captured: a tooling failure (exit >= 2) fails
+# closed and can never read as a PASS on an empty offender list.
+intended_coverage_gate() {
+    lsrc=0
+    tracked_rs="$(git ls-files 'src/**/*.rs' 'src/*.rs' 'tests/*.rs' 2>&1)" || lsrc=$?
+    [ "$lsrc" -lt 2 ] || {
+        echo "INTENDED-COVERAGE-FAIL: git ls-files exit $lsrc (tooling error, not PASS)" >&2
+        exit 1
+    }
+    missing=""
+    for f in $tracked_rs; do
+        case " $INTENDED " in
+            *" $f "*) ;;
+            *) missing="$missing $f" ;;
+        esac
+    done
+    if [ -n "$missing" ]; then
+        echo "INTENDED-COVERAGE-FAIL: tracked src/tests .rs absent from INTENDED (drifts outside every identity snapshot):$missing" >&2
+        exit 1
+    fi
+    echo "INTENDED-COVERAGE-OK: every tracked src/**/*.rs and tests/*.rs is listed in INTENDED"
+}
+
+# F-new (gate-surface-truth M1, closes assurance alumina-ajyok): an admitted
+# src/*/tests.rs or src/*/dot_tests.rs is trusted as test-only unsafe surface
+# ONLY if the parent module (resolved <dir>.rs, else <dir>/mod.rs) declares the
+# module under #[cfg(test)]. A filename-only admission would let a production
+# `mod tests;` (whose unsafe compiles into the binary) pass the unsafe gate.
+# This is not a filename-only rule: it asserts the actual cfg(test) attribute
+# adjacent to the mod declaration in the parent. Enumerated via find over the
+# working tree (same universe as the unsafe scan, untracked included), exit
+# captured so a scan failure fails closed and never reads as PASS.
+cfg_test_parentage_gate() {
+    fsrc=0
+    umods="$(find src -mindepth 2 -maxdepth 2 -type f \( -name 'tests.rs' -o -name 'dot_tests.rs' \) 2>/dev/null)" || fsrc=$?
+    [ "$fsrc" -eq 0 ] || {
+        echo "CFG-TEST-PARENTAGE-SCAN-FAIL: unit-module scan producer exit $fsrc (tooling error, not PASS)" >&2
+        exit 1
+    }
+    pg_bad=""
+    for m in $umods; do
+        dir=$(printf '%s' "$m" | sed 's#^src/\([^/]*\)/.*#\1#')
+        stem=$(basename "$m" .rs)
+        if [ -f "src/$dir.rs" ]; then
+            parent="src/$dir.rs"
+        elif [ -f "src/$dir/mod.rs" ]; then
+            parent="src/$dir/mod.rs"
+        else
+            pg_bad="$pg_bad $m(no parent module)"
+            continue
+        fi
+        # Assert the parent carries a #[cfg(test)] attribute immediately (modulo
+        # blank lines) preceding `mod <stem>;`. A bare production `mod <stem>;`
+        # without the attribute must NOT satisfy this rule. Single-line
+        # `#[cfg(test)] mod <stem>;` and two-line forms are both recognised.
+        prc=0
+        decl=$(awk -v stem="$stem" '
+            {
+                if (!found && $0 ~ ("^[[:space:]]*#\\[cfg\\(test\\)\\][[:space:]]*mod[[:space:]]+" stem "[[:space:]]*;")) { found = 1; next }
+                if (!found && $0 ~ /^[[:space:]]*#\[cfg\(test\)\]/) { pending = 1; next }
+                if (pending && $0 ~ /^[[:space:]]*$/) next
+                if (pending && $0 ~ ("^[[:space:]]*mod[[:space:]]+" stem "[[:space:]]*;")) found = 1
+                pending = 0
+            }
+            END { print (found ? "ok" : "missing") }
+        ' "$parent" 2>&1) || prc=$?
+        [ "$prc" -eq 0 ] || {
+            echo "CFG-TEST-PARENTAGE-FAIL: awk producer exit $prc on $parent (tooling error, not PASS)" >&2
+            exit 1
+        }
+        [ "$decl" = "ok" ] || pg_bad="$pg_bad $m(parent:$parent not #[cfg(test)]-declared)"
+    done
+    if [ -n "$pg_bad" ]; then
+        echo "CFG-TEST-PARENTAGE-FAIL: admitted unit-test modules not declared under #[cfg(test)] by parent:$pg_bad" >&2
+        exit 1
+    fi
+    echo "CFG-TEST-PARENTAGE-OK: every admitted src/*/tests.rs and src/*/dot_tests.rs is #[cfg(test)]-declared by its parent"
 }
 
 # One authoritative SHA256 operation for every identity input. Selection:
@@ -1151,6 +1234,8 @@ boundary_phase1_fast() {
     identity_snapshot "$IDENTITY_BEFORE"
     phase1_scope=$(phase1_change_scope)
     docslink_check
+    intended_coverage_gate
+    cfg_test_parentage_gate
     unsafe_surface_gate
     git diff --check
     echo "GIT-DIFF-CHECK-OK"
@@ -1442,6 +1527,6 @@ case "$TIER/$SCOPE" in
     boundary/phase1) boundary_phase1; boundary_phase1_markers; exit 1 ;;
     e2e/relay) e2e_relay ;;
     e2e/shutdown) e2e_shutdown ;;
-    docs/*) docslink_check; unsafe_surface_gate ;;
+    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate ;;
     *) usage ;;
 esac
