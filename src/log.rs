@@ -3089,6 +3089,171 @@ mod tests {
     }
 
     #[test]
+    fn logging_monitor_full_queue_tallies_refused_detail_batches_per_class() {
+        use crate::enforcement::monitor::{CapturedDetail, SlotCapture};
+        let (mut store, _file) = file_logstore();
+        for _ in 0..QUEUE_SLOTS {
+            store.startup_warning(1, "sub.example.org", Family::A);
+        }
+        assert!(store.is_full(), "ring is full before the monitor summary");
+        let mut m = Monitor::new();
+        for index in 0..(2 * DOMAIN_BATCH) {
+            m.note_fact_early_data(DomainOrdinal::from_index(index).expect("ordinal in range"));
+        }
+        let cause = AnyIllegalCause::HostNotAllowlisted;
+        let effect = Effect::Block {
+            scope: Scope::Connection,
+        };
+        for i in 0..(CAPTURE_BATCH + 1) {
+            m.note_consumed_capture(SlotCapture {
+                slot: i,
+                generation: 1,
+                detail: Some(CapturedDetail {
+                    fact: CapturedFact::AnyIllegal(cause),
+                    effect,
+                }),
+            });
+        }
+        let domain_batches = count_domain_batches(&m);
+        let capture_batches = count_capture_batches(&m);
+        assert_eq!(
+            domain_batches, 2,
+            "22 nonzero ordinals pack into 2 monitor_domain batches at 11 ordinals each"
+        );
+        assert_eq!(
+            capture_batches, 2,
+            "23 captures pack into 2 monitor_capture batches at 22 details each"
+        );
+        let dropped_before = store.dropped();
+        assert!(
+            store.monitor_summary(9, &mut m),
+            "the reserved summary always commits (displaces a normal record on a full ring)"
+        );
+        assert_eq!(
+            m.report_drops(),
+            domain_batches,
+            "RC2 F1: every refused monitor_domain batch on a full queue is counted once in report_drops"
+        );
+        assert_eq!(
+            m.capture_drops(),
+            capture_batches,
+            "RC3 F1: every refused monitor_capture batch on a full queue is counted once in capture_drops"
+        );
+        assert_eq!(
+            store.dropped(),
+            dropped_before + 1 + u64::from(domain_batches + capture_batches),
+            "whole-record accounting: the reserved displacement plus one generic drop per refused detail batch (no silent loss)"
+        );
+    }
+
+    #[test]
+    fn logging_monitor_queued_capture_batch_stranded_on_sink_failure_is_generic_drop() {
+        use crate::enforcement::monitor::{CapturedDetail, SlotCapture};
+        let (reader, writer) = UnixStream::pair().expect("socketpair");
+        drop(reader);
+        let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
+        let mut m = Monitor::new();
+        let cause = AnyIllegalCause::HostNotAllowlisted;
+        let effect = Effect::Block {
+            scope: Scope::Connection,
+        };
+        for i in 0..CAPTURE_BATCH {
+            m.note_consumed_capture(SlotCapture {
+                slot: i,
+                generation: 1,
+                detail: Some(CapturedDetail {
+                    fact: CapturedFact::AnyIllegal(cause),
+                    effect,
+                }),
+            });
+        }
+        assert_eq!(
+            count_capture_batches(&m),
+            1,
+            "22 captures pack into a single monitor_capture batch"
+        );
+        assert!(
+            store.monitor_summary(9, &mut m),
+            "the detail batch enqueues while the sink is still healthy"
+        );
+        assert_eq!(
+            m.capture_drops(),
+            0,
+            "a successfully queued detail batch is never a capture_drop"
+        );
+        assert_eq!(m.report_drops(), 0, "and never a report_drop either");
+        assert_eq!(
+            store.len(),
+            2,
+            "reserved summary plus one capture detail batch are queued"
+        );
+        let dropped_before = store.dropped();
+        store.drain_sink();
+        assert!(store.sink_has_failed(), "EPIPE latches the sink failed");
+        assert_eq!(
+            store.len(),
+            0,
+            "stranded records are cleared, never retained"
+        );
+        assert_eq!(
+            store.dropped(),
+            dropped_before + 2,
+            "RC4 F4-F7: an already-queued detail batch stranded at drain is counted as a whole-record drop"
+        );
+        assert_eq!(
+            m.capture_drops(),
+            0,
+            "drain-time stranding is generic whole-record accounting, never a monitor capture/report drop"
+        );
+        let _ = writer;
+    }
+
+    #[test]
+    fn logging_strand_queued_counts_forced_summary_residue_never_monitor_drops() {
+        use crate::enforcement::monitor::{CapturedDetail, SlotCapture};
+        let (mut store, _file) = file_logstore();
+        let mut m = Monitor::new();
+        let cause = AnyIllegalCause::HostNotAllowlisted;
+        let effect = Effect::Block {
+            scope: Scope::Connection,
+        };
+        for i in 0..CAPTURE_BATCH {
+            m.note_consumed_capture(SlotCapture {
+                slot: i,
+                generation: 1,
+                detail: Some(CapturedDetail {
+                    fact: CapturedFact::AnyIllegal(cause),
+                    effect,
+                }),
+            });
+        }
+        assert!(
+            store.monitor_summary(9, &mut m),
+            "the forced monitor summary commits like the shutdown forced-report path"
+        );
+        assert_eq!(
+            store.len(),
+            2,
+            "reserved summary plus one capture detail batch are queued"
+        );
+        let dropped_before = store.dropped();
+        let stranded = store.strand_queued();
+        assert_eq!(stranded, 2, "the exit path strands every queued record");
+        assert_eq!(
+            store.dropped(),
+            dropped_before + 2,
+            "stranded residue (incl. a forced shutdown summary) is counted once as whole-record drops, never silently lost (L18)"
+        );
+        assert_eq!(
+            m.capture_drops(),
+            0,
+            "stranding never charges capture_drops"
+        );
+        assert_eq!(m.report_drops(), 0, "stranding never charges report_drops");
+        assert_eq!(store.len(), 0, "queue is empty after stranding");
+    }
+
+    #[test]
     fn logging_drop_counter_saturation_sets_overflow_state() {
         let (mut store, _file) = file_logstore();
         store.saturate_dropped_for_test();

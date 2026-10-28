@@ -6140,6 +6140,98 @@ fn production_detection_close_transfers_typed_capture_with_slot_identity_into_mo
     });
 }
 
+#[test]
+fn second_detection_on_held_slot_is_suppressed_and_counted_first_relation_retained() {
+    let port = ephemeral_port();
+    let cfg = cfg_doc1(port, "connection", "block", "connection");
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ordinal = serving
+            .storage()
+            .ordinal_for_pair(&approved, 443)
+            .expect("ordinal");
+        serving.storage_mut().publish_test_a(ordinal.get());
+
+        let _first = connect(port);
+        pump(serving, 20);
+        assert_eq!(serving.storage().occupied(), 1, "peer admitted on slot 0");
+        assert!(
+            serving.slots[0].capture.detail.is_none(),
+            "an admitted slot carries no detection fact until the first violation"
+        );
+
+        let fact = CapturedFact::EarlyData(ordinal);
+        let effect = Effect::Block {
+            scope: Scope::Connection,
+        };
+        serving.stamp_capture(0, fact, effect);
+        assert!(
+            serving.slots[0].capture.detail.is_some(),
+            "the first detection stamps the held slot"
+        );
+        assert_eq!(
+            serving.storage().enforcement().monitor().capture_drops(),
+            0,
+            "RC2/RC3 serving: the first stamp is a real detection, never a suppression"
+        );
+        let generation = serving.slots[0].slot_gen;
+
+        serving.stamp_capture(0, fact, effect);
+        assert_eq!(
+            serving.storage().enforcement().monitor().capture_drops(),
+            1,
+            "a second violation on the same still-held slot is suppressed and counted in capture_drops"
+        );
+        let held = serving.slots[0]
+            .capture
+            .detail
+            .expect("the first relation stays held on the slot");
+        assert_eq!(
+            held.fact, fact,
+            "the first relation's fact is retained, never overwritten"
+        );
+        assert_eq!(
+            held.effect, effect,
+            "the first relation's effect is retained"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .monitor()
+                .capture_detail_len(),
+            0,
+            "a suppressed second detection never enters the consumed capture ring"
+        );
+
+        serving.close_slot(0);
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .monitor()
+                .capture_detail_len(),
+            1,
+            "close consumes exactly the one retained first capture"
+        );
+        let consumed = serving
+            .storage()
+            .enforcement()
+            .monitor()
+            .capture_detail(0)
+            .expect("consumed first capture");
+        assert_eq!(
+            consumed.detail.fact, fact,
+            "the consumed capture is the first relation"
+        );
+        assert_eq!(consumed.slot, 0, "slot identity rides the retained capture");
+        assert_eq!(
+            consumed.generation, generation,
+            "the detection generation rides the retained capture"
+        );
+    });
+}
+
 fn read_all(stream: &mut TcpStream) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
