@@ -67,6 +67,7 @@ contract; it never yields to a feature.
 | --- | --- |
 | [alumina-proxy.md](docs/alumina-proxy.md) | **Canonical spec** — sole governing requirements |
 | [docs/architecture.md](docs/architecture.md) | Conceptual design + as-built single-owner mapping (decisions D1–D7) |
+| [docs/benchmarks/e2micro-suite.md](docs/benchmarks/e2micro-suite.md) | e2-micro benchmark suite (1gbps + connection storms) vs Envoy/HAProxy — methodology + corrected M-04 results |
 | [docs/qa-package/README.md](docs/qa-package/README.md) | Local testQA run/validation instructions |
 | [docs/verification.md](docs/verification.md) | Verification instructions, command set + offline link checker |
 

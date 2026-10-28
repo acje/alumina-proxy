@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 
+# Local podman connection names (gitignored; never committed). Sourced when
+# present so the harness runs out-of-the-box on a dev machine; an explicit
+# environment variable still wins and the fail-closed checks below remain.
+if [ -f .ooda/podman-connections.env ]; then
+    . ./.ooda/podman-connections.env
+fi
+
 TIER="${1:-}"
 SCOPE="${2:-}"
 

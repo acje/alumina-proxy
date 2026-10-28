@@ -12,6 +12,13 @@
 # of this script.
 set -eu
 
+# Local podman connection names (gitignored; never committed). Sourced when
+# present so the harness runs out-of-the-box on a dev machine; an explicit
+# environment variable still wins and the fail-closed checks below remain.
+if [ -f .ooda/podman-connections.env ]; then
+    . ./.ooda/podman-connections.env
+fi
+
 ROOT="$(pwd)"
 BASE="docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a"
 BASE_ID="ad70ceb90f563e9fe2ef7064b92dc1347aeaeb71e5369ba8b242498ba030a6f8"

@@ -19,6 +19,13 @@
 # and the executed image is the recorded immutable ID.
 set -eu
 
+# Local podman connection names (gitignored; never committed). Sourced when
+# present so the harness runs out-of-the-box on a dev machine; an explicit
+# environment variable still wins and the fail-closed checks below remain.
+if [ -f .ooda/podman-connections.env ]; then
+    . ./.ooda/podman-connections.env
+fi
+
 ROOT="$(pwd)"
 # Harness image: derived ONCE from the pinned rust base + openssl/python3/
 # setpriv/ip (provisioned offline; never pulled at run time). The parent must

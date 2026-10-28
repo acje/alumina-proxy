@@ -31,6 +31,13 @@
 #              1 -> harness/supervision/protocol failure
 set -eu
 
+# Local podman connection names (gitignored; never committed). Sourced when
+# present so the harness runs out-of-the-box on a dev machine; an explicit
+# environment variable still wins and the fail-closed checks below remain.
+if [ -f .ooda/podman-connections.env ]; then
+    . ./.ooda/podman-connections.env
+fi
+
 ROOT="$(pwd)"
 PROXY="${1:?usage: bench_run.sh <alumina|envoy|haproxy> <smoke|timed> <1gbps|storm150|storm50>}"
 KIND="${2:?usage: bench_run.sh <alumina|envoy|haproxy> <smoke|timed> <1gbps|storm150|storm50>}"

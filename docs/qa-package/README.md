@@ -54,7 +54,10 @@ scripts/verify.sh mid union`; on macOS run `sh scripts/verify.sh boundary
 phase1` (the `mid` selectors fail closed off-Linux) — and the existing
 rootless **and** rootful podman connections (named by `PODMAN_CONNECTION` /
 `PODMAN_ROOT_CONNECTION`) with the pinned builder image present on both are
-required — `verify.sh` checks them and fails closed otherwise. The only
+required — `verify.sh` checks them and fails closed otherwise. Connection names
+may be exported in the environment or set in the gitignored local file
+`.ooda/podman-connections.env` (sourced by the harness when present; an
+already-set environment variable wins). The only
 authorized execution route is the pinned builder image over those connections
 — foreground `--rm` only, **no cloud start, no VM/TCP-remote target rotation,
 no daemon**. The wrapper
