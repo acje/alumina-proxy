@@ -65,7 +65,7 @@ async function load(abs) {
   if (!st.isFile()) return { kind: 'op', why: 'nonregular' }
   try {
     const text = await readFile(abs, 'utf8')
-    return { kind: 'ok', index: buildIndex(fromMarkdown(text)) }
+    return { kind: 'ok', text, index: buildIndex(fromMarkdown(text)) }
   } catch (err) {
     return { kind: 'op', why: err.code || 'parse' }
   }
@@ -76,6 +76,92 @@ function fail(marker, detail) {
   else domain = true
   process.stderr.write(`${marker} ${detail}\n`)
   return true
+}
+
+// M4: file:line citation resolution + range check. The docs corpus cites
+// source lines as `<file>(.rs|.md):LINE[-LINE][,LINE[-LINE]]` in prose. We
+// prove the cited file resolves (as-given, then src/, then tests/) and that
+// every cited line exists. This is a line-existence proof only — it never
+// claims the line still means what the sentence says. Bare `:NNN` continuations
+// (no leading file name, e.g. `:1040-1042`, `:443`) are NOT independently
+// checked — they inherit an implicit file from surrounding prose and would
+// false-positive on prose like `https://host:443` (residual, documented).
+let citOps = false
+let citDomain = false
+let citTotal = 0
+const CIT_HEAD_RE = /(^|[^A-Za-z0-9_./-])([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:rs|md)):([0-9]+)(?:-([0-9]+))?/g
+const CIT_CONT_RE = /^,([0-9]+)(?:-([0-9]+))?/
+const citLineCache = new Map()
+
+function lineCountOf(text) {
+  if (text.length === 0) return 0
+  return text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
+}
+
+function citFail(marker, detail) {
+  if (marker === 'CITATION-OP-FAIL') citOps = true
+  else citDomain = true
+  process.stderr.write(`${marker} ${detail}\n`)
+  return true
+}
+
+async function resolveCitationFile(file) {
+  for (const cand of [file, `src/${file}`, `tests/${file}`]) {
+    const abs = path.resolve(root, cand)
+    try {
+      const st = await stat(abs)
+      if (st.isFile()) return { abs, resolved: cand }
+    } catch (err) {
+      if (err.code !== 'ENOENT') return { op: true, why: err.code || 'stat', abs }
+    }
+  }
+  return null
+}
+
+async function citationLineCount(abs) {
+  if (citLineCache.has(abs)) return citLineCache.get(abs)
+  try {
+    const text = await readFile(abs, 'utf8')
+    const value = { ok: true, lines: lineCountOf(text) }
+    citLineCache.set(abs, value)
+    return value
+  } catch (err) {
+    const value = { ok: false, why: err.code || 'read' }
+    citLineCache.set(abs, value)
+    return value
+  }
+}
+
+async function checkCitationRanges(relFile, file, ranges) {
+  const resolved = await resolveCitationFile(file)
+  if (!resolved) return citFail('CITATION-MISSING', `${relFile} ${file}`)
+  if (resolved.op) return citFail('CITATION-OP-FAIL', `${relFile} ${resolved.why} ${file}`)
+  const lc = await citationLineCount(resolved.abs)
+  if (!lc.ok) return citFail('CITATION-OP-FAIL', `${relFile} ${lc.why} ${file}`)
+  for (const r of ranges) {
+    if (r.start > r.end) return citFail('CITATION-MALFORMED', `${relFile} ${file}:${r.start}-${r.end}`)
+    if (r.start < 1 || r.end > lc.lines) {
+      return citFail('CITATION-LINE-RANGE', `${relFile} ${file}:${r.start}-${r.end} (file has ${lc.lines} lines)`)
+    }
+  }
+  return false
+}
+
+async function checkCitations(relFile, text) {
+  for (const m of text.matchAll(CIT_HEAD_RE)) {
+    const file = m[2]
+    citTotal++
+    const ranges = [{ start: Number(m[3]), end: m[4] ? Number(m[4]) : Number(m[3]) }]
+    let from = m.index + m[0].length
+    for (;;) {
+      const cm = CIT_CONT_RE.exec(text.slice(from))
+      if (!cm) break
+      ranges.push({ start: Number(cm[1]), end: cm[2] ? Number(cm[2]) : Number(cm[1]) })
+      from += cm[0].length
+    }
+    if (await checkCitationRanges(relFile, file, ranges)) return true
+  }
+  return false
 }
 
 async function validate(thisDoc, url, srcAbs) {
@@ -121,19 +207,24 @@ for (const f of files) {
   const index = probe.index
   let failed = false
   for (const url of index.links) if (await validate(f, url, abs)) failed = true
+  if (await checkCitations(f, probe.text)) failed = true
   if (!failed) {
     cleanDocs++
     process.stdout.write(`DOCSLINK-OK ${f} (slugs ${index.slugs.size}, links ${index.links.length})\n`)
   }
 }
 const summary = `(files ${files.length}, clean ${cleanDocs}, local-checks ${localChecks}, out-of-scope ${outOfScope})`
-if (ops) {
+const citSummary = `(citations ${citTotal}, roots ${files.length})`
+if (ops || citOps) {
   process.stdout.write(`DOCSLINK-CHECK-RESULT ${summary}\n`)
+  process.stdout.write(`CITATION-CHECK-RESULT ${citSummary}\n`)
   process.exit(2)
 }
-if (domain) {
+if (domain || citDomain) {
   process.stdout.write(`DOCSLINK-CHECK-RESULT ${summary}\n`)
+  process.stdout.write(`CITATION-CHECK-RESULT ${citSummary}\n`)
   process.exit(1)
 }
 process.stdout.write(`DOCSLINK-CHECK-OK ${summary}\n`)
+process.stdout.write(`CITATION-CHECK-OK ${citSummary}\n`)
 process.exit(0)

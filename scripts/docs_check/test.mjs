@@ -17,11 +17,12 @@ function expect(name, files, wantExit, opts) {
   const out = res.stdout || ''
   const diag = !opts.diag || err.includes(opts.diag)
   const clean = (opts.noClean || []).every((s) => !out.includes(s))
-  const ok = got === wantExit && diag && clean
+  const has = !opts.hasOut || out.includes(opts.hasOut)
+  const ok = got === wantExit && diag && clean && has
   if (!ok) {
     failures++
     console.error(
-      `CTRL-FAIL ${name}: got exit ${got} (want ${wantExit}) diag=${diag} clean=${clean}` +
+      `CTRL-FAIL ${name}: got exit ${got} (want ${wantExit}) diag=${diag} clean=${clean} has=${has}` +
         `\n  out: ${out.split('\n').filter(Boolean).join(' | ')}` +
         `\n  err: ${err.split('\n').filter(Boolean).join(' | ')}`
     )
@@ -108,6 +109,31 @@ try {
   await writeFile(path.join(base, 'htm.md'), ['# HTM', '[htmlt](fake.html#Fake)', ''].join('\n'))
   await writeFile(path.join(base, 'statf.md'), ['[s](odir/miss.md#x)', ''].join('\n'))
 
+  // M4 citation resolution + range-check fixtures:
+  // target files for citation checks (cwd-relative as-given, then src/, then tests/)
+  await mkdir(path.join(base, 'src'), { recursive: true })
+  await mkdir(path.join(base, 'tests'), { recursive: true })
+  await writeFile(path.join(base, 'target.rs'), ['// 1', '// 2', '// 3', '// 4', '// 5', ''].join('\n')) // 5 lines
+  await writeFile(path.join(base, 'src', 'fallback.rs'), ['// a', '// b', '// c', '// d', ''].join('\n')) // 4 lines
+  await writeFile(path.join(base, 'tests', 'dfallback.rs'), ['// z', '// y', ''].join('\n')) // 2 lines
+  await writeFile(
+    path.join(base, 'cit_clean.md'),
+    [
+      'as-given `target.rs:1-5`, src fallback `fallback.rs:2-4`, tests fallback `dfallback.rs:1-2`',
+      'comma continuation `target.rs:1-3,5` and `target.rs:1-3,4-5`',
+      ''
+    ].join('\n')
+  )
+  await writeFile(path.join(base, 'cit_missing.md'), ['missing file citation `ghost.rs:10`', ''].join('\n'))
+  await writeFile(
+    path.join(base, 'cit_range.md'),
+    ['out-of-range `target.rs:9` and `target.rs:1-3,4-6`', ''].join('\n')
+  )
+  await writeFile(path.join(base, 'cit_bad.md'), ['start>end `target.rs:4-2`', ''].join('\n'))
+  await writeFile(path.join(base, 'cit_locked.rs'), ['// x', ''].join('\n'))
+  await chmod(path.join(base, 'cit_locked.rs'), 0o000)
+  await writeFile(path.join(base, 'cit_op.md'), ['unreadable target `cit_locked.rs:1`', ''].join('\n'))
+
   await writeFile(
     path.join(base, 'ref.md'),
     ['[used][r]', '', '[r]: ok-doc.md#protocol-contract', '[r]: no-such-file.md', ''].join('\n')
@@ -137,6 +163,13 @@ try {
   expect('op-fail html anchor unsupported', ['h.md'], 2, { diag: 'html-anchor-unsupported', noClean: ['DOCSLINK-OK', 'DOCSLINK-CHECK-OK'] })
   expect('op-fail non-Markdown fragment target no fabricated heading', ['htm.md'], 2, { diag: 'unsupported-target', noClean: ['DOCSLINK-OK', 'DOCSLINK-CHECK-OK'] })
 
+  // M4 citation resolution + range-check cases
+  expect('citation-clean as-given/src/tests resolution + comma continuation', ['cit_clean.md'], 0, { hasOut: 'CITATION-CHECK-OK', noClean: ['CITATION-CHECK-RESULT'] })
+  expect('citation-missing file fails closed naming the citation', ['cit_missing.md'], 1, { diag: 'CITATION-MISSING', noClean: ['CITATION-CHECK-OK', 'DOCSLINK-CHECK-OK'] })
+  expect('citation-line out-of-range fails closed naming line count', ['cit_range.md'], 1, { diag: 'CITATION-LINE-RANGE', noClean: ['CITATION-CHECK-OK', 'DOCSLINK-CHECK-OK'] })
+  expect('citation-start>end malformed fails closed', ['cit_bad.md'], 1, { diag: 'CITATION-MALFORMED', noClean: ['CITATION-CHECK-OK', 'DOCSLINK-CHECK-OK'] })
+  expect('citation-unreadable target is op-fail (exit 2) never PASS', ['cit_op.md'], 2, { diag: 'CITATION-OP-FAIL', noClean: ['CITATION-CHECK-OK', 'DOCSLINK-CHECK-OK'] })
+
   const staticRes = spawnSync('rg', ['-n', 'child_process|execSync|spawn|new Function|node:http|node:https', checker], { encoding: 'utf8' })
   ran++
   if (staticRes.status === 1) {
@@ -154,6 +187,9 @@ try {
   } catch {}
   try {
     await chmod(path.join(base, 'locked.md'), 0o644)
+  } catch {}
+  try {
+    await chmod(path.join(base, 'cit_locked.rs'), 0o644)
   } catch {}
   await rm(base, { recursive: true, force: true })
 }

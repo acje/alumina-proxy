@@ -668,15 +668,16 @@ docslink_check() {
     }
     node_env_preflight
     drc=0
-    node scripts/docs_check/check.mjs $DOCSLINK_ROOTS || drc=$?
+    docs_out="$(node scripts/docs_check/check.mjs $DOCSLINK_ROOTS)" || drc=$?
+    [ -n "$docs_out" ] && printf '%s\n' "$docs_out"
     case "$drc" in
         0) ;;
         1)
-            echo "DOCSLINK-CHECK-FAIL (missing file or literal fragment mismatch)" >&2
+            echo "DOCSLINK-CHECK-FAIL or CITATION-CHECK-FAIL (missing file/fragment or unresolvable/out-of-range citation)" >&2
             exit 1
             ;;
         2)
-            echo "DOCSLINK-CHECK-OP-FAIL (operational or unsupported construct)" >&2
+            echo "DOCSLINK-CHECK-OP-FAIL or CITATION-CHECK-OP-FAIL (operational or unsupported construct)" >&2
             exit 2
             ;;
         *)
@@ -684,7 +685,14 @@ docslink_check() {
             exit 1
             ;;
     esac
+    # Fail closed on the citation marker: a green adapter must have proven the
+    # corpus citations resolve and are in range (the marker line is the proof).
+    if ! printf '%s\n' "$docs_out" | grep -q '^CITATION-CHECK-OK '; then
+        echo "CITATION-CHECK-BLOCKED: adapter exit 0 but no CITATION-CHECK-OK marker" >&2
+        exit 2
+    fi
     echo "DOCSLINK-CHECK-OK"
+    echo "CITATION-CHECK-OK"
 }
 
 unsafe_surface_gate() {
