@@ -3,15 +3,16 @@
 Benchmark suite for the Alumina egress proxy (CONNECT forward proxy) moduli: the
 fresh `bench` suite replaces the deleted legacy suite (SM-1). It measures
 Alumina against the two market CONNECT-capable forward proxies — Envoy and
-HAProxy — under an e2-micro-shaped workload, with results to be recorded in the
-Results section by the boundary run (SM-4).
+HAProxy — under an e2-micro-shaped workload, with results recorded in §9.
 
 This document is methodology, metrics, and invocation reference. The Results
-section is a **placeholder** until SM-4's boundary run populates it with
-receipts. Nothing in a placeholder counts as a measurement.
+section (§9) holds the **corrected M-04 results** (2026-10-28) and the original
+SM-4 boundary-run tables, kept verbatim below as the superseded before/after
+baseline.
 
 - Topic: methodology (research-first, per evidence bead `alumina-d59gq`).
-- Status: SM-3 (doc + placeholder). Results pending SM-4.
+- Status: results recorded — corrected M-04 (2026-10-28) in §9; original SM-4
+  (2026-10-27) kept superseded below it. Correction package complete.
 - Governing repository spec: `docs/alumina-proxy.md` (this suite measures its
   golden CONNECT path; it does not alter proxy semantics).
 
@@ -201,15 +202,25 @@ Headline metrics (all from the JSON receipt in `.ooda/benchmarks/`):
 | Validity | `valid`, `reasons`, `workload_fulfilled`, `verdict` | failure-driven: corruption, missing-bytes, protocol disorder, timeouts, partial send, accounting break, or `unknown-cpu` invalidate; `workload_fulfilled` requires clean in-window counters |
 | Identity | `identity` | `source_head`, `dirty_count`, `retained_binary_sha256`, `executed_binary_sha256`, `bench image_id`, `config_sha256`, tool sha, python/OpenSSL versions — every receipt is reproducible and attributable |
 
-### F1 — the 1gbps profile is client-generator-limited: read achieved, not 1000
+### F1 — the 1gbps profile is echo-backend-limited (GIL-bound python path): read achieved, not 1000
 
 The 1000 Mbps figure in the steady profile is the **offered-load target**, not
-a delivered guarantee. On this host the open-loop client (single-owner stdlib
-selectors loop pacing a 32-tunnel cohort at 2048 outstanding) tops out below
-schedule: SM-2 smoke receipts show planned 61,035 frames vs admitted/sent
-~49–54k, i.e. **achieved_client_payload_mbps of 808 (alumina) / 881 (envoy) /
-846 (haproxy)**, `workload_fulfilled=False`, `valid=True` (shortfall is honest
-`backpressure_unsent`; an open-loop cap is not a failure reason by design).
+a delivered guarantee. The measured-path ceiling is set by the TLS1.3 echo
+backend, not by any proxy: the in-process python `EchoBackend`
+(`scripts/bench_workload.py`) is GIL/thread-bound at ~25.3 K frames/s
+(≈ 830 Mbps for 4096 B frames). That is why the original SM-2 smoke and SM-4
+run recorded **808 (alumina) / 881 (envoy) / 846 (haproxy)** Mbps and then
+**826–830 Mbps** on every subject (original SM-4 table, §9) — a shared harness
+backend ceiling, never a per-proxy claim.
+
+The python backend was **replaced on the measured path by a compiled
+Rust/rustls static-musl TLS1.3 echo backend** (`scripts/bench/echo-backend/`,
+M-03 commit `6c4cc49`; binary `.ooda/echo-backend/echo-backend-musl`,
+sha-pinned `efa64083…` via `BENCH_ECHO_SHA` in `bench_run.sh`). The compiled
+backend lifted the ceiling to **~999.7–1000 Mbps** (M-04: alumina 999.969,
+envoy 999.834, haproxy 999.725 — corrected table, §9). The python
+`EchoBackend` is retained as the in-process selftest reference and the
+`BENCH_BACKEND=python` one-line fallback.
 
 Consequences, stated up front:
 
@@ -217,12 +228,15 @@ Consequences, stated up front:
    **achieved** rate — `interval_vs_cohort.achieved_client_payload_mbps` — and
    `workload_fulfilled` must be shown alongside (F1).
 2. The **relative comparison remains fair**: all three subjects receive the
-   same offered load and the same scheduling, so the equal ceiling applies to
+   same offered load and the same backend, so any residual ceiling applies to
    all; this is a comparison of proxies at equal load, not an absolute-rate
    certification.
-3. The correct reading of a clean SM-2 smoke: "proxy sustained the generator at
-   ~810–880 Mbps offered payload on this host with a clean in-window verdict",
-   never "1 Gbps delivered".
+3. "≈1000 Mbps" with `workload_fulfilled=false` is **not** a delivered-1000
+   guarantee: it is the achieved rate plus a tiny open-loop backpressure/drain
+   tail at the target (M-04: `backpressure_unsent` alumina 56 / envoy 303 /
+   haproxy 502 of ~1.83 M frames = 0.003–0.03%; `missed_at_end=0` all) — the
+   open-loop client's outstanding-cap marker, exactly the F1 class the
+   fulfilled flag is designed to surface (caveats, §9).
 
 ### In-window vs drain honesty
 
@@ -251,8 +265,11 @@ fulfillment semantics, prefer the in-window echoed count and interpret
   alumina's single serving owner is its fixed profile and is disclosed as the
   asymmetry it is (§1).
 - **Confounded axes disclosed**: relay-vs-direct (setup path, §1), storm
-  `setup_latency` cross-subject incomparability (F8, §1), generator ceiling
-  (F1, §5). Nothing is silently averaged across these.
+  `setup_latency` cross-subject incomparability (F8, §1), echo-backend ceiling
+  (F1, §5 — GIL-bound python path, resolved by the M-03 compiled backend),
+  storm p50 delayed-ACK/Nagle first-segment stall (resolved by alumina upstream
+  `TCP_NODELAY` M-01 and haproxy `option http-no-delay` M-02; §9 honest
+  readings). Nothing is silently averaged across these.
 
 What this suite is NOT: it is not an absolute-throughput certification of any
 proxy, not a synthetic-payload-inspection benchmark, and not a max-load knee
@@ -315,17 +332,137 @@ Method choices are grounded in primary sources captured by the evidence pass
   TLS1.3 byte-exact echo backend (MSG_PEEK CONNECT-preamble tolerance), DNS
   responder (UDP+TCP), report/verdict model, tri-state selftest.
 - `scripts/bench_run.sh` — host supervisor: image + alumina-sha fail-closed
-  pins, podman session, receipts to `.ooda/benchmarks/`.
+  pins (`HEAD_CANDIDATE_SHA`), echo-backend-sha fail-closed pin
+  (`BENCH_ECHO_SHA`), `BENCH_BACKEND=compiled` default (`python` fallback to the
+  in-process EchoBackend), podman session, receipts to `.ooda/benchmarks/`.
 - `scripts/bench/run.sh` — in-container supervisor body: topology staging +
   supervision + `BENCH-OK`/`INVALID`/`FAIL` exits.
 - `scripts/bench/Dockerfile` — pinned bench image (trixie-slim + Envoy 1.40.2 +
   HAProxy 3.4.7 binaries).
 - `scripts/bench/envoy-connect.yaml` — Envoy CONNECT relay config.
-- `scripts/bench/haproxy-connect.cfg` — HAProxy CONNECT relay config.
+- `scripts/bench/haproxy-connect.cfg` — HAProxy CONNECT relay config (`option
+  http-no-delay` set — M-02 storm p50 stall fix).
+- `scripts/bench/echo-backend/` — M-03 compiled Rust/rustls static-musl TLS1.3
+  echo backend crate (`Cargo.toml`, `src/main.rs`; own empty `[workspace]`, out
+  of the alumina closure by design). Built to
+  `.ooda/echo-backend/echo-backend-musl` and sha-pinned fail-closed.
+- `.ooda/echo-backend/echo-backend-musl` — the compiled echo backend binary
+  (sha `efa64083…` on the M-04 path; gitignored build artifact, not committed).
 
 ---
 
-## 9. Results (SM-4 boundary run, 2026-10-27)
+## 9. Results (corrected, 2026-10-28 — supersedes the original SM-4 tables below)
+
+Corrected M-04 boundary-equivalent results recorded from repo HEAD `85b7769`
+(tree clean: `dirty_count=0` for every receipt): alumina binary sha-pinned
+fail-closed at `HEAD_CANDIDATE_SHA` = `executed_binary_sha256` `1e173c13…ce82`
+(M-01 upstream TCP_NODELAY fix included), compiled Rust echo backend
+`efa64083…72cd` (M-03), pinned bench image `7c3937c1…b449c` (Envoy v1.40.2,
+HAProxy 3.4.7). All nine timed runs are interleaved **A-E-H** per profile
+(alumina → envoy → haproxy), SECONDS 60 / WARMUP 5, every receipt `valid=True`.
+The JSON receipts in `.ooda/benchmarks/85b7769-*.json` are the source of truth.
+Latency columns report the frame data path (`latency.actual_send_to_echo`,
+p50/p95/p99 in µs — the cross-subject comparable measure, §1). The original
+SM-4 tables are kept below, labeled superseded, as the honest before/after
+baseline.
+
+### Corrected timed results (M-04)
+
+| Profile | Subject | achieved Mbps | fulfilled | p50 / p95 / p99 (µs) | CPU mean / peak (cores) | RSS mean (KiB) | missed_at_end | Receipt |
+|---|---|---|---|---|---|---|---|---|
+| 1gbps steady | alumina | 999.969 | false | 1050 / 1150 / 1150 | 0.409 / 0.440 | 211188 | 0 | `85b7769-bench-alumina-1gbps-timed-20261028T131504Z` |
+| 1gbps steady | envoy | 999.834 | false | 150 / 1150 / 1250 | 0.484 / 0.640 | 65949 | 0 | `85b7769-bench-envoy-1gbps-timed-20261028T131621Z` |
+| 1gbps steady | haproxy | 999.725 | false | 1150 / 1150 / 1250 | 0.370 / 0.480 | 24948 | 0 | `85b7769-bench-haproxy-1gbps-timed-20261028T131729Z` |
+| storm150 | alumina | n/a (storm) | true | 150 / 41950 / 42250 | 0.028 / 0.119 | 210915 | – | `85b7769-bench-alumina-storm150-timed-20261028T131839Z` |
+| storm150 | envoy | n/a (storm) | true | 250 / 41750 / 42150 | 0.051 / 0.544 | 65121 | – | `85b7769-bench-envoy-storm150-timed-20261028T131947Z` |
+| storm150 | haproxy | n/a (storm) | true | 150 / 41750 / 42150 | 0.031 / 0.080 | 25262 | – | `85b7769-bench-haproxy-storm150-timed-20261028T132055Z` |
+| storm50 | alumina | n/a (storm) | true | 250 / 41850 / 42450 | 0.011 / 0.077 | 210832 | – | `85b7769-bench-alumina-storm50-timed-20261028T132204Z` |
+| storm50 | envoy | n/a (storm) | true | 250 / 41550 / 42250 | 0.022 / 0.077 | 64867 | – | `85b7769-bench-envoy-storm50-timed-20261028T132313Z` |
+| storm50 | haproxy | n/a (storm) | true | 150 / 41450 / 42250 | 0.013 / 0.078 | 25068 | – | `85b7769-bench-haproxy-storm50-timed-20261028T132423Z` |
+
+Corrected per-subject storm establishment latency (µs, `latency.setup_latency`) —
+**with the F8 caveat (§1)**: the receipt semantics "CONNECT start → handshake
+complete" cover different path lengths per subject (relay+origin answer+TLS for
+Envoy/HAProxy vs CONNECT+TLS for alumina), so these are properties of each
+subject's own path, never an apples-to-apples comparison.
+
+| Profile | Subject | setup_latency p50 / p95 / p99 (µs) |
+|---|---|---|
+| storm150 | alumina | 1150 / 1550 / 1850 |
+| storm150 | envoy | 1350 / 1850 / 2150 |
+| storm150 | haproxy | 1250 / 1750 / 1950 |
+| storm50 | alumina | 1350 / 2050 / 2450 |
+| storm50 | envoy | 1550 / 1850 / 2050 |
+| storm50 | haproxy | 1450 / 1650 / 1850 |
+
+### Honest readings (M-04, corrected)
+
+- **1gbps: ~999.7–999.97 Mbps for all three subjects, all `workload_fulfilled=false`.**
+  The M-03 compiled backend lifted the python GIL ceiling (F1, §5) to the
+  open-loop target. The fulfilled flag is now a **tiny honest open-loop tail at
+  the 1000 Mbps target**, not a proxy deficiency: `missed_at_end=0` for all,
+  `sent==echoed` (1.830998M / 1.830751M / 1.830551M frames), with
+  `backpressure_unsent` alumina 56 / envoy 303 / haproxy 502 (~0.003–0.03% of
+  ~1.83 M) and a 29–33-frame `drain_echoed` just at close — the open-loop
+  client's outstanding-cap marker, never a certified-to-1000 (caveats below).
+  **Alumina is the closest to target** (999.969 Mbps, 56/1,831,054 = 0.003%
+  backpressure) and is the only subject with a `fulfilled=True` 1gbps receipt on
+  record (2 s smoke: 0 backpressure / 3 drain).
+- **Storms: `workload_fulfilled=true` for all six runs** — storm150 9000/9000
+  and storm50 3000/3000 planned sessions established exactly,
+  `setup_failures={}` (0), `send_failed=0`, `protocol_errors=0`,
+  `frames_echoed==frames_sent` 1:1. `setup_latency` fell ~40–50% (e.g. alumina
+  storm150 p50 1950→1150 µs, storm50 2950→1350 µs) — the same drain fix
+  benefiting session establishment.
+- **Storm p50 attribution (why the ~40 ms is gone)**: the original SM-4
+  ~40.65–40.95 ms data-path p50 for alumina and haproxy was the
+  **first-segment delayed-ACK/Nagle stall on the proxy→origin path** — fixed by
+  alumina upstream `TCP_NODELAY` in dial (M-01, commit `df54c44`) and haproxy
+  `option http-no-delay` (M-02, `490aff5`); envoy had no such stall (its p50 was
+  0.55–1.05 ms even on SM-4). Data-path p50 now ≈ 0.15–0.25 ms for all subjects,
+  matching envoy's data path.
+- **Uniform ~41–42.5 ms p95/p99 storm tail persists across every subject and
+  profile** — harness-scheduler cadence, not proxy latency; the single max
+  outlier was one alumina storm150 frame at 83 ms of ~90k (recorded, not
+  silent).
+- **Identity/fidelity**: `dirty_count=0`, `source_head=85b7769`,
+  `executed_binary_sha256=1e173c13…ce82` (alumina) vs pinned image binaries
+  (envoy `b9d6d1e0…`, haproxy `d2e03232…`), `image_id=7c3937c1…b449c`,
+  `host_cpus=8`, `host_mem_gib=14`, tool sha `c6bd1524`, OpenSSL 3.5.7,
+  python 3.13.5. RSS alumina ≈ 211 MiB — unchanged fixed named-buffer pool,
+  profile-invariant (§2).
+
+### Caveats (M-04)
+
+- **`fulfilled=false` at ~1000 Mbps is an open-loop cap, not a proxy fail**:
+  `missed_at_end=0` and the tiny `backpressure_unsent` / `drain_echoed`-at-close
+  (0.003–0.03%) mean the client never certified to 1000; read the achieved rate
+  **and** the fulfilled flag together (F1, §5).
+- **Uniform ~41–42.5 ms p95/p99 storm tail = harness cadence, cross-subject**:
+  identical tails across subjects and profiles are the scheduler's quanta, not
+  proxy latency; per-frame p50 is the load-bearing proxy signal.
+- **2 s smoke vs 60 s timed are not equivalent**: smoke validates path
+  correctness fast and can show `fulfilled=True` where the 60 s timed run shows
+  `fulfilled=False` at the same nominal profile (1gbps alumina: smoke True /
+  timed False). Timed receipts are the authoritative results.
+- **Residual M-04 surprises (recorded, not silent)**: (1) one haproxy storm50
+  smoke attempt exited `valid=False reasons=['unknown-cpu']` (missing end
+  boundary-tick observation for all three samplers — harness 2 s-sampling
+  flake; the storm workload itself was clean 100/100 sessions, 0 setup
+  failures); the re-run was `valid=True` and the flake receipt is retained
+  (`85b7769-bench-haproxy-storm50-smoke-20261028T131415Z.json`). (2) A spurious
+  client `cores_peak` on two 1gbps timed runs (10.3 / 11.7 cores, alumina and
+  haproxy) from one boundary-tick sample — same flake family; proxy and backend
+  CPU peaks are clean and are the values reported in the table above.
+
+---
+
+### Original SM-4 (superseded — 2026-10-27 boundary run)
+
+*Superseded by the corrected M-04 results above: the SM-4 tables predate the
+M-01/M-02 storm p50 fix and the M-03 compiled echo backend (their ~830 Mbps
+1gbps ceiling was the GIL-bound python backend, F1 §5). Retained verbatim as
+the honest before/after baseline; nothing below has been edited.*
 
 Recorded from the SM-4 boundary run: alumina rebuilt from repo HEAD `656c41c`
 (sha-pinned fail-closed `9abca2dd…ee7cf`), interleaved A-E-H per profile on the
