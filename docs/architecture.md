@@ -365,10 +365,16 @@ string (the convention), e.g. `src/client_hello.rs:161` ("parser-bounded:
 ciphers <= MAX_CIPHERS and extensions <= MAX_EXTENSIONS"),
 `src/config.rs:175` ("FixedHostname is ASCII"), `src/dns.rs:158` ("candidate
 count bounded by MAX_ADDRESSES"). Measured against non-`#[cfg(test)]` code, the
-proxy crate holds 30 production `expect()` calls (all with invariant reason
-strings) and zero production-line `unwrap()` calls — all `.unwrap()` instances
-are confined to `#[cfg(test)]` modules — plus 14 `expect()`s in the dev-only
-`src/bin/parser_bench.rs`. The spec carries the same blanket "`unwrap()` and
+proxy crate holds production `expect()` calls (all with invariant reason strings)
+and zero production-line `unwrap()` calls — all `.unwrap()` instances are
+confined to `#[cfg(test)]` modules — where the counts are reproduced by command,
+never hand-counted: `cargo clippy --lib -- -W clippy::expect_used
+-W clippy::unwrap_used` reports 40 `expect()`-use warnings and 0
+`unwrap()`-use warnings (`alumina (lib) generated 40 warnings`); the dev-only
+`src/bin/parser_bench.rs` contributes its 14 `expect()`s to
+`cargo clippy --bin parser_bench -- -W clippy::expect_used
+-W clippy::unwrap_used` (`alumina (bin "parser_bench") generated 14 warnings`).
+The `-W` flags must follow `--` or cargo errors. The spec carries the same blanket "`unwrap()` and
 `expect()` are excluded from production paths" claim (spec §Architecture →
 Failure Handling); that wording is the spec's, flagged to the mission owner, and
 not edited here.

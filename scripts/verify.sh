@@ -810,6 +810,44 @@ cfg_test_parentage_gate() {
     echo "CFG-TEST-PARENTAGE-OK: every admitted src/*/tests.rs and src/*/dot_tests.rs is #[cfg(test)]-declared by its parent"
 }
 
+# Canonical-spec digest control (gate-surface-truth M2, canonical-digest-20261028).
+# The governing spec must be pinned, not asserted: AGENTS.md is the single
+# doctrine surface that carries the pin (the spec file is never edited), so the
+# gate READS the pin out of AGENTS.md and fails closed if it cannot parse it
+# (CANONICAL-DIGEST-PIN-MISSING) — exactly one full 64-hex token on the line
+# marked "sha256". The actual digest is computed by the single authoritative
+# hasher (sha256_digest: hasher exit captured, empty digest rejected), so a
+# broken or missing hasher can never read as PASS. On mismatch BOTH digests and
+# the re-pin protocol are printed: a control that never recomputes is prose, and
+# the message must state its own maintenance.
+canonical_digest_gate() {
+    cg_prc=0
+    pins="$(sed -n 's/.*sha256[[:space:]]\{1,\}[^0-9a-f]*\([0-9a-f]\{64\}\).*/\1/p' AGENTS.md 2>&1)" || cg_prc=$?
+    [ "$cg_prc" -eq 0 ] || {
+        echo "CANONICAL-DIGEST-PIN-MISSING: AGENTS.md pin extraction failed (producer exit $cg_prc, not PASS)" >&2
+        exit 1
+    }
+    npin=0
+    for _p in $pins; do npin=$((npin + 1)); done
+    [ "$npin" -eq 1 ] || {
+        echo "CANONICAL-DIGEST-PIN-MISSING: expected exactly one 64-hex sha256 pin in AGENTS.md, found ${npin}; re-pin AGENTS.md with the spec's real digest in the same commit as the authorised spec change (not PASS)" >&2
+        exit 1
+    }
+    pin=$pins
+    actual="$(sha256_digest file "docs/alumina-proxy.md")" || {
+        echo "CANONICAL-DIGEST-GATE-FAIL: spec digest could not be computed (hasher failure, not PASS)" >&2
+        exit 1
+    }
+    if [ "$pin" != "$actual" ]; then
+        echo "CANONICAL-DIGEST-FAIL: docs/alumina-proxy.md sha256 does not match the AGENTS.md pin" >&2
+        echo "  expected: $pin  (pin in AGENTS.md)" >&2
+        echo "  actual:   $actual  (docs/alumina-proxy.md)" >&2
+        echo "  update protocol: an authorised spec change re-pins AGENTS.md in the same commit" >&2
+        exit 1
+    fi
+    echo "CANONICAL-DIGEST-OK: docs/alumina-proxy.md sha256 matches the AGENTS.md pin ($pin)"
+}
+
 # One authoritative SHA256 operation for every identity input. Selection:
 # sha256sum preferred, else shasum -a 256 (a SHA256 field must carry real
 # SHA256, never shasum's default SHA1). The producer exit and a non-empty
@@ -1237,6 +1275,7 @@ boundary_phase1_fast() {
     intended_coverage_gate
     cfg_test_parentage_gate
     unsafe_surface_gate
+    canonical_digest_gate
     git diff --check
     echo "GIT-DIFF-CHECK-OK"
     audit_deny_owner
@@ -1527,6 +1566,6 @@ case "$TIER/$SCOPE" in
     boundary/phase1) boundary_phase1; boundary_phase1_markers; exit 1 ;;
     e2e/relay) e2e_relay ;;
     e2e/shutdown) e2e_shutdown ;;
-    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate ;;
+    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate ;;
     *) usage ;;
 esac
