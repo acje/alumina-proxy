@@ -419,9 +419,18 @@ never proof of a lossless exit window.
   at the proxy's current emission; do not expect past records, and do not
   back-fill from the proxy.
 
-### Failure drill (stall the collector) — status: SPECIFICATION ONLY, not yet executed
+### Failure drill (stall the collector) — status: proxy-owned portion executed on the exact candidate; deployment-owned collector-restore portion BLOCKED/Unknown
 
-Execution is D4's scope (bead `alumina-cdwui.13`) on the exact candidate. Prerequisites for the executor:
+Execution is D4's scope (bead `alumina-cdwui.13`) on the exact candidate. The **proxy-owned**
+portion — pipe stdout to a non-reading consumer, generate notify-path activity, observe the
+whole-record drop counter (a documented lower bound) and continued denial while stalled — was
+executed by the repository's gate harness (`stdout_stall` / `monitor_stdout`, `mid full` via
+`boundary phase1`, witness-off/on); result and raw exits: bead `alumina-cdwui.13`. The
+**deployment-owned** collector-stall-and-restore portion was **not executed**: no external
+collector process, alerting stack, or liveness-probe infrastructure exists for this repository
+(missing prerequisite), so it is recorded **BLOCKED/Unknown**, never PASS and never an external
+alert-delivery claim. `boundary phase1` never executes E2E and nothing here is production
+qualification. Prerequisites for an executor of the full drill:
 
 1. A running proxy with at least one `notify` action reachable on a fixed golden
    path; a collector process that reads proxy stdout and appends to a durable
