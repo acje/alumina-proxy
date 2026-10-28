@@ -1589,12 +1589,12 @@ fn g1_r4_wrapped_generation_drops_pre_wrap_token_and_dispatches_own() {
 /// the connection's own token fail-closes as a stale drop: never a false live
 /// dispatch, never a wrap into the local-id range, and the queued head is never
 /// read. Ground truth recorded (no production change here): `shifted_generation`
-/// (src/serving.rs:3317-3321) WRAPS the generation into its low 53 bits rather
-/// than saturating to the all-ones field its doc-comment (3307-3312) and the
-/// design row claim; the fail-closed verdict still holds because the wrapped
-/// decoded generation never equals the live ceiling generation. Executes the
-/// real encode -> `dispatch_decode` -> slot-state path (matrix alumina-cdwui.4
-/// §2 G1.E1, EXHAUST — reachable and falsifiable).
+/// (src/serving.rs:3317-3321) WRAPS the generation into its low 53 bits — the
+/// doc-comment (3307-3312) previously claimed all-ones saturation; bc64328
+/// corrected it to truncation — and the fail-closed verdict still holds because
+/// the wrapped decoded generation never equals the live ceiling generation.
+/// Executes the real encode -> `dispatch_decode` -> slot-state path (matrix
+/// alumina-cdwui.4 §2 G1.E1, EXHAUST — reachable and falsifiable).
 fn g1_e1_token_ceiling_saturation_fails_closed_never_progresses() {
     const CEILING: u64 = 1u64 << 53;
     const LOW53: u64 = (1u64 << 53) - 1; // the packed generation's wrapped field ceiling
@@ -1634,10 +1634,10 @@ fn g1_e1_token_ceiling_saturation_fails_closed_never_progresses() {
         // Ground truth on the actual packing (recorded, not invented): the
         // packed generation wraps to its low 53 bits — checked_shl only guards
         // the shift amount (11 < 64), it does not detect result overflow — so a
-        // degenerate generation yields a low-bit generation field, not the
-        // all-ones field the doc-comment at serving.rs:3307-3312 and design
-        // row G1.E1 claim. The fail-closed verdict below is unchanged because
-        // the wrapped decoded generation can never equal this live ceiling.
+        // degenerate generation yields a low-bit generation field, never the
+        // all-ones field the earlier doc-comment (serving.rs:3307-3312) claimed
+        // (corrected to truncation at bc64328); the fail-closed verdict below is
+        // unchanged because the wrapped decoded generation cannot equal this live ceiling.
         assert_eq!(
             decoded,
             live & LOW53,
