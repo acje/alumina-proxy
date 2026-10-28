@@ -358,26 +358,33 @@ rejection/tunnel I/O/DNS/deadlines; one warn per rejection and per
 early-activity close; stdout only. **Shutdown** (spec §Lifecycle → Shutdown;
 §Architecture → Runtime surface): SIGTERM only →
 stop accepting, 8 s grace, drain, exit without deallocating; `panic="abort"`
-is fail-stop, not proof of panic freedom — **`unwrap()` is excluded from
-production paths; `expect()` is permitted only where an invariant argument makes
-the call infallible**, and every production `expect()` carries that reason
-string (the convention), e.g. `src/client_hello.rs:161` ("parser-bounded:
-ciphers <= MAX_CIPHERS and extensions <= MAX_EXTENSIONS"),
-`src/config.rs:175` ("FixedHostname is ASCII"), `src/dns.rs:158` ("candidate
-count bounded by MAX_ADDRESSES"). Measured against non-`#[cfg(test)]` code, the
-proxy crate holds production `expect()` calls (all with invariant reason strings)
-and zero production-line `unwrap()` calls — all `.unwrap()` instances are
-confined to `#[cfg(test)]` modules — where the counts are reproduced by command,
-never hand-counted: `cargo clippy --lib -- -W clippy::expect_used
--W clippy::unwrap_used` reports 40 `expect()`-use warnings and 0
-`unwrap()`-use warnings (`alumina (lib) generated 40 warnings`); the dev-only
-`src/bin/parser_bench.rs` contributes its 14 `expect()`s to
-`cargo clippy --bin parser_bench -- -W clippy::expect_used
--W clippy::unwrap_used` (`alumina (bin "parser_bench") generated 14 warnings`).
-The `-W` flags must follow `--` or cargo errors. The spec carries the same blanket "`unwrap()` and
-`expect()` are excluded from production paths" claim (spec §Architecture →
-Failure Handling); that wording is the spec's, flagged to the mission owner, and
-not edited here.
+is fail-stop, not proof of panic freedom. The convention is enforced by the
+deny, not counted by hand: **`unwrap()` is excluded from production paths,
+and `expect()` is permitted only where the site carries a stated invariant
+argument that makes the call infallible, enforced by lint denial with a
+per-site expectation**, each such site carrying that reason string, e.g.
+`ClientHello::ja4` (the parser bounds ciphers to `MAX_CIPHERS` and extensions
+to `MAX_EXTENSIONS`, so its capacity checks cannot fire),
+`FixedHostname::as_str` (construction normalizes to ASCII, so the stored bytes
+are always valid UTF-8), and `BindingList::from_slice` (the candidate count is
+bounded by `MAX_ADDRESSES`). The control is `#![deny(clippy::unwrap_used,
+clippy::expect_used)]` on the production crate roots (`src/lib.rs`,
+`src/main.rs`): `cargo clippy --lib -- -D clippy::expect_used -D
+clippy::unwrap_used` exiting 0 is the citation of compliance; a test-only
+carve-out (`#![cfg_attr(test, allow(...))]`) keeps unit-test targets
+compiling. The warning count is deliberately not the control (it already
+rotted once, from 30 to 40); the deny is. The dev-only
+`src/bin/parser_bench.rs` is its own crate root with no deny
+and still reports 14 `expect()`-use warnings under `cargo clippy --bin
+parser_bench -- -W clippy::expect_used -W clippy::unwrap_used`. This scopes
+`expect()`/`unwrap()` only; it is not a panic-freedom claim — `panic="abort"`
+is fail-stop and other panic sources remain. Known residual: an item-level
+`#[expect]` has the scope of the whole item, wider than the single site it
+justifies (`#[expect]` has no stable statement/expression placement on this
+toolchain — E0658), so the control guarantees a disappearing `expect()` is
+reported (`unfulfilled_lint_expectations`) and no unjustified item slips in,
+but not that a second `expect()` added inside an already-excepted function is
+individually argued.
 
 ## 8. Deployment and trust boundary
 

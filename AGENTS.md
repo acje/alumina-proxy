@@ -35,7 +35,7 @@ Every change must preserve:
 ## Rules
 
 - `docs/alumina-proxy.md` is the sole, byte-canonical governing
-  specification (sha256 `e6e6f3becab12f1605bdd6add04cd7ccd05b7a5050cc06163e712e094469d14d`). Never edit it; documents only
+  specification (sha256 `e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401`). Never edit it; documents only
   restate or cite it.
 - Native verification entry point, QA run and prerequisite ownership are
   `docs/qa-package/README.md`; the verify command set is in
