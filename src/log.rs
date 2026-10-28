@@ -4193,7 +4193,11 @@ mod tests {
             subject.drain_sink();
             turns += 1;
         }
-        assert_eq!(subject.len(), 0, "{label}: the queue drains after the stall");
+        assert_eq!(
+            subject.len(),
+            0,
+            "{label}: the queue drains after the stall"
+        );
         assert!(
             !subject.sink.blocked,
             "{label}: the successful resume clears the blocked latch"
@@ -4207,7 +4211,10 @@ mod tests {
 
     #[test]
     fn logging_writev_interrupted_keeps_cursor_and_stream_identical() {
-        assert_scripted_stall_preserves_cursor_and_stream(ScriptedFirst::Interrupted, "Interrupted");
+        assert_scripted_stall_preserves_cursor_and_stream(
+            ScriptedFirst::Interrupted,
+            "Interrupted",
+        );
     }
 
     #[test]
