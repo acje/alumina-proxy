@@ -1872,7 +1872,8 @@ mod tests {
     /// the record instead of merging it into a purported one-hour report: a
     /// rotation observed 2.5 windows after the window opened spans both full
     /// intervals (`window_end = start + 2*W`, `duration = 2*W`) and sets
-    /// `skipped=1`, the exact shape D1/D2 build on (docs/alumina-proxy.md:81).
+    /// `skipped=1`, the exact shape D1/D2 build on
+    /// (docs/alumina-proxy.md:122-124).
     fn delayed_window_summary_reports_skip_count_instead_of_one_hour_merger() {
         let mut storage = booted(1, 0);
         let origin = Instant::now();
@@ -1898,6 +1899,33 @@ mod tests {
                 && text.contains("duration=7200")
                 && text.contains("skipped=1"),
             "the record must span both intervals and mark the skipped window: {text}"
+        );
+        // Pin the fresh window's start to the last rotation boundary, never the
+        // observation time: a mutation that anchored the next window at `now`
+        // (10000) would pass the closed-record checks above while silently
+        // dropping every byte in [8200,10000) from this report onward.
+        // Activity inside the skipped-over gap must land in the next window.
+        storage
+            .incident_report_mut()
+            .note_tunnel_bytes(0, 0, 1, 60, 9000);
+        storage
+            .incident_report_mut()
+            .note_tunnel_bytes(0, 0, 1, 5, 9000);
+        let next = storage
+            .incident_report_mut()
+            .close_window(0, 9600)
+            .expect("close window 2");
+        assert_eq!(
+            next.window_start, 8200,
+            "fresh window opens at the rotation boundary, never at now"
+        );
+        assert_eq!(
+            next.activity.tunnels.value, 1,
+            "two gap writes on one generation are one tunnel"
+        );
+        assert_eq!(
+            next.activity.bytes.value, 65,
+            "gap bytes reach the report instead of being dropped"
         );
     }
 
@@ -1943,6 +1971,22 @@ mod tests {
             storage.logs().dropped(),
             before + 1,
             "enqueue failure is dropped whole and counted exactly once"
+        );
+        // Pin record identity, not just the counter: a reserved displacement
+        // path would also bump `dropped` by one yet COMMIT the summary into the
+        // ring (log.rs `displace_reserved`). The newest slot must therefore
+        // still hold a fill-time startup_warning, proving the closed-window
+        // summary was dropped whole and never entered the ring.
+        let newest = storage
+            .logs()
+            .last_record_bytes()
+            .expect("ring holds a record after fill");
+        let newest_text = String::from_utf8_lossy(newest);
+        assert!(
+            newest_text.contains("kind=startup_warning")
+                && !newest_text.contains("kind=incident_summary"),
+            "the closed-window summary must be dropped whole, never displaced \
+             into the ring: {newest_text}"
         );
         // The rotation reset the window counters regardless of the enqueue
         // outcome: new activity lands in the fresh window starting at 4600 with

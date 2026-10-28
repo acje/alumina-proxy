@@ -560,15 +560,15 @@ mod tests {
     }
 
     #[test]
-    /// G4.R3 — pre-wrap generation values (EXHAUST): the maximal constructible
-    /// generations are recorded exactly as `(window_start, slot_gen)` marker
-    /// pairs, and a rotation re-keys the marker so an old pre-wrap marker can
-    /// never become current again. The full 2^64 cycle that would return a slot
-    /// to an earlier generation is unreachable by construction (the fixed
-    /// profile adds no production hook) and stays BLOCKED/Unknown per decision
-    /// bead alumina-v52be; no wrap policy is invented here
-    /// (docs/architecture.md:491-492).
-    fn pre_wrap_generation_markers_never_match_an_old_marker() {
+    /// G4.R3 — one rotation at a pre-wrap generation: the maximal constructible
+    /// `slot_gen` is recorded exactly as a `(window_start, slot_gen)` marker,
+    /// and a window rotation re-keys the marker to the new window so the
+    /// pre-wrap pair can never become current again for the reused slot. The
+    /// full 2^64 cycle that would return a slot to an earlier generation is
+    /// unreachable by construction (the fixed profile adds no production hook)
+    /// and stays BLOCKED/Unknown per decision bead alumina-v52be; no wrap
+    /// policy is invented here (docs/architecture.md:491-492).
+    fn pre_wrap_generation_marker_is_rekeyed_on_rotation() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
         // Near-wrap generations: each distinct slot_gen is its own marker and
@@ -594,29 +594,42 @@ mod tests {
     }
 
     #[test]
-    /// G4.R3 — the marker records extreme generation values exactly: the
-    /// near-wrap boundary `u64::MAX` and a fresh slot's zero each carry their
-    /// own distinct `(window_start, slot_gen)` pair and never alias each other
-    /// (docs/architecture.md:491-492 records the width-bounded residue as an
-    /// artifact, not a proof).
+    /// G4.R3 — the marker records extreme generation values exactly on the
+    /// same slot: a wrapped-to-zero generation is a distinct `(window_start,
+    /// slot_gen)` pair from the pre-wrap `u64::MAX` marker and is never
+    /// deduped against it, so all three generations count as separate tunnels
+    /// in one window (docs/architecture.md:491-492 records the width-bounded
+    /// residue as an artifact, not a proof).
     fn marker_records_extreme_generation_values_exactly() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
+        // Three generations on the SAME slot: near-wrap, wrap boundary, and a
+        // wrap-equivalent zero. Each overwrites the marker; never dedup. The
+        // marker is asserted between calls so each generation's exact value
+        // is the witness, not the final overwrite.
         rep.note_tunnel_bytes(0, 0, u64::MAX - 1, 100, 1010);
+        assert_eq!(
+            rep.slot_markers[0],
+            Some((1000, u64::MAX - 1)),
+            "pre-wrap generation recorded exactly"
+        );
         rep.note_tunnel_bytes(0, 0, u64::MAX, 50, 1020);
-        rep.note_tunnel_bytes(0, 1, 0, 5, 1030);
         assert_eq!(
             rep.slot_markers[0],
             Some((1000, u64::MAX)),
-            "near-wrap generation recorded exactly"
+            "near-wrap generation overwrites the marker"
         );
+        rep.note_tunnel_bytes(0, 0, 0, 5, 1030);
         assert_eq!(
-            rep.slot_markers[1],
+            rep.slot_markers[0],
             Some((1000, 0)),
-            "zero generation is its own marker"
+            "a wrapped-to-zero generation is a distinct marker on the same slot"
         );
         let closed = rep.close_window(0, 1100).expect("closed");
-        assert_eq!(closed.activity.tunnels.value, 3);
+        assert_eq!(
+            closed.activity.tunnels.value, 3,
+            "three same-slot generations count as three distinct tunnels, never deduped"
+        );
         assert_eq!(closed.activity.bytes.value, 155);
     }
 
@@ -693,9 +706,10 @@ mod tests {
 
     #[test]
     /// G4 — window counters saturate with the overflow flag instead of wrapping
-    /// (docs/alumina-proxy.md:81): a byte write past `u64::MAX` pins the closed
-    /// window's byte count at the maximum and latches `overflow`, without
-    /// disturbing the exact-once tunnel count.
+    /// (docs/alumina-proxy.md:340 logging contract): a byte write past
+    /// `u64::MAX` pins the closed window's byte count at the maximum and
+    /// latches `overflow`, without disturbing the exact-once tunnel count, and
+    /// the next window's fresh counters clear the flag.
     fn window_bytes_saturate_and_latch_overflow_instead_of_wrapping() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
@@ -717,6 +731,13 @@ mod tests {
             closed.activity.tunnels.value, 1,
             "saturation does not disturb exact-once tunnel counting"
         );
+        // The latch is per-window: a fresh incident window's counters reset,
+        // so it closes without the previous window's overflow flag.
+        rep.note_incident_open(0, 2000, [None, None]);
+        rep.note_tunnel_bytes(0, 1, 2, 10, 2010);
+        let next = rep.close_window(0, 2100).expect("next window");
+        assert!(!next.overflow, "overflow clearance on the next window");
+        assert_eq!(next.activity.bytes.value, 10);
     }
 
     #[test]
