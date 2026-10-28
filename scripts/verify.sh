@@ -683,12 +683,15 @@ docslink_check() {
 
 unsafe_surface_gate() {
     # F3 (08-tooling-ci-scripts): file-level unsafe-surface confinement. The
-    # `unsafe` keyword is allowed ONLY in src/alloc.rs, src/log.rs, and files
-    # under tests/. Any other *.rs file containing the keyword fails closed,
-    # naming the offender(s). Read-only host-side check; no builds. rg is
-    # preferred; a grep -R fallback covers hosts without rg. target/ and .git
-    # are excluded (gitignored for rg, explicit for grep); the grep fallback
-    # also excludes .ooda/ so gitignored scratch never trips the gate.
+    # `unsafe` keyword is allowed ONLY in the production surface — src/alloc.rs,
+    # src/log.rs, and files under tests/ — and in #[cfg(test)] unit-test modules
+    # under src/ (src/*/tests.rs, src/*/dot_tests.rs), whose test-only `unsafe`
+    # never compiles into the production binary. Any other *.rs file containing
+    # the keyword fails closed, naming the offender(s). Read-only host-side
+    # check; no builds. rg is preferred; a grep -R fallback covers hosts without
+    # rg. target/ and .git are excluded (gitignored for rg, explicit for grep);
+    # the grep fallback also excludes .ooda/ so gitignored scratch never trips
+    # the gate.
     # Producer exit is captured (cf. sha256_digest): rg/grep exit 1 = no match
     # (clean); any exit >= 2 is a tooling error and fails closed, never passing
     # on an empty offender list.
@@ -707,15 +710,15 @@ unsafe_surface_gate() {
     bad=""
     for f in $offenders; do
         case "$f" in
-            src/alloc.rs|src/log.rs|tests/*) ;;
+            src/alloc.rs|src/log.rs|tests/*|src/*/tests.rs|src/*/dot_tests.rs) ;;
             *) bad="$bad $f" ;;
         esac
     done
     if [ -n "$bad" ]; then
-        echo "UNSAFE-SURFACE-FAIL: 'unsafe' outside allowlist (src/alloc.rs, src/log.rs, tests/):$bad" >&2
+        echo "UNSAFE-SURFACE-FAIL: 'unsafe' outside allowlist (prod: src/alloc.rs, src/log.rs, tests/*; cfg(test) unit modules: src/*/tests.rs, src/*/dot_tests.rs):$bad" >&2
         exit 1
     fi
-    echo "UNSAFE-SURFACE-OK: unsafe confined to src/alloc.rs, src/log.rs, tests/"
+    echo "UNSAFE-SURFACE-OK: unsafe confined to prod surface src/alloc.rs, src/log.rs, tests/* and cfg(test) unit modules src/*/tests.rs, src/*/dot_tests.rs"
 }
 
 # One authoritative SHA256 operation for every identity input. Selection:

@@ -69,7 +69,11 @@ Verification is tiered; each tier backs a different claim:
     cheap host gates — docs link gate, unsafe-surface gate, `git diff
     --check`, audit/deny — and an identity AFTER/compare. No Linux MID, no
     fixtures. Fails fast so a cheap-gate failure aborts before the ~90-min
-    compile-dominated dispatch.
+    compile-dominated dispatch. The unsafe-surface gate confines the `unsafe`
+    keyword to the production surface (`src/alloc.rs`, `src/log.rs`,
+    `tests/*`) plus `#[cfg(test)]` unit-test modules under `src/`
+    (`src/*/tests.rs`, `src/*/dot_tests.rs` — test-only, never compiled into
+    the production binary); production confinement is unchanged.
   - `sh scripts/verify.sh boundary phase1-slow`: reads the scope marker
     (missing => full, fail-safe). On docs-only it emits an explicit
     `PHASE1-SLOW-SKIPPED-BY-DESIGN` and skips the Linux MID; on full it runs
