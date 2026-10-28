@@ -1868,6 +1868,111 @@ mod tests {
     }
 
     #[test]
+    /// G4 — delayed/skipped reporting windows identify the skipped interval in
+    /// the record instead of merging it into a purported one-hour report: a
+    /// rotation observed 2.5 windows after the window opened spans both full
+    /// intervals (window_end = start + 2*W, duration = 2*W) and sets
+    /// `skipped=1`, the exact shape D1/D2 build on (docs/alumina-proxy.md:81).
+    fn delayed_window_summary_reports_skip_count_instead_of_one_hour_merger() {
+        let mut storage = booted(1, 0);
+        let origin = Instant::now();
+        storage.mount_clock(origin, 1000);
+        // Open the A incident and its reporting window at secs 1000.
+        storage
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .expect("open A incident");
+        storage.report_incident_if_due(origin);
+        // No report turn until 2.5 windows later: two full windows elapsed with
+        // the second never observed until now.
+        storage.report_incident_if_due(origin + Duration::from_secs(2 * 3600 + 1800));
+        let record = storage
+            .logs()
+            .last_record_bytes()
+            .expect("delayed summary record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=incident_summary")
+                && text.contains("window_start=1000")
+                && text.contains("window_end=8200")
+                && text.contains("duration=7200")
+                && text.contains("skipped=1"),
+            "the record must span both intervals and mark the skipped window: {text}"
+        );
+    }
+
+    #[test]
+    /// G4 — enqueue failure: a full log ring drops the closed-window summary
+    /// exactly once (drop accounting increments) but the rotation already reset
+    /// the window counters, so the next window starts fresh and later activity
+    /// is not merged into the dropped window. The incident-report pass never
+    /// changes authorization or retry scheduling: the schedule still holds the
+    /// open A incident after the failed enqueue (docs/alumina-proxy.md:193).
+    fn enqueue_failure_drops_summary_resets_window_and_counts_drop() {
+        use crate::schedule::TypeIncident;
+        let mut storage = booted(1, 0);
+        let origin = Instant::now();
+        storage.mount_clock(origin, 1000);
+        // Open the A incident and its reporting window at secs 1000.
+        storage
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .expect("open A incident");
+        storage.report_incident_if_due(origin);
+        // Activity in window 1: one exchange failure, one forwarded tunnel byte.
+        storage
+            .incident_report_mut()
+            .note_exchange_failure(0, Family::A, 1010, "timeout");
+        storage
+            .incident_report_mut()
+            .note_tunnel_bytes(0, 0, 1, 50, 1020);
+        // Fill the log ring to capacity: the closed-window summary cannot fit.
+        {
+            let ring = storage.logs_mut();
+            for _ in 0..crate::log::QUEUE_SLOTS {
+                ring.startup_warning(1, "sub.example.org", Family::A);
+            }
+        }
+        assert!(storage.logs().is_full(), "ring must be at capacity");
+        let before = storage.logs().dropped();
+        // Rotate at the boundary: the window closes and its counters reset, then
+        // the summary enqueue fails on the full ring and is dropped exactly once
+        // (drop accounting increments by one, never more).
+        storage.report_incident_if_due(origin + Duration::from_secs(3600));
+        assert_eq!(
+            storage.logs().dropped(),
+            before + 1,
+            "enqueue failure is dropped whole and counted exactly once"
+        );
+        // The rotation reset the window counters regardless of the enqueue
+        // outcome: new activity lands in the fresh window starting at 4600 with
+        // none of window-1's bytes or failures carried forward.
+        storage
+            .incident_report_mut()
+            .note_tunnel_bytes(0, 1, 2, 100, 4700);
+        let partial = storage
+            .incident_report_mut()
+            .close_window(0, 4800)
+            .expect("new-window partial summary");
+        assert_eq!(partial.window_start, 1000 + 3600);
+        assert_eq!(partial.activity.tunnels.value, 1, "only the new tunnel");
+        assert_eq!(partial.activity.bytes.value, 100, "window-1 bytes reset");
+        assert_eq!(
+            partial.per_type[0].failures.value, 0,
+            "window-1 failures reset"
+        );
+        // The incident-report pass never changes authorization or retry
+        // scheduling: the A incident stays open and keeps being reported.
+        assert!(
+            matches!(
+                storage.schedules().incident(0, Family::A),
+                Some(TypeIncident::Open { .. })
+            ),
+            "the report pass must not close or reschedule the incident"
+        );
+    }
+
+    #[test]
     fn boundary_recovery_coincidence_reports_window_incident_activity() {
         let mut storage = booted(1, 0);
         let origin = Instant::now();
