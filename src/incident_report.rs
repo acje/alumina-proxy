@@ -478,8 +478,8 @@ mod tests {
 
     #[test]
     /// G4.R1 — stale-marker / delayed-attribution rejection: a live tunnel
-    /// retains its (window_start, slot_gen) marker across a window rotation and
-    /// is counted exactly once per applicable window; a stale marker from a
+    /// retains its `(window_start, slot_gen)` marker across a window rotation
+    /// and is counted exactly once per applicable window; a stale marker from a
     /// closed window never pre-populates the current window's tunnel count, and
     /// bytes landing one second past a boundary belong to the new window, not
     /// the closed one (docs/architecture.md:489).
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     /// G4.R2 — same-window dedup: repeated `note_tunnel_bytes` for the same
-    /// (slot, slot_gen) pair keep one marker and one tunnel count while bytes
+    /// `(slot, slot_gen)` pair keep one marker and one tunnel count while bytes
     /// sum exactly; a generation change on the same slot is a fresh tunnel and
     /// resets the marker (docs/architecture.md:489).
     fn marker_dedups_same_window_and_reuse_resets_it() {
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     /// G4.R3 — pre-wrap generation values (EXHAUST): the maximal constructible
-    /// generations are recorded exactly as (window_start, slot_gen) marker
+    /// generations are recorded exactly as `(window_start, slot_gen)` marker
     /// pairs, and a rotation re-keys the marker so an old pre-wrap marker can
     /// never become current again. The full 2^64 cycle that would return a slot
     /// to an earlier generation is unreachable by construction (the fixed
@@ -595,8 +595,8 @@ mod tests {
 
     #[test]
     /// G4.R3 — the marker records extreme generation values exactly: the
-    /// near-wrap boundary u64::MAX and a fresh slot's zero each carry their own
-    /// distinct (window_start, slot_gen) pair and never alias each other
+    /// near-wrap boundary `u64::MAX` and a fresh slot's zero each carry their
+    /// own distinct `(window_start, slot_gen)` pair and never alias each other
     /// (docs/architecture.md:491-492 records the width-bounded residue as an
     /// artifact, not a proof).
     fn marker_records_extreme_generation_values_exactly() {
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     /// G4 — window counters saturate with the overflow flag instead of wrapping
-    /// (docs/alumina-proxy.md:81): a byte write past u64::MAX pins the closed
+    /// (docs/alumina-proxy.md:81): a byte write past `u64::MAX` pins the closed
     /// window's byte count at the maximum and latches `overflow`, without
     /// disturbing the exact-once tunnel count.
     fn window_bytes_saturate_and_latch_overflow_instead_of_wrapping() {

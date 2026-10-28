@@ -1871,7 +1871,7 @@ mod tests {
     /// G4 — delayed/skipped reporting windows identify the skipped interval in
     /// the record instead of merging it into a purported one-hour report: a
     /// rotation observed 2.5 windows after the window opened spans both full
-    /// intervals (window_end = start + 2*W, duration = 2*W) and sets
+    /// intervals (`window_end = start + 2*W`, `duration = 2*W`) and sets
     /// `skipped=1`, the exact shape D1/D2 build on (docs/alumina-proxy.md:81).
     fn delayed_window_summary_reports_skip_count_instead_of_one_hour_merger() {
         let mut storage = booted(1, 0);
