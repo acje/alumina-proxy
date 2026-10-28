@@ -531,6 +531,9 @@ pub enum ConfigError {
         key: String,
         value: String,
     },
+    EarlyDataBlockScopeInvalid {
+        scope: String,
+    },
     AllScopeGateOutOfRange {
         key: String,
         value: i64,
@@ -646,6 +649,10 @@ impl fmt::Display for ConfigError {
             ConfigError::AnyIllegalScopeInvalid { key, value } => write!(
                 f,
                 "config {key} value {value:?} invalid: any_illegal scope is connection or all only"
+            ),
+            ConfigError::EarlyDataBlockScopeInvalid { scope } => write!(
+                f,
+                "config early_data action \"block\" scope {scope:?} invalid: Block scope is connection only"
             ),
             ConfigError::AllScopeGateOutOfRange { key, value } => {
                 write!(
@@ -1069,6 +1076,10 @@ fn parse_cname_bailiwick(table: &toml::Table, fqdn_key: &str) -> Result<Vec<Stri
 /// Parses one per-FQDN control value (`early_data` or `ja4`): either the bare
 /// `"ignore"` opt-out shorthand or a `{ action, scope }` table with `action`
 /// in `notify|block` (tarpit reserved) and `scope` in `connection|fqdn|all`.
+/// For `early_data` the only legal `block` scope is `connection`; `fqdn` and
+/// `all` block scopes are invalid configuration (docs F-02 close), so an
+/// upstream-sourced early-data signal cannot select a per-domain or
+/// process-wide latch. `ja4` keeps the full scope grammar unchanged.
 fn parse_per_fqdn_control(
     value: &toml::Value,
     fqdn_key: &str,
@@ -1092,10 +1103,16 @@ fn parse_per_fqdn_control(
             }
             let action = require_string(table, "action")
                 .map_err(|err| prefix_group_error(&prefix, "action", err))?;
-            let scope = require_string(table, "scope")
+            let scope_text = require_string(table, "scope")
                 .map_err(|err| prefix_group_error(&prefix, "scope", err))?;
             let kind = parse_action_kind(&action, &format!("{prefix}.action"))?;
-            let scope = parse_per_fqdn_scope(&scope, &format!("{prefix}.scope"))?;
+            let scope = parse_per_fqdn_scope(&scope_text, &format!("{prefix}.scope"))?;
+            if control_key == "early_data"
+                && kind == ActionKind::Block
+                && scope != Scope::Connection
+            {
+                return Err(ConfigError::EarlyDataBlockScopeInvalid { scope: scope_text });
+            }
             Ok(PerFqdnControl::control(kind, scope))
         }
         _ => Err(ConfigError::WrongType(format!(
@@ -1420,7 +1437,7 @@ mod enforcement_config_tests {
             ),
             entry(
                 "other.example.org:443",
-                "{ action = \"block\", scope = \"all\" }",
+                "{ action = \"block\", scope = \"connection\" }",
                 "\"ignore\""
             ),
         ));
@@ -1446,7 +1463,10 @@ mod enforcement_config_tests {
         let first = control.ordinal(0).expect("ordinal");
         assert_eq!(
             control.early_data(first),
-            Some(PerFqdnControl::control(ActionKind::Block, Scope::All))
+            Some(PerFqdnControl::control(
+                ActionKind::Block,
+                Scope::Connection
+            ))
         );
         assert_eq!(control.ja4(first), Some(PerFqdnControl::Ignore));
         let second = control.ordinal(1).expect("ordinal");
@@ -1821,20 +1841,65 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn accepts_per_fqdn_fqdn_scope_for_block() {
+    fn rejects_early_data_block_fqdn_scope() {
         let doc = group(&entry_table(
             "a.example:443",
             "block",
             "fqdn",
+            "notify",
+            "connection",
+        ));
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::EarlyDataBlockScopeInvalid { scope } if scope == "fqdn"),
+            "expected EarlyDataBlockScopeInvalid(fqdn), got {err:?}"
+        );
+        assert_eq!(
+            err.exit_status(),
+            78,
+            "invalid early_data block scope must exit 78"
+        );
+    }
+
+    #[test]
+    fn rejects_early_data_block_all_scope() {
+        let doc = group(&entry_table(
+            "a.example:443",
+            "block",
+            "all",
+            "notify",
+            "connection",
+        ));
+        let err = parse_config_document(&doc).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::EarlyDataBlockScopeInvalid { scope } if scope == "all"),
+            "expected EarlyDataBlockScopeInvalid(all), got {err:?}"
+        );
+        assert_eq!(
+            err.exit_status(),
+            78,
+            "invalid early_data block scope must exit 78"
+        );
+    }
+
+    #[test]
+    fn ja4_keeps_fqdn_block_scope_for_block() {
+        let doc = group(&entry_table(
+            "a.example:443",
+            "block",
+            "connection",
             "block",
             "fqdn",
         ));
-        let cfg = parse_config_document(&doc).expect("fqdn scope valid per-FQDN");
+        let cfg = parse_config_document(&doc).expect("ja4 fqdn block scope valid per-FQDN");
         let control = cfg.control();
         let ordinal = control.ordinal(0).expect("ordinal");
         assert_eq!(
             control.early_data(ordinal),
-            Some(PerFqdnControl::control(ActionKind::Block, Scope::Domain))
+            Some(PerFqdnControl::control(
+                ActionKind::Block,
+                Scope::Connection
+            ))
         );
         assert_eq!(
             control.ja4(ordinal),
@@ -1843,19 +1908,26 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn accepts_per_fqdn_all_scope_for_block() {
+    fn ja4_keeps_all_block_scope_for_block() {
         let doc = group(&entry_table(
             "a.example:443",
             "block",
-            "all",
+            "connection",
             "block",
             "all",
         ));
-        let cfg = parse_config_document(&doc).expect("all scope valid per-FQDN");
+        let cfg = parse_config_document(&doc).expect("ja4 all block scope valid per-FQDN");
         let control = cfg.control();
         let ordinal = control.ordinal(0).expect("ordinal");
         assert_eq!(
             control.early_data(ordinal),
+            Some(PerFqdnControl::control(
+                ActionKind::Block,
+                Scope::Connection
+            ))
+        );
+        assert_eq!(
+            control.ja4(ordinal),
             Some(PerFqdnControl::control(ActionKind::Block, Scope::All))
         );
     }

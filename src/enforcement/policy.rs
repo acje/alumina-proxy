@@ -315,10 +315,10 @@ mod tests {
     }
 
     #[test]
-    fn early_data_selects_configured_block_domain() {
+    fn early_data_selects_configured_block_connection() {
         let t = table(
             any_controls(ActionKind::Block, Scope::All),
-            &[(ActionKind::Block, Scope::Domain)],
+            &[(ActionKind::Block, Scope::Connection)],
             &[(ActionKind::Notify, Scope::Connection)],
         );
         let mut latch = FirstSlot::new();
@@ -331,8 +331,9 @@ mod tests {
                 }
             ),
             Effect::Block {
-                scope: Scope::Domain
-            }
+                scope: Scope::Connection
+            },
+            "connection is the only early_data block scope reachable from valid config; fqdn/all block scopes are rejected at config parse (docs F-02 close), so early-data can no longer select a per-domain or process-wide latch"
         );
         assert_eq!(
             latch,
