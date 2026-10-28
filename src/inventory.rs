@@ -1,9 +1,9 @@
 use std::fmt;
 use std::mem::size_of;
 
-use crate::client_hello::MAX_CLIENT_HELLO;
+use crate::client_hello::ChInspector;
 use crate::config::CONFIG_DOC_LIMIT;
-use crate::connect::CONNECT_LIMIT;
+use crate::connect::ConnectParser;
 use crate::dns::ResponseWorkspace;
 use crate::startup_dns::{QUERY_BUF_LEN, RECV_BUF_LEN};
 
@@ -16,12 +16,23 @@ pub const TRAFFIC_STORAGE_BYTES: usize = TUNNEL_SLOTS * BUFFERS_PER_SLOT * BUFFE
 /// document (`config::load_config_document`'s `take` limit).
 pub const CONFIG_DOC_BUFFER_BYTES: usize = CONFIG_DOC_LIMIT + 1;
 
-/// The retained per-slot serving metadata: the fixed CONNECT parser head and
-/// the two 64 KiB `ClientHello` inspector buffers, allocated once per tunnel
-/// slot for the process lifetime and reused across connections.
-pub const SLOT_WORKSPACE_BYTES: usize = CONNECT_LIMIT + (MAX_CLIENT_HELLO * 2);
+/// The retained per-slot serving workspace: the fixed [`ConnectParser`] head
+/// and the [`ChInspector`] retained once per tunnel slot for the process
+/// lifetime and reused across connections. The inspector stores its parsed
+/// [`crate::client_hello::ClientHello`] by value — including the fixed
+/// cipher-suite, extension, ALPN, and signature-algorithm arrays that back the
+/// JA4 fingerprint — so `size_of` over the two retained types accounts for
+/// every retained parsing/inspection byte with no second hand-maintained
+/// factor. This is a lower
+/// bound on the slot's retained bytes: the per-slot serving workspace also
+/// carries gate, capture, cursors, and the approved hostname, which are
+/// deliberately not folded in here.
+pub const SLOT_WORKSPACE_BYTES: usize = size_of::<ConnectParser>() + size_of::<ChInspector>();
 
-/// The total retained serving-workspace bytes across all 512 slots.
+/// The total retained serving-workspace bytes across all 512 tunnel slots:
+/// every slot carries its own parser + inspector (incl. the retained JA4
+/// arrays), so the total is the per-slot type-derived figure times the fixed
+/// slot count.
 pub const SERVING_WORKSPACE_BYTES: usize = TUNNEL_SLOTS * SLOT_WORKSPACE_BYTES;
 
 /// The retained DNS transport named buffers (lower bound): the fixed 512-byte
@@ -164,10 +175,19 @@ impl BootInventory {
 
     /// The fixed named buffers the process is planned to retain for its
     /// lifetime (lower bound over named constants and `size_of` of the
-    /// retained DNS workspace). Constant-derived plan, not an observation:
-    /// the traffic store initializes at boot, the serving workspaces at
+    /// retained types). Constant-derived plan, not an observation and never a
+    /// measured RSS / process or kernel memory figure: the traffic store
+    /// initializes at boot, the serving workspaces at
     /// [`Preallocated::preallocate`](crate::runtime::Preallocated::preallocate),
     /// and the DNS buffers at the DNS transport's own construction.
+    ///
+    /// The bound sums three distinct categories — traffic storage, the
+    /// retained serving workspaces (per-slot parser + inspector, including the
+    /// retained JA4 arrays), and the DNS named buffers — and deliberately
+    /// excludes the remaining per-slot serving metadata (gate, capture,
+    /// cursors, approved hostname), transient scratch, the reserved log queue,
+    /// and any measured process/kernel memory, so it is a lower bound over
+    /// retained named buffers, never an RSS estimate.
     #[must_use]
     pub const fn named_fixed_buffer_bytes(&self) -> usize {
         self.traffic_storage_bytes
@@ -231,23 +251,41 @@ mod alloc_fault {
 #[cfg(test)]
 mod workspace_byte_constants {
     use super::*;
+    use crate::client_hello::{ChInspector, ClientHello};
+    use crate::connect::ConnectParser;
 
     #[test]
-    fn slot_workspace_matches_documented_136_kib() {
-        // G5-C06: pin the exact documented per-slot retained workspace figure
-        // (CONNECT parser head + two 64 KiB ClientHello buffers) so the
-        // arithmetic cannot drift from the design estimate.
-        assert_eq!(SLOT_WORKSPACE_BYTES, 136 * 1024);
+    fn slot_workspace_derives_from_retained_parser_and_inspector() {
+        let parser = size_of::<ConnectParser>();
+        let inspector = size_of::<ChInspector>();
+        let hello = size_of::<ClientHello>();
         assert_eq!(
             SLOT_WORKSPACE_BYTES,
-            CONNECT_LIMIT + (MAX_CLIENT_HELLO * 2),
-            "definition must stay in sync with its constituents"
+            parser + inspector,
+            "SLOT_WORKSPACE_BYTES must be the retained per-slot serving types verbatim: \
+             size_of::<ConnectParser>()={parser}, size_of::<ChInspector>()={inspector} \
+             (incl. size_of::<ClientHello>()={hello} retained inline); a change to the \
+             retained ClientHello/JA4 arrays must change this derived sum"
         );
     }
 
     #[test]
-    fn serving_workspace_matches_documented_68_mib() {
-        assert_eq!(SERVING_WORKSPACE_BYTES, 68 * 1024 * 1024);
+    fn slot_workspace_pinned_as_documented_tripwire() {
+        // [Tripwire] The derived per-slot serving workspace is pinned to the
+        // measured type-derived figure. If a retained ClientHello array (JA4
+        // ciphers/extensions/ALPN/sigalgs) or the parser/inspector layout ever
+        // changes, this pin FAILS and the documented figure (the architecture
+        // retained-storage table) must be reconciled and the pin rebased IN
+        // THE SAME CHANGE — never by bumping this number alone.
+        let per_slot = size_of::<ConnectParser>() + size_of::<ChInspector>();
+        assert_eq!(
+            SLOT_WORKSPACE_BYTES, 156_856,
+            "measured type-derived figure is {per_slot} bytes; reconcile the documented figure in the same change as any retained-array/layout edit"
+        );
+    }
+
+    #[test]
+    fn serving_workspace_derives_from_slot_count() {
         assert_eq!(
             SERVING_WORKSPACE_BYTES,
             TUNNEL_SLOTS * SLOT_WORKSPACE_BYTES,
