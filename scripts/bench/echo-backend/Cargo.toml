@@ -1,0 +1,30 @@
+# Standalone compiled echo backend for the e2-micro CONNECT benchmark suite
+# (M-03). Deliberately NOT part of the alumina workspace: its own empty
+# [workspace] table keeps `cargo build`/`cargo metadata` at the repo root from
+# picking it up, so it can never alter the alumina closure or lockfile.
+#
+# The crate mirrors the alumina dependency closure where possible (rustls
+# 0.23.46 + ring 0.17.14 + rustls-pki-types 1.15.1 + rustls-webpki 0.103.16,
+# the exact versions the production DoT client already pins) plus
+# rustls-pemfile 2.x (pure-Rust PEM reader; no build.rs, no proc-macro, only
+# a rustls-pki-types dependency). The binary is built for
+# aarch64-unknown-linux-musl --release in the same e2e harness image the
+# alumina musl build uses, so the static-musl result runs on the glibc bench
+# image with zero runtime dependencies.
+[package]
+name = "echo-backend"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+# Own empty workspace: isolate from the root alumina workspace (R: the
+# measured-path backend is a standalone tool, never a repo crate).
+[workspace]
+
+[dependencies]
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "=1.15.1"
+rustls-webpki = { version = "=0.103.16", default-features = false, features = ["ring", "std"] }
+ring = "=0.17.14"
+rustls-pemfile = "2"

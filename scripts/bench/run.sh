@@ -8,7 +8,8 @@
 #
 # Env provided by bench_run.sh: PROXY, KIND, SECONDS, WARMUP, STAMP,
 # WORKLOAD_ARGS, WORKLOAD_LABEL, BENCH_WORKLOAD, BENCH_SOURCE_HEAD,
-# BENCH_DIRTY_COUNT, BENCH_RUST_TARGET, BENCH_BINARY_SHA256, BENCH_IMAGE_ID.
+# BENCH_DIRTY_COUNT, BENCH_RUST_TARGET, BENCH_BINARY_SHA256, BENCH_IMAGE_ID,
+# BENCH_BACKEND.
 set -eu
 mkdir -p /work
 cd /work
@@ -105,11 +106,29 @@ python3 /app/scripts/bench_workload.py --role dns-responder \
 DNSPID=$!
 sleep 0.3
 
-# TLS1.3 byte-exact framed echo backend (genuine CA-signed cert)
-python3 /app/scripts/bench_workload.py --role backend \
-    --backend-addr 8.8.8.8 --backend-port 443 \
-    --cert /work/server.pem --key /work/server.key >/tmp/backend.log 2>&1 &
-SRV=$!
+# TLS1.3 byte-exact echo backend (genuine CA-signed cert). The measured path
+# uses the compiled static-musl Rust backend (identity fail-closed pinned by
+# bench_run.sh via BENCH_ECHO_SHA); BENCH_BACKEND=python selects the in-process
+# python EchoBackend (selftest reference / one-line fallback).
+BENCH_BACKEND="${BENCH_BACKEND:-compiled}"
+case "$BENCH_BACKEND" in
+    compiled)
+        install -m 0755 /ooda/echo-backend/echo-backend-musl /work/echo-backend
+        /work/echo-backend --cert /work/server.pem --key /work/server.key \
+            --addr 8.8.8.8:443 >/tmp/backend.log 2>&1 &
+        SRV=$!
+        ;;
+    python)
+        python3 /app/scripts/bench_workload.py --role backend \
+            --backend-addr 8.8.8.8 --backend-port 443 \
+            --cert /work/server.pem --key /work/server.key >/tmp/backend.log 2>&1 &
+        SRV=$!
+        ;;
+    *)
+        echo "BENCH-FAIL: unknown BENCH_BACKEND '$BENCH_BACKEND'" >&2
+        exit 1
+        ;;
+esac
 
 python3 - "$SRV" <<'PYEOF'
 import socket, sys, time

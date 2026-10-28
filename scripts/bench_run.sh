@@ -97,6 +97,28 @@ if [ "$PROXY" = "alumina" ]; then
     echo "BENCH-BINARY-IDENTITY: .ooda/$CANDIDATE_REL sha256=$CANDIDATE_SHA"
 fi
 
+# Echo backend identity (M-03): the measured path is the compiled static-musl
+# Rust TLS1.3 echo backend, sha-pinned fail-closed like HEAD_CANDIDATE_SHA.
+# BENCH_BACKEND defaults to compiled; BENCH_BACKEND=python selects the
+# in-process python EchoBackend (selftest reference / one-line fallback).
+BENCH_BACKEND="${BENCH_BACKEND:-compiled}"
+case "$BENCH_BACKEND" in
+    compiled|python) ;;
+    *) echo "BENCH-BLOCKED: BENCH_BACKEND must be compiled or python" >&2; exit 1 ;;
+esac
+ECHO_REL="echo-backend/echo-backend-musl"
+BENCH_ECHO_SHA="${BENCH_ECHO_SHA:-}"
+[ -f "$ROOT/.ooda/$ECHO_REL" ] || {
+    echo "BENCH-BLOCKED: compiled echo backend binary missing (.ooda/$ECHO_REL)" >&2
+    exit 1
+}
+computed=$(shasum -a 256 "$ROOT/.ooda/$ECHO_REL" | awk '{print $1}')
+[ -n "$BENCH_ECHO_SHA" ] && [ "$computed" = "$BENCH_ECHO_SHA" ] || {
+    echo "BENCH-BLOCKED: compiled echo backend identity mismatch (got $computed, want ${BENCH_ECHO_SHA:-<unset>})" >&2
+    exit 1
+}
+echo "BENCH-ECHO-IDENTITY: .ooda/$ECHO_REL sha256=$BENCH_ECHO_SHA"
+
 OUTDIR="$ROOT/.ooda/benchmarks"
 [ -d "$OUTDIR" ] || mkdir -p "$OUTDIR"
 TS="$(date +%Y%m%dT%H%M%SZ)"
@@ -145,6 +167,7 @@ podman --connection "$CONN" run --rm --name "$CN" --pull=never --timeout 360 \
     -e BENCH_DIRTY_COUNT="$BENCH_DIRTY_COUNT" \
     -e BENCH_RUST_TARGET="$BENCH_RUST_TARGET" \
     -e BENCH_BINARY_SHA256="$BENCH_BINARY_SHA256" \
+    -e BENCH_BACKEND="$BENCH_BACKEND" \
     -e BENCH_IMAGE_ID="$IMAGE_ID" \
     "$IMAGE_ID" sh /app/scripts/bench/run.sh || rcc=$?
 
