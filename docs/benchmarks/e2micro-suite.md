@@ -11,6 +11,8 @@ section (§9) holds the **corrected M-04 results** (2026-10-28).
 - Topic: methodology (research-first, per evidence bead `alumina-d59gq`).
 - Status: results recorded — corrected M-04 (2026-10-28) in §9. Correction
   package complete.
+- Protocol: P2 measurement protocol frozen for the exact candidate `3f587e9`
+  (2026-10-29) in §10 — binds E2–E4 before any measurement runs.
 - Governing repository spec: `docs/alumina-proxy.md` (this suite measures its
   golden CONNECT path; it does not alter proxy semantics).
 
@@ -451,6 +453,271 @@ subject's own path, never an apples-to-apples comparison.
   client `cores_peak` on two 1gbps timed runs (10.3 / 11.7 cores, alumina and
   haproxy) from one boundary-tick sample — same flake family; proxy and backend
   CPU peaks are clean and are the values reported in the table above.
+
+---
+
+## 10. P2 measurement protocol (frozen 2026-10-29) — exact candidate `3f587e9`
+
+Frozen protocol for the P2 measurement package (columns E2–E4,
+`alumina-cdwui.15/.16/.17`), adopted before any P2 measurement has run. The
+protocol, the receipt fields, and the honesty rules are fixed against the one
+exact candidate identity from the P1 integration gate
+(`alumina-cdwui.20`, commander-verified); evidence rows may not choose their
+own yardstick after seeing numbers. It **extends** this document (§1–§9) and
+changes nothing in them; it is not a benchmark framework and creates no files.
+
+### 10.1 Binding rule and non-authorizations
+
+- E2–E4 run **only** the exact commands in §10.5–§10.7 against the exact
+  candidate in §10.2, file **only** the receipt fields named there, and judge
+  them with the §10.4 verdict alphabet. A fresh executor must not need anything
+  outside this section beyond the §-cited invocation/schema tables.
+- **No optimization target is preselected**, and **no `fulfilled=true` is
+  required** for a receipt to be valid. A lower achieved goodput than a
+  baseline is a **finding to disclose**, never a failure and never a veto.
+- **No optimization implementation is authorised by this protocol.** This is a
+  measurement contract only. `alumina-73t4t` and `alumina-bsiv6` remain
+  separate, **unauthorised** change proposals and are not inputs here.
+- New receipt fields, new profiling/instrumentation, and new harness seams are
+  **out of scope** for E1–E4. A scenario or profile that needs one is recorded
+  `BLOCKED`/`Unknown` (§10.4) and routed as a seam decision — never silently
+  worked around and never answered with an earlier candidate's number.
+
+### 10.2 Exact candidate identity (P1 gate, `alumina-cdwui.20`)
+
+| Item | Identity (record verbatim) |
+|---|---|
+| Source SHA | `3f587e947fa8f050954b2f1fa7ec6b47012ac769` (short `3f587e9`; sole parent `ad82b77c…`; 19 commits `c27115e..HEAD`; no push) |
+| P1 base / changed set | base `eedec45`; 10 paths: `README.md`, `docs/architecture.md`, `- docs/serving-datastructure.html`, `src/config.rs`, `src/enforcement/policy.rs`, `src/incident_report.rs`, `src/log.rs`, `src/serve.rs`, `src/serving.rs`, `src/serving/tests.rs` |
+| Canonical spec digest | `e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401` (unchanged; CANONICAL-DIGEST-OK) |
+| Executed artifact sha256 | `c869192e67032597c4b490de16260cdc33b5b7a811cb7e37308f9b5d25274031` (`target/release/alumina`; production digest identical to the D4 candidate `a19d407`) |
+| Builder | podman connections `flock-vm` (rootless) / `flock-vm-root` (rootful); pinned `docker.io/library/rust@sha256:484dce…2779a` |
+| Pinned bench image (§3) | `localhost/alumina-bench:20261027`, id `7c3937c1…b449c` = `BENCH_IMAGE_ID` (fail-closed) |
+| Compiled echo backend (§5/§8) | `.ooda/echo-backend/echo-backend-musl`, `BENCH_ECHO_SHA` fail-closed; pinned sha `efa64083…72cd` (§9), but **record** the value actually used on each run |
+| Podman connection | rootful `BENCH_PODMAN_CONNECTION` (fail-closed unless reachable; `--network none`) |
+| Alumina bench binary | `.ooda/alumina-head/baseline/alumina-musl`, `aarch64-unknown-linux-musl`, `HEAD_CANDIDATE_SHA` fail-closed |
+
+#### 10.2.1 Clean-identity caveat (mandatory on every P2 receipt)
+
+The P1 gate earned **CONDITIONAL-COMPLETE**, not clean-tree qualification: at
+gate time `git status --porcelain` was non-empty because of one **foreign,
+untracked** file `scripts/verify_alt.sh` (99,890 B; sha256
+`85465b4c96daeef4234ac33168b4d831548aed0f7d9b3b7f8df37bb7dda0c8ee`) — another
+session's in-progress harness experiment, not authored by the gate, not a build
+input, byte-stable across the run, deliberately not deleted/staged/ignored.
+(The same external session produced `arch_alt/architecture-review.md`,
+`d25b3458…0802f`, mid-run on one aborted attempt; treat any such foreign
+untracked path the same way.)
+
+Consequence for P2: **every receipt must state the working-tree identity it
+actually ran on (§10.3) and that a clean-tree re-run is required before any
+production-qualification claim.** No P2 receipt may be presented as clean-tree
+or production qualification.
+
+### 10.3 Working-tree identity record (the checkout is contended)
+
+The harness's `identity.dirty_count` counts only tracked modifications
+(`git status --porcelain --untracked-files=no`) and therefore does **not** see
+untracked foreign files. Each P2 run MUST additionally capture, into the run
+record beside the JSON receipt:
+
+- `git rev-parse HEAD` — must equal §10.2's source SHA;
+- a full `git status --porcelain --untracked-files=all` snapshot **before and
+  after** the run (identity bracket), with `sha256` + size of any untracked
+  file on both snapshots (SOURCE-IDENTITY-STABLE discipline, as in the P1
+  gate);
+- the `BENCH-ECHO-IDENTITY` / `BENCH-BINARY-IDENTITY` lines emitted by
+  `bench_run.sh` (stdout; the fail-closed pins);
+- the rootful `BENCH_PODMAN_CONNECTION` name used.
+
+A run whose bracket does not hold (identity changed mid-run) is `Unknown`
+(§10.4), never a measured receipt.
+
+### 10.4 Verdict alphabet (pass / fail / invalid / Unknown)
+
+Receipt level — decided by the JSON receipt alone:
+
+| Verdict | Decided by (existing receipt fields) |
+|---|---|
+| `valid` | `valid=true`, `reasons=[]`, `verdict="valid"`, identity attrs equal to the §10.2 pins actually used, plus a held §10.3 bracket |
+| `invalid` | `valid=false` with non-empty `reasons` (corruption, missing-bytes, protocol disorder, timeout, partial send, accounting break, unknown-cpu) — a **measurement-invalid** determination, **never a proxy finding**; re-run and retain the invalid receipt (M-04 flake precedent, §9 caveats) |
+| `Unknown` | harness/operational: `BENCH-FAIL` (exit 1), `BENCH-BLOCKED` (podman/image/pin unreachable), a sampler probe typed `sampling.*.unknown=true`/`probe_failures`, an unreadable receipt, or an un-resolvable identity — record with the observed capability; never folded into `valid`, never a clean or negative proxy verdict |
+
+Rules every receipt MUST satisfy (cite §5/§9, do not re-derive):
+
+1. **Offered load is never reported as achieved goodput.** `--target-mbps` /
+   `params.target_mbps` is the offer; the headline is
+   `interval_vs_cohort.achieved_client_payload_mbps`, read with
+   `workload_fulfilled` shown alongside (F1).
+2. **`fulfilled=false` with `missed_at_end=0`** (tiny `backpressure_unsent` +
+   a `drain_echoed`-at-close open-loop tail) is **disclosed** as an open-loop
+   cap and read as such — never as a proxy failure (F1, §9 caveats).
+3. **Absent capability ⇒ `BLOCKED`/`Unknown`** with the observed capability
+   recorded (§10.6, §10.7) — never a fabricated number and never a substitute
+   candidate; `85b7769` or any pre-P1 SHA stays comparison-only (§6).
+4. A failed probe is typed `Unknown` (`sampling.*.unknown`), never folded clean.
+
+E-increment level (the whole E2/E3/E4 row):
+
+| Verdict | Decided by |
+|---|---|
+| `pass` | every prescribed run completed with a `valid` receipt at the §10.2 candidate + a held §10.3 bracket + honesty rules; a lower goodput than baseline is a disclosed finding, not a failure |
+| `fail` | a prescribed run could not be completed as specified (harness `BENCH-FAIL`, `invalid` receipt from an un-diagnosed cause, a missing required field, or identity not pinned to §10.2) |
+| `invalid` | the run produced a measurement-invalid receipt (re-run required; unusable as measured) |
+| `Unknown`/`BLOCKED` | capability absent (E3), seam not expressible (E3/E4 variants), bracketed identity unstable, or sampler `unknown` — with the observed capability recorded; routed, never substituted |
+
+### 10.5 E2 — reproduce 1-Gbps + connection-storm receipts
+
+**Objective.** Reproduce the §9 profile set on the exact candidate §10.2,
+producing new receipts judged by §10.4. The comparison source is
+`.ooda/benchmarks/85b7769-*.json` (interleaved A-E-H; SECONDS 60 / WARMUP 5;
+`dirty_count=0`). This candidate's numbers come only from its own new runs —
+§9 numbers are never restated as this candidate's.
+
+**Commands.** Timed runs interleaved **A-E-H** (alumina → envoy → haproxy),
+SECONDS 60 / WARMUP 5; smoke (2 s, WARMUP 0) is an optional fast-path
+correctness check only and never authoritative (cite §4 for the parameter
+tables and selftests):
+
+```sh
+BENCH_IMAGE_ID=7c3937c1df71c3190730efb0975a4b17a9d646d737d76e9ac3075afd831b449c \
+BENCH_PODMAN_CONNECTION=<rootful connection> \
+HEAD_CANDIDATE_SHA=<§10.5 note below> BENCH_ECHO_SHA=<recorded value> \
+sh scripts/bench_run.sh <alumina|envoy|haproxy> timed <1gbps|storm150|storm50>
+```
+
+Matrix: 3 subjects × 3 profiles = 9 timed runs (A-E-H per profile), each
+receipt to `.ooda/benchmarks/3f587e9-<subject>-<profile>-timed-*`.
+
+**Alumina binary note.** `HEAD_CANDIDATE_SHA` must name the sha of a
+`aarch64-unknown-linux-musl` build of §10.2 with its builder/toolchain
+recorded. The P1-gate executed artifact is `c869192e…`
+(`target/release/alumina`). If a build from §10.2 reproduces that sha, cite it;
+if its sha differs, record the delta and the build inputs explicitly — the
+candidate stays §10.2, but the receipt names exactly what ran.
+
+**Required receipt fields** (all existing, §5):
+
+| Purpose | Fields |
+|---|---|
+| Identity | `identity.source_head`, `identity.dirty_count` + §10.3 bracket, `identity.retained_binary_sha256`, `identity.executed_binary_sha256`, `identity.image_id`, `identity.rust_target`, `identity.config_sha256`, `identity.tool_sha256`, `identity.openssl_version`, `identity.python_version`, `identity.workload_label` |
+| Model | `e2micro_model.host_cpus`, `host_mem_gib`, `modeled_vcpu`, `modeled_mem_gib` |
+| Headline goodput | `interval_vs_cohort.achieved_client_payload_mbps`, `params.target_mbps`, `workload_fulfilled` |
+| Fulfilment honesty | `phases.measure.backpressure_unsent`, `phases.measure.missed_at_end`, `interval_vs_cohort.drain_echoed_frames`, `phases.measure.unechoed` |
+| Latency | `latency.actual_send_to_echo` / `sched_to_echo` / `send_lag` p50/p95/p99 + `max_us` + `overflow_count` |
+| CPU / RSS | `sampling.<client\|backend\|proxy>.cores_mean` / `cores_peak` / `rss_current_mean_kb` / `rss_current_peak_kb` / `vmhwm_kb` / `unknown` / `probe_failures` |
+| Storms | `storm.{arrivals_planned, arrivals_attempted, connections_established, sessions_completed, setup_failures, frames_sent, frames_echoed, protocol_errors, send_failed_sessions, peak_live, peak_dialing}` |
+| Validity | `valid`, `reasons`, `verdict`, `kind=timed`, `mode` |
+
+**E2 verdict.** Per §10.4: `pass` = all 9 receipts `valid` at §10.2 with a held
+§10.3 bracket and honesty rules — whatever the goodput or `fulfilled` values.
+`invalid` receipts are re-run and retained with reasons disclosed; an
+un-resolvable identity or harness failure makes the row `Unknown`/`fail`.
+
+### 10.6 E3 — 10-Gbps burst/sustained: capability preflight, then measure-or-BLOCKED
+
+**Capability preflight (explicit; run first; all observable via existing
+seams):**
+
+1. **Target architecture.** The alumina subject is the fixed-profile
+   `aarch64-unknown-linux-musl`, single-boot/single-serving-owner build (§10.2,
+   `docs/alumina-proxy.md`); the modeled target is e2-micro (2 shared vCPU /
+   1 GB, §2). Ten Gbps through **one** serving owner is a CPU-homing question
+   of the proxy on this host, not a network-cabling fact: record `rust_target`
+   + the modeled target, do not assume an egress NIC.
+2. **Network ceiling.** The aperture is in-container `--network none` over a
+   loopback global-unicast alias `8.8.8.8/32` (§2/§3): the ceiling is the
+   loopback path + echo backend + open-loop client at 4096 B frames, not a
+   device. Any 10-Gbps claim can only ever be "proxy-on-this-harness" and must
+   say so.
+3. **Backend / load-generator headroom.** The compiled echo backend must drain
+   ≥ the offered rate and the open-loop client must offer it without
+   saturating its own cores. Headroom is read from the E2 1gbps timed
+   receipts: `e2micro_model.host_cpus` and `sampling.<client|backend>.cores_mean`
+   — near-saturated sampler cores at 1 Gbps imply no honest 10× headroom.
+   Record the estimate and disclose it as an estimate.
+4. **Expressibility seam.** The documented invocation accepts only the
+   `E2MICRO_LABELS` set `1gbps|storm150|storm50`, and `1gbps` pins
+   `--target-mbps 1000` (`bench_run.sh`, `E2MICRO_LABELS` in the driver; the
+   `e2micro_model` receipt block is only attached for those labels). A 10-Gbps
+   steady/burst profile is **not expressible through `sh scripts/bench_run.sh …`
+   today** without a harness seam change — which is **out of this docs-only
+   protocol's authority** and must be a separate seam decision (new workload
+   label / `--target-mbps 10000` wiring) before any 10-Gbps numbers.
+
+**Determination.** If any preflight item cannot establish 10-Gbps capability,
+**or** the expressibility seam is not authorized, E3 records
+**`BLOCKED`/`Unknown`** with the observed capability values — never a
+fabricated 10-Gbps figure, never a substitute candidate.
+
+**Runnable command retained when the capability is absent:** the E2 1gbps
+timed alumina run, re-executed at the exact candidate:
+
+```sh
+BENCH_IMAGE_ID=7c3937c1df71c3190730efb0975a4b17a9d646d737d76e9ac3075afd831b449c \
+BENCH_PODMAN_CONNECTION=<rootful connection> \
+HEAD_CANDIDATE_SHA=<§10.5 note> BENCH_ECHO_SHA=<recorded value> \
+sh scripts/bench_run.sh alumina timed 1gbps
+```
+
+Its receipt's `e2micro_model` + `sampling.*.cores_mean` +
+`interval_vs_cohort.achieved_*` become the observed-capability record that E3
+files its `BLOCKED`/`Unknown` determination against.
+
+### 10.7 E4 — slow-peer backpressure and full-allowlist DNS/deadline (existing seams only)
+
+No new production metrics and no new instrumentation: every field exists in
+§5, and every injection point is an existing driver seam or a measured
+constant.
+
+**a) Slow-peer / backpressure — expressible now.** Model the slow peer through
+the open-loop admission cap and read the honest backpressure fields. Command =
+the E2 `1gbps` timed alumina invocation (§10.5). Required fields:
+`phases.measure.backpressure_unsent`, `phases.measure.missed_at_end`,
+`interval_vs_cohort.drain_*_frames`, `phases.measure.unechoed`,
+`latency.send_lag`, `latency.sched_to_echo` p50/p95/p99,
+`sampling.backend.cores_mean`. Verdict: a `valid` receipt reporting these fields
+(whatever their values) passes this slice; zero backpressure with
+`missed_at_end=0` is honestly reported as such — not a failure and not
+re-reported as a smaller proxy cost than measured.
+
+**b) Slow-peer sink-drain injection — seam-gated.** The driver already exposes
+the per-echo delay knob `--echo-delay-s` (backend role; default 0.0) and the
+`BENCH_BACKEND=python` one-line fallback (§5), but `run.sh` does not currently
+pass the knob through. Wiring it is a harness seam change — **out of E1's
+docs-only authority**. Until a seam decision authorizes it, this variant is
+`BLOCKED`/`Unknown` with the observed base backpressure (slice a) + the
+deadline constants, never fabricated.
+
+**c) Full-allowlist DNS failure/recovery + deadline-progress.** The golden path
+stages the fixed full-allowlist config and a DNS responder answering
+`example.com → 8.8.8.8` (`run.sh`); the driver's responder answers NXDOMAIN
+for any name it has no answer for — an existing seam. A controlled
+failure-and-recovery phase requires pointing the responder away from
+`example.com` (or dropping its answer) then restoring it, reachable only
+through a `run.sh`/staging seam change (**out of E1's docs-only authority**).
+Until then: `BLOCKED`/`Unknown` with the observed capability recorded.
+
+Deadline-**progress under load**, by contrast, is measurable now on the storm
+profiles with no seam change: the fixed constants `params.setup_deadline_s`
+(5.0), `params.drain_deadline_s` (5.0) and the 5.0 s no-progress STALL_LIMIT
+are already in every receipt, and the storm row's `storm.{arrivals_attempted,
+connections_established, sessions_completed, setup_failures}` plus
+`valid`/`reasons` (incl. `timeout`) show whether the candidate makes progress
+within the deadlines at churn. Command = the E2 `storm50`/`storm150` timed
+alumina invocations (§10.5). Verdict: §10.4 — `setup_failures={}` and
+`valid=true` are measured facts to disclose, not thresholds this protocol sets.
+
+### 10.8 Frozen receipt lifecycle
+
+- New receipts land in `.ooda/benchmarks/3f587e9-<subject>-*-<ts>.json`
+  (gitignored, §3/§5 pipeline); `.ooda/benchmarks/85b7769-*.json` remain the
+  comparison source and are untouched.
+- A `valid` receipt later found to misstate its §10.3 working tree is
+  reclassified `Unknown` and re-run — never amended in place.
+- Any E2–E4 row that cannot follow §10.5–§10.7 halts and reports
+  `BLOCKED`/`Unknown` with the observed capability and the exact reason —
+  never a partial number and never an earlier candidate's receipt.
 
 ---
 
