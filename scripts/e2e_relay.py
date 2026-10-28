@@ -270,6 +270,8 @@ class DnsResponder:
         self.conns = 0
         self._hlock = threading.Lock()
         self._handlers = []  # owned per-connection DNS handler threads (B2/B5)
+        self._conns = []  # owned per-connection sockets; stop() closes them so an
+                          # idle handler (5s recv timeout) exits within the drain deadline
 
     def start(self):
         self.thread.start()
@@ -281,6 +283,23 @@ class DnsResponder:
             self.sock.close()
         except OSError:
             pass
+        # Wake every owned handler connection: a handler blocked in recv(2) is
+        # NOT woken by close(2) on Linux, so its 5s recv timeout can outlast the
+        # 2s drain deadline and falsely flag a live-but-idle handler as a leak.
+        # shutdown(SHUT_RDWR) makes the blocked recv return EOF/ECONNRESET
+        # promptly (the suite's own close-to-unblock cleanup idiom).
+        with self._hlock:
+            conns = list(self._conns)
+            self._conns[:] = []
+        for conn in conns:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def join(self, deadline):
         self.thread.join(timeout=deadline)
@@ -337,6 +356,8 @@ class DnsResponder:
     def _serve(self, conn):
         try:
             conn.settimeout(5.0)
+            with self._hlock:
+                self._conns.append(conn)
             # a real TCP nameserver keeps the connection open across many
             # exchanges; the binary reuses one connection for the whole window
             while not self._stop:
@@ -412,6 +433,11 @@ class DnsResponder:
         except OSError:
             return
         finally:
+            with self._hlock:
+                try:
+                    self._conns.remove(conn)
+                except ValueError:
+                    pass
             try:
                 conn.close()
             except OSError:
@@ -628,32 +654,117 @@ def proxy_socket():
 def case_relay_tls13():
     """Real TLS1.3 ClientHello through the proxy to the -rev upstream.
 
-    The upstream reverses application-layer bytes, so an authentic handshake
-    succeeds and app bytes come back reversed: `hello-e2e\n` -> `\ne2e-olleh`.
-    Passing is judged on the reversed app bytes arriving over the tunnel
-    (proving the authentic handshake + bidirectional opaque relay); openssl
-    waits for the TLS close exchange on stdin EOF, so a content match is the
-    assertion rather than a clean exit (client-side orderly-EOF / half-close
-    teardown is covered by POS cases against the byte-exact raw echo).
+    OpenSSL 3.5.9 `s_client -proxy` hardcodes an HTTP/1.0 CONNECT
+    (`CONNECT host:port HTTP/1.0`), which a spec-conformant HTTP/1.1-only
+    CONNECT proxy correctly rejects (UnsupportedVersion -> 400,
+    docs/alumina-proxy.md:59,417), and `s_client -fd` (adopting an
+    already-connected fd) is absent from this OpenSSL line. So this case
+    issues a spec-compliant HTTP/1.1 CONNECT on a raw socket and adopts the
+    established tunnel via `s_client -unix` with a byte bridge, giving an
+    authentic openssl TLS1.3 handshake through the proxy. The upstream
+    reverses application-layer bytes, so an authentic handshake succeeds and
+    app bytes come back reversed: `hello-e2e\n` -> `\ne2e-olleh`.  Passing is
+    judged on the reversed app bytes arriving over the tunnel (proving the
+    authentic handshake + bidirectional opaque relay); openssl waits for the
+    TLS close exchange on stdin EOF, so a content match is the assertion
+    rather than a clean exit (client-side orderly-EOF / half-close teardown
+    is covered by POS cases against the byte-exact raw echo).
     """
+    import select
+
     got = b""
+    # Spec-compliant HTTP/1.1 CONNECT on a raw socket; the tunnel is the
+    # byte pipe the authentic TLS handshake and relay flow through.
+    tunnel = proxy_socket()
+    send_connect(tunnel, "example.com")
+    resp, rest, complete = recv_http_response(tunnel)
+    status = http_status_code(resp)
+    if not complete or status != 200:
+        fail(
+            "POS-RELAY-TLS13",
+            f"CONNECT not established (status={status} complete={complete} head={resp[:64]!r})",
+        )
+        try:
+            tunnel.close()
+        except OSError:
+            pass
+        return
+    if rest != b"":
+        # A real TLS upstream cannot send app bytes before our ClientHello, so
+        # surplus bytes after the 200 are an anomaly: fail, never bridge
+        # over-read bytes into the TLS stream.
+        fail(
+            "POS-RELAY-TLS13",
+            f"unexpected upstream bytes before ServerHello (rest={rest[:32]!r})",
+        )
+        tunnel.close()
+        return
+    tunnel.settimeout(None)
+
+    # Adopt the established tunnel for the authentic openssl TLS1.3 handshake:
+    # s_client -unix dials a unix-socket listener, and two pump threads copy
+    # bytes in both directions so the unix socket and the TCP tunnel act as one
+    # opaque pipe for openssl (no -proxy, no -fd).
+    sock_path = "/work/m06-relay.sock"
+    try:
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+    except OSError:
+        pass
+    ln = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        ln.bind(sock_path)
+        ln.listen(1)
+        ln.settimeout(10.0)
+    except OSError as exc:
+        ln.close()
+        tunnel.close()
+        fail("POS-RELAY-TLS13", f"unix listener setup failed: {exc}")
+        return
+
     proc = subprocess.Popen(
         [
-            "openssl", "s_client", "-proxy", "127.0.0.1:8080",
-            "-connect", "example.com:443", "-servername", "example.com",
-            "-tls1_3", "-quiet",
+            "openssl", "s_client", "-unix", sock_path,
+            "-servername", "example.com", "-tls1_3", "-quiet",
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    ux = None
     try:
+        try:
+            ux, _ = ln.accept()
+        except (OSError, socket.timeout) as exc:
+            fail("POS-RELAY-TLS13", f"s_client never connected to -unix listener: {exc}")
+            return
+        ux.settimeout(None)
+
+        def pump(src, dst):
+            try:
+                while True:
+                    chunk = src.recv(1 << 16)
+                    if not chunk:
+                        break
+                    dst.sendall(chunk)
+            except OSError:
+                pass
+            finally:
+                try:
+                    dst.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+
+        u2t = threading.Thread(target=pump, args=(ux, tunnel), daemon=True)
+        t2u = threading.Thread(target=pump, args=(tunnel, ux), daemon=True)
+        u2t.start()
+        t2u.start()
+
         assert proc.stdin is not None
         assert proc.stdout is not None
         proc.stdin.write(b"hello-e2e\n")
         proc.stdin.flush()
         proc.stdin.close()
-        import select
 
         deadline = time.time() + 20.0
         fd = proc.stdout.fileno()
@@ -701,6 +812,19 @@ def case_relay_tls13():
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        # close the bridge endpoints so the daemon pumps observe EOF/error and
+        # exit; remove the unix listener node (no leaks, no stale sockets).
+        for sock in (ux, tunnel, ln):
+            try:
+                if sock is not None:
+                    sock.close()
+            except OSError:
+                pass
+        try:
+            if os.path.exists(sock_path):
+                os.unlink(sock_path)
+        except OSError:
+            pass
 
 
 def recv_until_complete_eof(sock, rest, expected_len, name, timeout=20.0):
