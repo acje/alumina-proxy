@@ -47,13 +47,143 @@ post-boot state is preallocated** (§6).
 > test module) and the shared-readiness/runtime and startup-DNS test modules live
 > at `src/runtime/tests.rs` and `src/startup_dns/tests.rs`. Buffer reuse is D5b.
 
-## 3. Single-worker scheduling model
+## 3. The reactor pattern: one poll, one owner
+
+Alumina is a **classical readiness reactor**: one thread blocks in a single
+`mio::Poll` (epoll on Linux, kqueue under host tests), receives readiness edges
+for every registered source, and runs a non-blocking handler per edge inside a
+bounded turn. There is no async runtime, no future/executor machinery, no
+thread pool, and no completion queue: a readiness edge is a hint that an
+operation *may* proceed, never evidence that one completed (spec §Architecture
+→ I/O model). The reactor is realized by `Serving::preallocate` /
+`Serving::run_once` (`src/serving.rs:1019-1076,1257-1305`) under the owner turn
+in `Runtime::turn` (`src/runtime.rs:239-282`), and is the only I/O admission
+path in the process.
+
+The same poll serves both owner phases: the startup DNS window attaches the
+retained DNS transport to it **before** a listener exists
+(`src/serving/startup.rs:42-47,178-183`), and a serving decision registers the
+listener on that same poll without creating a second one
+(`src/serving.rs:1135-1142,1220-1240`). `Runtime::serve` is the process-lifetime
+loop over it and never returns `Ok` (`src/runtime.rs:366-379`).
+
+### 3.1 Event sources on the single poll
+
+| Source | Token | Interest | Dispatch effect |
+|---|---|---|---|
+| Listener | `0` | readable | accept batch under the visit budget; a transient accept failure (e.g. `EMFILE`) pauses re-arm for 100 ms instead of hot-looping (`src/serving.rs:1773-1802`) |
+| Client socket | `1..=512` | readable / writable | per-slot client arm |
+| Upstream socket | `UPSTREAM_BASE + slot` | readable / writable | per-slot upstream arm |
+| DNS refresh transport | `DNS_LOCAL` | phase-derived: writable while connecting or backpressured, readable while receiving, both while a write can proceed unwaited (`src/startup_dns.rs:1876-1887`) | raises the DNS freshness flag; the exchange itself advances cooperatively in the same turn |
+| SIGTERM self-pipe | `SIGNAL_LOCAL` | readable | first observation fixes the shutdown grace |
+
+Tokens are generation-tagged ids: the low 11 bits select the socket (client,
+upstream, or a reserved source id) and the high bits carry the slot generation,
+so an event for a slot that closed and was reused is dropped before any socket
+is touched (`src/serving.rs:135-162`). The listener, DNS, and signal ids are
+disjoint from every connection id, so no two registrations can collide.
+
+### 3.2 The reactor loop
+
+```text
+  readiness sources                  one owner turn (single OS thread)
++-------------------------------+    +------------------------------------------------+
+| listener              token 0 |--> | 1 resume_listener: re-arm after accept backoff |
+| client sockets        1..=512 |    | 2 poll(<=1024 events, min(deadline, caller))   |
+| upstream   UPSTREAM_BASE + n  |    | 3 SIGTERM pipe first -> Draining{deadline}     |
+| dns refresh        DNS_LOCAL  |    | 4 expire_sweep when now >= next_expiry         |
+| sigterm pipe    SIGNAL_LOCAL  |    | 5 pass 1: accept / dns flag / per-slot merge   |
++-------------------------------+    | 6 pass 2: one contiguous visit per slot        |
+                                     | 7 dns turn (<=8 advances) / re-arm interest    |
+                                     | 8 monitor+incident cadence / log drain         |
+                                     +------------------------------------------------+
+                                     then loop: the next wait is the nearest of
+                                     setup / connect attempt / idle / FIN drain /
+                                     grace / log drain / DNS exchange / refresh due
+```
+
+### 3.3 The turn, step by step
+
+1. **Re-arm a paused listener** once its backoff has elapsed, so a transient
+   accept failure is retried on a bounded cadence (`src/serving.rs:1433-1441`).
+2. **One `poll` call.** The timeout is the earliest pending deadline clipped by
+   the caller's timeout; `EINTR` is retried, and the event buffer is a ≤1024
+   event snapshot preallocated before the startup window and reused every turn
+   (`src/serving.rs:1257-1271`).
+3. **SIGTERM before traffic.** A readable self-pipe is handled ahead of every
+   connection event, so the first signal permanently stops admission, closes
+   pending setups, cancels the DNS transport, and fixes the monotonic grace
+   (`src/serving.rs:1272-1278,1540-1553`).
+4. **Deadline sweep** when `now >= next_expiry`: setup, connect-attempt, relay
+   idle, and FIN-drain expiry (`src/serving.rs:3241-3269`).
+5. **Coalesce, pass 1**: the listener folds into an accept batch, the DNS token
+   into a freshness flag, and every connection token into that slot's merged
+   readiness in first-arrival order — skipping idle slots and stale generations,
+   so interleaved client+upstream edges for one slot never waste a re-arm
+   (`src/serving.rs:1337-1376`).
+6. **Dispatch, pass 2**: each distinct slot is visited contiguously with both
+   arms ordered by first arrival, under the complete-visit budget, with timers
+   rejoining before the next visit once 256 work units have accrued
+   (`src/serving.rs:1377-1428,1988-2007`).
+7. **Cooperative DNS turn**, only when work is actually due (freshness edge, a
+   step that can proceed without waiting, or the exchange deadline): probe
+   sweep → corroboration → start one due refresh if the transport is idle →
+   at most 8 exchange advances → re-align the DNS interest to the new phase
+   (`src/runtime.rs:252-282,417-436`). Shutdown skips this entirely.
+8. **Reporting and drain**: monitor and incident cadence checks, then one
+   bounded log-sink drain (64 KiB or 16 operations), so a stalled sink cannot
+   delay tunnels or deadlines (`src/runtime.rs:274-281`).
+
+The loop exits only through `std::process::exit` — 0 on a clean drain, 70 when
+shutdown has to force-close remaining sockets — which skips the owner's
+destructors so the boot-owned heap is never freed before the OS reclaims it
+(`src/runtime.rs:366-379`).
+
+### 3.4 Timers: one earliest-deadline authority
+
+There is no timer thread, no timerfd, and no timer heap. `poll_timeout` folds
+every pending deadline into the single poll timeout: per-slot setup, connect
+attempt (clipped to setup), relay idle, FIN drain, shutdown grace, the next log
+drain, the outstanding DNS exchange deadline, and the next DNS refresh due time
+(`src/serving.rs:3159-3223`). An already-passed deadline yields a zero timeout,
+and the sweep runs before dispatch, so readiness can never be dispatched onto
+state whose deadline has already expired. Long batches are additionally bounded
+by the mid-batch timer recheck of §3.6.
+
+### 3.5 Readiness is a hint, not an outcome
+
+`WouldBlock` and spurious readiness are ordinary results, not errors, and each
+consumes budget so a stalled arm cannot spin (`src/serving.rs:100-106`). Every
+I/O outcome has an explicit permitted transition (IV-1); only successful writes
+advance the forwarding gate and byte accounting (D3, D5). Work left unfinished
+by budget exhaustion or re-queueing re-arms interest on the direction that
+still has work rather than waiting for a fresh edge (D7,
+`src/serving.rs:2017-2080`), and timer expiry never rewrites or splices a
+response that has begun (D1).
+
+### 3.6 Fair rotation and the per-visit budget
 
 Fair round-robin with a **64 KiB-or-16-op per-visit budget** (D6); timer recheck
 every ≤256 ready-slot visits; unfinished work reschedules without a new
 readiness edge; ready queue duplicate-free by construction (D7) — the
 application-owned queue of `:146`; deadlines checked against monotonic clock
 before any completion transition (`:146,147`).
+
+### 3.7 Why this shape
+
+- **Fixed profile.** All post-boot storage is preallocated (§6); there is no
+  per-connection task, boxed future, or wake queue to allocate, so steady-state
+  turns stay allocation-free.
+- **No synchronization surface.** One owner means no locks, no cross-thread
+  handoff, and no scheduling nondeterminism on the relay path.
+- **Bounded turn latency.** The visit budget, the 8-step DNS bound, the 64-byte
+  signal-drain cap, and whole-record log drops keep any single turn finite, so a
+  chatty peer cannot starve deadlines (III-3).
+- **Accepted cost.** No CPU parallelism: one blocking handler would stall every
+  source, so all socket operations are non-blocking and `WouldBlock` is a normal
+  outcome. A completion/proactor model is rejected on purpose — the gate and
+  byte-accounting invariants need the exact write-returned-N observation that
+  readiness supplies and completion queues hide (D3, D5).
 
 ## 4. Tunnel state machine and legal transitions
 
