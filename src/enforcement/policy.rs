@@ -239,7 +239,7 @@ mod tests {
         ];
         let t = table(
             controls,
-            &[(ActionKind::Block, Scope::Domain)],
+            &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Block, Scope::Domain)],
         );
         let mut latch = FirstSlot::new();
@@ -348,7 +348,7 @@ mod tests {
             any_controls(ActionKind::Block, Scope::Connection),
             &[
                 (ActionKind::Notify, Scope::Connection),
-                (ActionKind::Block, Scope::All),
+                (ActionKind::Notify, Scope::All),
             ],
             &[
                 (ActionKind::Notify, Scope::Connection),
@@ -376,7 +376,7 @@ mod tests {
                     ordinal: t.ordinal(1).expect("ordinal"),
                 }
             ),
-            Effect::Block { scope: Scope::All }
+            Effect::Notify { scope: Scope::All }
         );
     }
 
@@ -465,7 +465,7 @@ mod tests {
     fn early_data_unbound_ordinal_is_unknown_not_baseline() {
         let mut many = Vec::new();
         for _ in 0..ALLOWLIST_MAX {
-            many.push((ActionKind::Block, Scope::All));
+            many.push((ActionKind::Notify, Scope::All));
         }
         let big = table(any_controls(ActionKind::Block, Scope::All), &many, &many);
         let unbound = big.ordinal(5).expect("index 5 configured in a full table");
@@ -492,7 +492,7 @@ mod tests {
     fn evidence_insufficient_is_unknown_not_baseline() {
         let t = table(
             any_controls(ActionKind::Block, Scope::All),
-            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Block, Scope::All)],
         );
         let mut latch = FirstSlot::new();
@@ -513,7 +513,7 @@ mod tests {
     fn unattributed_is_unknown_not_any_illegal() {
         let t = table(
             any_controls(ActionKind::Block, Scope::All),
-            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Block, Scope::All)],
         );
         let mut latch = FirstSlot::new();
@@ -540,7 +540,7 @@ mod tests {
     fn missing_parse_result_is_unknown_never_an_action() {
         let t = table(
             any_controls(ActionKind::Block, Scope::All),
-            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Block, Scope::All)],
         );
         let mut latch = FirstSlot::new();
@@ -675,7 +675,7 @@ mod tests {
     fn control_table_storage_fits_planned_bound() {
         let t = table(
             any_controls(ActionKind::Block, Scope::All),
-            &[(ActionKind::Block, Scope::All)],
+            &[(ActionKind::Notify, Scope::Connection)],
             &[(ActionKind::Block, Scope::All)],
         );
         assert!(

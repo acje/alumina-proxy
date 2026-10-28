@@ -1859,6 +1859,10 @@ mod enforcement_config_tests {
             78,
             "invalid early_data block scope must exit 78"
         );
+        assert!(
+            err.to_string().contains("scope \"fqdn\""),
+            "Display must surface the raw fqdn literal, not an internal scope spelling: {err}"
+        );
     }
 
     #[test]
@@ -1880,6 +1884,28 @@ mod enforcement_config_tests {
             78,
             "invalid early_data block scope must exit 78"
         );
+    }
+
+    #[test]
+    fn accepts_notify_fqdn_and_all_early_data_scope() {
+        for (scope, typed_scope) in [("fqdn", Scope::Domain), ("all", Scope::All)] {
+            let doc = group(&entry_table(
+                "a.example:443",
+                "notify",
+                scope,
+                "notify",
+                "connection",
+            ));
+            let cfg = parse_config_document(&doc)
+                .expect("notify early_data keeps fqdn/all scopes legal (F-02 narrows block only)");
+            let control = cfg.control();
+            let ordinal = control.ordinal(0).expect("ordinal");
+            assert_eq!(
+                control.early_data(ordinal),
+                Some(PerFqdnControl::control(ActionKind::Notify, typed_scope)),
+                "notify scope {scope} must reach the early_data lane unchanged"
+            );
+        }
     }
 
     #[test]
