@@ -57,8 +57,9 @@ I/O model); **all post-boot state is preallocated** (§6).
 > serving workspaces → startup DNS window (`run_startup`) → on a Serve decision
 > attach the listener and enter `Runtime::serve` (`src/runtime.rs`); one poll
 > observes DNS freshness and traffic readiness, and the cooperative turn starts
-> due DNS exchanges itself (`main.rs:80-91`; `starts_due_dns_if_idle`
-> `runtime.rs:246-280`). Provisional parsers live in
+> due DNS exchanges itself (`main.rs:83-95`; `starts_due_dns_if_idle`
+> `runtime.rs:323-347`, called from `Runtime::turn` `runtime.rs:252-282`).
+> Provisional parsers live in
 > `src/{dns,connect,client_hello,startup_dns}.rs`; the rp2e tripwire/action/
 > monitoring surface lives in `src/enforcement/{mod,action,monitor,policy,state}.rs`
 > with the validated per-control schema — `[any_illegal]` (`connect_parse`,
@@ -287,8 +288,8 @@ deallocating.
 
 ## 5. Generations, lifetimes, and anti-alias (T7/T1-merged domains)
 
-Four domains must **not** be merged (spec §Invariants → III … The
-Generation-Isolation Invariant; §Architecture → Single Owner):
+Four domains must **not** be merged (spec §Invariants → III. Execution &
+Concurrency Invariants, Generation-Isolation; §Architecture → Single Owner):
 
 | Domain | Owner | Invalidation rule | Reuse proof status |
 |---|---|---|---|
