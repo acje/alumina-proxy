@@ -318,7 +318,8 @@ Stage-variant mapping (`src/serving.rs:340-351`):
 
 Lifetimes (spec §Lifecycle; §Invariants → IV … The Deadline Invariant): setup
 deadline starts at accept, never reset; connect
-deadlines clipped to it; idle starts at gate open, reset only on successful
+deadlines clipped to it; relay idle deadline (300 s, `IDLE_SECS`,
+`src/serving.rs:84`) starts at gate open, reset only on successful tunnel-byte
 writes; first EOF starts the never-reset 5 s drain; SIGTERM stops accepting +
 8 s grace (never extended); resources released exactly once; exit without
 deallocating.
@@ -386,9 +387,12 @@ client ◀─ flush_down (down_off/down_len; BODY_200 once, then relay bytes)
                (note_incident_tunnel_bytes, src/serving.rs:1942-1953)
 ```
 
-- Reads go direct-into-slab bounded by the live visit budget; in relay each
-  read is paired with the draining flush in the same visit, leaving ≥ half the
-  remaining budget for the flush (`read_room`, `src/serving.rs:1970-1990`).
+- Reads go direct-into-slab bounded by the live visit budget: each single read
+  is the coarse `READ_CHUNK` 32 KiB (`src/serving.rs:123`) straight into the
+  retained 128 KiB directional slab — no stack bounce buffer — still bounded by
+  the shared visit budget; in relay each read is paired with the draining flush
+  in the same visit, leaving ≥ half the remaining budget for the flush
+  (`read_room`, `src/serving.rs:1970-1990`).
 - Ordered EOF: each direction records `SideEof::Eof` independently, arms the
   once-started 5 s drain, and `finish_drain` sends a write half-close on a side
   only once that side's accepted bytes have fully drained
@@ -527,9 +531,9 @@ structure or a documented estimate; it is not a runtime or performance claim.
 | Poll events snapshot | `serving` | `POLL_EVENTS_CAP=1024` preallocated, reused | readiness/token list | reactor turn pass 1; hot | as-built | `src/serving.rs:105-123,1261-1271` |
 | Ready/coalescing tables | `serving` | `CoalescedBatch` first-arrival chain, ready visit state | merged arms, batch generations | pass 1/pass 2; hot | as-built | `src/serving.rs:1341-1428` |
 | Monitor facts/actions | `enforcement` | FactCounters (any_illegal/kinds, per-ordinal early_data+ja4, dns_anomaly kinds), ActionCounters (per-scope/per-ordinal), ja4_value `[[u8;36];32]`, ja4_seed/peer, 64-entry capture ring | saturating counters, JA4 value table, `[Option<ConsumedCapture>;64]` | fact fold → tripwire effect → monitor record; the always-emitted summary counters are authoritative; per-domain / per-capture detail batches are best-effort (dropped whole on overflow, never summed); warm | as-built | `src/enforcement/monitor.rs:11-115`; `src/log.rs:55-67` |
-| JA4 baseline table | `serving` | `[ [Ja4BaselineEntry;16]; 32 ]` = 512 × 36 B = 18,432 B | per-(ordinal,addr) JA4 strings | first-seen set baseline, never updated after seeding; warm | as-built | `src/serving.rs:584-619`; spec §JA4 client-fingerprint tripwire (docs/alumina-proxy.md:353) |
+| JA4 baseline table | `serving` | `[ [Ja4BaselineEntry;16]; 32 ]` = 512 × 36 B = 18,432 B | per-ordinal set of ≤16 distinct 36-byte JA4 strings (no per-IP element) | first-seen set baseline, never updated after seeding; warm | as-built | `src/serving.rs:584-619`; spec §JA4 client-fingerprint tripwire (docs/alumina-proxy.md:353) |
 | Enforcement control table | `enforcement`/`config` | `[Control;4]` + two `[PerFqdnControl;32]` + `count` | any_illegal + early_data/ja4 per FQDN | uniform decide(); warm per violation | as-built | `src/enforcement/action.rs:161-232` |
-| Enforcement latch/gate state | `enforcement` | `Enforcement { control, block_all, blocked, monitor, bad_handshake_gate, illegal_fqdn_gate, early_data_gate, ja4_gate }` plus one `FirstSlot` latch per serving slot | all-scope `block_all` latch; per-domain `blocked` bitset; four per-class `WindowedCounter` gates built from the `GateSet` threshold + window | an `AnyIllegal` cause or all-scope early_data/ja4 folds into its class gate; while the (threshold, window) cap is uncrossed the all-scope `Block` is demoted to `BaselineOnly`, and the first crossing lifts it and latches `block_all`; the per-connection `FirstSlot` latch (Armed→Spent once, re-armed on slot reset) applies the first-`AnyIllegal` action at most once per connection | as-built | `src/enforcement/state.rs:216-225,262-334`; `src/enforcement/action.rs:137-153,161-232`; `src/serving.rs:640,780` |
+| Enforcement latch/gate state | `enforcement` | `Enforcement { control, block_all, blocked, monitor, bad_handshake_gate, illegal_fqdn_gate, early_data_gate, ja4_gate }` plus one `FirstSlot` latch per serving slot | all-scope `block_all` latch; per-domain `blocked` bitset; four per-class `WindowedCounter` gates built from the `GateSet` threshold + window (boot defaults `ALL_SCOPE_GATE_DEFAULT_THRESHOLD = 1` and `ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS = 900`, `src/enforcement/state.rs:12,17` — operator configuration; the gate mechanism itself is a fixed constant) | an `AnyIllegal` cause or all-scope early_data/ja4 folds into its class gate; while the (threshold, window) cap is uncrossed the all-scope `Block` is demoted to `BaselineOnly`, and the first crossing lifts it and latches `block_all`; the per-connection `FirstSlot` latch (Armed→Spent once, re-armed on slot reset) applies the first-`AnyIllegal` action at most once per connection | as-built | `src/enforcement/state.rs:216-225,262-334`; `src/enforcement/action.rs:137-153,161-232`; `src/serving.rs:640,780` |
 | IncidentReport | `incident_report` | `name_reports [NameReport;32]` + `slot_markers [Option<(u64,u64)>;512]` | per-name windows, per-tunnel markers | per-window incident bytes/attribution; warm | as-built | `src/incident_report.rs:243-244`; `src/serve.rs:75` |
 | Cache entries | `cache` | ≤32 names × 2 families × 16 addresses | per-family bindings, generations, freshness/retirement deadlines | current-cache CONNECT authorization + refresh; hot | as-built | `src/cache.rs` |
 | Schedules | `schedule` | per-(name,family) refresh-due table + retry/incident transitions | due timestamps, backoff stages, incident N/M/window | drives startup window and serving refresh; warm | as-built | `src/schedule.rs` |
