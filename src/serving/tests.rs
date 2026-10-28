@@ -6176,7 +6176,9 @@ fn second_detection_on_held_slot_is_suppressed_and_counted_first_relation_retain
         );
         let generation = serving.slots[0].slot_gen;
 
-        serving.stamp_capture(0, fact, effect);
+        let second_fact = CapturedFact::AnyIllegal(AnyIllegalCause::HostNotAllowlisted);
+        let second_effect = Effect::Block { scope: Scope::All };
+        serving.stamp_capture(0, second_fact, second_effect);
         assert_eq!(
             serving.storage().enforcement().monitor().capture_drops(),
             1,
@@ -6188,11 +6190,19 @@ fn second_detection_on_held_slot_is_suppressed_and_counted_first_relation_retain
             .expect("the first relation stays held on the slot");
         assert_eq!(
             held.fact, fact,
-            "the first relation's fact is retained, never overwritten"
+            "docs/alumina-proxy.md:340 FIRST-wins: the first detection relation is retained, never overwritten by a later one"
+        );
+        assert_ne!(
+            held.fact, second_fact,
+            "a later relation with different fact never replaces the retained first"
         );
         assert_eq!(
             held.effect, effect,
             "the first relation's effect is retained"
+        );
+        assert_ne!(
+            held.effect, second_effect,
+            "a later relation's effect never replaces the retained first"
         );
         assert_eq!(
             serving
@@ -6222,7 +6232,11 @@ fn second_detection_on_held_slot_is_suppressed_and_counted_first_relation_retain
             .expect("consumed first capture");
         assert_eq!(
             consumed.detail.fact, fact,
-            "the consumed capture is the first relation"
+            "close consumes the retained FIRST relation, not the later suppressed one"
+        );
+        assert_eq!(
+            consumed.detail.effect, effect,
+            "consumed effect rides the first relation"
         );
         assert_eq!(consumed.slot, 0, "slot identity rides the retained capture");
         assert_eq!(

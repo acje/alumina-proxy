@@ -3131,13 +3131,13 @@ mod tests {
         );
         assert_eq!(
             m.report_drops(),
-            domain_batches,
-            "RC2 F1: every refused monitor_domain batch on a full queue is counted once in report_drops"
+            2,
+            "RC2 F1: one report_drop per refused monitor_domain batch — exactly 2 batches on this full queue"
         );
         assert_eq!(
             m.capture_drops(),
-            capture_batches,
-            "RC3 F1: every refused monitor_capture batch on a full queue is counted once in capture_drops"
+            2,
+            "RC3 F1: one capture_drop per refused monitor_capture batch — exactly 2 batches on this full queue"
         );
         assert_eq!(
             store.dropped(),
@@ -3203,7 +3203,7 @@ mod tests {
         assert_eq!(
             m.capture_drops(),
             0,
-            "drain-time stranding is generic whole-record accounting, never a monitor capture/report drop"
+            "capture_drops untouched: drain_sink's whole-record drop path is type-separated from the monitor counters (unit-split pin, not a runtime call)"
         );
         let _ = writer;
     }
@@ -3247,9 +3247,13 @@ mod tests {
         assert_eq!(
             m.capture_drops(),
             0,
-            "stranding never charges capture_drops"
+            "capture_drops untouched: strand_queued takes only &mut LogStore, so the monitor counters are type-separated here (mechanism-level pin, not call-site)"
         );
-        assert_eq!(m.report_drops(), 0, "stranding never charges report_drops");
+        assert_eq!(
+            m.report_drops(),
+            0,
+            "report_drops untouched: type-separated from LogStore::strand_queued by its signature"
+        );
         assert_eq!(store.len(), 0, "queue is empty after stranding");
     }
 
