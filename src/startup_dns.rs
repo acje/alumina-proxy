@@ -479,6 +479,10 @@ pub struct StartupReport {
 impl StartupReport {
     /// Records the first counted exchange failure (name ordinal + family) if
     /// none has been captured yet.
+    #[expect(
+        clippy::expect_used,
+        reason = "any name ordinal is below ALLOWLIST_MAX=32, which fits u16"
+    )]
     pub(crate) fn record_first_failure(&mut self, ordinal: usize, family: Family) {
         if self.first_failure.is_none() {
             self.first_failure = Some((
@@ -561,6 +565,10 @@ impl WindowLedger {
     /// not-attempted as the remainder, resolved names where a usable binding
     /// was published, and each unresolved name reported from its latest
     /// classified outcome rather than inferred.
+    #[expect(
+        clippy::expect_used,
+        reason = "ledger counts (attempted, resolved, names*2) are bounded by 2*ALLOWLIST_MAX=64, fitting u32"
+    )]
     pub(crate) fn finish(
         &self,
         exchanges: u32,
@@ -2800,6 +2808,10 @@ impl StartupDns {
         clippy::too_many_lines,
         reason = "long resolve-window driver covering exchange steps, timeouts, and publish bookkeeping"
     )]
+    #[expect(
+        clippy::expect_used,
+        reason = "window ledger counts (attempted, names*2, resolved) are bounded by 2*ALLOWLIST_MAX=64, fitting u32"
+    )]
     pub(crate) fn resolve_window(
         &mut self,
         inputs: WindowInputs<'_>,
@@ -2952,6 +2964,10 @@ impl StartupDns {
     /// Returns [`StartupDnsError::ExchangeActive`] when an exchange is already
     /// in progress, leaving the outstanding exchange, its schedule accounting,
     /// and its connection untouched.
+    #[expect(
+        clippy::expect_used,
+        reason = "DNS query length is capped by the fixed 2-byte prefix fit of DNS_MSG_LIMIT"
+    )]
     pub(crate) fn start_exchange(
         &mut self,
         fqdn: &Fqdn,

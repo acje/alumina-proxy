@@ -147,6 +147,10 @@ pub enum DriveOutcome {
 /// The fixed query context the DNS-wire target anchors on: the allowlist entry
 /// whose query the corpus message answers. Reconstructed per drive (test-only
 /// allocation); the parse path itself remains allocation-free.
+#[expect(
+    clippy::expect_used,
+    reason = "the fixed corpus FQDN literal is valid by construction"
+)]
 fn dns_context() -> Fqdn {
     Fqdn::parse("sub.example.org:443").expect("static dns corpus fqdn parses")
 }
@@ -157,6 +161,10 @@ fn dns_context() -> Fqdn {
 /// header offset, and without that the generated space would never pass the
 /// tid check to reach record parsing. `LogRecord` drives the fixed-slot
 /// encoder over the input as attacker-controlled text.
+#[expect(
+    clippy::expect_used,
+    reason = "the DNS transaction-id low byte is masked to 0xff, always fitting u8"
+)]
 fn drive(target: ParserTarget, input: &[u8]) -> DriveOutcome {
     match target {
         ParserTarget::ConnectHeaders => {
@@ -347,6 +355,10 @@ impl FuzzRun {
 /// Panics on the fixed `expect` only if a bounded fuzz length does not fit
 /// `usize`, which cannot happen on supported platforms.
 #[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "fuzz length is reduced modulo the usize max_len bound, so it always fits usize"
+)]
 pub fn fuzz_target(target: ParserTarget, seed: Seed, iterations: u64, max_len: usize) -> FuzzRun {
     let mut rng = DeterministicGen::new(seed);
     let bound = max_len.max(1);

@@ -850,6 +850,10 @@ impl ServeStorage {
     /// address and FQDN/pin presence plus the accumulated verdict. The record
     /// is written allocation-free into the fixed 2 KiB slot and drained once
     /// (docs/alumina-proxy.md:67).
+    #[expect(
+        clippy::expect_used,
+        reason = "resolver index is below MAX_RESOLVERS=5, which fits u32"
+    )]
     fn emit_resolver_probe(&mut self, verdicts: [ProbeVerdict; MAX_RESOLVERS]) {
         let Some(set) = self.dns.resolvers() else {
             return;
@@ -1083,6 +1087,10 @@ impl ServeStorage {
     /// the first counted exchange failure inside the window, so emitting again
     /// at end-of-window would duplicate it (no end-window replay,
     /// docs/alumina-proxy.md:67).
+    #[expect(
+        clippy::expect_used,
+        reason = "allowlist ordinal is below ALLOWLIST_MAX=32, which fits u32"
+    )]
     fn emit_startup_records(
         &mut self,
         secs: u64,

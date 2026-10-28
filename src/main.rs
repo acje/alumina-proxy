@@ -1,3 +1,6 @@
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 //! Alumina binary: fixed documented config inputs, no CLI or
 //! environment policy overrides. Runs the boot harness (privilege check,
 //! config read incl. the validated resolver set, 128 MiB traffic store +

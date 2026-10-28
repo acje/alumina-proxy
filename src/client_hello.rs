@@ -143,6 +143,10 @@ impl ClientHello {
     /// `MAX_CIPHERS` and `extensions` to `MAX_EXTENSIONS`, so the internal
     /// capacity checks in [`ja4_fingerprint`] cannot fire.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "the parser bounds ciphers to MAX_CIPHERS and extensions to MAX_EXTENSIONS, so the internal capacity checks cannot fire"
+    )]
     pub fn ja4(&self) -> [u8; 36] {
         let version = self
             .offered_versions()

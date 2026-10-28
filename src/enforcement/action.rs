@@ -104,6 +104,10 @@ impl AnyIllegalControl {
 pub struct DomainOrdinal(u8);
 
 impl DomainOrdinal {
+    #[expect(
+        clippy::expect_used,
+        reason = "mint guards index < count <= ALLOWLIST_MAX (32), so the ordinal fits u8"
+    )]
     fn mint(index: usize, count: usize) -> Option<DomainOrdinal> {
         (index < count && count <= ALLOWLIST_MAX)
             .then(|| DomainOrdinal(u8::try_from(index).expect("ordinal bounded by ALLOWLIST_MAX")))

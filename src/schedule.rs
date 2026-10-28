@@ -672,6 +672,10 @@ impl Schedules {
     ///
     /// Panics on the fixed `expect` only if the round-robin scan index does not
     /// fit `u8`, impossible given the bounded slot count.
+    #[expect(
+        clippy::expect_used,
+        reason = "round-robin scan index is bounded by the fixed slot count, which fits u8"
+    )]
     pub fn select_due(&mut self, now: u64) -> Result<Option<DueToken>, ScheduleError> {
         let total = self.name_count() * 2;
         for step in 0..total {

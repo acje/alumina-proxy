@@ -201,6 +201,10 @@ impl StagedPositive {
     /// Returns `BindingCapacityExceeded` when `bindings` exceeds
     /// `MAX_ADDRESSES` (never truncating), or `FamilyMismatch` when a binding
     /// does not match `family`.
+    #[expect(
+        clippy::expect_used,
+        reason = "binding count is checked against MAX_ADDRESSES=16, which fits u8"
+    )]
     pub(crate) fn stage(
         name: NameIndex,
         family: Family,
@@ -362,6 +366,10 @@ impl Cache {
     /// This function does not panic. Names not admitted by this cache are
     /// rejected by `admit` with `Err(NameOutOfRange)` (listed in `# Errors`)
     /// before any fixed-size entry indexing occurs.
+    #[expect(
+        clippy::expect_used,
+        reason = "eligible count cannot exceed MAX_ADDRESSES=16 after the staged-filter, fitting u8"
+    )]
     pub fn publish_positive(&mut self, staged: &StagedPositive) -> Result<(), CacheError> {
         self.admit(staged.name)?;
         let entry = self.entry_mut(staged.name, staged.family);

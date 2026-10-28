@@ -505,6 +505,10 @@ impl CoalescedBatch {
     /// chain exactly once. Every later token for the same slot and generation
     /// merges readiness without re-chaining; a token folded at a different
     /// generation (a mid-batch slot reuse) is dropped.
+    #[expect(
+        clippy::expect_used,
+        reason = "coalesced sequential order is bounded by MAX_TUNNELS=512, which fits u32"
+    )]
     fn fold(&mut self, index: usize, event_gen: u64, upstream: bool, ready: Readiness) {
         let acc = &mut self.slots[index];
         if acc.seen() && acc.slot_gen != event_gen {

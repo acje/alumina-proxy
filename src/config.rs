@@ -171,6 +171,10 @@ impl FixedHostname {
     /// Panics only if the normalized bytes are not valid UTF-8, impossible by
     /// construction because normalization accepts ASCII input only.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "FixedHostname normalization keeps only ASCII bytes, so they are always valid UTF-8"
+    )]
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(self.as_bytes()).expect("FixedHostname is ASCII")
     }
@@ -744,6 +748,10 @@ pub fn parse_config_document(doc: &str) -> Result<Config, ConfigError> {
     from_table(&table)
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "build_allowlist already validated 1..=32 entries, so ControlTable::new cannot fail"
+)]
 fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
     let listen = require_string(table, "listen")?;
     let allowance = require_integer(table, "startup_unresolved_allowance")?;
@@ -983,6 +991,10 @@ fn parse_gate_section(table: &toml::Table, name: &str) -> Result<AllScopeGate, C
     Ok(AllScopeGate::new(threshold, window_secs))
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "each key comes from table.keys() iteration, so it is present in the table by construction"
+)]
 fn parse_allowed_fqdn_table(
     value: &toml::Value,
     fqdn_key: &str,
@@ -1022,6 +1034,10 @@ fn parse_allowed_fqdn_table(
     Ok((early, j4, bailiwick))
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "parse_allowed_fqdn_table only calls this from the iterated 'cname_bailiwick' arm, so the key is present"
+)]
 fn parse_cname_bailiwick(table: &toml::Table, fqdn_key: &str) -> Result<Vec<String>, ConfigError> {
     let value = table
         .get("cname_bailiwick")

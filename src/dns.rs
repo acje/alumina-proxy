@@ -147,6 +147,10 @@ impl BindingList {
     ///
     /// Panics only if the bounded candidate count does not fit `u8`, impossible
     /// given the `MAX_ADDRESSES` bound.
+    #[expect(
+        clippy::expect_used,
+        reason = "candidate count is checked against MAX_ADDRESSES=16, which fits u8"
+    )]
     pub fn from_slice(addrs: &[NumericAddr]) -> Result<BindingList, DnsError> {
         if addrs.len() > MAX_ADDRESSES {
             return Err(DnsError::CandidatesExceeded {
@@ -453,6 +457,10 @@ fn write_header(buf: &mut [u8], tid: u16) -> Result<(), DnsError> {
     Ok(())
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "label and tail lengths are checked to be <= 63 before encoding, fitting u8"
+)]
 fn write_qname(buf: &mut [u8], mut pos: usize, name: &str) -> Result<usize, DnsError> {
     let bytes = name.as_bytes();
     let mut label_start = 0usize;
@@ -504,6 +512,10 @@ fn write_qname(buf: &mut [u8], mut pos: usize, name: &str) -> Result<usize, DnsE
 ///
 /// Panics on the fixed `expect` only if the DNS `CLASS_IN` constant does not
 /// fit the one-byte wire field, which cannot happen.
+#[expect(
+    clippy::expect_used,
+    reason = "CLASS_IN is the constant 1, which always fits the one-byte u8 wire field"
+)]
 pub fn build_query(
     fqdn: &Fqdn,
     family: Family,

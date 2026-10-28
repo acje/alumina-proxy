@@ -46,6 +46,10 @@ impl AllScopeGate {
 }
 
 impl Default for AllScopeGate {
+    #[expect(
+        clippy::expect_used,
+        reason = "default gate constants threshold 1 and window 900 are nonzero by definition"
+    )]
     fn default() -> Self {
         Self::new(
             NonZeroU32::new(ALL_SCOPE_GATE_DEFAULT_THRESHOLD)

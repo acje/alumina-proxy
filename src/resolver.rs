@@ -53,6 +53,10 @@ enum FqdnError {
 }
 
 impl Fqdn {
+    #[expect(
+        clippy::expect_used,
+        reason = "an FQDN is rejected when it exceeds FQDN_MAX_LEN=253, so its length fits u8"
+    )]
     fn parse(value: &str) -> Result<Fqdn, FqdnError> {
         if value.bytes().any(|b| b == b'*') {
             return Err(FqdnError::Wildcard);
@@ -97,6 +101,10 @@ impl Fqdn {
     ///
     /// Never: the inline bytes were validated as ASCII at construction.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "Fqdn::parse validated the stored bytes as ASCII, so they are always valid UTF-8"
+    )]
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.bytes[..usize::from(self.len)])
             .expect("Fqdn stores validated ASCII bytes")

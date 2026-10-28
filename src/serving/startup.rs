@@ -33,6 +33,10 @@ impl Serving {
         clippy::too_many_lines,
         reason = "long cooperative startup-DNS window loop folding poll/exchange/selection phases"
     )]
+    #[expect(
+        clippy::expect_used,
+        reason = "name ordinal is below ALLOWLIST_MAX=32, which fits u16"
+    )]
     pub(crate) fn run_startup_window(
         &mut self,
         nameserver: SocketAddr,

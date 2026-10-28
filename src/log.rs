@@ -815,6 +815,10 @@ const fn domain_block_nonzero(monitor: &Monitor, ordinal: DomainOrdinal) -> bool
 
 /// Number of `monitor_domain` batches needed to carry every nonzero domain
 /// block (32 ordinals -> ceil(nonzero / `DOMAIN_BATCH`), zero when none).
+#[expect(
+    clippy::expect_used,
+    reason = "nonzero count is bounded by ALLOWLIST_MAX=32 and the DOMAIN_BATCH division only shrinks it, so it fits u32"
+)]
 fn count_domain_batches(monitor: &Monitor) -> u32 {
     let mut nonzero = 0usize;
     for index in 0..crate::config::ALLOWLIST_MAX {
@@ -830,6 +834,10 @@ fn count_domain_batches(monitor: &Monitor) -> u32 {
 
 /// Number of `monitor_capture` batches needed to carry every capture detail
 /// (64 details -> ceil(len / `CAPTURE_BATCH`), zero when the window is empty).
+#[expect(
+    clippy::expect_used,
+    reason = "capture detail count is bounded by CAPTURE_DETAIL_LEN=64 and the CAPTURE_BATCH division only shrinks it, so it fits u32"
+)]
 fn count_capture_batches(monitor: &Monitor) -> u32 {
     u32::try_from(monitor.capture_detail_len().div_ceil(CAPTURE_BATCH))
         .expect("capture batch count fits u32")
@@ -842,6 +850,10 @@ fn count_capture_batches(monitor: &Monitor) -> u32 {
 #[expect(
     clippy::too_many_lines,
     reason = "long monitor record serializer emitting every indexed field into the fixed slot buffer"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "enumerated cause and unknown-reason indices stay below their small compile-time counts, fitting u32"
 )]
 fn encode_monitor_summary(
     slot_buf: &mut [u8; SLOT_BYTES],
@@ -991,6 +1003,10 @@ fn encode_monitor_summary(
 /// (no `Kind` variant exists for detail batches), `secs`, `part=n/total`, then
 /// up to [`DOMAIN_BATCH`] nonzero domain blocks scanned ascending from `start`,
 /// advancing `start` past every examined ordinal.
+#[expect(
+    clippy::expect_used,
+    reason = "allowlist index is below ALLOWLIST_MAX=32 (fits u32) and monitor JA4 values are stored as ASCII bytes (UTF-8 decode cannot fail)"
+)]
 fn encode_monitor_domain_batch(
     slot_buf: &mut [u8; SLOT_BYTES],
     secs: u64,
@@ -1079,6 +1095,10 @@ fn encode_monitor_domain_batch(
 /// Encodes one best-effort `monitor_capture` batch: its own hardcoded header,
 /// `secs`, `part=n/total`, then up to [`CAPTURE_BATCH`] capture details scanned
 /// ascending from `start`, advancing `start` past every examined detail.
+#[expect(
+    clippy::expect_used,
+    reason = "capture detail index is bounded by CAPTURE_DETAIL_LEN=64, which fits u32"
+)]
 fn encode_monitor_capture_batch(
     slot_buf: &mut [u8; SLOT_BYTES],
     secs: u64,
