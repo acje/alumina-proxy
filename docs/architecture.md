@@ -10,24 +10,47 @@ defines a boundary the spec leaves open, it is a **named design decision
 
 ## 1. Governing invariants (invariant-led design)
 
-The fixed-profile invariants I-1…IV-5 name the design element each enforces.
+The fixed-profile invariants are the spec's §Invariants (I: 3, II: 2, III: 3,
+IV: 5); each names the design element that enforces it. Internal uses keep one
+id per invariant (IV-1 is used at §3.5 and §4; III-3 at §3.7). A violation is a
+tripwire signal, never a tolerated deviation — there is no tolerated rate of bad
+behavior.
+
+| Id | Invariant (spec name) | Enforced by |
+|---|---|---|
+| I-1 | The Destination-Binding Invariant | validated allowlist + mandatory SNI match (`src/config.rs`), address eligibility (`src/eligibility.rs`), current-cache peer selection with no addresses/cache refs stored in a tunnel (`src/worker.rs`; §5) |
+| I-2 | The Authorization-Before-Forwarding Invariant | the two-barrier forwarding gate — A: no client bytes before full ClientHello validation; B: no upstream bytes before the gate opens (D2, `src/gate.rs`) |
+| I-3 | The Fail-Closed Invariant | fail-closed defaults in config validation (`src/config.rs`), DNS negative/contradictory outcomes (`src/dns.rs`), non-global-unicast rejection (`src/eligibility.rs`) |
+| II-1 | The Zero-Allocation Invariant | boot-preallocated storage (`src/inventory.rs`, §6) + allocator instrumentation (verification.md F3) |
+| II-2 | The Resource-Bounds Invariant | fixed build-time limits: `CONNECT_LIMIT` (`src/connect.rs:8`), `MAX_CLIENT_HELLO` (`src/client_hello.rs:6`), log `QUEUE_SLOTS`/`SLOT_BYTES` (`src/log.rs:53-54`), `inventory.rs` constants |
+| III-1 | The Ownership Invariant | one poll, one owner: `Serving::run_once` (`src/serving.rs:1257`) under `Runtime::turn` (`src/runtime.rs:252`); the slot table owns its lifecycle and counts (`src/worker.rs`) |
+| III-2 | The Generation-Isolation Invariant | generation-tagged socket ids (`src/serving.rs:135-162`), cache-entry generations (`src/cache.rs`), per-tunnel window markers (`src/incident_report.rs:242-245`) |
+| III-3 | The Bounded-Work Invariant | the per-visit I/O budget `VISIT_OPS`/`VISIT_BYTES` + timer recheck `TIMER_RECHECK_EVERY` (`src/serving.rs:105-111`); ≤ 8 DNS advances per turn (`src/runtime.rs:252-282`) |
+| IV-1 | The State-Transition Invariant | `Stage`/`GatePhase` enums — illegal transitions unrepresentable, every I/O outcome has a permitted transition (`src/serving.rs:340-351`, `src/gate.rs`) |
+| IV-2 | The Stream-Parsing Invariant | incremental CONNECT/ClientHello parsers with residual state and original-byte preservation (`src/connect.rs`, `src/client_hello.rs`) |
+| IV-3 | The Non-Decrypting Invariant | no accept-side TLS termination on the tunnel path — transparent bit-pipe; the only TLS in-process is the resolver DoT client (`src/startup_dns.rs`, rustls bounded seam) |
+| IV-4 | The Byte-Conservation Invariant | write-accounted gate + ordered per-direction forward with no duplication/replay (D5, `src/gate.rs`, `src/serving.rs`) |
+| IV-5 | The Deadline Invariant | single monotonic earliest-deadline authority: `poll_timeout` folds every deadline; the sweep runs before dispatch (`src/serving.rs:3159-3223,3241-3269`) |
 
 ## 2. Module & ownership decomposition
 
-Single binary crate, one worker thread, no async runtime (`:140,147`); **all
-post-boot state is preallocated** (§6).
+Single binary crate, one worker thread, no async runtime (spec §Architecture →
+I/O model); **all post-boot state is preallocated** (§6).
 
 | Module | Owns (mutating authority) | Citations |
 |---|---|---|
-| `config` | Parsed config, startup validation; EX_CONFIG 78 | `:54,56,58,60` |
-| `resolver` | Validated TOML `resolver` array (1..=5 entries); per-entry dial port 53 (bare `IP`) / 853 (`IP#fqdn`, strict-pin); DNS TCP transport (1 conn/1 query, getrandom TIDs) | `:567-614,616-701` (amendment), `:68` |
-| `dns_parse` | Wire parsing + staging classification (bounded CNAME, negatives, eligibility) | `:69,71,73,86-97` |
-| `cache` | Per-name×type entries, generations, staging, refresh due table, retry/incident, reporting; **tunnels never hold cache refs** | `:74-82,145` |
-| `tunnel` | 512 slots; per-slot state machine; two 128 KiB buffers; per-family counts | `:82,145,160,183` |
-| `parse` (CONNECT/CH) | Incremental CONNECT (8 KiB) + ClientHello (≤64 KiB) parsers, residual state, original bytes | `:34,41,47-50,163-164` |
-| `worker` / `Runtime` | The single owner loop: readiness demux, scheduling, timers, gate transitions — realized as the shared-readiness `Runtime` | `:138,144,146,147,149` |
-| `log` | 256×8 KiB preallocated queue; allocation-free encode; nonblocking sink; drop+count | `:149,178-179,193-194` |
-| `lifecycle` | SIGTERM, shutdown grace, drain; exit without deallocating | `:149,150,181,192` |
+| `config` | Parsed config, startup validation; EX_CONFIG 78 | spec §Configuration & DNS; §Keyed configuration schema → Document bound |
+| `resolver` | Validated TOML `resolver` array (1..=5 entries); per-entry dial port 53 (bare `IP`) / 853 (`IP#fqdn`, strict-pin); DNS TCP transport (1 conn/1 query, getrandom TIDs) | `:567-614,616-701` (amendment); spec §Configuration & DNS → Resolver selection / Transport |
+| `dns` | Wire parsing + staging classification (bounded CNAME, negatives) | spec §Configuration & DNS → Wire parsing / DNS provenance |
+| `eligibility` | Address eligibility (globally routable unicast only) | spec §Configuration & DNS → Addresses |
+| `cache` | Per-name×type entries, generations, staging, refresh due table, retry/incident, reporting; **tunnels never hold cache refs** | spec §Architecture → Cache Publication; §Configuration & DNS → Cache lifetime |
+| `worker` | 512-slot typed decision substrate: per-slot state machine, per-family counts; **owns no sockets** — a pure nonalloc decision core (`src/worker.rs:1-25`) | spec §Architecture → Single Owner |
+| `serving` | The serving owner loop, slot lifecycle, and the per-slot traffic buffers (boot-preallocated `TrafficStorage`, `src/inventory.rs`) handed to serving slots; `Serving::run_once` | src/serving.rs:1257; spec §Architecture → I/O model; §Initial resource profile |
+| `connect` | Incremental CONNECT (8 KiB) parser, residual state, original bytes | src/connect.rs:8; spec §Protocol contract → CONNECT request |
+| `client_hello` | ClientHello (≤64 KiB) parser (two-barrier gate, D2), residual state, original bytes | src/client_hello.rs:6; spec §Protocol contract → TLS ClientHello profile |
+| `runtime` | Shared-readiness `Runtime` owner loop: readiness demux, scheduling, timers, gate transitions; `Runtime::turn`; process exit | src/runtime.rs:252; spec §Architecture → Scheduling / → I/O model / → Runtime surface |
+| `log` | 256×2 KiB preallocated queue; allocation-free encode; nonblocking sink; drop+count | src/log.rs:53-54; spec §Initial resource profile; §Lifecycle → Log delivery |
+| `lifecycle` | SIGTERM + drain (`serving`), exit without deallocating (`runtime`), shutdown status (`log`) | spec §Lifecycle → Shutdown / → Closure |
 | `enforcement` | rp2e tripwire/action/monitoring surface (per-control schema: `[any_illegal]` with the four controls `connect_parse`, `host_not_allowlisted`, `tls_profile`, `ech` + keyed `[allowed_fqdn."<fqdn>:<port>"]` tables with per-FQDN `early_data`/`ja4` controls), per-control Action (`notify`|`block`), bounded stdout monitoring, control state | §Tripwire actions, monitoring, and pacing, §Keyed configuration schema, §Per-control enforcement schema |
 
 > **As-built realization.** `src/main.rs` is the single boot owner: preallocate
@@ -63,9 +86,10 @@ path in the process.
 The same poll serves both owner phases: the startup DNS window attaches the
 retained DNS transport to it **before** a listener exists
 (`src/serving/startup.rs:42-47,178-183`), and a serving decision registers the
-listener on that same poll without creating a second one
-(`src/serving.rs:1135-1142,1220-1240`). `Runtime::serve` is the process-lifetime
-loop over it and never returns `Ok` (`src/runtime.rs:366-379`).
+listener on the poll created once in `Serving::preallocate`
+(`src/serving.rs:1023,1135-1142`), with the DNS transport attached to that same
+registry (`src/serving.rs:1173-1177,1220-1240`). `Runtime::serve` is the
+process-lifetime loop over it and never returns `Ok` (`src/runtime.rs:366-379`).
 
 ### 3.1 Event sources on the single poll
 
@@ -166,8 +190,9 @@ response that has begun (D1).
 Fair round-robin with a **64 KiB-or-16-op per-visit budget** (D6); timer recheck
 every ≤256 ready-slot visits; unfinished work reschedules without a new
 readiness edge; ready queue duplicate-free by construction (D7) — the
-application-owned queue of `:146`; deadlines checked against monotonic clock
-before any completion transition (`:146,147`).
+application-owned queue of spec §Architecture → Scheduling; deadlines checked
+against monotonic clock before any completion transition (spec §Invariants → IV
+… The Deadline Invariant).
 
 ### 3.7 Why this shape
 
@@ -188,18 +213,45 @@ before any completion transition (`:146,147`).
 ## 4. Tunnel state machine and legal transitions
 
 Tunnel state is a Rust enum; **illegal transitions are unrepresentable**, not
-merely rejected (IV-1).
+merely rejected (IV-1). The protocol phases below are the `Stage` variants
+themselves (`src/serving.rs:340-351`); the former `GATE_OPENING` and `DRAINING`
+names are not top-level stages — `GATE_OPENING` is the gate-opening
+write-accounting transition inside `upstream_write` (`src/gate.rs:217-238`), and
+`DRAINING` is the relay-phase `SideEof` sub-state (`src/serving.rs:358-372`).
 
 ```
-ACCEPT → READ_CONNECT → (400/403 before 200 begins) → CLOSE
+Stage::ReadingConnect (connection accepted; reading CONNECT headers)
+        → (400/403 before 200 begins: Stage::Refusing) → Stage::Closing
                  ↓ AUTHORIZED (allowlisted, 443)
-        CONNECTING_UPSTREAM (revalidate per attempt, ≤4×2 s clipped to 10 s; 502/504)
-                 ↓ SENT_200 (successful CONNECT completed)
-        VALIDATING_CLIENTHELLO (≤64 KiB)
-                 ↓ GATE_OPENING (write-accounting transition)
-        RELAY_ACTIVE → DRAINING (first orderly EOF) → CLOSE
-        (after 200 begins: any error closes, no injected response, no TLS alert)
+Stage::RunningDecision (allowlist decision + per-attempt DNS peer selection)
+Stage::Dialing (≤4×2 s connect attempts clipped to the 10 s setup; 502/504 → Stage::Refusing)
+                 ↓ `200` written
+Stage::SendingConnected (successful CONNECT completed)
+Stage::ValidatingHello (≤64 KiB ClientHello; barriers A/B)
+                 ↓ gate opens: `GateOpened` in `upstream_write` (`src/gate.rs:217-238`) —
+                   the write-accounting transition after the end of the validated
+                   ClientHello (H), never a separate top-level stage
+Stage::WritingHello (partial upstream write of the validated ClientHello)
+Stage::Relay (bytes flow)
+                 ↓ first orderly EOF → the `SideEof` relay sub-state (`src/serving.rs:358-372`)
+Stage::Closing (drain half-closes, then close)
+(after 200 begins: any error closes with no injected response and no TLS alert)
 ```
+
+Stage-variant mapping (`src/serving.rs:340-351`):
+
+| Variant | Role in the as-built flow |
+|---|---|
+| `Idle` | empty slot; no live state |
+| `ReadingConnect` | connection accepted; reading CONNECT headers |
+| `RunningDecision` | allowlist decision + per-attempt DNS peer selection |
+| `Dialing` | upstream connect attempts (≤4×2 s clipped to the 10 s setup deadline; 502/504) |
+| `SendingConnected` | `200` written |
+| `ValidatingHello` | ≤64 KiB ClientHello validation (barriers A/B, D2) |
+| `WritingHello` | partial upstream write of the validated ClientHello; the `GateOpened` write-accounting transition (`src/gate.rs:217-238`) |
+| `Relay` | bytes flow; first orderly EOF enters the `SideEof` sub-state (DRAINING) |
+| `Refusing` | refusal response written before 200 begins (400/403/502/503/504) |
+| `Closing` | close after drain |
 
 Named decisions:
 
@@ -208,22 +260,26 @@ Named decisions:
   response/alert; only a *completed* 200 permits ClientHello inspection.
 - **D2 two barriers.** A: no client bytes before full validation (SNI
   normalized-equal to approved hostname). B: no upstream bytes before the gate
-  opens (`:201`).
+  opens (spec §Invariants → I … The Authorization-Before-Forwarding Invariant).
 - **D3 gate-opening.** The gate opens **in the same worker transition whose
   successful local-write accounting reaches the end of the validated
-  ClientHello (H), before any subsequent upstream read** (`:32`); a crossing
+  ClientHello (H), before any subsequent upstream read** (spec §Protocol
+  contract; `src/gate.rs:217-238`); a crossing
   write forwards trailing `X` from the open point; local-write success ≠ remote
   receipt; arrival ordering never inferred after open.
 - **D4 early-activity.** While B is closed the worker may do upstream I/O;
   actual data/EOF/reset terminates setup (metadata-only warn); WouldBlock/
   readiness is not activity.
 - **D5 accounting.** Forwarded bytes advance only on successful writes; partial
-  writes preserve order (`:32,80,146-147,220`). **D5a** exactly two per-family
-  counters (A/AAAA) per connecting tunnel, never addresses/refs (`:82`).
+  writes preserve order (spec §Architecture → I/O model; §Invariants → IV …
+  The Byte-Conservation Invariant). **D5a** exactly two per-family
+  counters (A/AAAA) per connecting tunnel, never addresses/refs (spec
+  §Configuration & DNS → Bounds and retries).
   **D5b** two 128 KiB buffers reused across CONNECT/ClientHello/relay without
   discarding coalesced bytes; relay buffers never enlarge setup limits.
 
-Lifetimes (`:189-192`): setup deadline starts at accept, never reset; connect
+Lifetimes (spec §Lifecycle; §Invariants → IV … The Deadline Invariant): setup
+deadline starts at accept, never reset; connect
 deadlines clipped to it; idle starts at gate open, reset only on successful
 writes; first EOF starts the never-reset 5 s drain; SIGTERM stops accepting +
 8 s grace (never extended); resources released exactly once; exit without
@@ -231,14 +287,15 @@ deallocating.
 
 ## 5. Generations, lifetimes, and anti-alias (T7/T1-merged domains)
 
-Four domains must **not** be merged (`:212`):
+Four domains must **not** be merged (spec §Invariants → III … The
+Generation-Isolation Invariant; §Architecture → Single Owner):
 
 | Domain | Owner | Invalidation rule | Reuse proof status |
 |---|---|---|---|
-| G1 Tunnel-slot generation | `tunnel` | Connection-scoped state; reuse must never make stale work valid | **design artifact**; nonreuse proof open gate |
+| G1 Tunnel-slot generation | `worker` (slot substrate) | Connection-scoped state; reuse must never make stale work valid | **design artifact**; nonreuse proof open gate |
 | G2 Cache-entry generation | `cache` | Advances on replacement/eviction; rejects obsolete | per-op tag; part of cache slice |
 | G3 DNS non-connection lifetime | `cache` | Refresh results not connection generations; no cache refs | structural |
-| G4 Reporting window id | `cache` | Ids not reusable while a live tunnel retains one; counters saturate | **design artifact**; proof open gate |
+| G4 Reporting window id | `incident_report` | Ids not reusable while a live tunnel retains one; counters saturate (per-tunnel `slot_markers`, `src/incident_report.rs:242-245`; surfaced as `IncidentReport` at `src/serve.rs:75`) | **design artifact**; proof open gate |
 
 A wide integer is not a nonreuse proof; width/exhaustion are recorded artifacts
 with construction-and-reuse proof as a future gate.
@@ -247,52 +304,80 @@ with construction-and-reuse proof as a future gate.
 
 - **T1 boot boundary:** boot init = privilege + config + resolver reads +
   storage/facility init; startup DNS is post-boot and allocation/deallocation-
-  free (`:64,150,206,230`).
+  free (spec §Architecture → Boot-Time Storage; §Initial resource profile).
 - **T3 memory reading:** 128 MiB is **tunnel traffic storage only**; the ban on
   heap alloc/dealloc during serving/refresh does not imply constant total
-  memory — process/kernel memory reported separately (`:143,183,206`).
+  memory — process/kernel memory reported separately (spec §Initial resource
+  profile; §Architecture → Boot-Time Storage).
 
 | Allocation | Size | Citations |
 |---|---|---|
-| Tunnel traffic buffers | 512 × 2 × 128 KiB = 128 MiB | `:160-162,183` |
-| Retained serving workspace (per-slot CONNECT head + 2×64 KiB ClientHello inspector + JA4 retention) | 512 × ~152.5 KiB ≈ 76 MiB (design estimate) | `:162,186,929` |
-| Config document buffer | 16385 B (16 KiB bound + 1 oversize-probe byte) | `:54,158` |
-| CONNECT / TLS pre-auth | ≤8 KiB / ≤64 KiB | `:163-164` |
-| DNS message/records staging | 16 KiB / 128 RRs | `:165` |
-| Cache entries | ≤32 names × 2 types, 16 A + 16 AAAA per name | `:74,166` |
-| Reporting storage | 32/64/512 markers | `:177` |
-| Log queue | 256 × 8 KiB | `:178` |
-| Ready/timer tables | Fixed slot counts (dup-free) | `:146` |
-| Stacks | Bounded worst-case (no recursion); numeric a **design artifact** | `:143,165,183` |
-| mio Poll/Events | Preallocated at boot; op matrix pinned | `:147,206,230` |
+| Tunnel traffic buffers | 512 × 2 × 128 KiB = 128 MiB | spec §Initial resource profile; §Architecture → I/O model |
+| Retained serving workspace (per-slot CONNECT head + 2×64 KiB ClientHello inspector + JA4 retention) | 512 × ~152.5 KiB ≈ 76 MiB (design estimate) | spec §JA4 client-fingerprint tripwire → Fixed storage; §Memory accounting — retained serving workspace |
+| Config document buffer | 16385 B (16 KiB bound + 1 oversize-probe byte) | spec §Keyed configuration schema → Document bound; §Configuration & DNS |
+| CONNECT / TLS pre-auth | ≤8 KiB / ≤64 KiB | spec §Initial resource profile |
+| DNS message/records staging | 16 KiB / 128 RRs | spec §Initial resource profile |
+| Cache entries | ≤32 names × 2 types, 16 A + 16 AAAA per name | spec §Initial resource profile; §Architecture → Cache Publication |
+| Reporting storage | 32/64/512 markers | spec §Initial resource profile |
+| Log queue | 256 × 2 KiB | spec §Initial resource profile |
+| Ready/timer tables | Fixed slot counts (dup-free) | spec §Architecture → Scheduling |
+| Stacks | Bounded worst-case (no recursion); numeric a **design artifact** | spec §Initial resource profile; §Verification |
+| mio Poll/Events | Preallocated at boot; op matrix pinned | spec §Architecture → I/O model |
 
 **Outside the 128 MiB budget** (separately accounted): the retained serving
 workspace (512 × ~152.5 KiB ≈ 76 MiB, design estimate — JA4 ClientHello
-retention reconciled at spec §JA4 client-fingerprint tripwire), DNS storage, metadata, stacks, executable,
-kernel socket buffers (T3).
-**Dependency seam (T2/G4):** `mio`+epoll mandated (`:147`); pin version,
+retention reconciled at spec §JA4 client-fingerprint tripwire → Fixed storage), DNS storage, metadata, stacks, executable,
+kernel socket buffers (T3). **Do not read the printed inventory 68 MiB as the
+reconciled 76 MiB:** the code inventory/print path still reports the
+pre-reconciliation figure — `SERVING_WORKSPACE_BYTES = 512 slots × 136 KiB`
+(`CONNECT_LIMIT` head + two 64 KiB inspector buffers; `src/inventory.rs:22,25`,
+test-pinned at `src/inventory.rs:250`; printed at `src/main.rs:32-37`) ≈ 68 MiB —
+while the ~16.5 KiB/slot JA4 ClientHello retention (~8.2 MiB, spec §JA4
+client-fingerprint tripwire → Fixed storage) is a spec figure the inventory does
+not yet account for; no code allocation exists for it yet.
+**Dependency seam (T2/G4):** `mio`+epoll mandated (spec §Architecture → I/O
+model); pin version,
 enumerate operations, gate each on source review + allocator instrumentation
 (verification.md F3) — mio steady-state alloc-freedom is not assumed.
 
 ## 7. Startup, logging, shutdown
 
-**Startup** (`:64-67`): privilege → config+resolver → storage → 90 s startup
+**Startup** (spec §Configuration & DNS; §Initial resource profile): privilege →
+config+resolver → storage → 90 s startup
 DNS window (exchanges clipped) → listener open; open early only when all names
 usable; at deadline serve if unresolved ≤ allowance else EX_TEMPFAIL 75; no
 readiness endpoint; one first-failure warn, suppressed per-type first warnings,
 one `startup_name` record per unresolved name plus one final summary. **Logging**
-(`:178-179,193-194`): allocation-free records ≤8
-KiB escaped, whole-record drop+count (never truncate), nonblocking drain under
+(spec §Lifecycle → Log delivery): allocation-free records ≤2
+KiB escaped (the maximum encoded record, including the terminating-newline
+framing, fits a 2 KiB slot — `src/log.rs:3-6,53-54`), whole-record drop+count
+(never truncate), nonblocking drain under
 per-turn budget with partial-write preservation; a stalled sink must not delay
 rejection/tunnel I/O/DNS/deadlines; one warn per rejection and per
-early-activity close; stdout only. **Shutdown** (`:150,192`): SIGTERM only →
-stop accepting, 8 s grace, drain, exit without deallocating; `panic="abort"`;
-`unwrap()/expect()` excluded from production paths.
+early-activity close; stdout only. **Shutdown** (spec §Lifecycle → Shutdown;
+§Architecture → Runtime surface): SIGTERM only →
+stop accepting, 8 s grace, drain, exit without deallocating; `panic="abort"`
+is fail-stop, not proof of panic freedom — **`unwrap()` is excluded from
+production paths; `expect()` is permitted only where an invariant argument makes
+the call infallible**, and every production `expect()` carries that reason
+string (the convention), e.g. `src/client_hello.rs:161` ("parser-bounded:
+ciphers <= MAX_CIPHERS and extensions <= MAX_EXTENSIONS"),
+`src/config.rs:175` ("FixedHostname is ASCII"), `src/dns.rs:158` ("candidate
+count bounded by MAX_ADDRESSES"). Measured against non-`#[cfg(test)]` code, the
+proxy crate holds 30 production `expect()` calls (all with invariant reason
+strings) and zero production-line `unwrap()` calls — all `.unwrap()` instances
+are confined to `#[cfg(test)]` modules — plus 14 `expect()`s in the dev-only
+`src/bin/parser_bench.rs`. The spec carries the same blanket "`unwrap()` and
+`expect()` are excluded from production paths" claim (spec §Architecture →
+Failure Handling); that wording is the spec's, flagged to the mission owner, and
+not edited here.
 
 ## 8. Deployment and trust boundary
 
-Alumina is responsible for the egress it provides (`:99-101`); VPC isolation is
-deployment-scoped. Runtime prerequisites (`:118,150`): minimal `FROM scratch`
+Alumina is responsible for the egress it provides (spec §Deployment boundary;
+§Threat model); VPC isolation is deployment-scoped. Runtime prerequisites (spec
+§Architecture → Runtime prerequisites; §Deployment boundary): minimal
+`FROM scratch`
 container holding only `/alumina` (statically linked musl binary) and
 `/config.toml` (validated allowlist + resolver set); non-root (`65534:65534`),
 empty caps
@@ -301,11 +386,13 @@ read-only rootfs (`--read-only`), no writable/secret volumes, and a dedicated
 appliance identity holding no application secrets or credentials. Confinement
 default-denies workload egress except to Alumina's private VPC endpoint
 (`tcp:5353`) + explicitly required non-HTTPS platform dependencies across all
-routes/families (`:116`), including removing default Private Google Access
+routes/families (spec §Deployment boundary), including removing default
+Private Google Access
 (`199.36.153.8/30:443`) bypasses when unused; exactly one listening socket;
 config read once; a validated `resolver` array with per-entry dial port 53
 (bare `IP`) / 853 (DoT `IP#fqdn` / strict-pin forms) supplied
-(`:567-614,616-701`); no NAT64/DNS64 in the egress path (`:101,116`).
+(`:567-614,616-701`); no NAT64/DNS64 in the egress path (spec §Deployment
+boundary; §Configuration & DNS → Addresses).
 
 - **Separate VPC appliance vs same-pod sidecar:** Because serverless
   multi-container sidecar sandboxes share a single network namespace
@@ -324,7 +411,8 @@ UDP/QUIC, HTTP/2 CONNECT, plain HTTP forwarding, transparent interception,
 TLS<1.3, ECH, HTTPS/SVCB substitution, DNS over HTTPS, recursion/follow-up
 queries, multi-worker data paths, control plane / readiness / metrics surface,
 DNS64/NAT64 compatibility, upstream auth or cert verification, automatic
-fallback (`:19,49,63,71,72,97,144,149`).
+fallback (spec §Overview; §Protocol contract; §Configuration & DNS; §Architecture
+→ Runtime surface; §Deployment boundary).
 
 Cross-map: [verification.md](verification.md) and
 [qa-package/README.md](qa-package/README.md) for gate execution and the open
