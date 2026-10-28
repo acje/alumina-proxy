@@ -3304,12 +3304,12 @@ impl Serving {
     }
 }
 
-/// The generation bits of a connection token shifted into place, failing
-/// closed on saturation: a degenerate generation whose shift overflows yields
-/// the all-ones generation field with the local-id mask cleared, so the
-/// token's local id stays decodable while its generation matches no live slot
-/// — a stale drop, never a false live match and never a wrap into the local
-/// id range.
+/// Packs the token generation field. Encode is truncation, not saturation:
+/// the generation's low bits are shifted into place (53-bit field on 64-bit),
+/// so a slot at or past the 2^53 ceiling encodes `gen mod 2^53`, which never
+/// equals the live `slot_gen` compared at dispatch — its events still fail
+/// closed: a stale drop, never a false live match and never a wrap into the
+/// local-id range.
 #[expect(
     clippy::cast_possible_truncation,
     reason = "token packing takes the generation's low bits on 32-bit targets"
