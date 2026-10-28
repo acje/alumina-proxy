@@ -2507,6 +2507,9 @@ impl Serving {
         self.slots[index].connect_deadline = Some(Deadline::connect_attempt(now, setup));
         match TcpStream::connect(sock) {
             Ok(stream) => {
+                if stream.set_nodelay(true).is_err() {
+                    return self.fail_current_attempt(index);
+                }
                 self.slots[index].upstream = Some(stream);
                 self.slots[index].dest_ip = Some(addr);
                 if self.slots[index].ja4_pending {

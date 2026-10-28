@@ -6349,6 +6349,65 @@ fn first_dial_failure_records_and_re_decides_to_no_binding_502() {
 }
 
 #[test]
+/// `TCP_NODELAY` must be enabled on the upstream socket inside the production
+/// dial, before the socket is stored into the slot, so storm sessions never
+/// stall on the Linux delayed-ACK/Nagle first-segment window (e2-micro
+/// confound fix 1). The option is sender-side, so the honest assertion reads it
+/// back off the proxy's own upstream fd.
+fn dial_sets_tcp_nodelay_on_the_upstream_socket() {
+    use crate::eligibility::NumericAddr;
+    use std::net::Ipv4Addr;
+    use std::os::fd::AsRawFd;
+    let port = ephemeral_port();
+    let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
+    let upstream_port = origin.local_addr().expect("origin addr").port();
+    let cfg = config_pair(port, upstream_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let _client = connect(port);
+        pump(serving, 10);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted"
+        );
+        let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+        let ws = &mut serving.slots[0];
+        ws.approved = Some(approved);
+        ws.approved_port = upstream_port;
+        ws.stage = Stage::Dialing;
+        serving
+            .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
+            .expect("loopback upstream dial");
+        let upstream = serving.slots[0]
+            .upstream
+            .as_ref()
+            .expect("the dialed slot must hold its upstream socket");
+        let mut nodelay: libc::c_int = 0;
+        let mut len = libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
+            .expect("an int-sized TCP option length fits socklen_t");
+        // SAFETY: `getsockopt` requires a valid open socket fd (the dialed
+        // upstream socket) and a writable buffer of at least `len` bytes;
+        // both hold for the `nodelay` int for the duration of the call.
+        let rc = unsafe {
+            libc::getsockopt(
+                upstream.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_NODELAY,
+                (&mut nodelay as *mut libc::c_int).cast::<libc::c_void>(),
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0, "getsockopt(IPPROTO_TCP, TCP_NODELAY) must succeed");
+        assert_ne!(
+            nodelay, 0,
+            "the upstream socket must have TCP_NODELAY enabled after the production dial \
+             (Linux returns 1; macOS returns the option size 4 — both nonzero mean enabled)"
+        );
+        let _origin_stream = origin.accept().expect("accept origin side").0;
+    });
+}
+
+#[test]
 /// The complete retry loop over four real dials, end to end, against live
 /// loopback listeners on `upstream_port` (the upstream-facing machine). Each
 /// round real-dials the listener for the round's family, and the test accepts
