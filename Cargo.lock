@@ -11,7 +11,6 @@ dependencies = [
  "mio",
  "ring",
  "rustls",
- "rustls-pki-types",
  "rustls-webpki",
  "signal-hook",
  "toml",
