@@ -927,8 +927,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   per turn with an <code>ExchangeClass::Startup</code> exchange
   (<code>src/serving/startup.rs:42-96</code>, <code>:147</code>), so a first
   observed SIGTERM during the window is seen within one bounded poll instead of
-  being invisible for the window’s full duration
-  (<code>ChangeLimit::Serving</code> exit 0/70 verdicts — see <a href="#observability">§8.5</a>).</p>
+  being invisible for the window’s full duration.</p>
   <p>Only fully validated outcomes reach the cache: <code>dns::apply_outcome</code>
   prepares the schedule delta <em>before</em> mutating the cache
   (<code>src/dns.rs:366-428</code>; prepared deltas at <code>src/schedule.rs:358-391</code>,
@@ -1404,9 +1403,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     may continue with <em>no external log-loss signal</em>: the latch does not
     exit the process, open another output channel, or by itself alter exit status,
     and the in-memory <code>dropped</code> counter cannot be emitted through the
-    failed sink (<code>src/log.rs:2094-2101</code>). This terminal-sink behavior
-    is deliberate fixed-profile semantics: the sink cannot stall serving, and in
-    exchange an unrecoverable sink failure is a counted but externally silent
+    failed sink (<code>src/log.rs:2094-2101</code>). The sink cannot stall
+    serving; an unrecoverable sink failure is a counted but externally silent
     loss.</p>
   </div>
 
