@@ -1,6 +1,50 @@
 #!/bin/sh
 set -eu
 
+# =============================================================================
+# verify.sh — native verification entry point (gate coordinator)
+#
+# This script is the single owner of the scoped gate ceremony: INNER (host
+# compile), MID (Linux-only behaviour proofs), BOUNDARY (candidate ceremony) and
+# the fixtures/e2e native gates. The governing spec is docs/alumina-proxy.md;
+# the verification instruction / command-set authority is docs/verification.md;
+# status and prerequisites are docs/qa-package/README.md.
+#
+# COST STRUCTURE (measured, not assumed). Every gate and every marker line below
+# is the same gate the ceremony always ran; what follows changes only where work
+# happens and how much of it repeats:
+#   I0  per-gate `PHASE1-TIMING: <gate> <ms|NA>` lines and a total, so wall clock
+#       claims are measured. `NA` means no millisecond clock was available.
+#   I1  ONE Cargo test invocation per feature config (lib units + foundations +
+#       boot + the 5 gate-only binaries together) instead of three per config,
+#       and one target dir per feature config (`$VERIFY_AW_TARGET_DIR`) so
+#       witness-on/off artifacts never share a fingerprint graph. The boundary
+#       slow tier therefore dispatches `mid union` alone: union covers the
+#       gate-only surface, so `mid full` (still available standalone) is not
+#       dispatched twice over the same candidate.
+#   I2  both Cargo target trees (production release + the fixture-facts variant)
+#       live in a VM-native podman volume. The variant KEEPS its own target dir:
+#       sharing the production release dir would clobber target/release/alumina,
+#       and "production artifact untouched" is a semantics guarantee.
+#   I3  one derived, digest-identified image built once FROM the pinned rust base
+#       (which ships no git, no clippy, no rustfmt), so the dispatch path performs
+#       no `apk add` and no `rustup component add` per run.
+#   I4  container Cargo cache and CARGO_HOME live in named volumes; only consumed
+#       artifacts are copied out, with a two-sided digest assertion.
+#   I5  the host target/ tree is no longer a container build home; it holds only
+#       copied-out artifacts, receipts and temp files.
+#   I8  `inner test <target>` host-native iteration path; backs no done-claim.
+#
+# The `ALT_`-prefixed knobs and `alt` selectors are the A/B surface for this cost
+# structure (ALT = alternative cost structure). `ALT_NO_VOLUME=1` restores the
+# original host bind-mount behaviour so a run can be measured apples-to-apples
+# against the pre-I4 scheme. `alt image` / `alt smoke` warm and prove the
+# container plumbing and back no claim.
+#
+# Do not run two boundary ceremonies concurrently: they share target/release and
+# the fixture volumes. Identity snapshots use fixed target/ paths.
+# =============================================================================
+
 # Local podman connection names (gitignored; never committed). Sourced when
 # present so the harness runs out-of-the-box on a dev machine; an explicit
 # environment variable still wins and the fail-closed checks below remain.
@@ -12,14 +56,85 @@ TIER="${1:-}"
 SCOPE="${2:-}"
 
 usage() {
-    echo "usage: verify.sh {inner|mid|boundary|fixtures|e2e} {check|foundations|boot|union|full|clippy|phase1|phase1-fast|phase1-slow|relay|shutdown} | verify.sh docs" >&2
+    echo "usage: verify.sh {inner|mid|boundary|fixtures|e2e} {check|test|foundations|boot|union|full|clippy|phase1|phase1-fast|phase1-slow|relay|shutdown} [target] | verify.sh docs" >&2
+    echo "       inner test <target> runs ONE integration target host-natively; backs no done-claim." >&2
     exit 2
 }
 
 [ -n "$TIER" ] || usage
 [ -n "$SCOPE" ] || [ "$TIER" = "docs" ] || usage
+FOCUS="${3:-}"
 
 TOOLCHAIN="1.99.0"
+
+# --- ALT cost-structure knobs (I1-I4) ----------------------------------------
+# Named podman volumes keep the container's Cargo caches on VM-native disk,
+# persistent across dispatches. Set ALT_TARGET_VOL/ALT_CARGO_HOME_VOL to isolate
+# concurrent experiments; set ALT_NO_VOLUME=1 to fall back to verify.sh's
+# host bind-mount behaviour for an apples-to-apples baseline measurement.
+ALT_TARGET_VOL="${ALT_TARGET_VOL:-alumina-verify-target}"
+ALT_CARGO_HOME_VOL="${ALT_CARGO_HOME_VOL:-alumina-verify-cargo-home}"
+ALT_NO_VOLUME="${ALT_NO_VOLUME:-0}"
+# One target dir per feature config (I1): witness-on and witness-off builds never
+# share a fingerprint graph, so the aw-clippy/aw-test adjacency hazard cannot
+# arise and no ordering workaround is needed.
+ALT_AW_TARGET_DIR="${ALT_AW_TARGET_DIR:-target/aw}"
+# I3: one derived, digest-identified image, built once FROM the pinned rust base.
+# Evidence for why: the pinned base carries NO git, NO clippy and NO rustfmt
+# (`rustup component list --installed` = cargo/rustc/rust-std only; `command -v
+# git` empty), so verify.sh re-downloads all three on EVERY dispatch
+# (`rustup component add clippy rustfmt` + `apk add git`), and its fresh
+# /cargo-home re-downloads all 50 crates every time. Baking the extras once and
+# persisting CARGO_HOME in a volume removes three repeated network costs from the
+# measured path. The base digest is quoted in the generated Containerfile and
+# every dispatch records the derived image ID.
+ALT_IMAGE="${ALT_IMAGE:-localhost/alumina-verify:20261029}"
+FIXTURE_IMAGE="${FIXTURE_IMAGE:-$ALT_IMAGE}"
+FIXTURE_BASE_IMAGE="docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a"
+
+# --- I0: timing instrumentation ---------------------------------------------
+# Millisecond timestamps from python3 (an already-required boundary prerequisite,
+# see config_observe). A host without it prints `NA` rather than a fabricated
+# number: an unmeasured phase must never look measured.
+ALT_T0=$(date +%s)
+now_ms() {
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'NA\n'
+        return 0
+    }
+    python3 -c 'import time; print(int(time.time()*1000))'
+}
+
+# phase_timed <label> <function> [args...]: run a gate, emit one
+# `PHASE1-TIMING: <label> <ms|NA>` line, propagate the gate's own exit status.
+# A gate that calls `exit` terminates the run as before (its timing line is then
+# absent, which is the honest signal that the phase did not complete).
+phase_timed() {
+    _pt_label="$1"
+    shift
+    _pt_t0=$(now_ms)
+    _pt_rc=0
+    "$@" || _pt_rc=$?
+    _pt_t1=$(now_ms)
+    case "${_pt_t0}${_pt_t1}" in
+        *NA*) printf 'PHASE1-TIMING: %s NA\n' "$_pt_label" ;;
+        *) printf 'PHASE1-TIMING: %s %sms\n' "$_pt_label" "$((_pt_t1 - _pt_t0))" ;;
+    esac
+    return "$_pt_rc"
+}
+
+# phase_mark <label> <ms>: emit a timing line for a phase measured inline (the
+# Linux dispatch, the fixture run, a copy-out) where no function call brackets it.
+phase_mark() {
+    printf 'PHASE1-TIMING: %s %s\n' "$1" "$2"
+}
+
+# Total elapsed is printed by the boundary marker block only (a global EXIT trap
+# would be clobbered by boot_fixtures' own temp-file trap).
+alt_total_timing() {
+    ALT_TOTAL=$(( $(date +%s) - ALT_T0 ))
+    printf 'PHASE1-TIMING: total %ss\n' "$ALT_TOTAL"
+}
 
 INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/fault.rs src/fuzz.rs src/config.rs src/resolver.rs src/preflight.rs src/inventory.rs src/boot.rs src/cache.rs src/client_hello.rs src/connect.rs src/dns.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/policy.rs src/enforcement/state.rs src/gate.rs src/incident_report.rs src/log.rs src/runtime.rs src/schedule.rs src/serve.rs src/serving.rs src/startup_dns.rs src/worker.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs"
 
@@ -45,9 +160,12 @@ done
 IDENTITY_FILES="$INTENDED .gitignore$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs"
 
 # Snapshot locations live under target/ (gitignored) so they never alter the
-# working-tree scope recorded in the status snapshot.
+# working-tree scope recorded in the status snapshot. scripts/verify.sh is itself
+# an identity input (it is in INTENDED), so a mid-run edit of the coordinator is
+# detectable by the same before/after comparison.
 IDENTITY_BEFORE="target/identity-before"
 IDENTITY_AFTER="target/identity-after"
+PHASE1_SCOPE_MARKER="target/phase1-scope"
 
 static_gate() {
     binfile="$1"
@@ -220,6 +338,23 @@ mid_boot() {
 # cargo invocation, which can otherwise trip a clippy-per-target fingerprint
 # E0463 (can't find crate for `alumina`) on the alloc-witness-only mio_matrix
 # test over the shared persistent target dir.
+# I1: the union now owns the WHOLE test surface for the candidate, once per
+# feature config. previously: 4 `atest` invocations in this union (foundations
+# and boot, each witness-off then witness-on) plus 2 more in `mid full`
+# (gate-only suite), i.e. three invocations per feature config with cargo
+# re-resolving the unit graph each time and the witness-on/off graphs competing
+# for one target dir. now: one invocation per config covering lib units +
+# foundations + boot + the 5 gate-only binaries, with a dedicated target dir per
+# config.
+#
+# Ordering is NOT free-form. The documented hazard (E0463 "can't find crate for
+# `alumina`" on an alloc-witness-only test target) is an aw-clippy-after-aw-test
+# adjacency. The proven-green sequence in verify.sh is: clippy pair adjacent,
+# with the aw test runs AFTER the aw clippy pass. That sequence is preserved
+# here (non-aw clippy -> aw clippy -> aw tests), and the dedicated
+# ${ALT_AW_TARGET_DIR} removes the shared-dir interference entirely.
+ALT_TEST_TARGETS="--test foundations --test boot --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall"
+
 mid_union() {
     [ "$(uname -s)" = "Linux" ] || {
         echo "mid union requires Linux execution" >&2
@@ -229,20 +364,21 @@ mid_union() {
     echo "PRODUCTION-RELEASE-BUILD (boundary union, no alloc-witness):"
     cargo +${TOOLCHAIN} build --locked --release
     static_gate "target/release/alumina"
-    echo "WITNESS-TESTS (--features alloc-witness):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness --test foundations
-    echo "WITNESS-OFF-TESTS (F2/F4 subset):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --test foundations
     echo "FMT:"
     cargo +${TOOLCHAIN} fmt --check
+    echo "COMBINED-SUITE-WITNESS-OFF (lib units + foundations + boot + 5 gate-only binaries):"
+    # shellcheck disable=SC2086
+    cargo +${TOOLCHAIN} atest -p alumina --locked --lib $ALT_TEST_TARGETS
+    echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
     echo "CLIPPY (production, no alloc-witness):"
     cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets -- -D warnings
-    echo "CLIPPY (test-harness with alloc-witness):"
-    cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets --features alloc-witness -- -D warnings
-    echo "BOOT-TESTS (strict parser + validated types + storage inventory):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --test boot
-    echo "BOOT-TESTS-WITNESS (alloc retention bound):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness --test boot
+    echo "CLIPPY (test-harness with alloc-witness; target dir ${ALT_AW_TARGET_DIR}):"
+    cargo +${TOOLCHAIN} aclippy -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --all-targets --features alloc-witness -- -D warnings
+    echo "COMBINED-SUITE-WITNESS-ON (lib units + foundations + boot + 5 gate-only binaries, alloc-witness):"
+    # shellcheck disable=SC2086
+    cargo +${TOOLCHAIN} atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $ALT_TEST_TARGETS
+    echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
+    echo "GATE-ONLY-SUITE-MID-OK"
     whitespace_gate
     echo "UNION-MID-OK"
 }
@@ -283,6 +419,10 @@ mid_clippy() {
 # fingerprints could meet mid_union's aw-clippy adjacency. Disposition
 # (cross-run-safe verified or isolated via --target-dir) recorded in the
 # sub-mission back-brief.
+# I1: kept as a STANDALONE selector (the gate-only suite on its own). The
+# boundary slow tier no longer dispatches it: `mid union` now covers this exact
+# surface for the same candidate, so dispatching both would re-run 2 of 2 test
+# invocations for zero extra coverage.
 mid_full() {
     [ "$(uname -s)" = "Linux" ] || {
         echo "mid full requires Linux execution" >&2
@@ -292,7 +432,7 @@ mid_full() {
     cargo +${TOOLCHAIN} atest -p alumina --locked --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
     echo "GATE-ONLY-SUITE-WITNESS (lib units + 5 gate-only binaries incl. mio_matrix + eligibility witness, alloc-witness):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall
+    cargo +${TOOLCHAIN} atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"
 }
@@ -343,6 +483,19 @@ boot_fixtures() {
         echo "BOOT-FIXTURES-BLOCKED: builder image absent on $ROOTCONN; pull required" >&2
         exit 1
     }
+    # I3: fixtures run on a digest-pinned image that already carries util-linux,
+    # python3 and git, so no fixture performs an `apk add` (network) inside the
+    # measured path. The image is built once FROM the same pinned rust base used
+    # by the build dispatch, so its provenance is a strict superset of the base
+    # the fixture proofs were accepted against.
+    ensure_fixture_image "$CONN"
+    ensure_fixture_image "$ROOTCONN"
+    fixture_id=$(podman --connection "$CONN" image inspect --format '{{.Id}}' "$FIXTURE_IMAGE" 2>/dev/null) || fixture_id=""
+    [ -n "$fixture_id" ] || {
+        echo "BOOT-FIXTURES-BLOCKED: fixture image '$FIXTURE_IMAGE' id unresolvable on $CONN (probe failure is not PASS)" >&2
+        exit 1
+    }
+    echo "  fixture image $FIXTURE_IMAGE id=$fixture_id (base $FIXTURE_BASE_IMAGE)"
     BIN="target/release/alumina"
     [ -x "$ROOT/$BIN" ] || {
         echo "BOOT-FIXTURES-BLOCKED: static binary missing ($BIN); run 'verify.sh mid union' first" >&2
@@ -350,7 +503,17 @@ boot_fixtures() {
     }
     release_sha_before=$(sha256_digest file "$ROOT/$BIN") || exit 1
     echo "BUILD fixture-facts variant (proof-only feature; separate target dir; production artifact untouched):"
+    _bf_t0=$(now_ms)
     linux_dispatch 'cargo +${TOOLCHAIN} build --release --locked --features fixture-facts --target-dir target/fixture-facts'
+    # I2/I4: the variant target dir lives in the VM-native volume, so only the
+    # built artifact is copied out. Its digest is asserted on both sides of the
+    # copy: the executed variant is the identified variant.
+    copy_out_artifact "fixture-facts/release/alumina" "target/fixture-facts/release/alumina" || exit 1
+    _bf_t1=$(now_ms)
+    case "${_bf_t0}${_bf_t1}" in
+        *NA*) phase_mark "fixtures.variant-build" NA ;;
+        *) phase_mark "fixtures.variant-build" "$((_bf_t1 - _bf_t0))ms" ;;
+    esac
     VARBIN="$ROOT/target/fixture-facts/release/alumina"
     [ -x "$VARBIN" ] || {
         echo "BOOT-FIXTURES-BLOCKED: fixture-facts variant binary missing after build" >&2
@@ -378,13 +541,15 @@ boot_fixtures() {
     # write the fixed documented inputs into a disposable container /work dir
     # (cwd-relative contract: main.rs reads config.toml, incl. the resolver
     # set, from the working directory), then drop privileges inside that dir.
+    # I3: no package install here any more. util-linux (setpriv), python3 and git
+    # are baked into the digest-pinned fixture image, so a fixture case performs
+    # no network I/O and cannot fail on a flaky mirror.
     stage() {
         printf '%s\n' \
             'set -eu' \
             'mkdir -p /work' \
             "printf '%s\\n' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' 'resolver = [\"127.0.0.1\"]' '[any_illegal]' 'connect_parse = { action = \"notify\", scope = \"connection\" }' 'host_not_allowlisted = { action = \"notify\", scope = \"connection\" }' 'tls_profile = { action = \"notify\", scope = \"connection\" }' 'ech = { action = \"notify\", scope = \"connection\" }' '[allowed_fqdn.\"example.com:443\"]' 'early_data = { action = \"notify\", scope = \"connection\" }' 'ja4 = { action = \"notify\", scope = \"connection\" }' > /work/config.toml" \
-            'chown -R 65534:65534 /work' \
-            'apk add --no-cache util-linux >/dev/null 2>&1 || true'
+            'chown -R 65534:65534 /work'
         true
     }
 
@@ -403,7 +568,10 @@ boot_fixtures() {
         > "$outf"
         > "$errf"
         set +e
-        podman --connection "$conn" run --rm -v "$ROOT:/app:ro,Z" "$@" "$IMAGE" sh -c "$(stage) && $run_cmd" >"$outf" 2>"$errf"
+        podman --connection "$conn" run --rm --pull=never \
+            -v "$ROOT:/app:ro,Z" \
+            $(target_volume_mount) \
+            "$@" "$FIXTURE_IMAGE" sh -c "$(stage) && $run_cmd" >"$outf" 2>"$errf"
         rc=$?
         set -e
         FIXTURE_OUTF="$outf"
@@ -621,9 +789,11 @@ POSPOS
     #    never verified absence.
     echo "METADATA (setid-reject + security.capability absence + mode + variant sha256 match on executed variant):"
     metar=0
-    metaout=$(podman --connection "$CONN" run --rm -v "$ROOT:/app:ro,Z" --user 0:0 "$IMAGE" \
-        sh -c 'apk add --no-cache python3 >/dev/null 2>&1 || true
-python3 /app/scripts/fixture_metadata_probe.py /app/target/fixture-facts/release/alumina "$1"' -- "$variant_sha" 2>&1) || metar=$?
+    metaout=$(podman --connection "$CONN" run --rm --pull=never \
+        -v "$ROOT:/app:ro,Z" \
+        $(target_volume_mount) \
+        --user 0:0 "$FIXTURE_IMAGE" \
+        sh -c 'python3 /app/scripts/fixture_metadata_probe.py /app/target/fixture-facts/release/alumina "$1"' -- "$variant_sha" 2>&1) || metar=$?
     printf '%s\n' "$metaout" | sed 's/^/  /'
     [ "$metar" -eq 0 ] || {
         echo "BOOT-FIXTURES FAIL: metadata probe exit $metar (probe error / setid / digest mismatch is not verified absence)" >&2
@@ -1156,10 +1326,128 @@ audit_deny_owner() {
     fi
 }
 
+# --- I3/I4 container plumbing: derived image, named volumes, artifact copy-out --
+
+# ensure_alt_image <connection>: make the derived image available once. This is
+# the ONLY networked step in the dispatch path, and it runs at most once per
+# connection; every consumer afterwards is `--pull=never`.
+ensure_alt_image() {
+    _conn="$1"
+    command -v podman >/dev/null 2>&1 || {
+        echo "ALT-IMAGE-BLOCKED: podman required on the host" >&2
+        exit 1
+    }
+    if podman --connection "$_conn" image exists "$ALT_IMAGE" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "ALT-IMAGE-BUILD: '$ALT_IMAGE' absent on $_conn; building once FROM the pinned base (network required ONCE)" >&2
+    _ctx="$(pwd)/target/alt-image"
+    mkdir -p "$_ctx"
+    cat >"$_ctx/Containerfile" <<ALTCF
+FROM $FIXTURE_BASE_IMAGE
+RUN apk add --no-cache git util-linux python3 \\
+ && rustup component add clippy rustfmt
+ALTCF
+    podman --connection "$_conn" build -t "$ALT_IMAGE" -f "$_ctx/Containerfile" "$_ctx" >&2 || {
+        echo "ALT-IMAGE-BLOCKED: derived image build failed on $_conn (network/prereq)" >&2
+        exit 1
+    }
+    podman --connection "$_conn" image exists "$ALT_IMAGE" >/dev/null 2>&1 || {
+        echo "ALT-IMAGE-BLOCKED: '$ALT_IMAGE' still absent after build on $_conn" >&2
+        exit 1
+    }
+}
+
+# Fixtures share the derived image (it also carries the setpriv/python3 the
+# fixture cases need), so the fixture path and the build path cannot diverge.
+ensure_fixture_image() {
+    ensure_alt_image "$1"
+}
+
+# ensure_volume <connection> <volume>: create the named volume once. The host
+# target/ tree is ~64k files; crossing virtiofs on every Cargo unit is the
+# dominant wall clock. Volumes are per-VM, so every call names its connection.
+ensure_volume() {
+    _vconn="$1"
+    _vol="$2"
+    if podman --connection "$_vconn" volume inspect "$_vol" >/dev/null 2>&1; then
+        return 0
+    fi
+    podman --connection "$_vconn" volume create "$_vol" >/dev/null || {
+        echo "ALT-VOLUME-BLOCKED: cannot create volume '$_vol' on $_vconn" >&2
+        exit 1
+    }
+}
+
+# target_volume_mount: read-only target-volume mount for fixture-side consumers
+# (they only read the built variant). Emits two words, or nothing under the
+# host bind-mount baseline (ALT_NO_VOLUME=1). The string is fixed and internal,
+# so the unquoted expansion at each call site is intentional and safe.
+target_volume_mount() {
+    if [ "$ALT_NO_VOLUME" = "1" ]; then
+        return 0
+    fi
+    printf '%s\n' "-v" "$ALT_TARGET_VOL:/app/target:ro"
+}
+
+# copy_out_artifact <volume-relative-path> <host-relative-path> (I4): copy one
+# built artifact out of the build volume and assert the digest is identical on
+# both sides. A one-sided copy would let a host-side gate identify bytes that
+# were never the bytes built, so the two-sided assertion is the identity proof.
+copy_out_artifact() {
+    _rel="$1"
+    _dest="$2"
+    if [ "$ALT_NO_VOLUME" = "1" ]; then
+        echo "ALT-COPY-SKIPPED: host bind-mount baseline (ALT_NO_VOLUME=1) keeps $_dest in place" >&2
+        return 0
+    fi
+    case "$_dest" in
+        target/*) ;;
+        *)
+            echo "ALT-COPY-FAIL: destination '$_dest' must be relative to target/ (the mounted copy root)" >&2
+            return 1
+            ;;
+    esac
+    # Copy root is the host target/ tree, so the container path drops the leading
+    # "target/" that every caller uses for the host-relative destination.
+    _host_rel="${_dest#target/}"
+    CONN="${PODMAN_CONNECTION:?PODMAN_CONNECTION must be set to your rootless podman connection}"
+    ROOT="$(pwd)"
+    ensure_alt_image "$CONN"
+    mkdir -p "$(dirname "$ROOT/$_dest")"
+    _copy_out=$(podman --connection "$CONN" run --rm --pull=never \
+        --user 0:0 \
+        -e REL="$_rel" \
+        -e DEST="$_host_rel" \
+        -v "$ALT_TARGET_VOL:/t:ro" \
+        -v "$ROOT/target:/out:Z" \
+        "$ALT_IMAGE" sh -c 'mkdir -p "/out/$(dirname "$DEST")" && cp "/t/$REL" "/out/$DEST" && sha256sum "/t/$REL" | cut -d" " -f1' 2>&1) || {
+        echo "ALT-COPY-FAIL: copy-out of $_rel failed:" >&2
+        printf '%s\n' "$_copy_out" >&2
+        return 1
+    }
+    _vol_sha=$(printf '%s\n' "$_copy_out" | tail -n 1)
+    [ -n "$_vol_sha" ] || {
+        echo "ALT-COPY-FAIL: empty volume-side digest for $_rel (not PASS)" >&2
+        return 1
+    }
+    _host_sha=$(sha256_digest file "$ROOT/$_dest") || return 1
+    [ "$_vol_sha" = "$_host_sha" ] || {
+        echo "ALT-COPY-FAIL: digest mismatch for $_rel (volume $_vol_sha != host $_host_sha)" >&2
+        return 1
+    }
+    echo "ALT-COPY-OK: $_dest sha256 $_host_sha (volume-side and host-side agree)"
+}
+
 # Host -> existing Linux dispatch: boundary children that must run on Linux are
-# executed inside the already-provisioned podman container (same exact image
-# and CARGO_HOME alias environment as the accepted btk/c7o runs), never by
-# calling Linux-only functions directly on a Darwin host.
+# executed inside the derived image, never by calling Linux-only functions
+# directly on a Darwin host. I4: the Cargo cache is a named volume mounted at
+# /app/target, so container-internal paths (/app/target/release/alumina,
+# /app/target/fixture-facts/release/alumina) keep their exact meaning while the
+# host target/ is no longer a build home.
+# G8-C17 preserved: the source stays mounted read-only (:ro,Z, matching the
+# fixture convention), so the checkout itself is never a build output location;
+# only the target path is writable, now via a volume rather than a host bind.
 linux_dispatch() {
     inner="$1"
     CONN="${PODMAN_CONNECTION:?PODMAN_CONNECTION must be set to your rootless podman connection}"
@@ -1172,29 +1460,64 @@ linux_dispatch() {
         exit 1
     }
     ROOT="$(pwd)"
-    IMAGE="docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a"
+    ensure_alt_image "$CONN"
+    IMAGE="$ALT_IMAGE"
+    _img_id=$(podman --connection "$CONN" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null) || _img_id=""
+    [ -n "$_img_id" ] || {
+        echo "LINUX-DISPATCH-BLOCKED: dispatch image id unresolvable for $IMAGE" >&2
+        exit 1
+    }
+    echo "  dispatch image $IMAGE id=$_img_id"
+    # Only the alias block is written now: clippy/rustfmt/git are baked into the
+    # derived image and the crate cache persists in $ALT_CARGO_HOME_VOL, so the
+    # dispatch performs no network provisioning. The two presence checks fail
+    # closed rather than silently installing -- a missing tool means the image is
+    # wrong, and installing it would reintroduce the network dependency.
     prov='mkdir -p /cargo-home
 printf "%s\n" "[alias]" "atest = [\"test\", \"--quiet\", \"--no-fail-fast\"]" "aclippy = [\"clippy\", \"--quiet\", \"--message-format=short\"]" > /cargo-home/config.toml
-rustup component add clippy rustfmt >/dev/null 2>&1 || true
-command -v git >/dev/null 2>&1 || apk add --no-cache git >/dev/null 2>&1 || true
+command -v git >/dev/null 2>&1 || { echo "LINUX-DISPATCH-BLOCKED: git absent from dispatch image (whitespace gate requires it)" >&2; exit 1; }
+rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-DISPATCH-BLOCKED: clippy component absent from dispatch image" >&2; exit 1; }
 '
+    _ld_t0=$(now_ms)
     drc=0
-    # G8-C17: source mounted read-only (:ro,Z, matching the :330/:548 fixture
-    # convention); a separate writable target volume keeps the build outputs
-    # (host target/ feeds host-side artifact_identity and boot_fixtures) while
-    # the checkout itself stays read-only. --user 0:0 matches :548; under the
-    # rootless podman mapping: container-root files land as the host user.
-    podman --connection "$CONN" run --rm --pull=never \
-        -v "$ROOT:/app:ro,Z" \
-        -v "$ROOT/target:/app/target:Z" \
-        --user 0:0 \
-        -e CARGO_HOME=/cargo-home \
-        -e CARGO_INCREMENTAL=0 \
-        -e CARGO_TERM_PROGRESS_WHEN=never \
-        -e TOOLCHAIN="$TOOLCHAIN" \
-        -e RUST_MIN_STACK=16777216 \
-        -w /app \
-        "$IMAGE" sh -c "$prov$inner" || drc=$?
+    if [ "$ALT_NO_VOLUME" = "1" ]; then
+        # Baseline mode only: verify.sh's original host bind-mount of target/, so
+        # the alt can be measured apples-to-apples against verify.sh.
+        podman --connection "$CONN" run --rm --pull=never \
+            -v "$ROOT:/app:ro,Z" \
+            -v "$ROOT/target:/app/target:Z" \
+            --user 0:0 \
+            -e CARGO_HOME=/cargo-home \
+            -e CARGO_INCREMENTAL=0 \
+            -e CARGO_TERM_PROGRESS_WHEN=never \
+            -e TOOLCHAIN="$TOOLCHAIN" \
+            -e RUST_MIN_STACK=16777216 \
+            -w /app \
+            "$IMAGE" sh -c "$prov$inner" || drc=$?
+    else
+        ensure_volume "$CONN" "$ALT_TARGET_VOL"
+        ensure_volume "$CONN" "$ALT_CARGO_HOME_VOL"
+        # The target path must exist inside the read-only source mount before the
+        # volume is mounted over it.
+        mkdir -p "$ROOT/target"
+        podman --connection "$CONN" run --rm --pull=never \
+            -v "$ROOT:/app:ro,Z" \
+            -v "$ALT_TARGET_VOL:/app/target" \
+            -v "$ALT_CARGO_HOME_VOL:/cargo-home" \
+            --user 0:0 \
+            -e CARGO_HOME=/cargo-home \
+            -e CARGO_INCREMENTAL=0 \
+            -e CARGO_TERM_PROGRESS_WHEN=never \
+            -e TOOLCHAIN="$TOOLCHAIN" \
+            -e RUST_MIN_STACK=16777216 \
+            -w /app \
+            "$IMAGE" sh -c "$prov$inner" || drc=$?
+    fi
+    _ld_t1=$(now_ms)
+    case "${_ld_t0}${_ld_t1}" in
+        *NA*) phase_mark "dispatch" NA ;;
+        *) phase_mark "dispatch" "$((_ld_t1 - _ld_t0))ms" ;;
+    esac
     [ "$drc" -eq 0 ] || {
         echo "LINUX-MID FAIL: '$inner' exit $drc" >&2
         exit 1
@@ -1225,7 +1548,7 @@ phase1_scope_classify() {
 # Real change-scope detector (B): unions the committed (HEAD~1..HEAD),
 # uncommitted (HEAD..worktree) and untracked path lists, classifies the union
 # via phase1_scope_classify, echoes the scope, and writes the scope marker to
-# target/phase1-scope (gitignored) so the slow tier can be a separate
+# $PHASE1_SCOPE_MARKER (gitignored) so the slow tier can be a separate
 # invocation. Conservative by construction: any git-producer failure, a missing
 # HEAD~1 (root commit), an empty union, or any non-allowlisted path => full
 # (more verification, never less). The PHASE1_SCOPE env override forces
@@ -1267,29 +1590,43 @@ phase1_change_scope() {
     fi
     printf '%s\n' "$scope"
     mkdir -p target
-    printf '%s\n' "$scope" > target/phase1-scope
+    printf '%s\n' "$scope" > "$PHASE1_SCOPE_MARKER"
 }
 
 boundary_phase1_fast() {
     # Fast tier (C): cheap host gates only — identity BEFORE/AFTER stability
     # self-check, change-scope classification (B), then docs/unsafe/whitespace/
     # audit gates. NO linux_dispatch, NO MID, NO fixtures. Runs before the
-    # expensive Linux MID so a failing cheap gate aborts before the ~90-min
+    # expensive Linux MID so a failing cheap gate aborts before the
     # compile-dominated dispatch. None of these mutate identity inputs, so the
     # BEFORE snapshot stays valid across them.
-    identity_snapshot "$IDENTITY_BEFORE"
+    # I0: every gate is individually timed so the fast tier's own contribution to
+    # wall clock is measured rather than assumed.
+    phase_timed "fast.identity-before" identity_snapshot "$IDENTITY_BEFORE"
+    _scope_t0=$(now_ms)
     phase1_scope=$(phase1_change_scope)
-    docslink_check
-    intended_coverage_gate
-    cfg_test_parentage_gate
-    unsafe_surface_gate
-    canonical_digest_gate
+    _scope_t1=$(now_ms)
+    case "${_scope_t0}${_scope_t1}" in
+        *NA*) phase_mark "fast.scope-classify" NA ;;
+        *) phase_mark "fast.scope-classify" "$((_scope_t1 - _scope_t0))ms" ;;
+    esac
+    phase_timed "fast.docslink" docslink_check
+    phase_timed "fast.intended-coverage" intended_coverage_gate
+    phase_timed "fast.cfg-test-parentage" cfg_test_parentage_gate
+    phase_timed "fast.unsafe-surface" unsafe_surface_gate
+    phase_timed "fast.canonical-digest" canonical_digest_gate
+    phase_timed "fast.git-diff-check" git_diff_check
+    phase_timed "fast.audit-deny" audit_deny_owner
+    phase_timed "fast.identity-after" identity_snapshot "$IDENTITY_AFTER"
+    phase_timed "fast.identity-compare" identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
+    echo "PHASE1-SCOPE-CLASSIFIED: $phase1_scope"
+}
+
+# `git diff --check` wrapped as a gate so it can be timed like its neighbours
+# without changing its semantics (non-zero exits fail the run as before).
+git_diff_check() {
     git diff --check
     echo "GIT-DIFF-CHECK-OK"
-    audit_deny_owner
-    identity_snapshot "$IDENTITY_AFTER"
-    identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
-    echo "PHASE1-SCOPE-CLASSIFIED: $phase1_scope"
 }
 
 boundary_phase1_slow() {
@@ -1299,9 +1636,17 @@ boundary_phase1_slow() {
     # snapshot is re-taken here (after boot_fixtures) and compared to the
     # BEFORE captured by the fast tier, so a separate slow invocation still
     # proves identity stability across the MID+fixtures.
+    #
+    # I1: this dispatches `mid union` ONLY. verify.sh dispatched
+    # `mid union && mid full`, and union now covers the gate-only surface for the
+    # same candidate, so the second selector would re-run 2 of 2 test
+    # invocations for zero extra coverage. `mid full` remains available
+    # standalone.
+    # I4: the built artifact is copied out of the build volume with a two-sided
+    # digest assertion before any host-side gate consumes it.
     scope="full"
-    if [ -f target/phase1-scope ]; then
-        scope=$(cat target/phase1-scope 2>/dev/null) || scope="full"
+    if [ -f "$PHASE1_SCOPE_MARKER" ]; then
+        scope=$(cat "$PHASE1_SCOPE_MARKER" 2>/dev/null) || scope="full"
     fi
     case "$scope" in
         docs-only)
@@ -1311,11 +1656,12 @@ boundary_phase1_slow() {
         full) ;;
         *) scope="full" ;;
     esac
-    linux_dispatch 'sh scripts/verify.sh mid union && sh scripts/verify.sh mid full'
-    boot_fixtures
-    identity_snapshot "$IDENTITY_AFTER"
-    identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
-    artifact_identity target/release/alumina || exit 1
+    linux_dispatch 'sh scripts/verify.sh mid union'
+    copy_out_artifact "release/alumina" "target/release/alumina" || exit 1
+    phase_timed "fixtures" boot_fixtures
+    phase_timed "identity-after" identity_snapshot "$IDENTITY_AFTER"
+    phase_timed "identity-compare" identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
+    phase_timed "artifact-identity" artifact_identity target/release/alumina || exit 1
 }
 
 boundary_phase1() {
@@ -1332,6 +1678,9 @@ boundary_phase1_markers() {
     echo "NotImplemented: deployment confinement + E2E release gates (Slice 7)"
     echo "RELEASE-NOT-READY: later-slice and release gates remain NotImplemented, not green"
     echo "BOUNDARY-OWNER-COORD-OK: all applicable phase1 children coordinated and exited 0 on this host"
+    echo "ALT-PARITY: every gate and marker of the pre-I0 ceremony is still present; only cost structure changed (see PHASE1-TIMING lines)"
+    echo "ALT-MODE: target_vol=$ALT_TARGET_VOL cargo_home_vol=$ALT_CARGO_HOME_VOL aw_target_dir=$ALT_AW_TARGET_DIR image=$ALT_IMAGE no_volume=$ALT_NO_VOLUME"
+    alt_total_timing
     echo "FINAL-PHASE1-COMPLETION: BLOCKED — pending fixture/doc/Rust repairs and review approval before any phase1 done-claim (no E2E equivalence claimed)"
 }
 
@@ -1480,6 +1829,9 @@ e2e_build_receipt() {
     else
         echo "PRODUCTION-RELEASE-BUILD (native Linux via container dispatch; host $(uname -s), target=${E2E_TARGET}):"
         linux_dispatch "cargo +${TOOLCHAIN} build --locked --release --target ${E2E_TARGET} --target-dir /app/target"
+        # I4: the build volume is VM-native, so the executed binary must be
+        # copied out (two-sided digest asserted) before the receipt is taken.
+        copy_out_artifact "${E2E_TARGET}/release/alumina" "${BIN}" || exit 1
     fi
     after=$(e2e_receipt_fields "$_gate" "$_harness_py" "$_harness_sh") || exit 1
     # Pre/post build source-input stability: the candidate inputs (HEAD +
@@ -1561,8 +1913,63 @@ inner_check() {
     echo "INNER-CHECK-OK"
 }
 
+# --- ALT-only operator helpers (no claim, prove/warm the cost plumbing) -------
+# `alt image` materialises the derived digest-identified image, `alt smoke`
+# exercises one dispatch + copy-out. They exist so the new plumbing can be
+# verified and its caches warmed without paying for a full boundary run.
+alt_image() {
+    CONN="${PODMAN_CONNECTION:?PODMAN_CONNECTION must be set to your rootless podman connection}"
+    ensure_alt_image "$CONN"
+    _aid=$(podman --connection "$CONN" image inspect --format '{{.Id}}' "$ALT_IMAGE" 2>/dev/null) || _aid=""
+    [ -n "$_aid" ] || {
+        echo "ALT-IMAGE-BLOCKED: id unresolvable for $ALT_IMAGE (probe failure is not PASS)" >&2
+        exit 1
+    }
+    echo "ALT-IMAGE-OK: $ALT_IMAGE id=$_aid base=$FIXTURE_BASE_IMAGE"
+}
+
+alt_smoke() {
+    echo "ALT-SMOKE: plumbing proof only (volume-mounted target, read-only source, two-sided copy-out digest); backs no claim"
+    linux_dispatch 'cargo +${TOOLCHAIN} build --locked -p alumina --bin alumina'
+    copy_out_artifact "debug/alumina" "target/alt-smoke/alumina" || exit 1
+    echo "ALT-SMOKE-OK"
+}
+
+# I8: host-native single-target test run for iteration speed — the inner loop for
+# someone working on one test, without a container round-trip. It backs NO
+# done-claim: MID and BOUNDARY own that. Host incompatibility is reported
+# honestly: a Linux-only assertion (epoll matrix, main-thread rlimit, stdout
+# stall) may fail on macOS/darwin, and that surfaces as
+# INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL with a pointer to the MID tier — never as
+# a pass and never as a silent skip.
+inner_test() {
+    _target="$1"
+    case "$_target" in
+        foundations|boot|eligibility|mio_matrix|main_thread_stack|monitor_stdout|stdout_stall) ;;
+        "")
+            echo "INNER-TEST usage: verify.sh inner test <target>" >&2
+            exit 2
+            ;;
+        *)
+            echo "INNER-TEST-UNKNOWN-TARGET: '$_target' is not a test target of this crate (whitelist: foundations boot eligibility mio_matrix main_thread_stack monitor_stdout stdout_stall)" >&2
+            exit 2
+            ;;
+    esac
+    echo "INNER-NO-CLAIM: host-native run of --test $_target backs no done-claim (MID/BOUNDARY own that)"
+    if cargo +${TOOLCHAIN} atest -p alumina --locked --test "$_target"; then
+        echo "INNER-TEST-OK: $_target"
+    else
+        _itr=$?
+        echo "INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL: $_target exit $_itr — if this is a Linux-only assertion, run the MID tier (verify.sh mid foundations|boot|union|full) instead; this is not a pass" >&2
+        exit "$_itr"
+    fi
+}
+
 case "$TIER/$SCOPE" in
     inner/check) inner_check ;;
+    inner/test) inner_test "$FOCUS" ;;
+    alt/image) alt_image ;;
+    alt/smoke) alt_smoke ;;
     mid/foundations) mid_foundations ;;
     mid/boot) mid_boot ;;
     mid/clippy) mid_clippy ;;
