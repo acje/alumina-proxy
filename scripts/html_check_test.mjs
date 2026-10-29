@@ -4,7 +4,8 @@
 // directly as `node scripts/html_check_test.mjs`. Not wired into verify.sh's
 // dispatch arms — identity-tracked and hand-run, same convention as
 // scripts/docs_check/test.mjs. One case per check plus one per review probe
-// (adversarial round 3, B1). Every case asserts the exit code AND the stdout
+// (adversarial round 3, B1; round-4 M1 adds row-header and positive cases).
+// Every case asserts the exit code AND the stdout
 // marker the behaviour must emit (or must not emit for the honesty rules).
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -152,6 +153,62 @@ try {
       '',
     ].join('\n')
   )
+  // M1 (review round 4) — check-5 coverage was negative-only; a mutant flagging
+  // every body row scored 17/17 and a row-header regression would silently
+  // uncheck 126/140 corpus rows. Three cases: (1) a <tbody> row whose
+  // <th scope="row"> is a counted cell, (2) a correct <tfoot> row must be
+  // accepted, (3) a correctly-sized nested table must be accepted.
+  await writeFile(
+    path.join(base, 'rowheader_short.html'),
+    [
+      '<!doctype html>',
+      '<html><body>',
+      '<table>',
+      '  <thead><tr><th>A</th><th>B</th><th>C</th></tr></thead>',
+      '  <tbody><tr><th scope="row">R</th><td>1</td></tr></tbody>',
+      '</table>',
+      '</body></html>',
+      '',
+    ].join('\n')
+  )
+  await writeFile(
+    path.join(base, 'tfoot_ok.html'),
+    [
+      '<!doctype html>',
+      '<html><body>',
+      '<table>',
+      '  <thead><tr><th>A</th><th>B</th></tr></thead>',
+      '  <tbody><tr><td>1</td><td>2</td></tr></tbody>',
+      '  <tfoot><tr><td>x</td><td>y</td></tr></tfoot>',
+      '</table>',
+      '</body></html>',
+      '',
+    ].join('\n')
+  )
+  await writeFile(
+    path.join(base, 'nested_ok.html'),
+    [
+      '<!doctype html>',
+      '<html><body>',
+      '<table>',
+      '  <thead><tr><th>O1</th><th>O2</th><th>O3</th></tr></thead>',
+      '  <tbody>',
+      '    <tr>',
+      '      <td>a</td>',
+      '      <td>',
+      '        <table>',
+      '          <thead><tr><th>I1</th><th>I2</th></tr></thead>',
+      '          <tbody><tr><td>x</td><td>y</td></tr></tbody>',
+      '        </table>',
+      '      </td>',
+      '      <td>c</td>',
+      '    </tr>',
+      '  </tbody>',
+      '</table>',
+      '</body></html>',
+      '',
+    ].join('\n')
+  )
 
   expect('clean-minimal document', ['clean.html'], 0, {
     has: ['HTML-CHECK-OK clean.html', 'clean 1'],
@@ -180,6 +237,21 @@ try {
   expect('check5 B1 tfoot row is a checked body row', ['b1_tfoot.html'], 1, { has: ['table-cell-count'] })
   expect('check5 B1 thead without a tr cell row is table-header-missing', ['b1_thead_notr.html'], 1, {
     has: ['table-header-missing'],
+  })
+  // M1 (round-4 advisory): the three cases that close check-5's negative-only
+  // coverage. rowheader_short is the case a row-header reclassification (a <tr>
+  // containing a <th> treated as a header row) would silently pass; asserting
+  // "has 2 cells" also proves the row header was counted as a cell.
+  expect('check5 tbody row header is a counted cell (rowheader_short)', ['rowheader_short.html'], 1, {
+    has: ['table-cell-count', 'has 2 cells'],
+  })
+  expect('check5 correct tfoot row is accepted (tfoot_ok)', ['tfoot_ok.html'], 0, {
+    has: ['HTML-CHECK-OK tfoot_ok.html'],
+    no: ['HTML-STRUCT-FAIL'],
+  })
+  expect('check5 correct nested table is accepted (nested_ok)', ['nested_ok.html'], 0, {
+    has: ['HTML-CHECK-OK nested_ok.html'],
+    no: ['HTML-STRUCT-FAIL'],
   })
 
   expect('exit2 missing file: op-fail, no OK, clean 0', ['nope-missing.html'], 2, {
