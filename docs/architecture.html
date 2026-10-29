@@ -117,8 +117,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   is empty (no tracked code, test, or manifest delta), so every citation below
   names the code that ships at HEAD.</p>
   <p class="meta"><strong>Identity:</strong> alumina is a single-binary, config-file
-  driven, DNS-conditional <code>CONNECT</code> proxy. It binds a listener only after a
-  90&nbsp;s startup DNS window classifies every allowlist name; it enforces a
+  driven, DNS-conditional <code>CONNECT</code> proxy. After a startup DNS window of at most
+  90&nbsp;s it opens the listener early once every name is usable, else Full or Degraded
+  at the deadline; it enforces a
   two-barrier forwarding gate per tunnel; it allocates its working set once at boot
   and never frees it; and it treats every enforcement deviation as a counted,
   observable fact rather than a silent pass.</p>
@@ -316,8 +317,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   </figure>
 
   <p>Two deployment facts recorded in source deserve emphasis. First, the startup
-  window is the process’s single admission decision: if DNS cannot classify the
-  allowlist within 90&nbsp;s, the process exits rather than serving degraded
+  window is the process’s single admission decision: it runs for at most 90&nbsp;s,
+  opening the listener early once every allowlist name is usable and, at the deadline,
+  serving Full when none are unresolved or Degraded within the configured allowance,
+  exiting 75 above it; a first-observed SIGTERM short-circuits the window as
+  Terminated and never lets it bind
   (<code>STARTUP_WINDOW_SECS: u64 = 90</code>, <code>src/startup_dns.rs:49</code>;
   the readiness rule is the canonical decision of <code>docs/alumina-proxy.md:108</code>).
   Second, the process is single-threaded for both DNS and serving: one
@@ -1041,7 +1045,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>A and B closed</td>
         <td><code>src/gate.rs:76-77</code></td></tr>
       <tr><th scope="row"><code>AwaitResponse</code></th>
-        <td>Connected; upstream CONNECT response being parsed</td>
+        <td>Upstream TCP connected; the proxy's 200 Connection established response to the client is being written; ClientHello validation begins once that write completes</td>
         <td>A and B closed</td>
         <td><code>src/gate.rs:78-80</code>; <code>on_response_ok</code> <code>:187-191</code></td></tr>
       <tr><th scope="row"><code>Validating</code></th>
@@ -1108,9 +1112,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <svg role="img" aria-labelledby="fig5-title" aria-describedby="fig5-desc"
          viewBox="0 0 840 400">
       <title id="fig5-title">Figure 5 — DNS/DoT path and refresh</title>
-      <desc id="fig5-desc">Startup: a 90-second window classifies every allowlist
-      name; if unresolved ≤ allowance the listener opens (Serve), else exit 75;
-      SIGTERM short-circuits as Terminated. In serving, refresh is scheduled
+      <desc id="fig5-desc">Startup: a maximum 90-second window opens early only when
+      every allowlist name is usable; at the deadline it opens Full (zero unresolved)
+      or Degraded (within allowance), else exits 75; a first-observed SIGTERM
+      short-circuits as Terminated and never binds. In serving, refresh is scheduled
       from each entry's TTL clamped to the fixed 5–900 s bounds for a cacheable
       positive; a validated negative with an SOA reschedules from the SOA
       clamped to 30–900 s, and a negative or failed exchange without an SOA
@@ -1120,8 +1125,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       sensors that never apply cache.</desc>
 
       <rect x="20" y="30" width="260" height="150" rx="8" fill="#eef2f7" stroke="#1a4d80" stroke-width="1.5"/>
-      <text x="150" y="52" text-anchor="middle" font-size="13" font-weight="700">Startup window (90 s)</text>
-      <text x="150" y="72" text-anchor="middle" font-size="11">classify every allowlist name</text>
+      <text x="150" y="52" text-anchor="middle" font-size="13" font-weight="700">Startup window (max 90 s)</text>
+      <text x="150" y="72" text-anchor="middle" font-size="11">open early when all names usable</text>
       <text x="150" y="90" text-anchor="middle" font-size="11">exchange deadline 5 s</text>
       <text x="150" y="108" text-anchor="middle" font-size="11">CSPRNG tid per exchange</text>
       <text x="150" y="126" text-anchor="middle" font-size="11">try_reserve_exact boot allocs</text>
@@ -1180,8 +1185,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>6.3 The startup decision and its register</h3>
   <p>The canonical readiness rule (spec <code>docs/alumina-proxy.md:108</code>) is:
     open the listener when the unresolved count is at most the configured
-    allowance, else exit <code>EX_TEMPFAIL</code> (75). The window is a fixed
-    90&nbsp;s (<code>src/startup_dns.rs:49</code>). The decision is typed as
+    allowance, else exit <code>EX_TEMPFAIL</code> (75). The window is a maximum
+    90&nbsp;s (<code>src/startup_dns.rs:49</code>): early closure opens
+    <code>Full</code> the moment every name is usable, while at the deadline it
+    opens <code>Full</code> (zero unresolved) or <code>Degraded</code> (within
+    the allowance). The decision is typed as
     <code>StartupDecision::{Serve(ServingMode), Exit75{unresolved}, Terminated}</code>
     (<code>src/serve.rs:97-102</code>): a first-observed SIGTERM short-circuits the
     window as <code>Terminated</code>, which never binds or attaches a listener.
