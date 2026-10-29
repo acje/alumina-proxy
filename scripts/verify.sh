@@ -143,6 +143,11 @@ INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh 
 # the bytes docslink_check reads (drift-proof by construction).
 DOCSLINK_ROOTS="docs/alumina-proxy.md docs/architecture.md docs/verification.md docs/qa-package/README.md README.md"
 
+# html-structure gate roots: structural artefacts docslink_check's Markdown
+# parser cannot see (check.mjs answers unsupported-target/html-anchor-unsupported
+# for HTML), so they get their own gate rather than a DOCSLINK_ROOTS entry.
+HTML_DOC_ROOTS="docs/architecture.html"
+
 # B1: every relevant before/after identity input consumed by the boundary run:
 # source/config/lock/toolchain/deny plus the docs and .gitignore that
 # docslink_check and the working-tree view consume. Changing build outputs (the
@@ -157,7 +162,7 @@ for root in $DOCSLINK_ROOTS; do
         *) GATE_ROOT_EXTRAS="$GATE_ROOT_EXTRAS $root" ;;
     esac
 done
-IDENTITY_FILES="$INTENDED .gitignore$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs"
+IDENTITY_FILES="$INTENDED .gitignore$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs scripts/html_check.mjs $HTML_DOC_ROOTS docs/architecture-review.md"
 
 # Snapshot locations live under target/ (gitignored) so they never alter the
 # working-tree scope recorded in the status snapshot. scripts/verify.sh is itself
@@ -863,6 +868,51 @@ docslink_check() {
     fi
     echo "DOCSLINK-CHECK-OK"
     echo "CITATION-CHECK-OK"
+}
+
+html_structure_check() {
+    # Offline Node-builtins structural gate for HTML artefacts
+    # (scripts/html_check.mjs): tag balance, duplicate ids, internal fragment
+    # closure, figure <desc> presence, and table cell-count consistency. The
+    # adapter's exit is captured unmasked (one-way split: operational failures
+    # never fold into 0/1); its output is printed verbatim.
+    command -v node >/dev/null 2>&1 || {
+        echo "HTML-STRUCTURE-BLOCKED: node required for HTML structure check (absent)" >&2
+        exit 1
+    }
+    [ -f scripts/html_check.mjs ] || {
+        echo "HTML-STRUCTURE-BLOCKED: scripts/html_check.mjs missing (no HTML structure check)" >&2
+        exit 1
+    }
+    node_env_preflight
+    hrc=0
+    html_out="$(node scripts/html_check.mjs $HTML_DOC_ROOTS)" || hrc=$?
+    [ -n "$html_out" ] && printf '%s\n' "$html_out"
+    case "$hrc" in
+        0)
+            # fail closed on the marker: a green adapter that checked nothing
+            # (no HTML-CHECK-OK line per root) is a blocked gate, not a pass.
+            for _html_root in $HTML_DOC_ROOTS; do
+                if ! printf '%s\n' "$html_out" | grep -q "^HTML-CHECK-OK $_html_root "; then
+                    echo "HTML-STRUCTURE-BLOCKED: adapter exit 0 but no HTML-CHECK-OK for $_html_root" >&2
+                    exit 2
+                fi
+            done
+            ;;
+        1)
+            echo "HTML-STRUCTURE-FAIL (structural HTML defect: tag imbalance, duplicate id, dangling fragment, missing desc, or table cell-count mismatch)" >&2
+            exit 1
+            ;;
+        2)
+            echo "HTML-STRUCTURE-OP-FAIL (operational or unsupported construct: unreadable file or unsupported HTML markup)" >&2
+            exit 2
+            ;;
+        *)
+            echo "HTML-STRUCTURE-FAIL (adapter exit $hrc)" >&2
+            exit 1
+            ;;
+    esac
+    echo "HTML-CHECK-OK"
 }
 
 unsafe_surface_gate() {
@@ -1981,6 +2031,6 @@ case "$TIER/$SCOPE" in
     boundary/phase1) boundary_phase1; boundary_phase1_markers; exit 1 ;;
     e2e/relay) e2e_relay ;;
     e2e/shutdown) e2e_shutdown ;;
-    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate ;;
+    docs/*) docslink_check; html_structure_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate ;;
     *) usage ;;
 esac
