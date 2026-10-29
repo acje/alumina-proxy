@@ -9,10 +9,14 @@ This document is methodology, metrics, and invocation reference. The Results
 section (§9) holds the **corrected M-04 results** (2026-10-28).
 
 - Topic: methodology (research-first, per evidence bead `alumina-d59gq`).
-- Status: results recorded — corrected M-04 (2026-10-28) in §9. Correction
-  package complete.
+- Status: results recorded — corrected M-04 (2026-10-28) in §9 (baseline,
+  comparison-only §6) and exact-candidate E2 timed receipts (2026-10-29) in
+  §11 (9/9 `valid`, verdict `pass`). Correction package complete.
 - Protocol: P2 measurement protocol frozen for the exact candidate `3f587e9`
   (2026-10-29) in §10 — binds E2–E4 before any measurement runs.
+- Decision: E5 NoChangeJustified (2026-10-29) in §12 — evidence synthesis
+  only; no runtime change, no production-qualification claim; 10-Gbps (E3),
+  E4 capability slices, and deployment-owned collector assurance remain open.
 - Governing repository spec: `docs/alumina-proxy.md` (this suite measures its
   golden CONNECT path; it does not alter proxy semantics).
 
@@ -950,6 +954,91 @@ sessions_completed` exactly, `setup_failures={}`, `session_errors=0`,
 - **Every E2 receipt must be read with the §10.2.1 clean-identity caveat**: the
   working tree carried two foreign untracked files; a clean-tree re-run is
   required before any production-qualification claim.
+
+---
+
+## 12. E5 decision (2026-10-29) — NoChangeJustified, no runtime change
+
+Mission `cdwui-e5-decision-20261029` (epic `alumina-cdwui.18`). This section
+synthesises the E2/E3/E4 measurement outcomes into the package verdict using
+§10.4 and the E5 decision rules (`alumina-cdwui.18`). It is **evidence
+synthesis only**: no runtime change is proposed, authorised, or implemented,
+and no production-qualification claim is made (P1 gate stays CONDITIONAL-
+COMPLETE, §10.2.1). Candidate numbers live in §11 and are cited, never
+re-derived here; §9 M-04 stays comparison-only (§6) and is not this
+candidate's current result.
+
+### 12.1 Evidence — what it establishes (exact receipts)
+
+| Source (bead) | Establishes on candidate §10.2 (`3f587e9`, binary `c869192e…`) | Verdict |
+|---|---|---|
+| E2 (`alumina-cdwui.15`, §10.5/§11) | 9/9 timed receipts `valid=true`; 1gbps: alumina 999.999 Mbps `fulfilled=true`, 0 `backpressure_unsent` (§11.1); storm150 9000/9000 and storm50 3000/3000 `sessions_completed`, `setup_failures={}`, `protocol_errors=0`, `frames_echoed==frames_sent` 1:1 (§11.2). Bounded progress, no starvation signal. | `pass` (§10.4) |
+| E3 (`alumina-cdwui.16`, §10.6) | No 10-Gbps number exists. Preflight: near-saturated open-loop client (`sampling.client.cores_mean` ≈ 0.92 at 1 Gbps, §11), loopback-only aperture (any claim would be "proxy-on-this-harness"), and the expressibility seam (`bench_run.sh` label set, `--target-mbps 10000` wiring, lifting `MAX_TARGET_MBPS`/`MAX_OUTSTANDING_CAP`, `scripts/bench_workload.py:3335/:107`) is unauthorised. | `BLOCKED`/`Unknown` — capability, not a proxy finding |
+| E4 (`alumina-cdwui.17`, §10.7) | (a) slow-peer base / (b) sink-drain injection `BLOCKED` (seam-gated); (c1) full 32-name allowlist DNS fail/recovery `BLOCKED` (seam-gated); (c2) deadline progress under load **MEASURED** by exact-input reuse of E2 storm receipts (`setup_failures={}`, `valid=true`); (d) stalled-stdout+load **MEASURED** by D2/D4 reuse. No correctness defect discovered; no P1 raised. | 2 measured, 3 `BLOCKED` |
+| D2/D4 (`alumina-cdwui.11`/`.13`) | Proxy-owned notification evidence measured (`stdout_stall` whole-record drop counter = lower bound; bounded drain); **deployment-owned** collector liveness/alerting/retention `BLOCKED`/Unknown — named prerequisite absent. | proxy measured; deployment comparator open |
+| P1 gate (`alumina-cdwui.20`) | Combined post-P1 candidate integrated; constituent markers exit 0; **CONDITIONAL-COMPLETE** under the §10.2.1 clean-identity caveat (foreign untracked `scripts/verify_alt.sh` + `arch_alt/` present, stable) — clean-tree re-run required before any production-qualification claim; BOUNDARY never runs E2E. | CONDITIONAL-COMPLETE (not production-qualified) |
+
+### 12.2 Verdict — NoChangeJustified
+
+Applying the E5 decision rule (_prefer no change when the candidate meets the
+required workload with bounded progress and no demonstrated bottleneck_):
+
+- **Meets the required workload.** The required workload is the E2 profile set
+  (§10.5): 1 Gbps steady + storm150/50. The candidate lands 999.999 Mbps
+  `fulfilled=true` with 0 `backpressure_unsent` (§11.1) and 100% planned storm
+  sessions with `setup_failures={}` (§11.2) — inside the measurable envelope.
+- **Bounded progress.** Storm deadlines hold under churn (c2 measured); a
+  stalled stdout does not stall rejection/tunnel I/O/DNS/deadlines (d, D2/D4);
+  no unfair-starvation signal in any measured slice.
+- **No demonstrated bottleneck inside the measurable envelope.** Proxy
+  `cores_mean` ≈ 0.385 at 1 Gbps (§11.1); the only near-saturated sampler is
+  the **open-loop client** (≈ 0.92 core), a shared-harness ceiling per §10.4
+  rule 5; the compiled echo backend (≈ 0.22 cores) is not the ceiling. Nothing
+  measured attributes a gap to the proxy path.
+
+Therefore **no runtime change is justified by the current evidence**, and no
+optimisation mission/decision bead is filed. This is **not** a performance-done
+or production-qualification claim: it is the decision that nothing measured
+justifies changing the relay/buffer/budget/observability surface today.
+
+### 12.3 What this candidate does NOT establish (open items; all outside this package)
+
+| Open item | Status (exact) | Owner / route |
+|---|---|---|
+| 10-Gbps burst/sustained | No number exists; E3 `BLOCKED` on capability + unauthorised seam (§12.1) | seam decision + 10-Gbps-capable host; independent review required |
+| E4 slow-peer (a) / sink-drain (b) | `BLOCKED` — `--echo-delay-s` sink wiring is a harness seam change | seam decision |
+| E4 full-allowlist DNS failure/recovery (c1) | `BLOCKED` — 32-name staging + responder fault-injection are seam changes | seam decision |
+| Deployment-owned collector assurance (liveness/alerting/retention) | `BLOCKED`/Unknown — no external collector infrastructure present (D4 `alumina-cdwui.13`) | deployment owner |
+| Clean-tree production qualification | P1 CONDITIONAL-COMPLETE; §10.2.1 caveat applies to every P2 receipt | exclusive-checkout re-run (release gate `alumina-cdwui.20`) |
+| Relay observability-field additions, backlog changes, multi-worker/kernel zero-copy, buffer/budget changes, other runtime-surface/profile changes | Excluded from this package (§10.1) and undeveloped | separate decision + user/spec authorisation |
+
+### 12.4 Cheap falsifiers (what would overturn NoChangeJustified)
+
+Each is a named measurement that, if it produced the listed result, would
+justify a separately-authored optimisation/decision mission — none is proposed
+or implemented here, and none is expressible under the frozen §10 seams:
+
+1. **10 Gbps**: seam decision + capable host where the proxy — not
+   client/backend/loopback — is the ceiling (achieved < offered with proxy
+   `cores_mean` near-saturated while client/backend retain headroom, §10.6
+   item 3).
+2. **Slow-peer / sink-drain**: a slow-consumer slice (via the `--echo-delay-s`
+   seam) showing unbounded queue/backpressure, starvation of unrelated tunnels,
+   or a deadline expiry at churn (E4 a/b expected invariant).
+3. **Full-allowlist DNS**: a 32-name staging + fault-injection slice showing a
+   DNS failure/recovery deadline breach or exchange starvation under relay load
+   (E4 c1 expected invariant).
+4. **Notification/deployment**: evidence that a stalled stdout delays
+   rejection/tunnel I/O/DNS/deadlines beyond the D2/D4 lower bounds, or a
+   deployment whose collector cannot be assured by the operator runbook (D4).
+
+### 12.5 Closure conditions (not self-approvable)
+
+E5 synthesises evidence only. Before final closure of `alumina-cdwui.18`: an
+**independent performance review** and an **independent architecture review**
+must approve this interpretation (§10.1; E5 acceptance `alumina-cdwui.18`);
+`sh scripts/verify.sh docs` passes for this docs-only change. No runtime change
+ships with this decision.
 
 ---
 
