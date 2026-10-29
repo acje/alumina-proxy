@@ -182,14 +182,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       calibrated fixture bound, not a universal or total bound). Resolving the
       fixed-profile mismatch is an owner decision
       (<code>alumina-szmy0.11</code>).</li>
-      <li><strong>F-03 (S2) — capacity:</strong> the retained boot floor is
-      ≈&nbsp;204.6&nbsp;MiB (≈&nbsp;409&nbsp;KiB/tunnel), not the 128&nbsp;MiB
+      <li><strong>F-03 (S2) — capacity:</strong> the printed, constant-derived
+      named-buffer lower-bound plan is
+      ≈&nbsp;204.7&nbsp;MiB (≈&nbsp;409&nbsp;KiB/tunnel), not the 128&nbsp;MiB
       traffic-store headline; the printed lower bound is
       <code>214&nbsp;665&nbsp;002</code> bytes.</li>
       <li><strong>F-04 (S2) — design economy:</strong> the per-slot inspector
-      retains 128&nbsp;KiB (two 64&nbsp;KiB buffers) to inspect a 16&nbsp;KiB
-      handshake cap — 64&nbsp;MiB of the 76.6&nbsp;MiB serving workspace is
-      inspector headroom.</li>
+      retains two distinct 64&nbsp;KiB buffers (128&nbsp;KiB per slot) to
+      inspect a 16&nbsp;KiB handshake cap; across 512 slots that is 64&nbsp;MiB
+      of the 76.6&nbsp;MiB serving workspace — the retained capacity of the two
+      arrays (4× the 16&nbsp;KiB message bound, i.e. 3× excess), not
+      reclaimable headroom.</li>
       <li><strong>F-05…F-11:</strong> two declared-but-unused direct dependencies;
       a fragile positional two-call exchange protocol; non-zeroized slot reuse;
       a 21-module public surface for two consumers; terminal silent sink failure;
@@ -405,9 +408,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <th scope="row" class="fid">F-03</th>
         <td class="sev">S2</td>
         <td>Capacity</td>
-        <td>Retained boot floor ≈ 204.6 MiB (≈ 409 KiB/tunnel), versus the
-        128 MiB traffic-store headline. The inventory is an explicit <em>lower
-        bound</em>, not an RSS figure.</td>
+        <td>Printed, constant-derived named-buffer lower-bound plan ≈ 204.7 MiB
+        (≈ 409 KiB/tunnel), versus the 128 MiB traffic-store headline. The
+        inventory is an explicit <em>lower bound</em> over retained named
+        buffers, not an RSS figure.</td>
         <td><code>src/inventory.rs:9-49</code>, <code>:273-285</code>;
         boot print <code>214665002</code> via <code>src/main.rs:34-40</code>.</td>
       </tr>
@@ -415,10 +419,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <th scope="row" class="fid">F-04</th>
         <td class="sev">S2</td>
         <td>Design economy</td>
-        <td>The per-slot <code>ChInspector</code> retains two 64 KiB buffers
-        (<code>buf</code> + <code>scratch</code>) to inspect a 16 KiB handshake
-        cap — 64 MiB of the 76.6 MiB serving workspace is single-connection
-        inspector headroom.</td>
+        <td>The per-slot <code>ChInspector</code> retains two distinct 64 KiB
+        buffers (<code>buf</code> + <code>scratch</code>, 128 KiB per slot) to
+        inspect a 16 KiB handshake cap. Across 512 slots the two arrays'
+        retained capacity is 64 MiB of the 76.6 MiB serving workspace; a
+        64 KiB buffer is 4× the 16 KiB message bound (3× excess), which does
+        not itself establish reclaimable headroom because the arrays have
+        distinct roles.</td>
         <td><code>src/client_hello.rs:6-21</code>,
         <code>:410-419</code>.</td>
       </tr>
@@ -448,9 +455,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <th scope="row" class="fid">F-07</th>
         <td class="sev">S3</td>
         <td>Hygiene</td>
-        <td><code>SlotWorkspace::reset</code> clears lengths and cursors only;
-        prior tunnel bytes stay in the retained per-slot slabs for the process
-        lifetime. Not written out by any current path.</td>
+        <td><code>SlotWorkspace::reset</code> rebuilds the parser, inspector,
+        gate, capture, deadlines and other slot metadata through their
+        constructors; prior contents of the two retained 128 KiB traffic slabs
+        are not zeroized and no current disclosure path was found. One
+        coordinated closure item with <a href="#unknowns">U-06</a>.</td>
         <td><code>src/serving.rs:774-803</code>.</td>
       </tr>
       <tr>
@@ -556,7 +565,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   as-is, or an authorised change to the fixed profile follows — is that owner
   decision; no outcome is chosen here.</p>
 
-  <h3>2.3 F-03 — retained boot floor ≈ 204.6 MiB, not 128 MiB (S2)</h3>
+  <h3>2.3 F-03 — printed named-buffer plan ≈ 204.7 MiB, not 128 MiB (S2)</h3>
   <p>The traffic store alone is 128 MiB: <code>TUNNEL_SLOTS = 512</code> ×
   <code>BUFFERS_PER_SLOT = 2</code> × <code>BUFFER_BYTES = 128 * 1024</code>
   (<code>src/inventory.rs:9-12</code>), i.e. 134 217 728 bytes. But the retained
@@ -572,11 +581,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>The inventory is deliberately a <em>lower bound over retained named
   buffers</em> and explicitly <em>not</em> an RSS estimate
   (<code>src/inventory.rs:173-196</code>): it excludes per-slot metadata, transient
-  scratch, kernel socket buffers, and allocator fragmentation. Real RSS is
-  therefore strictly higher; see <a href="#unknowns">U-03</a>. See also
+  scratch, kernel socket buffers, and allocator fragmentation, so actual RSS is
+  an open measurement and no ordering against this bound is asserted; see
+  <a href="#unknowns">U-03</a>. See also
   <a href="#memory">§8</a> for the full envelope.</p>
 
-  <h3>2.4 F-04 — inspector headroom: 64 MiB to inspect a 16 KiB cap (S2)</h3>
+  <h3>2.4 F-04 — 64 MiB of retained inspector capacity for a 16 KiB cap (S2)</h3>
   <p><code>ChInspector</code> retains two <code>[u8; 64 * 1024]</code> buffers
   (<code>buf</code> and <code>scratch</code>,
   <code>src/client_hello.rs:410-419</code>) per slot, sized to
@@ -587,10 +597,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   interop bound (RFC 8446 §5.1) that rejects rather than reassembles a
   spec-legal multi-record ClientHello larger than 16 KiB.</p>
   <p>The arithmetic: 2 × 64 KiB × 512 slots = 64 MiB of the 76.6 MiB serving
-  workspace is single-connection inspector headroom (≈ 83%). This is not a
-  defect — it may be exactly the margin an adversarial fragmentation fixture
-  needs — but it is the cheapest memory lever in the system and the one most
-  likely to break a fixture if changed. <a href="#recommendations">R-6</a>.</p>
+  workspace is the retained capacity of the two distinct arrays (≈ 83%), and
+  each 64 KiB buffer is 4× the 16 KiB message bound — that is 3× excess, not
+  headroom. This is not a defect — it may be exactly the margin an adversarial
+  fragmentation fixture needs — and it establishes no reclaimable surplus,
+  because the two arrays serve distinct roles; a saving claim would require a
+  concrete record-framing/resizing model. <a href="#recommendations">R-6</a>.</p>
 
   <h3>2.5 F-05 — two declared-to-import unused dependencies (S3)</h3>
   <p><code>rustls-pki-types = "=1.15.1"</code> and
@@ -1493,13 +1505,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   type-derived figures that the binary prints at boot
   (<code>src/main.rs:34-40</code>), and that pinned ticket tests lock to exact
   values (<code>src/inventory.rs:273-285</code>). The number printed is
-  <code>214 665 002</code> bytes ≈ 204.7 MiB, printed as “inventory named fixed
-  buffers (lower bound): traffic 134217728 + serving workspace 80310272 + dns
-  named buffers 137002” (recorded measurement).</p>
+  <code>214 665 002</code> bytes ≈ 204.7 MiB — the printed, constant-derived
+  named-buffer lower-bound plan (traffic 134217728 + serving workspace 80310272
+  + dns named buffers 137002), not a measured boot or RSS figure.</p>
 
   <table>
-    <caption>Table 9 — The retained boot memory envelope (recorded measurement and
-    type-derived plan).</caption>
+    <caption>Table 9 — The printed named-buffer memory envelope (recorded
+    measurement of the boot print; a type-derived plan, not an RSS
+    figure).</caption>
     <thead>
       <tr>
         <th scope="col">Category</th>
@@ -1560,14 +1573,16 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>8.2 The zero-allocation discipline and its DoT caveat</h3>
   <p>The serving steady state is allocation-free by construction after boot:
   the slot table is built once by <code>collect()</code> over an exact-size
-  iterator (<code>src/serving.rs:1028-1035</code>, see <a href="#unknowns">U-02</a>),
-  and the per-turn event buffer is a fixed <code>POLL_EVENTS_CAP</code> array, not
-  a reallocated Vec (run_once coalesces into a stack array,
-  <code>src/serving.rs:1291-1305</code>). The reactor’s per-turn
-  <code>events</code> buffer is replaced with a zero-capacity buffer and restored —
-  the property depends on <code>mio</code> not allocating for
-  <code>with_capacity(0)</code> (see <a href="#unknowns">U-01</a>),
-  <code>src/serving.rs:1263</code>, <code>:1307</code>).</p>
+  iterator (<code>src/serving.rs:1028-1035</code>, see <a href="#unknowns">U-02</a>).
+  Per turn, run_once coalesces the poll batch into a fixed stack
+  <code>items</code> array (<code>[(Token, Readiness); POLL_EVENTS_CAP]</code>,
+  <code>src/serving.rs:1288</code>) — a separate stack-owned buffer, not a
+  reallocated Vec. Distinct from that, the reactor’s boot-retained per-turn
+  <code>events</code> buffer is swapped with <code>Events::with_capacity(0)</code>
+  and restored after polling; that swap/restore property depends on
+  <code>mio</code> not allocating for <code>with_capacity(0)</code>
+  (see <a href="#unknowns">U-01</a>), <code>src/serving.rs:1263</code>,
+  <code>:1307</code>.</p>
   <p>F-02 is the honest restatement: it is not “the process never allocates after
   boot”; it is “the plain-DNS profile never allocates after boot, and the DoT
   profile allocates per connect (per-TLS-upgrade,
@@ -1883,12 +1898,16 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         latency/CPU cost under resolver flapping, not a defect.</td>
       </tr>
       <tr><th scope="row" class="fid">U-06</th><td>Risk</td>
-        <td><code>SlotWorkspace::reset</code> leaves prior tunnel bytes in the
-        retained 128 KiB slabs for process lifetime (<code>src/serving.rs:774-803</code>).
-        No path writes them out today, but the buffers outlive the tunnel by
-        design (<code>process::exit</code> skips drops).</td>
+        <td>Coordinated with <a href="#discoveries-table">F-07</a>:
+        <code>SlotWorkspace::reset</code> rebuilds the parser, inspector, gate,
+        capture, deadlines and other slot metadata through their constructors,
+        but the two retained 128 KiB traffic slabs are not zeroized
+        (<code>src/serving.rs:774-803</code>). No path writes them out today,
+        and the buffers outlive the tunnel by design
+        (<code>process::exit</code> skips drops).</td>
         <td>Memory-disclosure only if a future path misuses <code>buf_len</code>;
-        no such path found.</td>
+        no current disclosure path was found — one disposition item with F-07,
+        not two.</td>
       </tr>
     </tbody>
   </table>
@@ -1949,11 +1968,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>Removes a silent degradation mode from the refresh path.</td></tr>
       <tr><th scope="row">R-6</th>
         <td>Decide whether multi-record pre-hello fragmentation is a stated
-        requirement before shrinking the 64 KiB inspector buffers; treat the
-        4× headroom as the memory lever only under that decision.</td>
+        requirement before any inspector-buffer resizing; claim a saving only
+        under a concrete record-framing/resizing model, and do not mandate a
+        shrink.</td>
         <td>F-04; <code>src/client_hello.rs:6-21</code>, <code>:410-419</code></td>
-        <td>The 64 MiB inspector headroom is the cheapest memory lever but the one
-        most likely to break an adversarial fixture.</td></tr>
+        <td>No 64 MiB saving is presumed: the two arrays' retained capacity
+        serves distinct roles, and resizing is a requirements-first decision
+        over a concrete model, not a memory lever.</td></tr>
       <tr><th scope="row">R-7</th>
         <td>State the terminal-sink behaviour as accepted risk in operator-facing
         material: after the first hard stdout error, log loss is counted but
@@ -2014,7 +2035,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code>,
         <code>:273-285</code>; <code>src/main.rs:34-40</code></td>
         <td>recorded measurement (print) + as-built plan</td></tr>
-      <tr><th scope="row">F-04 inspector headroom</th>
+      <tr><th scope="row">F-04 inspector retained capacity</th>
         <td><code>src/client_hello.rs:6-21</code>, <code>:410-419</code></td>
         <td>as-built</td></tr>
       <tr><th scope="row">F-05 unused deps</th>

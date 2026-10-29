@@ -26,11 +26,11 @@ pure state machine separated from all I/O. The dominant architectural asset is t
 `SlotIndex`/`TunnelIndex` are consumed, `ValidatedHello` requires a `HelloAccepted` witness,
 `DomainOrdinal` is a range-bounded index validated against the current table).
 
-The dominant architectural cost is **memory**: the retained boot footprint is ≈ **205 MiB**, not
-the 128 MiB traffic store that the inventory headline reports, because every one of the 512 slots
-also retains a `ConnectParser` plus a `ChInspector` holding two 64 KiB buffers and a full inline
-`ClientHello` (`156,856` bytes/slot, pinned by test). Per concurrent tunnel the retained cost is
-≈ **409 KiB**.
+The dominant architectural cost is **memory**: the retained, constant-derived named-buffer plan is
+≈ **204.7 MiB** — not the 128 MiB traffic store that the inventory headline reports — because every
+one of the 512 slots also retains a `ConnectParser` plus a `ChInspector` holding two 64 KiB buffers
+and a full inline `ClientHello` (`156,856` bytes/slot, pinned by test). Per concurrent tunnel the
+retained cost is ≈ **409 KiB** — a printed lower bound, not a measured RSS figure.
 
 Five findings deserve management attention:
 
@@ -166,7 +166,7 @@ Three properties are worth calling out as genuinely well done:
 | Serving workspaces | 512 × (size_of::<ConnectParser>() + size_of::<ChInspector>()) (`:30-36`) | 80,310,272 | 76.6 |
 | DNS named buffers | 512 + 16,386 + `size_of::<ResponseWorkspace>()` (`:43-44`) | ≈17 KB | 0.02 |
 | Log queue | 256 × 2 KiB (`:49`, pinned equal in `src/log.rs:154`) | 524,288 | 0.5 |
-| **Retained floor** | | **≈214.5 MB** | **≈204.6** |
+| **Retained floor** | | **≈214.7 MB** | **≈204.7** |
 
 Two structural observations follow from the code, not from any document:
 
@@ -176,10 +176,14 @@ Two structural observations follow from the code, not from any document:
 2. **The workspace is dominated by two 64 KiB inspector buffers** plus an inline `ClientHello`
    whose largest field is `ciphers: [u16; 8192]` = 16 KiB
    (`src/client_hello.rs:6-18`, `:61-77`, `:411-419`). `MAX_CLIENT_HELLO` is 64 KiB while
-   `MAX_HANDSHAKE_LEN` is 16 KiB, i.e. the retained per-slot scratch is 4× the security-relevant
-   message bound (`:18` vs `:6`). That single ratio accounts for 64 MiB of the 76.6 MiB workspace
-   total. The headroom is only reachable by multiple pre-hello records, so it is defensible — but
-   it is headroom, not a requirement, and it is the obvious first lever if the footprint must fall.
+   `MAX_HANDSHAKE_LEN` is 16 KiB (`:18` vs `:6`): a 64 KiB buffer is 4× the security-relevant
+   message bound, i.e. 3× excess; across 512 slots the two arrays' retained capacity is 64 MiB of
+   the 76.6 MiB workspace total. That is retained capacity with distinct roles, not reclaimable
+   headroom — the arithmetic surplus against a single 16 KiB handshake does not establish
+   reclaimable memory, so any saving claim needs a concrete record-framing/resizing model first.
+   The surplus is only reachable by multiple pre-hello records, so the sizing is defensible — but
+   it is not a requirement, and it is a candidate for a later model-based decision if the
+   footprint must fall.
 
 The inventory's lower-bound framing is honest, but it means a capacity planner reading
 `named_fixed_buffer_bytes()` (which reports traffic + workspace + DNS = 214,528,000) still misses
@@ -390,11 +394,11 @@ half-mutated state. For a single-binary security component this is the right com
 |---|---|---|---|---|
 | F-01 | S2 | Enforcement | `[early_data]` All-scope gate is unreachable; operator knob is inert | §7 above; `src/config.rs:1110-1115`, `src/enforcement/state.rs:271-277`, `:1415-1450` |
 | F-02 | S2 | Contract | "No post-boot heap alloc" holds only for plain DNS; DoT allocates per connect (per-TLS-upgrade) and, on its one warm successful-exchange fixture, up to eight allocations and up to eight deallocations — a calibrated fixture bound, not a total/universal bound; owner decision pending (`alumina-szmy0.11`) | `src/startup_dns.rs:1101-1120`, `:2096-2102`; `src/startup_dns/tests.rs:1217-1224`; `dot_tests.rs:1340-1348`, `:1416-1423` |
-| F-03 | S2 | Capacity | Retained boot floor ≈ 205 MiB (409 KiB/tunnel), vs a 128 MiB headline; inventory is an explicit lower bound | `src/inventory.rs:10-49`, `:176-196`, `:273-285` |
-| F-04 | S2 | Design economy | 64 KiB inspector buffers for a 16 KiB handshake cap = 64 MiB of the 76.6 MiB workspace headroom | `src/client_hello.rs:6-18`, `:411-419` |
+| F-03 | S2 | Capacity | Printed named-buffer plan ≈ 204.7 MiB (409 KiB/tunnel), vs a 128 MiB headline; inventory is an explicit lower bound, not an RSS figure | `src/inventory.rs:10-49`, `:176-196`, `:273-285` |
+| F-04 | S2 | Design economy | Two distinct 64 KiB inspector buffers per slot for a 16 KiB handshake cap = 64 MiB of the 76.6 MiB workspace retained capacity (a 64 KiB buffer is 4× the 16 KiB message bound, i.e. 3× excess); no reclaimable headroom assumed | `src/client_hello.rs:6-18`, `:411-419` |
 | F-05 | S3 | Supply chain | `rustls-pki-types` and `rustls-webpki` declared as direct deps, referenced by zero Rust files | `Cargo.toml:199-200`; grep over `src/`, `tests/`, `examples/` |
 | F-06 | S3 | Robustness | Exchange class is a positional 2-call protocol; runtime cancels anything not marked serving/probe | `src/startup_dns.rs:2996-3007`, `:1613-1621`; `src/runtime.rs:258-262`, `:345` |
-| F-07 | S3 | Hygiene | Slot buffers are not zeroized on reuse; only lengths/cursors reset | `src/serving.rs:774-803` |
+| F-07 | S3 | Hygiene | Slot metadata/parser/inspector are reset through constructors on reuse; the two 128 KiB traffic slabs are not zeroized; no current disclosure path found (one coordinated item with U-06) | `src/serving.rs:774-803` |
 | F-08 | S3 | API surface | 21 `pub mod`s + public test-seam constructors (`Serving::new`, `Runtime::new`) for two consumers | `src/lib.rs:4-27`, `src/serving.rs:1157`, `src/runtime.rs:207` |
 | F-09 | S4 | Observability | Sink failure is terminal and silent-by-design after the first hard write error | `src/log.rs:2094-2101`, `:1637-1646` |
 | F-10 | S4 | Positive | Single-clock discipline (`origin`+`now0` threaded through worker, cache, DNS) with an explicit re-anchor seam | `src/serve.rs:204-227`, `src/worker.rs:97-105`, `src/startup_dns.rs:1369-1381` |
@@ -434,7 +438,7 @@ the protocol unrepresentable-to-misuse at zero runtime cost.
 | U-03 | Unknown | Real RSS includes allocator fragmentation, rustls/ring heap, and the kernel socket buffers for up to 512×2 sockets — none of it modelled by `BootInventory`. | Requires measurement, out of scope for a source-only review. |
 | U-04 | Unknown | Whether the `early_data` gate is *intended* to become reachable again if `Block{All}` is ever legalised for early data (the `F-02 close` comment at `src/config.rs:1076-1082` suggests the restriction is intentional and permanent). | Intent is not inferable from code alone; treated as an inert knob, which is the as-built truth. The disposition is an open F-01/U-04 owner decision (bead `alumina-szmy0.9`), not decided by this document. |
 | U-05 | Risk | A `DoT` deployment performs DNS refresh on a single connection with a 5 s exchange deadline; a failed handshake forces a full reconnect (and a fresh rustls config) on the next exchange. There is no persistent re-handshake backoff separate from the schedule ladder. | Design appears intentional (schedule backoff is 1/2/4/8/16/30 s, `src/schedule.rs:16`); flagged as a latency/CPU cost under resolver flapping, not as a defect. |
-| U-06 | Risk | `SlotWorkspace::reset` leaves prior tunnel bytes in the retained 128 KiB slabs for the process lifetime (`src/serving.rs:774-803`). No path writes them out, but the buffers outlive the tunnel by design (`process::exit` skips drops). | Memory-disclosure only if a future path misuses `buf_len`; currently no such path found. |
+| U-06 | Risk | Coordinated with F-07: `SlotWorkspace::reset` rebuilds parser/inspector/gate/capture/deadlines and other slot metadata through constructors, but the two retained 128 KiB traffic slabs are not zeroized (`src/serving.rs:774-803`). No path writes them out, but the buffers outlive the tunnel by design (`process::exit` skips drops). | Memory-disclosure only if a future path misuses `buf_len`; no current disclosure path found — one disposition item with F-07. |
 
 ---
 
@@ -469,7 +473,7 @@ Used as *criteria* only (`AGENTS.md`), applied to code:
    `alumina-szmy0.9`). Independent of that decision, replace the `state.rs` test's direct
    `ControlTable` construction with a config-derived one (`src/enforcement/state.rs:1415-1450`) so
    any future reachability is proven against a config the parser can actually produce.
-3. **Publish the real retained-memory figure** (≈409 KiB/slot, ≈205 MiB at 512 slots) wherever
+3. **Publish the real retained-memory figure** (≈409 KiB/slot, ≈204.7 MiB at 512 slots) wherever
    capacity is described, and consider folding the excluded per-slot fields into `BootInventory`
    so the accessor stops being a lower bound over a subset.
 4. **Delete or justify the two unused direct dependencies.** Cheapest finding to close. (F-05)
@@ -479,8 +483,10 @@ Used as *criteria* only (`AGENTS.md`), applied to code:
    first hard stdout error, log loss is counted but unrecoverable. (F-09)
 
 Not recommended: shrinking the 64 KiB inspector buffers without first deciding whether multi-record
-pre-hello fragmentation is a stated requirement. The 4× headroom is the cheapest memory lever
-(F-04) but it is also the one most likely to break an adversarial fixture.
+pre-hello fragmentation is a stated requirement. A 64 KiB buffer is 4× the 16 KiB message bound
+(3× excess), so the retained capacity is not a presumed 64 MiB saving; any resizing is a
+requirements-first decision over a concrete record-framing/resizing model (F-04), and the buffers
+are also what an adversarial fragmentation fixture exercises.
 
 ---
 
