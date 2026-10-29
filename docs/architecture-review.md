@@ -354,8 +354,11 @@ budget per turn (`:2049-2123`). Three properties are architectural rather than c
 The weakness is the terminal state: once the sink latches `failed`, `next_drain` returns `None`
 forever (`src/log.rs:1637-1646`), so a broken stdout permanently ends observability. Given the
 stderr-free-after-sink-switch decision (`src/main.rs:76-81`, `src/serve.rs:371-384`) there is no
-fallback channel, and the only surviving signal is the exit code plus the `dropped` counter. This
-is a defensible deliberate choice; it should be recorded as accepted risk rather than discovered
+fallback channel. After a hard stdout failure the process may continue with no external log-loss
+signal: the latch does not exit the process, open another output channel, or by itself alter exit
+status, and the in-memory `dropped` counter cannot be emitted through the failed sink
+(`src/log.rs:2094-2101`). Whether to accept this risk is the owner's decision (bead
+`alumina-szmy0.23`); it is recorded as accepted risk only if the owner accepts it, not discovered
 during an incident.
 
 `IncidentReport` is the second observability axis: 32 preallocated per-name windows with 3800 s
@@ -378,7 +381,7 @@ whether any window is near a boundary — a small, constant, always-on cost.
 | A setup handle cannot free an established tunnel (and vice versa) | `SlotIndex` / `TunnelIndex`, consumed by release | `src/worker.rs:316-337`, `:570-614` |
 | Serving without a listener is unrepresentable | `Preallocated` has no `serve`; `attach` consumes `self` | `src/runtime.rs:26-43`, `:153` |
 | Ambiguous evidence cannot become a clean pass | `Effect::Unknown` variants | `src/enforcement/policy.rs:136-145` |
-| No production panic on attacker input | crate-level `deny(clippy::unwrap_used, expect_used)`; no `panic!` in `src/` outside tests | `src/lib.rs:1-2`, verified by grep at the target SHA |
+| Panic hygiene: crate lints, `panic = "abort"`, annotated `#[expect]` bounds | No `unwrap` and no `panic!` in `src/` outside tests; every `expect` carries a proven-bound `#[expect]`; this narrows reachable panics but is not a type-level proof that no attacker-controlled input can reach a panic — comprehensive proof/fuzz evidence is a separate item | `src/lib.rs:1-2`; `Cargo.toml:226-229`, verified by grep at the target SHA |
 
 The last row is worth stating precisely: every `expect(...)` in production code carries an
 `#[expect(clippy::expect_used, reason = ...)]` with a proven-bound justification (e.g.
@@ -400,7 +403,7 @@ half-mutated state. For a single-binary security component this is the right com
 | F-06 | S3 | Robustness | Exchange class is a positional 2-call protocol; runtime cancels anything not marked serving/probe | `src/startup_dns.rs:2996-3007`, `:1613-1621`; `src/runtime.rs:258-262`, `:345` |
 | F-07 | S3 | Hygiene | Slot metadata/parser/inspector are reset through constructors on reuse; the two 128 KiB traffic slabs are not zeroized; no current disclosure path found (one coordinated item with U-06) | `src/serving.rs:774-803` |
 | F-08 | S3 | API surface | 21 `pub mod`s + public test-seam constructors (`Serving::new`, `Runtime::new`) for two consumers | `src/lib.rs:4-27`, `src/serving.rs:1157`, `src/runtime.rs:207` |
-| F-09 | S4 | Observability | Sink failure is terminal and silent-by-design after the first hard write error | `src/log.rs:2094-2101`, `:1637-1646` |
+| F-09 | S4 | Observability | Sink failure is terminal after the first hard write error: the process may continue with no external log-loss signal and the in-memory `dropped` counter cannot be emitted through the failed sink; the latch does not itself alter exit status | `src/log.rs:2094-2101`, `:1637-1646` |
 | F-10 | S4 | Positive | Single-clock discipline (`origin`+`now0` threaded through worker, cache, DNS) with an explicit re-anchor seam | `src/serve.rs:204-227`, `src/worker.rs:97-105`, `src/startup_dns.rs:1369-1381` |
 | F-11 | S4 | Positive | Per-entry CNAME bailiwick + config-time divergence rejection | `src/dns.rs:863-953`, `src/config.rs:1244-1262` |
 
@@ -479,8 +482,10 @@ Used as *criteria* only (`AGENTS.md`), applied to code:
 4. **Delete or justify the two unused direct dependencies.** Cheapest finding to close. (F-05)
 5. **Make the exchange class a parameter of `start_exchange`.** Small change, removes a silent
    degradation mode from the refresh path. (F-06)
-6. **State the terminal-sink behaviour as accepted risk** in the operator-facing material: after the
-   first hard stdout error, log loss is counted but unrecoverable. (F-09)
+6. **Have the owner explicitly accept or reject the terminal-sink risk** in the operator-facing
+   material: after the first hard stdout error the process may continue with no external log-loss
+   signal, the in-memory `dropped` counter cannot be emitted through the failed sink, and the latch
+   does not itself alter exit status (owner decision `alumina-szmy0.23`). (F-09)
 
 Not recommended: shrinking the 64 KiB inspector buffers without first deciding whether multi-record
 pre-hello fragmentation is a stated requirement. A 64 KiB buffer is 4× the 16 KiB message bound

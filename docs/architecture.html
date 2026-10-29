@@ -476,10 +476,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <th scope="row" class="fid">F-09</th>
         <td class="sev">S4</td>
         <td>Observability</td>
-        <td>Sink failure is terminal and silent by design: after the first hard
-        write error the queue is dropped through a counted counter and
-        <code>next_drain</code> returns <code>None</code> forever. Defensible;
-        should be recorded as accepted risk.</td>
+        <td>Sink failure is terminal: after the first hard write error the queue
+        is dropped through a counted counter and <code>next_drain</code> returns
+        <code>None</code> forever. The process may then continue with no external
+        log-loss signal — the in-memory <code>dropped</code> counter cannot be
+        emitted through the failed sink and the latch does not itself alter exit
+        status. Owner acceptance pending
+        (<code>alumina-szmy0.23</code>).</td>
         <td><code>src/log.rs:2094-2101</code>, <code>:1637-1646</code>.</td>
       </tr>
       <tr>
@@ -1653,15 +1656,20 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 
   <h3>9.2 The terminal sink state and the failure register</h3>
   <div class="callout amber" role="note">
-    <p><strong>F-09 (S4, accepted-risk).</strong> Once the sink latches
+    <p><strong>F-09 (S4).</strong> Once the sink latches
     <code>failed</code>, <code>next_drain</code> returns <code>None</code> forever
     (<code>src/log.rs:1637-1646</code>): a broken stdout permanently ends
     observability. There is no second sink: boot diagnostics use stderr
-    (<code>src/main.rs:65-80</code>, <code>:145-148</code>), but once the log store owns stdout there is
-    no fallback channel (<code>src/log.rs:1403-1410</code>), so the only surviving
-    signals are the exit code and the <code>dropped</code> counter. This
-    is a defensible deliberate choice; it should be recorded as accepted risk, not
-    discovered during an incident. <a href="#recommendations">R-7</a>.</p>
+    (<code>src/main.rs:65-80</code>, <code>:145-148</code>), but once the log store
+    owns stdout there is no fallback channel (<code>src/log.rs:1403-1410</code>).
+    After a hard stdout failure the process may continue with <em>no external
+    log-loss signal</em>: the latch does not exit the process, open another output
+    channel, or by itself alter exit status, and the in-memory
+    <code>dropped</code> counter cannot be emitted through the failed sink
+    (<code>src/log.rs:2094-2101</code>). This is a defensible deliberate choice,
+    but whether the owner accepts the risk is not decided here; it should be
+    recorded as an explicit owner decision (bead <code>alumina-szmy0.23</code>),
+    not discovered during an incident. <a href="#recommendations">R-7</a>.</p>
   </div>
 
   <h3>9.3 Incident reporting</h3>
@@ -1688,15 +1696,26 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 
   <h3>9.5 Exit codes and degradation surfaces</h3>
   <p>Process exit and per-request HTTP degradation are the two fixed failure
-  surfaces; both are typed and unconditional. The shutdown pair comes from
-  <code>ShutdownExit</code>: <code>Drained ⇒ 0</code> and <code>Forced ⇒ 70</code>
-  (<code>src/serving.rs:178-187</code>), applied through
-  <code>src/runtime.rs:374-376</code>. Boot and startup failures exit the
-  documented constants — <code>EX_CONFIG = 78</code> at <code>src/boot.rs:7</code>,
-  <code>EX_TEMPFAIL = 75</code> and <code>EX_SOFTWARE = 70</code> at
-  <code>src/main.rs:23-24</code> — and the terminal-sink latch (F-09) is the one
-  unannounced observability failure: once stdout latches <code>failed</code>, log
-  loss is counted but unrecoverable (<code>src/log.rs:1637-1646</code>).</p>
+  surfaces; both are typed and unconditional. Exit <code>0</code> has two
+  reachable producers: a drained serving shutdown after gate-opened tunnels
+  complete (<code>ShutdownExit::Drained ⇒ 0</code>,
+  <code>src/serving.rs:186</code>, applied through
+  <code>src/runtime.rs:374-376</code>) and a startup <code>Terminated</code>
+  decision (SIGTERM within the startup window), which emits the shutdown record
+  and exits <code>0</code> (<code>src/main.rs:104-107</code>). Exit
+  <code>70</code> (<code>EX_SOFTWARE</code>) is forced shutdown with undrained
+  tunnels at the deadline (<code>ShutdownExit::Forced ⇒ 70</code>,
+  <code>src/serving.rs:187</code>) and also every startup software failure — no
+  bound listener, <code>attach</code> failure, or <code>serve</code> error —
+  each exiting <code>EX_SOFTWARE</code> (<code>src/main.rs:89-99</code>). Boot
+  and startup configuration failures exit the documented
+  <code>EX_CONFIG = 78</code> (<code>src/boot.rs:7</code>,
+  <code>src/main.rs:109-112</code>) and the startup DNS verdict exits
+  <code>EX_TEMPFAIL = 75</code> (<code>src/main.rs:103</code>). The terminal-sink
+  latch (F-09) is the one unannounced observability failure: once stdout latches
+  <code>failed</code>, log loss is counted but unrecoverable and there is no
+  external signal while the process runs (<code>src/log.rs:1637-1646</code>,
+  <code>:2094-2101</code>).</p>
 
   <table>
     <caption>Table 10 — Exit codes and HTTP degradation surfaces.</caption>
@@ -1709,11 +1728,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     </thead>
     <tbody>
       <tr><th scope="row">0</th>
-        <td>Drained shutdown after gate-opened tunnels complete</td>
-        <td><code>src/serving.rs:186</code>; <code>src/main.rs:106</code></td></tr>
+        <td>Drained shutdown after gate-opened tunnels complete
+        (<code>ShutdownExit::Drained</code>) or startup
+        <code>Terminated</code> (SIGTERM within the startup window)</td>
+        <td><code>src/serving.rs:186</code>; <code>src/main.rs:89-111</code></td></tr>
       <tr><th scope="row">70 (<code>EX_SOFTWARE</code>)</th>
-        <td>Forced shutdown (undrained tunnels at the deadline)</td>
-        <td><code>src/serving.rs:187</code>; <code>src/main.rs:24</code>, <code>:93-99</code></td></tr>
+        <td>Forced shutdown (undrained tunnels at the deadline) or startup
+        software failure: no bound listener, <code>attach</code> failure, or
+        <code>serve</code> error</td>
+        <td><code>src/serving.rs:187</code>; <code>src/main.rs:24</code>, <code>:89-99</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
         <td><code>src/main.rs:23</code>, <code>:103</code>; <code>src/serve.rs:97-102</code></td></tr>
@@ -1728,7 +1751,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/serving/policy.rs:22-24</code></td></tr>
       <tr><th scope="row">Sink latch</th>
         <td>Stdout <code>failed</code>: drops counted, <code>next_drain</code> is
-        <code>None</code> forever (F-09, accepted risk)</td>
+        <code>None</code> forever; the latch does not exit, open another channel,
+        or alter exit status, and the in-memory <code>dropped</code> counter
+        cannot be emitted through the failed sink — no external log-loss signal
+        while the process runs (F-09; owner acceptance pending,
+        <code>alumina-szmy0.23</code>)</td>
         <td><code>src/log.rs:1637-1646</code>, <code>:2094-2101</code></td></tr>
     </tbody>
   </table>
@@ -1792,10 +1819,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">A stale DNS publish cannot overwrite a newer entry</th>
         <td><code>Generation</code> + <code>StaleGeneration</code> rejection</td>
         <td><code>src/cache.rs:50-62</code>, <code>:373-382</code></td></tr>
-      <tr><th scope="row">No production panic on attacker input</th>
-        <td>crate-level <code>deny(clippy::unwrap_used, expect_used)</code>;
-        no <code>panic!</code> in <code>src/</code> outside tests; every
-        <code>expect</code> carries a proven-bound <code>#[expect]</code></td>
+      <tr><th scope="row">Panic hygiene: crate lints, <code>panic =
+      "abort"</code>, annotated <code>#[expect]</code> bounds</th>
+        <td>No <code>unwrap</code> and no <code>panic!</code> in <code>src/</code>
+        outside tests; every <code>expect</code> carries a proven-bound
+        <code>#[expect]</code>. This narrows reachable panics but is not a
+        type-level proof that no attacker-controlled input can reach a panic;
+        comprehensive proof/fuzz evidence is a separate item, not established
+        here.</td>
         <td><code>src/lib.rs:1-2</code>; <code>Cargo.toml:226-229</code></td></tr>
     </tbody>
   </table>
@@ -1976,11 +2007,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         serves distinct roles, and resizing is a requirements-first decision
         over a concrete model, not a memory lever.</td></tr>
       <tr><th scope="row">R-7</th>
-        <td>State the terminal-sink behaviour as accepted risk in operator-facing
-        material: after the first hard stdout error, log loss is counted but
-        unrecoverable.</td>
+        <td>Have the owner explicitly accept or reject the terminal-sink risk in
+        operator-facing material: after the first hard stdout error the process
+        may continue with no external log-loss signal, the in-memory
+        <code>dropped</code> counter cannot be emitted through the failed sink,
+        and the latch does not itself alter exit status (owner decision
+        <code>alumina-szmy0.23</code>).</td>
         <td>F-09; <code>src/log.rs:2094-2101</code>, <code>:1637-1646</code></td>
-        <td>Prevents discovering a silent observability loss during an incident.</td></tr>
+        <td>Prevents discovering a silent observability loss during an incident;
+        the risk is recorded only after the owner accepts it.</td></tr>
       <tr><th scope="row">R-8</th>
         <td>Document the ten-variant <code>Stage</code> and the 3600-second
         incident window as the current as-built values wherever the register is
