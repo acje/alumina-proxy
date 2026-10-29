@@ -801,6 +801,107 @@ alumina invocations (§10.5). Verdict: §10.4 — `setup_failures={}` and
 
 ---
 
+## 11. Results (E2, 2026-10-29) — exact candidate `3f587e9` timed receipts
+
+E2 reproduce run for the exact candidate §10.2 (`3f587e9`), judged by §10.4.
+Nine timed runs, interleaved **A-E-H** per profile, SECONDS 60 / WARMUP 5,
+rootful `BENCH_PODMAN_CONNECTION=flock-vm-root`. Receipts in
+`.ooda/benchmarks/3f587e9-bench-<subject>-<profile>-timed-*.json`.
+
+**Verbatim session stdout (raw exits):**
+
+```
+RUN 1/9 alumina timed 1gbps   EXIT=0  BENCH-OK  3f587e9-bench-alumina-1gbps-timed-20261029T005603Z.json
+RUN 2/9 envoy   timed 1gbps   EXIT=0  BENCH-OK  3f587e9-bench-envoy-1gbps-timed-20261029T005714Z.json
+RUN 3/9 haproxy timed 1gbps   EXIT=0  BENCH-OK  3f587e9-bench-haproxy-1gbps-timed-20261029T005825Z.json
+RUN 4/9 alumina timed storm150 EXIT=0 BENCH-OK  3f587e9-bench-alumina-storm150-timed-20261029T005936Z.json
+RUN 5/9 envoy   timed storm150 EXIT=0 BENCH-OK  3f587e9-bench-envoy-storm150-timed-20261029T010046Z.json
+RUN 6/9 haproxy timed storm150 EXIT=0 BENCH-OK  3f587e9-bench-haproxy-storm150-timed-20261029T010157Z.json
+RUN 7/9 alumina timed storm50  EXIT=0 BENCH-OK  3f587e9-bench-alumina-storm50-timed-20261029T010308Z.json
+RUN 8/9 envoy   timed storm50  EXIT=0 BENCH-OK  3f587e9-bench-envoy-storm50-timed-20261029T010418Z.json
+RUN 9/9 haproxy timed storm50  EXIT=0 BENCH-OK  3f587e9-bench-haproxy-storm50-timed-20261029T010528Z.json
+```
+
+**Identity/fidelity (every receipt):** `valid=true`, `reasons=[]`,
+`verdict=valid`, `kind=timed`, `mode=via-proxy`, `source_head=3f587e947fa8…`
+(§10.2), `dirty_count=0`, `image_id=7c3937c1…b449c` (pinned bench image),
+`rust_target=aarch64-unknown-linux-musl`, `config_sha256` per subject,
+openssl 3.5.7 / python 3.13.5, `tool_sha256=5ac6475b…`. §10.3 identity bracket
+held: HEAD pinned to `3f587e9` for all 9 runs; the two foreign untracked files
+(`scripts/verify_alt.sh` `85465b4c…`, `arch_alt/architecture-review.md`
+`d25b3458…`, sizes 99890 / 37818 B) are byte-identical on the pre- and
+post-run snapshots — SOURCE-IDENTITY-STABLE. Run-time pins: BENCH-ECHO-IDENTITY
+`efa64083…72cd` on all 9; BENCH-BINARY-IDENTITY `c869192e…` on the three
+alumina runs (alumina-only line, §10.3) and img-pinned `identity.
+executed_binary_sha256` `b9d6d1e0…` (envoy) / `d2e03232…` (haproxy).
+
+### 11.1 Steady (1gbps) results
+
+Same columns as §9 (proxy CPU sampler; `latency.actual_send_to_echo` µs).
+
+| Subject | achieved Mbps | fulfilled | p50 / p95 / p99 (µs) | CPU mean / peak (cores) | RSS mean (KiB) | missed_at_end | Receipt |
+|---|---|---|---|---|---|---|---|
+| alumina | 999.999 | true | 50 / 50 / 150 | 0.385 / 0.440 | 211188 | 0 | `3f587e9-bench-alumina-1gbps-timed-20261029T005603Z` |
+| envoy | 999.148 | false | 150 / 1150 / 1150 | 0.458 / 0.600 | 66052 | 0 | `3f587e9-bench-envoy-1gbps-timed-20261029T005714Z` |
+| haproxy | 999.999 | true | 50 / 150 / 150 | 0.414 / 12.872* | 24920 | 0 | `3f587e9-bench-haproxy-1gbps-timed-20261029T005825Z` |
+
+\* spurious one-sample proxy `cores_peak` (boundary-tick flake; proxy
+`cores_mean` 0.414 is the load-bearing value) — same flake family as M-04
+caveat (2), never a resource finding.
+
+### 11.2 Storm results
+
+Progress fields (missing from steady receipts and never asserted there, §10.5):
+`arrivals_planned == arrivals_attempted == connections_established ==
+sessions_completed` exactly, `setup_failures={}`, `session_errors=0`,
+`protocol_errors=0`, `send_failed_sessions=0`, `frames_echoed == frames_sent`
+1:1, on every storm run. `workload_fulfilled=true` on all six.
+
+| Profile | Subject | dp p50 / p95 / p99 (µs) | setup p50 / p95 / p99 (µs) | CPU mean / peak (cores) | RSS mean (KiB) | Receipt |
+|---|---|---|---|---|---|---|
+| storm150 | alumina | 250 / 41950 / 42550 | 2050 / 2550 / 2850 | 0.043 / 0.087 | 210875 | `3f587e9-bench-alumina-storm150-timed-20261029T005936Z` |
+| storm150 | envoy | 350 / 41750 / 42550 | 2150 / 2450 / 2750 | 0.061 / 0.119 | 65091 | `3f587e9-bench-envoy-storm150-timed-20261029T010046Z` |
+| storm150 | haproxy | 250 / 41750 / 42450 | 2150 / 2550 / 2750 | 0.044 / 0.080 | 25228 | `3f587e9-bench-haproxy-storm150-timed-20261029T010157Z` |
+| storm50 | alumina | 450 / 42350 / 43050 | 3850 / 4850 / 5450 | 0.023 / 0.080 | 210834 | `3f587e9-bench-alumina-storm50-timed-20261029T010308Z` |
+| storm50 | envoy | 650 / 42150 / 42950 | 4050 / 5050 / 5850 | 0.047 / 0.114 | 64888 | `3f587e9-bench-envoy-storm50-timed-20261029T010418Z` |
+| storm50 | haproxy | 450 / 41850 / 42750 | 3950 / 4950 / 5550 | 0.028 / 0.080 | 25079 | `3f587e9-bench-haproxy-storm50-timed-20261029T010528Z` |
+
+### 11.3 Honest readings and disclosures (same-subject, same-profile vs §9 M-04)
+
+- **All 9 receipts `valid`; E2 verdict `pass`** (§10.4: every prescribed run
+  completed with a `valid` receipt at the §10.2 candidate, §10.3 bracket held,
+  honesty rules satisfied). Whatever the goodput/`fulfilled` values, none is a
+  veto (§10.1).
+- **1gbps: ~999.1–999.999 Mbps all three subjects**, `missed_at_end=0`
+  everywhere. **Alumina and haproxy now `fulfilled=true` with 0
+  `backpressure_unsent`** (vs §9 M-04 `false`, 56 and 502 unsent frames) and a
+  3–4-frame `drain_echoed` at close — the open-loop cap landed inside the
+  window this run; a cleaner run, disclosed, not asserted as fixed progress
+  (tool/driver note below). **Envoy `fulfilled=false`** (1558 / 1,829,495 =
+  0.085% `backpressure_unsent`, `missed_at_end=0`) — a tiny honest open-loop
+  tail, read as such (F1).
+- **1gbps data-path p50 dropped to ~50 µs (alumina, haproxy) / 150 µs (envoy)**
+  vs §9 M-04 1050 / 1150 / 150 µs — same-subject/same-profile disclosed delta,
+  consistent with the storm data-path p50 staying at the post-fix ~0.15–0.65 ms
+  band; no new threshold is claimed.
+- **Storm setup_latency is higher than M-04 on every subject/profile** (e.g.
+  alumina storm150 p50 2050 vs 1150 µs; storm50 3850 vs 1350 µs) while the
+  uniform ~41.5–43.1 ms p95/p99 tail (harness cadence, ±0.3 ms of M-04)
+  persists. Same-subject/same-profile deltas are measured facts recorded here
+  (F8 path-length caveat on any cross-subject read); no fail/veto per §10.4.
+- **Comparison pin deltas (disclosed, §10.5):** `tool_sha256` is `5ac6475b…`
+  here vs `c6bd1524…` at M-04 — a **single comment-line change
+  (85b7769→3f587e9)** in `scripts/bench_workload.py` (selftest wording only,
+  no behaviour); the alumina retained/executed binary is this candidate's build
+  `c869192e…` vs the old `85b7769` binary `1e173c13…` (§10.2, intended); bench
+  image id, openssl, python, and envoy/haproxy binary shas are identical on
+  both sides.
+- **Every E2 receipt must be read with the §10.2.1 clean-identity caveat**: the
+  working tree carried two foreign untracked files; a clean-tree re-run is
+  required before any production-qualification claim.
+
+---
+
 ## References
 
 1. Envoy performance FAQ — benchmarking best practices:
