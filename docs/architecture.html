@@ -1,0 +1,2115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alumina — Exit-Gate Proxy Architecture</title>
+<style>
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0 auto;
+  max-width: 86rem;
+  padding: 1.25rem 1.5rem 4rem;
+  color: #1a1a1a;
+  background: #ffffff;
+  font: 15.5px/1.6 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+a { color: #1a4d80; text-decoration: underline; text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible { outline: 2px solid #1a4d80; outline-offset: 2px; }
+.skip {
+  position: absolute; left: -9999px; top: 0;
+  background: #1a4d80; color: #fff; padding: .5rem .8rem; border-radius: 0 0 .3rem 0;
+}
+.skip:focus { left: 0; }
+header.doc {
+  border-bottom: 2px solid #1a1a1a; padding-bottom: .9rem; margin-bottom: 1.2rem;
+}
+h1 { font-size: 1.85rem; line-height: 1.25; margin: 0 0 .4rem; }
+.lede { font-size: 1.04rem; margin: .2rem 0 .6rem; max-width: 88ch; }
+.meta { font-size: .86rem; color: #3a3a3a; margin: .15rem 0; max-width: 110ch; }
+.meta code, .lede code { background: #f2f2f2; padding: .04rem .28rem; border-radius: .25rem; }
+h2 {
+  font-size: 1.3rem; line-height: 1.3; margin: 2.6rem 0 .8rem; padding-top: .9rem;
+  border-top: 1px solid #c9c9c9;
+}
+h3 { font-size: 1.08rem; margin: 1.7rem 0 .5rem; }
+h4 { font-size: .97rem; margin: 1.25rem 0 .4rem; }
+section p, section li, section dd, section dl { max-width: 88ch; }
+.warn {
+  border: 1px solid #b45309; background: #fff7ed; padding: .9rem 1.1rem;
+  border-radius: .35rem; margin: 1.2rem 0;
+}
+.warn h2 { border: 0; margin: 0 0 .4rem; padding: 0; font-size: 1.05rem; color: #7c2d12; }
+.warn p, .warn li { max-width: 100ch; color: #431407; }
+.callout {
+  border-left: 4px solid #1a4d80; background: #f4f8fc; padding: .6rem .9rem;
+  border-radius: 0 .3rem .3rem 0; margin: 1rem 0;
+}
+.callout.amber { border-left-color: #b45309; background: #fff7ed; }
+.callout p { margin: .25rem 0; }
+nav.toc {
+  margin: 1.4rem 0 0; border: 1px solid #8f8f8f; border-radius: .35rem;
+  padding: .9rem 1.1rem; background: #fafafa;
+}
+nav.toc h2 { border: 0; margin: 0 0 .5rem; padding: 0; font-size: .92rem;
+  letter-spacing: .06em; text-transform: uppercase; color: #3a3a3a; }
+nav.toc ol { margin: 0; padding-left: 1.35rem; columns: 2; column-gap: 2.6rem; }
+nav.toc li { margin: .16rem 0; font-size: .93rem; }
+table {
+  border-collapse: collapse; width: 100%; margin: .9rem 0 1.4rem;
+  font-size: .88rem; line-height: 1.45;
+}
+caption {
+  caption-side: top; text-align: left; font-size: .85rem; color: #2f2f2f;
+  padding: 0 0 .35rem; font-weight: 600;
+}
+th, td { border: 1px solid #9a9a9a; padding: .38rem .55rem; text-align: left; vertical-align: top; }
+thead th { background: #e9e9e9; }
+td code, th code { background: #f2f2f2; padding: .03rem .25rem; border-radius: .22rem; font-size: .84em; }
+figure {
+  margin: 1.4rem 0 1.8rem; padding: .8rem .9rem; border: 1px solid #c9c9c9;
+  border-radius: .35rem; background: #fdfdfd;
+}
+figcaption { font-size: .88rem; color: #2f2f2f; padding: .45rem .1rem .1rem; }
+figure svg { display: block; max-width: 100%; height: auto; border: 0; }
+.sev { font-variant-numeric: tabular-nums; }
+.fid { font-weight: 700; white-space: nowrap; }
+code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87em; }
+.reg { font-size: .8rem; color: #444; }
+.discrepancy {
+  border: 1px solid #b91c1c; background: #fef2f2; padding: .8rem 1rem;
+  border-radius: .35rem; margin: 1.1rem 0;
+}
+.discrepancy h3 { color: #7f1d1d; margin: 0 0 .4rem; }
+@media print {
+  body { max-width: none; padding: .5in .35in; font-size: 11pt; }
+  nav.toc { display: none; }
+  .skip { display: none; }
+  h2 { page-break-after: avoid; }
+  figure, table { page-break-inside: avoid; }
+  a { text-decoration: none; color: #000; }
+}
+@media (max-width: 760px) {
+  nav.toc ol { columns: 1; }
+  body { padding: .8rem .7rem 3rem; }
+  table { font-size: .8rem; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="doc">
+  <h1>Alumina — Architecture of the DNS-bound exit-gate proxy</h1>
+  <p class="lede">A source-grounded description of the as-built system at a fixed
+  revision: the two forwarding barriers, the single-reactor serving loop, the
+  typed enforcement lattice, the fixed-storage memory envelope, and the DoT-bound
+  startup-to-serving DNS path that decides whether the process may listen at all.</p>
+  <p class="meta"><strong>Authority:</strong> alumina-proxy source tree at commit
+  <code>1362548705860e186e5b0fc6cfb71521ccd94e04</code> (branch <code>main</code>;
+  reviewed source SHA <code>3f587e947fa8f050954b2f1fa7ec6b47012ac769</code>).
+  All line citations are to that revision and were checked at HEAD; none are
+  copied from another document. Reviewed source
+  equals current source: <code>git diff --stat
+  3f587e947fa8f050954b2f1fa7ec6b47012ac769..HEAD -- src tests Cargo.toml Cargo.lock</code>
+  is empty (no tracked code, test, or manifest delta), so every citation below
+  names the code that ships at HEAD.</p>
+  <p class="meta"><strong>Identity:</strong> alumina is a single-binary, config-file
+  driven, DNS-conditional <code>CONNECT</code> proxy. It binds a listener only after a
+  90&nbsp;s startup DNS window classifies every allowlist name; it enforces a
+  two-barrier forwarding gate per tunnel; it allocates its working set once at boot
+  and never frees it; and it treats every enforcement deviation as a counted,
+  observable fact rather than a silent pass.</p>
+  <p class="meta"><strong>Method:</strong> three registers are kept distinct
+  throughout. <em>Observed as-built</em> records what the source at the pinned
+  revision does (each claim cites <code>src/*.rs</code> or <code>tests/*.rs</code>).
+  <em>Recorded measurement</em> records values printed or asserted by the code
+  itself (a boot inventory print, a pinned ticket test). <em>Spec intent</em>
+  records what the specification (<code>docs/alumina-proxy.md</code>, SHA-256
+  <code>e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401</code>)
+  promises. Where the three disagree, the disagreement is itself a finding and is
+  flagged, never silently resolved.</p>
+  <p class="meta"><strong>Acronyms.</strong> DoT = DNS over TLS. SPKI = Subject
+  Public Key Info. JA4 = string hash of TLS client fingerprint features. SNI =
+  Server Name Indication. FQDN = fully qualified domain name. MiB = 1024<sup>2</sup>
+  bytes.</p>
+</header>
+
+<nav class="toc" aria-label="Table of contents">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#critical-discoveries">Critical discoveries at a glance</a></li>
+    <li><a href="#purpose">System purpose and boundary</a></li>
+    <li><a href="#discoveries-table">Critical discoveries register</a></li>
+    <li><a href="#components">Component ownership</a></li>
+    <li><a href="#connect-sequence">CONNECT and tunnel sequence</a></li>
+    <li><a href="#gate">The two-barrier forwarding gate</a></li>
+    <li><a href="#dns-dot">DNS, DoT, and the refresh path</a></li>
+    <li><a href="#enforcement">Enforcement: violations, effects, gates</a></li>
+    <li><a href="#memory">Memory envelope</a></li>
+    <li><a href="#observability">Observability and failure</a></li>
+    <li><a href="#security">Security and trust</a></li>
+    <li><a href="#unknowns">Residual unknowns</a></li>
+    <li><a href="#recommendations">Recommendations</a></li>
+    <li><a href="#appendix-a">Appendix A — Evidence map</a></li>
+    <li><a href="#appendix-b">Appendix B — Method, identity, verification</a></li>
+  </ol>
+</nav>
+
+<main id="main">
+
+<section id="critical-discoveries">
+  <div class="warn" role="note" aria-label="Critical discoveries summary">
+    <h2>⚠ Critical discoveries at a glance</h2>
+    <p>Eleven source-grounded discoveries (F-01…F-11) are detailed in the
+    <a href="#discoveries-table">critical discoveries register</a>; six open
+    unknowns (U-01…U-06) are listed in the <a href="#unknowns">residual
+    unknowns</a> section. The headline items an operator or next maintainer must
+    know before touching this system:</p>
+    <ul>
+      <li><strong>F-01 (S2) — an inert operator knob:</strong> the <code>
+      [early_data]</code> All-scope enforcement gate cannot arm in production
+      configuration; it is documented, parsed, stored, and consumed, but the only
+      reachable raw effects never fire it. Not a bypass, but a semantics gap.</li>
+      <li><strong>F-02 (S2) — a contract wording gap:</strong> “no post-boot
+      heap allocation” holds for the plain-DNS profile only; a DoT resolver
+      allocates on every connect and up to a bounded 8 events per warm exchange.</li>
+      <li><strong>F-03 (S2) — capacity:</strong> the retained boot floor is
+      ≈&nbsp;204.6&nbsp;MiB (≈&nbsp;409&nbsp;KiB/tunnel), not the 128&nbsp;MiB
+      traffic-store headline; the printed lower bound is
+      <code>214&nbsp;665&nbsp;002</code> bytes.</li>
+      <li><strong>F-04 (S2) — design economy:</strong> the per-slot inspector
+      retains 128&nbsp;KiB (two 64&nbsp;KiB buffers) to inspect a 16&nbsp;KiB
+      handshake cap — 64&nbsp;MiB of the 76.6&nbsp;MiB serving workspace is
+      inspector headroom.</li>
+      <li><strong>F-05…F-11:</strong> two declared-but-unused direct dependencies;
+      a fragile positional two-call exchange protocol; non-zeroized slot reuse;
+      a 21-module public surface for two consumers; terminal silent sink failure;
+      a strong single-clock discipline; per-entry CNAME bailiwick confinement.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="purpose">
+  <h2>1. System purpose and boundary</h2>
+
+  <p>Alumina is the castle’s <strong>exit gate</strong>. The specification is
+  explicit (<code>docs/alumina-proxy.md</code> §Design philosophy): it does not
+  police ingress, guard an interior, or inspect payloads; it guards the single
+  exit through which a trusted-at-rest application reaches the outside world,
+  with a fixed and opinionated design rather than a surface of configuration
+  choices. The trust model is not distrust of the system: the application and the
+  operator are trusted at rest, and the operator holds full privilege over both.
+  Alumina exists because compromise is inevitable — when the application is
+  compromised, the proxy’s task is to <em>identify</em> the compromise and
+  <em>protect against further exploitation</em> purely through egress, which is
+  the limit of its visibility and responsibility.</p>
+
+  <p>From that task follows the core promise that shapes the whole codebase:
+  <strong>no silent acceptance of adversarial behavior</strong> and likewise no
+  silent acceptance of internally inconsistent evidence. In the idiomatic
+  deployment the only client is the trusted application on a fixed golden path,
+  so a correctly configured, healthy workload produces zero deviations; the
+  enforcement machinery that follows exists to turn any deviation into a typed,
+  counted fact with a documented effect.</p>
+
+  <h3>1.1 Boundary: what the binary is allowed to do</h3>
+  <ul>
+    <li><strong>Fixed input, no policy from the environment.</strong> The only
+    configuration input is <code>config.toml</code> relative to the working
+    directory (<code>src/main.rs:22</code>, <code>CONFIG_PATH</code>); no CLI
+    arguments or environment variables are read as policy. The configuration
+    document is size-bounded (≤ 16&nbsp;KiB at <code>src/config.rs:15</code>, <code>CONFIG_DOC_LIMIT</code>,
+    schema-strict: an unknown key is an
+    error), read once at boot through
+    <code>config::load_config_document</code> (load entry at <code>src/config.rs:706</code>;
+    strict schema and unknown-key rejection at <code>:739-783</code>).</li>
+    <li><strong>Privilege floor.</strong> Preflight refuses root, refuses any
+    non-empty effective/permitted/ambient capability set, and requires
+    <code>no_new_privs</code> before the process may proceed
+    (<code>src/preflight.rs:96-116</code>). Exit codes are fixed and documented:
+    <code>75</code> <code>EX_TEMPFAIL</code> for the startup DNS verdict,
+    <code>70</code> <code>EX_SOFTWARE</code> (given as program exit),
+    <code>78</code> <code>EX_CONFIG</code> for configuration failure
+    (<code>src/main.rs:23-24</code>, <code>src/boot.rs:7</code>).</li>
+    <li><strong>Listener conditionality.</strong> The listener is opened only
+    when the startup window’s canonical readiness rule holds — the unresolved
+    count must be at most the configured allowance, otherwise the process exits
+    with status 75 (<code>src/serve.rs:97-102</code>,
+    <code>StartupDecision::{Serve,Exit75,Terminated}</code>). A first observed
+    SIGTERM short-circuits the window and never binds.</li>
+    <li><strong>Egress only.</strong> Upstream tunnels carry approved hostname
+    traffic; ingress policing, payload inspection, and inter-client traffic are
+    explicitly outside scope (spec §Design philosophy, §non-goals).</li>
+  </ul>
+
+  <p class="reg">Register note — <em>observed as-built</em> for every claim in
+  this subsection; the fixed-input and privilege-floor statements are additionally
+  spec intent (<code>docs/alumina-proxy.md</code> §Configuration &amp; DNS, §Security
+  hardening). The two agree.</p>
+
+  <h3>1.2 Deployment boundary</h3>
+  <p>The idiomatic deployment places alumina on the same host as the trusted
+  application, listening on the configured <code>listen</code> address (the
+  reference deployment uses a private endpoint), with the application pointed
+  at it as its HTTP <code>CONNECT</code> proxy, and the process holding no
+  elevated privileges. Upstream, the proxy performs its own DNS resolution — a
+  plain-DNS or DoT exchange per query over a retained connection — and connects
+  to the resolved peer on the allowlisted port. Figure 1 shows the boundary and
+  the three surfaces that cross it (config in, tunnel traffic, DNS).</p>
+
+  <figure>
+    <svg role="img" aria-labelledby="fig1-title" aria-describedby="fig1-desc"
+         viewBox="0 0 840 360">
+      <title id="fig1-title">Figure 1 — Alumina deployment boundary</title>
+      <desc id="fig1-desc">A local trusted application sends CONNECT traffic to
+      the alumina process on its configured listen address (a private endpoint
+      in the reference deployment); alumina validates, resolves the hostname
+      through its DNS cache (plain DNS or DoT to a retained resolver), opens an
+      upstream tunnel, and relays through the two-barrier gate. Config arrives
+      once from config.toml; logs exit via stdout; exit codes carry the startup
+      verdict.</desc>
+      <rect x="10" y="30" width="210" height="120" rx="8" fill="#f2f2f2" stroke="#444" stroke-width="1.5"/>
+      <text x="115" y="60" text-anchor="middle" font-size="14" font-weight="700">Trusted application</text>
+      <text x="115" y="80" text-anchor="middle" font-size="12">(trusted at rest; the</text>
+      <text x="115" y="96" text-anchor="middle" font-size="12">only client on the</text>
+      <text x="115" y="112" text-anchor="middle" font-size="12">golden path)</text>
+      <rect x="315" y="30" width="250" height="200" rx="8" fill="#e9f2fb" stroke="#1a4d80" stroke-width="2"/>
+      <text x="440" y="58" text-anchor="middle" font-size="15" font-weight="700">Alumina proxy</text>
+      <text x="440" y="80" text-anchor="middle" font-size="12">single reactor, 512 tunnel slots</text>
+      <text x="440" y="98" text-anchor="middle" font-size="12">two-barrier forwarding gate</text>
+      <text x="440" y="116" text-anchor="middle" font-size="12">typed enforcement lattice</text>
+      <text x="440" y="134" text-anchor="middle" font-size="12">boot-fixed memory envelope</text>
+      <rect x="335" y="150" width="210" height="56" rx="6" fill="#ffffff" stroke="#1a4d80" stroke-width="1.2"/>
+      <text x="440" y="172" text-anchor="middle" font-size="12" font-weight="600">DNS cache + DoT/plain</text>
+      <text x="440" y="190" text-anchor="middle" font-size="12">retained resolver connection</text>
+      <rect x="620" y="30" width="210" height="120" rx="8" fill="#f2f2f2" stroke="#444" stroke-width="1.5"/>
+      <text x="725" y="60" text-anchor="middle" font-size="14" font-weight="700">Upstream workloads</text>
+      <text x="725" y="80" text-anchor="middle" font-size="12">reachable only through</text>
+      <text x="725" y="96" text-anchor="middle" font-size="12">approved, resolved</text>
+      <text x="725" y="112" text-anchor="middle" font-size="12">host:port peers</text>
+      <line x1="220" y1="90" x2="313" y2="90" stroke="#1a4d80" stroke-width="2"/>
+      <polygon points="313,85 326,90 313,95" fill="#1a4d80"/>
+      <text x="267" y="80" text-anchor="middle" font-size="11.5">CONNECT</text>
+      <line x1="565" y1="90" x2="618" y2="90" stroke="#1a4d80" stroke-width="2"/>
+      <polygon points="618,85 631,90 618,95" fill="#1a4d80"/>
+      <text x="596" y="80" text-anchor="middle" font-size="11.5">tunnel</text>
+      <rect x="335" y="260" width="210" height="40" rx="6" fill="#ffffff" stroke="#444" stroke-width="1.2"/>
+      <text x="440" y="284" text-anchor="middle" font-size="12">config.toml ≤ 16 KiB, once</text>
+      <line x1="365" y1="232" x2="400" y2="258" stroke="#444" stroke-width="1.4"/>
+      <line x1="400" y1="258" x2="398" y2="262" stroke="#444" stroke-width="1.4"/>
+      <text x="368" y="252" text-anchor="middle" font-size="11">in</text>
+      <rect x="335" y="300" width="210" height="40" rx="6" fill="#ffffff" stroke="#444" stroke-width="1.2"/>
+      <text x="440" y="324" text-anchor="middle" font-size="12">stdout ring logs (256 × 2 KiB)</text>
+      <line x1="440" y1="262" x2="440" y2="298" stroke="#444" stroke-width="1.4"/>
+      <polygon points="435,298 440,309 445,298" fill="#444"/>
+      <text x="625" y="218" text-anchor="middle" font-size="11.5">DNS: plain :53 / DoT :853</text>
+      <line x1="500" y1="208" x2="625" y2="178" stroke="#444" stroke-width="1.5" stroke-dasharray="4,3"/>
+      <polygon points="625,183 631,171 619,173" fill="#444"/>
+    </svg>
+    <figcaption>Figure 1 — Deployment boundary. Local trusted application; single
+    alumina process; upstream workloads reached only through approved resolved
+    peers; config in once; DNS on a retained connection; logs via a boot-owned
+    stdout ring.</figcaption>
+  </figure>
+
+  <p>Two deployment facts recorded in source deserve emphasis. First, the startup
+  window is the process’s single admission decision: if DNS cannot classify the
+  allowlist within 90&nbsp;s, the process exits rather than serving degraded
+  (<code>STARTUP_WINDOW_SECS: u64 = 90</code>, <code>src/startup_dns.rs:49</code>;
+  the readiness rule is the canonical decision of <code>docs/alumina-proxy.md:108</code>).
+  Second, the process is single-threaded for both DNS and serving: one
+  reactor loop, one owner of the poll, one set of timers
+  (<code>src/runtime.rs</code>, <code>src/serving.rs</code>; the worker owns
+  tunnel state inside the same thread — <code>WorkerClock</code> and slot tables
+  live in <code>src/worker.rs</code>). There is no dedicated DoT thread: the
+  only <code>std::thread</code> invocation in production code is the
+  <code>thread::sleep</code>
+  that parks the single thread inside the startup DNS driver
+  (<code>src/startup_dns.rs:25</code>, <code>:2929</code>; <code>resolve_window</code>
+  runs synchronously on the reactor thread before the listener opens, and the
+  serving-time DNS work is cooperative per-turn advance, not a second thread).
+  No thread is ever spawned in production — the only
+  <code>std::thread::spawn</code>/<code>Builder</code> sites in
+  <code>src/serve.rs:1248</code> and <code>:2170</code> are
+  <code>#[cfg(test)]</code> doubles. The single thread observes traffic,
+  log, DNS, and shutdown readiness in one combined wait
+  (<code>docs/alumina-proxy.md:146</code>).</p>
+</section>
+
+<section id="discoveries-table">
+  <h2>2. Critical discoveries register</h2>
+
+  <p>Every discovery below was re-verified in the source at the pinned revision
+  immediately before writing; line numbers are to that revision. Severity follows
+  the scale in <a href="#appendix-b">Appendix B</a>: <strong>S2</strong> = contract
+  or capacity mismatch that will mislead an operator or the next maintainer;
+  <strong>S3</strong> = maintainability or hygiene with bounded blast radius;
+  <strong>S4</strong> = informational or positive finding. (No <strong>S1</strong>
+  — a correctness/security risk reachable in the shipped configuration — was
+  found in this pass.)</p>
+
+  <table>
+    <caption>Table 1 — Critical discoveries F-01…F-11, with area, severity, and
+    primary evidence.</caption>
+    <thead>
+      <tr>
+        <th scope="col">ID</th>
+        <th scope="col">Severity</th>
+        <th scope="col">Area</th>
+        <th scope="col">Finding</th>
+        <th scope="col">Primary evidence</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th scope="row" class="fid">F-01</th>
+        <td class="sev">S2</td>
+        <td>Enforcement</td>
+        <td>The <code>[early_data]</code> All-scope gate cannot arm: only a raw
+        <code>Effect::Block{scope: All}</code> notes the counter, and
+        <code>config.rs</code> rejects any <code>early_data</code> block outside
+        <code>connection</code> scope. The knob is parsed, stored, consumed — and
+        inert.</td>
+        <td><code>src/config.rs:1110-1115</code>;
+        <code>src/enforcement/state.rs:272-278</code>;
+        test builds the unreachable table at
+        <code>:1415-1450</code>.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-02</th>
+        <td class="sev">S2</td>
+        <td>Contract wording</td>
+        <td>“No post-boot heap allocation” holds for the plain-DNS profile only.
+        A DoT resolver allocates on every connect and up to a witnessed bound of
+        ≤ 8 events per warm exchange; the boot-window zero-allocation witness
+        qualifies itself to bare-IP/plain DNS.</td>
+        <td><code>src/startup_dns.rs:1101-1120</code>, <code>:2090-2104</code>;
+        <code>src/startup_dns/dot_tests.rs:1344</code>, <code>:1416-1423</code>;
+        <code>src/startup_dns/tests.rs:1217-1224</code>.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-03</th>
+        <td class="sev">S2</td>
+        <td>Capacity</td>
+        <td>Retained boot floor ≈ 204.6 MiB (≈ 409 KiB/tunnel), versus the
+        128 MiB traffic-store headline. The inventory is an explicit <em>lower
+        bound</em>, not an RSS figure.</td>
+        <td><code>src/inventory.rs:9-49</code>, <code>:273-285</code>;
+        boot print <code>214665002</code> via <code>src/main.rs:34-40</code>.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-04</th>
+        <td class="sev">S2</td>
+        <td>Design economy</td>
+        <td>The per-slot <code>ChInspector</code> retains two 64 KiB buffers
+        (<code>buf</code> + <code>scratch</code>) to inspect a 16 KiB handshake
+        cap — 64 MiB of the 76.6 MiB serving workspace is single-connection
+        inspector headroom.</td>
+        <td><code>src/client_hello.rs:6-21</code>,
+        <code>:410-419</code>.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-05</th>
+        <td class="sev">S3</td>
+        <td>Supply chain</td>
+        <td><code>rustls-pki-types</code> and <code>rustls-webpki</code> are
+        declared as direct dependencies but referenced by zero Rust files
+        (source uses only the <code>rustls::pki_types</code> re-export).</td>
+        <td><code>Cargo.toml:199-200</code>; grep over
+        <code>src/</code>, <code>tests/</code> finds no direct
+        <code>rustls_pki_types</code>/<code>rustls_webpki</code> imports.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-06</th>
+        <td class="sev">S3</td>
+        <td>Robustness</td>
+        <td>The exchange class is a positional two-call protocol
+        (<code>start_exchange</code> then another call to set
+        serving/probe); the runtime cancels any exchange not explicitly marked
+        serving or probe. Reordering the calls silently reverts the class.</td>
+        <td><code>src/startup_dns.rs:2971-3007</code>, <code>:1613-1621</code>;
+        <code>src/runtime.rs:258-262</code>, <code>:345</code>.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-07</th>
+        <td class="sev">S3</td>
+        <td>Hygiene</td>
+        <td><code>SlotWorkspace::reset</code> clears lengths and cursors only;
+        prior tunnel bytes stay in the retained per-slot slabs for the process
+        lifetime. Not written out by any current path.</td>
+        <td><code>src/serving.rs:774-803</code>.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-08</th>
+        <td class="sev">S3</td>
+        <td>API surface</td>
+        <td>21 <code>pub mod</code>s plus public test-seam constructors
+        (<code>Serving::new</code>, <code>Runtime::new</code>) are exported for
+        exactly two consumers (the binary and the tests).</td>
+        <td><code>src/lib.rs:4-27</code>; <code>src/serving.rs:1157</code>;
+        <code>src/runtime.rs:207</code>.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-09</th>
+        <td class="sev">S4</td>
+        <td>Observability</td>
+        <td>Sink failure is terminal and silent by design: after the first hard
+        write error the queue is dropped through a counted counter and
+        <code>next_drain</code> returns <code>None</code> forever. Defensible;
+        should be recorded as accepted risk.</td>
+        <td><code>src/log.rs:2094-2101</code>, <code>:1637-1646</code>.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-10</th>
+        <td class="sev">S4</td>
+        <td>Positive</td>
+        <td>Single-clock discipline: one <code>now0</code> origin + whole-second
+        offsets threaded through worker, cache, DNS, and serving with an explicit
+        re-anchor seam at <code>mount_clock</code>.</td>
+        <td><code>src/serve.rs:204-227</code>; <code>src/worker.rs:97-105</code>;
+        <code>src/startup_dns.rs:1369-1381</code>.</td>
+      </tr>
+      <tr>
+        <th scope="row" class="fid">F-11</th>
+        <td class="sev">S4</td>
+        <td>Positive</td>
+        <td>Per-entry CNAME bailiwick: one allowlist entry’s declared CNAME
+        suffixes cannot widen a neighbour’s coverage, and same-bare-name entries
+        must declare byte-identical suffix lists or boot fails.</td>
+        <td><code>src/dns.rs:863-953</code>;
+        <code>src/config.rs:1244-1262</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>2.1 F-01 — the <code>[early_data]</code> All-scope gate is inert (S2)</h3>
+  <p>The enforcement layer attaches one All-scope gate per violation class:
+  <code>bad_handshake</code>, <code>illegal_fqdn</code>, <code>early_data</code>,
+  and <code>ja4</code> (<code>GateSet</code>,
+  <code>src/enforcement/state.rs:71-77</code>). Each gate’s counter is noted only
+  when the <em>raw</em> decided effect is <code>Effect::Block { scope: All }</code>
+  (<code>src/enforcement/state.rs:272-278</code>). For <code>EarlyUpstreamData</code>
+  the raw effect comes from the per-FQDN control, and the configuration parser
+  rejects any <code>early_data</code> block with a scope other than
+  <code>connection</code> (<code>src/config.rs:1110-1115</code>):
+  <code>ConfigError::EarlyDataBlockScopeInvalid</code> is returned for
+  <code>fqdn</code> or <code>all</code> block scopes. The code comment documents
+  this as the “F-02 close”: an upstream-sourced early-data signal cannot select a
+  per-domain or process-wide latch.</p>
+  <p>Consequence: the only reachable raw effects for <code>EarlyUpstreamData</code>
+  are <code>BaselineOnly</code>, <code>Unknown</code>, <code>Notify</code>, or
+  <code>Block { Connection }</code> — never <code>Block { All }</code> — so the
+  <code>early_data</code> gate’s counter is never noted and its
+  <code>crossed</code> flag never arms. The section is still parsed
+  (<code>src/config.rs:798-805</code>), validated (<code>:963-999</code>), stored
+  in <code>GateSet</code>, and wired into the counter table
+  (<code>src/enforcement/state.rs:242-246</code>). The unit test that appears to
+  prove reachability builds a <code>ControlTable</code> directly with
+  <code>early_data = Block{All}</code> (<code>src/enforcement/state.rs:1415-1450</code>)
+  — a table state the production parser cannot produce — so the test masks the
+  unreachability rather than refuting it.</p>
+  <p>The per-<em>connection</em> control still fires, so this is a semantics
+  defect, not an open bypass. Every other property of the layer — first-fact
+  latching, counted <code>Unknown</code>, per-class isolation — is unaffected.</p>
+
+  <h3>2.2 F-02 — the allocation contract holds for plain DNS only (S2)</h3>
+  <p>The system’s zero-allocation story has a plain-DNS profile and a DoT
+  profile, and the DoT profile allocates. <code>build_tls_connection</code>
+  (<code>src/startup_dns.rs:1098-1120</code>) allocates on every DoT connect:
+  <code>Arc::new(provider)</code>, a full <code>ClientConfig</code> (containing
+  Arcs and Vecs), <code>target.fqdn.as_str().to_owned()</code> (a <code>String</code>),
+  an <code>Arc&lt;AluminaServerCertVerifier&gt;</code>, and the rustls
+  <code>ClientConnection</code> with its internal buffers; the connection itself
+  is moved into a <code>Box</code> at <code>:2090-2104</code>.</p>
+  <p>The warm path still allocates, but bounded: the repository’s own witness caps
+  it at <code>WARM_DOT_ALLOC_BOUND = 8</code> and asserts the cap
+  (<code>src/startup_dns/dot_tests.rs:1344</code>, <code>:1416-1423</code>). The
+  boot-window zero-allocation witness is explicit that it applies to the
+  bare-IP/plain-DNS resolver only (<code>src/startup_dns/tests.rs:1217-1224</code>).
+  The claim “no post-boot heap alloc/dealloc” is therefore true for the plain
+  profile and false as written for a DoT profile — a contract-wording problem
+  with a real consequence: a reviewer can read a green alloc-witness run as proof
+  of a global property. <a href="#recommendations">Recommendation R-2</a>.</p>
+
+  <h3>2.3 F-03 — retained boot floor ≈ 204.6 MiB, not 128 MiB (S2)</h3>
+  <p>The traffic store alone is 128 MiB: <code>TUNNEL_SLOTS = 512</code> ×
+  <code>BUFFERS_PER_SLOT = 2</code> × <code>BUFFER_BYTES = 128 * 1024</code>
+  (<code>src/inventory.rs:9-12</code>), i.e. 134 217 728 bytes. But the retained
+  serving workspaces add 80 310 272 bytes (<code>SERVING_WORKSPACE_BYTES = 512 ×
+  SLOT_WORKSPACE_BYTES</code>, <code>src/inventory.rs:36</code>, where
+  <code>SLOT_WORKSPACE_BYTES = size_of::&lt;ConnectParser&gt;() +
+  size_of::&lt;ChInspector&gt;()</code> = 156 856, pinned by the
+  <code>:273-285</code> ticket test). Together with the DNS named buffers
+  (137 002 bytes = 512 + 16 386 + 120 104, <code>src/inventory.rs:41-44</code>),
+  the printed lower bound is <code>214 665 002</code> bytes ≈ 204.7 MiB
+  (<code>src/main.rs:34-40</code>; recorded measurement). Dividing the traffic plus
+  workspace across 512 slots gives ≈ 419 000 bytes ≈ 409 KiB per tunnel.</p>
+  <p>The inventory is deliberately a <em>lower bound over retained named
+  buffers</em> and explicitly <em>not</em> an RSS estimate
+  (<code>src/inventory.rs:173-196</code>): it excludes per-slot metadata, transient
+  scratch, kernel socket buffers, and allocator fragmentation. Real RSS is
+  therefore strictly higher; see <a href="#unknowns">U-03</a>. See also
+  <a href="#memory">§8</a> for the full envelope.</p>
+
+  <h3>2.4 F-04 — inspector headroom: 64 MiB to inspect a 16 KiB cap (S2)</h3>
+  <p><code>ChInspector</code> retains two <code>[u8; 64 * 1024]</code> buffers
+  (<code>buf</code> and <code>scratch</code>,
+  <code>src/client_hello.rs:410-419</code>) per slot, sized to
+  <code>MAX_CLIENT_HELLO = 64 * 1024</code> (<code>:6</code>). The inspected
+  handshake, however, is bounded at <code>MAX_HANDSHAKE_LEN = 16 * 1024</code>
+  (<code>:18</code>) with a per-record payload cap of
+  <code>RECORD_PAYLOAD_LIMIT = 16 * 1024</code> (<code>:9</code>) — a deliberate
+  interop bound (RFC 8446 §5.1) that rejects rather than reassembles a
+  spec-legal multi-record ClientHello larger than 16 KiB.</p>
+  <p>The arithmetic: 2 × 64 KiB × 512 slots = 64 MiB of the 76.6 MiB serving
+  workspace is single-connection inspector headroom (≈ 83%). This is not a
+  defect — it may be exactly the margin an adversarial fragmentation fixture
+  needs — but it is the cheapest memory lever in the system and the one most
+  likely to break a fixture if changed. <a href="#recommendations">R-6</a>.</p>
+
+  <h3>2.5 F-05 — two declared-to-import unused dependencies (S3)</h3>
+  <p><code>rustls-pki-types = "=1.15.1"</code> and
+  <code>rustls-webpki = { version = "=0.103.16", default-features = false, features
+  = ["ring", "std"] }</code> appear in <code>[dependencies]</code>
+  (<code>Cargo.toml:199-200</code>), but a grep over <code>src/</code> and
+  <code>tests/</code> finds no direct <code>rustls_pki_types</code> or
+  <code>rustls_webpki</code> import: the source uses the
+  <code>rustls::pki_types</code> re-export (<code>src/startup_dns.rs:36</code>,
+  <code>src/startup_dns/dot_tests.rs:9</code>). They may be retained for a future
+  trust-anchor intake (the verifier comment at
+  <code>src/startup_dns.rs:812-820</code> anticipates future trust anchors), but as
+  declared today each is an unused pin. <a href="#recommendations">R-4</a>.</p>
+
+  <h3>2.6 F-06 — the positional two-call exchange-class protocol (S3)</h3>
+  <p><code>StartupDns::start_exchange</code> initialises an
+  <code>ActiveExchange</code> with <code>serving: false, probe: false</code>
+  (<code>src/startup_dns.rs:2971-3007</code>) — the class is <em>not</em> a
+  parameter of the single call. The serving and probe marks are applied by two
+  separate later calls (<code>mark_serving_started</code>,
+  <code>src/runtime.rs:345</code>; <code>mark_probe_started</code> at
+  <code>src/startup_dns.rs:3341</code>, <code>:3411</code>). The runtime’s
+  per-turn <code>cancel_retained_startup_exchange</code> cancels exactly the
+  exchanges that are neither serving nor probe (<code>src/startup_dns.rs:1613-1621</code>,
+  driven from <code>src/runtime.rs:258-262</code>).</p>
+  <p>This is a fragile seam: the class of an in-flight exchange is whatever two
+  earlier calls last said, so reordering — e.g. starting an exchange, marking it
+  serving, then starting a probe without checking <code>active.is_some()</code> —
+  silently reassigns class. Today every call site is correct and the guard
+  (<code>ExchangeActive</code>, <code>:2977-2979</code>) rejects overlap, but the
+  type makes the mistake easy. <a href="#recommendations">R-5</a> makes the class
+  a parameter of <code>start_exchange</code>.</p>
+</section>
+
+<section id="components">
+  <h2>3. Component ownership</h2>
+
+  <p>Alumina’s crate root exports 21 public modules (<code>src/lib.rs:4-27</code>)
+  under crate-level <code>deny(clippy::unwrap_used, clippy::expect_used)</code>
+  (<code>src/lib.rs:1-2</code>), which is the first and strongest architectural
+  verb: production code may not unwrap; every <code>expect</code> must carry a
+  proven-bound justification and an <code>#[expect]</code> with a <code>reason</code>
+  (e.g. <code>src/serving.rs:509</code>, <code>src/config.rs:1001-1004</code>,
+  <code>src/cache.rs:369-372</code>). Figure 2 shows the ownership layers and the
+  one-directional call seams between them.</p>
+
+  <figure>
+    <svg role="img" aria-labelledby="fig2-title" aria-describedby="fig2-desc"
+         viewBox="0 0 840 470">
+      <title id="fig2-title">Figure 2 — Alumina component ownership layers</title>
+      <desc id="fig2-desc">Layers from bottom: config and preflight feed the boot
+      path; the runtime reactor owns the serving loop, worker, cache, and DNS
+      transport; the serving layer owns slots and the inspector; gate and
+      client_hello own validation and the two-barrier authority; enforcement
+      owns policy, state, action, and monitor; connect and eligibility own the
+      parser and destination policy; logs and incident reports emit observability.
+      Ownership is read by layer: each layer is owned by, and called only from,
+      the layers above it; no layer calls upward.</desc>
+
+      <rect x="20" y="20" width="800" height="64" rx="8" fill="#eef2f7" stroke="#1a4d80" stroke-width="1.5"/>
+      <text x="420" y="42" text-anchor="middle" font-size="14" font-weight="700">Binary / boot path</text>
+      <text x="420" y="60" text-anchor="middle" font-size="12">main.rs · boot.rs · preflight.rs · config.rs — privilege floor, config intake, exit codes</text>
+
+      <rect x="20" y="104" width="800" height="78" rx="8" fill="#e9f2fb" stroke="#1a4d80" stroke-width="1.5"/>
+      <text x="420" y="126" text-anchor="middle" font-size="14" font-weight="700">Reactor core</text>
+      <text x="420" y="144" text-anchor="middle" font-size="12">runtime.rs — one poll owner · serve.rs — readiness decision + startup window</text>
+      <text x="420" y="160" text-anchor="middle" font-size="12">worker.rs — SlotState per slot · cache.rs — generation-tagged Cache</text>
+      <rect x="40" y="140" width="130" height="26" rx="5" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="105" y="157" text-anchor="middle" font-size="11">runtime</text>
+      <rect x="180" y="140" width="110" height="26" rx="5" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="235" y="157" text-anchor="middle" font-size="11">serve</text>
+      <rect x="300" y="140" width="110" height="26" rx="5" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="355" y="157" text-anchor="middle" font-size="11">worker</text>
+      <rect x="420" y="140" width="100" height="26" rx="5" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="470" y="157" text-anchor="middle" font-size="11">cache</text>
+
+      <rect x="20" y="202" width="800" height="78" rx="8" fill="#f4f8fc" stroke="#1a4d80" stroke-width="1.5"/>
+      <text x="420" y="224" text-anchor="middle" font-size="14" font-weight="700">Serving surface</text>
+      <text x="420" y="242" text-anchor="middle" font-size="12">serving.rs — slot table, Stage machine, admit/refuse, run_once reactor turn</text>
+      <text x="420" y="258" text-anchor="middle" font-size="12">client_hello.rs — ChInspector + ClientHello validation + JA4 fingerprint</text>
+      <rect x="40" y="232" width="170" height="26" rx="5" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="125" y="249" text-anchor="middle" font-size="11">serving</text>
+      <rect x="220" y="232" width="180" height="26" rx="5" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="310" y="249" text-anchor="middle" font-size="11">client_hello</text>
+
+      <rect x="20" y="300" width="800" height="78" rx="8" fill="#fdf4f4" stroke="#7c2d12" stroke-width="1.5"/>
+      <text x="420" y="322" text-anchor="middle" font-size="14" font-weight="700">Validation and authorization</text>
+      <text x="420" y="340" text-anchor="middle" font-size="12">gate.rs — two-barrier forwarding authority (pure state machine)</text>
+      <text x="420" y="356" text-anchor="middle" font-size="12">connect.rs — CONNECT head parser + bare-CR/LF rejection · eligibility.rs — destination policy</text>
+      <rect x="40" y="330" width="140" height="26" rx="5" fill="#fff" stroke="#7c2d12" stroke-width="1"/>
+      <text x="110" y="347" text-anchor="middle" font-size="11">gate</text>
+      <rect x="190" y="330" width="140" height="26" rx="5" fill="#fff" stroke="#7c2d12" stroke-width="1"/>
+      <text x="260" y="347" text-anchor="middle" font-size="11">connect</text>
+      <rect x="340" y="330" width="150" height="26" rx="5" fill="#fff" stroke="#7c2d12" stroke-width="1"/>
+      <text x="415" y="347" text-anchor="middle" font-size="11">eligibility</text>
+
+      <rect x="20" y="398" width="800" height="64" rx="8" fill="#fbf7ec" stroke="#8a5a00" stroke-width="1.5"/>
+      <text x="420" y="420" text-anchor="middle" font-size="14" font-weight="700">Enforcement and observability</text>
+      <text x="420" y="438" text-anchor="middle" font-size="12">enforcement/{policy,state,action,monitor}.rs · log.rs · incident_report.rs · schedule.rs</text>
+      <text x="420" y="453" text-anchor="middle" font-size="12">dns.rs · resolver.rs · startup_dns.rs — DoT/plain transport</text>
+    </svg>
+    <figcaption>Figure 2 — Component ownership. The binary and boot path feed the
+    reactor core; the serving surface owns slots and inspection; validation and
+    authorization own the two-barrier authority; enforcement and observability
+    consume typed deviations and emit logs and incident reports. DNS/DoT and the
+    resolver sit below the reactor core and are driven through <code>StartupDns</code>.</figcaption>
+  </figure>
+
+  <table>
+    <caption>Table 2 — Module ownership and one-line responsibility.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Module</th>
+        <th scope="col">Responsibility (as-built)</th>
+        <th scope="col">Key citation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row"><code>main</code>/<code>boot</code></th>
+        <td>Entry glue, exit-code constants, preflight wiring, boot inventory print.</td>
+        <td><code>src/main.rs:22-40</code>, <code>src/boot.rs:7</code></td></tr>
+      <tr><th scope="row"><code>preflight</code></th>
+        <td>Privilege floor: root/capability/no_new_privs rejection before any DNS.</td>
+        <td><code>src/preflight.rs:96-116</code></td></tr>
+      <tr><th scope="row"><code>config</code></th>
+        <td>Strict schema parse; allowlist (≤ 32), ports, early_data/ja4 controls, gate sections, CNAME bailiwicks, resolver trust homogeneity.</td>
+        <td><code>src/config.rs:17</code>, <code>:798-805</code>, <code>:1110-1115</code>, <code>:1244-1262</code></td></tr>
+      <tr><th scope="row"><code>runtime</code></th>
+        <td>Single-reactor owner; startup window driver; serves as the attached owner after <code>attach</code>; owns DNS scheduling per turn.</td>
+        <td><code>src/runtime.rs:26-43</code>, <code>:109</code>, <code>:207</code>, <code>:258-262</code>, <code>:345</code></td></tr>
+      <tr><th scope="row"><code>serve</code></th>
+        <td>Readiness decision (Serve/Exit75/Terminated); <code>run_startup_within</code>; clock anchor and <code>mount_clock</code> re-anchor seam; per-turn incident pass.</td>
+        <td><code>src/serve.rs:97-102</code>, <code>:204-227</code>, <code>:431-440</code>, <code>:1008</code></td></tr>
+      <tr><th scope="row"><code>serving</code></th>
+        <td>Slot table, <code>Stage</code> machine (10 stages), accept backoff, admission (503 on capacity), refusal bodies, run_once reactor turn, reset.</td>
+        <td><code>src/serving.rs:87-98</code>, <code>:200-202</code>, <code>:340-351</code>, <code>:774-803</code>, <code>:1157</code>, <code>:1263-1308</code></td></tr>
+      <tr><th scope="row"><code>worker</code></th>
+        <td>Per-slot <code>SlotState</code> (free/in-setup/established), <code>SlotIndex</code>/<code>TunnelIndex</code> handles, upstream attempt pacing, worker clock.</td>
+        <td><code>src/worker.rs:42-58</code>, <code>:97-105</code>, <code>:316-337</code>, <code>:344-354</code>, <code>:570-578</code></td></tr>
+      <tr><th scope="row"><code>client_hello</code></th>
+        <td><code>ChInspector</code> (2 × 64 KiB), ClientHello validation, JA4 fingerprint retention.</td>
+        <td><code>src/client_hello.rs:6-21</code>, <code>:410-419</code></td></tr>
+      <tr><th scope="row"><code>connect</code></th>
+        <td>CONNECT head parser, 16-line bound, bare-CR/LF rejection, CRLFCRLF head delimiter.</td>
+        <td><code>src/connect.rs:13</code>, <code>:332-340</code>, <code>:896-907</code></td></tr>
+      <tr><th scope="row"><code>gate</code></th>
+        <td>The two-barrier forwarding authority: pure state machine, <code>UpstreamWrite</code> verdicts, <code>Activity</code>, witness-minted <code>ValidatedHello</code>.</td>
+        <td><code>src/gate.rs:1-43</code>, <code>:45-78</code>, <code>:114-142</code></td></tr>
+      <tr><th scope="row"><code>enforcement/*</code></th>
+        <td>Violation lattice (6), effect projection (4), per-class <code>AllScopeGate</code>s, <code>DomainOrdinal</code>, monitor facts (10 recorders).</td>
+        <td><code>src/enforcement/policy.rs:89-97</code>, <code>:100-146</code>; <code>state.rs:71-77</code>, <code>:272-278</code>; <code>action.rs:98-132</code>; <code>monitor.rs:12-26</code></td></tr>
+      <tr><th scope="row"><code>dns</code>/<code>schedule</code>/<code>cache</code></th>
+        <td>DNS parse + bailiwick; TTL-clamped refresh (5–900 s) with retry backoff
+        [1,2,4,8,16,30]; generation-tagged cache with stale-publish rejection.</td>
+        <td><code>src/dns.rs:863-953</code>, <code>:983-1027</code>; <code>schedule.rs:16</code>, <code>:56-69</code>;
+        <code>cache.rs:50-62</code>, <code>:373-382</code></td></tr>
+      <tr><th scope="row"><code>resolver</code></th>
+        <td>DoT/plain classification: FQDN ⇒ port 853 + pin; bare IP ⇒ port 53; no silent plain fallback.</td>
+        <td><code>src/resolver.rs:215-235</code></td></tr>
+      <tr><th scope="row"><code>startup_dns</code></th>
+        <td>Nonblocking DNS state machine; exchange deadline 5 s; failback 900 s; CSPRNG tids; retained-resolver reuse; decision window 90 s.</td>
+        <td><code>src/startup_dns.rs:48-49</code>, <code>:341-360</code>, <code>:667</code>, <code>:1363-1381</code>, <code>:2971-3007</code></td></tr>
+      <tr><th scope="row"><code>log</code></th>
+        <td>256 × 2 KiB boot-owned ring; per-turn 16-op/64 KiB drain budget; counted drops; reserved-priority displacement; terminal sink latch.</td>
+        <td><code>src/log.rs:53-59</code>, <code>:1637-1646</code>, <code>:2045-2123</code>, <code>:2094-2101</code>, <code>:2163-2266</code></td></tr>
+      <tr><th scope="row"><code>incident_report</code></th>
+        <td>Per-name windowed incident reporting (3600 s window), sticky snapshots, eligible-binding transition tracking.</td>
+        <td><code>src/incident_report.rs:14-15</code>, <code>:99-110</code>, <code>:242-250</code></td></tr>
+      <tr><th scope="row"><code>inventory</code></th>
+        <td>Fixed-storage plan: traffic store, serving workspace, DNS named buffers, log queue; the printed lower bound.</td>
+        <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="connect-sequence">
+  <h2>4. CONNECT and the tunnel sequence</h2>
+
+  <p>A connection is admitted, parsed, validated, gated, and relayed through the
+  slot’s <code>Stage</code> state machine (<code>src/serving.rs:340-351</code>).
+  The stage machine is a typed, non-public enum with ten states — <code>Idle</code>,
+  <code>ReadingConnect</code>, <code>RunningDecision</code>, <code>Dialing</code>,
+  <code>SendingConnected</code>, <code>ValidatingHello</code>,
+  <code>WritingHello</code>, <code>Relay</code>, <code>Refusing(&amp;'static
+  [u8])</code>, and <code>Closing</code>. Note that this observed as-built set has
+  <strong>ten</strong> variants; the review register that precedes this document
+  lists <em>nine</em> — the ten-variant set below is the source truth and the
+  discrepancy is flagged in <a href="#appendix-b">Appendix B</a>.</p>
+
+  <h3>4.1 Admission and the capacity answer</h3>
+  <p>Admission is bounded by <code>MAX_TUNNELS = TUNNEL_SLOTS = 512</code> and
+  pending setups by <code>MAX_PENDING_SETUPS = 128</code>
+  (<code>src/worker.rs:42-45</code>); the spec’s historical “640” figure is
+  explicitly rejected in the code comment (“never 640”). Upstream attempts are
+  paced per tunnel at <code>MAX_UPSTREAM_ATTEMPTS = 4</code>, with an absolute
+  setup deadline of <code>SETUP_DEADLINE_SECS = 10</code> that is never reset,
+  and per-attempt connect deadlines of <code>CONNECT_DEADLINE_SECS = 2</code>
+  clipped to the setup deadline (<code>src/worker.rs:48-55</code>).</p>
+  <p>On admission failure the code writes the fixed <code>BODY_503 = "HTTP/1.1
+  503 Service Unavailable … no capacity\n"</code> and records a
+  <code>RejectReason::Capacity</code> log (<code>src/serving.rs:1808-1836</code>;
+  body constant at <code>:201-202</code>). Accept re-arms are backed off 100 ms
+  after a transient failure so a hot loop cannot spin (<code>ACCEPT_BACKOFF</code>,
+  <code>src/serving.rs:96-98</code>). A successful admission assigns the slot’s
+  fresh generation, freezes the setup deadline, registers the client on the
+  reactor, and moves the stage to <code>ReadingConnect</code>
+  (<code>src/serving.rs:1819-1836</code>).</p>
+
+  <h3>4.2 The CONNECT head parse</h3>
+  <p>The head is bounded by <code>MAX_HEADER_LINES = 16</code>
+  (<code>src/connect.rs:13</code>; the “too many header lines” rejection at
+  <code>:103</code>, <code>:289</code>) and ends at the first <code>CRLFCRLF</code>
+  (<code>:185</code>). Two hardening details are architectural: a bare line feed
+  (a <code>0x0a</code> not preceded by <code>0x0d</code>) and a bare carriage
+  return are both rejected rather than tolerated (<code>src/connect.rs:332-340</code>),
+  as required by the spec’s L3 bare-CR rejection. The result limits the parser to
+  the head only — tunnel bytes after the delimiter are never treated as metadata.</p>
+
+  <figure>
+    <svg role="img" aria-labelledby="fig3-title" aria-describedby="fig3-desc"
+         viewBox="0 0 840 400">
+      <title id="fig3-title">Figure 3 — CONNECT and tunnel setup sequence</title>
+      <desc id="fig3-desc">Client to serving: TCP connect, CONNECT head, 400/403/
+      502/504 refusal or 200 established. Serving parses the head, runs the worker
+      decision, dials the resolved peer, and writes 200. Serving validates the
+      ClientHello; on success it opens the two-barrier gate, writes the validated
+      hello upstream, then relays both directions. Any early upstream data while
+      the gate is closed is a counted violation that terminates setup.</desc>
+
+      <line x1="60" y1="30" x2="60" y2="360" stroke="#888" stroke-width="1.2"/>
+      <text x="60" y="24" text-anchor="middle" font-size="11" font-weight="700">Client</text>
+      <line x1="290" y1="30" x2="290" y2="360" stroke="#888" stroke-width="1.2"/>
+      <text x="290" y="24" text-anchor="middle" font-size="11" font-weight="700">Serving (slot)</text>
+      <line x1="520" y1="30" x2="520" y2="360" stroke="#888" stroke-width="1.2"/>
+      <text x="520" y="24" text-anchor="middle" font-size="11" font-weight="700">Worker/connect</text>
+      <line x1="740" y1="30" x2="740" y2="360" stroke="#888" stroke-width="1.2"/>
+      <text x="740" y="24" text-anchor="middle" font-size="11" font-weight="700">Upstream</text>
+
+      <text x="175" y="58" text-anchor="middle" font-size="11">TCP + CONNECT head (≤16 lines)</text>
+      <line x1="60" y1="70" x2="290" y2="70" stroke="#1a4d80" stroke-width="1.6"/>
+      <polygon points="290,65 303,70 290,75" fill="#1a4d80"/>
+
+      <text x="405" y="96" text-anchor="middle" font-size="11">parse head · bare-CR/LF rejection</text>
+      <line x1="290" y1="108" x2="290" y2="108" stroke="#1a4d80" stroke-width="1"/>
+      <circle cx="290" cy="108" r="3" fill="#1a4d80"/>
+
+      <text x="630" y="128" text-anchor="middle" font-size="11">decision + dial resolved peer</text>
+      <line x1="290" y1="140" x2="520" y2="140" stroke="#1a4d80" stroke-width="1.6"/>
+      <polygon points="520,135 533,140 520,145" fill="#1a4d80"/>
+      <line x1="520" y1="152" x2="740" y2="152" stroke="#1a4d80" stroke-width="1.6"/>
+      <polygon points="740,147 753,152 740,157" fill="#1a4d80"/>
+      <text x="630" y="174" text-anchor="middle" font-size="11">connects (≤ 4 attempts, 2 s each)</text>
+      <line x1="740" y1="186" x2="520" y2="186" stroke="#1a4d80" stroke-width="1.6"/>
+      <polygon points="520,181 507,186 520,191" fill="#1a4d80"/>
+
+      <text x="405" y="206" text-anchor="middle" font-size="11">200 Connection established</text>
+      <line x1="290" y1="218" x2="60" y2="218" stroke="#1a4d80" stroke-width="1.6"/>
+      <polygon points="60,213 47,218 60,223" fill="#1a4d80"/>
+
+      <text x="175" y="244" text-anchor="middle" font-size="11">ClientHello (validated)</text>
+      <line x1="60" y1="256" x2="290" y2="256" stroke="#1a4d80" stroke-width="1.6"/>
+      <polygon points="290,251 303,256 290,261" fill="#1a4d80"/>
+      <text x="405" y="266" text-anchor="middle" font-size="11">validate + open gate at H</text>
+      <circle cx="290" cy="278" r="3" fill="#7c2d12"/>
+      <line x1="290" y1="278" x2="290" y2="278" stroke="#7c2d12" stroke-width="1"/>
+
+      <text x="630" y="296" text-anchor="middle" font-size="11">validated hello (barrier A)</text>
+      <line x1="290" y1="308" x2="520" y2="308" stroke="#7c2d12" stroke-width="1.6"/>
+      <polygon points="520,303 533,308 520,313" fill="#7c2d12"/>
+      <line x1="520" y1="320" x2="740" y2="320" stroke="#7c2d12" stroke-width="1.6"/>
+      <polygon points="740,315 753,320 740,325" fill="#7c2d12"/>
+
+      <text x="405" y="344" text-anchor="middle" font-size="11">relay: both barriers open</text>
+      <line x1="740" y1="352" x2="60" y2="352" stroke="#7c2d12" stroke-width="1.6" stroke-dasharray="6,3"/>
+      <polygon points="60,347 47,352 60,357" fill="#7c2d12"/>
+      <text x="400" y="372" text-anchor="middle" font-size="10.5" fill="#7c2d12">Refusals: 400 · 403 · 502 (no resolution) · 502 (dial failed) · 504 — at any pre-gate point</text>
+    </svg>
+    <figcaption>Figure 3 — CONNECT and tunnel setup. Refusal bodies are fixed per
+    class (see Table 3); the two-barrier gate opens in the same transition that
+    writes the end of the validated hello (H).</figcaption>
+  </figure>
+
+  <h3>4.3 Refusal classes and fixed bodies</h3>
+  <p>The refusal surface is a typed <code>Refusal</code> enum with five cases —
+  <code>BadRequest</code>, <code>Forbidden</code>, <code>NoResolvedAddresses</code>,
+  <code>DialFailed</code>, <code>SetupTimeout</code> — mapping one-to-one onto
+  fixed HTTP bodies so a refusal reason is never reverse-inferred from a byte
+  match (<code>src/serving/policy.rs:8-24</code>). Table 3 lists the mapping.</p>
+
+  <table>
+    <caption>Table 3 — CONNECT admission refusal matrix: typed Refusal to HTTP response.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Refusal</th>
+        <th scope="col">HTTP response</th>
+        <th scope="col">When (as-built)</th>
+        <th scope="col">Citation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row"><code>BadRequest</code></th>
+        <td><code>400 Bad Request</code>, content-length 0</td>
+        <td>CONNECT head malformed, too many header lines, bare-CR/LF</td>
+        <td><code>src/serving/policy.rs:16</code>; <code>src/connect.rs:103,289,332-340</code></td></tr>
+      <tr><th scope="row"><code>Forbidden</code></th>
+        <td><code>403 Forbidden</code>, content-length 0</td>
+        <td>Hostname not allowlisted (blocked-domain refusal)</td>
+        <td><code>src/serving/policy.rs:17</code></td></tr>
+      <tr><th scope="row"><code>NoResolvedAddresses</code></th>
+        <td><code>502 Bad Gateway</code> “no resolved addresses”</td>
+        <td>No eligible positive binding for the approved name before dial</td>
+        <td><code>src/serving/policy.rs:18-19</code></td></tr>
+      <tr><th scope="row"><code>DialFailed</code></th>
+        <td><code>502 Bad Gateway</code> “upstream connection failed”</td>
+        <td>Connect attempts exhausted (≤ 4) or refused</td>
+        <td><code>src/serving/policy.rs:20-21</code></td></tr>
+      <tr><th scope="row"><code>SetupTimeout</code></th>
+        <td><code>504 Gateway Timeout</code></td>
+        <td>Setup deadline (10 s) expired before the gate opened</td>
+        <td><code>src/serving/policy.rs:22-24</code></td></tr>
+      <tr><th scope="row">(capacity)</th>
+        <td><code>503 Service Unavailable</code> “no capacity”</td>
+        <td>No free slot at admission</td>
+        <td><code>src/serving.rs:201-202</code>, <code>:1808-1836</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="gate">
+  <h2>5. The two-barrier forwarding gate</h2>
+
+  <p><code>gate.rs</code> is the <em>authority</em> over byte flow, and it is a
+  pure state machine: no sockets, no I/O, small, fixed-offset, deterministic, and
+  unit-testable (<code>src/gate.rs:1-8</code>). The bytes themselves live in the
+  boot-owned per-slot workspace, so the gate makes decisions only. There are two
+  barriers, and each is an invariant from the spec
+  (<code>docs/alumina-proxy.md</code> §Authorization-Before-Forwarding):</p>
+  <ul>
+    <li><strong>Barrier A (client → upstream):</strong> no client bytes,
+    including <code>ClientHello</code>, are forwarded before complete validation
+    with exactly one SNI normalized-equal to the approved CONNECT hostname, no
+    ECH, and the TLS 1.3 profile. <code>crate::client_hello::validate</code>
+    supplies the verdict; the gate tracks the hello boundary in the stream.</li>
+    <li><strong>Barrier B (upstream → client):</strong> no upstream bytes are
+    forwarded before the gate opens. A successful CONNECT response alone
+    authorizes neither direction.</li>
+  </ul>
+
+  <h3>5.1 The gate state machine</h3>
+  <p>The gate returns a typed <code>UpstreamWrite</code> verdict per client
+  write: <code>BlockedByBarrierA</code> while the hello is not yet fully
+  validated; <code>WritingHello { total }</code> when exactly the validated hello
+  prefix may pass; <code>GateOpened { crossing, relay_from_open }</code> for the
+  single transition that crosses H and may include coalesced trailing bytes;
+  and <code>Open</code> once fully relayed
+  (<code>src/gate.rs:41-67</code>). Upstream activity while barrier B is closed
+  is typed as <code>Activity::{Data, Eof, Reset}</code>
+  (<code>src/gate.rs:74-78</code>); only <em>observation</em> of such activity
+  terminates setup — <code>WouldBlock</code>/readiness alone is not activity
+  (D4, <code>src/gate.rs:66-78</code>).</p>
+
+  <figure id="fig4">
+    <svg role="img" aria-labelledby="fig4-title" aria-describedby="fig4-desc"
+         viewBox="0 0 840 400">
+      <title id="fig4-title">Figure 4 — The two-barrier gate</title>
+      <desc id="fig4-desc">Client stream on the left: the hello passes validation
+      inside the barrier A region, and only validated hello bytes may cross A to
+      the upstream side. Upstream bytes may not cross barrier B back to the client
+      until the gate opens at offset H when the validated hello write reaches its
+      end. Early upstream data before H is a counted EarlyUpstreamData violation
+      that terminates setup.</desc>
+
+      <rect x="20" y="60" width="150" height="240" rx="8" fill="#eef2f7" stroke="#1a4d80" stroke-width="1.5"/>
+      <text x="95" y="82" text-anchor="middle" font-size="12" font-weight="700">Client side</text>
+      <text x="95" y="102" text-anchor="middle" font-size="11">unvalidated bytes</text>
+      <text x="95" y="118" text-anchor="middle" font-size="11">ClientHello</text>
+      <text x="95" y="134" text-anchor="middle" font-size="11">+ CONNECT resp</text>
+
+      <rect x="360" y="60" width="170" height="240" rx="8" fill="#fdf4f4" stroke="#7c2d12" stroke-width="1.5"/>
+      <text x="445" y="82" text-anchor="middle" font-size="12" font-weight="700">Barrier A/B region</text>
+      <text x="445" y="102" text-anchor="middle" font-size="11">validate hello · track H</text>
+      <text x="445" y="118" text-anchor="middle" font-size="11">gate opens at H</text>
+      <text x="445" y="140" text-anchor="middle" font-size="11">crossing + relay_from_open</text>
+
+      <rect x="660" y="60" width="160" height="240" rx="8" fill="#eef7f0" stroke="#14532d" stroke-width="1.5"/>
+      <text x="740" y="82" text-anchor="middle" font-size="12" font-weight="700">Upstream side</text>
+      <text x="740" y="102" text-anchor="middle" font-size="11">validated hello only</text>
+      <text x="740" y="118" text-anchor="middle" font-size="11">through barrier A</text>
+
+      <line x1="170" y1="180" x2="358" y2="180" stroke="#1a4d80" stroke-width="2"/>
+      <polygon points="358,174 372,180 358,186" fill="#1a4d80"/>
+      <text x="262" y="170" text-anchor="middle" font-size="11" font-weight="700">Barrier A</text>
+      <text x="262" y="184" text-anchor="middle" font-size="10">validated hello only</text>
+      <line x1="530" y1="180" x2="658" y2="180" stroke="#7c2d12" stroke-width="2"/>
+      <polygon points="658,174 672,180 658,186" fill="#7c2d12"/>
+      <text x="595" y="170" text-anchor="middle" font-size="11" font-weight="700">H</text>
+      <text x="604" y="184" text-anchor="middle" font-size="10">barrier B opens</text>
+
+      <line x1="740" y1="120" x2="445" y2="150" stroke="#b91c1c" stroke-width="1.6" stroke-dasharray="5,3"/>
+      <polygon points="445,156 441,144 456,150" fill="#b91c1c"/>
+      <text x="605" y="145" text-anchor="middle" font-size="10.5" fill="#b91c1c">early upstream data before H →</text>
+      <text x="605" y="158" text-anchor="middle" font-size="10.5" fill="#b91c1c">EarlyUpstreamData violation</text>
+
+      <text x="420" y="260" text-anchor="middle" font-size="11">Open: relay both directions</text>
+      <line x1="740" y1="276" x2="95" y2="276" stroke="#14532d" stroke-width="1.8" stroke-dasharray="7,3"/>
+      <polygon points="95,271 82,276 95,281" fill="#14532d"/>
+      <text x="420" y="300" text-anchor="middle" font-size="10.5" fill="#14532d">gate.rs UpstreamWrite: BlockedByBarrierA · WritingHello · GateOpened · Open</text>
+      <text x="420" y="316" text-anchor="middle" font-size="10.5" fill="#444">Activity while B closed: Data / Eof / Reset ⇒ terminate setup (D4)</text>
+
+      <line x1="30" y1="337" x2="810" y2="337" stroke="#d0d7de" stroke-width="1"/>
+      <text x="420" y="354" text-anchor="middle" font-size="10.5" font-weight="700" fill="#444">GatePhase (pure, monotonic): AwaitConnect → Connecting → AwaitResponse → Validating → RelayActive</text>
+      <text x="420" y="372" text-anchor="middle" font-size="10.5" fill="#b91c1c">Terminated { ClientHelloRejected | EarlyUpstream } — reachable only from pre-open phases</text>
+    </svg>
+    <figcaption>Figure 4 — The two-barrier gate. Barrier A admits only the
+    validated hello; the gate opens exactly when the validated-hello write crosses
+    H; upstream data before that is a counted <code>EarlyUpstreamData</code>
+    violation and terminates setup. The <code>GatePhase</code> lifecycle strip
+    below is monotonic, and <code>Terminated</code> is reachable only from the
+    pre-open phases (see <a href="#gate-phase">§5.4</a>).</figcaption>
+  </figure>
+
+  <h3>5.2 The witness-minted hello boundary</h3>
+  <p><code>ValidatedHello { end }</code> is mintable only with a
+  <code>HelloAccepted</code> witness, which only <code>client_hello::validate</code>
+  can produce — so the gate can never be told a caller-invented hello boundary
+  (<code>src/gate.rs:114-142</code>; the type-level invariant is recorded in
+  <a href="#appendix-a">Appendix A</a>). A test-only <code>test_new</code>
+  constructor exists under <code>#[cfg(test)]</code> and can never be reached in a
+  production build (<code>src/gate.rs:131-137</code>).</p>
+
+  <h3>5.3 Gate opening is atomic with the crossing write</h3>
+  <p>The gate opens atomically in the same transition whose successful
+  client→upstream write accounting reaches the end of the validated
+  <code>ClientHello</code> (H), before any subsequent upstream read (D3,
+  <code>src/gate.rs:217-244</code>). A single successful write may cross H and carry
+  coalesced trailing bytes; those trailing bytes are relay-from-open and are
+  already forwarded by that same write (<code>relay_from_open</code>). Ordered
+  progress is kept by monotonic committed offsets, so a partial successful write
+  advances only its own bytes. This is the mechanism that makes “no silent
+  acceptance” hold in the streaming direction: bytes cannot leak across the
+  barrier before the hello is fully validated and authorized.</p>
+
+  <h3 id="gate-phase">5.4 GatePhase: the typed tunnel lifecycle</h3>
+  <p><code>GatePhase</code> is the pure lifecycle carrier of the two-barrier
+  gate — the phase plus the byte-offset ledger for both barriers live in
+  <code>TunnelGate</code> (<code>src/gate.rs:73-90</code>, <code>:93-94</code>).
+  The order is monotonic — <code>AwaitConnect → Connecting → AwaitResponse →
+  Validating → RelayActive</code> — and <code>Terminated</code> is reachable
+  only from the pre-open phases; every terminator forbids forwarding in both
+  directions (<code>TerminateReason</code>, <code>src/gate.rs:63-68</code>).</p>
+
+  <table>
+    <caption>Table 4 — GatePhase: one tunnel’s typed lifecycle against the two
+    barriers.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Phase</th>
+        <th scope="col">Meaning (as-built)</th>
+        <th scope="col">Barriers</th>
+        <th scope="col">Citation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row"><code>AwaitConnect</code></th>
+        <td>Reading the CONNECT head</td>
+        <td>A and B closed</td>
+        <td><code>src/gate.rs:74-75</code></td></tr>
+      <tr><th scope="row"><code>Connecting</code></th>
+        <td>CONNECT authorized; upstream connect in progress</td>
+        <td>A and B closed</td>
+        <td><code>src/gate.rs:76-77</code></td></tr>
+      <tr><th scope="row"><code>AwaitResponse</code></th>
+        <td>Connected; upstream CONNECT response being parsed</td>
+        <td>A and B closed</td>
+        <td><code>src/gate.rs:78-80</code>; <code>on_response_ok</code> <code>:187-191</code></td></tr>
+      <tr><th scope="row"><code>Validating</code></th>
+        <td>CONNECT response OK (<code>SENT_200</code>); ClientHello being
+        validated</td>
+        <td>A and B closed</td>
+        <td><code>src/gate.rs:81-83</code>; <code>on_hello_validated</code> <code>:196-201</code></td></tr>
+      <tr><th scope="row"><code>RelayActive</code></th>
+        <td>Both barriers open; ordered relay</td>
+        <td>A and B open</td>
+        <td><code>src/gate.rs:84-85</code>; only <code>upstream_write</code> opens
+        it, crossing H <code>:217-244</code></td></tr>
+      <tr><th scope="row"><code>Terminated(reason)</code></th>
+        <td>Setup terminated before the gate opened; no forwarding</td>
+        <td>n/a</td>
+        <td><code>on_hello_rejected</code> <code>:205-206</code>;
+        <code>observe_upstream_activity</code> <code>:249-258</code></td></tr>
+    </tbody>
+  </table>
+  <p>Only <code>upstream_write</code> can open the gate, and only after a
+  <code>ValidatedHello</code> has released barrier A — the barrier-B release
+  therefore reduces to “the single transition that crosses H”
+  (<code>src/gate.rs:217-244</code>; see §5.3 and <a href="#fig4">Figure 4</a>).</p>
+</section>
+
+<section id="dns-dot">
+  <h2>6. DNS, DoT, and the refresh path</h2>
+
+  <p>Alumina performs its own resolution over one retained transport with one
+  outstanding query — <code>StartupDns</code> is a hand-rolled nonblocking state
+  machine over a single reusable connection (<code>src/startup_dns.rs:1147-1282</code>).
+  It carries four control planes: the refresh schedule per name × family, resolver
+  failover on counted failure, failback after relocation, and sensor probes that
+  never apply cache state. This section covers the classifier, the DoT profile,
+  the startup decision, and the refresh/retry schedule.</p>
+
+  <h3>6.1 Resolver classification: FQDN ⇒ DoT, bare IP ⇒ plain, no silent fallback</h3>
+  <p>A resolver entry is either a bare IP (port 53, plain DNS) or an
+  IP-with-attached-FQDN (port <code>DOT_PORT</code> 853, DoT). The FQDN presence
+  is both the DoT signal and the port signal, and there is no silent plain-DNS
+  fallback for a DoT entry (<code>src/resolver.rs:215-235</code>). Trust
+  homogeneity across the resolver set is enforced at configuration time — a mix of
+  trust classes is rejected rather than degraded
+  (<code>ConfigError::MixedResolverTrust</code>, <code>src/config.rs:829-836</code>).
+  The “F-02 close” is a separate guard on the <em>early_data</em> control’s block
+  scope — only <code>connection</code> is legal, so an upstream-sourced early-data
+  signal cannot select a per-domain or process-wide latch
+  (<code>src/config.rs:1074-1082</code>, see <a href="#discoveries-table">F-01</a>).</p>
+
+  <h3>6.2 DoT trust: pin-or-nothing</h3>
+  <p>The DoT client pins via <code>#pin-sha256=</code> and checks SPKI + SNI/SAN
+  only; certificate validity dates are turned into a counted warning
+  (<code>expired_pin_certs</code>) rather than a rejection
+  (<code>src/startup_dns.rs:827-859</code>, <code>:846-848</code>). Without a pin,
+  chain validation runs against an explicitly empty root store and therefore
+  always fails — a deliberate “no trust anchors yet” position that surfaces as
+  startup warnings (<code>src/startup_dns.rs:851-857</code>,
+  <code>src/main.rs:127-143</code>). The result is deliberate: a
+  pin is the only trust. “<code>IP#fqdn</code> without pin” is a deterministically
+  unusable resolver rather than a degraded one — which is a defensible choice that
+  any operator documentation must state plainly.</p>
+
+  <figure>
+    <svg role="img" aria-labelledby="fig5-title" aria-describedby="fig5-desc"
+         viewBox="0 0 840 400">
+      <title id="fig5-title">Figure 5 — DNS/DoT path and refresh</title>
+      <desc id="fig5-desc">Startup: a 90-second window classifies every allowlist
+      name; if unresolved ≤ allowance the listener opens (Serve), else exit 75;
+      SIGTERM short-circuits as Terminated. In serving, refresh is scheduled
+      from each entry's TTL clamped to the fixed 5–900 s bounds for a cacheable
+      positive; a validated negative with an SOA reschedules from the SOA
+      clamped to 30–900 s, and a negative or failed exchange without an SOA
+      resumes via the retry backoff ladder 1/2/4/8/16/30 s.
+      Failover relocates to the next resolver after counted failures, failback
+      returns after 900 s with three consecutive successes; probes are pure
+      sensors that never apply cache.</desc>
+
+      <rect x="20" y="30" width="260" height="150" rx="8" fill="#eef2f7" stroke="#1a4d80" stroke-width="1.5"/>
+      <text x="150" y="52" text-anchor="middle" font-size="13" font-weight="700">Startup window (90 s)</text>
+      <text x="150" y="72" text-anchor="middle" font-size="11">classify every allowlist name</text>
+      <text x="150" y="90" text-anchor="middle" font-size="11">exchange deadline 5 s</text>
+      <text x="150" y="108" text-anchor="middle" font-size="11">CSPRNG tid per exchange</text>
+      <text x="150" y="126" text-anchor="middle" font-size="11">try_reserve_exact boot allocs</text>
+      <text x="150" y="144" text-anchor="middle" font-size="11">then hand transport to serving</text>
+
+      <rect x="340" y="30" width="250" height="150" rx="8" fill="#e9f2fb" stroke="#1a4d80" stroke-width="1.5"/>
+      <text x="465" y="52" text-anchor="middle" font-size="13" font-weight="700">Readiness decision</text>
+      <text x="465" y="76" text-anchor="middle" font-size="11">unresolved ≤ allowance ⇒ Serve</text>
+      <text x="465" y="94" text-anchor="middle" font-size="11">unresolved &gt; allowance ⇒ exit 75</text>
+      <text x="465" y="112" text-anchor="middle" font-size="11">SIGTERM first ⇒ Terminated</text>
+      <text x="465" y="130" text-anchor="middle" font-size="11">listener opens exactly on Serve</text>
+
+      <rect x="640" y="30" width="180" height="150" rx="8" fill="#fdf4f4" stroke="#7c2d12" stroke-width="1.5"/>
+      <text x="730" y="52" text-anchor="middle" font-size="12" font-weight="700">DoT profile</text>
+      <text x="730" y="74" text-anchor="middle" font-size="11">FQDN ⇒ :853 + pin</text>
+      <text x="730" y="92" text-anchor="middle" font-size="11">SPKI/SAN only; expiry</text>
+      <text x="730" y="110" text-anchor="middle" font-size="11">counted not fatal</text>
+      <text x="730" y="128" text-anchor="middle" font-size="11">no pin ⇒ unusable,</text>
+      <text x="730" y="144" text-anchor="middle" font-size="11">warned at startup</text>
+
+      <line x1="280" y1="105" x2="338" y2="105" stroke="#1a4d80" stroke-width="2"/>
+      <polygon points="338,100 351,105 338,110" fill="#1a4d80"/>
+      <line x1="590" y1="105" x2="638" y2="105" stroke="#7c2d12" stroke-width="2"/>
+      <polygon points="638,100 651,105 638,110" fill="#7c2d12"/>
+
+      <rect x="20" y="220" width="800" height="150" rx="8" fill="#f4f8fc" stroke="#1a4d80" stroke-width="1.5"/>
+      <text x="420" y="244" text-anchor="middle" font-size="13" font-weight="700">Serving refresh — retained exchange, 5 s deadline</text>
+
+      <rect x="40" y="262" width="180" height="80" rx="6" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="130" y="284" text-anchor="middle" font-size="11" font-weight="700">Refresh schedule</text>
+      <text x="130" y="300" text-anchor="middle" font-size="10.5">TTL-clamped 5–900 s</text>
+      <text x="130" y="316" text-anchor="middle" font-size="10.5">per name × family</text>
+
+      <rect x="240" y="262" width="180" height="80" rx="6" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="330" y="284" text-anchor="middle" font-size="11" font-weight="700">Failover</text>
+      <text x="330" y="300" text-anchor="middle" font-size="10.5">counted failures ⇒</text>
+      <text x="330" y="316" text-anchor="middle" font-size="10.5">next resolver, no downgrade</text>
+
+      <rect x="440" y="262" width="180" height="80" rx="6" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="530" y="284" text-anchor="middle" font-size="11" font-weight="700">Failback (900 s)</text>
+      <text x="530" y="300" text-anchor="middle" font-size="10.5">grace period then</text>
+      <text x="530" y="316" text-anchor="middle" font-size="10.5">3 consecutive successes</text>
+
+      <rect x="640" y="262" width="160" height="80" rx="6" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
+      <text x="720" y="284" text-anchor="middle" font-size="11" font-weight="700">Probes</text>
+      <text x="720" y="300" text-anchor="middle" font-size="10.5">pure sensor, never</text>
+      <text x="720" y="316" text-anchor="middle" font-size="10.5">applies cache state</text>
+    </svg>
+    <figcaption>Figure 5 — The DNS/DoT path. Startup classifies once; serving
+    refreshes on a TTL-clamped 5–900 s schedule over the retained exchange
+    (30–900 s from a validated negative's SOA, 1/2/4/8/16/30 s retry backoff
+    when no SOA backs the failure); failover must not silently downgrade, and
+    probes observe without acting on the cache.</figcaption>
+  </figure>
+
+  <h3>6.3 The startup decision and its register</h3>
+  <p>The canonical readiness rule (spec <code>docs/alumina-proxy.md:108</code>) is:
+    open the listener when the unresolved count is at most the configured
+    allowance, else exit <code>EX_TEMPFAIL</code> (75). The window is a fixed
+    90&nbsp;s (<code>src/startup_dns.rs:49</code>). The decision is typed as
+    <code>StartupDecision::{Serve(ServingMode), Exit75{unresolved}, Terminated}</code>
+    (<code>src/serve.rs:97-102</code>): a first-observed SIGTERM short-circuits the
+    window as <code>Terminated</code>, which never binds or attaches a listener.
+    A single 90-second exchange report is carried by
+    <code>StartupOutcome</code> (<code>src/serve.rs:104-112</code>).</p>
+  <p>Only fully validated outcomes reach the cache: <code>dns::apply_outcome</code>
+  prepares the schedule delta <em>before</em> mutating the cache
+  (<code>src/dns.rs:366-428</code>; prepared deltas at <code>src/schedule.rs:358-391</code>,
+  <code>:502-537</code>), so a <code>DeadlineOverflow</code> leaves both resources
+  untouched. Responses are matched on tid + qname + qtype + qclass + rcode
+  (<code>src/dns.rs:983-1027</code>), <code>DNAME</code> and trailing bytes are
+  rejected everywhere (<code>:1181-1183</code>).</p>
+
+  <h3>6.4 Per-entry CNAME bailiwick (F-11)</h3>
+  <p>Each allowlist name derives its own bailiwick: itself plus only the CNAME
+  suffixes it declared. Coverage is per-entry, so one entry’s declared suffixes
+  never widen a neighbour’s trust (<code>src/dns.rs:863-953</code>), and
+  same-bare-name entries across ports must declare byte-identical suffix lists or
+  boot fails with <code>DivergentCnameBailiwick</code>
+  (<code>src/config.rs:1244-1262</code>). The flat union of declared suffixes is
+  bounded by the fixed <code>ALLOWLIST_MAX</code> (32) slot bound, and overflow is
+  fail-stop (<code>src/dns.rs:863-953</code>).</p>
+
+  <table>
+    <caption>Table 5 — DNS/DoT control planes and their seat in the source.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Plane</th>
+        <th scope="col">Trigger</th>
+        <th scope="col">State</th>
+        <th scope="col">Citation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">Refresh schedule</th>
+        <td>due time per name × family</td>
+        <td>TTL-clamped 5–900 s (positive); SOA-clamped 30–900 s (validated negative);
+        retry backoff [1,2,4,8,16,30] when no SOA backs a failure</td>
+        <td><code>src/schedule.rs:16</code> (backoff), <code>:56-69</code> (refresh bounds)</td></tr>
+      <tr><th scope="row">Failover</th>
+        <td>counted exchange failure</td>
+        <td><code>degradations</code>, <code>active_resolver</code></td>
+        <td><code>src/startup_dns.rs:3523-3577</code></td></tr>
+      <tr><th scope="row">Failback</th>
+        <td>grace after relocation</td>
+        <td><code>failback_due</code>, <code>failback_source</code>, 3 consecutive successes</td>
+        <td><code>src/startup_dns.rs:3178-3210</code>, <code>:3631-3638</code></td></tr>
+      <tr><th scope="row">Sensor probes</th>
+        <td>post-window sweep, sustained-negative corroboration</td>
+        <td><code>probe_sweep</code>, <code>corroboration</code> (never applies cache)</td>
+        <td><code>src/startup_dns.rs:3238-3258</code>, <code>:3320-3347</code>, <code>:3377-3413</code></td></tr>
+      <tr><th scope="row">Downgrade guard</th>
+        <td>relocation of a DoT entry</td>
+        <td>downgrade counted as <code>dp</code> fact; no silent plain fallback</td>
+        <td><code>src/startup_dns.rs:3216-3230</code>; <code>src/resolver.rs:215-235</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>6.5 Cache lifetime and the generation guard</h3>
+  <p>The cache stores validated bindings only, keyed by configured name ×
+  <code>Family</code> (<code>A</code>/<code>Aaaa</code>) with a fixed address
+  capacity of <code>MAX_ADDRESSES = 16</code> per name and family
+  (<code>src/cache.rs:7</code>). <code>EntryState</code> is a deadline-derived
+  view, never stored: <code>Empty | Fresh | Stale | Retired</code> are computed
+  from the freshness and retirement deadlines (<code>src/cache.rs:66-77</code>).
+  Every publish is generation-guarded: a validated in-flight result carries the
+  current <code>Generation</code>, and <code>publish_positive</code> refuses any
+  mismatch (<code>StaleGeneration</code>), so a stale publish can never overwrite
+  a newer entry (<code>src/cache.rs:50-62</code>, <code>:373-382</code>).</p>
+
+  <table>
+    <caption>Table 6 — DNS cache lifetime and the generation guard.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Property</th>
+        <th scope="col">Bounding constant / rule</th>
+        <th scope="col">Citation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">Address capacity</th>
+        <td>16 per name × family (<code>MAX_ADDRESSES</code>)</td>
+        <td><code>src/cache.rs:7</code></td></tr>
+      <tr><th scope="row"><code>EntryState</code></th>
+        <td><code>Empty | Fresh | Stale | Retired</code>, computed from deadlines,
+        never stored</td>
+        <td><code>src/cache.rs:66-77</code></td></tr>
+      <tr><th scope="row">TTL clamping</th>
+        <td><code>ttl.clamp(1, TTL_CAP)</code>; <code>TTL_CAP = 86 400</code> s
+        (L12) — an honored TTL is always 1 s … 86 400 s</td>
+        <td><code>src/cache.rs:18</code>, <code>:383</code></td></tr>
+      <tr><th scope="row">Freshness deadline</th>
+        <td>receipt + clamped TTL</td>
+        <td><code>src/cache.rs:383-384</code></td></tr>
+      <tr><th scope="row">Stale grace</th>
+        <td><code>STALE_GRACE = 259 200</code> s (72 h) before retirement</td>
+        <td><code>src/cache.rs:10</code></td></tr>
+      <tr><th scope="row">Stale serving window</th>
+        <td><code>STALE_SERVING_WINDOW = 3600</code> s (1 h): past freshness a
+        stale entry may still be served only while <code>stale_allowed</code> and
+        <code>now &lt; freshness + 3600 s</code>; retention continues to the
+        retirement deadline</td>
+        <td><code>src/cache.rs:15</code>, <code>:151-170</code></td></tr>
+      <tr><th scope="row">Eviction</th>
+        <td>validated NXDOMAIN clears <em>both</em> families; validated NODATA
+        clears only the queried family</td>
+        <td><code>src/cache.rs:426-448</code> (nxdomain), <code>:450-459</code> (nodata)</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="enforcement">
+  <h2>7. Enforcement: violations, effects, gates</h2>
+
+  <p>The enforcement stack is deliberately small and typed: a violation lattice,
+  a pure violation→effect projection, per-class saturation gates, and a monitor
+  that folds counted facts into a fixed record. Its purpose is to make “no silent
+  acceptance” mechanically true — an internally inconsistent observation is
+  reported as <code>Unknown</code>, never silently treated as a pass.</p>
+
+  <h3>7.1 The violation lattice</h3>
+  <p>There are six top-level <code>Violation</code> cases
+  (<code>src/enforcement/policy.rs:89-97</code>): <code>AnyIllegal { cause }</code>
+  (with four <code>AnyIllegalCause</code> payload classes —
+  <code>KIND_COUNT = 4</code>, <code>:84-87</code>), <code>EarlyUpstreamData</code>,
+  <code>Ja4Change</code>, <code>EvidenceInsufficient</code>, <code>Unattributed</code>,
+  and <code>MissingParseResult</code>. This observed as-built set has
+  <strong>six</strong> variants, in agreement with the review register that
+  precedes this document (“the violation lattice has six cases”) — there is no
+  count discrepancy here.</p>
+  <p>The last three cases exist precisely to keep “unknown” out of “harmless”:
+  all three map to <code>Effect::Unknown { reason }</code>
+  (<code>src/enforcement/policy.rs:136-145</code>) and none consumes the
+  first-slot latch. That distinction is the mechanism that makes the “no silent
+  acceptance” invariant honest: evidence that is internally inconsistent is
+  reported as unknown rather than treated as a pass.</p>
+
+  <table>
+    <caption>Table 7 — Violation → effect projection (the raw decided effect).</caption>
+    <thead>
+      <tr>
+        <th scope="col">Violation</th>
+        <th scope="col">Raw effect (before gate)</th>
+        <th scope="col">Citation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row"><code>AnyIllegal { cause }</code></th>
+        <td>Depends on the cause’s control; first occurrence consumes the
+        connection-level <code>FirstSlot</code> latch</td>
+        <td><code>src/enforcement/policy.rs:113-121</code></td></tr>
+      <tr><th scope="row"><code>EarlyUpstreamData { ordinal }</code></th>
+        <td>Per-FQDN <code>early_data</code> control: BaselineOnly / Unknown /
+        Notify / Block{Connection}</td>
+        <td><code>src/enforcement/policy.rs:122-130</code></td></tr>
+      <tr><th scope="row"><code>Ja4Change { ordinal }</code></th>
+        <td>Per-FQDN <code>ja4</code> control: full scope grammar incl. Block{All}</td>
+        <td><code>src/enforcement/policy.rs:131-135</code></td></tr>
+      <tr><th scope="row"><code>EvidenceInsufficient</code></th>
+        <td><code>Unknown { NotYetValidated }</code></td>
+        <td><code>src/enforcement/policy.rs:136-138</code></td></tr>
+      <tr><th scope="row"><code>Unattributed</code></th>
+        <td><code>Unknown { Unattributed }</code></td>
+        <td><code>src/enforcement/policy.rs:139-141</code></td></tr>
+      <tr><th scope="row"><code>MissingParseResult</code></th>
+        <td><code>Unknown { MissingParseResult }</code></td>
+        <td><code>src/enforcement/policy.rs:142-145</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>The effect type itself has exactly four forms: <code>BaselineOnly</code>,
+  <code>Notify { scope }</code>, <code>Block { scope }</code>, and
+  <code>Unknown { reason }</code> (<code>src/enforcement/policy.rs:100-105</code>).
+  The projection is a pure function (<code>decide</code>,
+  <code>:113-146</code>) over the <code>ControlTable</code> and the first-slot
+  latch — no I/O, no mutation of the table, deterministic and unit-testable.</p>
+
+  <h3>7.2 The per-class gates</h3>
+  <p>Gates are per-class: <code>bad_handshake</code>, <code>illegal_fqdn</code>,
+  <code>early_data</code>, and <code>ja4</code> form <code>GateSet</code>
+  (<code>src/enforcement/state.rs:71-77</code>). Each is an <code>AllScopeGate</code>
+  whose <code>threshold</code> and <code>window_secs</code> are <code>NonZero</code>,
+  so a gate that could never arm is unrepresentable
+  (<code>src/enforcement/state.rs:26-46</code>). Defaults are threshold 1 in a
+  900-second window (<code>:12-17</code>) — the FIRST deviation of the armed
+  class arms the All-scope block, sticky until restart. Each class’s gate counts
+  only that class’s facts: the per-class isolation between <code>bad_handshake</code>
+  and <code>illegal_fqdn</code> is enforced by which counter each cause notes
+  (<code>src/enforcement/state.rs:264-286</code>).</p>
+
+  <table>
+    <caption>Table 8 — The four per-class All-scope gates and their defaults.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Gate</th>
+        <th scope="col">Counts (as-built)</th>
+        <th scope="col">Default threshold/window</th>
+        <th scope="col">Reachable per (F-01/F-02)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row"><code>bad_handshake</code></th>
+        <td><code>ConnectParse</code>, <code>TlsProfile</code>, <code>Ech</code></td>
+        <td>1 / 900 s</td>
+        <td>Reachable</td></tr>
+      <tr><th scope="row"><code>illegal_fqdn</code></th>
+        <td><code>HostNotAllowlisted</code></td>
+        <td>1 / 900 s</td>
+        <td>Reachable</td></tr>
+      <tr><th scope="row"><code>early_data</code></th>
+        <td><code>EarlyUpstreamData</code></td>
+        <td>1 / 900 s</td>
+        <td><strong>Inert (F-01)</strong></td></tr>
+      <tr><th scope="row"><code>ja4</code></th>
+        <td><code>Ja4Change</code></td>
+        <td>1 / 900 s</td>
+        <td>Reachable (Block{All} legal)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.3 Typed ordinals and the monitor</h3>
+  <p><code>DomainOrdinal</code> is a 0-based configured-allowlist ordinal whose
+  constructor mints values only against a specific table’s entry count
+  (<code>src/enforcement/action.rs:98-132</code>), so a blocked scope is applied
+  only by the table that minted the ordinal and attacker-controlled strings are
+  never keys. The monitor (<code>src/enforcement/monitor.rs</code>) folds counted
+  facts into <code>FactCounters</code> — observed as-built counter families:
+  any_illegal (per cause), early_data and ja4 (per ordinal), unknown, resolver
+  degraded, dns anomaly, downgrade-to-plain, probe relocations, expired pin certs,
+  ja4 seed and change, folded by ten <code>note_fact_*</code> recorder methods
+  (<code>src/enforcement/monitor.rs:178-290</code>). Bounded Unix-time windows
+  rotate the <code>IncidentReport</code> at <code>REPORT_WINDOW_SECS = 3600</code>
+  (recorded measurement; the review register’s “3800 s” does not match source
+  <code>src/incident_report.rs:14</code>).</p>
+  <p>All counting is saturation-based and bounded; the monitor record itself is
+  encoded in place into the fixed log slot budget, and anomaly kinds are discrete
+  (<code>DnsAnomalyKind</code>) so a new sensor can never default to an unrelated
+  class.</p>
+</section>
+
+<section id="memory">
+  <h2>8. Memory envelope</h2>
+
+  <p>Alumina pre-allocates its working set once at boot and never frees it. The
+  authoritative plan is <code>inventory.rs</code> — a set of named constants and
+  type-derived figures that the binary prints at boot
+  (<code>src/main.rs:34-40</code>), and that pinned ticket tests lock to exact
+  values (<code>src/inventory.rs:273-285</code>). The number printed is
+  <code>214 665 002</code> bytes ≈ 204.7 MiB, printed as “inventory named fixed
+  buffers (lower bound): traffic 134217728 + serving workspace 80310272 + dns
+  named buffers 137002” (recorded measurement).</p>
+
+  <table>
+    <caption>Table 9 — The retained boot memory envelope (recorded measurement and
+    type-derived plan).</caption>
+    <thead>
+      <tr>
+        <th scope="col">Category</th>
+        <th scope="col">Derivation</th>
+        <th scope="col">Bytes</th>
+        <th scope="col">Citation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">Traffic store</th>
+        <td>512 slots × 2 buffers × 128 KiB</td>
+        <td>134 217 728 (128 MiB)</td>
+        <td><code>src/inventory.rs:9-12</code></td></tr>
+      <tr><th scope="row">Serving workspace</th>
+        <td>512 × <code>SLOT_WORKSPACE_BYTES</code> (156 856 =
+        <code>size_of::&lt;ConnectParser&gt;</code> + <code>size_of::&lt;ChInspector&gt;</code>)</td>
+        <td>80 310 272 (76.6 MiB)</td>
+        <td><code>src/inventory.rs:20-36</code>, pin at <code>:273-285</code></td></tr>
+      <tr><th scope="row">DNS named buffers</th>
+        <td>512 (query) + 16 386 (response, <code>DNS_MSG_LIMIT + 2</code>) + 120 104
+        (<code>size_of::&lt;ResponseWorkspace&gt;</code>)</td>
+        <td>137 002</td>
+        <td><code>src/inventory.rs:39-44</code>; <code>src/dns.rs:12</code></td></tr>
+      <tr><th scope="row">Log queue</th>
+        <td>256 slots × 2 KiB</td>
+        <td>524 288 (0.5 MiB)</td>
+        <td><code>src/inventory.rs:47-49</code>; <code>src/log.rs:53-54</code></td></tr>
+      <tr><th scope="row"><strong>Printed lower bound</strong></th>
+        <td>traffic + serving + dns named buffers</td>
+        <td><strong>214 665 002 (≈ 204.7 MiB)</strong></td>
+        <td><code>src/main.rs:34-40</code>; <code>src/inventory.rs:192-196</code></td></tr>
+    </tbody>
+  </table>
+
+  <p class="reg">Register note — the <em>printed</em> bound is a recorded
+  measurement (the binary literally prints it); the derivation is a type-derived
+  plan; it is explicitly <em>not</em> an RSS figure. Per slot: 262 144 bytes
+  traffic (2 × 128 KiB) + 156 856 workspace ≈ 419 000 bytes ≈ 409 KiB per tunnel
+  on the printed basis (F-03). The older spec row “512 × 136 KiB ≈ 68 MiB”
+  describes the pre-retention profile and survives only as a historical row in
+  the spec (<code>docs/alumina-proxy.md:434</code>); what the binary computes and
+  prints is <code>80 310 272</code> for the serving workspace.</p>
+
+  <h3>8.1 What the bound includes and excludes</h3>
+  <ul>
+    <li><strong>Included:</strong> per-slot traffic buffers; retained parser +
+    inspector (including the retained JA4 arrays as the
+    <code>Option&lt;ClientHello&gt;</code> inside each <code>ChInspector</code>);
+    DNS transport query/response/parse buffers; everything <code>size_of</code>
+    over the retained types yields — with no second hand-maintained factor.</li>
+    <li><strong>Excluded by design:</strong> per-slot gate/capture/cursors and the
+    approved hostname, transient scratch, the reserved log queue, kernel socket
+    buffers, allocator fragmentation, and rustls/ring heap. The bound is a lower
+    bound over retained named buffers, never an RSS estimate
+    (<code>src/inventory.rs:173-181</code>).</li>
+  </ul>
+
+  <h3>8.2 The zero-allocation discipline and its DoT caveat</h3>
+  <p>The serving steady state is allocation-free by construction after boot:
+  the slot table is built once by <code>collect()</code> over an exact-size
+  iterator (<code>src/serving.rs:1028-1035</code>, see <a href="#unknowns">U-02</a>),
+  and the per-turn event buffer is a fixed <code>POLL_EVENTS_CAP</code> array, not
+  a reallocated Vec (run_once coalesces into a stack array,
+  <code>src/serving.rs:1291-1305</code>). The reactor’s per-turn
+  <code>events</code> buffer is replaced with a zero-capacity buffer and restored —
+  the property depends on <code>mio</code> not allocating for
+  <code>with_capacity(0)</code> (see <a href="#unknowns">U-01</a>),
+  <code>src/serving.rs:1263</code>, <code>:1307</code>).</p>
+  <p>F-02 is the honest restatement: it is not “the process never allocates after
+  boot”; it is “the plain-DNS profile never allocates after boot, and the DoT
+  profile allocates per connect with a witnessed bound of ≤ 8 events per warm
+  exchange” (<code>src/startup_dns/dot_tests.rs:1344</code>, <code>:1416-1423</code>).
+  The boot-window zero-allocation witness says so in words
+  (<code>src/startup_dns/tests.rs:1217-1224</code>).</p>
+
+  <h3>8.3 The serving concurrency and scheduling envelope</h3>
+  <p>The reactor is a single poll owner (<code>poll: Poll</code> on the
+  <code>Serving</code> struct, <code>src/serving.rs:917</code>). Each turn reads a
+  fixed <code>POLL_EVENTS_CAP = 1024</code>-event snapshot into the boot-reused
+  buffer (<code>src/serving.rs:117</code>), coalescing the tokens into one fixed
+  <code>CoalescedBatch</code> — a two-pass structure whose first pass folds
+  arrivals in order and whose second pass re-dispatches each slot contiguously
+  within a single complete visit (<code>src/serving.rs:478-489</code>,
+  <code>:1341</code>). Per-visit I/O is bounded — <code>VISIT_OPS = 16</code> ops
+  or 64 KiB per connection visit, whichever comes first, combined across both
+  directions (<code>src/serving.rs:105-106</code>) — timers rejoin the turn at
+  most every <code>TIMER_RECHECK_EVERY = 256</code> ready-slots or I/O ops
+  (<code>src/serving.rs:111</code>), and per-turn DNS progress advances toward the
+  shared deadline by at most <code>DNS_ADVANCE_BOUND = 8</code> cooperative steps
+  (<code>src/runtime.rs:24</code>, <code>:419-440</code>), so a chatty or stalled
+  peer can never starve traffic within a turn. Every dispatched token is
+  generation-tagged — low bits are the local id, high bits the slot generation —
+  so a stale event for a reused slot index is dropped before any socket is
+  touched (<code>src/serving.rs:152-162</code>).</p>
+</section>
+
+<section id="observability">
+  <h2>9. Observability and failure</h2>
+
+  <h3>9.1 The boot-owned log ring</h3>
+  <p>Logging is a fixed 256-slot × 2 KiB ring (512 KiB) owned at boot
+  (<code>QUEUE_SLOTS = 256</code>, <code>SLOT_BYTES = 2 * 1024</code>,
+  <code>src/log.rs:53-54</code>), retained as <code>LogStore</code> for process
+  lifetime (<code>src/log.rs:1429-1441</code>), encoded in place, and drained by a
+  single nonblocking <code>write_vectored</code> under a per-turn budget of 16
+  fragments / 64 KiB (<code>SINK_MAX_OPS = 16</code>, <code>SINK_MAX_BYTES = 64 * 1024</code>,
+  <code>src/log.rs:66-67</code>, <code>:2045-2123</code>). Three properties are
+  architectural:</p>
+  <ol>
+    <li><strong>The sink can never stall serving.</strong> fd 1 is made
+    nonblocking once, after boot, by the binary only
+    (<code>prepare_stdout</code>, <code>src/log.rs:1579-1590</code>), and
+    <code>write_vectored</code> either progresses or latches <code>WouldBlock</code>
+    with a retained cursor and a 100 ms retry
+    (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:2085-2107</code>).
+    <code>tests/stdout_stall.rs</code> and <code>tests/monitor_stdout.rs</code> are
+    the executable form of this claim.</li>
+    <li><strong>Drops are always counted, never silent.</strong> Ring-full and
+    encode-failure both <code>drop_one</code> (<code>src/log.rs:2163-2174</code>),
+    a hard sink error drops the whole queue <em>through the same counter</em>
+    (<code>:2094-2101</code>), and exit paths strand-count the residue
+    (<code>strand_queued</code>, <code>src/log.rs:1668-1677</code>).</li>
+    <li><strong>Priority classes exist.</strong> A reserved record can displace
+    the newest normal record on a full ring rather than being dropped
+    (<code>enqueue_reserved</code>, <code>src/log.rs:2205-2266</code>) — the
+    mechanism that keeps shutdown/fatal evidence from being evicted by a monitor
+    burst.</li>
+  </ol>
+
+  <h3>9.2 The terminal sink state and the failure register</h3>
+  <div class="callout amber" role="note">
+    <p><strong>F-09 (S4, accepted-risk).</strong> Once the sink latches
+    <code>failed</code>, <code>next_drain</code> returns <code>None</code> forever
+    (<code>src/log.rs:1637-1646</code>): a broken stdout permanently ends
+    observability. There is no second sink: boot diagnostics use stderr
+    (<code>src/main.rs:65-80</code>, <code>:145-148</code>), but once the log store owns stdout there is
+    no fallback channel (<code>src/log.rs:1403-1410</code>), so the only surviving
+    signals are the exit code and the <code>dropped</code> counter. This
+    is a defensible deliberate choice; it should be recorded as accepted risk, not
+    discovered during an incident. <a href="#recommendations">R-7</a>.</p>
+  </div>
+
+  <h3>9.3 Incident reporting</h3>
+  <p><code>IncidentReport</code> is the second observability axis: 32 preallocated
+  per-name windows (<code>names: [NameReport; ALLOWLIST_MAX]</code>,
+  <code>src/incident_report.rs:99-119</code>) with <code>REPORT_WINDOW_SECS =
+  3600</code> <em>recorded</em> rotation (<code>src/incident_report.rs:14</code>),
+  coalesced skipped windows, sticky per-window incident snapshots, and
+  eligible-binding transition tracking (<code>src/incident_report.rs:99-181</code>,
+  <code>:242-250</code>). Its per-turn pass over all names
+  (<code>src/serve.rs:431-485</code>) is O(32) and bounded, but it runs every turn
+  regardless of whether any window is near a boundary — a small, constant,
+  always-on cost.</p>
+
+  <h3>9.4 Degradation is observable, never silent</h3>
+  <p>Four counted fact families exist precisely so degradation is observable:
+  <code>resolver_degraded</code>, <code>dns_anomaly</code>,
+  <code>downgrade_to_plain</code>, and <code>probe_relocations</code> are all
+  folded into the monitor (<code>src/enforcement/monitor.rs:16-19</code>), which
+  means a resolver silently degrading is structurally impossible — any relocation
+  or downgrade is a counted fact with a documented register. This is the positive
+  corollary of “no silent acceptance”: the operator is told, in the fixed monitor
+  record, when the DNS path is less healthy than it was.</p>
+
+  <h3>9.5 Exit codes and degradation surfaces</h3>
+  <p>Process exit and per-request HTTP degradation are the two fixed failure
+  surfaces; both are typed and unconditional. The shutdown pair comes from
+  <code>ShutdownExit</code>: <code>Drained ⇒ 0</code> and <code>Forced ⇒ 70</code>
+  (<code>src/serving.rs:178-187</code>), applied through
+  <code>src/runtime.rs:374-376</code>. Boot and startup failures exit the
+  documented constants — <code>EX_CONFIG = 78</code> at <code>src/boot.rs:7</code>,
+  <code>EX_TEMPFAIL = 75</code> and <code>EX_SOFTWARE = 70</code> at
+  <code>src/main.rs:23-24</code> — and the terminal-sink latch (F-09) is the one
+  unannounced observability failure: once stdout latches <code>failed</code>, log
+  loss is counted but unrecoverable (<code>src/log.rs:1637-1646</code>).</p>
+
+  <table>
+    <caption>Table 10 — Exit codes and HTTP degradation surfaces.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Code</th>
+        <th scope="col">Meaning</th>
+        <th scope="col">Citation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">0</th>
+        <td>Drained shutdown after gate-opened tunnels complete</td>
+        <td><code>src/serving.rs:186</code>; <code>src/main.rs:106</code></td></tr>
+      <tr><th scope="row">70 (<code>EX_SOFTWARE</code>)</th>
+        <td>Forced shutdown (undrained tunnels at the deadline)</td>
+        <td><code>src/serving.rs:187</code>; <code>src/main.rs:24</code>, <code>:93-99</code></td></tr>
+      <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
+        <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
+        <td><code>src/main.rs:23</code>, <code>:103</code>; <code>src/serve.rs:97-102</code></td></tr>
+      <tr><th scope="row">78 (<code>EX_CONFIG</code>)</th>
+        <td>Boot / configuration failure</td>
+        <td><code>src/boot.rs:7</code>; <code>src/main.rs:66-80</code>, <code>:111-117</code></td></tr>
+      <tr><th scope="row">503 (HTTP)</th>
+        <td>Admission: no free slot — typed capacity answer, fixed body</td>
+        <td><code>src/serving.rs:201-202</code>, <code>:1808-1836</code></td></tr>
+      <tr><th scope="row">504 (HTTP)</th>
+        <td><code>SetupTimeout</code>: setup deadline expired before the gate opened</td>
+        <td><code>src/serving/policy.rs:22-24</code></td></tr>
+      <tr><th scope="row">Sink latch</th>
+        <td>Stdout <code>failed</code>: drops counted, <code>next_drain</code> is
+        <code>None</code> forever (F-09, accepted risk)</td>
+        <td><code>src/log.rs:1637-1646</code>, <code>:2094-2101</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="security">
+  <h2>10. Security and trust</h2>
+
+  <h3>10.1 Threat model in one paragraph</h3>
+  <p>The spec’s threat model (<code>docs/alumina-proxy.md</code> §Threat model) is
+  a compromised trusted application — the client is trusted at rest and the
+  operator holds full privilege, but compromise is assumed inevitable, so the
+  proxy’s task is to <em>identify</em> the compromise and <em>protect against
+  further exploitation</em> purely through egress. The design consequence is a
+  Golden Path: a correctly configured, healthy workload produces zero deviations,
+  so any observed deviation is by construction a signal.</p>
+
+  <h3>10.2 Authorization-before-forwarding (the two barriers again)</h3>
+  <p>Three invariants from the spec (§Authorization) are implemented by type and
+  by mechanism, not by convention:</p>
+  <table>
+    <caption>Table 11 — Security invariants and their type-level carriers.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Invariant</th>
+        <th scope="col">Carrier / mechanism</th>
+        <th scope="col">Citation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">Destination-Binding: tunnel only for approved FQDN on
+      allowlisted port, from a positive current cache entry, before its retirement
+      deadline</th>
+        <td>allowlist-verified hostname + port; cache-entry-scoped selection;
+        generation-age retirement</td>
+        <td><code>src/config.rs</code>; <code>src/worker.rs:825-860</code>;
+        <code>src/cache.rs:373-382</code></td></tr>
+      <tr><th scope="row">Authorization-Before-Forwarding: no client tunnel bytes
+      until ClientHello validates with exactly-one matching SNI; no upstream bytes
+      before the gate opens</th>
+        <td>two-barrier gate (<code>src/gate.rs</code>); witness-minted
+        <code>ValidatedHello</code></td>
+        <td><code>src/gate.rs:114-142</code>; spec §Authorization</td></tr>
+      <tr><th scope="row">Early upstream data or EOF/reset through actual I/O while
+      the gate is closed ⇒ terminate setup, no forwarding, no logging of upstream
+      bytes</th>
+        <td><code>Activity::{Data,Eof,Reset}</code> observation (D4)</td>
+        <td><code>src/gate.rs:74-78</code>; <code>src/serving.rs:2634-2649</code></td></tr>
+      <tr><th scope="row">Ambiguous evidence cannot become a clean pass</th>
+        <td><code>Effect::Unknown</code> variants; no first-slot latch consumption</td>
+        <td><code>src/enforcement/policy.rs:136-145</code></td></tr>
+      <tr><th scope="row">A gate cannot arm with threshold 0 / window 0</th>
+        <td><code>AllScopeGate { NonZeroU32, NonZeroU64 }</code></td>
+        <td><code>src/enforcement/state.rs:26-46</code></td></tr>
+      <tr><th scope="row">Serving without a listener is unrepresentable</th>
+        <td><code>Preallocated</code> has no <code>serve</code>; <code>attach</code>
+        consumes <code>self</code></td>
+        <td><code>src/runtime.rs:26-43</code>, <code>:153</code></td></tr>
+      <tr><th scope="row">A stale DNS publish cannot overwrite a newer entry</th>
+        <td><code>Generation</code> + <code>StaleGeneration</code> rejection</td>
+        <td><code>src/cache.rs:50-62</code>, <code>:373-382</code></td></tr>
+      <tr><th scope="row">No production panic on attacker input</th>
+        <td>crate-level <code>deny(clippy::unwrap_used, expect_used)</code>;
+        no <code>panic!</code> in <code>src/</code> outside tests; every
+        <code>expect</code> carries a proven-bound <code>#[expect]</code></td>
+        <td><code>src/lib.rs:1-2</code>; <code>Cargo.toml:226-229</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>10.3 TLS and the ClientHello profile</h3>
+  <p>The ClientHello surface is deliberately narrow. Validation enforces a TLS 1.3
+  profile with no ECH, exactly one SNI that must normalize-equal the approved
+  hostname (<code>L8</code> — non-<code>host_name</code>
+  <code>server_name</code> entries rejected), and a minimum initial TLS record
+  payload (<code>L9</code>) to reject degenerate framing
+  (<code>src/client_hello.rs:526-528</code>). The inspector holds the
+  flattened message across feeds, copying each record payload exactly once
+  regardless of fragmentation (<code>src/client_hello.rs:410-419</code>). The JA4
+  fingerprint is retained per slot (the <code>Option&lt;ClientHello&gt;</code>
+  inside <code>ChInspector</code>) as the baseline for the <code>ja4</code> gate —
+  a per-class gate whose <code>Block{All}</code> scope is legal and reachable, unlike <code>early_data</code> (F-01)
+  (Table 8; the <code>ja4</code> grammar keeps the full scope set in
+  <code>src/enforcement/policy.rs:131-135</code>).</p>
+
+  <h3>10.4 Trust boundary summary — pin-or-nothing, no silent downgrade</h3>
+  <p>Three trust statements summarize the boundary:</p>
+  <ul>
+    <li><strong>DoT is pin-or-nothing.</strong> Without a pinned SPKI, chain
+    validation fails deterministically (empty root store) and the resolver is
+    unusable with a startup warning — there is no CA-validated mode in the current
+    build (<code>src/startup_dns.rs:851-857</code>).
+    <a href="#recommendations">R-1</a> proposes documenting this as operator
+    doctrine.</li>
+    <li><strong>Failover never downgrades identity.</strong> Relocations cannot
+    silently swap a DoT entry to plain DNS; a downgrade is counted as a
+    <code>dp</code> fact (<code>src/startup_dns.rs:3216-3230</code>).</li>
+    <li><strong>Trust is homogeneous or boot fails.</strong> A mixed-trust
+    resolver set is rejected at configuration time
+    (<code>src/config.rs:829-836</code>).</li>
+  </ul>
+</section>
+
+<section id="unknowns">
+  <h2>11. Residual unknowns</h2>
+
+  <p>Six unknowns remain after the source pass. They are risks or intent-gaps the
+  source alone cannot close; each is stated with the reason it is not resolvable
+  from code. None is resolved by inference.</p>
+
+  <table>
+    <caption>Table 12 — Residual unknowns U-01…U-06.</caption>
+    <thead>
+      <tr>
+        <th scope="col">#</th>
+        <th scope="col">Kind</th>
+        <th scope="col">Statement</th>
+        <th scope="col">Why it is unknown</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row" class="fid">U-01</th><td>Risk</td>
+        <td>Every reactor turn replaces <code>self.events</code> with
+        <code>Events::with_capacity(0)</code> and restores it after the poll; the
+        per-turn zero-allocation property depends on <code>mio</code> not
+        allocating for a zero-capacity buffer and on <code>epoll_wait</code>
+        writing into the pre-existing buffer.</td>
+        <td>Not executable in a source-only pass; steady-state alloc witnesses in
+        <code>src/serving/tests.rs</code> (e.g. <code>:5896</code>,
+        <code>:5971</code>, <code>:6008</code>, <code>:7361</code>,
+        <code>:7664</code>) probably cover it, but none ran in this production.</td>
+      </tr>
+      <tr><th scope="row" class="fid">U-02</th><td>Risk</td>
+        <td>The <code>Vec&lt;SlotWorkspace&gt;</code> is built by <code>collect()</code>
+        from an exact-size iterator (<code>src/serving.rs:1028-1035</code>), so it
+        is one boot allocation; any later growth would allocate post-boot.</td>
+        <td>Depends on <code>Vec</code>’s exact <code>size_hint</code> path — true
+        for this code but not enforced by a type.</td>
+      </tr>
+      <tr><th scope="row" class="fid">U-03</th><td>Unknown</td>
+        <td>Real RSS includes allocator fragmentation, rustls/ring heap, and the
+        kernel socket buffers for up to 512 × 2 sockets; none of it is modelled by
+        <code>BootInventory</code>, which is explicitly a lower bound
+        (<code>src/inventory.rs:173-181</code>).</td>
+        <td>Requires measurement; out of scope for a source-only reading. See
+        <a href="#recommendations">R-3</a>.</td>
+      </tr>
+      <tr><th scope="row" class="fid">U-04</th><td>Unknown</td>
+        <td>Whether the <code>[early_data]</code> gate is <em>intended</em> to
+        become reachable again if <code>Block{All}</code> is ever legalised for
+        early data (the “F-02 close” comment at <code>src/config.rs:1074-1082</code>
+        suggests the restriction is intentional and permanent).</td>
+        <td>Intent is not inferable from code; treated as an inert knob, which is
+        the as-built truth. <a href="#recommendations">R-2</a></td>
+      </tr>
+      <tr><th scope="row" class="fid">U-05</th><td>Risk</td>
+        <td>A DoT deployment refreshes on a single connection with a 5 s exchange
+        deadline; a failed handshake forces a full reconnect (and a fresh rustls
+        config) on the next exchange, with no persistent re-handshake backoff
+        separate from the schedule ladder.</td>
+        <td>Design appears intentional (schedule backoff is
+        [1,2,4,8,16,30], <code>src/schedule.rs:16</code>); flagged as a
+        latency/CPU cost under resolver flapping, not a defect.</td>
+      </tr>
+      <tr><th scope="row" class="fid">U-06</th><td>Risk</td>
+        <td><code>SlotWorkspace::reset</code> leaves prior tunnel bytes in the
+        retained 128 KiB slabs for process lifetime (<code>src/serving.rs:774-803</code>).
+        No path writes them out today, but the buffers outlive the tunnel by
+        design (<code>process::exit</code> skips drops).</td>
+        <td>Memory-disclosure only if a future path misuses <code>buf_len</code>;
+        no such path found.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="recommendations">
+  <h2>12. Recommendations</h2>
+
+  <p>Recommendations are labelled proposals only — each is a decision for the
+  operator/owner, not a change made by this document. They follow directly from
+  the register above and are prefixed <code>R-n</code> for traceability. They are
+  listed here and nowhere else; no change is mixed into this documentation.</p>
+
+  <table>
+    <caption>Table 13 — Recommendations (labelled proposals only).</caption>
+    <thead>
+      <tr>
+        <th scope="col">#</th>
+        <th scope="col">Proposal</th>
+        <th scope="col">Source finding(s)</th>
+        <th scope="col">Rationale</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">R-1</th>
+        <td>Record “DoT is pin-or-nothing” and “IP#fqdn without pin is an unusable
+        resolver” as operator-facing doctrine (documented, not code).</td>
+        <td>Pin-or-nothing observation; <code>src/startup_dns.rs:851-857</code></td>
+        <td>The current build has no CA-validated DoT mode; an operator could read
+        a warning as degradation rather than unusability.</td></tr>
+      <tr><th scope="row">R-2</th>
+        <td>Resolve F-01 one way or the other: either drop the inert
+        <code>[early_data]</code> All-scope gate surface, or legalise
+        <code>Block{All}</code> for early data if the gate is intended to be
+        reachable. If kept, state in operator material that the All-scope knob is
+        inert.</td>
+        <td>F-01; U-04</td>
+        <td>A documented operator control with no runtime effect is a semantics
+        trap for the next maintainer.</td></tr>
+      <tr><th scope="row">R-3</th>
+        <td>Measure and publish a real RSS figure for a nominal deployment as a
+        companion to the printed lower bound; state the gap in the capacity
+        documentation.</td>
+        <td>F-03; U-03</td>
+        <td>204.7 MiB is a lower bound; operators sizing hosts need the real RSS
+        envelope including allocator and socket buffers.</td></tr>
+      <tr><th scope="row">R-4</th>
+        <td>Delete, justify, or mark <code>#[deprecated = "future trust anchors"]</code>
+        on the two declared-but-unused direct dependencies
+        (<code>rustls-pki-types</code>, <code>rustls-webpki</code>).</td>
+        <td>F-05; <code>Cargo.toml:199-200</code></td>
+        <td>Unused direct pins cost supply-chain review surface for no benefit
+        today.</td></tr>
+      <tr><th scope="row">R-5</th>
+        <td>Make the exchange class a parameter of <code>start_exchange</code> so
+        the serving/probe mark cannot be reordered past the guard.</td>
+        <td>F-06; <code>src/startup_dns.rs:2971-3007</code></td>
+        <td>Removes a silent degradation mode from the refresh path.</td></tr>
+      <tr><th scope="row">R-6</th>
+        <td>Decide whether multi-record pre-hello fragmentation is a stated
+        requirement before shrinking the 64 KiB inspector buffers; treat the
+        4× headroom as the memory lever only under that decision.</td>
+        <td>F-04; <code>src/client_hello.rs:6-21</code>, <code>:410-419</code></td>
+        <td>The 64 MiB inspector headroom is the cheapest memory lever but the one
+        most likely to break an adversarial fixture.</td></tr>
+      <tr><th scope="row">R-7</th>
+        <td>State the terminal-sink behaviour as accepted risk in operator-facing
+        material: after the first hard stdout error, log loss is counted but
+        unrecoverable.</td>
+        <td>F-09; <code>src/log.rs:2094-2101</code>, <code>:1637-1646</code></td>
+        <td>Prevents discovering a silent observability loss during an incident.</td></tr>
+      <tr><th scope="row">R-8</th>
+        <td>Document the ten-variant <code>Stage</code> and the 3600-second
+        incident window as the current as-built values wherever the register is
+        quoted.</td>
+        <td>Appendix B verifies both discrepancies.</td>
+        <td>Ensures future readers anchor on source truth rather than the
+        preceding register’s “nine” stages and “3800 s” window.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="appendix-a">
+  <h2>Appendix A — Evidence map</h2>
+
+  <p>This appendix is the claim→citation index for the document. Every citation
+  was checked against the pinned revision <code>1362548705860…</code>; line
+  numbers are to that revision. Where a claim crosses registers (as-built /
+  recorded / spec), the register is named.</p>
+
+  <table>
+    <caption>Table 14 — Evidence map: section → primary citations.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Section / claim</th>
+        <th scope="col">Primary citation(s)</th>
+        <th scope="col">Register</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th scope="row">Fixed input, no CLI/env policy</th>
+        <td><code>src/main.rs:22</code> (<code>CONFIG_PATH</code>); schema-strict
+        load at <code>src/config.rs:700-820</code> region</td>
+        <td>as-built (+ spec §Configuration &amp; DNS)</td></tr>
+      <tr><th scope="row">Privilege floor / exit codes</th>
+        <td><code>src/preflight.rs:96-116</code>; <code>src/main.rs:23-24</code>;
+        <code>src/boot.rs:7</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Listener conditionality / readiness rule</th>
+        <td><code>src/serve.rs:97-102</code>, <code>:104-112</code>,
+        <code>:1008</code>; <code>src/startup_dns.rs:49</code>;</td>
+        <td>as-built (+ spec <code>:108</code>)</td></tr>
+      <tr><th scope="row">F-01 early_data inert</th>
+        <td><code>src/config.rs:1110-1115</code>; <code>src/enforcement/state.rs:272-278</code>;
+        <code>:1415-1450</code> (test)</td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">F-02 DoT alloc</th>
+        <td><code>src/startup_dns.rs:1098-1120</code>, <code>:2090-2104</code>;
+        <code>src/startup_dns/dot_tests.rs:1344</code>, <code>:1416-1423</code>;
+        <code>src/startup_dns/tests.rs:1217-1224</code></td>
+        <td>as-built + recorded (witness bound 8)</td></tr>
+      <tr><th scope="row">F-03 memory floor</th>
+        <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code>,
+        <code>:273-285</code>; <code>src/main.rs:34-40</code></td>
+        <td>recorded measurement (print) + as-built plan</td></tr>
+      <tr><th scope="row">F-04 inspector headroom</th>
+        <td><code>src/client_hello.rs:6-21</code>, <code>:410-419</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">F-05 unused deps</th>
+        <td><code>Cargo.toml:199-200</code>; grep over <code>src/</code>/<code>tests/</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">F-06 exchange class</th>
+        <td><code>src/startup_dns.rs:2971-3007</code>, <code>:1613-1621</code>;
+        <code>src/runtime.rs:258-262</code>, <code>:345</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">F-07 slot reset no zeroize</th>
+        <td><code>src/serving.rs:774-803</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">F-08 API surface</th>
+        <td><code>src/lib.rs:4-27</code>; <code>src/serving.rs:1157</code>;
+        <code>src/runtime.rs:207</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">F-09 terminal sink</th>
+        <td><code>src/log.rs:2094-2101</code>, <code>:1637-1646</code>,
+        <code>:1668-1677</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">F-10 single clock</th>
+        <td><code>src/serve.rs:204-227</code>; <code>src/worker.rs:97-105</code>;
+        <code>src/startup_dns.rs:1369-1381</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">F-11 CNAME bailiwick</th>
+        <td><code>src/dns.rs:863-953</code>; <code>src/config.rs:1244-1262</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Stage machine (10 states)</th>
+        <td><code>src/serving.rs:340-351</code></td>
+        <td>as-built (discrepancy: register says 9)</td></tr>
+      <tr><th scope="row">CONNECT parse bounds &amp; bare-CR/LF</th>
+        <td><code>src/connect.rs:13</code>, <code>:103</code>, <code>:185</code>,
+        <code>:289</code>, <code>:332-340</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Admission / 503 / backoff</th>
+        <td><code>src/serving.rs:96-98</code>, <code>:201-202</code>,
+        <code>:1808-1836</code>; <code>src/worker.rs:42-55</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Refusal matrix</th>
+        <td><code>src/serving/policy.rs:8-24</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Violation lattice (6) / effects (4)</th>
+        <td><code>src/enforcement/policy.rs:89-97</code>, <code>:100-105</code>,
+        <code>:113-146</code>; <code>AnyIllegalCause KIND_COUNT :84-87</code></td>
+        <td>as-built (register agrees: “six”)</td></tr>
+      <tr><th scope="row">Per-class gates / non-zero defaults</th>
+        <td><code>src/enforcement/state.rs:12-17</code>, <code>:26-46</code>,
+        <code>:71-77</code>, <code>:272-278</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Monitor facts (10 recorders)</th>
+        <td><code>src/enforcement/monitor.rs:12-26</code>, <code>:178-290</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Log ring / drain / priority</th>
+        <td><code>src/log.rs:53-72</code>, <code>:1429-1441</code>,
+        <code>:2045-2123</code>, <code>:2163-2174</code>, <code>:2205-2266</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Incident report</th>
+        <td><code>src/incident_report.rs:14-15</code>, <code>:99-119</code>,
+        <code>:242-250</code>; <code>src/serve.rs:431-485</code></td>
+        <td>as-built (recorded rotation 3600 s)</td></tr>
+      <tr><th scope="row">DNS parse / bailiwick / tid match</th>
+        <td><code>src/dns.rs:366-428</code>, <code>:863-953</code>,
+        <code>:983-1027</code>, <code>:1181-1183</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Resolver classifier</th>
+        <td><code>src/resolver.rs:215-235</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Startup DNS machine / deadlines</th>
+        <td><code>src/startup_dns.rs:48-49</code>, <code>:667</code>,
+        <code>:1147-1282</code>, <code>:1363-1381</code>, <code>:2971-3007</code>,
+        <code>:3216-3230</code>, <code>:3523-3577</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Single-reactor / run_once / events swap</th>
+        <td><code>src/serving.rs:117</code>, <code>:1049</code>, <code>:1263-1308</code>;
+        <code>src/runtime.rs:26-43</code></td>
+        <td>as-built (U-01/U-02)</td></tr>
+      <tr><th scope="row">DoT trust / pin-or-nothing</th>
+        <td><code>src/startup_dns.rs:827-859</code>, <code>:851-857</code>;
+        <code>src/main.rs:127-143</code></td>
+        <td>as-built</td></tr>
+      <tr><th scope="row">Printed lower bound (214 665 002)</th>
+        <td><code>src/main.rs:34-40</code>; <code>src/inventory.rs:192-196</code>;
+        <code>docs/architecture.md:570</code></td>
+        <td>recorded measurement</td></tr>
+      <tr><th scope="row">Spec intent citations</th>
+        <td><code>docs/alumina-proxy.md</code> §Design philosophy, §Protocol
+        contract, §Authorization, §Configuration &amp; DNS, §Memory, §Verification,
+        <code>:434</code> historical table row</td>
+        <td>spec intent</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="appendix-b">
+  <h2>Appendix B — Method, identity, verification</h2>
+
+  <h3>B.1 Method</h3>
+  <p>This document was produced by a source-only reading pass over the pinned
+  revision. No build, test, formatter, linter, git mutation, or long-running
+  command was executed to produce its findings; every architectural claim is a
+  static reading. Unknowns are enumerated explicitly (Table 12) rather than resolved
+  by inference, and no finding is upgraded to a strength the reading cannot
+  support. The three registers (as-built / recorded measurement / spec intent) are
+  labelled inline whenever they diverge.</p>
+
+  <h3>B.2 Identity and authority</h3>
+  <ul>
+    <li><strong>Scope:</strong> <code>/Users/anders.jensen/code/alumina-proxy</code>,
+    single deliverable <code>docs/architecture.html</code>, produced in this mission;
+    documentation only — no source, test, or manifest change. No <code>git</code>
+    mutation was performed by this document; worktree left clean of changes
+    beyond this file.</li>
+    <li><strong>Revision:</strong> HEAD <code>1362548705860e186e5b0fc6cfb71521ccd94e04</code>,
+    <code>main</code>. Source reviewed at
+    <code>3f587e947fa8f050954b2f1fa7ec6b47012ac769</code>. Verified at HEAD;
+    <code>git status --porcelain</code> was empty apart from the new
+    deliverable and unrelated pre-existing work owned by other jobs.</li>
+    <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
+    <code>e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401</code>
+    (matches the pinned digest); referenced as spec intent only.</li>
+    <li><strong>Severity scale:</strong> S1 = correctness/security risk reachable
+    in the shipped configuration; S2 = contract or capacity mismatch that will
+    mislead an operator or next maintainer; S3 = maintainability/hygiene with
+    bounded blast radius; S4 = informational/positive. No S1 was found.</li>
+  </ul>
+
+  <h3>B.3 Verified discrepancies against the preceding register</h3>
+  <p class="discrepancy" role="note">
+  <strong>Two discrepancies are recorded verbatim (source is the authority; the
+  preceding register is not copied where it disagrees):</strong></p>
+  <ul>
+    <li><strong>D-1 (Stage count).</strong> <code>Stage</code> has
+    <strong>10</strong> variants (<code>src/serving.rs:340-351</code>): Idle,
+    ReadingConnect, RunningDecision, Dialing, SendingConnected, ValidatingHello,
+    WritingHello, Relay, Refusing(&amp;'static [u8]), Closing. The preceding
+    register lists “nine”.</li>
+    <li><strong>D-2 (Incident window).</strong> <code>REPORT_WINDOW_SECS = 3600</code>
+    (<code>src/incident_report.rs:14-15</code>). The preceding register’s “3800 s”
+    rotation does not match source; the recorded as-built value is 3600 s.</li>
+  </ul>
+
+  <h4>D-1 dialogue (the ten-state Stage machine)</h4>
+  <p>The ten states are mutually exclusive: <code>Idle</code> is the free state;
+  <code>Refusing</code> and <code>Closing</code> are terminal stages; the absolute
+  setup deadline covers every pre-gate stage, while <code>Dialing</code>
+  additionally carries the per-attempt connect deadline; and
+  <code>RelayActive</code> is the single open-gate phase. The register’s
+  “nine” likely folded `Refusing` into `Closing`; the source keeps them distinct
+  (`Refusing` carries the static refusal body pointer).</p>
+
+  <h4>B.4 Verification of this document</h4>
+  <ul>
+    <li><strong>Structural:</strong> standalone single file; inline CSS and SVG;
+    no external assets, no script/link/iframe elements, no CSS resource
+    references, no <code>src=</code> attributes, and no absolute URLs. Validated
+    structurally with a Node audit (unique ids, fragment closure, no external
+    tokens, tag balance) plus a citation-bounds check.</li>
+    <li><strong>Compliance gate (mission-run, documented here for the record):</strong>
+    <code>sh scripts/verify.sh docs</code> exits 0 (docslink, intended-coverage,
+    cfg-test-parentage, unsafe-surface, canonical-digest all pass); the
+    <code>docs/alumina-proxy.md</code> digest above is unchanged; the document
+    adds exactly one untracked file and touches none already tracked.</li>
+    <li><strong>Citation rule:</strong> every <code>F-</code>/<code>U-</code> item
+    carries at least one <code>src/*.rs:line</code> or <code>tests/*.rs:line</code>
+    citation that was checked against the pinned revision; no line number in
+    this document was invented.</li>
+  </ul>
+</section>
+
+</main>
+</body>
+</html>
+<!-- → to: moltke | status: complete | next_input: verify and publish docs/architecture.html; flag D-1..D-2 (Stage=10, incident window=3600) against the register; no code diff | artefact: docs/architecture.html -->
