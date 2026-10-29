@@ -162,7 +162,7 @@ for root in $DOCSLINK_ROOTS; do
         *) GATE_ROOT_EXTRAS="$GATE_ROOT_EXTRAS $root" ;;
     esac
 done
-IDENTITY_FILES="$INTENDED .gitignore$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs scripts/html_check.mjs scripts/html_check_test.mjs $HTML_DOC_ROOTS docs/architecture-review.md"
+IDENTITY_FILES="$INTENDED .gitignore$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs scripts/html_check.mjs scripts/html_check_test.mjs $HTML_DOC_ROOTS"
 
 # Snapshot locations live under target/ (gitignored) so they never alter the
 # working-tree scope recorded in the status snapshot. scripts/verify.sh is itself
@@ -1196,11 +1196,9 @@ identity_snapshot() {
     # The appended inputs are identity-carried, not gate roots: the docslink/
     # citation gate files (scripts/docs_check/*), the structural HTML gate and
     # its regression fixture (scripts/html_check.mjs and
-    # scripts/html_check_test.mjs), the html_check root (docs/architecture.html
-    # via $HTML_DOC_ROOTS, expanded here to exactly one path), and
-    # docs/architecture-review.md (an identity-only Markdown companion read by
-    # no gate — tracked so drift in the reviewed artefact's review cannot escape
-    # the boundary snapshot). Word-splitting thus yields exactly the intended
+    # scripts/html_check_test.mjs), and the html_check root
+    # (docs/architecture.html via $HTML_DOC_ROOTS, expanded here to exactly one
+    # path). Word-splitting thus yields exactly the intended
     # paths. The hasher's stderr is
     # retained so a failed hash names the failing input; it is surfaced before
     # removal, never masked.
