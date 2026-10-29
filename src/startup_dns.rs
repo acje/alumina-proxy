@@ -210,7 +210,7 @@ enum ExchangeResult {
 /// cancels only a retained [`ExchangeClass::Startup`] exchange; a serving
 /// refresh ([`ExchangeClass::Serving`]) and a post-window probe or
 /// corroboration ([`ExchangeClass::Probe`]) are owned by the serving path and
-/// are never cancelled there (docs/alumina-proxy.md:64-65, :826).
+/// are never cancelled there (docs/alumina-proxy.md:107, :627-642, :1196).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExchangeClass {
     /// A startup-window exchange owned by the single boot owner.
@@ -243,7 +243,7 @@ struct ActiveExchange {
     /// The class the caller chose at start. The runtime cancellation guard
     /// cancels only a retained [`ExchangeClass::Startup`] exchange; a serving
     /// refresh and a post-window probe are owned by the serving path and are
-    /// never cancelled there (docs/alumina-proxy.md:826).
+    /// never cancelled there (docs/alumina-proxy.md:107, :627-642, :1196).
     class: ExchangeClass,
     /// The cache entry generation captured at exchange start. Apply compares
     /// the staged result against this captured value so an obsolete result
@@ -2923,10 +2923,15 @@ impl StartupDns {
     /// Starts a cooperative DNS exchange without waiting for network
     /// readiness: it opens-or-reuses the transport connection, draws a fresh
     /// transaction id, builds the fixed query, and records the exchange
-    /// (name/family/absolute deadline) so subsequent
-    /// [`Self::advance_exchange`] turns can conclude it. Counted per-exchange
-    /// network failures never surface here; they terminate a later turn as
-    /// [`TurnResult::Failed`].
+    /// (name/family/absolute deadline/class) so subsequent
+    /// [`Self::advance_exchange`] turns can conclude it. The required
+    /// [`ExchangeClass`] is chosen by the caller at start and decides whether
+    /// the serving runtime's cancellation guard may cancel the exchange: a
+    /// retained [`ExchangeClass::Startup`] exchange is cancelled at the next
+    /// serving turn, while [`ExchangeClass::Serving`] and
+    /// [`ExchangeClass::Probe`] exchanges are owned by the serving path and
+    /// survive it. Counted per-exchange network failures never surface here;
+    /// they terminate a later turn as [`TurnResult::Failed`].
     ///
     /// # Errors
     ///
@@ -3361,7 +3366,8 @@ impl StartupDns {
     /// nothing to do (no pending request, a single-resolver set, or a stale
     /// request already concluded). The corroboration targets the next
     /// configured resolver after the active one and runs as a pure-sensor
-    /// probe (initial generation, probe flag) so it never applies cache state;
+    /// probe (initial generation, [`ExchangeClass::Probe`]) so it never applies
+    /// cache state;
     /// on conclusion the active resolver is restored or its degradation
     /// advanced (alox18). While any exchange or probe is in flight the call
     /// defers and preserves the pending request (single-active guard).

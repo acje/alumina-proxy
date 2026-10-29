@@ -2997,6 +2997,14 @@ fn sweep_next_probe_relocates_and_starts_the_first_unprobed_resolver() {
         transport.has_active_exchange(),
         "the probe exchange is in flight"
     );
+    assert!(
+        transport
+            .active
+            .as_ref()
+            .is_some_and(|ex| ex.class == ExchangeClass::Probe),
+        "the sweep probe exchange is classed Probe so the serving runtime's \
+         startup-cancellation guard never mistakes it for retained startup work"
+    );
 }
 
 #[test]

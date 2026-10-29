@@ -1566,14 +1566,18 @@ fn retained_startup_exchange_cannot_advance_body() {
     drop(responder);
 }
 
-/// F-06 regression: a serving-runtime refresh started with
-/// [`ExchangeClass::Serving`] must survive the next serving turn. The startup
-/// cancellation guard runs at the top of every turn (runtime.rs:258-262) ahead
-/// of the refresh scheduling and cooperative turn (:270); an exchange whose
-/// class were forgotten would read as Startup and be cancelled there, losing
-/// the refresh. The typed class makes the forgotten state unrepresentable;
-/// this test drives a Serving refresh through that exact window and asserts it
-/// survives and concludes through the serving turns.
+/// F-06 regression, production-path pin: a due schedule and an idle serving
+/// owner must auto-start a refresh through [`Runtime::starts_due_dns_if_idle`]
+/// (runtime.rs:323-351) — the only serving classification site — and that
+/// started exchange must carry [`ExchangeClass::Serving`]. The startup
+/// cancellation guard at the top of every turn (runtime.rs:258-262) cancels
+/// only a retained [`ExchangeClass::Startup`] exchange; a refresh whose class
+/// were mis-started at the production site would read as retained startup work
+/// and be cancelled there, losing the refresh. The typed class makes the
+/// forgotten state unrepresentable; this test drives the production site
+/// through a due schedule and pins the classification via
+/// [`StartupDns::active_is_serving`] without re-supplying the class at a test
+/// call site.
 fn serving_refresh_survives_next_turn_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
@@ -1581,50 +1585,78 @@ fn serving_refresh_survives_next_turn_body() {
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
     let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
-    let (responder_addr, responder) = spawn_responder_keep_alive();
+    // The stall responder withholds the answer for 300 ms so the started
+    // exchange cannot conclude inside its start turn (`DNS_ADVANCE_BOUND = 8`,
+    // runtime.rs:24) and the in-flight classification can be observed
+    // deterministically.
+    let (responder_addr, responder) = spawn_stall_responder();
 
     runtime
         .serving
         .storage_mut()
         .dns_mut()
         .set_peer_for_test(responder_addr);
+    let secs = runtime.serving().storage().dns().now_u64();
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(
-            0,
-            Family::A,
-            Instant::now() + Duration::from_secs(10),
-            ExchangeClass::Serving,
-        )
-        .expect("start a serving refresh");
-
-    runtime
-        .turn(Some(Duration::from_millis(2)))
-        .expect("one serving turn");
-
+        .schedules_mut()
+        .overwrite_due_at(0, Family::A, secs)
+        .expect("due the A family now");
     assert!(
-        runtime.serving.storage().dns().has_active_exchange(),
-        "a Serving-class refresh must survive the next turn's startup-exchange \
-         cancellation guard (runtime.rs:258-262)"
+        !runtime.serving().storage().dns().has_active_exchange(),
+        "the retained transport must be idle before the due refresh"
     );
 
-    let mut published = false;
+    let mut started = false;
     for _ in 0..200 {
         runtime
-            .turn(Some(Duration::from_millis(5)))
+            .turn(Some(Duration::from_millis(2)))
             .expect("owner turn");
-        if name_published(&runtime, 0, Family::A) {
-            published = true;
-            break;
-        }
-        if !runtime.serving.storage().dns().has_active_exchange() {
+        if runtime.serving().storage().dns().has_active_exchange() {
+            started = true;
             break;
         }
     }
     assert!(
-        published,
-        "the survived Serving refresh must conclude and publish through the serving turns"
+        started,
+        "an idle serving owner must auto-start the due refresh through \
+         the production starts_due_dns_if_idle path"
+    );
+    assert!(
+        runtime.serving().storage().dns().active_is_serving(),
+        "the production-started refresh must be classified Serving \
+         (active_is_serving), not re-supplied at a test call site"
+    );
+
+    runtime
+        .turn(Some(Duration::from_millis(2)))
+        .expect("one more serving turn");
+
+    assert!(
+        runtime.serving().storage().dns().has_active_exchange(),
+        "a Serving-class refresh must survive the next turn's startup-exchange \
+         cancellation guard (runtime.rs:258-262)"
+    );
+    assert!(
+        runtime.serving().storage().dns().active_is_serving(),
+        "and must still be classified Serving after that turn"
+    );
+
+    let mut concluded = false;
+    for _ in 0..200 {
+        runtime
+            .turn(Some(Duration::from_millis(5)))
+            .expect("owner turn to conclusion");
+        if !runtime.serving().storage().dns().has_active_exchange() {
+            concluded = true;
+            break;
+        }
+    }
+    assert!(
+        concluded,
+        "the survived Serving refresh must conclude through the serving turns \
+         once the stall responder answers, not hang"
     );
     drop(responder);
 }
