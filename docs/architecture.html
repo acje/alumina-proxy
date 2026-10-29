@@ -120,9 +120,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   driven, DNS-conditional <code>CONNECT</code> proxy. After a startup DNS window of at most
   90&nbsp;s it opens the listener early once every name is usable, else Full or Degraded
   at the deadline; it enforces a
-  two-barrier forwarding gate per tunnel; it allocates its working set once at boot
-  and never frees it; and it treats every enforcement deviation as a counted,
-  observable fact rather than a silent pass.</p>
+  two-barrier forwarding gate per tunnel; it allocates its retained working set
+  once at boot and never frees it — the plain-DNS profile, with a DoT resolver
+  additionally allocating per connect (F-02); and it treats every enforcement
+  deviation as a counted, observable fact rather than a silent pass.</p>
   <p class="meta"><strong>Method:</strong> three registers are kept distinct
   throughout. <em>Observed as-built</em> records what the source at the pinned
   revision does (each claim cites <code>src/*.rs</code> or <code>tests/*.rs</code>).
@@ -176,7 +177,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       reachable raw effects never fire it. Not a bypass, but a semantics gap.</li>
       <li><strong>F-02 (S2) — a contract wording gap:</strong> “no post-boot
       heap allocation” holds for the plain-DNS profile only; a DoT resolver
-      allocates on every connect and up to a bounded 8 events per warm exchange.</li>
+      allocates on every connect and, on the one warm successful-exchange
+      fixture, up to eight allocations and up to eight deallocations (a
+      calibrated fixture bound, not a universal or total bound). Resolving the
+      fixed-profile mismatch is an owner decision
+      (<code>alumina-szmy0.11</code>).</li>
       <li><strong>F-03 (S2) — capacity:</strong> the retained boot floor is
       ≈&nbsp;204.6&nbsp;MiB (≈&nbsp;409&nbsp;KiB/tunnel), not the 128&nbsp;MiB
       traffic-store headline; the printed lower bound is
@@ -387,8 +392,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td class="sev">S2</td>
         <td>Contract wording</td>
         <td>“No post-boot heap allocation” holds for the plain-DNS profile only.
-        A DoT resolver allocates on every connect and up to a witnessed bound of
-        ≤ 8 events per warm exchange; the boot-window zero-allocation witness
+        A DoT resolver allocates on every connect (per-TLS-upgrade) and, on the
+        one warm successful-exchange fixture, up to eight allocations and up to
+        eight deallocations — a calibrated witness bound on that fixture, not a
+        universal or total bound; the boot-window zero-allocation witness
         qualifies itself to bare-IP/plain DNS.</td>
         <td><code>src/startup_dns.rs:1101-1120</code>, <code>:2090-2104</code>;
         <code>src/startup_dns/dot_tests.rs:1344</code>, <code>:1416-1423</code>;
@@ -528,15 +535,24 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   an <code>Arc&lt;AluminaServerCertVerifier&gt;</code>, and the rustls
   <code>ClientConnection</code> with its internal buffers; the connection itself
   is moved into a <code>Box</code> at <code>:2090-2104</code>.</p>
-  <p>The warm path still allocates, but bounded: the repository’s own witness caps
-  it at <code>WARM_DOT_ALLOC_BOUND = 8</code> and asserts the cap
-  (<code>src/startup_dns/dot_tests.rs:1344</code>, <code>:1416-1423</code>). The
-  boot-window zero-allocation witness is explicit that it applies to the
+  <p>The warm path still allocates, but bounded: the repository’s own witness — a
+  single warm successful-exchange fixture — asserts up to eight allocations
+  <em>and</em> up to eight deallocations independently against
+  <code>WARM_DOT_ALLOC_BOUND = 8</code>
+  (<code>src/startup_dns/dot_tests.rs:1340-1348</code>, <code>:1416-1423</code>).
+  That is a calibrated fixture bound, never a universal protocol bound and never
+  an eight-<em>total</em>-event maximum; the fixture counts allocation events on
+  that exchange (per-TLS-upgrade allocation, with close/reconnect paths dropping
+  TLS state, <code>src/startup_dns.rs:2096-2102</code>), which is total heap
+  activity there, distinct from the retained named storage the inventory reports.
+  The boot-window zero-allocation witness is explicit that it applies to the
   bare-IP/plain-DNS resolver only (<code>src/startup_dns/tests.rs:1217-1224</code>).
   The claim “no post-boot heap alloc/dealloc” is therefore true for the plain
   profile and false as written for a DoT profile — a contract-wording problem
   with a real consequence: a reviewer can read a green alloc-witness run as proof
-  of a global property. <a href="#recommendations">Recommendation R-2</a>.</p>
+  of a global property. Resolving the fixed-profile mismatch is an owner decision
+  (owning bead <code>alumina-szmy0.11</code>); this document does not resolve it.
+  <a href="#recommendations">Recommendation R-2</a>.</p>
 
   <h3>2.3 F-03 — retained boot floor ≈ 204.6 MiB, not 128 MiB (S2)</h3>
   <p>The traffic store alone is 128 MiB: <code>TUNNEL_SLOTS = 512</code> ×
@@ -725,8 +741,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>Violation lattice (6), effect projection (4), per-class <code>AllScopeGate</code>s, <code>DomainOrdinal</code>, monitor facts (10 recorders).</td>
         <td><code>src/enforcement/policy.rs:89-97</code>, <code>:100-146</code>; <code>state.rs:71-77</code>, <code>:272-278</code>; <code>action.rs:98-132</code>; <code>monitor.rs:12-26</code></td></tr>
       <tr><th scope="row"><code>dns</code>/<code>schedule</code>/<code>cache</code></th>
-        <td>DNS parse + bailiwick; TTL-clamped refresh (5–900 s) with retry backoff
-        [1,2,4,8,16,30]; generation-tagged cache with stale-publish rejection.</td>
+        <td>DNS parse + bailiwick; refresh on a nonzero positive TTL clamped to
+        5–900 s, zero TTL at 1 s (no stale serving), validated negative SOA
+        30–900 s; retry backoff [1,2,4,8,16,30]; generation-tagged cache with
+        stale-publish rejection.</td>
         <td><code>src/dns.rs:863-953</code>, <code>:983-1027</code>; <code>schedule.rs:16</code>, <code>:56-69</code>;
         <code>cache.rs:50-62</code>, <code>:373-382</code></td></tr>
       <tr><th scope="row"><code>resolver</code></th>
@@ -1096,17 +1114,24 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/config.rs:1074-1082</code>, see <a href="#discoveries-table">F-01</a>).</p>
 
   <h3>6.2 DoT trust: pin-or-nothing</h3>
-  <p>The DoT client pins via <code>#pin-sha256=</code> and checks SPKI + SNI/SAN
-  only; certificate validity dates are turned into a counted warning
-  (<code>expired_pin_certs</code>) rather than a rejection
-  (<code>src/startup_dns.rs:827-859</code>, <code>:846-848</code>). Without a pin,
-  chain validation runs against an explicitly empty root store and therefore
-  always fails — a deliberate “no trust anchors yet” position that surfaces as
-  startup warnings (<code>src/startup_dns.rs:851-857</code>,
-  <code>src/main.rs:127-143</code>). The result is deliberate: a
-  pin is the only trust. “<code>IP#fqdn</code> without pin” is a deterministically
-  unusable resolver rather than a degraded one — which is a defensible choice that
-  any operator documentation must state plainly.</p>
+  <p>The DoT client pins via <code>#pin-sha256=</code> and authenticates the peer
+  three ways: SNI/SAN matching against the server name, a SHA-256 digest of the
+  end-entity certificate’s SPKI compared against the pin when one is configured,
+  and TLS 1.2/1.3 handshake-signature verification with the configured provider
+  algorithms — the peer must prove possession of the pinned certificate’s private
+  key (<code>src/startup_dns.rs:827-859</code>, <code>:861-877</code>). Certificate
+  validity-window exclusion is best-effort and counted only when the DER validity
+  parse succeeds (<code>expired_pin_certs</code>, <code>:846-848</code>); the DER
+  walk fails open, so a parse anomaly reports no warning rather than a rejection
+  (<code>:1074-1085</code>) — pin-or-nothing and fail-open validity parsing stay
+  distinct facts. Without a pin, chain validation runs against an explicitly
+  empty root store and therefore always fails — a deliberate “no trust anchors
+  yet” position that surfaces as startup warnings
+  (<code>src/startup_dns.rs:851-857</code>, <code>src/main.rs:127-143</code>). The
+  result is deliberate: a pin is the only trust. “<code>IP#fqdn</code> without
+  pin” is a deterministically unusable resolver rather than a degraded one —
+  which is a defensible choice that any operator documentation must state
+  plainly.</p>
 
   <figure>
     <svg role="img" aria-labelledby="fig5-title" aria-describedby="fig5-desc"
@@ -1115,11 +1140,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <desc id="fig5-desc">Startup: a maximum 90-second window opens early only when
       every allowlist name is usable; at the deadline it opens Full (zero unresolved)
       or Degraded (within allowance), else exits 75; a first-observed SIGTERM
-      short-circuits as Terminated and never binds. In serving, refresh is scheduled
-      from each entry's TTL clamped to the fixed 5–900 s bounds for a cacheable
-      positive; a validated negative with an SOA reschedules from the SOA
-      clamped to 30–900 s, and a negative or failed exchange without an SOA
-      resumes via the retry backoff ladder 1/2/4/8/16/30 s.
+      short-circuits as Terminated and never binds. In serving, refresh is
+      scheduled from each entry's TTL — a nonzero positive clamped to the fixed
+      5–900 s bounds, a zero TTL refreshing at 1 s with no stale serving; a
+      validated negative with an SOA reschedules from the SOA clamped to
+      30–900 s, and a negative or failed exchange without an SOA resumes via the
+      retry backoff ladder 1/2/4/8/16/30 s.
       Failover relocates to the next resolver after counted failures, failback
       returns after 900 s with three consecutive successes; probes are pure
       sensors that never apply cache.</desc>
@@ -1141,11 +1167,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 
       <rect x="640" y="30" width="180" height="150" rx="8" fill="#fdf4f4" stroke="#7c2d12" stroke-width="1.5"/>
       <text x="730" y="52" text-anchor="middle" font-size="12" font-weight="700">DoT profile</text>
-      <text x="730" y="74" text-anchor="middle" font-size="11">FQDN ⇒ :853 + pin</text>
-      <text x="730" y="92" text-anchor="middle" font-size="11">SPKI/SAN only; expiry</text>
-      <text x="730" y="110" text-anchor="middle" font-size="11">counted not fatal</text>
-      <text x="730" y="128" text-anchor="middle" font-size="11">no pin ⇒ unusable,</text>
-      <text x="730" y="144" text-anchor="middle" font-size="11">warned at startup</text>
+      <text x="730" y="72" text-anchor="middle" font-size="11">FQDN ⇒ :853 + pin</text>
+      <text x="730" y="87" text-anchor="middle" font-size="11">SPKI + SNI/SAN</text>
+      <text x="730" y="102" text-anchor="middle" font-size="11">+ handshake signature</text>
+      <text x="730" y="117" text-anchor="middle" font-size="11">expiry: counted not fatal</text>
+      <text x="730" y="133" text-anchor="middle" font-size="11">no pin ⇒ unusable,</text>
+      <text x="730" y="149" text-anchor="middle" font-size="11">warned at startup</text>
 
       <line x1="280" y1="105" x2="338" y2="105" stroke="#1a4d80" stroke-width="2"/>
       <polygon points="338,100 351,105 338,110" fill="#1a4d80"/>
@@ -1157,8 +1184,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 
       <rect x="40" y="262" width="180" height="80" rx="6" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
       <text x="130" y="284" text-anchor="middle" font-size="11" font-weight="700">Refresh schedule</text>
-      <text x="130" y="300" text-anchor="middle" font-size="10.5">TTL-clamped 5–900 s</text>
-      <text x="130" y="316" text-anchor="middle" font-size="10.5">per name × family</text>
+      <text x="130" y="300" text-anchor="middle" font-size="10.5">positive TTL 5–900 s</text>
+      <text x="130" y="316" text-anchor="middle" font-size="10.5">zero TTL ⇒ 1 s</text>
+      <text x="130" y="332" text-anchor="middle" font-size="10.5">neg SOA 30–900 s</text>
 
       <rect x="240" y="262" width="180" height="80" rx="6" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
       <text x="330" y="284" text-anchor="middle" font-size="11" font-weight="700">Failover</text>
@@ -1176,10 +1204,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <text x="720" y="316" text-anchor="middle" font-size="10.5">applies cache state</text>
     </svg>
     <figcaption>Figure 5 — The DNS/DoT path. Startup classifies once; serving
-    refreshes on a TTL-clamped 5–900 s schedule over the retained exchange
-    (30–900 s from a validated negative's SOA, 1/2/4/8/16/30 s retry backoff
-    when no SOA backs the failure); failover must not silently downgrade, and
-    probes observe without acting on the cache.</figcaption>
+    refreshes on the entry's TTL — a nonzero positive clamped to 5–900 s, a zero
+    TTL at 1 s with no stale serving (30–900 s from a validated negative's SOA,
+    1/2/4/8/16/30 s retry backoff when no SOA backs the failure); failover must
+    not silently downgrade, and probes observe without acting on the
+    cache.</figcaption>
   </figure>
 
   <h3>6.3 The startup decision and its register</h3>
@@ -1199,9 +1228,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   prepares the schedule delta <em>before</em> mutating the cache
   (<code>src/dns.rs:366-428</code>; prepared deltas at <code>src/schedule.rs:358-391</code>,
   <code>:502-537</code>), so a <code>DeadlineOverflow</code> leaves both resources
-  untouched. Responses are matched on tid + qname + qtype + qclass + rcode
-  (<code>src/dns.rs:983-1027</code>), <code>DNAME</code> and trailing bytes are
-  rejected everywhere (<code>:1181-1183</code>).</p>
+  untouched. Responses are matched on tid + question fields (qname + qtype +
+  qclass) (<code>src/dns.rs:983-1027</code>); QR/opcode/TC are validated from
+  the response flags, and RCODE is classified or rejected — NOERROR/NXDOMAIN
+  are handled, every other RCODE is refused (<code>:1199-1230</code>) — so RCODE
+  is validated, not a query-equality field; <code>DNAME</code> and trailing bytes
+  are rejected everywhere (<code>:1181-1183</code>).</p>
 
   <h3>6.4 Per-entry CNAME bailiwick (F-11)</h3>
   <p>Each allowlist name derives its own bailiwick: itself plus only the CNAME
@@ -1226,9 +1258,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <tbody>
       <tr><th scope="row">Refresh schedule</th>
         <td>due time per name × family</td>
-        <td>TTL-clamped 5–900 s (positive); SOA-clamped 30–900 s (validated negative);
-        retry backoff [1,2,4,8,16,30] when no SOA backs a failure</td>
-        <td><code>src/schedule.rs:16</code> (backoff), <code>:56-69</code> (refresh bounds)</td></tr>
+        <td>nonzero positive TTL 5–900 s; zero TTL 1 s (no stale serving);
+        SOA-clamped 30–900 s (validated negative); retry backoff [1,2,4,8,16,30]
+        when no SOA backs a failure</td>
+        <td><code>src/schedule.rs:16</code> (backoff), <code>:51-60</code>,
+        <code>:64-69</code> (refresh bounds)</td></tr>
       <tr><th scope="row">Failover</th>
         <td>counted exchange failure</td>
         <td><code>degradations</code>, <code>active_resolver</code></td>
@@ -1279,8 +1313,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/cache.rs:66-77</code></td></tr>
       <tr><th scope="row">TTL clamping</th>
         <td><code>ttl.clamp(1, TTL_CAP)</code>; <code>TTL_CAP = 86 400</code> s
-        (L12) — an honored TTL is always 1 s … 86 400 s</td>
-        <td><code>src/cache.rs:18</code>, <code>:383</code></td></tr>
+        (L12) — an honored cache TTL is always 1 s … 86 400 s (the freshness
+        clamp; the <em>refresh</em> interval uses the schedule bounds instead:
+        5–900 s nonzero positive, 1 s zero). A zero-TTL origin is fresh for 1 s
+        and never served stale.</td>
+        <td><code>src/cache.rs:18</code>, <code>:383</code>, <code>:412</code></td></tr>
       <tr><th scope="row">Freshness deadline</th>
         <td>receipt + clamped TTL</td>
         <td><code>src/cache.rs:383-384</code></td></tr>
@@ -1433,8 +1470,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 <section id="memory">
   <h2>8. Memory envelope</h2>
 
-  <p>Alumina pre-allocates its working set once at boot and never frees it. The
-  authoritative plan is <code>inventory.rs</code> — a set of named constants and
+  <p>Alumina pre-allocates its retained working set once at boot and never frees
+  it — the plain-DNS profile; a DoT resolver additionally allocates per connect
+  (F-02, see §2.2). The authoritative plan is <code>inventory.rs</code> — a set
+  of named constants and
   type-derived figures that the binary prints at boot
   (<code>src/main.rs:34-40</code>), and that pinned ticket tests lock to exact
   values (<code>src/inventory.rs:273-285</code>). The number printed is
@@ -1515,10 +1554,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>src/serving.rs:1263</code>, <code>:1307</code>).</p>
   <p>F-02 is the honest restatement: it is not “the process never allocates after
   boot”; it is “the plain-DNS profile never allocates after boot, and the DoT
-  profile allocates per connect with a witnessed bound of ≤ 8 events per warm
-  exchange” (<code>src/startup_dns/dot_tests.rs:1344</code>, <code>:1416-1423</code>).
-  The boot-window zero-allocation witness says so in words
-  (<code>src/startup_dns/tests.rs:1217-1224</code>).</p>
+  profile allocates per connect (per-TLS-upgrade,
+  <code>src/startup_dns.rs:2096-2102</code>) — with, on its one warm
+  successful-exchange fixture, up to eight allocations and up to eight
+  deallocations while the transport stays realloc-free; that is total heap
+  activity on that exchange, distinct from the retained named storage the
+  inventory reports, and it is a calibrated fixture bound, not a universal or
+  total bound” (<code>src/startup_dns/dot_tests.rs:1340-1348</code>,
+  <code>:1416-1423</code>). The boot-window zero-allocation witness says so in
+  words (<code>src/startup_dns/tests.rs:1217-1224</code>). Resolving the
+  fixed-profile mismatch is an owner decision (owning bead
+  <code>alumina-szmy0.11</code>); this document does not resolve it.</p>
 
   <h3>8.3 The serving concurrency and scheduling envelope</h3>
   <p>The reactor is a single poll owner (<code>poll: Poll</code> on the
@@ -1739,10 +1785,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>10.4 Trust boundary summary — pin-or-nothing, no silent downgrade</h3>
   <p>Three trust statements summarize the boundary:</p>
   <ul>
-    <li><strong>DoT is pin-or-nothing.</strong> Without a pinned SPKI, chain
-    validation fails deterministically (empty root store) and the resolver is
-    unusable with a startup warning — there is no CA-validated mode in the current
-    build (<code>src/startup_dns.rs:851-857</code>).
+    <li><strong>DoT is pin-or-nothing.</strong> With a pin, the peer is
+    authenticated by SPKI + SNI/SAN matching and TLS 1.2/1.3 handshake-signature
+    verification — possession of the pinned certificate's private key
+    (<code>src/startup_dns.rs:827-859</code>, <code>:861-877</code>). Without a
+    pinned SPKI, chain validation fails deterministically (empty root store) and
+    the resolver is unusable with a startup warning — there is no CA-validated
+    mode in the current build (<code>src/startup_dns.rs:851-857</code>).
     <a href="#recommendations">R-1</a> proposes documenting this as operator
     doctrine.</li>
     <li><strong>Failover never downgrades identity.</strong> Relocations cannot
@@ -2025,8 +2074,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/runtime.rs:26-43</code></td>
         <td>as-built (U-01/U-02)</td></tr>
       <tr><th scope="row">DoT trust / pin-or-nothing</th>
-        <td><code>src/startup_dns.rs:827-859</code>, <code>:851-857</code>;
-        <code>src/main.rs:127-143</code></td>
+        <td><code>src/startup_dns.rs:827-859</code>, <code>:861-877</code>,
+        <code>:1074-1085</code>; <code>src/main.rs:127-143</code></td>
         <td>as-built</td></tr>
       <tr><th scope="row">Printed lower bound (214 665 002)</th>
         <td><code>src/main.rs:34-40</code>; <code>src/inventory.rs:192-196</code>;

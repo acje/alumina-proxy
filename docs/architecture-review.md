@@ -284,8 +284,11 @@ Design decisions that hold up:
   (`src/dns.rs:366-428`; prepared deltas at `src/schedule.rs:358-391`, `:502-537`), so a
   `DeadlineOverflow` leaves both resources untouched.
 * **Transaction id is CSPRNG-drawn per exchange** (`src/startup_dns.rs:1363-1366`) and the
-  response is matched on tid + qname + qtype + qclass + rcode (`src/dns.rs:983-1027`), with
-  `DNAME` rejected everywhere and trailing bytes rejected (`:1181-1183`).
+  response is matched on tid + question fields (qname + qtype + qclass) (`src/dns.rs:983-1027`);
+  QR/opcode/TC are validated from the response flags and RCODE is classified or rejected
+  (NOERROR/NXDOMAIN handled, every other RCODE refused, `:1199-1230`) — RCODE is validated, not
+  matched against the query — with `DNAME` rejected everywhere and trailing bytes rejected
+  (`:1181-1183`).
 * **Bailiwick is per-entry**, so one allowlist entry's declared CNAME suffixes cannot widen a
   neighbour's trust (`src/dns.rs:863-953`), and same-bare-name entries across ports must declare
   byte-identical suffix lists or boot fails (`src/config.rs:1244-1262`).
@@ -294,26 +297,35 @@ Design decisions that hold up:
   resolver set itself must be trust-homogeneous (`src/config.rs:829-836`).
 
 Trust model, stated precisely because it is easy to misread: with a `#pin-sha256=` pin, the
-verifier checks **SPKI pin + SNI/SAN only**, treating certificate validity dates as a warning
-counter (`ep`), never a rejection (`src/startup_dns.rs:827-859`, `:846-848`). Without a pin, chain
-validation runs against an explicitly empty root store (`:851-857`) and therefore always fails —
-a deliberate "no trust anchors yet" position that surfaces as startup warnings (`src/main.rs:127-143`).
-The consequence is that **DoT trust is pin-or-nothing**: there is no CA-validated mode in the
-current build. That is a legitimate choice, but it means "`IP#fqdn` without pin" is a
-deterministically unusable resolver rather than a degraded one.
+verifier checks **SPKI pin + SNI/SAN + TLS handshake-signature verification** — the peer must
+prove possession of the pinned certificate's private key (`src/startup_dns.rs:827-859`,
+`:861-877`). Certificate validity exclusion is best-effort and counted only when the DER validity
+parse succeeds (`ep`, `:846-848`); the DER walk fails open, so a parse anomaly reports no warning
+rather than a rejection (`:1074-1085`). Pin-or-nothing and fail-open validity parsing are distinct
+facts. Without a pin, chain validation runs against an explicitly empty root store (`:851-857`) and
+therefore always fails — a deliberate "no trust anchors yet" position that surfaces as startup
+warnings (`src/main.rs:127-143`). The consequence is that **DoT trust is pin-or-nothing**: there is
+no CA-validated mode in the current build. That is a legitimate choice, but it means "`IP#fqdn`
+without pin" is a deterministically unusable resolver rather than a degraded one.
 
 **F-03 (S2, allocation profile).** `build_tls_connection` (`src/startup_dns.rs:1101-1120`) allocates
-per connect: `Arc::new(provider)`, `ClientConfig` (containing `Arc`s and `Vec`s),
+per connect (per-TLS-upgrade): `Arc::new(provider)`, `ClientConfig` (containing `Arc`s and `Vec`s),
 `target.fqdn.as_str().to_owned()` (`String`), `Arc::new(AluminaServerCertVerifier)`,
-`ClientConnection::new` (rustls internal buffers), plus `Box::new(conn)` at `:2100`. The warm reuse
-path additionally allocates a bounded number of rustls per-record buffers — the repository's own
-witness caps that at `WARM_DOT_ALLOC_BOUND = 8` and asserts it
-(`src/startup_dns/dot_tests.rs:1344`, `:1416-1423`). The boot-window zero-allocation witness says in
-so many words that it qualifies the claim for a plain-DNS resolver only
+`ClientConnection::new` (rustls internal buffers), plus `Box::new(conn)` at `:2100`
+(`src/startup_dns.rs:2096-2102`); close/reconnect paths drop that TLS state. The warm reuse path
+additionally allocates a bounded number of rustls per-record buffers: the repository's own witness —
+a single warm successful-exchange fixture — asserts up to eight allocations **and** up to eight
+deallocations independently against `WARM_DOT_ALLOC_BOUND = 8`
+(`src/startup_dns/dot_tests.rs:1340-1348`, `:1416-1423`), with the transport itself realloc-free
+(`:1416-1419`). That is a calibrated fixture bound, not a universal protocol bound and never an
+eight-*total*-event maximum; it bounds total allocation activity on that one exchange, distinct
+from the retained named storage the inventory reports. The boot-window zero-allocation witness says
+in so many words that it qualifies the claim for a plain-DNS resolver only
 (`src/startup_dns/tests.rs:1217-1224`). So the fixed-profile statement "no post-boot heap
 alloc/dealloc" is true for the plain profile and *false as written* for a DoT profile. This is a
 contract-wording problem with a real consequence: an operator or reviewer can read a green
-alloc-witness run as proof of a global property.
+alloc-witness run as proof of a global property; resolving the fixed-profile mismatch is an owner
+decision (`alumina-szmy0.11`), not a documentation fix.
 
 ---
 
@@ -377,7 +389,7 @@ half-mutated state. For a single-binary security component this is the right com
 | ID | Sev | Area | Finding | Evidence |
 |---|---|---|---|---|
 | F-01 | S2 | Enforcement | `[early_data]` All-scope gate is unreachable; operator knob is inert | §7 above; `src/config.rs:1110-1115`, `src/enforcement/state.rs:271-277`, `:1415-1450` |
-| F-02 | S2 | Contract | "No post-boot heap alloc" holds only for plain DNS; DoT allocates per connect and ≤8 events per warm exchange | `src/startup_dns.rs:1101-1120`, `:2096-2102`; `src/startup_dns/tests.rs:1217-1224`; `dot_tests.rs:1344`, `:1416-1423` |
+| F-02 | S2 | Contract | "No post-boot heap alloc" holds only for plain DNS; DoT allocates per connect (per-TLS-upgrade) and, on its one warm successful-exchange fixture, up to eight allocations and up to eight deallocations — a calibrated fixture bound, not a total/universal bound; owner decision pending (`alumina-szmy0.11`) | `src/startup_dns.rs:1101-1120`, `:2096-2102`; `src/startup_dns/tests.rs:1217-1224`; `dot_tests.rs:1340-1348`, `:1416-1423` |
 | F-03 | S2 | Capacity | Retained boot floor ≈ 205 MiB (409 KiB/tunnel), vs a 128 MiB headline; inventory is an explicit lower bound | `src/inventory.rs:10-49`, `:176-196`, `:273-285` |
 | F-04 | S2 | Design economy | 64 KiB inspector buffers for a 16 KiB handshake cap = 64 MiB of the 76.6 MiB workspace headroom | `src/client_hello.rs:6-18`, `:411-419` |
 | F-05 | S3 | Supply chain | `rustls-pki-types` and `rustls-webpki` declared as direct deps, referenced by zero Rust files | `Cargo.toml:199-200`; grep over `src/`, `tests/`, `examples/` |
@@ -434,7 +446,7 @@ Used as *criteria* only (`AGENTS.md`), applied to code:
 |---|---|---|
 | Single boot owner, single serving owner | **Holds.** Linear consuming chain; `Preallocated` cannot serve; `attach` consumes. | `src/runtime.rs:40-172` |
 | Two reused 128 KiB buffers per tunnel | **Holds, but understates cost.** The pair is real, and each slot *also* retains 153 KiB of parser/inspector. | `src/inventory.rs:10-36`, `src/serving.rs:625-697` |
-| No post-boot heap alloc/dealloc | **Holds for plain DNS; qualified for DoT.** | `src/startup_dns/tests.rs:1217-1224`, `dot_tests.rs:1416-1423` |
+| No post-boot heap alloc/dealloc | **Holds for plain DNS; a real mismatch for a DoT profile** (a calibrated fixture bound, not documentation-qualified; owner decision owns resolution). | `src/startup_dns/tests.rs:1217-1224`, `dot_tests.rs:1340-1348`, `:1416-1423` |
 | No runtime-surface expansion (no CLI/env policy) | **Holds.** Fixed `config.toml`; only `/proc/self/status` is read; the `fixture-facts` feature is compile-time only. | `src/main.rs:22`, `:150-169`, `src/preflight.rs:123-130` |
 | No silent acceptance; tripwires fire on first deviation | **Holds in mechanism** (default threshold 1, first-slot latch, `Unknown` never `BaselineOnly`). **One lexicon gap**: the `[early_data]` bar is inert (F-01). | `src/enforcement/state.rs:12-17`, `policy.rs:113-146` |
 | Operator chooses the action; proxy owns the semantics | **Holds.** Actions/scopes are config; the latch, the two barriers, the refusal bodies and the two-barrier ordering are code constants. | `src/config.rs:855-999`, `src/gate.rs`, `src/serving/policy.rs:16-34` |
@@ -445,7 +457,8 @@ Used as *criteria* only (`AGENTS.md`), applied to code:
 ## 14. Recommended next steps (ordered by value/cost)
 
 1. **Decide the DoT allocation stance and write it down in the profile.** Either (a) keep the
-   bounded seam and state the profile as "plain: zero; DoT: bounded per-connect + ≤N per warm record",
+   bounded seam and state the profile as "plain: zero; DoT: bounded per-connect (per-TLS-upgrade),
+   up to eight allocations and up to eight deallocations per warm successful exchange",
    or (b) hoist the rustls `ClientConfig`/verifier to boot so only the `ClientConnection` allocates
    per connect. Option (b) removes the `Arc`/`String` churn and makes the per-connect cost one
    object; it does not remove rustls's internal allocations, so the profile must be qualified either
