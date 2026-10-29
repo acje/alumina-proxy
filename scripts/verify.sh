@@ -162,7 +162,7 @@ for root in $DOCSLINK_ROOTS; do
         *) GATE_ROOT_EXTRAS="$GATE_ROOT_EXTRAS $root" ;;
     esac
 done
-IDENTITY_FILES="$INTENDED .gitignore$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs scripts/html_check.mjs $HTML_DOC_ROOTS docs/architecture-review.md"
+IDENTITY_FILES="$INTENDED .gitignore$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs scripts/html_check.mjs scripts/html_check_test.mjs $HTML_DOC_ROOTS docs/architecture-review.md"
 
 # Snapshot locations live under target/ (gitignored) so they never alter the
 # working-tree scope recorded in the status snapshot. scripts/verify.sh is itself
@@ -900,8 +900,17 @@ html_structure_check() {
             done
             ;;
         1)
-            echo "HTML-STRUCTURE-FAIL (structural HTML defect: tag imbalance, duplicate id, dangling fragment, missing desc, or table cell-count mismatch)" >&2
-            exit 1
+            # The adapter emits HTML-CHECK-RESULT on every non-crash path, so on
+            # exit 1 the marker must be present before this is a structural
+            # defect. A missing marker means the adapter crashed (uncaught
+            # throw, syntax error): an operational failure, not a domain-negative
+            # verdict (error != negative finding).
+            if printf '%s\n' "$html_out" | grep -q '^HTML-CHECK-RESULT '; then
+                echo "HTML-STRUCTURE-FAIL (structural HTML defect: tag imbalance, duplicate id, dangling fragment, missing desc, or table cell-count mismatch)" >&2
+                exit 1
+            fi
+            echo "HTML-STRUCTURE-OP-FAIL (adapter exit 1 without an HTML-CHECK-RESULT marker)" >&2
+            exit 2
             ;;
         2)
             echo "HTML-STRUCTURE-OP-FAIL (operational or unsupported construct: unreadable file or unsupported HTML markup)" >&2
@@ -1183,8 +1192,16 @@ identity_snapshot() {
     errf="$dir/inputs.sha256.err"
     : >"$dir/inputs.sha256"
     # The batch expansion is intentionally unquoted: IDENTITY_FILES is a fixed,
-    # space-free set (INTENDED plus .gitignore and the docs roots), so
-    # word-splitting yields exactly the intended paths. The hasher's stderr is
+    # space-free set (INTENDED plus .gitignore and the docs-arm gate inputs).
+    # The appended inputs are identity-carried, not gate roots: the docslink/
+    # citation gate files (scripts/docs_check/*), the structural HTML gate and
+    # its regression fixture (scripts/html_check.mjs and
+    # scripts/html_check_test.mjs), the html_check root (docs/architecture.html
+    # via $HTML_DOC_ROOTS, expanded here to exactly one path), and
+    # docs/architecture-review.md (an identity-only Markdown companion read by
+    # no gate — tracked so drift in the reviewed artefact's review cannot escape
+    # the boundary snapshot). Word-splitting thus yields exactly the intended
+    # paths. The hasher's stderr is
     # retained so a failed hash names the failing input; it is surfaced before
     # removal, never masked.
     if [ "$IDENTITY_HASHER" = "sha256sum" ]; then

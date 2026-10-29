@@ -14,8 +14,10 @@
 //      id="frag" or name="frag" in the same document
 //   4. every <figure> contains a <desc> (a <desc> outside a figure is not
 //      required and never fails)
-//   5. table cell-count consistency: every <tr> in <tbody> has the same
-//      cell count as the <th> header row; a <table> with no <thead> fails
+//   5. table cell-count consistency: every <tr> inside a <table> (in <thead>,
+//      <tbody>, <tfoot>, or directly under <table>) has the same cell count as
+//      the <th> header row; a <table> with no <thead>, or a <thead> with no
+//      header cell row, fails (table-header-missing)
 //
 // Exit discipline (one-way split — operational never folds into 0/1):
 //   0  every input clean
@@ -217,7 +219,9 @@ async function checkOne(f) {
       if (top.isTable) {
         if (!top.foundThead) {
           sf(top.line, 'table-header-missing', 'table has no <thead> header row')
-        } else if (top.headerCount !== null) {
+        } else if (top.headerCount === null) {
+          sf(top.line, 'table-header-missing', 'table <thead> has no header cell row')
+        } else {
           for (const row of top.bodyRows) {
             if (row.cells !== top.headerCount) {
               sf(row.line, 'table-cell-count', `tbody row has ${row.cells} cells, header row has ${top.headerCount}`)
@@ -247,8 +251,8 @@ async function checkOne(f) {
     let tableRef = null
     if (tag.name === 'tr') {
       const top0 = stack[stack.length - 1]
-      if (top0 && (top0.name === 'thead' || top0.name === 'tbody')) trRole = top0.name === 'thead' ? 'header' : 'body'
       tableRef = nearestAncestor((fr) => fr.isTable)
+      trRole = (tableRef && top0 && top0.name === 'thead') ? 'header' : 'body'
     } else if (tag.name === 'thead' || tag.name === 'tbody') {
       tableRef = nearestAncestor((fr) => fr.isTable)
     }
