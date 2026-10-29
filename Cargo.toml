@@ -196,7 +196,10 @@ signal-hook = { version = "=0.4.5", default-features = false }
 # static-link profile. TLS 1.3 only (no tls12 feature): the DoT client shares
 # the serving-side TLS profile; TLS 1.2-only resolvers are refused.
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "logging"] }
-rustls-pki-types = "=1.15.1"
+# rustls-webpki is retained as the sole enabler of the `ring` feature in the
+# resolved graph (feature unification), not a source import: removing it drops
+# `ring` from the closure and breaks the DoT TLS path. rustls-pki-types is not
+# declared directly (it arrives via rustls); the =1.15.1 pin resolves identical.
 rustls-webpki = { version = "=0.103.16", default-features = false, features = ["ring", "std"] }
 # Direct ring access for the strict DoT SPKI pin: the pin is the SHA-256 of
 # the server's SubjectPublicKeyInfo, and rustls keeps its digest surface
