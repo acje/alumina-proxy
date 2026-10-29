@@ -239,7 +239,7 @@ async function checkOne(f) {
     }
     if (CELLS.has(tag.name) &&
         (Object.prototype.hasOwnProperty.call(attrs, 'colspan') || Object.prototype.hasOwnProperty.call(attrs, 'rowspan'))) {
-      opFail(`${f}:${lineNo} unsupported colspan/rowspan on <${tag.name}> (cell-count cannot be verified)`)
+      opFail(`${f}:${lineNo} unsupported colspan/rowspan on <${tag.name}> (cell-count cannot be verified)`, local)
     }
     if (tag.selfClosing || VOID.has(tag.name)) continue
 
@@ -303,11 +303,12 @@ async function checkOne(f) {
     }
   }
 
-  return { ids: ids.size, fragments: frags.length, tables: tableCount, figures: figureCount, clean: local.ops === 0 && local.struct === 0 }
+  return { ids: ids.size, fragments: frags.length, tables: tableCount, figures: figureCount, ops: local.ops, struct: local.struct, clean: local.ops === 0 && local.struct === 0 }
 }
 
-function opFail(detail) {
+function opFail(detail, local) {
   opsTotal++
+  if (local) local.ops++
   lines.push(`HTML-CHECK-OP-FAIL ${detail}`)
 }
 
@@ -324,6 +325,8 @@ for (const f of files) {
   if (res.clean) {
     cleanTotal++
     lines.push(`HTML-CHECK-OK ${f} (ids ${res.ids}, fragments ${res.fragments}, tables ${res.tables}, figures ${res.figures})`)
+  } else if (res.ops > 0) {
+    lines.push(`HTML-CHECK-OP-FAIL ${f} (not clean: ${res.ops} operational, ${res.struct} structural)`)
   }
   idsTotal += res.ids
   fragsTotal += res.fragments
