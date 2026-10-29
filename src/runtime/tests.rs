@@ -78,13 +78,8 @@ fn falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(0, Family::A, exchange_deadline)
+        .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
         .expect("start exchange");
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .mark_serving_started();
 
     let client = connect(port);
     let mut accepted = false;
@@ -151,13 +146,8 @@ fn exchange_failed_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(0, Family::A, exchange_deadline)
+        .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
         .expect("start exchange");
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .mark_serving_started();
 
     runtime.cooperative_dns_turn().expect("cooperative turn");
 
@@ -226,13 +216,8 @@ fn hot_relay_many_slots_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(0, Family::A, exchange_deadline)
+        .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
         .expect("start exchange");
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .mark_serving_started();
 
     let per_slot: usize = 160 * 1024;
     let per_slot_kib = per_slot / 1024;
@@ -802,13 +787,8 @@ fn idle_falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(0, Family::A, exchange_deadline)
+        .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
         .expect("start exchange");
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .mark_serving_started();
 
     let mut published = false;
     for _ in 0..200 {
@@ -876,13 +856,13 @@ fn reconnect_falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(0, Family::A, Instant::now() + Duration::from_secs(10))
+        .start_dns_exchange(
+            0,
+            Family::A,
+            Instant::now() + Duration::from_secs(10),
+            ExchangeClass::Serving,
+        )
         .expect("start exchange A");
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .mark_serving_started();
     let mut first = false;
     for _ in 0..200 {
         runtime
@@ -906,13 +886,13 @@ fn reconnect_falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(0, Family::Aaaa, Instant::now() + Duration::from_secs(10))
+        .start_dns_exchange(
+            0,
+            Family::Aaaa,
+            Instant::now() + Duration::from_secs(10),
+            ExchangeClass::Serving,
+        )
         .expect("start exchange Aaaa");
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .mark_serving_started();
     let mut second = false;
     for _ in 0..200 {
         runtime
@@ -1064,13 +1044,8 @@ fn shutdown_falsifier_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(0, Family::A, exchange_deadline)
+        .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
         .expect("start exchange");
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .mark_serving_started();
     assert!(
         runtime.serving().storage().dns().has_active_exchange(),
         "the exchange must be active before the signal"
@@ -1176,13 +1151,8 @@ fn selfpipe_receiving_cancellation_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(0, Family::A, exchange_deadline)
+        .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
         .expect("start exchange");
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .mark_serving_started();
 
     let mut saw_receiving = false;
     for _ in 0..300 {
@@ -1567,7 +1537,7 @@ fn retained_startup_exchange_cannot_advance_body() {
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(0, Family::A, past_deadline)
+        .start_dns_exchange(0, Family::A, past_deadline, ExchangeClass::Startup)
         .expect("start a retained startup exchange past its deadline");
 
     assert!(
@@ -1594,6 +1564,79 @@ fn retained_startup_exchange_cannot_advance_body() {
         "cancelling a retained startup exchange must not mutate the refresh schedule"
     );
     drop(responder);
+}
+
+/// F-06 regression: a serving-runtime refresh started with
+/// [`ExchangeClass::Serving`] must survive the next serving turn. The startup
+/// cancellation guard runs at the top of every turn (runtime.rs:258-262) ahead
+/// of the refresh scheduling and cooperative turn (:270); an exchange whose
+/// class were forgotten would read as Startup and be cancelled there, losing
+/// the refresh. The typed class makes the forgotten state unrepresentable;
+/// this test drives a Serving refresh through that exact window and asserts it
+/// survives and concludes through the serving turns.
+fn serving_refresh_survives_next_turn_body() {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+    let (responder_addr, responder) = spawn_responder_keep_alive();
+
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(
+            0,
+            Family::A,
+            Instant::now() + Duration::from_secs(10),
+            ExchangeClass::Serving,
+        )
+        .expect("start a serving refresh");
+
+    runtime
+        .turn(Some(Duration::from_millis(2)))
+        .expect("one serving turn");
+
+    assert!(
+        runtime.serving.storage().dns().has_active_exchange(),
+        "a Serving-class refresh must survive the next turn's startup-exchange \
+         cancellation guard (runtime.rs:258-262)"
+    );
+
+    let mut published = false;
+    for _ in 0..200 {
+        runtime
+            .turn(Some(Duration::from_millis(5)))
+            .expect("owner turn");
+        if name_published(&runtime, 0, Family::A) {
+            published = true;
+            break;
+        }
+        if !runtime.serving.storage().dns().has_active_exchange() {
+            break;
+        }
+    }
+    assert!(
+        published,
+        "the survived Serving refresh must conclude and publish through the serving turns"
+    );
+    drop(responder);
+}
+
+#[test]
+fn serving_refresh_survives_next_turn() {
+    let t = thread::Builder::new()
+        .name("serving-refresh-survives-witness".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(serving_refresh_survives_next_turn_body)
+        .expect("spawn serving-refresh-survives witness thread");
+    t.join().expect("serving-refresh-survives witness thread");
 }
 
 #[test]

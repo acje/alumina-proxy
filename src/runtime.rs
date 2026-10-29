@@ -16,7 +16,7 @@ use mio::net::TcpListener;
 use crate::serve::{ServeStorage, StartupError, StartupOutcome};
 use crate::serving::{ServeError, Serving, Shutdown, ShutdownExit};
 use crate::startup_dns::{
-    EXCHANGE_DEADLINE_SECS, STARTUP_WINDOW_SECS, StartupDnsError, TurnResult,
+    EXCHANGE_DEADLINE_SECS, ExchangeClass, STARTUP_WINDOW_SECS, StartupDnsError, TurnResult,
 };
 
 /// The bounded number of cooperative DNS advances a single owner turn may make,
@@ -340,9 +340,13 @@ impl Runtime {
         let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
         self.serving
             .storage_mut()
-            .start_dns_exchange(selected.name(), selected.family(), deadline)
+            .start_dns_exchange(
+                selected.name(),
+                selected.family(),
+                deadline,
+                ExchangeClass::Serving,
+            )
             .map_err(ServeError::from)?;
-        self.serving.storage_mut().dns_mut().mark_serving_started();
         Ok(())
     }
 

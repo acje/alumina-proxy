@@ -839,7 +839,14 @@ fn dot_exchange_traverses_handshake_before_send_and_receive() {
     let fqdn = cfg.allowlist().get(0).unwrap();
     let deadline = Instant::now() + Duration::from_millis(1500);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
+        .start_exchange(
+            fqdn,
+            Family::A,
+            0,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
         .unwrap();
     let mut seen: Vec<ExchangeStep> = Vec::new();
     let mut terminal = None;
@@ -953,7 +960,14 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
     // completes the handshake, then publishes.
     let deadline = Instant::now() + Duration::from_millis(1500);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
+        .start_exchange(
+            fqdn,
+            Family::A,
+            0,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
         .unwrap();
     let first = drive_to_terminal(
         &mut transport,
@@ -981,7 +995,14 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
     // fresh dial, client rebuild, or re-handshake.
     let deadline = Instant::now() + Duration::from_millis(1500);
     transport
-        .start_exchange(fqdn, Family::A, 1, deadline, Generation::INITIAL)
+        .start_exchange(
+            fqdn,
+            Family::A,
+            1,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
         .unwrap();
     let second = drive_to_terminal(
         &mut transport,
@@ -1296,7 +1317,14 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
 
     let deadline = Instant::now() + Duration::from_millis(1500);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
+        .start_exchange(
+            fqdn,
+            Family::A,
+            0,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
         .unwrap();
     let first = drive_to_terminal(
         &mut transport,
@@ -1318,7 +1346,14 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
 
     let deadline = Instant::now() + Duration::from_millis(1500);
     transport
-        .start_exchange(fqdn, Family::A, 1, deadline, Generation::INITIAL)
+        .start_exchange(
+            fqdn,
+            Family::A,
+            1,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
         .unwrap();
     let second = drive_to_terminal(
         &mut transport,
@@ -1370,7 +1405,14 @@ fn dot_warm_serving_exchange_alloc_witness() {
     // allocation surface under witness.
     let deadline = Instant::now() + Duration::from_millis(1500);
     transport
-        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)
+        .start_exchange(
+            fqdn,
+            Family::A,
+            0,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
         .unwrap();
     let cold = drive_to_terminal(
         &mut transport,
@@ -1396,7 +1438,14 @@ fn dot_warm_serving_exchange_alloc_witness() {
     // calibrated rustls seam bound.
     let deadline = Instant::now() + Duration::from_millis(1500);
     transport
-        .start_exchange(fqdn, Family::A, 1, deadline, Generation::INITIAL)
+        .start_exchange(
+            fqdn,
+            Family::A,
+            1,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
         .unwrap();
     let (warm, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
         drive_to_terminal(

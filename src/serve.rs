@@ -21,8 +21,8 @@ use crate::log::{Level, LogStore, ResolverProbeSegment};
 use crate::resolver::MAX_RESOLVERS;
 use crate::schedule::Schedules;
 use crate::startup_dns::{
-    FailureReason, IncidentNote, ProbeVerdict, PublishedKind, STARTUP_WINDOW_SECS, StartupDns,
-    StartupDnsError, StartupReport, TurnResult,
+    ExchangeClass, FailureReason, IncidentNote, ProbeVerdict, PublishedKind, STARTUP_WINDOW_SECS,
+    StartupDns, StartupDnsError, StartupReport, TurnResult,
 };
 use crate::worker::{
     AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, SlotIndex, TunnelIndex,
@@ -753,9 +753,12 @@ impl ServeStorage {
 
     /// Starts a cooperative DNS exchange on the retained transport for the
     /// named allowlist entry, dialing the currently active resolver. The
-    /// exchange draws a fresh transaction id and records its deadline without
-    /// waiting for network readiness; subsequent [`Self::advance_dns`] turns
-    /// conclude it.
+    /// exchange draws a fresh transaction id, records its class and deadline
+    /// without waiting for network readiness; subsequent
+    /// [`Self::advance_dns`] turns conclude it. The caller supplies the
+    /// [`ExchangeClass`] so a serving refresh, a startup-window exchange, and a
+    /// probe are each classified at start — a forgotten class is
+    /// unrepresentable.
     ///
     /// # Errors
     ///
@@ -766,6 +769,7 @@ impl ServeStorage {
         ordinal: usize,
         family: Family,
         deadline: Instant,
+        class: ExchangeClass,
     ) -> Result<(), StartupDnsError> {
         let fqdn = self
             .config
@@ -783,7 +787,7 @@ impl ServeStorage {
             .generation();
         self.active_exchange_family = Some(family);
         self.dns
-            .start_exchange(fqdn, family, ordinal, deadline, generation)?;
+            .start_exchange(fqdn, family, ordinal, deadline, generation, class)?;
         let secs = self.cache_secs(Instant::now());
         self.incident_report
             .note_exchange_attempt(ordinal, family, secs);

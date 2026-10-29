@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 
 use crate::cache::{CacheError, Family};
 use crate::serve::{StartupError, StartupOutcome};
-use crate::startup_dns::{EXCHANGE_DEADLINE_SECS, StartupDnsError, TurnResult, WindowLedger};
+use crate::startup_dns::{
+    EXCHANGE_DEADLINE_SECS, ExchangeClass, StartupDnsError, TurnResult, WindowLedger,
+};
 
 use super::Serving;
 
@@ -138,7 +140,12 @@ impl Serving {
                     let deadline =
                         Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS).min(remaining);
                     ledger.track_attempt(ordinal, family);
-                    self.storage.start_dns_exchange(ordinal, family, deadline)?;
+                    self.storage.start_dns_exchange(
+                        ordinal,
+                        family,
+                        deadline,
+                        ExchangeClass::Startup,
+                    )?;
                     continue;
                 }
             }

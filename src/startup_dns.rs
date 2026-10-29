@@ -205,6 +205,23 @@ enum ExchangeResult {
     Failed(FailureReason),
 }
 
+/// The class of one outstanding exchange, chosen by the caller at start so a
+/// forgotten classification is unrepresentable. The runtime cancellation guard
+/// cancels only a retained [`ExchangeClass::Startup`] exchange; a serving
+/// refresh ([`ExchangeClass::Serving`]) and a post-window probe or
+/// corroboration ([`ExchangeClass::Probe`]) are owned by the serving path and
+/// are never cancelled there (docs/alumina-proxy.md:64-65, :826).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExchangeClass {
+    /// A startup-window exchange owned by the single boot owner.
+    Startup,
+    /// A post-window serving refresh owned by the serving runtime.
+    Serving,
+    /// A pure-sensor probe (sweep or corroboration) that parses and validates
+    /// the response but never publishes name-authorization state.
+    Probe,
+}
+
 /// The full legal context of one outstanding cooperative exchange, owned as a
 /// single value on [`StartupDns`] so that at most one exchange can exist. A
 /// transaction id, identity, deadline, per-stage state, and any deferred
@@ -223,16 +240,11 @@ struct ActiveExchange {
     /// settles as the counted failure it is, never aborted.
     connect_err: Option<io::ErrorKind>,
     tid: u16,
-    /// Whether the exchange was started by the serving runtime (a refresh)
-    /// rather than the startup window. The serving runtime cancels a retained
-    /// startup exchange whose window already expired; a serving refresh is
-    /// never cancelled by that path.
-    serving: bool,
-    /// Whether the exchange is a post-window probe rather than a startup or
-    /// serving exchange. A probe is a pure sensor: it parses and validates a
-    /// response to record a resolver verdict, but never publishes
-    /// name-authorization state (docs/alumina-proxy.md:826).
-    probe: bool,
+    /// The class the caller chose at start. The runtime cancellation guard
+    /// cancels only a retained [`ExchangeClass::Startup`] exchange; a serving
+    /// refresh and a post-window probe are owned by the serving path and are
+    /// never cancelled there (docs/alumina-proxy.md:826).
+    class: ExchangeClass,
     /// The cache entry generation captured at exchange start. Apply compares
     /// the staged result against this captured value so an obsolete result
     /// cannot overwrite newer cache state (docs/alumina-proxy.md:74,
@@ -1499,7 +1511,9 @@ impl StartupDns {
     /// retained startup exchange must not survive into serving.
     #[cfg(test)]
     pub(crate) fn active_is_serving(&self) -> bool {
-        self.active.as_ref().is_some_and(|ex| ex.serving)
+        self.active
+            .as_ref()
+            .is_some_and(|ex| ex.class == ExchangeClass::Serving)
     }
 
     /// The configured resolver set, for the serving owner to fold per-resolver
@@ -1580,41 +1594,20 @@ impl StartupDns {
         self.corroboration_pending = None;
     }
 
-    /// Marks the outstanding exchange as a serving-runtime refresh, so the
-    /// runtime-boundary guard ([`Self::cancel_retained_startup_exchange`])
-    /// never cancels a refresh the serving runtime owns. A no-op when idle;
-    /// the startup window never calls this, so a retained startup exchange
-    /// stays distinguishable from a serving refresh.
-    pub(crate) const fn mark_serving_started(&mut self) {
-        if let Some(ex) = self.active.as_mut() {
-            ex.serving = true;
-        }
-    }
-
-    /// Marks the outstanding exchange as a post-window probe, so the receive
-    /// step discards the name outcome instead of publishing name-authorization
-    /// state. A no-op when idle; only the probe sweep calls this, so a probe
-    /// stays distinguishable from a startup or serving exchange.
-    pub(crate) const fn mark_probe_started(&mut self) {
-        if let Some(ex) = self.active.as_mut() {
-            ex.probe = true;
-        }
-    }
-
     /// Cancels a retained startup exchange whose window already expired: the
     /// serving runtime must never advance or publish it
-    /// (docs/alumina-proxy.md:64-65). The discriminator targets only a
-    /// genuinely-startup exchange — one that is neither a serving refresh nor a
-    /// post-window probe — so a serving-runtime refresh, a probe-sweep probe,
-    /// and a corroboration exchange (all owned by the serving path) are never
-    /// cancelled here, and the refresh schedule is left untouched — the startup
-    /// window already released the in-flight selection on the expiry path, so
-    /// no stuck-pending slot can block a later refresh.
+    /// (docs/alumina-proxy.md:64-65). The discriminator is the typed class
+    /// chosen at start — only a genuinely-startup exchange is cancelled here;
+    /// a serving-runtime refresh, a probe-sweep probe, and a corroboration
+    /// exchange (all owned by the serving path) are never cancelled, and the
+    /// refresh schedule is left untouched — the startup window already
+    /// released the in-flight selection on the expiry path, so no
+    /// stuck-pending slot can block a later refresh.
     pub(crate) fn cancel_retained_startup_exchange(&mut self) {
         if self
             .active
             .as_ref()
-            .is_some_and(|ex| !ex.serving && !ex.probe)
+            .is_some_and(|ex| ex.class == ExchangeClass::Startup)
         {
             self.cancel_for_shutdown();
         }
@@ -1979,8 +1972,7 @@ impl StartupDns {
             let reason = self.note_failure(
                 ex.ordinal,
                 ex.family,
-                ex.probe,
-                ex.serving,
+                ex.class,
                 schedules,
                 FailureReason::Connect,
             )?;
@@ -1992,8 +1984,7 @@ impl StartupDns {
                 let reason = self.note_failure(
                     ex.ordinal,
                     ex.family,
-                    ex.probe,
-                    ex.serving,
+                    ex.class,
                     schedules,
                     FailureReason::Connect,
                 )?;
@@ -2005,8 +1996,7 @@ impl StartupDns {
                 let reason = self.note_failure(
                     ex.ordinal,
                     ex.family,
-                    ex.probe,
-                    ex.serving,
+                    ex.class,
                     schedules,
                     FailureReason::Connect,
                 )?;
@@ -2038,8 +2028,7 @@ impl StartupDns {
             let reason = self.note_failure(
                 ex.ordinal,
                 ex.family,
-                ex.probe,
-                ex.serving,
+                ex.class,
                 schedules,
                 FailureReason::Timeout,
             )?;
@@ -2107,8 +2096,7 @@ impl StartupDns {
             let reason = self.note_failure(
                 ex.ordinal,
                 ex.family,
-                ex.probe,
-                ex.serving,
+                ex.class,
                 schedules,
                 FailureReason::TlsIdentity,
             )?;
@@ -2133,8 +2121,7 @@ impl StartupDns {
                 let reason = self.note_failure(
                     ex.ordinal,
                     ex.family,
-                    ex.probe,
-                    ex.serving,
+                    ex.class,
                     schedules,
                     FailureReason::TlsIdentity,
                 )?;
@@ -2146,8 +2133,7 @@ impl StartupDns {
             let reason = self.note_failure(
                 ex.ordinal,
                 ex.family,
-                ex.probe,
-                ex.serving,
+                ex.class,
                 schedules,
                 FailureReason::Timeout,
             )?;
@@ -2265,8 +2251,7 @@ impl StartupDns {
                                 let reason = self.note_failure(
                                     ex.ordinal,
                                     ex.family,
-                                    ex.probe,
-                                    ex.serving,
+                                    ex.class,
                                     schedules,
                                     FailureReason::Send,
                                 )?;
@@ -2282,8 +2267,7 @@ impl StartupDns {
                                 let reason = self.note_failure(
                                     ex.ordinal,
                                     ex.family,
-                                    ex.probe,
-                                    ex.serving,
+                                    ex.class,
                                     schedules,
                                     FailureReason::Send,
                                 )?;
@@ -2302,8 +2286,7 @@ impl StartupDns {
                         let reason = self.note_failure(
                             ex.ordinal,
                             ex.family,
-                            ex.probe,
-                            ex.serving,
+                            ex.class,
                             schedules,
                             FailureReason::Send,
                         )?;
@@ -2323,8 +2306,7 @@ impl StartupDns {
                         let reason = self.note_failure(
                             ex.ordinal,
                             ex.family,
-                            ex.probe,
-                            ex.serving,
+                            ex.class,
                             schedules,
                             FailureReason::Send,
                         )?;
@@ -2336,8 +2318,7 @@ impl StartupDns {
                 let reason = self.note_failure(
                     ex.ordinal,
                     ex.family,
-                    ex.probe,
-                    ex.serving,
+                    ex.class,
                     schedules,
                     FailureReason::Send,
                 )?;
@@ -2353,8 +2334,7 @@ impl StartupDns {
             let reason = self.note_failure(
                 ex.ordinal,
                 ex.family,
-                ex.probe,
-                ex.serving,
+                ex.class,
                 schedules,
                 FailureReason::Timeout,
             )?;
@@ -2401,8 +2381,7 @@ impl StartupDns {
                     let reason = self.note_failure(
                         ex.ordinal,
                         ex.family,
-                        ex.probe,
-                        ex.serving,
+                        ex.class,
                         schedules,
                         FailureReason::Timeout,
                     )?;
@@ -2416,8 +2395,7 @@ impl StartupDns {
                     let reason = self.note_failure(
                         ex.ordinal,
                         ex.family,
-                        ex.probe,
-                        ex.serving,
+                        ex.class,
                         schedules,
                         FailureReason::Timeout,
                     )?;
@@ -2443,8 +2421,7 @@ impl StartupDns {
         let reason = self.note_failure(
             ex.ordinal,
             ex.family,
-            ex.probe,
-            ex.serving,
+            ex.class,
             schedules,
             FailureReason::Send,
         )?;
@@ -2473,8 +2450,7 @@ impl StartupDns {
                     let reason = self.note_failure(
                         ex.ordinal,
                         ex.family,
-                        ex.probe,
-                        ex.serving,
+                        ex.class,
                         schedules,
                         FailureReason::Receive,
                     )?;
@@ -2490,8 +2466,7 @@ impl StartupDns {
                 let reason = self.note_failure(
                     ex.ordinal,
                     ex.family,
-                    ex.probe,
-                    ex.serving,
+                    ex.class,
                     schedules,
                     FailureReason::Receive,
                 )?;
@@ -2520,15 +2495,14 @@ impl StartupDns {
                         let reason = self.note_failure(
                             ex.ordinal,
                             ex.family,
-                            ex.probe,
-                            ex.serving,
+                            ex.class,
                             schedules,
                             FailureReason::Timeout,
                         )?;
                         return Ok(RecvStep::Failed(reason));
                     }
                     let kind = classify_published(&outcome);
-                    if ex.probe {
+                    if ex.class == ExchangeClass::Probe {
                         if self.workspace.extreme_ttl() {
                             self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
                         }
@@ -2555,7 +2529,7 @@ impl StartupDns {
                         crate::schedule::IncidentTransition::Closed => self.incident_closes += 1,
                         crate::schedule::IncidentTransition::None => {}
                     }
-                    if ex.serving {
+                    if ex.class == ExchangeClass::Serving {
                         for (family, transition) in [Family::A, Family::Aaaa]
                             .into_iter()
                             .zip(incidents.per_type)
@@ -2582,8 +2556,7 @@ impl StartupDns {
                     let reason = self.note_failure(
                         ex.ordinal,
                         ex.family,
-                        ex.probe,
-                        ex.serving,
+                        ex.class,
                         schedules,
                         FailureReason::Receive,
                     )?;
@@ -2596,8 +2569,7 @@ impl StartupDns {
             let reason = self.note_failure(
                 ex.ordinal,
                 ex.family,
-                ex.probe,
-                ex.serving,
+                ex.class,
                 schedules,
                 FailureReason::Timeout,
             )?;
@@ -2975,6 +2947,7 @@ impl StartupDns {
         ordinal: usize,
         deadline: Instant,
         generation: Generation,
+        class: ExchangeClass,
     ) -> Result<(), StartupDnsError> {
         if self.active.is_some() {
             return Err(StartupDnsError::ExchangeActive);
@@ -3001,8 +2974,7 @@ impl StartupDns {
             qlen: total,
             connect_err,
             tid,
-            serving: false,
-            probe: false,
+            class,
             generation,
         });
         Ok(())
@@ -3110,7 +3082,14 @@ impl StartupDns {
             .name_index(ordinal)
             .ok_or(CacheError::NameOutOfRange)?;
         let generation = cache.entry(name_index, family)?.generation();
-        self.start_exchange(fqdn, family, ordinal, deadline, generation)?;
+        self.start_exchange(
+            fqdn,
+            family,
+            ordinal,
+            deadline,
+            generation,
+            ExchangeClass::Startup,
+        )?;
         loop {
             match self.advance_exchange(fqdn, cache, schedules)? {
                 TurnResult::Pending => {
@@ -3306,8 +3285,14 @@ impl StartupDns {
         });
         self.corroboration_outcome = None;
         let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
-        self.start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)?;
-        self.mark_probe_started();
+        self.start_exchange(
+            fqdn,
+            Family::A,
+            0,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Probe,
+        )?;
         Ok(())
     }
 
@@ -3333,12 +3318,18 @@ impl StartupDns {
         };
         self.relocate_for_probe(target)?;
         let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
-        // A probe is a pure sensor that never applies cache state
-        // (mark_probe_started sets probe=true; advance_exchange returns
-        // RecvStep::Published before the cache apply), so the captured
-        // generation is the initial value and is never compared.
-        self.start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL)?;
-        self.mark_probe_started();
+        // A probe is a pure sensor that never applies cache state (class
+        // ExchangeClass::Probe reaches RecvStep::Published before any cache
+        // apply), so the captured generation is the initial value and is never
+        // compared.
+        self.start_exchange(
+            fqdn,
+            Family::A,
+            0,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Probe,
+        )?;
         if let Some(sweep) = &mut self.probe_sweep {
             sweep.remaining[index] = false;
             sweep.current = Some(target);
@@ -3407,8 +3398,8 @@ impl StartupDns {
             pending.ordinal,
             deadline,
             Generation::INITIAL,
+            ExchangeClass::Probe,
         )?;
-        self.mark_probe_started();
         Ok(false)
     }
 
@@ -3643,8 +3634,7 @@ impl StartupDns {
         &mut self,
         ordinal: usize,
         family: Family,
-        probe: bool,
-        serving: bool,
+        class: ExchangeClass,
         schedules: &mut Schedules,
         reason: FailureReason,
     ) -> Result<FailureReason, StartupDnsError> {
@@ -3660,9 +3650,9 @@ impl StartupDns {
             sweep.verdicts[index] = ProbeVerdict::Failed(reason);
             sweep.current = None;
         }
-        if !probe {
+        if !matches!(class, ExchangeClass::Probe) {
             let transition = schedules.note_exchange_failure(ordinal, family, now, reason)?;
-            if serving && matches!(transition, PerTypeTransition::Opened) {
+            if class == ExchangeClass::Serving && matches!(transition, PerTypeTransition::Opened) {
                 self.note_incident(IncidentNote::Open {
                     ordinal,
                     family,
