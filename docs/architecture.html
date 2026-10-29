@@ -552,7 +552,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   with a real consequence: a reviewer can read a green alloc-witness run as proof
   of a global property. Resolving the fixed-profile mismatch is an owner decision
   (owning bead <code>alumina-szmy0.11</code>); this document does not resolve it.
-  <a href="#recommendations">Recommendation R-2</a>.</p>
+  The open conformance question — whether the DoT allocation profile conforms
+  as-is, or an authorised change to the fixed profile follows — is that owner
+  decision; no outcome is chosen here.</p>
 
   <h3>2.3 F-03 — retained boot floor ≈ 204.6 MiB, not 128 MiB (S2)</h3>
   <p>The traffic store alone is 128 MiB: <code>TUNNEL_SLOTS = 512</code> ×
@@ -1342,7 +1344,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h2>7. Enforcement: violations, effects, gates</h2>
 
   <p>The enforcement stack is deliberately small and typed: a violation lattice,
-  a pure violation→effect projection, per-class saturation gates, and a monitor
+  a pure violation→effect projection, per-class counted gates, and a monitor
   that folds counted facts into a fixed record. Its purpose is to make “no silent
   acceptance” mechanically true — an internally inconsistent observation is
   reported as <code>Unknown</code>, never silently treated as a pass.</p>
@@ -1408,12 +1410,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>Gates are per-class: <code>bad_handshake</code>, <code>illegal_fqdn</code>,
   <code>early_data</code>, and <code>ja4</code> form <code>GateSet</code>
   (<code>src/enforcement/state.rs:71-77</code>). Each is an <code>AllScopeGate</code>
-  whose <code>threshold</code> and <code>window_secs</code> are <code>NonZero</code>,
-  so a gate that could never arm is unrepresentable
+  whose <code>threshold</code> and <code>window_secs</code> are <code>NonZero</code>:
+  <code>NonZero</code> makes only zero parameter values unrepresentable and says
+  nothing about whether a gate can ever arm
   (<code>src/enforcement/state.rs:26-46</code>). Defaults are threshold 1 in a
-  900-second window (<code>:12-17</code>) — the FIRST deviation of the armed
-  class arms the All-scope block, sticky until restart. Each class’s gate counts
-  only that class’s facts: the per-class isolation between <code>bad_handshake</code>
+  900-second window (<code>:12-17</code>).</p>
+  <p>Arming differs by class. An <code>AnyIllegal</code> counter is noted on every
+  class fact; an early-data or <code>ja4</code> counter is noted only when the
+  <em>raw</em> decided effect is <code>Effect::Block { scope: All }</code>, and only
+  a raw <code>Effect::Block { scope: All }</code> is gated into an all-scope action
+  (<code>src/enforcement/state.rs:262-334</code>). Each class’s gate counts only
+  that class’s facts: the per-class isolation between <code>bad_handshake</code>
   and <code>illegal_fqdn</code> is enforced by which counter each cause notes
   (<code>src/enforcement/state.rs:264-286</code>).</p>
 
@@ -1449,10 +1456,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 
   <h3>7.3 Typed ordinals and the monitor</h3>
   <p><code>DomainOrdinal</code> is a 0-based configured-allowlist ordinal whose
-  constructor mints values only against a specific table’s entry count
-  (<code>src/enforcement/action.rs:98-132</code>), so a blocked scope is applied
-  only by the table that minted the ordinal and attacker-controlled strings are
-  never keys. The monitor (<code>src/enforcement/monitor.rs</code>) folds counted
+  payload is a range-bounded <code>u8</code> index; no table identity is stored,
+  and <code>from_index</code> takes no table
+  (<code>src/enforcement/action.rs:98-132</code>). On lookup the ordinal is
+  validated against the <em>current</em> table’s entry count, so a table with the
+  same or a larger count accepts the value and an out-of-range ordinal yields
+  <code>Unknown</code>/no control (<code>src/enforcement/action.rs:206-230</code>):
+  the type proves an index/range discipline, not table provenance, and
+  attacker-controlled strings are never keys. The monitor
+  (<code>src/enforcement/monitor.rs</code>) folds counted
   facts into <code>FactCounters</code> — observed as-built counter families:
   any_illegal (per cause), early_data and ja4 (per ordinal), unknown, resolver
   degraded, dns anomaly, downgrade-to-plain, probe relocations, expired pin certs,
@@ -1461,10 +1473,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   rotate the <code>IncidentReport</code> at <code>REPORT_WINDOW_SECS = 3600</code>
   (recorded measurement; the review register’s “3800 s” does not match source
   <code>src/incident_report.rs:14</code>).</p>
-  <p>All counting is saturation-based and bounded; the monitor record itself is
-  encoded in place into the fixed log slot budget, and anomaly kinds are discrete
-  (<code>DnsAnomalyKind</code>) so a new sensor can never default to an unrelated
-  class.</p>
+  <p>Counting is not uniform. The monitor’s <code>FactCounters</code> counters
+  saturate and are bounded, and the monitor record itself is encoded in place
+  into the fixed log slot budget; a <code>WindowedCounter</code> gate counter, in
+  contrast, is a plain <code>u32</code> increment
+  (<code>self.count += 1</code>, <code>src/enforcement/state.rs:148-160</code>) —
+  a saturating add is not what bounds it. Anomaly kinds
+  are discrete (<code>DnsAnomalyKind</code>) so a new sensor can never default to
+  an unrelated class.</p>
 </section>
 
 <section id="memory">
@@ -1750,7 +1766,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>Effect::Unknown</code> variants; no first-slot latch consumption</td>
         <td><code>src/enforcement/policy.rs:136-145</code></td></tr>
       <tr><th scope="row">A gate cannot arm with threshold 0 / window 0</th>
-        <td><code>AllScopeGate { NonZeroU32, NonZeroU64 }</code></td>
+        <td><code>AllScopeGate { NonZeroU32, NonZeroU64 }</code> — nonzero
+        threshold/window only; it does not constrain whether a gate can ever
+        arm</td>
         <td><code>src/enforcement/state.rs:26-46</code></td></tr>
       <tr><th scope="row">Serving without a listener is unrepresentable</th>
         <td><code>Preallocated</code> has no <code>serve</code>; <code>attach</code>
@@ -1902,11 +1920,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>The current build has no CA-validated DoT mode; an operator could read
         a warning as degradation rather than unusability.</td></tr>
       <tr><th scope="row">R-2</th>
-        <td>Resolve F-01 one way or the other: either drop the inert
-        <code>[early_data]</code> All-scope gate surface, or legalise
-        <code>Block{All}</code> for early data if the gate is intended to be
-        reachable. If kept, state in operator material that the All-scope knob is
-        inert.</td>
+        <td>Keep the inert <code>[early_data]</code> All-scope knob documented as
+        inert in operator material, or take the F-01/U-04 reconciliation through a
+        separately governed schema/spec decision. This document does not decide
+        which; the F-01/U-04 disposition is an owner decision recorded under bead
+        <code>alumina-szmy0.9</code>.</td>
         <td>F-01; U-04</td>
         <td>A documented operator control with no runtime effect is a semantics
         trap for the next maintainer.</td></tr>

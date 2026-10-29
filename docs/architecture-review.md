@@ -24,7 +24,7 @@ per-connection lifecycle is a closed enum state machine, and the two forwarding 
 pure state machine separated from all I/O. The dominant architectural asset is that most
 "cannot happen" statements are *types* rather than assertions (`Preallocated` cannot serve,
 `SlotIndex`/`TunnelIndex` are consumed, `ValidatedHello` requires a `HelloAccepted` witness,
-`DomainOrdinal` is minted against a table).
+`DomainOrdinal` is a range-bounded index validated against the current table).
 
 The dominant architectural cost is **memory**: the retained boot footprint is ≈ **205 MiB**, not
 the 128 MiB traffic store that the inventory headline reports, because every one of the 512 slots
@@ -368,7 +368,7 @@ whether any window is near a boundary — a small, constant, always-on cost.
 |---|---|---|
 | A gate cannot arm with threshold 0 / window 0 | `AllScopeGate{NonZeroU32, NonZeroU64}` | `src/enforcement/state.rs:25-46` |
 | A gate can never be told a caller-invented hello boundary | `ValidatedHello::new(_accepted: HelloAccepted, ..)` | `src/gate.rs:114-142` |
-| A blocked scope can only be applied by the table that minted the ordinal | `DomainOrdinal::mint(index, count)` | `src/enforcement/action.rs:98-132` |
+| A blocked scope is applied only via a range-bounded ordinal, validated against the current table's entry count on lookup (out-of-range ⇒ `Unknown`/no control) | `DomainOrdinal` — `u8` index; `from_index` takes no table | `src/enforcement/action.rs:98-132`, `:206-230` |
 | A stale DNS publish cannot overwrite a newer entry | `Generation` + `StaleGeneration` | `src/cache.rs:50-62`, `:373-382` |
 | A slot is exactly one of free / in-setup / established | `SlotState` enum owns the counts | `src/worker.rs:344-354`, `:634-692` |
 | A setup handle cannot free an established tunnel (and vice versa) | `SlotIndex` / `TunnelIndex`, consumed by release | `src/worker.rs:316-337`, `:570-614` |
@@ -432,7 +432,7 @@ the protocol unrepresentable-to-misuse at zero runtime cost.
 | U-01 | Risk | `run_once` replaces `self.events` with `Events::with_capacity(0)` every turn and restores it (`src/serving.rs:1263`, `:1307`). The per-turn zero-allocation property depends on `mio`'s `with_capacity(0)` not allocating and `epoll_wait` writing into the pre-existing buffer. | Not verified here (no build). The `Phase::Serving` alloc witnesses in `src/serving/tests.rs` (`:5896`, `:5971`, `:6008`, `:7361`, `:7664`) probably cover the steady state, but this review did not execute them. |
 | U-02 | Risk | The `Vec<SlotWorkspace>` is built by `collect()` from an exact-size iterator (`src/serving.rs:1028-1035`), so it is one boot allocation; any later growth would allocate post-boot. | Depends on `Vec`'s exact `size_hint` path; true for this code but not enforced by a type. |
 | U-03 | Unknown | Real RSS includes allocator fragmentation, rustls/ring heap, and the kernel socket buffers for up to 512×2 sockets — none of it modelled by `BootInventory`. | Requires measurement, out of scope for a source-only review. |
-| U-04 | Unknown | Whether the `early_data` gate is *intended* to become reachable again if `Block{All}` is ever legalised for early data (the `F-02 close` comment at `src/config.rs:1076-1082` suggests the restriction is intentional and permanent). | Intent is not inferable from code alone; treated as an inert knob, which is the as-built truth. |
+| U-04 | Unknown | Whether the `early_data` gate is *intended* to become reachable again if `Block{All}` is ever legalised for early data (the `F-02 close` comment at `src/config.rs:1076-1082` suggests the restriction is intentional and permanent). | Intent is not inferable from code alone; treated as an inert knob, which is the as-built truth. The disposition is an open F-01/U-04 owner decision (bead `alumina-szmy0.9`), not decided by this document. |
 | U-05 | Risk | A `DoT` deployment performs DNS refresh on a single connection with a 5 s exchange deadline; a failed handshake forces a full reconnect (and a fresh rustls config) on the next exchange. There is no persistent re-handshake backoff separate from the schedule ladder. | Design appears intentional (schedule backoff is 1/2/4/8/16/30 s, `src/schedule.rs:16`); flagged as a latency/CPU cost under resolver flapping, not as a defect. |
 | U-06 | Risk | `SlotWorkspace::reset` leaves prior tunnel bytes in the retained 128 KiB slabs for the process lifetime (`src/serving.rs:774-803`). No path writes them out, but the buffers outlive the tunnel by design (`process::exit` skips drops). | Memory-disclosure only if a future path misuses `buf_len`; currently no such path found. |
 
@@ -463,11 +463,12 @@ Used as *criteria* only (`AGENTS.md`), applied to code:
    per connect. Option (b) removes the `Arc`/`String` churn and makes the per-connect cost one
    object; it does not remove rustls's internal allocations, so the profile must be qualified either
    way. (F-02)
-2. **Resolve F-01 one way or the other.** If the `early_data` bar is permanently unreachable,
-   delete the section from the schema and the `GateSet`, so the config surface and the implemented
-   surface agree. If it is meant to become reachable, the parser restriction must be lifted
-   deliberately and the `state.rs` test's direct `ControlTable` construction should be replaced by a
-   config-derived one, so the test proves a reachable path.
+2. **Decide F-01/U-04 in a separately governed step.** The `[early_data]` All-scope knob is inert as
+   built; the disposition — document it as inert in operator material, or reconcile the schema/spec
+   in a separately governed decision — is not settled by this document (owner bead
+   `alumina-szmy0.9`). Independent of that decision, replace the `state.rs` test's direct
+   `ControlTable` construction with a config-derived one (`src/enforcement/state.rs:1415-1450`) so
+   any future reachability is proven against a config the parser can actually produce.
 3. **Publish the real retained-memory figure** (≈409 KiB/slot, ≈205 MiB at 512 slots) wherever
    capacity is described, and consider folding the excluded per-slot fields into `BootInventory`
    so the accessor stops being a lower bound over a subset.
