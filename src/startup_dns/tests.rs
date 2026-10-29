@@ -1349,6 +1349,10 @@ fn wait_until_next_step_with_no_scheduled_step_does_not_decide_early() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "long two-part assertion that a refused second start leaves the first exchange surviving"
+)]
 fn start_active_exchange_is_refused_and_first_survives() {
     let cfg = config();
     let fqdn0 = cfg.allowlist().get(0).unwrap();
