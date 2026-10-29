@@ -521,7 +521,13 @@ The harness's `identity.dirty_count` counts only tracked modifications
 untracked foreign files. Each P2 run MUST additionally capture, into the run
 record beside the JSON receipt:
 
-- `git rev-parse HEAD` — must equal §10.2's source SHA;
+- `git rev-parse HEAD` — must equal §10.2's source SHA. **Execute from a
+  checkout whose HEAD is exactly `3f587e9`** (detached checkout or exclusive
+  clone at that commit); docs-only commits after it (`e537c54`, `2c3efd4`,
+  `3a4d0f9`, …) are **not** part of the measured candidate. The failure mode is
+  fail-closed, never silent: `HEAD_CANDIDATE_SHA=c869192e…` must equal the
+  staged binary's sha and the receipt's `identity.source_head` must equal the
+  run-time HEAD, else the run is `Unknown`/`fail` (§10.4);
 - a full `git status --porcelain --untracked-files=all` snapshot **before and
   after** the run (identity bracket), with `sha256` + size of any untracked
   file on both snapshots (SOURCE-IDENTITY-STABLE discipline, as in the P1
@@ -550,9 +556,11 @@ Receipt level — decided by the JSON receipt alone:
 Rules every receipt MUST satisfy (cite §5/§9, do not re-derive):
 
 1. **Offered load is never reported as achieved goodput.** `--target-mbps` /
-   `params.target_mbps` is the offer; the headline is
+   `params.target_mbps` is the offer. For **steady** profiles the headline is
    `interval_vs_cohort.achieved_client_payload_mbps`, read with
-   `workload_fulfilled` shown alongside (F1).
+   `workload_fulfilled` shown alongside (F1); **storm** receipts carry no
+   achieved goodput, so their headline is `workload_fulfilled` + the in-window
+   frame counts (`interval_vs_cohort.in_window_*`, §10.5).
 2. **`fulfilled=false` with `missed_at_end=0`** (tiny `backpressure_unsent` +
    a `drain_echoed`-at-close open-loop tail) is **disclosed** as an open-loop
    cap and read as such — never as a proxy failure (F1, §9 caveats).
@@ -561,10 +569,12 @@ Rules every receipt MUST satisfy (cite §5/§9, do not re-derive):
    candidate; `85b7769` or any pre-P1 SHA stays comparison-only (§6).
 4. A failed probe is typed `Unknown` (`sampling.*.unknown`), never folded clean.
 5. **Ceiling attribution.** `achieved < offered` with a near-saturated
-   `sampling.<client|backend>.cores_mean` (shared-harness bottleneck, e.g. the
-   GIL-bound echo backend, §9 F1) is a **shared-harness ceiling** and must be
-   labelled as such — never the proxy-path cost; only a non-saturated read path
-   attributes the delta to the proxy.
+   `sampling.<client|backend>.cores_mean` (shared-harness bottleneck — e.g. the
+   open-loop client cores at the offered rate, or the fallback `BENCH_BACKEND=
+   python` echo path, §5 F1) is a **shared-harness ceiling** and must be
+   labelled as such — never the proxy-path cost; the compiled echo backend
+   drains at ~0.22 cores at 1 Gbps and is not the ceiling; only a non-saturated
+   read path attributes the delta to the proxy.
 
 E-increment level (the whole E2/E3/E4 row):
 
@@ -582,10 +592,18 @@ producing new receipts judged by §10.4. The comparison source is the **timed**
 receipts only — `.ooda/benchmarks/85b7769-bench-*-timed-*.json` (interleaved
 A-E-H; SECONDS 60 / WARMUP 5; `dirty_count=0`); the 2 s smoke receipts
 (`…-smoke-…json`) are never comparison inputs (§4). Before any comparison is
-claimed, show the baseline pins equal on both sides: bench image id,
-executed/retained binary sha, `identity.tool_sha256`, openssl and python
-versions. This candidate's numbers come only from its own new runs — §9 numbers
-are never restated as this candidate's.
+claimed, require the **harness pins** equal on both sides — bench image id
+(`7c3937c1…`), openssl version, python version, envoy/haproxy binary shas (same
+pinned image) — plus `executed == retained` **within each receipt** (verified
+both sides: E2 `c869192e…`==`c869192e…`, baseline `1e173c13…`==`1e173c13…`).
+The alumina binary sha **necessarily differs** across sides by design
+(`1e173c13…` baseline → `c869192e…` candidate) and is the **subject** of the
+comparison, not a precondition of it. `identity.tool_sha256` is expected equal;
+any delta is recorded and disclosed (the verified `85b7769→3f587e9` delta
+`c6bd1524…`→`5ac6475b…` is the single comment-line change in
+`scripts/bench_workload.py`, bead `alumina-cdwui.15`). This candidate's numbers
+come only from its own new runs — §9 numbers are never restated as this
+candidate's.
 
 **Commands.** Timed runs interleaved **A-E-H** (alumina → envoy → haproxy),
 SECONDS 60 / WARMUP 5; smoke (2 s, WARMUP 0) is an optional fast-path
@@ -603,27 +621,41 @@ Matrix: 3 subjects × 3 profiles = 9 timed runs (A-E-H per profile), each
 receipt to `.ooda/benchmarks/3f587e9-bench-<subject>-<profile>-<kind>-*`
 (`STAMP = <short-head>-bench-$PROXY-$WORKLOAD-$KIND-$TS`, `bench_run.sh`).
 
-**Alumina binary note.** `HEAD_CANDIDATE_SHA` must name the sha of a
-`aarch64-unknown-linux-musl` build of §10.2 with its builder/toolchain
-recorded. Build and stage it exactly as follows (every step below is a pin, not
-a suggestion):
+**Alumina binary note.** `HEAD_CANDIDATE_SHA` must name the sha of the §10.2
+candidate build of alumina. **The sole build owner is `scripts/verify.sh mid
+union`** (`cargo +1.99.0 build --locked --release` — toolchain 1.99.0 per
+`rust-toolchain.toml`, **no `--target`, no `--target-dir`**) → `target/release/
+alumina`. The harness labels the artifact `aarch64-unknown-linux-musl`
+(`bench_run.sh` `BENCH_RUST_TARGET`) and requires a statically-linked aarch64
+ELF, but the **build command itself is Host-kind** — do **not** pass `--target`.
+On a Darwin host (mid selectors are Linux-only; host `cc`/Apple `ld` rejects
+the musl link flags) dispatch the same command into the pinned builder image —
+`CARGO_HOME=/cargo-home` is REQUIRED because the digest is
+`CARGO_HOME`-sensitive, and `--target`/`--target-dir` must NOT be added
+(CompileKind changes `-C metadata`, so even identical source builds to a
+different digest):
 
 ```sh
-# toolchain 1.99.0 (rust-toolchain.toml) via the pinned builder images
-# docker.io/library/rust@sha256:484dce…2779a (§10.2 Builder; verify.sh canary);
-# target fixed at aarch64-unknown-linux-musl (bench_run.sh BENCH_RUST_TARGET).
-cargo +1.99.0 build --locked --release --target aarch64-unknown-linux-musl --target-dir target
+podman --connection "$BENCH_PODMAN_CONNECTION" run --rm --pull=never \
+  -v "$PWD:/app:ro,Z" -v "$PWD/target:/app/target:Z" --user 0:0 \
+  -e CARGO_HOME=/cargo-home -e CARGO_INCREMENTAL=0 -w /app \
+  docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a \
+  sh -c 'cargo +1.99.0 build --locked --release'
 # stage the statically-linked artifact where bench_run.sh mounts it
 # (host `.ooda/…` -> container `/ooda/…` -> `/work/alumina`, run.sh):
-install -m 0755 target/aarch64-unknown-linux-musl/release/alumina .ooda/alumina-head/baseline/alumina-musl
-shasum -a 256 .ooda/alumina-head/baseline/alumina-musl   # expect the §10.2 sha below
+install -m 0755 target/release/alumina .ooda/alumina-head/baseline/alumina-musl
+shasum -a 256 .ooda/alumina-head/baseline/alumina-musl   # expect c869192e…
 ```
 
-The P1-gate executed artifact is `c869192e…` (`target/release/alumina` —
-statically-linked aarch64 musl ELF, digest asserted equal to D4 candidate
-`a19d407`); a §10.2 (`3f587e9`) build is expected to reproduce it. **The file
-now staged at `.ooda/alumina-head/baseline/alumina-musl` is the old `85b7769`
-build (`1e173c13…ce82`)** — running the candidate `HEAD_CANDIDATE_SHA` against it
+The pinned executed artifact is `c869192e…` (`target/release/alumina`,
+statically-linked aarch64 musl ELF, digest equal to D4 candidate `a19d407` and
+to the E2 receipts; **measured in the pinned image**: this Host-kind build
+under `CARGO_HOME=/cargo-home` reproduces `c869192e…`, while adding
+`--target aarch64-unknown-linux-musl` yields `e10c7d9a…`/`ac37ff18…`, and a
+default `CARGO_HOME` yields `47ce3f54…` — all ≠, so this recipe is the only
+documented one that lands the pin). **The file now staged at
+`.ooda/alumina-head/baseline/alumina-musl` is the old `85b7769` build
+(`1e173c13…ce82`)** — running the candidate `HEAD_CANDIDATE_SHA` against it
 fails closed (`BENCH-BLOCKED: alumina binary identity mismatch`,
 `bench_run.sh`), which is the intended outcome until the rebuild above lands. A
 fresh build that does **not** reproduce `c869192e…` is fail-closed too: record
@@ -674,6 +706,19 @@ there. The storm is a connection-churn/progress test, not a goodput reading.
 `invalid` receipts are re-run and retained with reasons disclosed; an
 un-resolvable identity or harness failure makes the row `Unknown`/`fail`.
 
+**E2 run status (disclosed, not hidden).** The nine E2 timed runs were executed
+**before** this round-2 amendment (review `alumina-nfxt8`) landed, under the
+§10 text at commit `2c3efd4` — a **protocol-order deviation**, recorded here so
+it is never silently absorbed. The runs passed the fail-closed pin
+`HEAD_CANDIDATE_SHA=c869192e…` against the `verify.sh mid union` provenance
+artifact (§10.5 Alumina binary note, since corrected), so every E2 receipt is
+identity-pinned to §10.2 and valid for the candidate; the receipts and their §11
+recorded results stand. The §10 text in force then carried the defective build
+recipe (round-2 B1); later E2–E4 runs must follow this amended §10. (§10.3
+bracket held on the E2 runs — `identity.source_head = 3f587e9…`,
+`dirty_count=0`, `rust_target = aarch64-unknown-linux-musl`; bead
+`alumina-cdwui.15`.)
+
 ### 10.6 E3 — 10-Gbps burst/sustained: capability preflight, then measure-or-BLOCKED
 
 **Capability preflight (explicit; run first; all observable via existing
@@ -697,9 +742,13 @@ seams):**
    — near-saturated sampler cores at 1 Gbps imply no honest 10× headroom.
    Record the estimate and disclose it as an estimate. Note that
    `e2micro_model.host_cpus` / `host_mem_gib` are **hard-coded literals** in the
-   report writer (`bench_workload.py`: 8 CPUs / 14 GiB), not observed values —
-   accurate on today's host, false on any other — so the executor must also
-   record `nproc` and `/proc/meminfo` beside any receipt that claims headroom.
+   report writer (`bench_workload.py`: 8 CPUs / 14 GiB) describing the **harness
+   VM** — record the harness VM's capability, not the client's:
+   `podman --connection "$BENCH_PODMAN_CONNECTION" info --format
+   '{{.Host.CPUs}} {{.Host.MemTotal}}'`, or `/proc/meminfo` **inside** the bench
+   container, beside any receipt that claims headroom. (The Darwin client host
+   reports `nproc=14` / 36 GiB and has no `/proc/meminfo`; its numbers are not
+   the measured ones.)
 4. **Expressibility seam.** The documented invocation accepts only the
    `E2MICRO_LABELS` set `1gbps|storm150|storm50`, and `1gbps` pins
    `--target-mbps 1000` (`bench_run.sh`, `E2MICRO_LABELS` in the driver; the
@@ -708,10 +757,12 @@ seams):**
    today** without a harness seam change — which is **out of this docs-only
    protocol's authority** and must be a separate seam decision (new workload
    label / `--target-mbps 10000` wiring) before any 10-Gbps numbers.
-   Independently of the label set, `bench_workload.py` rejects
-   `--target-mbps > 2000` (`MAX_TARGET_MBPS`, "target-mbps out of range",
-   exit 3) and caps the outstanding-cap argument at `MAX_OUTSTANDING_CAP = 8192`
-   — a seam decision must lift those constants too, not just wire the label.
+   Independently of the label set, `bench_workload.py` `_workload_validate`
+   rejects `target_mbps > 2000` (bare literal at
+   `scripts/bench_workload.py:3335`, "target-mbps out of range", exit 3) and
+   caps the outstanding-cap argument at the `MAX_OUTSTANDING_CAP = 8192`
+   constant (`:107`) — a seam decision must lift those limits too, not just wire
+   the label.
 
 **Determination.** If any preflight item cannot establish 10-Gbps capability,
 **or** the expressibility seam is not authorized, E3 records
