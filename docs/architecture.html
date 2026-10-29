@@ -448,7 +448,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>The exchange class is a positional two-call protocol
         (<code>start_exchange</code> then another call to set
         serving/probe); the runtime cancels any exchange not explicitly marked
-        serving or probe. Reordering the calls silently reverts the class.</td>
+        serving or probe. A mark issued before <code>start_exchange</code> is a
+        no-op, and an omitted mark lets the runtime cancel the exchange as
+        retained startup work; an overlapping second start fails closed with
+        <code>ExchangeActive</code> and never silently reassigns the class.</td>
         <td><code>src/startup_dns.rs:2971-3007</code>, <code>:1613-1621</code>;
         <code>src/runtime.rs:258-262</code>, <code>:345</code>.</td>
       </tr>
@@ -641,13 +644,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   per-turn <code>cancel_retained_startup_exchange</code> cancels exactly the
   exchanges that are neither serving nor probe (<code>src/startup_dns.rs:1613-1621</code>,
   driven from <code>src/runtime.rs:258-262</code>).</p>
-  <p>This is a fragile seam: the class of an in-flight exchange is whatever two
-  earlier calls last said, so reordering — e.g. starting an exchange, marking it
-  serving, then starting a probe without checking <code>active.is_some()</code> —
-  silently reassigns class. Today every call site is correct and the guard
-  (<code>ExchangeActive</code>, <code>:2977-2979</code>) rejects overlap, but the
-  type makes the mistake easy. <a href="#recommendations">R-5</a> makes the class
-  a parameter of <code>start_exchange</code>.</p>
+  <p>This is a fragile seam: the class of an in-flight exchange is set by two
+  separate later calls, so a mark issued before <code>start_exchange</code> is a
+  no-op (<code>src/startup_dns.rs:1583-1601</code>) and an omitted mark leaves
+  the exchange with the start defaults (<code>serving: false,
+  probe: false</code>), which the runtime’s per-turn cancellation guard then
+  treats as retained startup work (<code>src/runtime.rs:258-262</code>).
+  Overlap is not silently reassigned: a second <code>start_exchange</code> while
+  one is active returns <code>ExchangeActive</code> and leaves the outstanding
+  exchange and its class untouched (<code>src/startup_dns.rs:2964-2981</code>) —
+  the guard fails closed. Today every call site is correct, but the type makes
+  the mistake easy. <a href="#recommendations">R-5</a> makes the class a
+  parameter of <code>start_exchange</code>.</p>
 </section>
 
 <section id="components">
@@ -810,10 +818,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>ReadingConnect</code>, <code>RunningDecision</code>, <code>Dialing</code>,
   <code>SendingConnected</code>, <code>ValidatingHello</code>,
   <code>WritingHello</code>, <code>Relay</code>, <code>Refusing(&amp;'static
-  [u8])</code>, and <code>Closing</code>. Note that this observed as-built set has
-  <strong>ten</strong> variants; the review register that precedes this document
-  lists <em>nine</em> — the ten-variant set below is the source truth and the
-  discrepancy is flagged in <a href="#appendix-b">Appendix B</a>.</p>
+  [u8])</code>, and <code>Closing</code>. Note that the stage machine has these
+  <strong>ten</strong> variants (<code>src/serving.rs:340-351</code>); the
+  register’s nine-row stage table is the nominal successful path — it lists
+  <code>Accept</code> as a separate (non-<code>Stage</code>) entry step and omits
+  the alternate <code>Refusing</code> branch, so its “nine” counts path steps,
+  not variants. The two counts measure different things (see
+  <a href="#appendix-b">Appendix B</a>).</p>
 
   <h3>4.1 Admission and the capacity answer</h3>
   <p>Admission is bounded by <code>MAX_TUNNELS = TUNNEL_SLOTS = 512</code> and
@@ -2015,10 +2026,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>Unused direct pins cost supply-chain review surface for no benefit
         today.</td></tr>
       <tr><th scope="row">R-5</th>
-        <td>Make the exchange class a parameter of <code>start_exchange</code> so
-        the serving/probe mark cannot be reordered past the guard.</td>
+        <td>Make the exchange class a parameter of <code>start_exchange</code>
+        so the serving/probe class is fixed by the single call rather than by
+        separate marks that can be omitted or issued before the start.</td>
         <td>F-06; <code>src/startup_dns.rs:2971-3007</code></td>
-        <td>Removes a silent degradation mode from the refresh path.</td></tr>
+        <td>Removes the silent omitted-mark cancellation mode from the refresh
+        path.</td></tr>
       <tr><th scope="row">R-6</th>
         <td>Decide whether multi-record pre-hello fragmentation is a stated
         requirement before any inspector-buffer resizing; claim a saving only
@@ -2044,7 +2057,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         quoted.</td>
         <td>Appendix B verifies both discrepancies.</td>
         <td>Ensures future readers anchor on source truth rather than the
-        preceding register’s “nine” stages and “3800 s” window.</td></tr>
+        preceding register’s nominal nine-row stage table and its “3800 s”
+        window.</td></tr>
     </tbody>
   </table>
 </section>
@@ -2227,8 +2241,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <li><strong>D-1 (Stage count).</strong> <code>Stage</code> has
     <strong>10</strong> variants (<code>src/serving.rs:340-351</code>): Idle,
     ReadingConnect, RunningDecision, Dialing, SendingConnected, ValidatingHello,
-    WritingHello, Relay, Refusing(&amp;'static [u8]), Closing. The preceding
-    register lists “nine”.</li>
+    WritingHello, Relay, Refusing(&amp;'static [u8]), Closing. The register’s
+    “nine” counts the rows of its stage table, the nominal successful path: it
+    lists <code>Accept</code> as a separate (non-<code>Stage</code>) entry step
+    and omits the alternate <code>Refusing</code> branch. The two counts measure
+    different things, so this is not a genuine discrepancy; D-2 below is.</li>
     <li><strong>D-2 (Incident window).</strong> <code>REPORT_WINDOW_SECS = 3600</code>
     (<code>src/incident_report.rs:14-15</code>). The preceding register’s “3800 s”
     rotation does not match source; the recorded as-built value is 3600 s.</li>
@@ -2239,9 +2256,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>Refusing</code> and <code>Closing</code> are terminal stages; the absolute
   setup deadline covers every pre-gate stage, while <code>Dialing</code>
   additionally carries the per-attempt connect deadline; and
-  <code>RelayActive</code> is the single open-gate phase. The register’s
-  “nine” likely folded `Refusing` into `Closing`; the source keeps them distinct
-  (`Refusing` carries the static refusal body pointer).</p>
+  <code>RelayActive</code> is the single open-gate phase. The register’s “nine”
+  counts the rows of its nominal successful-path table, which omits the
+  alternate <code>Refusing</code> branch; the source keeps <code>Refusing</code>
+  distinct from <code>Closing</code> (<code>Refusing</code> carries the static
+  refusal body pointer). The two counts measure different things; no variant
+  was folded into another.</p>
 
   <h4>B.4 Verification of this document</h4>
   <ul>

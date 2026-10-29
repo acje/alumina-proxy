@@ -127,7 +127,11 @@ call site today (`src/serve.rs:1060`), so this is a documented seam rather than 
 
 ## 4. Request data path
 
-One `CONNECT` traverses nine explicit stages (`Stage`, `src/serving.rs:340-351`):
+On the nominal successful path, one `CONNECT` moves through the nine steps below
+(the `Stage` state machine, `src/serving.rs:340-351`): the first row, `Accept`,
+is a serving entry step (`accept_all → admit`) rather than a `Stage` variant,
+and the alternate refusal branch (`Refusing(&'static [u8])`) is not on this
+successful path — the `Stage` enum itself has ten variants.
 
 | # | Stage | Entry point | What is decided / enforced | Citation |
 |---|---|---|---|---|
