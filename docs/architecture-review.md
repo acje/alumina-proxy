@@ -89,8 +89,12 @@ deadline (`src/serving.rs:67`, `:137`, `:144`, `:150`, `:917`).
 | Witness / harness | `Counting`, `fuzz`, `fault` | `src/alloc.rs`, `src/fuzz.rs`, `src/fault.rs` | 225 / 581 / 156 |
 
 Twenty-one of twenty-seven modules are `pub` (`src/lib.rs:4-27`); `enforcement` and
-`incident_report` are private. The library surface exists because the integration tests under
-`tests/` consume it; the binary is the only production consumer.
+`incident_report` are private. The library surface is consumed by three in-tree consumer
+classes: the serving binary (`src/main.rs`), the integration tests under `tests/`, and the
+developer-harness binary `src/bin/parser_bench.rs` (which links `alumina::client_hello`
+directly, `src/bin/parser_bench.rs:1-9`, `:45`). Whether every export is necessary per
+consumer is an open assessment (owner bead `alumina-szmy0.21`), not a presumption of
+narrowing.
 
 ---
 
@@ -402,7 +406,7 @@ half-mutated state. For a single-binary security component this is the right com
 | F-05 | S3 | Supply chain | `rustls-pki-types` and `rustls-webpki` declared as direct deps, referenced by zero Rust files | `Cargo.toml:199-200`; grep over `src/`, `tests/`, `examples/` |
 | F-06 | S3 | Robustness | Exchange class is a positional 2-call protocol; runtime cancels anything not marked serving/probe | `src/startup_dns.rs:2996-3007`, `:1613-1621`; `src/runtime.rs:258-262`, `:345` |
 | F-07 | S3 | Hygiene | Slot metadata/parser/inspector are reset through constructors on reuse; the two 128 KiB traffic slabs are not zeroized; no current disclosure path found (one coordinated item with U-06) | `src/serving.rs:774-803` |
-| F-08 | S3 | API surface | 21 `pub mod`s + public test-seam constructors (`Serving::new`, `Runtime::new`) for two consumers | `src/lib.rs:4-27`, `src/serving.rs:1157`, `src/runtime.rs:207` |
+| F-08 | S3 | API surface | 21 `pub mod`s + public test-seam constructors (`Serving::new`, `Runtime::new`) serve three in-tree consumer classes: the serving binary, the tests under `tests/`, and the developer-harness binary `src/bin/parser_bench.rs` (links `alumina::client_hello` directly); per-consumer export necessity is an open assessment, not a narrowing decision (owner `alumina-szmy0.21`) | `src/lib.rs:4-27`, `src/serving.rs:1157`, `src/runtime.rs:207`, `src/bin/parser_bench.rs:1-9`, `:45` |
 | F-09 | S4 | Observability | Sink failure is terminal after the first hard write error: the process may continue with no external log-loss signal and the in-memory `dropped` counter cannot be emitted through the failed sink; the latch does not itself alter exit status | `src/log.rs:2094-2101`, `:1637-1646` |
 | F-10 | S4 | Positive | Single-clock discipline (`origin`+`now0` threaded through worker, cache, DNS) with an explicit re-anchor seam | `src/serve.rs:204-227`, `src/worker.rs:97-105`, `src/startup_dns.rs:1369-1381` |
 | F-11 | S4 | Positive | Per-entry CNAME bailiwick + config-time divergence rejection | `src/dns.rs:863-953`, `src/config.rs:1244-1262` |
@@ -479,7 +483,12 @@ Used as *criteria* only (`AGENTS.md`), applied to code:
 3. **Publish the real retained-memory figure** (≈409 KiB/slot, ≈204.7 MiB at 512 slots) wherever
    capacity is described, and consider folding the excluded per-slot fields into `BootInventory`
    so the accessor stops being a lower bound over a subset.
-4. **Delete or justify the two unused direct dependencies.** Cheapest finding to close. (F-05)
+4. **Resolve the two unused direct dependencies through dependency intake.** The decision —
+   rust-dep-intake-gated deletion of `rustls-pki-types`/`rustls-webpki`, or an explicit
+   feature/version-unification justification for keeping the direct pins (e.g. a future
+   trust-anchor intake) — is owned by the F-05 intake (bead `alumina-szmy0.16`), not settled
+   here. A Rust item attribute such as `#[deprecated]` cannot be applied to a Cargo
+   dependency. (F-05)
 5. **Make the exchange class a parameter of `start_exchange`.** Small change, removes a silent
    degradation mode from the refresh path. (F-06)
 6. **Have the owner explicitly accept or reject the terminal-sink risk** in the operator-facing

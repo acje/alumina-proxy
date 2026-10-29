@@ -195,7 +195,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       reclaimable headroom.</li>
       <li><strong>F-05…F-11:</strong> two declared-but-unused direct dependencies;
       a fragile positional two-call exchange protocol; non-zeroized slot reuse;
-      a 21-module public surface for two consumers; terminal silent sink failure;
+      a 21-module public surface for three in-tree consumer classes; terminal silent sink
+      failure;
       a strong single-clock discipline; per-entry CNAME bailiwick confinement.</li>
     </ul>
   </div>
@@ -467,10 +468,16 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td class="sev">S3</td>
         <td>API surface</td>
         <td>21 <code>pub mod</code>s plus public test-seam constructors
-        (<code>Serving::new</code>, <code>Runtime::new</code>) are exported for
-        exactly two consumers (the binary and the tests).</td>
+        (<code>Serving::new</code>, <code>Runtime::new</code>) serve three in-tree
+        consumer classes: the serving binary, the integration tests under
+        <code>tests/</code>, and the developer-harness binary
+        <code>src/bin/parser_bench.rs</code> (which links
+        <code>alumina::client_hello</code> directly). Whether every export is
+        necessary per consumer is an open assessment (owner bead
+        <code>alumina-szmy0.21</code>), not an export-narrowing decision.</td>
         <td><code>src/lib.rs:4-27</code>; <code>src/serving.rs:1157</code>;
-        <code>src/runtime.rs:207</code>.</td>
+        <code>src/runtime.rs:207</code>; <code>src/bin/parser_bench.rs:1-9</code>,
+        <code>:45</code>.</td>
       </tr>
       <tr>
         <th scope="row" class="fid">F-09</th>
@@ -615,10 +622,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>tests/</code> finds no direct <code>rustls_pki_types</code> or
   <code>rustls_webpki</code> import: the source uses the
   <code>rustls::pki_types</code> re-export (<code>src/startup_dns.rs:36</code>,
-  <code>src/startup_dns/dot_tests.rs:9</code>). They may be retained for a future
-  trust-anchor intake (the verifier comment at
+  <code>src/startup_dns/dot_tests.rs:9</code>). A future trust-anchor intake is one
+  reason they might be retained (the verifier comment at
   <code>src/startup_dns.rs:812-820</code> anticipates future trust anchors), but as
-  declared today each is an unused pin. <a href="#recommendations">R-4</a>.</p>
+  declared today each is an unused pin. Whether to delete them or justify the direct
+  pins is a dependency decision owned by the F-05 intake (bead
+  <code>alumina-szmy0.16</code>); this document does not decide it.
+  <a href="#recommendations">R-4</a>.</p>
 
   <h3>2.6 F-06 — the positional two-call exchange-class protocol (S3)</h3>
   <p><code>StartupDns::start_exchange</code> initialises an
@@ -649,8 +659,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   verb: production code may not unwrap; every <code>expect</code> must carry a
   proven-bound justification and an <code>#[expect]</code> with a <code>reason</code>
   (e.g. <code>src/serving.rs:509</code>, <code>src/config.rs:1001-1004</code>,
-  <code>src/cache.rs:369-372</code>). Figure 2 shows the ownership layers and the
-  one-directional call seams between them.</p>
+  <code>src/cache.rs:369-372</code>). Figure 2 groups the modules into ownership layers
+  and notes the dependency seams that cross the layer boundaries: the DNS/DoT transport
+  calls the reactor core’s <code>Cache</code>/<code>Schedules</code> operations
+  (<code>src/dns.rs:348-380</code>); the serving-surface inspector depends on top-layer
+  <code>config</code> types (<code>src/client_hello.rs:3</code>,
+  <code>:1108-1118</code>); and the gate’s two-barrier authority depends on the
+  serving-surface <code>HelloAccepted</code> witness (<code>src/gate.rs:27</code>).
+  Ownership is directional by layer; calls are not exclusively top-down.</p>
 
   <figure>
     <svg role="img" aria-labelledby="fig2-title" aria-describedby="fig2-desc"
@@ -662,8 +678,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       client_hello own validation and the two-barrier authority; enforcement
       owns policy, state, action, and monitor; connect and eligibility own the
       parser and destination policy; logs and incident reports emit observability.
-      Ownership is read by layer: each layer is owned by, and called only from,
-      the layers above it; no layer calls upward.</desc>
+      Ownership is read by layer, but calls are not exclusively top-down: the DNS/DoT
+      transport calls reactor-core Cache/Schedules operations, the client_hello
+      inspector depends on top-layer config types, and the gate depends on the
+      serving-surface HelloAccepted witness.</desc>
 
       <rect x="20" y="20" width="800" height="64" rx="8" fill="#eef2f7" stroke="#1a4d80" stroke-width="1.5"/>
       <text x="420" y="42" text-anchor="middle" font-size="14" font-weight="700">Binary / boot path</text>
@@ -1986,9 +2004,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>204.7 MiB is a lower bound; operators sizing hosts need the real RSS
         envelope including allocator and socket buffers.</td></tr>
       <tr><th scope="row">R-4</th>
-        <td>Delete, justify, or mark <code>#[deprecated = "future trust anchors"]</code>
-        on the two declared-but-unused direct dependencies
-        (<code>rustls-pki-types</code>, <code>rustls-webpki</code>).</td>
+        <td>Remove the two declared-but-unused direct dependencies
+        (<code>rustls-pki-types</code>, <code>rustls-webpki</code>) through a
+        dependency-intake-gated deletion, or justify retaining the direct pins in the
+        manifest (e.g. a future trust-anchor intake) with an explicit
+        feature/version-unification rationale. The F-05 intake owns the decision (bead
+        <code>alumina-szmy0.16</code>); <code>#[deprecated]</code> is a Rust item
+        attribute and cannot be applied to a Cargo dependency.</td>
         <td>F-05; <code>Cargo.toml:199-200</code></td>
         <td>Unused direct pins cost supply-chain review surface for no benefit
         today.</td></tr>
