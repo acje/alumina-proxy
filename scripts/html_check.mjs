@@ -50,9 +50,13 @@
 //      `SOURCE-CONTENT-IDENTITY <64-hex>` must have that value equal to the
 //      gate's recomputed SHA-256 manifest over the current working-tree
 //      source set (src/**, tests/*.rs, Cargo.toml, Cargo.lock; docs and the
-//      spec digest excluded). A mismatch names both documented and recomputed
-//      values; a covered file that exists but cannot be read is operational.
-//      A document without the marker is skipped.
+//      spec digest excluded). Exactly one marker is required: zero markers is
+//      skipped (verify.sh fail-closes on the absent per-root OK), two or more
+//      markers is a duplicate/mixed declaration and a check failure that
+//      names the count — a later increment can never update only the header
+//      and leave a second declaration silently green. A mismatch names both
+//      documented and recomputed values; a covered file that exists but
+//      cannot be read is operational.
 //
 // Exit discipline (one-way split — operational never folds into 0/1):
 //   0  every input clean
@@ -506,21 +510,23 @@ function checkApparatusIn(f, text, lineAt, local) {
 
 // Check 8 — source-content identity. architecture.html declares the exact
 // source-content identity of the bytes it cites as the machine marker
-// `SOURCE-CONTENT-IDENTITY <64-hex>`. The gate recomputes that identity from
+// `SOURCE-CONTENT-IDENTITY <64-hex>`, and the marker must appear exactly once
+// in the document: a doc without it is skipped (no identity asserted; verify.sh
+// fail-closes on the missing per-root OK marker), and a doc with two or more
+// markers — duplicate or mixed declarations — is a domain failure rather than
+// an unchecked first-match (M-1 closure). The gate recomputes the identity from
 // the CURRENT working tree (not a pinned commit) over a fixed covered set:
 // every file under src/ (recursive), every tests/*.rs, and the manifest roots
 // Cargo.toml and Cargo.lock; docs/ and the spec digest are deliberately
 // excluded so the document can never hash itself. On a mismatch the gate names
 // both the documented and the recomputed value (exit 1); a covered file that
 // exists but cannot be read is operational (exit 2). The identity is a SHA-256
-// manifest: for each file in byte-lexicographic relative-path order, the
+// manifest: for each file in deterministic relative-path order (files.sort();
+// the current ASCII path set makes this identical to UTF-8 byte order), the
 // 4-byte big-endian path length, the UTF-8 path, the 4-byte big-endian content
 // length, then the raw content bytes (an empty file contributes a zero content
-// length — unambiguous). A document without the marker is skipped (no
-// identity is asserted for it); verify.sh fail-closes on the per-root OK
-// marker so a gate root that silently loses its identity statement is a
-// blocked gate, not a pass.
-const IDENTITY_MARKER_RE = /SOURCE-CONTENT-IDENTITY ([0-9a-f]{64})/
+// length — unambiguous).
+const IDENTITY_MARKER_RE = /SOURCE-CONTENT-IDENTITY ([0-9a-f]{64})/g
 const IDENTITY_SET = ['src/**', 'tests/*.rs', 'Cargo.toml', 'Cargo.lock']
 
 // Collect every relative path under src/ (recursive) as src/<rel>. A missing
@@ -590,16 +596,27 @@ async function sourceIdentity(root) {
   return { hex: h.digest('hex'), count: files.length }
 }
 
-// Check 8 — recompute the declared identity from the working tree; match is a
-// pass, mismatch names both values (exit 1), an unreadable covered file is
-// operational (exit 2). Only documents carrying the marker are checked.
+// Check 8 — recompute the declared identity from the working tree. Exactly one
+// machine marker is required: zero markers means no identity is asserted (the
+// document is skipped; verify.sh fail-closes on the absent per-root OK, so a
+// gate root silently losing its statement is a blocked gate, not a pass), and
+// two or more markers is the duplicate/mixed declaration a later increment
+// could otherwise leave partly unenforced — a domain failure (exit 1) naming
+// the count. With exactly one marker, a match is a pass, a mismatch names both
+// values (exit 1), and an unreadable covered file is operational (exit 2).
 async function checkIdentityIn(f, text, local) {
-  const m = IDENTITY_MARKER_RE.exec(text)
-  if (!m) {
+  const markers = [...text.matchAll(IDENTITY_MARKER_RE)]
+  if (markers.length === 0) {
     lines.push(`HTML-IDENTITY-SKIP ${f}`)
     return
   }
-  const documented = m[1]
+  if (markers.length !== 1) {
+    local.identityFail++
+    identityFailTotal++
+    lines.push(`HTML-IDENTITY-FAIL ${f} expected 1 SOURCE-CONTENT-IDENTITY marker, found ${markers.length} (duplicate or mixed source-identity declarations)`)
+    return
+  }
+  const documented = markers[0][1]
   const id = await sourceIdentity(root)
   if (id.op) {
     local.identityOps++

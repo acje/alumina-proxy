@@ -336,6 +336,51 @@ try {
     has: [`HTML-IDENTITY-FAIL identity_stale.html`, `documented ${zeros}`, `recomputed ${correct}`],
     no: ['HTML-IDENTITY-OK identity_stale.html', 'HTML-CHECK-OK identity_stale.html'],
   })
+  // M-1 closure: the document must carry exactly one machine marker. Two
+  // identical markers (duplicate) and two differing markers (mixed) are both
+  // domain failures (exit 1) naming the count — a later increment that updates
+  // only the header must never leave a second declaration silently green. A
+  // document with no marker at all is skipped (verify.sh fail-closes on the
+  // absent per-root HTML-IDENTITY-OK, so the skip path is only safe because the
+  // gate root always carries the marker).
+  await writeFile(
+    path.join(base, 'identity_dup.html'),
+    [
+      '<!doctype html>',
+      '<html><body>',
+      `<p>SOURCE-CONTENT-IDENTITY ${correct}</p>`,
+      `<p>SOURCE-CONTENT-IDENTITY ${correct}</p>`,
+      '</body></html>',
+      '',
+    ].join('\n')
+  )
+  expect('check8 duplicate identical markers fail closed (exit 1)', ['identity_dup.html'], 1, {
+    has: ['HTML-IDENTITY-FAIL identity_dup.html', 'expected 1 SOURCE-CONTENT-IDENTITY marker, found 2'],
+    no: ['HTML-IDENTITY-OK identity_dup.html', 'HTML-CHECK-OK identity_dup.html'],
+  })
+  await writeFile(
+    path.join(base, 'identity_mixed.html'),
+    [
+      '<!doctype html>',
+      '<html><body>',
+      `<p>SOURCE-CONTENT-IDENTITY ${correct}</p>`,
+      `<p>SOURCE-CONTENT-IDENTITY ${zeros}</p>`,
+      '</body></html>',
+      '',
+    ].join('\n')
+  )
+  expect('check8 mixed identity markers fail closed (exit 1)', ['identity_mixed.html'], 1, {
+    has: ['HTML-IDENTITY-FAIL identity_mixed.html', 'expected 1 SOURCE-CONTENT-IDENTITY marker, found 2'],
+    no: ['HTML-IDENTITY-OK identity_mixed.html', 'HTML-CHECK-OK identity_mixed.html'],
+  })
+  await writeFile(
+    path.join(base, 'identity_absent.html'),
+    ['<!doctype html>', '<html><body><p>no identity marker</p>', '</body></html>', ''].join('\n')
+  )
+  expect('check8 no marker is skipped clean (exit 0, skip line)', ['identity_absent.html'], 0, {
+    has: ['HTML-IDENTITY-SKIP identity_absent.html', 'HTML-CHECK-OK identity_absent.html'],
+    no: ['HTML-IDENTITY-FAIL', 'HTML-IDENTITY-OP-FAIL'],
+  })
   // Operational split (exit 2): a covered source file that exists but is
   // unreadable is operational, not a domain-negative. Permissions locked
   // before this run and restored immediately after (before any later fixture

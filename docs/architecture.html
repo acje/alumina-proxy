@@ -1811,10 +1811,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     All line citations are to that revision.</li>
     <li><strong>Source-content identity:</strong> the exact identity that pins the
     cited bytes is the SHA-256 manifest over the working-tree source set
-    described in the header, <code>SOURCE-CONTENT-IDENTITY 4bc424a17b6dcb955d8303d2ac00f5b3208298d1758ff2d0dc5ba5c9235a7ebb</code>;
-    the docs gate recomputes it and fails on any mismatch (docs and the
-    specification digest are excluded from the set). The base commit names the
-    revision; the content identity binds the currently cited bytes.</li>
+    described in the header. It is declared by the header's single machine
+    marker <code>SOURCE-CONTENT-IDENTITY</code> — that marker must appear
+    exactly once in this document and the docs gate recomputes it from the
+    working tree, failing on any mismatch (docs and the specification digest are
+    excluded from the set). The base commit names the revision; the content
+    identity binds the currently cited bytes.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
     <code>e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401</code>
     (unchanged); referenced as the governing specification only.</li>
