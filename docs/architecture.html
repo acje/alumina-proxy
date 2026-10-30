@@ -302,7 +302,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   verb: production code may not unwrap; every <code>expect</code> must carry a
   proven-bound justification and an <code>#[expect]</code> with a <code>reason</code>
   (e.g. <code>src/serving.rs:509</code>, <code>src/config.rs:1001-1004</code>,
-  <code>src/cache.rs:369-372</code>). Figure 2 groups the modules into ownership layers
+  <code>src/cache.rs:369-372</code>). The public surface has three consumers: the
+  serving binary (<code>src/main.rs</code>), the test corpus, and the dev-only
+  <code>src/bin/parser_bench.rs</code> developer harness, a distinct binary
+  importing <code>alumina::client_hello::{ChInspector, Inspect,
+  ja4_fingerprint}</code> to drive those two parsing seams in a tight loop
+  (<code>src/bin/parser_bench.rs:1-9</code>, <code>:45</code>;
+  <code>src/lib.rs:4-27</code>). Figure 2 groups the modules into ownership layers
   and notes the dependency seams that cross the layer boundaries: the DNS/DoT transport
   calls the reactor core’s <code>Cache</code>/<code>Schedules</code> operations
   (<code>src/dns.rs:348-380</code>); the serving-surface inspector depends on top-layer
@@ -313,8 +319,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   above are real dependencies, not a strict acyclic layering.</p>
 
   <p>The TLS trust-verification stack is a deliberately minimal and bounded seam.
-  <code>rustls</code> and <code>ring</code> are the two direct dependencies of the
-  DoT path (<code>Cargo.toml:198</code>, <code>:209</code>): rustls supplies the
+  <code>Cargo.toml</code> declares three direct DoT-related manifest entries —
+  <code>rustls</code>, <code>rustls-webpki</code>, and <code>ring</code>
+  (<code>Cargo.toml:198-209</code>); two of them, <code>rustls</code> and
+  <code>ring</code>, are direct source imports
+  (<code>src/startup_dns.rs:31-38</code>): rustls supplies the
   TLS 1.3 client (<code>default-features = false</code>), and ring is promoted to a
   direct dependency so the strict SPKI pin can hash the server’s SubjectPublicKeyInfo
   directly (rustls keeps its digest surface crate-private). <code>rustls-pki-types</code>
@@ -480,12 +489,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>ReadingConnect</code>, <code>RunningDecision</code>, <code>Dialing</code>,
   <code>SendingConnected</code>, <code>ValidatingHello</code>,
   <code>WritingHello</code>, <code>Relay</code>, <code>Refusing(&amp;'static
-  [u8])</code>, and <code>Closing</code>. Ten variants count the machine’s breadth;
-  the nominal successful path steps through nine of them, with
-  <code>Accept</code> as the separate admission entry step (not a
-  <code>Stage</code> variant) and the alternate <code>Refusing</code> branch
-  replacing the hello-validated tail. The two counts — ten variants against nine
-  path steps — measure different things and are both as-built facts.</p>
+  [u8])</code>, and <code>Closing</code>. Nine nominal steps:
+  <code>Accept</code> (not a <code>Stage</code> variant) plus eight
+  <code>Stage</code> variants — <code>ReadingConnect</code>,
+  <code>RunningDecision</code>, <code>Dialing</code>, <code>SendingConnected</code>,
+  <code>ValidatingHello</code>, <code>WritingHello</code>, <code>Relay</code>,
+  <code>Closing</code>; ten enum variants overall, with <code>Idle</code> and the
+  alternate <code>Refusing</code> branch completing the set.</p>
 
   <h3>3.1 Admission and the capacity answer</h3>
   <p>Admission is bounded by <code>MAX_TUNNELS = TUNNEL_SLOTS = 512</code> and
@@ -1367,13 +1377,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (boot init is exempt; shutdown exits without deallocating), while dependency
   behavior is a bounded seam — the DoT profile allocates per connect
   (per-TLS-upgrade, <code>src/startup_dns.rs:1101-1120</code>,
-  <code>build_tls_connection</code> at <code>:1113-1132</code>), and the retained
-  serving refresh itself allocates nothing: on its one warm successful-exchange
-  fixture the repository asserts zero reallocations of the transport buffer and
-  at most eight allocations and at most eight deallocations, independently, against
-  <code>WARM_DOT_ALLOC_BOUND = 8</code>
-  (<code>src/startup_dns.rs:2083-2117</code>;
-  <code>src/startup_dns/dot_tests.rs:1379</code>, <code>:1437-1472</code>). That
+  <code>build_tls_connection</code> at <code>:1113-1132</code>). On the retained
+  serving refresh’s one warm successful-exchange fixture, the transport itself
+  must not allocate or reallocate (<code>counts.reallocs == 0</code>), while the
+  bounded rustls seam — the dependency scope — may allocate at most
+  <code>WARM_DOT_ALLOC_BOUND = 8</code> and deallocate at most 8 independently
+  (<code>src/startup_dns/dot_tests.rs:1371-1381</code>, <code>:1435-1472</code>;
+  per-TLS-upgrade allocation at <code>src/startup_dns.rs:2067-2091</code>). That
   is a calibrated fixture bound — total heap activity on that single warm
   exchange, distinct from the retained named storage the inventory reports — never
   a universal or total-event maximum. The boot-window zero-allocation witness is
@@ -1498,13 +1508,16 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   and exits <code>0</code> (<code>src/main.rs:104-107</code>). Exit
   <code>70</code> (<code>EX_SOFTWARE</code>) is forced shutdown with undrained
   tunnels at the deadline (<code>ShutdownExit::Forced ⇒ 70</code>,
-  <code>src/serving.rs:187</code>) and also every startup software failure — no
-  bound listener, <code>attach</code> failure, or <code>serve</code> error —
-  each exiting <code>EX_SOFTWARE</code> (<code>src/main.rs:89-99</code>). Boot
-  and startup configuration failures exit the documented
-  <code>EX_CONFIG = 78</code> (<code>src/boot.rs:7</code>,
-  <code>src/main.rs:109-112</code>) and the startup DNS verdict exits
-  <code>EX_TEMPFAIL = 75</code> (<code>src/main.rs:103</code>). The terminal-sink
+  <code>src/serving.rs:187</code>) and startup serving failures — no bound
+  listener, <code>attach</code> failure, or <code>serve</code> error — each
+  exiting <code>EX_SOFTWARE</code> (<code>src/main.rs:89-107</code>). Every
+  <code>owner.run_startup</code> error maps to <code>EX_CONFIG = 78</code>:
+  <code>StartupError::{Dns, Cache, Listener}</code> — DNS transport/storage,
+  readiness evaluation, and listener bind — plus boot storage, preallocation,
+  and stdout-sink setup failures
+  (<code>src/boot.rs:7</code>; <code>src/main.rs:62-80</code>,
+  <code>:109-112</code>; <code>src/serve.rs:117-128</code>); the startup DNS
+  verdict exits <code>EX_TEMPFAIL = 75</code> (<code>src/main.rs:103</code>). The terminal-sink
   latch of §8.2 is the one failure surface where log loss is counted but
   unrecoverable and externally unreportable while the process runs
   (<code>src/log.rs:1637-1646</code>, <code>:2094-2101</code>).</p>
@@ -1525,16 +1538,20 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>Terminated</code> (SIGTERM within the startup window)</td>
         <td><code>src/serving.rs:186</code>; <code>src/main.rs:89-111</code></td></tr>
       <tr><th scope="row">70 (<code>EX_SOFTWARE</code>)</th>
-        <td>Forced shutdown (undrained tunnels at the deadline) or startup
-        software failure: no bound listener, <code>attach</code> failure, or
+        <td>Forced shutdown (undrained tunnels at the deadline) or a startup
+        serving failure: no bound listener, <code>attach</code> failure, or
         <code>serve</code> error</td>
-        <td><code>src/serving.rs:187</code>; <code>src/main.rs:24</code>, <code>:89-99</code></td></tr>
+        <td><code>src/serving.rs:187</code>; <code>src/main.rs:24</code>, <code>:89-107</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
         <td><code>src/main.rs:23</code>, <code>:103</code>; <code>src/serve.rs:98</code></td></tr>
       <tr><th scope="row">78 (<code>EX_CONFIG</code>)</th>
-        <td>Boot / configuration failure</td>
-        <td><code>src/boot.rs:7</code>; <code>src/main.rs:66-80</code>, <code>:111-117</code></td></tr>
+        <td>Every <code>owner.run_startup</code> error —
+        <code>StartupError::{Dns, Cache, Listener}</code>: DNS
+        transport/storage, readiness evaluation, listener bind — plus boot
+        storage, preallocation, and stdout-sink setup failures</td>
+        <td><code>src/boot.rs:7</code>; <code>src/main.rs:62-80</code>,
+        <code>:109-112</code>; <code>src/serve.rs:117-128</code></td></tr>
       <tr><th scope="row">503 (HTTP)</th>
         <td>Admission: no free slot — typed capacity answer, fixed body</td>
         <td><code>src/serving.rs:201-202</code>, <code>:1808-1836</code></td></tr>
