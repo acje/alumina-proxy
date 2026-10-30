@@ -179,6 +179,16 @@ name = "monitor_stdout"
 path = "tests/monitor_stdout.rs"
 harness = false
 
+# harness = false: this binary closes the child's stdout read end so the
+# nonblocking sink write fails on an unrecoverable closed pipe, and proves the
+# serving owner-turn exits EX_IOERR (74) once that fails the sink, instead of
+# continuing with observability permanently lost (F-09 evidence for the
+# sink-failure owner exit).
+[[test]]
+name = "stdout_closed"
+path = "tests/stdout_closed.rs"
+harness = false
+
 [dependencies]
 toml = { version = "=1.1.8", default-features = false, features = ["std", "parse", "serde"] }
 mio = { version = "=1.2.4", default-features = false, features = ["net", "os-poll", "os-ext"] }

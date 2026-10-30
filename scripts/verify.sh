@@ -136,7 +136,7 @@ alt_total_timing() {
     printf 'PHASE1-TIMING: total %ss\n' "$ALT_TOTAL"
 }
 
-INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/fault.rs src/fuzz.rs src/config.rs src/resolver.rs src/preflight.rs src/inventory.rs src/boot.rs src/cache.rs src/client_hello.rs src/connect.rs src/dns.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/policy.rs src/enforcement/state.rs src/gate.rs src/incident_report.rs src/log.rs src/runtime.rs src/schedule.rs src/serve.rs src/serving.rs src/startup_dns.rs src/worker.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs"
+INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/fault.rs src/fuzz.rs src/config.rs src/resolver.rs src/preflight.rs src/inventory.rs src/boot.rs src/cache.rs src/client_hello.rs src/connect.rs src/dns.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/policy.rs src/enforcement/state.rs src/gate.rs src/incident_report.rs src/log.rs src/runtime.rs src/schedule.rs src/serve.rs src/serving.rs src/startup_dns.rs src/worker.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
 
 # docslink gate roots: the exact nonempty argv docslink_check consumes. Shared
 # with the identity snapshot so the boundary content identity covers precisely
@@ -358,7 +358,7 @@ mid_boot() {
 # with the aw test runs AFTER the aw clippy pass. That sequence is preserved
 # here (non-aw clippy -> aw clippy -> aw tests), and the dedicated
 # ${ALT_AW_TARGET_DIR} removes the shared-dir interference entirely.
-ALT_TEST_TARGETS="--test foundations --test boot --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall"
+ALT_TEST_TARGETS="--test foundations --test boot --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed"
 
 mid_union() {
     [ "$(uname -s)" = "Linux" ] || {
@@ -2041,13 +2041,13 @@ alt_smoke() {
 inner_test() {
     _target="$1"
     case "$_target" in
-        foundations|boot|eligibility|mio_matrix|main_thread_stack|monitor_stdout|stdout_stall) ;;
+        foundations|boot|eligibility|mio_matrix|main_thread_stack|monitor_stdout|stdout_stall|stdout_closed) ;;
         "")
             echo "INNER-TEST usage: verify.sh inner test <target>" >&2
             exit 2
             ;;
         *)
-            echo "INNER-TEST-UNKNOWN-TARGET: '$_target' is not a test target of this crate (whitelist: foundations boot eligibility mio_matrix main_thread_stack monitor_stdout stdout_stall)" >&2
+            echo "INNER-TEST-UNKNOWN-TARGET: '$_target' is not a test target of this crate (whitelist: foundations boot eligibility mio_matrix main_thread_stack monitor_stdout stdout_stall stdout_closed)" >&2
             exit 2
             ;;
     esac

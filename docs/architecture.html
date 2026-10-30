@@ -101,7 +101,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   reference; none is copied from another document.</p>
   <p class="meta"><strong>Identity pins cited bytes:</strong> the human revision
   above names the base commit; the mechanically enforced binding is the exact
-  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY 46bfd94f35540a2917747e732fa63d060f7c63bf3157e4d32335ce89dabe8f6e</code> —
+  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY d37223260d4e106fa31a9be8d8b122a40806db65786df3ecc5df6d17ef28b134</code> —
   a deterministic manifest over the current working-tree source set
   (<code>src/**</code>, <code>tests/*.rs</code>, <code>Cargo.toml</code>,
   <code>Cargo.lock</code>; docs and the specification digest excluded). The
@@ -122,7 +122,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   source at the commit named above. Every architectural claim cites
   <code>src/*.rs</code>, <code>tests/*.rs</code>, or the governing specification
   (<code>docs/alumina-proxy.md</code>, SHA-256
-  <code>4e59e9d9e535475510e961fa719c69d1fa1ca8838452b32d5805b8f30fb9e78a</code>).
+  <code>69d91d17a53f7efc0380343b2c2404007fe676cddbdba0a21c4be77a61549b2d</code>).
   Values the code itself prints or asserts are recorded as measured. No review
   apparatus — findings, severities, proposals, or open questions — is carried here;
   the architecture is described as it is built.</p>
@@ -189,10 +189,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     non-empty effective/permitted/ambient capability set, and requires
     <code>no_new_privs</code> before the process may proceed
     (<code>src/preflight.rs:96-116</code>). Exit codes are fixed and documented:
+    <code>74</code> <code>EX_IOERR</code> for an unrecoverable stdout sink
+    failure at the serving owner-turn boundary,
     <code>75</code> <code>EX_TEMPFAIL</code> for the startup DNS verdict,
     <code>70</code> <code>EX_SOFTWARE</code> (given as program exit),
     <code>78</code> <code>EX_CONFIG</code> for configuration failure
-    (<code>src/main.rs:23-24</code>, <code>src/boot.rs:7</code>).</li>
+    (<code>src/runtime.rs:30</code>, <code>:285-288</code>;
+    <code>src/main.rs:23-24</code>, <code>src/boot.rs:7</code>).</li>
     <li><strong>Listener conditionality.</strong> The listener is opened only
     when the startup window’s canonical readiness rule holds — the unresolved
     count must be at most the configured allowance, otherwise the process exits
@@ -431,7 +434,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/config.rs:17</code>, <code>:805-815</code>, <code>:1120-1125</code>, <code>:1244-1262</code></td></tr>
       <tr><th scope="row"><code>runtime</code></th>
         <td>Single-reactor owner; startup window driver; serves as the attached owner after <code>attach</code>; owns DNS scheduling per turn.</td>
-        <td><code>src/runtime.rs:153</code>, <code>:187</code>, <code>:207</code>, <code>:262</code>, <code>:347</code>, <code>:421</code></td></tr>
+        <td><code>src/runtime.rs:159</code>, <code>:193</code>, <code>:213</code>, <code>:268</code>, <code>:352</code>, <code>:427</code></td></tr>
       <tr><th scope="row"><code>serve</code></th>
         <td>Readiness decision (Serve/Exit75/Terminated); <code>run_startup_within</code>; clock anchor and <code>mount_clock</code> re-anchor seam; per-turn incident pass.</td>
         <td><code>src/serve.rs:98</code>, <code>:107</code>, <code>:223</code>, <code>:423-485</code>, <code>:974-990</code></td></tr>
@@ -1013,14 +1016,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   mark (<code>src/startup_dns.rs:215-223</code>, <code>:2948-2959</code>; the
   class is stored on the <code>ActiveExchange</code>). The retained-resolver
   refresh path requests a <code>Serving</code> exchange
-  (<code>src/runtime.rs:347</code>; <code>start_dns_exchange</code> in
+  (<code>src/runtime.rs:352</code>; <code>start_dns_exchange</code> in
   <code>src/serve.rs:767</code>), and a cooperative startup window requests
   <code>Startup</code> (<code>src/serving/startup.rs:147</code>). Per-turn
   cleanup cancels exactly the <code>Startup</code>-class retained work while
   serving exchanges stay outstanding:
   <code>cancel_retained_startup_exchange</code>
   (<code>src/startup_dns.rs:1606-1614</code>, driven from
-  <code>src/runtime.rs:262</code>) is scoped to the startup class by the typed
+  <code>src/runtime.rs:268</code>) is scoped to the startup class by the typed
   lifecycle, so no servicing or probe exchange is ever cancelled as leftover
   startup work. Overlap fails closed: a second <code>start_exchange</code> while
   one is active returns <code>ExchangeActive</code> and leaves the outstanding
@@ -1424,7 +1427,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   most every <code>TIMER_RECHECK_EVERY = 256</code> ready-slots or I/O ops
   (<code>src/serving.rs:111</code>), and per-turn DNS progress advances toward the
   shared deadline by at most <code>DNS_ADVANCE_BOUND = 8</code> cooperative steps
-  (<code>src/runtime.rs:24</code>, <code>:421-440</code>), so a chatty or stalled
+  (<code>src/runtime.rs:24</code>, <code>:427-446</code>), so a chatty or stalled
   peer can never starve traffic within a turn. Every dispatched token is
   generation-tagged — low bits are the local id, high bits the slot generation —
   so a stale event for a reused slot index is dropped before any socket is
@@ -1453,7 +1456,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>Logging is a fixed 256-slot × 2 KiB ring (512 KiB) owned at boot
   (<code>QUEUE_SLOTS = 256</code>, <code>SLOT_BYTES = 2 * 1024</code>,
   <code>src/log.rs:53-54</code>), retained as <code>LogStore</code> for process
-  lifetime (<code>src/log.rs:1429-1441</code>), encoded in place, and drained by a
+  lifetime (<code>src/log.rs:1443-1455</code>), encoded in place, and drained by a
   single nonblocking <code>write_vectored</code> under a per-turn budget of 16
   fragments / 64 KiB (<code>SINK_MAX_OPS = 16</code>, <code>SINK_MAX_BYTES = 64 * 1024</code>,
   <code>src/log.rs:66-67</code>, <code>:2045-2123</code>). Three properties are
@@ -1461,20 +1464,20 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <ol>
     <li><strong>The sink can never stall serving.</strong> fd 1 is made
     nonblocking once, after boot, by the binary only
-    (<code>prepare_stdout</code>, <code>src/log.rs:1579-1590</code>), and
+    (<code>prepare_stdout</code>, <code>src/log.rs:1593-1604</code>), and
     <code>write_vectored</code> either progresses or latches <code>WouldBlock</code>
     with a retained cursor and a 100 ms retry
     (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:2085-2107</code>).
     <code>tests/stdout_stall.rs</code> and <code>tests/monitor_stdout.rs</code> are
     the executable form of this claim.</li>
     <li><strong>Drops are always counted, never silent.</strong> Ring-full and
-    encode-failure both <code>drop_one</code> (<code>src/log.rs:2163-2174</code>),
+    encode-failure both <code>drop_one</code> (<code>src/log.rs:2283-2289</code>),
     a hard sink error drops the whole queue <em>through the same counter</em>
     (<code>:2094-2101</code>), and exit paths strand-count the residue
-    (<code>strand_queued</code>, <code>src/log.rs:1668-1677</code>).</li>
+    (<code>strand_queued</code>, <code>src/log.rs:1682-1691</code>).</li>
     <li><strong>Priority classes exist.</strong> A reserved record can displace
     the newest normal record on a full ring rather than being dropped
-    (<code>enqueue_reserved</code>, <code>src/log.rs:2205-2266</code>) — the
+    (<code>enqueue_reserved</code>, <code>src/log.rs:2225-2280</code>) — the
     mechanism that keeps shutdown/fatal evidence from being evicted by a monitor
     burst.</li>
   </ol>
@@ -1482,17 +1485,20 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>8.2 The terminal sink state and its failure consequences</h3>
   <div class="callout amber" role="note">
     <p>Once the sink latches <code>failed</code>, <code>next_drain</code> returns
-    <code>None</code> forever (<code>src/log.rs:1637-1646</code>): a broken stdout
+    <code>None</code> forever (<code>src/log.rs:1651-1660</code>): a broken stdout
     permanently ends observability. There is no second sink: boot diagnostics use
     stderr (<code>src/main.rs:65-80</code>, <code>:145-148</code>), but once the
     log store owns stdout there is no fallback channel
-    (<code>src/log.rs:1403-1410</code>). After a hard stdout failure the process
-    may continue with <em>no external log-loss signal</em>: the latch does not
-    exit the process, open another output channel, or by itself alter exit status,
-    and the in-memory <code>dropped</code> counter cannot be emitted through the
-    failed sink (<code>src/log.rs:2094-2101</code>). The sink cannot stall
-    serving; an unrecoverable sink failure is a counted but externally silent
-    loss.</p>
+    (<code>src/log.rs:1403-1410</code>). The serving owner therefore exits
+    <code>EX_IOERR</code> (74) at the owner-turn boundary: the drain pass that
+    latches the failure surfaces it (<code>src/log.rs:2109-2117</code>), and
+    <code>Runtime::turn</code> exits in place immediately after the per-turn
+    drain (<code>src/runtime.rs:285-288</code>). The in-memory
+    <code>dropped</code> counter cannot itself be emitted through the failed
+    sink, so the process-level exit is the operator’s log-loss signal. The
+    failed latch still cannot stall serving: the owner exits rather than linger
+    with observability permanently lost, and a stalled (would-block) sink is
+    never a failure and never exits.</p>
   </div>
 
   <h3>8.3 Incident reporting</h3>
@@ -1523,7 +1529,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   reachable producers: a drained serving shutdown after gate-opened tunnels
   complete (<code>ShutdownExit::Drained ⇒ 0</code>,
   <code>src/serving.rs:186</code>, applied through
-  <code>src/runtime.rs:374-377</code>) and a startup <code>Terminated</code>
+  <code>src/runtime.rs:387-390</code>) and a startup <code>Terminated</code>
   decision (SIGTERM within the startup window), which emits the shutdown record
   and exits <code>0</code> (<code>src/main.rs:104-107</code>). Exit
   <code>70</code> (<code>EX_SOFTWARE</code>) is forced shutdown with undrained
@@ -1537,10 +1543,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   and stdout-sink setup failures
   (<code>src/boot.rs:7</code>; <code>src/main.rs:62-80</code>,
   <code>:109-112</code>; <code>src/serve.rs:117-128</code>); the startup DNS
-  verdict exits <code>EX_TEMPFAIL = 75</code> (<code>src/main.rs:103</code>). The terminal-sink
-  latch of §8.2 is the one failure surface where log loss is counted but
-  unrecoverable and externally unreportable while the process runs
-  (<code>src/log.rs:1637-1646</code>, <code>:2094-2101</code>).</p>
+  verdict exits <code>EX_TEMPFAIL = 75</code> (<code>src/main.rs:103</code>).
+  Exit <code>74</code> (<code>EX_IOERR</code>) is an unrecoverable stdout sink
+  failure: the owner-turn drain latches the failed sink and the owner exits in
+  place (<code>src/runtime.rs:30</code>, <code>:285-288</code>), which is the
+  operator’s log-loss signal for the terminal-sink latch of §8.2 — the one
+  failure surface where log loss is counted and observability ends, so the
+  process exits rather than continue externally unreportable
+  (<code>src/log.rs:1651-1660</code>, <code>:2109-2117</code>).</p>
 
   <table>
     <caption>Table 8 — Exit codes and HTTP degradation surfaces.</caption>
@@ -1562,6 +1572,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         serving failure: no bound listener, <code>attach</code> failure, or
         <code>serve</code> error</td>
         <td><code>src/serving.rs:187</code>; <code>src/main.rs:24</code>, <code>:89-107</code></td></tr>
+      <tr><th scope="row">74 (<code>EX_IOERR</code>)</th>
+        <td>Unrecoverable stdout sink failure: the owner-turn drain latches the
+        failed sink and the owner exits in place; backpressure (WouldBlock)
+        never exits</td>
+        <td><code>src/runtime.rs:30</code>, <code>:285-288</code>;
+        <code>src/log.rs:2109-2117</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
         <td><code>src/main.rs:23</code>, <code>:103</code>; <code>src/serve.rs:98</code></td></tr>
@@ -1580,11 +1596,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/serving/policy.rs:22-24</code></td></tr>
       <tr><th scope="row">Sink latch</th>
         <td>Stdout <code>failed</code>: drops counted, <code>next_drain</code> is
-        <code>None</code> forever; the latch does not exit, open another channel,
-        or alter exit status, and the in-memory <code>dropped</code> counter
-        cannot be emitted through the failed sink — no external log-loss signal
-        while the process runs</td>
-        <td><code>src/log.rs:1637-1646</code>, <code>:2094-2101</code></td></tr>
+        <code>None</code> forever; the drain pass that latches the failure
+        surfaces it and the owner exits <code>74</code> at the next owner-turn
+        boundary — the exit is the operator’s log-loss signal, since the
+        in-memory <code>dropped</code> counter cannot be emitted through the
+        failed sink</td>
+        <td><code>src/log.rs:1651-1660</code>, <code>:2109-2117</code>;
+        <code>src/runtime.rs:285-288</code></td></tr>
     </tbody>
   </table>
 </section>
@@ -1643,7 +1661,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Serving without a listener is unrepresentable</th>
         <td><code>Preallocated</code> has no <code>serve</code>; <code>attach</code>
         consumes <code>self</code></td>
-        <td><code>src/runtime.rs:40</code>, <code>:153</code></td></tr>
+        <td><code>src/runtime.rs:46</code>, <code>:159</code></td></tr>
       <tr><th scope="row">A stale DNS publish cannot overwrite a newer entry</th>
         <td><code>Generation</code> + <code>StaleGeneration</code> rejection</td>
         <td><code>src/cache.rs:50-62</code>, <code>:373-382</code></td></tr>
@@ -1740,18 +1758,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/startup_dns.rs:36</code></td></tr>
       <tr><th scope="row">Exchange class typed at the start seam</th>
         <td><code>src/startup_dns.rs:215-223</code>, <code>:2948-2959</code>,
-        <code>:1606-1614</code>; <code>src/runtime.rs:262</code>, <code>:347</code>;
+        <code>:1606-1614</code>; <code>src/runtime.rs:268</code>, <code>:352</code>;
         <code>src/serve.rs:767</code>; <code>src/serving/startup.rs:147</code></td></tr>
       <tr><th scope="row">Slot reset reinitializes metadata (retained traffic
       slabs not zeroized)</th>
         <td><code>src/serving.rs:774-803</code></td></tr>
       <tr><th scope="row">Public module surface / consumer classes</th>
         <td><code>src/lib.rs:4-27</code>; <code>src/serving.rs:1157</code>;
-        <code>src/runtime.rs:207</code>; <code>src/bin/parser_bench.rs:1-9</code>,
+        <code>src/runtime.rs:213</code>; <code>src/bin/parser_bench.rs:1-9</code>,
         <code>:45</code></td></tr>
       <tr><th scope="row">Terminal sink state</th>
-        <td><code>src/log.rs:2094-2101</code>, <code>:1637-1646</code>,
-        <code>:1668-1677</code></td></tr>
+        <td><code>src/log.rs:2109-2117</code>, <code>:1651-1660</code>,
+        <code>:1682-1691</code></td></tr>
       <tr><th scope="row">Single clock / mount_clock re-anchor</th>
         <td><code>src/serve.rs:223</code>; <code>src/worker.rs:97-105</code>;
         <code>src/startup_dns.rs:1387-1393</code></td></tr>
@@ -1794,7 +1812,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>:3520-3597</code></td></tr>
       <tr><th scope="row">Single-reactor / run_once / events swap</th>
         <td><code>src/serving.rs:117</code>, <code>:1263-1308</code>;
-        <code>src/runtime.rs:153</code>, <code>:187</code></td></tr>
+        <code>src/runtime.rs:159</code>, <code>:193</code></td></tr>
       <tr><th scope="row">DoT trust / pin-or-nothing</th>
         <td><code>src/startup_dns.rs:839-888</code>, <code>:1088-1098</code>;
         <code>src/main.rs:127-143</code></td></tr>
@@ -1828,7 +1846,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     excluded from the set). The base commit names the revision; the content
     identity binds the currently cited bytes.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
-    <code>4e59e9d9e535475510e961fa719c69d1fa1ca8838452b32d5805b8f30fb9e78a</code>
+    <code>69d91d17a53f7efc0380343b2c2404007fe676cddbdba0a21c4be77a61549b2d</code>
     (re-pinned by the governed gate-section amendment); referenced as the governing
     specification only.</li>
   </ul>

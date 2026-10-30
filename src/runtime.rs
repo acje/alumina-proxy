@@ -23,6 +23,12 @@ use crate::startup_dns::{
 /// so a chatty or stalled peer can never starve traffic within a turn.
 const DNS_ADVANCE_BOUND: usize = 8;
 
+/// `EX_IOERR` (74): the process exit on an unrecoverable stdout sink write
+/// failure latched at the serving owner-turn boundary (F-09) — observability is
+/// permanently lost, so the owner exits rather than continue with no external
+/// log-loss signal (docs/alumina-proxy.md §F-09).
+pub(crate) const EX_IOERR: i32 = 74;
+
 /// The pre-attach owner: the retained serving workspaces are preallocated over
 /// boot-completed storage, and the startup window runs over that complete
 /// owner, exactly as main wires it. It carries no serving loop: [`Self::turn`]
@@ -277,7 +283,10 @@ impl Runtime {
         self.serving
             .storage_mut()
             .report_incident_if_due(Instant::now());
-        self.serving.storage_mut().logs_mut().drain_sink();
+        match self.serving.storage_mut().logs_mut().drain_sink() {
+            crate::log::DrainOutcome::SinkFailed => std::process::exit(EX_IOERR),
+            crate::log::DrainOutcome::Ok => {}
+        }
         Ok(())
     }
 
