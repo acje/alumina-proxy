@@ -33,8 +33,8 @@ and acted on; there is no tolerated rate of bad behavior. The tripwires react
 on the first sign of deviation and are highly accurate. The action taken (notify, block, or the reserved tarpit) is the operator's
 configuration choice; the proxy does not always panic by blocking all egress.
 Alumina's promise is highly accurate tripwires; the operator decides the
-appropriate action for their context. The all-scope block bar is operator-configurable too — four per-class gate sections
-(`[bad_handshake]`, `[illegal_fqdn]`, `[early_data]`, `[ja4]`), each defaulting to threshold 1,
+appropriate action for their context. The all-scope block bar is operator-configurable too — three per-class gate sections
+(`[bad_handshake]`, `[illegal_fqdn]`, `[ja4]`), each defaulting to threshold 1,
 so at the default threshold of 1 the first deviation of a class arms all-scope block, sticky
 until restart. The operator chooses the action AND the bar per class; the gate mechanism itself stays
 fixed. Raising a threshold is a deliberate operator choice to tolerate a bounded burst,
@@ -94,9 +94,11 @@ Alumina's own configuration is strict; client input is accepted where variants h
 Configuration is a single TOML document of at most 16 KiB (16384 bytes), including comments and whitespace, with a required set of 1 through 32 `[allowed_fqdn."<fqdn>:<port>"]` keyed tables — each carrying the mandatory per-FQDN `early_data` and `ja4` controls (each an inline `{ action, scope }` table or the bare `"ignore"` opt-out) — and a required `listen` key. Each table key is a literal `<fqdn>:<port>` spelling naming a lowercase ASCII DNS hostname (an IP literal-shaped entry — a name whose labels are all-numeric, e.g. `1.2.3.4:443` — is invalid configuration) with a canonical decimal port from 1 through 65535 and no leading zero; a bare FQDN without `:port`, an empty or non-numeric port, port `0`, a port above `65535`, or a leading-zero port is invalid configuration. Table keys are unique after normalization (lowercase FQDN plus canonical port); a duplicate after normalization is invalid configuration. Both limits apply: 32 maximum-length DNS names need not fit. A compact configuration with 32 entries of 100 ASCII bytes each (including the `:port` suffix) and a listener fits within the document limit. Bound the configuration read and reject oversized input without truncating it. Load and fully validate configuration and local prerequisites before opening listeners or issuing DNS queries. There is no runtime policy update interface; see the [runtime surface](#architecture).
 
 `startup_unresolved_allowance` is required and must be an integer from `0` through the number of configured `[allowed_fqdn."..."]` tables minus one; `0` requires every hostname to be usable at startup. An empty table set is invalid configuration. The allowance affects startup availability, never destination authorization. All configuration keys are mandatory; no defaults are supplied. The one exception is the
-four optional per-class gate sections `[bad_handshake]`, `[illegal_fqdn]`, `[early_data]`,
+three optional per-class gate sections `[bad_handshake]`, `[illegal_fqdn]`,
 and `[ja4]`, each of which defaults to `threshold = 1` / `window_secs = 900`
-(§Keyed configuration schema).
+(§Keyed configuration schema). An `[early_data]` gate section is not accepted:
+it is invalid configuration (exit 78) because its all-scope action is
+unreachable by construction (§Keyed configuration schema).
 
 Missing or unreadable configuration, invalid TOML (including duplicate keys or invalid table redefinitions), missing required fields, unknown keys or tables, incorrect types, out-of-range values, conflicting settings, and unmet local prerequisites cause immediate startup failure with exit status 78 (EX_CONFIG) and a diagnostic identifying the field or source location where available. The conflicting-settings class is enumerated here for auditability (documentation clarification only; no new validation): the mandated-set predicates — a required set of settings that must be present and consistent together, where a member present more than once after normalization is a conflict (duplicate keys, invalid table redefinitions, and duplicate allowlist names after normalization are the enumerated instances) — and the forbidden-pair predicates — two settings that cannot legally coexist under this document's schema, where the schema's enumerated scope values are exclusive (a scope value outside the enumerated set for its surface is invalid configuration rather than a silent override). Reject duplicate allowlist names after normalization. Do not coerce types, discard invalid entries, or supply missing required values from defaults, environment variables, or command-line overrides. After startup resolution, DNS timeouts, negative answers, and other network failures are expected runtime outcomes governed by the cache rules below, not configuration errors.
 
@@ -759,9 +761,9 @@ window_secs = 900  # integer >= 1; whole-second window within which the facts mu
 threshold   = 1    # integer >= 1; HostNotAllowlisted facts that arm all-scope block
 window_secs = 900  # integer >= 1; whole-second window within which the facts must arrive
 
-[early_data]      # optional; absent -> defaults threshold = 1, window_secs = 900
-threshold   = 1    # integer >= 1; EarlyUpstreamData Block-All facts that arm all-scope block
-window_secs = 900  # integer >= 1; whole-second window within which the facts must arrive
+[early_data]      # rejected: invalid configuration (exit 78) — this section is not configurable;
+threshold   = 1    # its all-scope block action is unreachable by construction (the only legal
+window_secs = 900  # early_data block scope is connection, F-02 close); do not present it.
 
 [ja4]             # optional; absent -> defaults threshold = 1, window_secs = 900
 threshold   = 1    # integer >= 1; Ja4Change Block-All facts that arm all-scope block
@@ -803,28 +805,36 @@ ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all
   `action` is `notify`|`block` (tarpit reserved, `ignore` invalid), `scope` is
   `connection`|`all` (`fqdn`/`domain` invalid, exit 78); an absent group or a missing/unknown
   key is invalid configuration (rp2e §Configuration surface (implemented; exact schema) preserved).
-- The four gate sections `[bad_handshake]`, `[illegal_fqdn]`, `[early_data]`, and `[ja4]` are
+- The three gate sections `[bad_handshake]`, `[illegal_fqdn]`, and `[ja4]` are
   optional; when a section is present it carries exactly the two keys `threshold`
   and `window_secs`, each an integer >= 1; a missing, unknown, or out-of-range key is invalid
   configuration (exit 78); when absent the section's defaults `threshold = 1` and
   `window_secs = 900` apply. Each class's gate counts only that class's facts: `bad_handshake`
   counts every `AnyIllegal` fact with cause `ConnectParse`/`TlsProfile`/`Ech`; `illegal_fqdn`
-  counts every `AnyIllegal` fact with cause `HostNotAllowlisted`; `early_data` counts
-  `EarlyUpstreamData` facts only when their raw effect is `Block`/`all`; `ja4` counts
+  counts every `AnyIllegal` fact with cause `HostNotAllowlisted`; `ja4` counts
   `Ja4Change` facts only when their raw effect is `Block`/`all`. The gate is per-class (one
   counter per class), never per-scope/per-domain. At the
   default threshold of 1 the first deviation of a class arms all-scope block, sticky until
   restart; raising a threshold is the operator's deliberate choice to tolerate a bounded
   burst (§Design philosophy — the exit gate). These sections are the ONE deliberate exception to
   the no-defaults doctrine.
+- An `[early_data]` per-class gate section is rejected at config load with exit 78
+  (EX_CONFIG) and a diagnostic naming the section: its all-scope block action is unreachable
+  by construction, because the only legal `block` scope for `early_data` is `connection`
+  (§F-02 close). Accepting the section as an inert knob would be a silent no-op, so existing
+  configurations that carry it fail boot by design. The per-connection early-data control and
+  the per-FQDN `early_data = { action, scope }` keys remain configurable and functional; only
+  this section's all-scope gate bar is removed.
 - **Breaking change:** the old `[any_illegal] scope = "..."` single-key form, the positional
   `[actions]` arrays, and the `flare_only` literal are removed; the `ja4` control is new and
-  mandatory. SP-002's early-data `block` scope restriction is superseded (per-FQDN scope is
-  uniformly `connection`|`fqdn`|`all` for both `early_data` and `ja4`; the per-class SP-001
-  gates mitigate the upstream-sourced process-wide-latch concern).
+  mandatory. SP-002's early-data `block` scope restriction is superseded: per-FQDN
+  `early_data` block scope is `connection` only (§F-02 close) while `ja4` per-FQDN scope is
+  uniformly `connection`|`fqdn`|`all`; the upstream-sourced process-wide-latch concern is
+  resolved structurally, because no all-scope early-data block or gate section is
+  configurable.
 - All keys are mandatory with no defaults and no environment or command-line override;
   unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as today — except the
-  four optional gate sections, which carry the defaults `threshold = 1` /
+  three optional gate sections, which carry the defaults `threshold = 1` /
   `window_secs = 900` (§Keyed configuration schema). Configuration validation timing and
   procedure are unchanged.
 
@@ -963,7 +973,7 @@ facts — `bad_handshake` counts every `AnyIllegal` fact with cause `ConnectPars
 `Ech`, `illegal_fqdn` every `AnyIllegal` fact with cause `HostNotAllowlisted`, and `early_data`
 /`ja4` only their per-FQDN facts projecting to Block All; a not-yet-crossed Block All
 downgrades to BaselineOnly. Each class's threshold and window are operator-configurable via
-its optional gate section (`[bad_handshake]`, `[illegal_fqdn]`, `[early_data]`, `[ja4]`,
+its optional gate section (`[bad_handshake]`, `[illegal_fqdn]`, `[ja4]`,
 §Keyed configuration schema), defaulting to `threshold = 1` / `window_secs = 900`; at the
 default, the first Block-All projection of a class arms that class's latch (sticky until
 restart).
@@ -990,8 +1000,8 @@ semantics.
 
 **Superseded (operator-configurable per-class gates, SP-001 amendment).** The fixed-constants
 claim above is superseded: each class's threshold and window are operator-configurable via
-its optional gate section — `[bad_handshake]`, `[illegal_fqdn]`, `[early_data]`, `[ja4]` —
-(§Keyed configuration schema), defaulting to `threshold = 1` / `window_secs = 900`
+its optional gate section — `[bad_handshake]`, `[illegal_fqdn]`, `[ja4]` — (§Keyed
+configuration schema; an `[early_data]` gate section is rejected at load, exit 78), defaulting to `threshold = 1` / `window_secs = 900`
 (`parse_gate_section`, `src/config.rs:950`; `Enforcement::new`, `src/serve.rs:176`). At the
 default the first deviation of a class arms that class's all-scope block, sticky until
 restart, so the "no tolerated rate" guarantee is preserved;
@@ -1445,7 +1455,7 @@ All-scope latch arms fire only after a bounded fact counter crosses the CONFIGUR
 within the CONFIGURED window, with no speculative pacing (`WindowedCounter`
 `src/enforcement/state.rs:123`, `decide` `src/enforcement/state.rs:258`). Each class's
 threshold and window are operator-configurable via its optional gate section —
-`[bad_handshake]`, `[illegal_fqdn]`, `[early_data]`, `[ja4]` — (§Keyed
+`[bad_handshake]`, `[illegal_fqdn]`, `[ja4]` — (§Keyed
 configuration schema), with defaults `threshold = 1` fact within `window_secs = 900` seconds
 (`ALL_SCOPE_GATE_DEFAULT_THRESHOLD`/`ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS`,
 `src/enforcement/state.rs:12,17`). The values are deliberate under the design philosophy

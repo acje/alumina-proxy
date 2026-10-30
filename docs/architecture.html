@@ -101,7 +101,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   reference; none is copied from another document.</p>
   <p class="meta"><strong>Identity pins cited bytes:</strong> the human revision
   above names the base commit; the mechanically enforced binding is the exact
-  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY 4bc424a17b6dcb955d8303d2ac00f5b3208298d1758ff2d0dc5ba5c9235a7ebb</code> —
+  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY 33ce31d265921d89eb6bc87d2e71b504dfe9eddf990d44faff0499bc4c152f3e</code> —
   a deterministic manifest over the current working-tree source set
   (<code>src/**</code>, <code>tests/*.rs</code>, <code>Cargo.toml</code>,
   <code>Cargo.lock</code>; docs and the specification digest excluded). The
@@ -122,7 +122,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   source at the commit named above. Every architectural claim cites
   <code>src/*.rs</code>, <code>tests/*.rs</code>, or the governing specification
   (<code>docs/alumina-proxy.md</code>, SHA-256
-  <code>e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401</code>).
+  <code>56434a285d6ca565391a19df9bd884ba133ab8a6456e0675b8da8a4eb529f154</code>).
   Values the code itself prints or asserts are recorded as measured. No review
   apparatus — findings, severities, proposals, or open questions — is carried here;
   the architecture is described as it is built.</p>
@@ -183,7 +183,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     document is size-bounded (≤ 16&nbsp;KiB at <code>src/config.rs:15</code>, <code>CONFIG_DOC_LIMIT</code>,
     schema-strict: an unknown key is an
     error), read once at boot through
-    <code>config::load_config_document</code> (load entry at <code>src/config.rs:706</code>;
+    <code>config::load_config_document</code> (load entry at <code>src/config.rs:711</code>;
     strict schema and unknown-key rejection at <code>:739-783</code>).</li>
     <li><strong>Privilege floor.</strong> Preflight refuses root, refuses any
     non-empty effective/permitted/ambient capability set, and requires
@@ -312,7 +312,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/lib.rs:1-2</code>), which is the first and strongest architectural
   verb: production code may not unwrap; every <code>expect</code> must carry a
   proven-bound justification and an <code>#[expect]</code> with a <code>reason</code>
-  (e.g. <code>src/serving.rs:509</code>, <code>src/config.rs:1001-1004</code>,
+  (e.g. <code>src/serving.rs:509</code>, <code>src/config.rs:1011-1014</code>,
   <code>src/cache.rs:369-372</code>). The public surface has three consumers: the
   serving binary (<code>src/main.rs</code>), the test corpus, and the dev-only
   <code>src/bin/parser_bench.rs</code> developer harness, a distinct binary
@@ -428,7 +428,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/preflight.rs:96-116</code></td></tr>
       <tr><th scope="row"><code>config</code></th>
         <td>Strict schema parse; allowlist (≤ 32), ports, early_data/ja4 controls, gate sections, CNAME bailiwicks, resolver trust homogeneity.</td>
-        <td><code>src/config.rs:17</code>, <code>:798-805</code>, <code>:1110-1115</code>, <code>:1244-1262</code></td></tr>
+        <td><code>src/config.rs:17</code>, <code>:805-815</code>, <code>:1120-1125</code>, <code>:1244-1262</code></td></tr>
       <tr><th scope="row"><code>runtime</code></th>
         <td>Single-reactor owner; startup window driver; serves as the attached owner after <code>attach</code>; owns DNS scheduling per turn.</td>
         <td><code>src/runtime.rs:153</code>, <code>:187</code>, <code>:207</code>, <code>:262</code>, <code>:347</code>, <code>:421</code></td></tr>
@@ -859,11 +859,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   fallback for a DoT entry (<code>src/resolver.rs:215-235</code>). Trust
   homogeneity across the resolver set is enforced at configuration time — a mix of
   trust classes is rejected rather than degraded
-  (<code>ConfigError::MixedResolverTrust</code>, <code>src/config.rs:829-836</code>).
+  (<code>ConfigError::MixedResolverTrust</code>, <code>src/config.rs:827-842</code>).
   A separate guard restricts the <code>early_data</code> control’s block scope to
   <code>connection</code> only — an upstream-sourced early-data signal therefore
   cannot select a per-domain or process-wide latch
-  (<code>src/config.rs:1074-1082</code>, <code>:1110-1115</code>; see
+  (<code>src/config.rs:1086-1092</code>, <code>:1120-1125</code>; see
   <a href="#enforcement">§6.2</a>).</p>
 
   <h3>5.2 DoT trust: pin-or-nothing</h3>
@@ -1169,7 +1169,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>6.2 The per-class gates</h3>
   <p>Gates are per-class: <code>bad_handshake</code>, <code>illegal_fqdn</code>,
   <code>early_data</code>, and <code>ja4</code> form <code>GateSet</code>
-  (<code>src/enforcement/state.rs:71-77</code>). Each is an <code>AllScopeGate</code>
+  (<code>src/enforcement/state.rs:71-77</code>), but the configuration surface
+  accepts only the three sections <code>[bad_handshake]</code>,
+  <code>[illegal_fqdn]</code>, and <code>[ja4]</code>
+  (<code>src/config.rs:810-813</code>) and rejects an <code>[early_data]</code>
+  gate section at load; the GateSet’s <code>early_data</code> slot is always the
+  default (<code>src/config.rs:812</code>). Each is an <code>AllScopeGate</code>
   whose <code>threshold</code> and <code>window_secs</code> are nonzero
   (<code>NonZeroU32</code>/<code>NonZeroU64</code>): the nonzero types make only
   zero parameter values unrepresentable and say nothing about whether a gate can
@@ -1184,33 +1189,36 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   and <code>illegal_fqdn</code> is enforced by which counter each cause notes
   (<code>src/enforcement/state.rs:264-286</code>).</p>
   <div class="callout" role="note">
-    <p>The <code>[early_data]</code> All-scope gate cannot arm in shipped
-    configuration, and the restriction is structural rather than an oversight.
-    A per-class all-scope counter is noted only when the raw decided effect is
+    <p>The <code>[early_data]</code> gate section is rejected at config load with
+    exit 78 (<code>ConfigError::EarlyDataGateRejected</code>,
+    <code>src/config.rs:537</code>, raised at <code>:806-808</code>), so no boot
+    succeeds carrying it and the all-scope early-data bar cannot be configured at
+    all. The rejection is structural, not an oversight: a per-class all-scope
+    counter is noted only when the raw decided effect is
     <code>Effect::Block { scope: All }</code>
     (<code>src/enforcement/state.rs:262-278</code>), and the configuration parser
     rejects any <code>early_data</code> block whose scope is not
     <code>connection</code> (<code>ConfigError::EarlyDataBlockScopeInvalid</code>,
-    <code>src/config.rs:1110-1115</code>); the parser comment documents the
+    <code>src/config.rs:1120-1125</code>); the parser comment documents the
     restriction as the early-data block-scope close — an upstream-sourced
     early-data signal cannot select a per-domain or process-wide latch
-    (<code>docs/alumina-proxy.md:1007-1009</code>). The only reachable raw effects
+    (<code>docs/alumina-proxy.md:1017-1019</code>). The only reachable raw effects
     for <code>EarlyUpstreamData</code> are therefore <code>BaselineOnly</code>,
     <code>Unknown</code>, <code>Notify</code>, or <code>Block { Connection }</code> —
     never <code>Block { All }</code> — so the <code>early_data</code> gate’s
-    counter is never noted and its <code>crossed</code> flag never arms. The section
-    is still parsed (<code>src/config.rs:798-805</code>), validated
-    (<code>:963-999</code>), stored, and wired into the counter table
-    (<code>src/enforcement/state.rs:242-246</code>); a unit test that builds a
-    <code>ControlTable</code> directly with <code>early_data = Block { All }</code>
+    counter is never noted and its <code>crossed</code> flag never arms. A unit
+    test that builds a <code>ControlTable</code> directly with
+    <code>early_data = Block { All }</code>
     (<code>src/enforcement/state.rs:1415-1450</code>) exercises the plumbing under
     a table state the production parser cannot produce, so it documents the
-    unreachability rather than a live path. The per-<em>connection</em> control
-    still fires; this is an inert knob, not an open bypass.</p>
+    unreachability rather than a live path. The per-<em>connection</em> early-data
+    control and the per-FQDN <code>early_data</code> keys remain configurable and
+    fire normally; the gate section itself is a rejected surface, not an inert
+    knob left in place.</p>
   </div>
 
   <table>
-    <caption>Table 6 — The four per-class All-scope gates and their defaults.</caption>
+    <caption>Table 6 — The three per-class All-scope gate sections and their defaults.</caption>
     <thead>
       <tr>
         <th scope="col">Gate</th>
@@ -1228,11 +1236,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>HostNotAllowlisted</code></td>
         <td>1 / 900 s</td>
         <td>Reachable</td></tr>
-      <tr><th scope="row"><code>early_data</code></th>
-        <td><code>EarlyUpstreamData</code></td>
-        <td>1 / 900 s</td>
-        <td>Inert: only <code>connection</code>-scope block is legal, so no
-        All-scope effect is ever produced</td></tr>
+      <tr><th scope="row"><code>[early_data]</code> (rejected)</th>
+        <td>n/a — gate section rejected at load; the enforcement counter notes
+        only a raw <code>Block{All}</code>, which no valid config produces</td>
+        <td>—</td>
+        <td>Rejected at load, exit 78: only <code>connection</code>-scope block
+        is legal, so no All-scope bar is configurable</td></tr>
       <tr><th scope="row"><code>ja4</code></th>
         <td><code>Ja4Change</code></td>
         <td>1 / 900 s</td>
@@ -1682,7 +1691,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>dp</code> fact (<code>src/startup_dns.rs:3200-3221</code>).</li>
     <li><strong>Trust is homogeneous or boot fails.</strong> A mixed-trust
     resolver set is rejected at configuration time
-    (<code>src/config.rs:829-836</code>).</li>
+    (<code>src/config.rs:827-842</code>).</li>
   </ul>
 </section>
 
@@ -1711,11 +1720,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Listener conditionality / readiness rule</th>
         <td><code>src/serve.rs:98</code>, <code>:974-990</code>;
         <code>src/startup_dns.rs:49</code>; spec <code>docs/alumina-proxy.md:108</code></td></tr>
-      <tr><th scope="row">early_data block scope connection-only; All-scope gate
-      structurally unreachable</th>
-        <td><code>src/config.rs:1110-1115</code>, <code>:798-805</code>,
-        <code>:963-999</code>; <code>src/enforcement/state.rs:262-278</code>,
-        <code>:1415-1450</code> (test); <code>docs/alumina-proxy.md:1007-1009</code></td></tr>
+      <tr><th scope="row">early_data block scope connection-only; the
+      <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
+        <td><code>src/config.rs:1120-1125</code>, <code>:805-815</code>,
+        <code>:975-1009</code>; <code>src/enforcement/state.rs:262-278</code>,
+        <code>:1415-1450</code> (test); <code>docs/alumina-proxy.md:1017-1019</code>,
+        <code>:821-827</code></td></tr>
       <tr><th scope="row">DoT seam allocation profile (warm fixture bound 8)</th>
         <td><code>src/startup_dns.rs:1101-1120</code>, <code>:2083-2117</code>;
         <code>src/startup_dns/dot_tests.rs:1379</code>, <code>:1437-1472</code>;
@@ -1818,8 +1828,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     excluded from the set). The base commit names the revision; the content
     identity binds the currently cited bytes.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
-    <code>e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401</code>
-    (unchanged); referenced as the governing specification only.</li>
+    <code>56434a285d6ca565391a19df9bd884ba133ab8a6456e0675b8da8a4eb529f154</code>
+    (re-pinned by the governed gate-section amendment); referenced as the governing
+    specification only.</li>
   </ul>
 </section>
 

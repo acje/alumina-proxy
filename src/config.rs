@@ -534,6 +534,7 @@ pub enum ConfigError {
     EarlyDataBlockScopeInvalid {
         scope: String,
     },
+    EarlyDataGateRejected,
     AllScopeGateOutOfRange {
         key: String,
         value: i64,
@@ -653,6 +654,10 @@ impl fmt::Display for ConfigError {
             ConfigError::EarlyDataBlockScopeInvalid { scope } => write!(
                 f,
                 "config early_data action \"block\" scope {scope:?} invalid: Block scope is connection only"
+            ),
+            ConfigError::EarlyDataGateRejected => write!(
+                f,
+                "config [early_data] gate section cannot arm: its all-scope block action is unreachable by construction (the only legal early_data block scope is connection; see docs/alumina-proxy.md F-02 close)"
             ),
             ConfigError::AllScopeGateOutOfRange { key, value } => {
                 write!(
@@ -797,12 +802,17 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
     let control = ControlTable::new(any_controls, &parsed.early_data, &parsed.ja4)
         .expect("build_allowlist validated 1..=32 entries, so ControlTable::new cannot fail");
     let resolver = build_resolver_set(table)?;
-    let gates = GateSet::new(
-        parse_gate_section(table, "bad_handshake")?,
-        parse_gate_section(table, "illegal_fqdn")?,
-        parse_gate_section(table, "early_data")?,
-        parse_gate_section(table, "ja4")?,
-    );
+    let gates = {
+        if table.get("early_data").is_some() {
+            return Err(ConfigError::EarlyDataGateRejected);
+        }
+        GateSet::new(
+            parse_gate_section(table, "bad_handshake")?,
+            parse_gate_section(table, "illegal_fqdn")?,
+            AllScopeGate::default(),
+            parse_gate_section(table, "ja4")?,
+        )
+    };
     Ok(Config {
         allowlist: parsed.allowlist,
         listen,
@@ -1407,8 +1417,8 @@ mod enforcement_config_tests {
         )
     }
 
-    /// The four per-class gate section names in the fixed schema order.
-    const GATE_SECTIONS: [&str; 4] = ["bad_handshake", "illegal_fqdn", "early_data", "ja4"];
+    /// The three per-class gate section names in the fixed schema order.
+    const GATE_SECTIONS: [&str; 3] = ["bad_handshake", "illegal_fqdn", "ja4"];
 
     /// A `[<name>]` gate section with the given `threshold`/`window_secs`.
     fn gate_section(name: &str, threshold: u32, window: u64) -> String {
@@ -2171,13 +2181,12 @@ mod enforcement_config_tests {
     #[test]
     fn gates_custom_values_per_section() {
         let doc = gate_doc(&format!(
-            "{}{}{}{}",
+            "{}{}{}",
             gate_section("bad_handshake", 2, 120),
             gate_section("illegal_fqdn", 5, 300),
-            gate_section("early_data", 7, 600),
             gate_section("ja4", 11, 900),
         ));
-        let cfg = parse_config_document(&doc).expect("valid four-section gate config");
+        let cfg = parse_config_document(&doc).expect("valid three-section gate config");
         assert_eq!(
             cfg.gates().bad_handshake(),
             AllScopeGate::new(
@@ -2193,19 +2202,84 @@ mod enforcement_config_tests {
             )
         );
         assert_eq!(
-            cfg.gates().early_data(),
-            AllScopeGate::new(
-                NonZeroU32::new(7).expect("7 is nonzero"),
-                NonZeroU64::new(600).expect("600 is nonzero"),
-            )
-        );
-        assert_eq!(
             cfg.gates().ja4(),
             AllScopeGate::new(
                 NonZeroU32::new(11).expect("11 is nonzero"),
                 NonZeroU64::new(900).expect("900 is nonzero"),
             )
         );
+    }
+
+    #[test]
+    fn early_data_gate_section_rejected_at_load() {
+        let doc = gate_doc(&gate_section("early_data", 7, 600));
+        let err = parse_config_document(&doc)
+            .expect_err("[early_data] gate section must be rejected at load (exit 78)");
+        assert!(
+            matches!(err, ConfigError::EarlyDataGateRejected),
+            "expected EarlyDataGateRejected, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_status(),
+            78,
+            "gate rejection must exit 78 (EX_CONFIG)"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("[early_data]"),
+            "diagnostic must name the section, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("unreachable by construction"),
+            "diagnostic must state the unreachable-all-scope reason, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn early_data_gate_section_rejected_regardless_of_value_shape_and_absent_loads() {
+        let entry = entry_table(
+            "a.example.org:443",
+            "notify",
+            "connection",
+            "notify",
+            "connection",
+        );
+        for top_level in [
+            "[early_data]\nthreshold = 5\nwindow_secs = 300\n",
+            "early_data = 5\n",
+            "early_data = { threshold = 1, window_secs = 900 }\n",
+        ] {
+            let doc = format!("{}{}{}{}", base(), top_level, any_illegal_default(), entry,);
+            let err = parse_config_document(&doc)
+                .expect_err("[early_data] any value shape must be rejected at load");
+            assert!(
+                matches!(err, ConfigError::EarlyDataGateRejected),
+                "expected EarlyDataGateRejected, got {err:?}"
+            );
+            assert_eq!(
+                err.exit_status(),
+                78,
+                "gate rejection must exit 78 (EX_CONFIG)"
+            );
+        }
+        let absent = gate_doc("");
+        let cfg = parse_config_document(&absent).expect("config without [early_data] must load");
+        assert_eq!(cfg.gates().early_data(), AllScopeGate::default());
+        assert_eq!(cfg.gates().ja4(), AllScopeGate::default());
+    }
+
+    #[test]
+    fn early_data_gate_section_absent_while_per_fqdn_control_still_parses() {
+        let doc = group(&entry_table(
+            "a.example.org:443",
+            "notify",
+            "connection",
+            "notify",
+            "connection",
+        ));
+        let cfg = parse_config_document(&doc)
+            .expect("per-FQDN early_data control without a gate section must load");
+        assert_eq!(cfg.control().len(), 1);
     }
 
     #[test]

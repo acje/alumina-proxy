@@ -48,14 +48,13 @@ ech = { action = "notify", scope = "connection" }
 # block, sticky until restart), window_secs = 900. Raising a threshold is the
 # operator's deliberate choice to tolerate a bounded burst — never a hidden tolerated
 # rate. bad_handshake counts ConnectParse/TlsProfile/Ech facts; illegal_fqdn counts
-# HostNotAllowlisted facts; early_data/ja4 count only their Block-All facts.
+# HostNotAllowlisted facts; ja4 counts only its Block-All facts. An [early_data] gate
+# section is rejected at load (exit 78): its all-scope block action is unreachable by
+# construction (early-data block scope is connection-only).
 [bad_handshake]
 threshold   = 1
 window_secs = 900
 [illegal_fqdn]
-threshold   = 1
-window_secs = 900
-[early_data]
 threshold   = 1
 window_secs = 900
 [ja4]

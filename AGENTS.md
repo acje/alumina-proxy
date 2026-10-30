@@ -24,8 +24,8 @@ Every change must preserve:
 - **Operator chooses the action; the proxy owns the semantics.** The action for
   a context is operator configuration; security semantics are fixed constants
   (the allowlist is the operator's, enforcement is the proxy's). The all-scope
-  block bar (threshold and window, the four per-class gate sections
-  `[bad_handshake]`/`[illegal_fqdn]`/`[early_data]`/`[ja4]`) is operator configuration
+  block bar (threshold and window, the three per-class gate sections
+  `[bad_handshake]`/`[illegal_fqdn]`/`[ja4]`) is operator configuration
   too; the gate mechanism itself is a fixed constant.
 - **More is less.** Narrow scope is the mechanism for provable invariants. The
   fixed profile — single boot owner and single serving owner, two reused 128 KiB
@@ -73,7 +73,7 @@ because one side "wins".
 ## Rules
 
 - `docs/alumina-proxy.md` is the sole, byte-canonical governing
-  specification (sha256 `e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401`). Never edit it; documents only
+  specification (sha256 `56434a285d6ca565391a19df9bd884ba133ab8a6456e0675b8da8a4eb529f154`). Never edit it; documents only
   restate or cite it.
 - Native verification entry point, QA run and prerequisite ownership are
   `docs/qa-package/README.md`; the verify command set is in
