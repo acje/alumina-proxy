@@ -18,11 +18,15 @@
 //      <tbody>, <tfoot>, or directly under <table>) has the same cell count as
 //      the <th> header row; a <table> with no <thead>, or a <thead> with no
 //      header cell row, fails (table-header-missing)
-//   6. citation bounds: every `<file>:LINE[-LINE]` (file matching
-//      [A-Za-z0-9_][A-Za-z0-9_./-]*\.(rs|md|toml|sh|mjs|json|html), rejected
-//      when preceded by [A-Za-z0-9_./-]) must resolve as-given against the
-//      working directory, then src/, then tests/. Every cited range must
-//      satisfy 1 <= start <= end <= lineCount. A missing file, a malformed
+//   6. citation bounds: every `<file>:LINE[-LINE]` whose file head matches
+//      ((?:\.{1,2}/)*[A-Za-z0-9_][A-Za-z0-9_./-]*\.(rs|md|toml|sh|mjs|json|
+//      html)), rejected when preceded by [A-Za-z0-9_./-], must resolve
+//      as-given against the working directory, then src/, then tests/. A
+//      leading `./` prefix is accepted and normalised away before resolution
+//      (the natural `rg -n PATTERN ./src` copy-paste form); `../` is resolved
+//      as-given through the same candidate order, so an escaping path fails to
+//      resolve and is reported. Every cited range must satisfy
+//      1 <= start <= end <= lineCount. A missing file, a malformed
 //      range (start > end) and an out-of-range line are check failures;
 //      stat/read errors other than ENOENT are operational. Bare `:NNN`
 //      continuations (no leading file name, e.g. `:1040-1042`, `:443`) are
@@ -33,8 +37,14 @@
 //   7. banned issue apparatus: F-NN, U-NN, bead ids `alumina-xxxxx`
 //      (the negative lookahead keeps the legitimate `alumina-proxy` binary
 //      name clean), severity tags `(S1)`/`(S2)`/`(S3)`, and the phrases
-//      `owner decision`, `review finding`, `recommendation`
-//      (case-insensitive). Any occurrence is a check failure.
+//      `owner decision`, `review finding`, and prose-only `recommendation`
+//      (case-insensitive; identifier/path forms like `src/recommendation.rs`
+//      are clean). Any occurrence is a check failure. The class set is a
+//      fixed, intentionally narrow contract (two-digit F-NN / U-NN, five-char
+//      `alumina-xxxxx` bead ids, S1-S3, the three phrases): variants outside
+//      these exact classes are not scanned. The scan covers the whole file
+//      including raw markup, so the set is a heuristic, not a proof of
+//      semantic apparatus (residual, documented).
 //
 // Exit discipline (one-way split — operational never folds into 0/1):
 //   0  every input clean
@@ -54,9 +64,11 @@ const CELLS = new Set(['td', 'th'])
 // Check 6 — citation head and continuation. The head requires a file carrying
 // one of the corpus extensions immediately followed by :LINE[-LINE]; a
 // preceding [A-Za-z0-9_./-] rejects the match, so a bare `:NNN` continuation
-// or a `host:443` port never acquires an implicit file. `,NNN` / `,NNN-NNN`
-// continuations extend the same cited file (docs-check convention).
-const CIT_HEAD_RE = /(^|[^A-Za-z0-9_./-])([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:rs|md|toml|sh|mjs|json|html)):([0-9]+)(?:-([0-9]+))?/g
+// or a `host:443` port never acquires an implicit file. An optional `./` or
+// `../` prefix is part of the head and `./` is stripped before resolution.
+// `,NNN` / `,NNN-NNN` continuations extend the same cited file (docs-check
+// convention).
+const CIT_HEAD_RE = /(^|[^A-Za-z0-9_./-])((?:\.{1,2}\/)*[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:rs|md|toml|sh|mjs|json|html)):([0-9]+)(?:-([0-9]+))?/g
 const CIT_CONT_RE = /^,([0-9]+)(?:-([0-9]+))?/
 
 // Check 7 — banned issue apparatus. Each entry labels the pattern class so the
@@ -68,7 +80,7 @@ const APPARATUS_RE = [
   { label: 'S1-S2-S3', re: /\((?:S1|S2|S3)\)/g },
   { label: 'owner-decision', re: /owner decision/gi },
   { label: 'review-finding', re: /review finding/gi },
-  { label: 'recommendation', re: /recommendation/gi },
+  { label: 'recommendation', re: /(?<![A-Za-z0-9_./-])recommendation(?![A-Za-z0-9_/-])/gi },
 ]
 
 const citLineCache = new Map()
@@ -411,7 +423,7 @@ async function checkCitationsIn(f, text, lineAt, local) {
     const docLine = lineAt(m.index)
     local.citHeads++
     citHeadsTotal++
-    const file = m[2]
+    const file = m[2].replace(/^\.\//, '')
     const ranges = [{ start: Number(m[3]), end: m[4] ? Number(m[4]) : Number(m[3]) }]
     let from = m.index + m[0].length
     for (;;) {

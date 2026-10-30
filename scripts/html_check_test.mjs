@@ -256,6 +256,34 @@ try {
     path.join(base, 'apparatus_fp.html'),
     ['<!doctype html>', '<html><body>', '<p>alumina-proxy and docs/alumina-proxy.md</p>', '</body></html>', ''].join('\n')
   )
+  // H1 (adversarial round 5, blocking) — `./`-prefixed citation heads must be
+  // parsed, not silently skipped. cit_dot.html cites ./one.rs:1 in range;
+  // cit_dot_oob.html cites ./one.rs:99 — the H1 bypass form (old regex: no
+  // head matched, exit 0 despite an out-of-range line).
+  await writeFile(
+    path.join(base, 'cit_dot.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>./one.rs:1</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  await writeFile(
+    path.join(base, 'cit_dot_oob.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>./one.rs:99</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  // M3 (adversarial round 5) — comma continuations and a < 1 start are
+  // implemented behaviours that must not survive deletion.
+  await writeFile(
+    path.join(base, 'cit_cont_oob.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>one.rs:1,99</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  await writeFile(
+    path.join(base, 'cit_zero.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>one.rs:0</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  // M1 (adversarial round 5) — `recommendation` must not false-positive on a
+  // legitimate identifier/path such as src/recommendation.rs.
+  await writeFile(
+    path.join(base, 'apparatus_recommend_path.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>src/recommendation.rs</code> for details.</p>', '</body></html>', ''].join('\n')
+  )
 
   expect('clean-minimal document', ['clean.html'], 0, {
     has: ['HTML-CHECK-OK clean.html', 'clean 1'],
@@ -338,6 +366,26 @@ try {
     has: ['HTML-CITATION-OK cite_src.html (citations 1)', 'HTML-CHECK-OK cite_src.html'],
     no: ['HTML-CITATION-FAIL', 'HTML-CITATION-OP-FAIL'],
   })
+  // H1 (adversarial round 5): dot-prefixed heads are parsed and resolved after
+  // stripping `./`. cit_dot_oob is the H1 regression — the old regex matched no
+  // head, printed HTML-CITATION-OK and exited 0 despite the out-of-range line.
+  expect('citation ./-prefixed head in range', ['cit_dot.html'], 0, {
+    has: ['HTML-CITATION-OK cit_dot.html (citations 1)', 'HTML-CHECK-OK cit_dot.html'],
+    no: ['HTML-CITATION-FAIL', 'HTML-CITATION-OP-FAIL'],
+  })
+  expect('citation ./-prefixed head out of range (H1 regression)', ['cit_dot_oob.html'], 1, {
+    has: ['HTML-CITATION-FAIL cit_dot_oob.html:', 'out-of-range', 'one.rs:99', 'file has 1 line'],
+    no: ['HTML-CITATION-OK cit_dot_oob.html', 'HTML-CHECK-OK'],
+  })
+  // M3 (adversarial round 5): comma continuations and start < 1 are proven.
+  expect('citation ,NNN continuation out of range', ['cit_cont_oob.html'], 1, {
+    has: ['HTML-CITATION-FAIL cit_cont_oob.html:', 'out-of-range', 'one.rs:99'],
+    no: ['HTML-CITATION-OK cit_cont_oob.html', 'HTML-CHECK-OK'],
+  })
+  expect('citation start < 1 (file.rs:0) fails', ['cit_zero.html'], 1, {
+    has: ['HTML-CITATION-FAIL cit_zero.html:', 'out-of-range', 'one.rs:0', 'file has 1 line'],
+    no: ['HTML-CITATION-OK cit_zero.html', 'HTML-CHECK-OK'],
+  })
 
   // Check 7 — banned issue apparatus: every offender named, and the legitimate
   // binary name `alumina-proxy` (plus the spec path) must never false-positive.
@@ -356,6 +404,12 @@ try {
   })
   expect('check7 apparatus false-positive guard (alumina-proxy clean)', ['apparatus_fp.html'], 0, {
     has: ['HTML-APPARATUS-OK apparatus_fp.html', 'HTML-CHECK-OK apparatus_fp.html'],
+    no: ['HTML-APPARATUS-FAIL', 'HTML-CITATION-FAIL', 'HTML-CITATION-OP-FAIL'],
+  })
+  // M1 (adversarial round 5): `recommendation` inside a path/identifier must
+  // not be flagged as bead-id-class apparatus.
+  expect('check7 recommendation path false-positive guard (M1)', ['apparatus_recommend_path.html'], 0, {
+    has: ['HTML-APPARATUS-OK apparatus_recommend_path.html', 'HTML-CHECK-OK apparatus_recommend_path.html'],
     no: ['HTML-APPARATUS-FAIL', 'HTML-CITATION-FAIL', 'HTML-CITATION-OP-FAIL'],
   })
 
