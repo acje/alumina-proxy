@@ -134,7 +134,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <li><a href="#observability">8&nbsp;Observability and failure</a></li>
     <li><a href="#security">9&nbsp;Security and trust</a></li>
     <li><a href="#appendix-a">Appendix A — Evidence map</a></li>
-    <li><a href="#appendix-b">Appendix B — Method, identity, verification</a></li>
+    <li><a href="#appendix-b">Appendix B — Provenance</a></li>
   </ol>
 </nav>
 
@@ -1788,47 +1788,19 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 </section>
 
 <section id="appendix-b">
-  <h2>Appendix B — Method, identity, verification</h2>
+  <h2>Appendix B — Provenance</h2>
 
-  <h3>B.1 Method</h3>
-  <p>This document is a static, source-only reading of the pinned revision. No
-  build, test, formatter, linter, or git mutation was executed to produce its
-  statements; every architectural claim is a reading of <code>src/*.rs</code>,
-  <code>tests/*.rs</code>, or the specification. Values the code itself prints or
-  asserts (the boot inventory print, pinned ticket bounds, the warm-exchange
-  allocation witness) are recorded as measured. Nothing in this document is
-  stated at a strength the reading cannot support.</p>
-
-  <h3>B.2 Identity and authority</h3>
   <ul>
-    <li><strong>Scope:</strong> <code>/Users/anders.jensen/code/alumina-proxy</code>,
-    single deliverable <code>docs/architecture.html</code>; documentation only —
-    no source, test, or manifest change beyond the two verification-script
-    adjustments already merged for this reference.</li>
+    <li><strong>Source reading:</strong> this document is a static, source-only
+    reading of the pinned revision; every architectural claim is a reading of
+    <code>src/*.rs</code>, <code>tests/*.rs</code>, or the specification, and no
+    claim is stated at a strength the reading cannot support.</li>
     <li><strong>Revision:</strong> as-built source revision
     <code>590c197ca768055774a44a2484a3e849fd96a2a0</code>, branch <code>main</code>.
     All line citations are to that revision.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
     <code>e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401</code>
     (unchanged); referenced as the governing specification only.</li>
-  </ul>
-
-  <h3>B.3 Verification of this document</h3>
-  <ul>
-    <li><strong>Structural:</strong> standalone single file; inline CSS and SVG;
-    no external assets, no script/link/iframe elements, no CSS resource
-    references, no <code>src=</code> attributes, and no absolute URLs. Validated
-    structurally with a Node audit (unique ids, fragment closure, no external
-    tokens, tag balance) plus a citation-bounds check.</li>
-    <li><strong>Compliance gate (mission-run, documented here for the record):</strong>
-    <code>sh scripts/verify.sh docs</code> exits 0 (docslink, intended-coverage,
-    canonical-digest pass); the <code>docs/alumina-proxy.md</code> digest above
-    is unchanged.</li>
-    <li><strong>Citation rule:</strong> every <code>src/*.rs</code>,
-    <code>tests/*.rs</code>, <code>Cargo.toml</code>, or <code>docs/*</code> line
-    reference names a line that exists at the pinned revision; no line number in
-    this document was invented, and citations for the files whose code moved
-    since the previous reference were re-derived from the source.</li>
   </ul>
 </section>
 
