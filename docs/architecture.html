@@ -1478,6 +1478,46 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   current path; they outlive the tunnel by design (<code>src/serving.rs:774-803</code>).
   The reuse is therefore bounded to within-slot state, with retained buffers a
   storage decision rather than a disclosure path.</p>
+
+  <h3>7.4 Nominal process RSS on the native Linux candidate</h3>
+  <p>The printed named-buffer plan is a type-derived lower bound over retained
+  named buffers, never an RSS figure (§7, §7.1). The measured nominal process
+  RSS on the native Linux release candidate pinned in §7.2 (HEAD
+  3a7b4a9451f78c, release binary 4cce1daab61f, toolchain 1.99.0, alloc-witness
+  enabled) is a distinct, as-built quantity. Five fresh supervised processes,
+  each sampled from kernel state after full startup, give a median resident
+  set of <strong>215&nbsp;375&nbsp;872 bytes ≈ 205.4 MiB</strong>, range
+  215&nbsp;371&nbsp;776–215&nbsp;375&nbsp;872 bytes (≈ 205.4 MiB at both
+  ends), read as <code>/proc/&lt;pid&gt;/smaps_rollup</code> Rss with
+  <code>/proc/&lt;pid&gt;/status</code> VmRSS agreeing byte-for-byte on every
+  sample. That is ≈ 0.7 MiB above the printed plan of
+  214&nbsp;665&nbsp;002 bytes ≈ 204.7 MiB
+  (<code>src/main.rs:34-40</code>, <code>src/inventory.rs:192-196</code>): the
+  difference is code, stack, and allocator/kernel socket-buffer residency
+  outside the retained named-buffer set — a nominal observation on this
+  candidate, never a guarantee, ordering, or capacity bound on another
+  workload or binary.</p>
+  <p>The measured workload was the nominal idle golden path, observed per
+  repetition rather than assumed: full startup with the two allowlisted names
+  (<code>drain.example.org</code> -> 8.8.8.8,
+  <code>force.example.org</code> -> 208.67.222.220) resolved usable before the
+  listener opened; one idle attached listener (LISTEN TCP 127.0.0.1:8080,
+  owned by the binary); zero CONNECT tunnels; one retained plain-DNS TCP
+  resolver connection (ESTABLISHED to 127.0.0.1:53, owned by the binary) plus
+  the two internal AF_UNIX SIGTERM self-pipe sockets; no upstream or client
+  tunnel socket; stdout to a writable regular log file. A second sample after
+  a further 2 s of idle returned the identical value on every run, and each of
+  the five processes exited 0 on SIGTERM with exactly one retained resolver
+  session. Every sample was taken only after the full-startup witness (startup
+  A answers served, listener bound, resolver connection established, quiet
+  window) and only while the process was alive; the measurement harness
+  refuses to report a value otherwise. The runs executed the binary
+  unprivileged (uid 65534) inside an isolated network-namespace container on a
+  loopback DNS responder; kernel 7.1.10-200.fc44.aarch64 (Fedora 44), aarch64,
+  with <code>smaps_rollup</code> available. No saturation workload is
+  measured: the memory-design branch closed with no resize or capacity
+  decision, so this is the nominal single-value RSS on the pinned candidate,
+  not a bound for other workloads or binaries.</p>
 </section>
 
 <section id="observability">
