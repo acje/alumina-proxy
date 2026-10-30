@@ -570,7 +570,7 @@ mod tests {
     /// unreachable by construction (the fixed profile adds no production hook)
     /// and stays BLOCKED/Unknown per decision bead alumina-v52be; no wrap
     /// policy is invented here (the stored marker key,
-    /// src/incident_report.rs:244, is built as `(window_start, slot_gen)` at
+    /// `src/incident_report.rs:244`, is built as `(window_start, slot_gen)` at
     /// :357).
     fn pre_wrap_generation_marker_is_rekeyed_on_rotation() {
         let mut rep = IncidentReport::new();
@@ -602,7 +602,7 @@ mod tests {
     /// same slot: a wrapped-to-zero generation is a distinct `(window_start,
     /// slot_gen)` pair from the pre-wrap `u64::MAX` marker and is never
     /// deduped against it, so all three generations count as separate tunnels
-    /// in one window (the u64 width witness at src/incident_report.rs:244
+    /// in one window (the u64 width witness at `src/incident_report.rs:244`
     /// records the residue exactly; per decision bead alumina-v52be it is
     /// an artifact, not a proof).
     fn marker_records_extreme_generation_values_exactly() {
