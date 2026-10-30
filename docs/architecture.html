@@ -94,7 +94,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   typed enforcement lattice, the fixed-storage memory envelope, and the DoT-bound
   startup-to-serving DNS path that decides whether the process may listen at all.</p>
   <p class="meta"><strong>Authority:</strong> the as-built source revision
-  <code>a3ddacb204e242c7a00637bf72bb7c4df05be5aa</code> (branch <code>main</code>).
+  <code>590c197ca768055774a44a2484a3e849fd96a2a0</code> (branch <code>main</code>).
   All line citations are to that as-built source revision, were verified by the
   docs gate at the documentation revision carrying this document, and were
   re-derived for every file whose code moved after the previous architectural
@@ -429,7 +429,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/serving.rs:87-98</code>, <code>:200-202</code>, <code>:340-351</code>, <code>:774-803</code>, <code>:1157</code>, <code>:1263-1308</code></td></tr>
       <tr><th scope="row"><code>worker</code></th>
         <td>Per-slot <code>SlotState</code> (free/in-setup/established), <code>SlotIndex</code>/<code>TunnelIndex</code> handles, upstream attempt pacing, worker clock.</td>
-        <td><code>src/worker.rs:42-58</code>, <code>:97-105</code>, <code>:316-337</code>, <code>:344-354</code>, <code>:570-578</code></td></tr>
+        <td><code>src/worker.rs:42-58</code>, <code>:97-105</code>, <code>:317-338</code>, <code>:345-355</code>, <code>:571-579</code></td></tr>
       <tr><th scope="row"><code>client_hello</code></th>
         <td><code>ChInspector</code> (2 × 64 KiB), ClientHello validation, JA4 fingerprint retention.</td>
         <td><code>src/client_hello.rs:6-21</code>, <code>:410-419</code></td></tr>
@@ -517,8 +517,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/serving.rs:1819-1836</code>).</p>
   <p>Handles are linear and typed — <code>SlotIndex</code> during setup,
   <code>TunnelIndex</code> after graduation, consumed on release — so a stale
-  handle can never free a reused slot (<code>src/worker.rs:311-340</code>,
-  <code>:589-614</code>).</p>
+  handle can never free a reused slot (<code>src/worker.rs:312-341</code>,
+  <code>:590-615</code>).</p>
 
   <h3>3.2 The CONNECT head parse</h3>
   <p>The head is bounded by <code>MAX_HEADER_LINES = 16</code>
@@ -1335,7 +1335,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>The printed bound deliberately excludes the remaining retained fixed
   structures. Their retained capacities: a worker slot table
   <code>[SlotState; 512]</code> plus <code>free_heap [u16; 512]</code>
-  (<code>src/worker.rs:371-378</code>), a deadline-presence bitmap
+  (<code>src/worker.rs:372-379</code>), a deadline-presence bitmap
   <code>[u64; 8]</code> = 64 B (<code>src/serving.rs:852-863</code>), the
   preallocated <code>POLL_EVENTS_CAP = 1024</code>-event snapshot
   (<code>src/serving.rs:117</code>), the JA4 baseline
@@ -1599,7 +1599,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       deadline</th>
         <td>allowlist-verified hostname + port; cache-entry-scoped selection;
         generation-age retirement</td>
-        <td><code>src/config.rs</code>; <code>src/worker.rs:825-860</code>;
+        <td><code>src/config.rs</code>; <code>src/worker.rs:826-861</code>;
         <code>src/cache.rs:373-382</code></td></tr>
       <tr><th scope="row">Authorization-Before-Forwarding: no client tunnel bytes
       until ClientHello validates with exactly-one matching SNI; no upstream bytes
@@ -1679,7 +1679,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h2>Appendix A — Evidence map</h2>
 
   <p>This appendix is the claim→citation index for the document. Every citation
-  was checked against the commit <code>a3ddacb204e242c7a00637bf72bb7c4df05be5aa</code>;
+  was checked against the commit <code>590c197ca768055774a44a2484a3e849fd96a2a0</code>;
   line numbers are to that revision.</p>
 
   <table>
@@ -1806,7 +1806,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     no source, test, or manifest change beyond the two verification-script
     adjustments already merged for this reference.</li>
     <li><strong>Revision:</strong> as-built source revision
-    <code>a3ddacb204e242c7a00637bf72bb7c4df05be5aa</code>, branch <code>main</code>.
+    <code>590c197ca768055774a44a2484a3e849fd96a2a0</code>, branch <code>main</code>.
     All line citations are to that revision.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
     <code>e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401</code>
