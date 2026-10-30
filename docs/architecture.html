@@ -281,7 +281,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   exiting 75 above it; a first-observed SIGTERM short-circuits the window as
   Terminated and never lets it bind
   (<code>STARTUP_WINDOW_SECS: u64 = 90</code>, <code>src/startup_dns.rs:49</code>;
-  the readiness rule is the canonical decision of <code>docs/alumina-proxy.md:108</code>).
+  the readiness rule is the canonical rule at <code>docs/alumina-proxy.md:110</code>).
   Second, the process is single-threaded for both DNS and serving: one
   reactor loop, one owner of the poll, one set of timers
   (<code>src/runtime.rs</code>, <code>src/serving.rs</code>; the worker owns
@@ -889,8 +889,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   deliberate “no trust anchors yet” position that surfaces as startup warnings
   (<code>src/startup_dns.rs:863-870</code>, <code>src/main.rs:127-143</code>). The
   result is deliberate: a pin is the only trust. “<code>IP#fqdn</code> without
-  pin” is a deterministically unusable resolver rather than a degraded one —
-  operator documentation must state this plainly.</p>
+  pin” is a deterministically unusable resolver rather than a degraded one.</p>
 
   <figure>
     <svg role="img" aria-labelledby="fig5-title" aria-describedby="fig5-desc"
@@ -971,7 +970,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   </figure>
 
   <h3>5.3 The startup decision and its report</h3>
-  <p>The canonical readiness rule (spec <code>docs/alumina-proxy.md:108</code>) is:
+  <p>The canonical readiness rule (spec <code>docs/alumina-proxy.md:110</code>) is:
     open the listener when the unresolved count is at most the configured
     allowance, else exit <code>EX_TEMPFAIL</code> (75). The window is a maximum
     90&nbsp;s (<code>src/startup_dns.rs:49</code>): early closure opens
@@ -1373,7 +1372,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   156 856 workspace ≈ 419 000 bytes ≈ 409 KiB per tunnel on the printed basis.
   An older spec row, “512 × 136 KiB ≈ 68 MiB”, describes the pre-retention
   profile and survives only as a historical row in the specification
-  (<code>docs/alumina-proxy.md:434</code>); what the binary computes and prints
+  (<code>docs/alumina-proxy.md:436</code>); what the binary computes and prints
   for the serving workspace is <code>80 310 272</code>.</p>
 
   <h3>7.1 What the bound includes and excludes</h3>
@@ -1460,10 +1459,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   any phase.</p>
   <p>The honest restatement of the fixed-memory contract is: first-party
   execution paths do not allocate or deallocate heap storage after boot
-  (boot init is exempt; shutdown exits without deallocating), while dependency
-  behavior is a bounded seam — the DoT profile allocates per connect
-  (per-TLS-upgrade, <code>src/startup_dns.rs:1101-1120</code>,
-  <code>build_tls_connection</code> at <code>:1113-1132</code>). On the retained
+  (boot init is exempt; shutdown exits without deallocating), with one
+  authorised first-party exception: each DoT dial builds its TLS state at the
+  per-connect setup seam <code>build_tls_connection</code>
+  (<code>src/startup_dns.rs:1101-1120</code>, called from <code>:2085-2090</code>),
+  which the specification records as the authorised first-party allocation point
+  (<code>docs/alumina-proxy.md:625-627</code>). Dependency behaviour is a separate
+  bounded seam outside the first-party scope: the pinned rustls performs
+  bounded per-record allocations on an established DoT connection
+  (<code>docs/alumina-proxy.md:625-627</code>). On the retained
   serving refresh’s one warm successful-exchange fixture, the transport itself
   must not allocate or reallocate (<code>counts.reallocs == 0</code>), while the
   bounded rustls seam — the dependency scope — may allocate at most
@@ -1474,7 +1478,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   exchange, distinct from the retained named storage the inventory reports — never
   a universal or total-event maximum. The boot-window zero-allocation witness is
   explicit that it applies to the bare-IP/plain-DNS path only
-  (<code>src/startup_dns/tests.rs:1217-1224</code>).</p>
+  (<code>src/startup_dns/tests.rs:1247-1252</code>, <code>:1283-1284</code>).</p>
 
   <h3>7.3 The serving concurrency and scheduling envelope</h3>
   <p>The reactor is a single poll owner (<code>poll: Poll</code> on the
@@ -1548,10 +1552,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   refuses to report a value otherwise. The runs executed the binary
   unprivileged (uid 65534) inside an isolated network-namespace container on a
   loopback DNS responder; kernel 7.1.10-200.fc44.aarch64 (Fedora 44), aarch64,
-  with <code>smaps_rollup</code> available. No saturation workload is
-  measured: the memory-design branch closed with no resize or capacity
-  decision, so this is the nominal single-value RSS on the pinned candidate,
-  not a bound for other workloads or binaries.</p>
+  with <code>smaps_rollup</code> available. No saturation workload is measured;
+  the figure is the nominal single-value RSS on the pinned candidate, not a
+  bound for other workloads or binaries.</p>
 </section>
 
 <section id="observability">
@@ -1570,8 +1573,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <li><strong>The sink can never stall serving.</strong> fd 1 is made
     nonblocking once, after boot, by the binary only
     (<code>prepare_stdout</code>, <code>src/log.rs:1579-1590</code>), and
-    <code>write_vectored</code> either progresses or latches <code>WouldBlock</code>
-    with a retained cursor and a 100 ms retry
+    <code>write_vectored</code> either progresses or latches a recoverable
+    backpressure condition (<code>WouldBlock</code> or <code>Interrupted</code>,
+    including a zero-progress write) with a retained cursor and a 100 ms retry
     (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:2091-2098</code>).
     <code>tests/stdout_stall.rs</code> and <code>tests/monitor_stdout.rs</code> are
     the executable form of this claim.</li>
@@ -1688,7 +1692,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">74 (<code>EX_IOERR</code>)</th>
         <td>Unrecoverable stdout sink failure: the sticky failed latch is read
         after each per-turn drain and the owner exits in place unless shutdown
-        has begun; backpressure (WouldBlock) never exits</td>
+        has begun; recoverable backpressure (WouldBlock, Interrupted,
+        zero-progress) never exits</td>
         <td><code>src/runtime.rs:30</code>, <code>:293-296</code>;
         <code>src/log.rs:2099-2107</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
@@ -1786,7 +1791,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         type-level proof that no attacker-controlled input can reach a panic;
         comprehensive proof/fuzz evidence is a separate item, not established
         here.</td>
-        <td><code>src/lib.rs:1-2</code>; <code>Cargo.toml:230</code></td></tr>
+        <td><code>src/lib.rs:1-2</code>; <code>Cargo.toml:240</code></td></tr>
     </tbody>
   </table>
 
@@ -1815,8 +1820,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     (<code>src/startup_dns.rs:839-888</code>). Without a
     pinned SPKI, chain validation fails deterministically (empty root store) and
     the resolver is unusable with a startup warning — there is no CA-validated
-    mode in the current build (<code>src/startup_dns.rs:863-870</code>); operator
-    documentation must state this plainly.</li>
+    mode in the current build (<code>src/startup_dns.rs:863-870</code>).</li>
     <li><strong>Failover never downgrades identity.</strong> Relocations cannot
     silently swap a DoT entry to plain DNS; a downgrade is counted as a
     <code>dp</code> fact (<code>src/startup_dns.rs:3200-3221</code>).</li>
@@ -1851,7 +1855,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/boot.rs:7</code></td></tr>
       <tr><th scope="row">Listener conditionality / readiness rule</th>
         <td><code>src/serve.rs:98</code>, <code>:974-990</code>;
-        <code>src/startup_dns.rs:49</code>; spec <code>docs/alumina-proxy.md:108</code></td></tr>
+        <code>src/startup_dns.rs:49</code>; spec <code>docs/alumina-proxy.md:110</code></td></tr>
       <tr><th scope="row">early_data block scope connection-only; the
       <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
         <td><code>src/config.rs:1120-1125</code>, <code>:805-815</code>,
@@ -1861,7 +1865,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">DoT seam allocation profile (warm fixture bound 8)</th>
         <td><code>src/startup_dns.rs:1101-1120</code>, <code>:2083-2117</code>;
         <code>src/startup_dns/dot_tests.rs:1379</code>, <code>:1437-1472</code>;
-        <code>src/startup_dns/tests.rs:1217-1224</code></td></tr>
+        <code>src/startup_dns/tests.rs:1247-1252</code>, <code>:1283-1284</code></td></tr>
       <tr><th scope="row">Memory floor (printed named-buffer plan)</th>
         <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code>,
         <code>:273-285</code>; <code>src/main.rs:34-40</code></td></tr>
@@ -1935,7 +1939,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Spec intent citations</th>
         <td><code>docs/alumina-proxy.md</code> §Design philosophy, §Protocol
         contract, §Authorization, §Configuration &amp; DNS, §Memory, §Verification,
-        <code>:108</code>, <code>:434</code></td></tr>
+        <code>:110</code>, <code>:436</code></td></tr>
     </tbody>
   </table>
 </section>
