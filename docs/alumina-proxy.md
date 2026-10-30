@@ -761,9 +761,10 @@ window_secs = 900  # integer >= 1; whole-second window within which the facts mu
 threshold   = 1    # integer >= 1; HostNotAllowlisted facts that arm all-scope block
 window_secs = 900  # integer >= 1; whole-second window within which the facts must arrive
 
-[early_data]      # rejected: invalid configuration (exit 78) — this section is not configurable;
-threshold   = 1    # its all-scope block action is unreachable by construction (the only legal
-window_secs = 900  # early_data block scope is connection, F-02 close); do not present it.
+# An [early_data] gate section is NOT part of this schema: it is rejected at load
+# with exit 78 (invalid configuration). Its all-scope block action is unreachable by
+# construction (early_data block scope is connection only; §F-02 close), so a copied
+# schema that includes one fails boot by design — do not include it.
 
 [ja4]             # optional; absent -> defaults threshold = 1, window_secs = 900
 threshold   = 1    # integer >= 1; Ja4Change Block-All facts that arm all-scope block
@@ -827,11 +828,11 @@ ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all
   this section's all-scope gate bar is removed.
 - **Breaking change:** the old `[any_illegal] scope = "..."` single-key form, the positional
   `[actions]` arrays, and the `flare_only` literal are removed; the `ja4` control is new and
-  mandatory. SP-002's early-data `block` scope restriction is superseded: per-FQDN
-  `early_data` block scope is `connection` only (§F-02 close) while `ja4` per-FQDN scope is
-  uniformly `connection`|`fqdn`|`all`; the upstream-sourced process-wide-latch concern is
-  resolved structurally, because no all-scope early-data block or gate section is
-  configurable.
+  mandatory. SP-002's early-data `block` scope restriction stands — this amendment does
+  not supersede it: per-FQDN `early_data` block scope remains `connection` only (§F-02
+  close), `Block { All }` for early data stays forbidden, and `ja4` per-FQDN scope is
+  uniformly `connection`|`fqdn`|`all`. The upstream-sourced process-wide-latch concern is
+  resolved structurally, because no all-scope early-data block or gate section is configurable.
 - All keys are mandatory with no defaults and no environment or command-line override;
   unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as today — except the
   three optional gate sections, which carry the defaults `threshold = 1` /
@@ -972,7 +973,7 @@ any control, decomposed per class: each class's `WindowedCounter` counts only th
 facts — `bad_handshake` counts every `AnyIllegal` fact with cause `ConnectParse`/`TlsProfile`/
 `Ech`, `illegal_fqdn` every `AnyIllegal` fact with cause `HostNotAllowlisted`, and `early_data`
 /`ja4` only their per-FQDN facts projecting to Block All; a not-yet-crossed Block All
-downgrades to BaselineOnly. Each class's threshold and window are operator-configurable via
+downgrades to BaselineOnly. Each configurable gate class's threshold and window are operator-configurable via
 its optional gate section (`[bad_handshake]`, `[illegal_fqdn]`, `[ja4]`,
 §Keyed configuration schema), defaulting to `threshold = 1` / `window_secs = 900`; at the
 default, the first Block-All projection of a class arms that class's latch (sticky until
@@ -1023,17 +1024,18 @@ upstream-sourced signal can no longer select a per-domain or process-wide latch 
 those scopes are unreachable from configuration. This amendment records the binding
 semantics.
 
-**Superseded (per-control schema, T2/T3/T6).** SP-002's early-data `block` scope restriction
-is superseded by the per-control schema: per-FQDN `scope` is uniformly
-`connection` | `fqdn` | `all` for BOTH `early_data` and `ja4` (§Keyed configuration schema,
-§Per-control enforcement schema T6). The upstream-sourced process-wide-latch concern that
-motivated the restriction is mitigated structurally instead: the per-class SP-001 gates
-(§SP-001) arm Block All only after the CONFIGURED fact threshold within the CONFIGURED
-window, each class counting only its own facts (`early_data` counts `EarlyUpstreamData`
-facts only when they project to Block All); at the default threshold = 1 the first such
-fact arms that class's latch, and the operator may raise each class's bar via its optional
-gate section (§Keyed configuration schema). The baseline mandatory denial (terminate
-setup on early upstream data while the gate is closed) is unchanged.
+**Superseded (per-control schema, T2/T3/T6; re-restricted for `early_data` by §F-02 close).**
+Per-FQDN `early_data` block scope is `connection` only — the §F-02 close re-restricted it,
+so `Block { All }` for early data remains forbidden (invalid configuration, exit 78);
+`ja4` per-FQDN scope remains uniformly `connection` | `fqdn` | `all` (§Keyed configuration
+schema, §Per-control enforcement schema T6). The upstream-sourced process-wide-latch
+concern is mitigated structurally in addition: the per-class SP-001 gates arm Block All
+only after the CONFIGURED fact threshold within the CONFIGURED window, each class counting
+only its own facts (`early_data` counts `EarlyUpstreamData` facts only when they project to
+Block All); at the default threshold = 1 the first such fact arms that class's latch, and
+the operator may raise each gate class's bar via its optional gate section (§Keyed
+configuration schema). Baseline mandatory denial (terminate setup on early upstream data
+while the gate is closed) is unchanged.
 
 #### SP-003 — Homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup
 

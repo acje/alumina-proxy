@@ -8,12 +8,12 @@ use super::policy::{AnyIllegalCause, Effect, UnknownReason, Violation, decide as
 
 /// The default per-class All-scope gate threshold: at the default the FIRST
 /// deviation of a class arms that class's All-scope block, sticky until
-/// restart. Operator-configurable per class via the four gate sections.
+/// restart. Operator-configurable per class via the configurable gate sections.
 pub const ALL_SCOPE_GATE_DEFAULT_THRESHOLD: u32 = 1;
 
 /// The default per-class All-scope gate window: the whole-second window within
 /// which the threshold facts of a class must arrive. Operator-configurable per
-/// class via the four gate sections.
+/// class via the configurable gate sections.
 pub const ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS: u64 = 900;
 
 /// Operator-configurable SP-001 All-scope gate parameters: the threshold of
@@ -64,9 +64,9 @@ impl Default for AllScopeGate {
 /// class: `bad_handshake` (`ConnectParse`/`TlsProfile`/`Ech`), `illegal_fqdn`
 /// (`HostNotAllowlisted`), `early_data` (`EarlyUpstreamData`), and `ja4`
 /// (`Ja4Change`). Each class's gate counts only that class's facts, so the
-/// operator chooses the action AND the bar per class. Each field is an
-/// [`AllScopeGate`] whose `NonZero` fields make a never-arming gate
-/// unrepresentable.
+/// operator chooses the action AND the bar per class; the `early_data` slot
+/// is always `AllScopeGate::default()` because its gate section is not
+/// configurable (rejected at load, exit 78), so its bar is not operator-chosen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GateSet {
     bad_handshake: AllScopeGate,

@@ -464,7 +464,7 @@ impl Config {
         &self.control
     }
 
-    /// The four per-class SP-001 All-scope gates (threshold/window per class);
+    /// The per-class SP-001 All-scope gates (threshold/window per class);
     /// each defaults to threshold 1 / window 900s when its section is absent.
     #[must_use]
     pub const fn gates(&self) -> GateSet {
@@ -2165,7 +2165,7 @@ mod enforcement_config_tests {
     }
 
     #[test]
-    fn gates_absent_default_all_four() {
+    fn gates_absent_default_all_slots() {
         let cfg = parse_config_document(&gate_doc("")).expect("valid config without gate sections");
         assert_eq!(cfg.gates(), GateSet::default());
         assert_eq!(cfg.gates().bad_handshake().threshold(), 1);
@@ -2279,7 +2279,25 @@ mod enforcement_config_tests {
         ));
         let cfg = parse_config_document(&doc)
             .expect("per-FQDN early_data control without a gate section must load");
-        assert_eq!(cfg.control().len(), 1);
+        let control = cfg.control();
+        assert_eq!(control.len(), 1);
+        let first = control.ordinal(0).expect("ordinal");
+        assert_eq!(
+            control.early_data(first),
+            Some(PerFqdnControl::control(
+                ActionKind::Notify,
+                Scope::Connection
+            ))
+        );
+        assert_eq!(
+            control.ja4(first),
+            Some(PerFqdnControl::control(
+                ActionKind::Notify,
+                Scope::Connection
+            ))
+        );
+        assert_eq!(cfg.gates().early_data(), AllScopeGate::default());
+        assert_eq!(cfg.gates().ja4(), AllScopeGate::default());
     }
 
     #[test]

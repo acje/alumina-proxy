@@ -493,7 +493,8 @@ changes nothing in them; it is not a benchmark framework and creates no files.
 |---|---|
 | Source SHA | `3f587e947fa8f050954b2f1fa7ec6b47012ac769` (short `3f587e9`; sole parent `ad82b77c…`; 19 commits `c27115e..HEAD`; no push) |
 | P1 base / changed set | base `eedec45`; 10 paths: `README.md`, `docs/architecture.md`, `docs/serving-datastructure.html` (deleted), `src/config.rs`, `src/enforcement/policy.rs`, `src/incident_report.rs`, `src/log.rs`, `src/serve.rs`, `src/serving.rs`, `src/serving/tests.rs` |
-| Canonical spec digest | `56434a285d6ca565391a19df9bd884ba133ab8a6456e0675b8da8a4eb529f154` (re-pinned by the governed gate-section amendment; CANONICAL-DIGEST-OK) |
+| Canonical spec digest (at candidate time `3f587e9`) | `e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401` (unchanged within the candidate) |
+| Current governing spec digest (post-F-01 amendment) | `4e59e9d9e535475510e961fa719c69d1fa1ca8838452b32d5805b8f30fb9e78a` (re-pinned by the governed gate-section amendment; CANONICAL-DIGEST-OK pins AGENTS.md) |
 | Executed artifact sha256 | `c869192e67032597c4b490de16260cdc33b5b7a811cb7e37308f9b5d25274031` (`target/release/alumina`; production digest identical to the D4 candidate `a19d407`) |
 | Builder | podman connections `flock-vm` (rootless) / `flock-vm-root` (rootful); pinned `docker.io/library/rust@sha256:484dce…2779a` |
 | Pinned bench image (§3) | `localhost/alumina-bench:20261027`, id `7c3937c1…b449c` = `BENCH_IMAGE_ID` (fail-closed) |

@@ -101,7 +101,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   reference; none is copied from another document.</p>
   <p class="meta"><strong>Identity pins cited bytes:</strong> the human revision
   above names the base commit; the mechanically enforced binding is the exact
-  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY 33ce31d265921d89eb6bc87d2e71b504dfe9eddf990d44faff0499bc4c152f3e</code> —
+  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY 46bfd94f35540a2917747e732fa63d060f7c63bf3157e4d32335ce89dabe8f6e</code> —
   a deterministic manifest over the current working-tree source set
   (<code>src/**</code>, <code>tests/*.rs</code>, <code>Cargo.toml</code>,
   <code>Cargo.lock</code>; docs and the specification digest excluded). The
@@ -122,7 +122,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   source at the commit named above. Every architectural claim cites
   <code>src/*.rs</code>, <code>tests/*.rs</code>, or the governing specification
   (<code>docs/alumina-proxy.md</code>, SHA-256
-  <code>56434a285d6ca565391a19df9bd884ba133ab8a6456e0675b8da8a4eb529f154</code>).
+  <code>4e59e9d9e535475510e961fa719c69d1fa1ca8838452b32d5805b8f30fb9e78a</code>).
   Values the code itself prints or asserts are recorded as measured. No review
   apparatus — findings, severities, proposals, or open questions — is carried here;
   the architecture is described as it is built.</p>
@@ -1202,7 +1202,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>src/config.rs:1120-1125</code>); the parser comment documents the
     restriction as the early-data block-scope close — an upstream-sourced
     early-data signal cannot select a per-domain or process-wide latch
-    (<code>docs/alumina-proxy.md:1017-1019</code>). The only reachable raw effects
+    (<code>docs/alumina-proxy.md:1018-1020</code>). The only reachable raw effects
     for <code>EarlyUpstreamData</code> are therefore <code>BaselineOnly</code>,
     <code>Unknown</code>, <code>Notify</code>, or <code>Block { Connection }</code> —
     never <code>Block { All }</code> — so the <code>early_data</code> gate’s
@@ -1724,8 +1724,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
         <td><code>src/config.rs:1120-1125</code>, <code>:805-815</code>,
         <code>:975-1009</code>; <code>src/enforcement/state.rs:262-278</code>,
-        <code>:1415-1450</code> (test); <code>docs/alumina-proxy.md:1017-1019</code>,
-        <code>:821-827</code></td></tr>
+        <code>:1415-1450</code> (test); <code>docs/alumina-proxy.md:1018-1020</code>,
+        <code>:822-828</code></td></tr>
       <tr><th scope="row">DoT seam allocation profile (warm fixture bound 8)</th>
         <td><code>src/startup_dns.rs:1101-1120</code>, <code>:2083-2117</code>;
         <code>src/startup_dns/dot_tests.rs:1379</code>, <code>:1437-1472</code>;
@@ -1828,7 +1828,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     excluded from the set). The base commit names the revision; the content
     identity binds the currently cited bytes.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
-    <code>56434a285d6ca565391a19df9bd884ba133ab8a6456e0675b8da8a4eb529f154</code>
+    <code>4e59e9d9e535475510e961fa719c69d1fa1ca8838452b32d5805b8f30fb9e78a</code>
     (re-pinned by the governed gate-section amendment); referenced as the governing
     specification only.</li>
   </ul>
