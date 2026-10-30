@@ -876,10 +876,15 @@ html_structure_check() {
     # closure, figure <desc> presence, table cell-count consistency, citation
     # bounds (every <file>:LINE[-LINE] resolves as-given then src/ then tests/
     # and is in range — a missing file / malformed range / out-of-range line is
-    # a check failure), and banned issue apparatus (F-NN / U-NN / bead ids /
+    # a check failure), banned issue apparatus (F-NN / U-NN / bead ids /
     # (S1-S3) / owner decision / review finding / recommendation — the
     # legitimate `alumina-proxy` binary name stays clean via a negative
-    # lookahead). The adapter emits one OK marker per root per check on
+    # lookahead), and the archived source-content identity: the document's
+    # declared SOURCE-CONTENT-IDENTITY SHA-256 must equal the gate's recomputed
+    # manifest over the current working-tree source set (src/**, tests/*.rs,
+    # Cargo.toml, Cargo.lock; docs excluded), with a stale pin naming both the
+    # documented and the recomputed value. The adapter emits one OK marker per
+    # root per check on
     # success; this gate fails closed if any is missing. The adapter's exit is
     # captured unmasked (one-way split: operational failures never fold into
     # 0/1); its output is printed verbatim.
@@ -913,6 +918,10 @@ html_structure_check() {
                     echo "HTML-STRUCTURE-BLOCKED: adapter exit 0 but no HTML-APPARATUS-OK for $_html_root" >&2
                     exit 2
                 fi
+                if ! printf '%s\n' "$html_out" | grep -q "^HTML-IDENTITY-OK $_html_root "; then
+                    echo "HTML-STRUCTURE-BLOCKED: adapter exit 0 but no HTML-IDENTITY-OK for $_html_root (source-content identity not asserted)" >&2
+                    exit 2
+                fi
             done
             ;;
         1)
@@ -943,6 +952,7 @@ html_structure_check() {
     echo "HTML-CHECK-OK"
     echo "HTML-CITATION-CHECK-OK"
     echo "HTML-APPARATUS-CHECK-OK"
+    echo "HTML-IDENTITY-CHECK-OK"
 }
 
 unsafe_surface_gate() {

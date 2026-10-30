@@ -99,6 +99,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   docs gate at the documentation revision carrying this document, and were
   re-derived for every file whose code moved after the previous architectural
   reference; none is copied from another document.</p>
+  <p class="meta"><strong>Identity pins cited bytes:</strong> the human revision
+  above names the base commit; the mechanically enforced binding is the exact
+  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY 4bc424a17b6dcb955d8303d2ac00f5b3208298d1758ff2d0dc5ba5c9235a7ebb</code> —
+  a deterministic manifest over the current working-tree source set
+  (<code>src/**</code>, <code>tests/*.rs</code>, <code>Cargo.toml</code>,
+  <code>Cargo.lock</code>; docs and the specification digest excluded). The
+  content identity, not the base commit alone, pins the currently cited bytes:
+  the docs gate recomputes it from the working tree and fails on any mismatch,
+  so the citations stay locked to the exact implementation content this
+  document describes, even across a commentary-only commit that changes none of
+  the covered source.</p>
   <p class="meta"><strong>Identity:</strong> alumina is a single-binary, config-file
   driven, DNS-conditional <code>CONNECT</code> proxy. After a startup DNS window of at most
   90&nbsp;s it opens the listener early once every name is usable, else Full or Degraded
@@ -1798,6 +1809,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <li><strong>Revision:</strong> as-built source revision
     <code>590c197ca768055774a44a2484a3e849fd96a2a0</code>, branch <code>main</code>.
     All line citations are to that revision.</li>
+    <li><strong>Source-content identity:</strong> the exact identity that pins the
+    cited bytes is the SHA-256 manifest over the working-tree source set
+    described in the header, <code>SOURCE-CONTENT-IDENTITY 4bc424a17b6dcb955d8303d2ac00f5b3208298d1758ff2d0dc5ba5c9235a7ebb</code>;
+    the docs gate recomputes it and fails on any mismatch (docs and the
+    specification digest are excluded from the set). The base commit names the
+    revision; the content identity binds the currently cited bytes.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
     <code>e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401</code>
     (unchanged); referenced as the governing specification only.</li>

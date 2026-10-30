@@ -46,15 +46,24 @@
 //      these exact classes are not scanned. The scan covers the whole file
 //      including raw markup, so the set is a heuristic, not a proof of
 //      semantic apparatus (residual, documented).
+//   8. source-content identity: a document carrying the marker
+//      `SOURCE-CONTENT-IDENTITY <64-hex>` must have that value equal to the
+//      gate's recomputed SHA-256 manifest over the current working-tree
+//      source set (src/**, tests/*.rs, Cargo.toml, Cargo.lock; docs and the
+//      spec digest excluded). A mismatch names both documented and recomputed
+//      values; a covered file that exists but cannot be read is operational.
+//      A document without the marker is skipped.
 //
 // Exit discipline (one-way split — operational never folds into 0/1):
 //   0  every input clean
-//   1  at least one structural, citation-bounds or issue-apparatus check
-//      failure (all offenders named)
+//   1  at least one structural, citation-bounds, issue-apparatus or
+//      source-content-identity check failure (all offenders named)
 //   2  operational/unsupported only (missing/unreadable input file, colspan/
-//      rowspan, or an unreadable cited file). A run with both a failure and an
-//      operation exits 2 but still prints every check-failure line it found.
-import { readFile, stat } from 'node:fs/promises'
+//      rowspan, an unreadable cited file, or an unreadable identity-set file).
+//      A run with both a failure and an operation exits 2 but still prints
+//      every check-failure line it found.
+import { readdir, readFile, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -95,6 +104,8 @@ let citHeadsTotal = 0
 let citFailTotal = 0
 let citOpsTotal = 0
 let apparatusTotal = 0
+let identityFailTotal = 0
+let identityOpsTotal = 0
 let cleanTotal = 0
 let idsTotal = 0
 let fragsTotal = 0
@@ -195,7 +206,7 @@ async function checkOne(f) {
     opFail(`${f} unreadable (${err.code || 'read'})`)
     return null
   }
-  const local = { ops: 0, struct: 0, citHeads: 0, citFail: 0, citOps: 0, apparatus: 0 }
+  const local = { ops: 0, struct: 0, citHeads: 0, citFail: 0, citOps: 0, apparatus: 0, identityFail: 0, identityOps: 0, identitySeen: 0 }
   const sf = (lineNo, kind, detail) => { local.struct++; structTotal++; lines.push(`HTML-STRUCT-FAIL ${f}:${lineNo} ${kind} ${detail}`) }
 
   const n = text.length
@@ -212,11 +223,12 @@ async function checkOne(f) {
     return lo + 1
   }
 
-  // Checks 6 and 7 operate on the document text alone (they share the
+  // Checks 6, 7 and 8 operate on the document text alone (they share the
   // structural line index for `:line` attribution); the tag walk below owns the
   // structural checks 1-5.
   await checkCitationsIn(f, text, lineAt, local)
   checkApparatusIn(f, text, lineAt, local)
+  await checkIdentityIn(f, text, local)
 
   const ids = new Map()
   const names = new Set()
@@ -384,7 +396,7 @@ async function checkOne(f) {
     figures: figureCount,
     ops: local.ops,
     struct: local.struct,
-    clean: local.ops === 0 && local.struct === 0 && local.citFail === 0 && local.citOps === 0 && local.apparatus === 0,
+    clean: local.ops === 0 && local.struct === 0 && local.citFail === 0 && local.citOps === 0 && local.apparatus === 0 && local.identityFail === 0 && local.identityOps === 0,
   }
 }
 
@@ -492,6 +504,119 @@ function checkApparatusIn(f, text, lineAt, local) {
   }
 }
 
+// Check 8 — source-content identity. architecture.html declares the exact
+// source-content identity of the bytes it cites as the machine marker
+// `SOURCE-CONTENT-IDENTITY <64-hex>`. The gate recomputes that identity from
+// the CURRENT working tree (not a pinned commit) over a fixed covered set:
+// every file under src/ (recursive), every tests/*.rs, and the manifest roots
+// Cargo.toml and Cargo.lock; docs/ and the spec digest are deliberately
+// excluded so the document can never hash itself. On a mismatch the gate names
+// both the documented and the recomputed value (exit 1); a covered file that
+// exists but cannot be read is operational (exit 2). The identity is a SHA-256
+// manifest: for each file in byte-lexicographic relative-path order, the
+// 4-byte big-endian path length, the UTF-8 path, the 4-byte big-endian content
+// length, then the raw content bytes (an empty file contributes a zero content
+// length — unambiguous). A document without the marker is skipped (no
+// identity is asserted for it); verify.sh fail-closes on the per-root OK
+// marker so a gate root that silently loses its identity statement is a
+// blocked gate, not a pass.
+const IDENTITY_MARKER_RE = /SOURCE-CONTENT-IDENTITY ([0-9a-f]{64})/
+const IDENTITY_SET = ['src/**', 'tests/*.rs', 'Cargo.toml', 'Cargo.lock']
+
+// Collect every relative path under src/ (recursive) as src/<rel>. A missing
+// directory contributes nothing (the manifest simply lacks those files, so the
+// recomputed identity cannot match a documented identity that includes them —
+// a deletion is a domain negative, not an operational failure). A readdir
+// error other than ENOENT is operational.
+async function walkTree(dirAbs, rel) {
+  let ents
+  try {
+    ents = await readdir(dirAbs, { withFileTypes: true })
+  } catch (err) {
+    if (err.code === 'ENOENT') return { paths: [] }
+    return { op: true, why: err.code || 'readdir', path: rel || dirAbs }
+  }
+  const paths = []
+  for (const e of ents) {
+    const r = rel ? `${rel}/${e.name}` : e.name
+    if (e.isDirectory()) {
+      const sub = await walkTree(`${dirAbs}/${e.name}`, r)
+      if (sub.op) return sub
+      paths.push(...sub.paths)
+    } else if (e.isFile()) {
+      paths.push(r)
+    }
+  }
+  return { paths }
+}
+
+// Recompute the exact source-content identity of the current working tree.
+// Returns { hex, count } on success or { op, why, path } on an operational
+// failure (a covered file that exists but cannot be read).
+async function sourceIdentity(root) {
+  const files = []
+  const src = await walkTree(`${root}/src`, 'src')
+  if (src.op) return src
+  files.push(...src.paths)
+  const tests = await walkTree(`${root}/tests`, 'tests')
+  if (tests.op) return tests
+  files.push(...tests.paths.filter((p) => p.endsWith('.rs')))
+  for (const m of ['Cargo.toml', 'Cargo.lock']) {
+    try {
+      const st = await stat(`${root}/${m}`)
+      if (st.isFile()) files.push(m)
+    } catch (err) {
+      if (err.code !== 'ENOENT') return { op: true, why: err.code || 'stat', path: m }
+    }
+  }
+  files.sort()
+  const h = createHash('sha256')
+  const plen = Buffer.alloc(4)
+  const clen = Buffer.alloc(4)
+  for (const rel of files) {
+    let content
+    try {
+      content = await readFile(`${root}/${rel}`)
+    } catch (err) {
+      return { op: true, why: err.code || 'read', path: rel }
+    }
+    plen.writeUInt32BE(Buffer.byteLength(rel, 'utf8'))
+    clen.writeUInt32BE(content.length)
+    h.update(plen)
+    h.update(rel, 'utf8')
+    h.update(clen)
+    h.update(content)
+  }
+  return { hex: h.digest('hex'), count: files.length }
+}
+
+// Check 8 — recompute the declared identity from the working tree; match is a
+// pass, mismatch names both values (exit 1), an unreadable covered file is
+// operational (exit 2). Only documents carrying the marker are checked.
+async function checkIdentityIn(f, text, local) {
+  const m = IDENTITY_MARKER_RE.exec(text)
+  if (!m) {
+    lines.push(`HTML-IDENTITY-SKIP ${f}`)
+    return
+  }
+  const documented = m[1]
+  const id = await sourceIdentity(root)
+  if (id.op) {
+    local.identityOps++
+    identityOpsTotal++
+    lines.push(`HTML-IDENTITY-OP-FAIL ${f} ${id.why} ${id.path}`)
+    return
+  }
+  if (id.hex === documented) {
+    local.identitySeen++
+    lines.push(`HTML-IDENTITY-OK ${f} (source-content-identity ${documented}, set ${id.count} files: ${IDENTITY_SET.join(', ')})`)
+  } else {
+    local.identityFail++
+    identityFailTotal++
+    lines.push(`HTML-IDENTITY-FAIL ${f} documented ${documented} recomputed ${id.hex}`)
+  }
+}
+
 if (files.length === 0) {
   opFail('no input files (fixed nonempty root list required)')
   lines.push('HTML-CHECK-RESULT (files 0, clean 0, ids 0, fragments 0, tables 0, figures 0, citations 0, apparatus 0)')
@@ -513,9 +638,9 @@ for (const f of files) {
   tablesTotal += res.tables
   figuresTotal += res.figures
 }
-lines.push(`HTML-CHECK-RESULT (files ${files.length}, clean ${cleanTotal}, ids ${idsTotal}, fragments ${fragsTotal}, tables ${tablesTotal}, figures ${figuresTotal}, citations ${citHeadsTotal}, apparatus ${apparatusTotal})`)
+lines.push(`HTML-CHECK-RESULT (files ${files.length}, clean ${cleanTotal}, ids ${idsTotal}, fragments ${fragsTotal}, tables ${tablesTotal}, figures ${figuresTotal}, citations ${citHeadsTotal}, apparatus ${apparatusTotal}, identity ${identityFailTotal + identityOpsTotal})`)
 process.stdout.write(`${lines.join('\n')}\n`)
 
-if (opsTotal > 0 || citOpsTotal > 0) process.exit(2)
-if (structTotal > 0 || citFailTotal > 0 || apparatusTotal > 0) process.exit(1)
+if (opsTotal > 0 || citOpsTotal > 0 || identityOpsTotal > 0) process.exit(2)
+if (structTotal > 0 || citFailTotal > 0 || apparatusTotal > 0 || identityFailTotal > 0) process.exit(1)
 process.exit(0)

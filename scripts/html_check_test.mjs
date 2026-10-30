@@ -291,6 +291,62 @@ try {
     ['<!doctype html>', '<html><body>', '<h2>Recommendations</h2>', '</body></html>', ''].join('\n')
   )
 
+  // Check 8 — source-content identity (exact working-tree manifest). The
+  // test derives the correct hash from the checker itself (probe run against
+  // a deliberately-stale document), so it never duplicates the manifest
+  // algorithm. The covered set is src/** (recursive), tests/*.rs, Cargo.toml,
+  // Cargo.lock relative to the checker cwd — created here alongside the
+  // pre-existing src/foo.rs and tests/*.rs citation fixtures.
+  await mkdir(path.join(base, 'tests'))
+  await mkdir(path.join(base, 'src', 'ident_sub'))
+  await writeFile(path.join(base, 'src', 'ident_main.rs'), 'pub fn ident() {}\n')
+  await writeFile(path.join(base, 'src', 'ident_sub', 'deep.rs'), '')
+  await writeFile(path.join(base, 'tests', 'ident_t.rs'), '// ident\n')
+  await writeFile(path.join(base, 'Cargo.toml'), '[package]\nname = "ident"\nversion = "0.0.0"\n')
+  await writeFile(path.join(base, 'Cargo.lock'), '# probe lock\n')
+  const zeros = '0'.repeat(64)
+  const probeName = 'identity_probe.html'
+  await writeFile(
+    path.join(base, probeName),
+    ['<!doctype html>', '<html><body>', `<p>SOURCE-CONTENT-IDENTITY ${zeros}</p>`, '</body></html>', ''].join('\n')
+  )
+  const probeRes = spawnSync(process.execPath, [checker, probeName], { cwd: base, encoding: 'utf8' })
+  const probeMatch = /recomputed ([0-9a-f]{64})/.exec(probeRes.stdout || '')
+  if (probeRes.status !== 1 || !probeMatch) {
+    failures++
+    console.error(`HTML-CHECK-TEST-FAIL identity-probe: expected exit 1 + recomputed hash, got exit ${probeRes.status}\n  out: ${(probeRes.stdout || '').split('\n').filter(Boolean).join(' | ')}`)
+  } else {
+    ran++
+    console.log('HTML-CHECK-TEST-PASS identity-probe derives working-tree identity (exit 1)')
+  }
+  const correct = probeMatch ? probeMatch[1] : zeros
+  await writeFile(
+    path.join(base, 'identity_ok.html'),
+    ['<!doctype html>', '<html><body>', `<p>SOURCE-CONTENT-IDENTITY ${correct}</p>`, '</body></html>', ''].join('\n')
+  )
+  expect('check8 identity match is clean (exit 0)', ['identity_ok.html'], 0, {
+    has: [`HTML-IDENTITY-OK identity_ok.html`, 'HTML-CHECK-OK identity_ok.html'],
+    no: ['HTML-IDENTITY-FAIL', 'HTML-IDENTITY-OP-FAIL'],
+  })
+  await writeFile(
+    path.join(base, 'identity_stale.html'),
+    ['<!doctype html>', '<html><body>', `<p>SOURCE-CONTENT-IDENTITY ${zeros}</p>`, '</body></html>', ''].join('\n')
+  )
+  expect('check8 stale identity mismatch names both values (exit 1)', ['identity_stale.html'], 1, {
+    has: [`HTML-IDENTITY-FAIL identity_stale.html`, `documented ${zeros}`, `recomputed ${correct}`],
+    no: ['HTML-IDENTITY-OK identity_stale.html', 'HTML-CHECK-OK identity_stale.html'],
+  })
+  // Operational split (exit 2): a covered source file that exists but is
+  // unreadable is operational, not a domain-negative. Permissions locked
+  // before this run and restored immediately after (before any later fixture
+  // can observe the locked file).
+  await chmod(path.join(base, 'src', 'ident_sub', 'deep.rs'), 0o000)
+  expect('check8 unreadable covered source is operational (exit 2)', ['identity_ok.html'], 2, {
+    has: ['HTML-IDENTITY-OP-FAIL identity_ok.html', 'EACCES', 'src/ident_sub/deep.rs'],
+    no: ['HTML-IDENTITY-OK identity_ok.html', 'HTML-CHECK-OK identity_ok.html'],
+  })
+  await chmod(path.join(base, 'src', 'ident_sub', 'deep.rs'), 0o644)
+
   expect('clean-minimal document', ['clean.html'], 0, {
     has: ['HTML-CHECK-OK clean.html', 'clean 1'],
     no: ['HTML-STRUCT-FAIL', 'HTML-CHECK-OP-FAIL'],
