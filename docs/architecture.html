@@ -1805,10 +1805,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 
   <h3>9.3 TLS and the ClientHello profile</h3>
   <p>The ClientHello surface is deliberately narrow. Validation enforces a TLS 1.3
-  profile with no ECH, exactly one SNI that must normalize-equal the approved
-  hostname (<code>L8</code> — non-<code>host_name</code>
-  <code>server_name</code> entries rejected), and a minimum initial TLS record
-  payload (<code>L9</code>) to reject degenerate framing
+  profile with no ECH (<code>src/client_hello.rs:604-608</code>,
+  <code>:685-688</code>, <code>:708-723</code> for the version; <code>:672-674</code>,
+  <code>:1108-1111</code> for ECH), exactly one SNI that must normalize-equal the
+  approved hostname, with non-<code>host_name</code> <code>server_name</code>
+  entries rejected (<code>L8</code>; <code>src/client_hello.rs:771-813</code>,
+  <code>:1108-1120</code>), and a minimum initial TLS record payload
+  (<code>L9</code>) to reject degenerate framing
   (<code>src/client_hello.rs:526-528</code>). The inspector holds the
   flattened message across feeds, copying each record payload exactly once
   regardless of fragmentation (<code>src/client_hello.rs:410-419</code>). The JA4
