@@ -1399,22 +1399,23 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>src/serving/tests.rs</code>.</p>
   <p>The measured witness basis, on the native Linux candidate pinned by the
   header's exact source-content identity (HEAD 3a7b4a9451f78c, release
-  4cce1daab61f, toolchain 1.99.0, alloc-witness enabled): three focused success
-  witnesses assert <code>Counts::all_zero()</code> — allocations, deallocations,
-  reallocations, and unphased counts all zero — over the
-  <code>Runtime::turn → Serving::run_once</code> poll/pump paths and the retained
-  serving workspace:
+  4cce1daab61f, toolchain 1.99.0, alloc-witness enabled): two focused
+  alloc-witness tests assert <code>Counts::all_zero()</code> — allocations,
+  deallocations, reallocations, and unphased counts all zero — over the
+  <code>Runtime::turn → Serving::run_once</code> poll/pump paths:
   <code>hot_relay_turns_compose_with_bounded_stalled_dns</code>
   (<code>src/runtime/tests.rs:177</code>, Serving phase, 17 hot relays + stalled
-  DNS + backlog + expiry across 900 owner turns),
+  DNS + backlog + expiry across 900 owner turns) and
   <code>due_refresh_owner_path_spends_zero_allocations</code>
   (<code>src/runtime/tests.rs:2346</code>, BackgroundRefresh phase, 200 owner
-  turns), and <code>serving_consumes_boot_traffic_buffers_by_value_not_reallocation</code>
-  (<code>src/serving/tests.rs:127</code>, which asserts the boot traffic slabs
-  transfer into the slot workspaces by value: <code>slots[0].buf</code> and
+  turns). A separate pointer-transfer witness, not a numeric allocation
+  witness, covers the second claim:
+  <code>serving_consumes_boot_traffic_buffers_by_value_not_reallocation</code>
+  (<code>src/serving/tests.rs:127</code>) asserts the boot traffic slabs transfer
+  into the slot workspaces by value: <code>slots[0].buf</code> and
   <code>slots[511].down</code> keep the <code>TrafficStorage</code>
   allocation pointers, so no second traffic allocation occurs when the serving
-  workspaces are built). The mio allocation matrix
+  workspaces are built. The mio allocation matrix
   (<code>tests/mio_matrix.rs</code>, alloc-witness-only) measures the same
   dependency seam: the retained <code>Events</code> heap buffer is attributed to
   its boot allocation, a later named phase never carries its release, and steady
