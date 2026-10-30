@@ -271,13 +271,13 @@ pub enum ConnectPhase {
     Forbidden,
     /// Allowlisted but the name currently has no eligible non-retired binding
     /// at any outstanding per-family cursor: never resolved, or all remaining
-    /// addresses are retired (HTTP 502, "no resolved addresses"; docs/alumina-proxy.md:43).
+    /// addresses are retired (HTTP 502, "no resolved addresses"; docs/alumina-proxy.md:83).
     NoBinding,
     /// The absolute setup deadline has passed before the forwarding gate
-    /// opened (HTTP 504; docs/alumina-proxy.md:43,189).
+    /// opened (HTTP 504; docs/alumina-proxy.md:83).
     DeadlineExhausted,
     /// All allowed upstream attempts were consumed (HTTP 502, "upstream
-    /// connection failed"; docs/alumina-proxy.md:43). Distinct from [`ConnectPhase::NoBinding`]
+    /// connection failed"; docs/alumina-proxy.md:83). Distinct from [`ConnectPhase::NoBinding`]
     /// so the two 502 reasons and bodies are never conflated (9pac M5).
     CandidatesExhausted,
     /// Proceed: dial this eligible destination for this family within the
@@ -291,13 +291,13 @@ pub enum ConnectPhase {
 }
 
 impl ConnectPhase {
-    /// The canonical fixed status for this phase (docs/alumina-proxy.md:43;
+    /// The canonical fixed status for this phase (docs/alumina-proxy.md:83;
     /// canonical refusal matrix at src/serving/policy.rs:8-24): 403
-    /// not-allowlisted, 502 for both
-    /// no-binding and candidates-exhausted, 504 setup deadline, 200 for an
-    /// authorized `Peer`. HTTP 503 is capacity-only and lives in
-    /// [`AdmissionError`]; HTTP 400 malformed is parser-owned and never reaches
-    /// the worker. Pinned by `refusal_statuses_follow_the_canonical_fixed_matrix`.
+    /// not-allowlisted, 502 for both no-binding and candidates-exhausted, 504
+    /// setup deadline, 200 for an authorized `Peer`. HTTP 503 is
+    /// capacity-only and lives in [`AdmissionError`]; HTTP 400 malformed is
+    /// parser-owned and never reaches the worker. Pinned by
+    /// `refusal_statuses_follow_the_canonical_fixed_matrix`.
     #[must_use]
     pub const fn status(self) -> u16 {
         match self {
