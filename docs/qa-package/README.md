@@ -88,9 +88,9 @@ claim), and this repo never provisions VMs, connections or images.
   builder image; requires `podman`, a reachable rootless podman connection and
   the pinned image present).
 - `mid full` — **Linux-only**; fail closed on any non-Linux host. Runs the
-  gate-only test surface (lib unit tests + the 5 integration binaries that run
+  gate-only test surface (lib unit tests + the 6 integration binaries that run
   in no other selector: eligibility, mio_matrix, main_thread_stack,
-  monitor_stdout, stdout_stall) witness-off then witness-on
+  monitor_stdout, stdout_stall, stdout_closed) witness-off then witness-on
   (`--features alloc-witness`, incl. the eligibility witness and the
   alloc-witness-only mio_matrix binary); atest-only (no clippy/fmt).
   foundations and boot are not re-run here — `mid union` already runs them in

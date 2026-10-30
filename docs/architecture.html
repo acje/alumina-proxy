@@ -93,15 +93,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   revision: the two forwarding barriers, the single-reactor serving loop, the
   typed enforcement lattice, the fixed-storage memory envelope, and the DoT-bound
   startup-to-serving DNS path that decides whether the process may listen at all.</p>
-  <p class="meta"><strong>Authority:</strong> the as-built source revision
+  <p class="meta"><strong>Authority:</strong> the as-built source reading
+  originates from the historical base revision
   <code>590c197ca768055774a44a2484a3e849fd96a2a0</code> (branch <code>main</code>).
-  All line citations are to that as-built source revision, were verified by the
-  docs gate at the documentation revision carrying this document, and were
-  re-derived for every file whose code moved after the previous architectural
-  reference; none is copied from another document.</p>
-  <p class="meta"><strong>Identity pins cited bytes:</strong> the human revision
-  above names the base commit; the mechanically enforced binding is the exact
-  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY e751df9dc4a995bb5dc6eca7bdb282a578499ace60ebd8b9aa9e77dcc17d39c1</code> —
+  That base is provenance only: the exact bytes cited by this document are
+  pinned by the source-content identity below, which the docs gate recomputes
+  from the working tree and fails on any mismatch, and were re-derived for every
+  file whose code moved after the previous architectural reference; none is
+  copied from another document.</p>
+  <p class="meta"><strong>Identity pins cited bytes:</strong> the base revision
+  above is historical provenance; the mechanically enforced binding is the exact
+  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY 0719cf797762e186d839586c74c0940eb192d800d0dbc3b541f6216118e2c6a7</code> —
   a deterministic manifest over the current working-tree source set
   (<code>src/**</code>, <code>tests/*.rs</code>, <code>Cargo.toml</code>,
   <code>Cargo.lock</code>; docs and the specification digest excluded). The
@@ -1724,9 +1726,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 <section id="appendix-a">
   <h2>Appendix A — Evidence map</h2>
 
-  <p>This appendix is the claim→citation index for the document. Every citation
-  was checked against the commit <code>590c197ca768055774a44a2484a3e849fd96a2a0</code>;
-  line numbers are to that revision.</p>
+  <p>This appendix is the claim→citation index for the document. Every line
+  citation was verified by the docs gate against the working-tree bytes pinned
+  by the header's source-content identity; the historical base revision
+  <code>590c197ca768055774a44a2484a3e849fd96a2a0</code> is provenance only.</p>
 
   <table>
     <caption>Table 10 — Evidence map: section / claim → primary citations.</caption>
@@ -1842,9 +1845,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     reading of the pinned revision; every architectural claim is a reading of
     <code>src/*.rs</code>, <code>tests/*.rs</code>, or the specification, and no
     claim is stated at a strength the reading cannot support.</li>
-    <li><strong>Revision:</strong> as-built source revision
-    <code>590c197ca768055774a44a2484a3e849fd96a2a0</code>, branch <code>main</code>.
-    All line citations are to that revision.</li>
+    <li><strong>Revision:</strong> the historical base revision is
+    <code>590c197ca768055774a44a2484a3e849fd96a2a0</code> (branch <code>main</code>),
+    named for provenance only — the currently cited bytes are pinned by the exact
+    <code>SOURCE-CONTENT-IDENTITY</code> declared in the header, not by this base.</li>
     <li><strong>Source-content identity:</strong> the exact identity that pins the
     cited bytes is the SHA-256 manifest over the working-tree source set
     described in the header. It is declared by the header's single machine

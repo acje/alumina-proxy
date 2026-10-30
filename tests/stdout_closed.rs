@@ -10,6 +10,7 @@ use alumina::config::parse_config_document;
 use alumina::inventory::TrafficStorage;
 use alumina::runtime::{Preallocated, Runtime};
 use alumina::serve::{ServeStorage, StartupDecision};
+use alumina::serving::ServeError;
 
 const BODY_403: &str = "403 Forbidden";
 const CLOSED_TIMEOUT: Duration = Duration::from_secs(120);
@@ -219,6 +220,10 @@ fn parent_main() {
 }
 
 /// Scenario 1: a decided refusal is served and the owner-turn drain exits 74.
+/// The 403 probe uses a bounded per-read timeout so a child that never serves
+/// on the dead stdout cannot hold this parent in a blocking read past the
+/// file-wide watchdog; a timed-out read is a probe, only EOF or a real I/O
+/// error ends the read loop.
 fn scenario_owner_latch() {
     let mut child = spawn_closed(&["--child-owner"], true);
     let mut stderr = child.stderr.take().expect("child stderr");
@@ -227,6 +232,9 @@ fn scenario_owner_latch() {
     client
         .write_all(b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n")
         .expect("write connect head");
+    client
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .expect("set read timeout");
     let mut seen = false;
     let mut buf = [0u8; 256];
     let deadline = Instant::now() + CLOSED_TIMEOUT;
@@ -238,6 +246,9 @@ fn scenario_owner_latch() {
                     seen = true;
                 }
             }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
             Ok(_) | Err(_) => break,
         }
     }
@@ -275,6 +286,21 @@ fn scenario_startup_latch(shutdown_first: bool) {
     );
 }
 
+/// Reports an unexpected `serve()` return across the child modes. Every
+/// expected outcome terminates inside `serve()` (exit `74` on a latched sink,
+/// or the shutdown verdict), so any return here is a test failure whose actual
+/// cause must be named and must not masquerade as a clean exit. The parent's
+/// exit-code assertion is the authority: after printing, this terminates with
+/// the distinct fail code `125`, which matches neither the expected `74` nor
+/// the shutdown `0`, so a leaked child always fails its scenario.
+fn report_unexpected_serve(what: &str, outcome: Result<std::convert::Infallible, ServeError>) {
+    match outcome {
+        Ok(never) => match never {},
+        Err(e) => eprintln!("STDOUT-CLOSED-SERVE-ERROR ({what}): {e}"),
+    }
+    std::process::exit(125);
+}
+
 /// The owner-turn-latch mode: a refused CONNECT is decided and the first
 /// serving owner turn whose drain latches exits 74.
 fn child_owner_main() {
@@ -290,18 +316,14 @@ fn child_owner_main() {
         .expect("prepare nonblocking stdout sink");
     let traffic = TrafficStorage::allocate().expect("allocate traffic storage");
     let runtime = Runtime::new(storage, listener, traffic).expect("attach runtime");
-    let _ = runtime.serve().err();
-    eprintln!("STDOUT-CLOSED-LEAKED: the child kept running after the failed sink");
+    report_unexpected_serve("owner", runtime.serve());
 }
 
 /// Runs the production startup window with a dead stdout: the startup-window
 /// drain latches the sink, and the first serving owner turn must exit 74.
 fn child_startup_main() {
     match run_start_up() {
-        Ok(runtime) => {
-            let _ = runtime.serve().err();
-            eprintln!("STDOUT-CLOSED-LEAKED: the child kept running after the failed sink");
-        }
+        Ok(runtime) => report_unexpected_serve("startup", runtime.serve()),
         Err(what) => {
             eprintln!("STDOUT-CLOSED-STARTUP-FAILED: {what}");
         }
@@ -324,8 +346,7 @@ fn child_shutdown_main() {
         .expect("self-SIGTERM");
     assert!(killed.success(), "kill -TERM self must succeed");
     std::thread::sleep(Duration::from_millis(100));
-    let _ = runtime.serve().err();
-    eprintln!("STDOUT-CLOSED-LEAKED: the child kept running after the failed sink");
+    report_unexpected_serve("shutdown", runtime.serve());
 }
 
 /// Boots the storage, prepares the dead stdout sink, allocates the traffic

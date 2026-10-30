@@ -251,6 +251,13 @@ impl Runtime {
     /// the retained transport was cancelled at the first SIGTERM and no DNS
     /// deadline may outlive it or delay the drain.
     ///
+    /// After the serving drain, an unrecoverable stdout sink failure (F-09) is
+    /// observed via `sink_has_failed` on the log store; while shutdown has not
+    /// begun the process exits with `EX_IOERR` (74) instead of continuing to
+    /// serve on a permanently failed sink. Once shutdown has begun the drain
+    /// carries no exit: the process terminates by the shutdown verdict alone
+    /// and the shutdown drains stay exit-free.
+    ///
     /// # Errors
     ///
     /// Returns a serve error when the poll, a registration, or a cooperative
