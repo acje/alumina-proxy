@@ -1051,6 +1051,38 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>dp</code> monitor fact and never performed silently
   (<code>note_downgrade_if_dot_to_plain</code>,
   <code>src/startup_dns.rs:3200-3221</code>; <code>src/resolver.rs:215-235</code>).</p>
+  <p>The reconnect cost of that single-connection refresh path is an as-built
+  measured quantity on the pinned native Linux release binary 4cce1daab61f
+  (§7.2) against a strict-pinned loopback DoT responder
+  (<code>127.0.0.1#dot.test#pin-sha256=Neh7ibmf4XjPYrBqu/hlbW4Ibp23X3uuja0AU85JHgY</code>,
+  port 853), five fresh supervised processes per workload, every process
+  serving the same four successful exchanges (two startup A, two immediate
+  serving AAAA; the qtype multiset was witnessed per run and the run was
+  refused otherwise). Under <em>warm reuse</em> — the responder keeps the
+  accepted connection open — all four exchanges complete on the one retained
+  TLS1.3 connection, with a measured proxy CPU delta of zero clock ticks
+  (CLK_TCK 100, i.e. below the 10&nbsp;ms tick resolution) per run and no
+  schedule backoff entered. Under <em>resolver flap</em> — the responder
+  closes the connection after each successful answer — each exchange takes a
+  new accepted connection and fresh TLS1.3 handshake: four connections and
+  four handshakes per run against one in warm reuse (4× on the
+  connection/handshake axis). Per-connection connect+TLS+first-query setup
+  stays 0.5–5&nbsp;ms in both workloads, so the amplified cost is not
+  per-connect latency but the failure-backoff wait: the flap runs show
+  2.0–3.0&nbsp;s inter-response gaps against sub-ms in warm reuse, i.e. the
+  schedule backoff ladder [1,2,4,8,16,30] is entered on the serving refreshes,
+  and median wall per four-exchange run rises from ≈1.3&nbsp;s (warm reuse) to
+  ≈5.3&nbsp;s (flap), while the measured proxy CPU delta for the whole
+  four-exchange flap run is a median 0.03&nbsp;s (range 0.02–0.08&nbsp;s) —
+  CPU is not the amplifier; wall/backoff latency is. Conditions: loopback
+  transport with no packet loss (the only fault injected is a TCP close after
+  each answer), a single responder and single listener, and the fixed
+  four-exchange workload; both workloads share a ≈1&nbsp;s
+  startup-settlement-to-first-serving-refresh cadence that sits inside the
+  wall figures but is not part of the flap cost. The 5&nbsp;s exchange
+  deadline and the [1,2,4,8,16,30] ladder are unchanged; this paragraph
+  records the measured cost of the existing behaviour with its conditions and
+  adds no mechanism and carries no acceptance verdict.</p>
 
   <h3>5.6 Cache lifetime and the generation guard</h3>
   <p>The cache stores validated bindings only, keyed by configured name ×
