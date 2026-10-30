@@ -482,7 +482,7 @@ mod tests {
     /// and is counted exactly once per applicable window; a stale marker from a
     /// closed window never pre-populates the current window's tunnel count, and
     /// bytes landing one second past a boundary belong to the new window, not
-    /// the closed one (docs/architecture.md:489).
+    /// the closed one (src/incident_report.rs:242-250).
     fn live_tunnel_retains_marker_across_rotations_counted_per_window() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
@@ -535,7 +535,7 @@ mod tests {
     /// G4.R2 — same-window dedup: repeated `note_tunnel_bytes` for the same
     /// `(slot, slot_gen)` pair keep one marker and one tunnel count while bytes
     /// sum exactly; a generation change on the same slot is a fresh tunnel and
-    /// resets the marker (docs/architecture.md:489).
+    /// resets the marker (src/incident_report.rs:242-250).
     fn marker_dedups_same_window_and_reuse_resets_it() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
@@ -567,7 +567,7 @@ mod tests {
     /// full 2^64 cycle that would return a slot to an earlier generation is
     /// unreachable by construction (the fixed profile adds no production hook)
     /// and stays BLOCKED/Unknown per decision bead alumina-v52be; no wrap
-    /// policy is invented here (docs/architecture.md:491-492).
+    /// policy is invented here (the retained marker key, src/incident_report.rs:243-244).
     fn pre_wrap_generation_marker_is_rekeyed_on_rotation() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
@@ -598,8 +598,8 @@ mod tests {
     /// same slot: a wrapped-to-zero generation is a distinct `(window_start,
     /// slot_gen)` pair from the pre-wrap `u64::MAX` marker and is never
     /// deduped against it, so all three generations count as separate tunnels
-    /// in one window (docs/architecture.md:491-492 records the width-bounded
-    /// residue as an artifact, not a proof).
+    /// in one window (the retained marker key, src/incident_report.rs:243-244,
+    /// records the width-bounded residue as an artifact, not a proof).
     fn marker_records_extreme_generation_values_exactly() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);

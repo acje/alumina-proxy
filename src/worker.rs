@@ -291,8 +291,9 @@ pub enum ConnectPhase {
 }
 
 impl ConnectPhase {
-    /// The canonical fixed status for this phase (docs/alumina-proxy.md:43,
-    /// architecture.md:65): 403 not-allowlisted, 502 for both
+    /// The canonical fixed status for this phase (docs/alumina-proxy.md:43;
+    /// canonical refusal matrix at src/serving/policy.rs:8-24): 403
+    /// not-allowlisted, 502 for both
     /// no-binding and candidates-exhausted, 504 setup deadline, 200 for an
     /// authorized `Peer`. HTTP 503 is capacity-only and lives in
     /// [`AdmissionError`]; HTTP 400 malformed is parser-owned and never reaches
