@@ -284,6 +284,12 @@ try {
     path.join(base, 'apparatus_recommend_path.html'),
     ['<!doctype html>', '<html><body>', '<p>See <code>src/recommendation.rs</code> for details.</p>', '</body></html>', ''].join('\n')
   )
+  // R1 (this review) — plural `Recommendations` is a prose-only recommendation
+  // form and must be rejected; the singular path guard above stays green.
+  await writeFile(
+    path.join(base, 'apparatus_recommend_plural.html'),
+    ['<!doctype html>', '<html><body>', '<h2>Recommendations</h2>', '</body></html>', ''].join('\n')
+  )
 
   expect('clean-minimal document', ['clean.html'], 0, {
     has: ['HTML-CHECK-OK clean.html', 'clean 1'],
@@ -346,7 +352,7 @@ try {
     no: ['HTML-CITATION-FAIL', 'HTML-CITATION-OP-FAIL'],
   })
   expect('citation missing file names offender', ['cite_missing.html'], 1, {
-    has: ['HTML-CITATION-FAIL cite_missing.html:', 'missing-file', 'nope.rs:1'],
+    has: ['HTML-CITATION-FAIL cite_missing.html:3', 'missing-file', 'nope.rs:1'],
     no: ['HTML-CITATION-OK cite_missing.html', 'HTML-CHECK-OK'],
   })
   expect('citation out-of-range line', ['cite_out_of_range.html'], 1, {
@@ -411,6 +417,10 @@ try {
   expect('check7 recommendation path false-positive guard (M1)', ['apparatus_recommend_path.html'], 0, {
     has: ['HTML-APPARATUS-OK apparatus_recommend_path.html', 'HTML-CHECK-OK apparatus_recommend_path.html'],
     no: ['HTML-APPARATUS-FAIL', 'HTML-CITATION-FAIL', 'HTML-CITATION-OP-FAIL'],
+  })
+  expect('check7 plural Recommendations rejected (R1)', ['apparatus_recommend_plural.html'], 1, {
+    has: ['HTML-APPARATUS-FAIL apparatus_recommend_plural.html:', 'recommendation "Recommendations"'],
+    no: ['HTML-APPARATUS-OK apparatus_recommend_plural.html', 'HTML-CHECK-OK'],
   })
 
   const staticRes = spawnSync('rg', ['-n', 'child_process|execSync|spawn|new Function|node:http|node:https', checker], { encoding: 'utf8' })

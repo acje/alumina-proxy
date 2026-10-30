@@ -37,11 +37,12 @@
 //   7. banned issue apparatus: F-NN, U-NN, bead ids `alumina-xxxxx`
 //      (the negative lookahead keeps the legitimate `alumina-proxy` binary
 //      name clean), severity tags `(S1)`/`(S2)`/`(S3)`, and the phrases
-//      `owner decision`, `review finding`, and prose-only `recommendation`
-//      (case-insensitive; identifier/path forms like `src/recommendation.rs`
-//      are clean). Any occurrence is a check failure. The class set is a
+//      `owner decision`, `review finding`, and prose-only `recommendation` /
+//      `recommendations` (case-insensitive; identifier/path forms like
+//      `src/recommendation.rs` are clean). Any occurrence is a check failure.
+//      The class set is a
 //      fixed, intentionally narrow contract (two-digit F-NN / U-NN, five-char
-//      `alumina-xxxxx` bead ids, S1-S3, the three phrases): variants outside
+//      `alumina-xxxxx` bead ids, S1-S3, the four phrases): variants outside
 //      these exact classes are not scanned. The scan covers the whole file
 //      including raw markup, so the set is a heuristic, not a proof of
 //      semantic apparatus (residual, documented).
@@ -80,7 +81,7 @@ const APPARATUS_RE = [
   { label: 'S1-S2-S3', re: /\((?:S1|S2|S3)\)/g },
   { label: 'owner-decision', re: /owner decision/gi },
   { label: 'review-finding', re: /review finding/gi },
-  { label: 'recommendation', re: /(?<![A-Za-z0-9_./-])recommendation(?![A-Za-z0-9_/-])/gi },
+  { label: 'recommendation', re: /(?<![A-Za-z0-9_./-])recommendations?(?![A-Za-z0-9_/-])(?!\.[A-Za-z0-9])/gi },
 ]
 
 const citLineCache = new Map()
