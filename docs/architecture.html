@@ -1483,11 +1483,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>The printed named-buffer plan is a type-derived lower bound over retained
   named buffers, never an RSS figure (§7, §7.1). The measured nominal process
   RSS on the native Linux release candidate pinned in §7.2 (HEAD
-  3a7b4a9451f78c, release binary 4cce1daab61f, toolchain 1.99.0, alloc-witness
-  enabled) is a distinct, as-built quantity. Five fresh supervised processes,
-  each sampled from kernel state after full startup, give a median resident
-  set of <strong>215&nbsp;375&nbsp;872 bytes ≈ 205.4 MiB</strong>, range
-  215&nbsp;371&nbsp;776–215&nbsp;375&nbsp;872 bytes (≈ 205.4 MiB at both
+  3a7b4a9451f78c, release binary 4cce1daab61f, toolchain 1.99.0, a normal
+  production release built without the opt-in <code>alloc-witness</code>
+  feature — that counting-allocator witness exists only in the separate §7.2
+  test builds) is a distinct, as-built quantity. Five fresh supervised
+  processes, each sampled from kernel state after full startup, give a median
+  resident set of <strong>215&nbsp;375&nbsp;872 bytes ≈ 205.4 MiB</strong>,
+  range 215&nbsp;371&nbsp;776–215&nbsp;375&nbsp;872 bytes (≈ 205.4 MiB at both
   ends), read as <code>/proc/&lt;pid&gt;/smaps_rollup</code> Rss with
   <code>/proc/&lt;pid&gt;/status</code> VmRSS agreeing byte-for-byte on every
   sample. That is ≈ 0.7 MiB above the printed plan of
