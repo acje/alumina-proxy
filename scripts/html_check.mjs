@@ -18,13 +18,31 @@
 //      <tbody>, <tfoot>, or directly under <table>) has the same cell count as
 //      the <th> header row; a <table> with no <thead>, or a <thead> with no
 //      header cell row, fails (table-header-missing)
+//   6. citation bounds: every `<file>:LINE[-LINE]` (file matching
+//      [A-Za-z0-9_][A-Za-z0-9_./-]*\.(rs|md|toml|sh|mjs|json|html), rejected
+//      when preceded by [A-Za-z0-9_./-]) must resolve as-given against the
+//      working directory, then src/, then tests/. Every cited range must
+//      satisfy 1 <= start <= end <= lineCount. A missing file, a malformed
+//      range (start > end) and an out-of-range line are check failures;
+//      stat/read errors other than ENOENT are operational. Bare `:NNN`
+//      continuations (no leading file name, e.g. `:1040-1042`, `:443`) are
+//      NOT independently checked — they inherit an implicit file from
+//      surrounding prose and would false-positive on prose like
+//      `https://host:443` (residual, documented, matching the docs-check
+//      convention).
+//   7. banned issue apparatus: F-NN, U-NN, bead ids `alumina-xxxxx`
+//      (the negative lookahead keeps the legitimate `alumina-proxy` binary
+//      name clean), severity tags `(S1)`/`(S2)`/`(S3)`, and the phrases
+//      `owner decision`, `review finding`, `recommendation`
+//      (case-insensitive). Any occurrence is a check failure.
 //
 // Exit discipline (one-way split — operational never folds into 0/1):
 //   0  every input clean
-//   1  at least one structural check failure (all offenders named)
-//   2  operational/unsupported only (missing/unreadable file, colspan/
-//      rowspan). A run with both a failure and an operation exits 2 but
-//      still prints every HTML-STRUCT-FAIL line it found.
+//   1  at least one structural, citation-bounds or issue-apparatus check
+//      failure (all offenders named)
+//   2  operational/unsupported only (missing/unreadable input file, colspan/
+//      rowspan, or an unreadable cited file). A run with both a failure and an
+//      operation exits 2 but still prints every check-failure line it found.
 import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -33,11 +51,37 @@ const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input'
 const RAWTEXT = new Set(['style', 'script'])
 const CELLS = new Set(['td', 'th'])
 
+// Check 6 — citation head and continuation. The head requires a file carrying
+// one of the corpus extensions immediately followed by :LINE[-LINE]; a
+// preceding [A-Za-z0-9_./-] rejects the match, so a bare `:NNN` continuation
+// or a `host:443` port never acquires an implicit file. `,NNN` / `,NNN-NNN`
+// continuations extend the same cited file (docs-check convention).
+const CIT_HEAD_RE = /(^|[^A-Za-z0-9_./-])([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:rs|md|toml|sh|mjs|json|html)):([0-9]+)(?:-([0-9]+))?/g
+const CIT_CONT_RE = /^,([0-9]+)(?:-([0-9]+))?/
+
+// Check 7 — banned issue apparatus. Each entry labels the pattern class so the
+// failure line names the class as well as the matched text.
+const APPARATUS_RE = [
+  { label: 'F-nn', re: /\bF-\d{2}\b/g },
+  { label: 'U-nn', re: /\bU-\d{2}\b/g },
+  { label: 'bead-id', re: /\balumina-(?!proxy\b)[a-z0-9]{5}\b/g },
+  { label: 'S1-S2-S3', re: /\((?:S1|S2|S3)\)/g },
+  { label: 'owner-decision', re: /owner decision/gi },
+  { label: 'review-finding', re: /review finding/gi },
+  { label: 'recommendation', re: /recommendation/gi },
+]
+
+const citLineCache = new Map()
+
 const files = process.argv.slice(2)
 const root = process.cwd()
 
 let opsTotal = 0
 let structTotal = 0
+let citHeadsTotal = 0
+let citFailTotal = 0
+let citOpsTotal = 0
+let apparatusTotal = 0
 let cleanTotal = 0
 let idsTotal = 0
 let fragsTotal = 0
@@ -138,7 +182,7 @@ async function checkOne(f) {
     opFail(`${f} unreadable (${err.code || 'read'})`)
     return null
   }
-  const local = { ops: 0, struct: 0 }
+  const local = { ops: 0, struct: 0, citHeads: 0, citFail: 0, citOps: 0, apparatus: 0 }
   const sf = (lineNo, kind, detail) => { local.struct++; structTotal++; lines.push(`HTML-STRUCT-FAIL ${f}:${lineNo} ${kind} ${detail}`) }
 
   const n = text.length
@@ -154,6 +198,12 @@ async function checkOne(f) {
     }
     return lo + 1
   }
+
+  // Checks 6 and 7 operate on the document text alone (they share the
+  // structural line index for `:line` attribution); the tag walk below owns the
+  // structural checks 1-5.
+  await checkCitationsIn(f, text, lineAt, local)
+  checkApparatusIn(f, text, lineAt, local)
 
   const ids = new Map()
   const names = new Set()
@@ -307,7 +357,22 @@ async function checkOne(f) {
     }
   }
 
-  return { ids: ids.size, fragments: frags.length, tables: tableCount, figures: figureCount, ops: local.ops, struct: local.struct, clean: local.ops === 0 && local.struct === 0 }
+  if (local.citFail === 0 && local.citOps === 0) {
+    lines.push(`HTML-CITATION-OK ${f} (citations ${local.citHeads})`)
+  }
+  if (local.apparatus === 0) {
+    lines.push(`HTML-APPARATUS-OK ${f}`)
+  }
+
+  return {
+    ids: ids.size,
+    fragments: frags.length,
+    tables: tableCount,
+    figures: figureCount,
+    ops: local.ops,
+    struct: local.struct,
+    clean: local.ops === 0 && local.struct === 0 && local.citFail === 0 && local.citOps === 0 && local.apparatus === 0,
+  }
 }
 
 function opFail(detail, local) {
@@ -316,9 +381,107 @@ function opFail(detail, local) {
   lines.push(`HTML-CHECK-OP-FAIL ${detail}`)
 }
 
+function lineCountOf(text) {
+  if (text.length === 0) return 0
+  return text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
+}
+
+// Resolve a cited file as-given against the working directory, then src/, then
+// tests/ (docs-check convention). A stat error other than ENOENT is an
+// operational result, never a verdict.
+async function resolveCitationFile(file) {
+  for (const cand of [file, `src/${file}`, `tests/${file}`]) {
+    const abs = path.resolve(root, cand)
+    try {
+      const st = await stat(abs)
+      if (st.isFile()) return { abs, resolved: cand }
+    } catch (err) {
+      if (err.code !== 'ENOENT') return { op: true, why: err.code || 'stat' }
+    }
+  }
+  return null
+}
+
+// Check 6 — every citation head resolves and every cited range is well-formed
+// and in bounds. Missing file / malformed range / out-of-range are check
+// failures; a stat/read error other than ENOENT is operational. All offenders
+// are named: the loop keeps scanning after the first defect.
+async function checkCitationsIn(f, text, lineAt, local) {
+  for (const m of text.matchAll(CIT_HEAD_RE)) {
+    const docLine = lineAt(m.index)
+    local.citHeads++
+    citHeadsTotal++
+    const file = m[2]
+    const ranges = [{ start: Number(m[3]), end: m[4] ? Number(m[4]) : Number(m[3]) }]
+    let from = m.index + m[0].length
+    for (;;) {
+      const cm = CIT_CONT_RE.exec(text.slice(from))
+      if (!cm) break
+      ranges.push({ start: Number(cm[1]), end: cm[2] ? Number(cm[2]) : Number(cm[1]) })
+      from += cm[0].length
+    }
+    const head = ranges[0]
+    const headStr = head.end === head.start ? `${file}:${head.start}` : `${file}:${head.start}-${head.end}`
+    const resolved = await resolveCitationFile(file)
+    if (!resolved) {
+      local.citFail++
+      citFailTotal++
+      lines.push(`HTML-CITATION-FAIL ${f}:${docLine} missing-file ${headStr}`)
+      continue
+    }
+    if (resolved.op) {
+      local.citOps++
+      citOpsTotal++
+      lines.push(`HTML-CITATION-OP-FAIL ${f}:${docLine} stat-${resolved.why} ${headStr}`)
+      continue
+    }
+    let lc = citLineCache.get(resolved.abs)
+    if (lc === undefined) {
+      try {
+        lc = { ok: true, lines: lineCountOf(await readFile(resolved.abs, 'utf8')) }
+      } catch (err) {
+        lc = { ok: false, why: err.code || 'read' }
+      }
+      citLineCache.set(resolved.abs, lc)
+    }
+    if (!lc.ok) {
+      local.citOps++
+      citOpsTotal++
+      lines.push(`HTML-CITATION-OP-FAIL ${f}:${docLine} read-${lc.why} ${headStr}`)
+      continue
+    }
+    for (const r of ranges) {
+      if (r.start > r.end) {
+        local.citFail++
+        citFailTotal++
+        lines.push(`HTML-CITATION-FAIL ${f}:${docLine} malformed-range ${file}:${r.start}-${r.end}`)
+        continue
+      }
+      if (r.start < 1 || r.end > lc.lines) {
+        local.citFail++
+        citFailTotal++
+        lines.push(`HTML-CITATION-FAIL ${f}:${docLine} out-of-range ${file}:${r.start}-${r.end} (file has ${lc.lines} lines)`)
+      }
+    }
+  }
+}
+
+// Check 7 — banned issue apparatus. Every match names the pattern class and
+// the matched text, and counts as a check failure.
+function checkApparatusIn(f, text, lineAt, local) {
+  for (const pat of APPARATUS_RE) {
+    pat.re.lastIndex = 0
+    for (const m of text.matchAll(pat.re)) {
+      local.apparatus++
+      apparatusTotal++
+      lines.push(`HTML-APPARATUS-FAIL ${f}:${lineAt(m.index)} ${pat.label} "${m[0]}"`)
+    }
+  }
+}
+
 if (files.length === 0) {
   opFail('no input files (fixed nonempty root list required)')
-  lines.push('HTML-CHECK-RESULT (files 0, clean 0, ids 0, fragments 0, tables 0, figures 0)')
+  lines.push('HTML-CHECK-RESULT (files 0, clean 0, ids 0, fragments 0, tables 0, figures 0, citations 0, apparatus 0)')
   process.stdout.write(`${lines.join('\n')}\n`)
   process.exit(2)
 }
@@ -337,9 +500,9 @@ for (const f of files) {
   tablesTotal += res.tables
   figuresTotal += res.figures
 }
-lines.push(`HTML-CHECK-RESULT (files ${files.length}, clean ${cleanTotal}, ids ${idsTotal}, fragments ${fragsTotal}, tables ${tablesTotal}, figures ${figuresTotal})`)
+lines.push(`HTML-CHECK-RESULT (files ${files.length}, clean ${cleanTotal}, ids ${idsTotal}, fragments ${fragsTotal}, tables ${tablesTotal}, figures ${figuresTotal}, citations ${citHeadsTotal}, apparatus ${apparatusTotal})`)
 process.stdout.write(`${lines.join('\n')}\n`)
 
-if (opsTotal > 0) process.exit(2)
-if (structTotal > 0) process.exit(1)
+if (opsTotal > 0 || citOpsTotal > 0) process.exit(2)
+if (structTotal > 0 || citFailTotal > 0 || apparatusTotal > 0) process.exit(1)
 process.exit(0)

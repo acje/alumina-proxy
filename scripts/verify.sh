@@ -873,9 +873,16 @@ docslink_check() {
 html_structure_check() {
     # Offline Node-builtins structural gate for HTML artefacts
     # (scripts/html_check.mjs): tag balance, duplicate ids, internal fragment
-    # closure, figure <desc> presence, and table cell-count consistency. The
-    # adapter's exit is captured unmasked (one-way split: operational failures
-    # never fold into 0/1); its output is printed verbatim.
+    # closure, figure <desc> presence, table cell-count consistency, citation
+    # bounds (every <file>:LINE[-LINE] resolves as-given then src/ then tests/
+    # and is in range — a missing file / malformed range / out-of-range line is
+    # a check failure), and banned issue apparatus (F-NN / U-NN / bead ids /
+    # (S1-S3) / owner decision / review finding / recommendation — the
+    # legitimate `alumina-proxy` binary name stays clean via a negative
+    # lookahead). The adapter emits one OK marker per root per check on
+    # success; this gate fails closed if any is missing. The adapter's exit is
+    # captured unmasked (one-way split: operational failures never fold into
+    # 0/1); its output is printed verbatim.
     command -v node >/dev/null 2>&1 || {
         echo "HTML-STRUCTURE-BLOCKED: node required for HTML structure check (absent)" >&2
         exit 1
@@ -890,30 +897,42 @@ html_structure_check() {
     [ -n "$html_out" ] && printf '%s\n' "$html_out"
     case "$hrc" in
         0)
-            # fail closed on the marker: a green adapter that checked nothing
-            # (no HTML-CHECK-OK line per root) is a blocked gate, not a pass.
+            # fail closed on the markers: a green adapter that skipped a check
+            # (no HTML-CHECK-OK, HTML-CITATION-OK or HTML-APPARATUS-OK line per
+            # root) is a blocked gate, not a pass.
             for _html_root in $HTML_DOC_ROOTS; do
                 if ! printf '%s\n' "$html_out" | grep -q "^HTML-CHECK-OK $_html_root "; then
                     echo "HTML-STRUCTURE-BLOCKED: adapter exit 0 but no HTML-CHECK-OK for $_html_root" >&2
+                    exit 2
+                fi
+                if ! printf '%s\n' "$html_out" | grep -q "^HTML-CITATION-OK $_html_root "; then
+                    echo "HTML-STRUCTURE-BLOCKED: adapter exit 0 but no HTML-CITATION-OK for $_html_root" >&2
+                    exit 2
+                fi
+                if ! printf '%s\n' "$html_out" | grep -Eq "^HTML-APPARATUS-OK $_html_root([[:space:]]|$)"; then
+                    echo "HTML-STRUCTURE-BLOCKED: adapter exit 0 but no HTML-APPARATUS-OK for $_html_root" >&2
                     exit 2
                 fi
             done
             ;;
         1)
             # The adapter emits HTML-CHECK-RESULT on every non-crash path, so on
-            # exit 1 the marker must be present before this is a structural
-            # defect. A missing marker means the adapter crashed (uncaught
-            # throw, syntax error): an operational failure, not a domain-negative
-            # verdict (error != negative finding).
+            # exit 1 the marker must be present before this is a domain defect.
+            # A missing marker means the adapter crashed (uncaught throw, syntax
+            # error): an operational failure, not a domain-negative verdict
+            # (error != negative finding). On a real domain failure the
+            # diagnostic names the citation-bounds and issue-apparatus defect
+            # classes alongside the structural ones (specific offenders are
+            # already printed verbatim above by the adapter).
             if printf '%s\n' "$html_out" | grep -q '^HTML-CHECK-RESULT '; then
-                echo "HTML-STRUCTURE-FAIL (structural HTML defect: tag imbalance, duplicate id, dangling fragment, missing desc, or table cell-count mismatch)" >&2
+                echo "HTML-STRUCTURE-FAIL (HTML defect: structural — tag imbalance, duplicate id, dangling fragment, missing desc, table cell-count mismatch; citation bounds — missing file, malformed range, out-of-range line; issue apparatus — F-NN/U-NN/bead id/(S1-S3)/owner decision/review finding/recommendation)" >&2
                 exit 1
             fi
             echo "HTML-STRUCTURE-OP-FAIL (adapter exit 1 without an HTML-CHECK-RESULT marker)" >&2
             exit 2
             ;;
         2)
-            echo "HTML-STRUCTURE-OP-FAIL (operational or unsupported construct: unreadable file or unsupported HTML markup)" >&2
+            echo "HTML-STRUCTURE-OP-FAIL (operational or unsupported construct: unreadable file, unsupported HTML markup, or unreadable cited file)" >&2
             exit 2
             ;;
         *)
@@ -922,6 +941,8 @@ html_structure_check() {
             ;;
     esac
     echo "HTML-CHECK-OK"
+    echo "HTML-CITATION-CHECK-OK"
+    echo "HTML-APPARATUS-CHECK-OK"
 }
 
 unsafe_surface_gate() {

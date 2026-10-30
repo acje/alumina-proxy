@@ -8,7 +8,7 @@
 // Every case asserts the exit code AND the stdout
 // marker the behaviour must emit (or must not emit for the honesty rules).
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 const repoRoot = process.cwd()
@@ -209,6 +209,53 @@ try {
       '',
     ].join('\n')
   )
+  // Check 6 (citation bounds) and check 7 (banned issue apparatus) fixtures.
+  // one.rs is a 1-line cited target; foo.rs tests the src/ fallback; locked.rs
+  // is rendered unreadable (chmod 000) to prove the operational split (exit 2)
+  // stays distinct from a domain-negative (exit 1).
+  await writeFile(path.join(base, 'one.rs'), '// one line\n')
+  await writeFile(
+    path.join(base, 'cite_ok.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>one.rs:1</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  await writeFile(
+    path.join(base, 'cite_missing.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>nope.rs:1</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  await writeFile(
+    path.join(base, 'cite_out_of_range.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>one.rs:99</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  await writeFile(
+    path.join(base, 'cite_malformed.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>one.rs:5-2</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  await writeFile(path.join(base, 'locked.rs'), '// locked\n')
+  await chmod(path.join(base, 'locked.rs'), 0o000)
+  await writeFile(
+    path.join(base, 'cite_locked.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>locked.rs:1</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  await mkdir(path.join(base, 'src'))
+  await writeFile(path.join(base, 'src', 'foo.rs'), '// foo\n')
+  await writeFile(
+    path.join(base, 'cite_src.html'),
+    ['<!doctype html>', '<html><body>', '<p>See <code>foo.rs:1</code>.</p>', '</body></html>', ''].join('\n')
+  )
+  await writeFile(
+    path.join(base, 'apparatus.html'),
+    [
+      '<!doctype html>',
+      '<html><body>',
+      '<p>F-01 U-02 alumina-abcde (S1) owner decision review finding recommendation</p>',
+      '</body></html>',
+      '',
+    ].join('\n')
+  )
+  await writeFile(
+    path.join(base, 'apparatus_fp.html'),
+    ['<!doctype html>', '<html><body>', '<p>alumina-proxy and docs/alumina-proxy.md</p>', '</body></html>', ''].join('\n')
+  )
 
   expect('clean-minimal document', ['clean.html'], 0, {
     has: ['HTML-CHECK-OK clean.html', 'clean 1'],
@@ -261,6 +308,55 @@ try {
   expect('exit2 colspan: op-fail, no OK, clean 0', ['colspan.html'], 2, {
     has: ['HTML-CHECK-OP-FAIL', 'not clean', 'clean 0'],
     no: ['HTML-CHECK-OK'],
+  })
+
+  // Check 6 — citation bounds: positive, negative and operational cases.
+  // Every case asserts the exit code AND the marker it must emit (or must not
+  // emit). The unreadable-cited-file case restores permissions before cleanup.
+  expect('citation clean pass (exist + in range)', ['cite_ok.html'], 0, {
+    has: ['HTML-CITATION-OK cite_ok.html (citations 1)', 'HTML-CHECK-OK cite_ok.html'],
+    no: ['HTML-CITATION-FAIL', 'HTML-CITATION-OP-FAIL'],
+  })
+  expect('citation missing file names offender', ['cite_missing.html'], 1, {
+    has: ['HTML-CITATION-FAIL cite_missing.html:', 'missing-file', 'nope.rs:1'],
+    no: ['HTML-CITATION-OK cite_missing.html', 'HTML-CHECK-OK'],
+  })
+  expect('citation out-of-range line', ['cite_out_of_range.html'], 1, {
+    has: ['HTML-CITATION-FAIL cite_out_of_range.html:', 'out-of-range', 'one.rs:99', 'file has 1 line'],
+    no: ['HTML-CITATION-OK cite_out_of_range.html', 'HTML-CHECK-OK'],
+  })
+  expect('citation malformed range (start > end)', ['cite_malformed.html'], 1, {
+    has: ['HTML-CITATION-FAIL cite_malformed.html:', 'malformed-range', 'one.rs:5-2'],
+    no: ['out-of-range', 'HTML-CITATION-OK', 'HTML-CHECK-OK'],
+  })
+  expect('citation unreadable cited file is operational (exit 2)', ['cite_locked.html'], 2, {
+    has: ['HTML-CITATION-OP-FAIL cite_locked.html:', 'read-', 'locked.rs:1'],
+    no: ['HTML-CITATION-FAIL', 'HTML-CITATION-OK cite_locked.html', 'HTML-CHECK-OK'],
+  })
+  await chmod(path.join(base, 'locked.rs'), 0o644)
+  expect('citation src/ fallback resolution', ['cite_src.html'], 0, {
+    has: ['HTML-CITATION-OK cite_src.html (citations 1)', 'HTML-CHECK-OK cite_src.html'],
+    no: ['HTML-CITATION-FAIL', 'HTML-CITATION-OP-FAIL'],
+  })
+
+  // Check 7 — banned issue apparatus: every offender named, and the legitimate
+  // binary name `alumina-proxy` (plus the spec path) must never false-positive.
+  expect('check7 banned apparatus: all offenders named', ['apparatus.html'], 1, {
+    has: [
+      'HTML-APPARATUS-FAIL apparatus.html:',
+      'F-nn "F-01"',
+      'U-nn "U-02"',
+      'bead-id "alumina-abcde"',
+      'S1-S2-S3 "(S1)"',
+      'owner-decision "owner decision"',
+      'review-finding "review finding"',
+      'recommendation "recommendation"',
+    ],
+    no: ['HTML-APPARATUS-OK apparatus.html', 'HTML-CHECK-OK'],
+  })
+  expect('check7 apparatus false-positive guard (alumina-proxy clean)', ['apparatus_fp.html'], 0, {
+    has: ['HTML-APPARATUS-OK apparatus_fp.html', 'HTML-CHECK-OK apparatus_fp.html'],
+    no: ['HTML-APPARATUS-FAIL', 'HTML-CITATION-FAIL', 'HTML-CITATION-OP-FAIL'],
   })
 
   const staticRes = spawnSync('rg', ['-n', 'child_process|execSync|spawn|new Function|node:http|node:https', checker], { encoding: 'utf8' })
