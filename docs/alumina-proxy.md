@@ -1003,7 +1003,7 @@ semantics.
 claim above is superseded: each class's threshold and window are operator-configurable via
 its optional gate section — `[bad_handshake]`, `[illegal_fqdn]`, `[ja4]` — (§Keyed
 configuration schema; an `[early_data]` gate section is rejected at load, exit 78), defaulting to `threshold = 1` / `window_secs = 900`
-(`parse_gate_section`, `src/config.rs:950`; `Enforcement::new`, `src/serve.rs:176`). At the
+(`parse_gate_section`, `src/config.rs:975`; `Enforcement::new`, `src/serve.rs:176`). At the
 default the first deviation of a class arms that class's all-scope block, sticky until
 restart, so the "no tolerated rate" guarantee is preserved;
 raising a threshold is the operator's deliberate choice to tolerate a bounded burst. The
@@ -1033,9 +1033,11 @@ concern is mitigated structurally in addition: the per-class SP-001 gates arm Bl
 only after the CONFIGURED fact threshold within the CONFIGURED window, each class counting
 only its own facts (`early_data` counts `EarlyUpstreamData` facts only when they project to
 Block All); at the default threshold = 1 the first such fact arms that class's latch, and
-the operator may raise each gate class's bar via its optional gate section (§Keyed
-configuration schema). Baseline mandatory denial (terminate setup on early upstream data
-while the gate is closed) is unchanged.
+the operator may raise each configurable class's bar via its optional gate section
+— `[bad_handshake]`, `[illegal_fqdn]`, `[ja4]` — (§Keyed configuration schema; an
+`[early_data]` gate section is rejected at load, exit 78, so that class's bar is fixed at
+the default and cannot be operator-raised). Baseline mandatory denial (terminate setup on
+early upstream data while the gate is closed) is unchanged.
 
 #### SP-003 — Homogeneous-trust resolver arrays; mixed DoT/plain rejected at startup
 
@@ -1442,7 +1444,7 @@ caller, and `Fqdn::parse` never applies one. The only configuration surface that
 at least two labels is the declared `cname_bailiwick` zone suffix
 (`parse_cname_bailiwick_suffix`, `src/config.rs:96-105`, ≥ 2-label check at
 `src/config.rs:101-103`), a distinct F-07 safety rule; it never constrains the allowlist
-name itself. The allowlist key path is `parse_allowed_fqdn_table` (`src/config.rs:825`),
+name itself. The allowlist key path is `parse_allowed_fqdn_table` (`src/config.rs:1015`),
 which parses each key through `Fqdn::parse`.
 
 Tests: `Fqdn::parse("1.2.3.4:443").is_err()` and `Fqdn::parse("93.184.216.34:443").is_err()`
@@ -1490,8 +1492,8 @@ configured window (§Per-control enforcement schema T6 — SP-001 preservation).
 #### SP-003 — homogeneous-trust resolver arrays
 
 A resolver array must be trust-homogeneous; a mixed plain (bare-IP) and DoT (`IP#fqdn`) set
-is rejected at startup exit 78 (`src/config.rs:661`). Test: `resolver_mixed_plain_and_dot_trust_rejected`
-(`src/config.rs:1973`).
+is rejected at startup exit 78 (`src/config.rs:842`). Test: `resolver_mixed_plain_and_dot_trust_rejected`
+(`src/config.rs:2901`).
 
 #### SP-004 — sustained-negative incident class
 

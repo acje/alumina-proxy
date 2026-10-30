@@ -64,9 +64,11 @@ impl Default for AllScopeGate {
 /// class: `bad_handshake` (`ConnectParse`/`TlsProfile`/`Ech`), `illegal_fqdn`
 /// (`HostNotAllowlisted`), `early_data` (`EarlyUpstreamData`), and `ja4`
 /// (`Ja4Change`). Each class's gate counts only that class's facts, so the
-/// operator chooses the action AND the bar per class; the `early_data` slot
-/// is always `AllScopeGate::default()` because its gate section is not
-/// configurable (rejected at load, exit 78), so its bar is not operator-chosen.
+/// operator chooses the action AND the bar per class; production configuration
+/// always installs `AllScopeGate::default()` for the `early_data` slot because
+/// its gate section is rejected at load (exit 78), so its bar is not
+/// operator-chosen. `GateSet::new` still takes the slot as a parameter so unit
+/// tests can exercise a non-default bar; no production path supplies one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GateSet {
     bad_handshake: AllScopeGate,
