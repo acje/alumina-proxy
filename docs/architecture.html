@@ -432,7 +432,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/gate.rs:1-43</code>, <code>:45-78</code>, <code>:114-142</code></td></tr>
       <tr><th scope="row"><code>enforcement/*</code></th>
         <td>Violation lattice (6), effect projection (4), per-class <code>AllScopeGate</code>s, <code>DomainOrdinal</code>, monitor facts.</td>
-        <td><code>src/enforcement/policy.rs:89-97</code>, <code>:100-146</code>; <code>state.rs:71-77</code>, <code>:262-286</code>; <code>action.rs:98-132</code>; <code>monitor.rs:12-26</code></td></tr>
+        <td><code>src/enforcement/policy.rs:89-97</code>, <code>:100-146</code>; <code>src/enforcement/state.rs:71-77</code>, <code>:262-286</code>; <code>src/enforcement/action.rs:98-132</code>; <code>src/enforcement/monitor.rs:12-26</code></td></tr>
       <tr><th scope="row"><code>dns</code>/<code>schedule</code>/<code>cache</code></th>
         <td>DNS parse + bailiwick; refresh on a nonzero positive TTL clamped to
         5–900 s, zero TTL at 1 s (no stale serving), validated negative SOA
@@ -507,8 +507,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/serving.rs:1819-1836</code>).</p>
   <p>Handles are linear and typed — <code>SlotIndex</code> during setup,
   <code>TunnelIndex</code> after graduation, consumed on release — so a stale
-  handle can never free a reused slot (<code>src/worker.rs:159-202</code>,
-  <code>:344-354</code>).</p>
+  handle can never free a reused slot (<code>src/worker.rs:311-340</code>,
+  <code>:589-614</code>).</p>
 
   <h3>3.2 The CONNECT head parse</h3>
   <p>The head is bounded by <code>MAX_HEADER_LINES = 16</code>
@@ -630,8 +630,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   </table>
 
   <h3>3.4 Tunnel lifetimes and the shutdown deadline</h3>
-  <p>The setup deadline starts at accept and is never reset, and connect
-  attempts are clipped to it (already stated in §3.1). The relay idle deadline
+  <p>The setup deadline starts at accept and is never reset
+  (<code>SETUP_DEADLINE_SECS</code>, <code>src/worker.rs:51</code>), and connect
+  attempts are clipped to it. The relay idle deadline
   is 300 s, starting at gate open and reset only on successful tunnel-byte
   writes — never by readiness alone (<code>IDLE_SECS</code>,
   <code>src/serving.rs:84</code>). The first orderly EOF starts a 5 s drain
