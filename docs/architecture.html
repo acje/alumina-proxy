@@ -196,7 +196,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>75</code> <code>EX_TEMPFAIL</code> for the startup DNS verdict,
     <code>70</code> <code>EX_SOFTWARE</code> (given as program exit),
     <code>78</code> <code>EX_CONFIG</code> for configuration failure
-    (<code>src/runtime.rs:30</code>, <code>:286-289</code>;
+    (<code>src/runtime.rs:30</code>, <code>:293-296</code>;
     <code>src/main.rs:23-24</code>, <code>src/boot.rs:7</code>).</li>
     <li><strong>Listener conditionality.</strong> The listener is opened only
     when the startup window’s canonical readiness rule holds — the unresolved
@@ -436,7 +436,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/config.rs:17</code>, <code>:805-815</code>, <code>:1120-1125</code>, <code>:1244-1262</code></td></tr>
       <tr><th scope="row"><code>runtime</code></th>
         <td>Single-reactor owner; startup window driver; serves as the attached owner after <code>attach</code>; owns DNS scheduling per turn.</td>
-        <td><code>src/runtime.rs:159</code>, <code>:193</code>, <code>:213</code>, <code>:268</code>, <code>:352</code>, <code>:427</code></td></tr>
+        <td><code>src/runtime.rs:159</code>, <code>:193</code>, <code>:213</code>, <code>:275</code>, <code>:359</code>, <code>:434</code></td></tr>
       <tr><th scope="row"><code>serve</code></th>
         <td>Readiness decision (Serve/Exit75/Terminated); <code>run_startup_within</code>; clock anchor and <code>mount_clock</code> re-anchor seam; per-turn incident pass.</td>
         <td><code>src/serve.rs:98</code>, <code>:107</code>, <code>:223</code>, <code>:423-485</code>, <code>:974-990</code></td></tr>
@@ -1018,14 +1018,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   mark (<code>src/startup_dns.rs:215-223</code>, <code>:2948-2959</code>; the
   class is stored on the <code>ActiveExchange</code>). The retained-resolver
   refresh path requests a <code>Serving</code> exchange
-  (<code>src/runtime.rs:352</code>; <code>start_dns_exchange</code> in
+  (<code>src/runtime.rs:359</code>; <code>start_dns_exchange</code> in
   <code>src/serve.rs:767</code>), and a cooperative startup window requests
   <code>Startup</code> (<code>src/serving/startup.rs:147</code>). Per-turn
   cleanup cancels exactly the <code>Startup</code>-class retained work while
   serving exchanges stay outstanding:
   <code>cancel_retained_startup_exchange</code>
   (<code>src/startup_dns.rs:1606-1614</code>, driven from
-  <code>src/runtime.rs:268</code>) is scoped to the startup class by the typed
+  <code>src/runtime.rs:275</code>) is scoped to the startup class by the typed
   lifecycle, so no servicing or probe exchange is ever cancelled as leftover
   startup work. Overlap fails closed: a second <code>start_exchange</code> while
   one is active returns <code>ExchangeActive</code> and leaves the outstanding
@@ -1429,7 +1429,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   most every <code>TIMER_RECHECK_EVERY = 256</code> ready-slots or I/O ops
   (<code>src/serving.rs:111</code>), and per-turn DNS progress advances toward the
   shared deadline by at most <code>DNS_ADVANCE_BOUND = 8</code> cooperative steps
-  (<code>src/runtime.rs:24</code>, <code>:427-446</code>), so a chatty or stalled
+  (<code>src/runtime.rs:24</code>, <code>:434-453</code>), so a chatty or stalled
   peer can never starve traffic within a turn. Every dispatched token is
   generation-tagged — low bits are the local id, high bits the slot generation —
   so a stale event for a reused slot index is dropped before any socket is
@@ -1500,8 +1500,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     (<code>sink_has_failed</code>, <code>src/log.rs:1697-1699</code>). The
     serving owner therefore exits <code>EX_IOERR</code> (74) at the owner-turn
     boundary: after the per-turn drain it reads that latch and exits in place
-    unless shutdown has begun (<code>src/runtime.rs:286-289</code>); a
-    shutdown-phase drain (<code>src/runtime.rs:146</code>, <code>:409</code>) is
+    unless shutdown has begun (<code>src/runtime.rs:293-296</code>); a
+    shutdown-phase drain (<code>src/runtime.rs:146</code>, <code>:416</code>) is
     exit-free, and the shutdown verdict always wins over a latched sink. The
     in-memory <code>dropped</code> counter cannot itself be emitted through the
     failed sink, so the process-level exit is the operator’s log-loss signal. The
@@ -1538,7 +1538,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   reachable producers: a drained serving shutdown after gate-opened tunnels
   complete (<code>ShutdownExit::Drained ⇒ 0</code>,
   <code>src/serving.rs:186</code>, applied through
-  <code>src/runtime.rs:387-390</code>) and a startup <code>Terminated</code>
+  <code>src/runtime.rs:394-397</code>) and a startup <code>Terminated</code>
   decision (SIGTERM within the startup window), which emits the shutdown record
   and exits <code>0</code> (<code>src/main.rs:104-107</code>). Exit
   <code>70</code> (<code>EX_SOFTWARE</code>) is forced shutdown with undrained
@@ -1556,7 +1556,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   Exit <code>74</code> (<code>EX_IOERR</code>) is an unrecoverable stdout sink
   failure: the per-turn drain passes the queue, and once the sticky failed latch
   is set the owner exits in place at the turn unless shutdown has begun
-  (<code>src/runtime.rs:30</code>, <code>:286-289</code>), which is the
+  (<code>src/runtime.rs:30</code>, <code>:293-296</code>), which is the
   operator’s log-loss signal for the terminal-sink latch of §8.2 — the one
   failure surface where log loss is counted and observability ends, so the
   process exits rather than continue externally unreportable
@@ -1586,7 +1586,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>Unrecoverable stdout sink failure: the sticky failed latch is read
         after each per-turn drain and the owner exits in place unless shutdown
         has begun; backpressure (WouldBlock) never exits</td>
-        <td><code>src/runtime.rs:30</code>, <code>:286-289</code>;
+        <td><code>src/runtime.rs:30</code>, <code>:293-296</code>;
         <code>src/log.rs:2099-2107</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
@@ -1612,7 +1612,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         signal, since the in-memory <code>dropped</code> counter cannot be
         emitted through the failed sink</td>
         <td><code>src/log.rs:2099-2107</code>, <code>:1697-1699</code>,
-        <code>:1637-1646</code>; <code>src/runtime.rs:286-289</code></td></tr>
+        <code>:1637-1646</code>; <code>src/runtime.rs:293-296</code></td></tr>
     </tbody>
   </table>
 </section>
@@ -1769,7 +1769,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/startup_dns.rs:36</code></td></tr>
       <tr><th scope="row">Exchange class typed at the start seam</th>
         <td><code>src/startup_dns.rs:215-223</code>, <code>:2948-2959</code>,
-        <code>:1606-1614</code>; <code>src/runtime.rs:268</code>, <code>:352</code>;
+        <code>:1606-1614</code>; <code>src/runtime.rs:275</code>, <code>:359</code>;
         <code>src/serve.rs:767</code>; <code>src/serving/startup.rs:147</code></td></tr>
       <tr><th scope="row">Slot reset reinitializes metadata (retained traffic
       slabs not zeroized)</th>
