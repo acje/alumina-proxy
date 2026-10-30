@@ -337,18 +337,19 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>The TLS trust-verification stack is a deliberately minimal and bounded seam.
   <code>Cargo.toml</code> declares three direct DoT-related manifest entries —
   <code>rustls</code>, <code>rustls-webpki</code>, and <code>ring</code>
-  (<code>Cargo.toml:198-209</code>); two of them, <code>rustls</code> and
-  <code>ring</code>, are direct source imports
-  (<code>src/startup_dns.rs:31-38</code>): rustls supplies the
+  (<code>Cargo.toml:208</code>, <code>:209-213</code>, <code>:214-219</code>);
+  two of them, <code>rustls</code> and <code>ring</code>, are direct source
+  imports (<code>src/startup_dns.rs:31-38</code> for rustls;
+  <code>:851-853</code> for the ring digest): rustls supplies the
   TLS 1.3 client (<code>default-features = false</code>), and ring is promoted to a
   direct dependency so the strict SPKI pin can hash the server’s SubjectPublicKeyInfo
   directly (rustls keeps its digest surface crate-private). <code>rustls-pki-types</code>
   is not declared directly — it arrives via rustls and the source imports only the
   <code>rustls::pki_types</code> re-export, never <code>rustls_pki_types</code>
-  itself (<code>Cargo.toml:199-203</code>; <code>src/startup_dns.rs:36</code>).
+  itself (<code>Cargo.toml:209-212</code>; <code>src/startup_dns.rs:36</code>).
   <code>rustls-webpki</code> is retained as the sole feature-enabler of the
   <code>ring</code> provider in the resolved graph, not as a source import
-  (<code>Cargo.toml:199-203</code>).</p>
+  (<code>Cargo.toml:209-213</code>).</p>
 
   <figure>
     <svg role="img" aria-labelledby="fig2-title" aria-describedby="fig2-desc"
@@ -821,7 +822,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row"><code>AwaitResponse</code></th>
         <td>Upstream TCP connected; the proxy's 200 Connection established response to the client is being written; ClientHello validation begins once that write completes</td>
         <td>A and B closed</td>
-        <td><code>src/gate.rs:78-80</code>; <code>on_response_ok</code> <code>:187-191</code></td></tr>
+        <td><code>src/serving.rs:2539-2555</code>, <code>:3033-3043</code></td></tr>
       <tr><th scope="row"><code>Validating</code></th>
         <td>CONNECT response OK (<code>SENT_200</code>); ClientHello being
         validated</td>
@@ -1574,11 +1575,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     nonblocking once, after boot, by the binary only
     (<code>prepare_stdout</code>, <code>src/log.rs:1579-1590</code>), and
     <code>write_vectored</code> either progresses or latches a recoverable
-    backpressure condition (<code>WouldBlock</code> or <code>Interrupted</code>,
-    including a zero-progress write) with a retained cursor and a 100 ms retry
-    (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:2091-2098</code>).
-    <code>tests/stdout_stall.rs</code> and <code>tests/monitor_stdout.rs</code> are
-    the executable form of this claim.</li>
+    backpressure condition — <code>WouldBlock</code>, <code>Interrupted</code>, or
+    a zero-progress write — keeping the retained cursor and the 100 ms retry
+    (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:2091-2111</code>).
+    None of the three sets the persistent failed latch, so none can trigger the
+    sink-failure exit (<code>sink_has_failed</code>, <code>src/log.rs:1697</code>).
+    <code>tests/stdout_stall.rs</code> and <code>tests/monitor_stdout.rs</code>
+    witness the full-pipe case; the injected Interrupted and zero-progress cases
+    are witnessed by
+    <code>logging_writev_interrupted_keeps_cursor_and_stream_identical</code> and
+    <code>logging_writev_zero_progress_keeps_cursor_and_stream_identical</code>
+    (<code>src/log.rs:4451-4461</code>).</li>
     <li><strong>Drops are always counted, never silent.</strong> Ring-full and
     encode-failure both <code>drop_one</code> (<code>src/log.rs:2273-2278</code>),
     a hard sink error drops the whole queue <em>through the same counter</em>
@@ -1613,8 +1620,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     in-memory <code>dropped</code> counter cannot itself be emitted through the
     failed sink, so the process-level exit is the operator’s log-loss signal. The
     failed latch still cannot stall serving: the owner exits rather than linger
-    with observability permanently lost, and a stalled (would-block) sink is
-    never a failure and never exits.</p>
+    with observability permanently lost, and recoverable backpressure — a
+    would-block, interrupted, or zero-progress write — never sets the latch and
+    never exits.</p>
   </div>
 
   <h3>8.3 Incident reporting</h3>
@@ -1693,9 +1701,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>Unrecoverable stdout sink failure: the sticky failed latch is read
         after each per-turn drain and the owner exits in place unless shutdown
         has begun; recoverable backpressure (WouldBlock, Interrupted,
-        zero-progress) never exits</td>
+        zero-progress) never sets the latch and never exits</td>
         <td><code>src/runtime.rs:30</code>, <code>:293-296</code>;
-        <code>src/log.rs:2099-2107</code></td></tr>
+        <code>src/log.rs:2099-2111</code>, <code>:1697</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
         <td><code>src/main.rs:23</code>, <code>:103</code>; <code>src/serve.rs:98</code></td></tr>
@@ -1872,8 +1880,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Inspector retained capacity</th>
         <td><code>src/client_hello.rs:6-21</code>, <code>:410-419</code></td></tr>
       <tr><th scope="row">Trust-verification dependency seam</th>
-        <td><code>Cargo.toml:198</code>, <code>:199-203</code>, <code>:209</code>;
-        <code>src/startup_dns.rs:36</code></td></tr>
+        <td><code>Cargo.toml:208</code>, <code>:209-213</code>, <code>:214-219</code>;
+        <code>src/startup_dns.rs:36</code>, <code>:851-853</code></td></tr>
       <tr><th scope="row">Exchange class typed at the start seam</th>
         <td><code>src/startup_dns.rs:215-223</code>, <code>:2948-2959</code>,
         <code>:1606-1614</code>; <code>src/runtime.rs:275</code>, <code>:359</code>;
