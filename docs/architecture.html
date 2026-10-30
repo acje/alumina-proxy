@@ -1397,6 +1397,34 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>epoll_wait</code> writing into the pre-existing buffer, and it is
   exercised by the steady-state allocation witnesses in
   <code>src/serving/tests.rs</code>.</p>
+  <p>The measured witness basis, on the native Linux candidate pinned by the
+  header's exact source-content identity (HEAD 3a7b4a9451f78c, release
+  4cce1daab61f, toolchain 1.99.0, alloc-witness enabled): three focused success
+  witnesses assert <code>Counts::all_zero()</code> — allocations, deallocations,
+  reallocations, and unphased counts all zero — over the
+  <code>Runtime::turn → Serving::run_once</code> poll/pump paths and the retained
+  serving workspace:
+  <code>hot_relay_turns_compose_with_bounded_stalled_dns</code>
+  (<code>src/runtime/tests.rs:177</code>, Serving phase, 17 hot relays + stalled
+  DNS + backlog + expiry across 900 owner turns),
+  <code>due_refresh_owner_path_spends_zero_allocations</code>
+  (<code>src/runtime/tests.rs:2346</code>, BackgroundRefresh phase, 200 owner
+  turns), and <code>serving_consumes_boot_traffic_buffers_by_value_not_reallocation</code>
+  (<code>src/serving/tests.rs:127</code>, which asserts the boot traffic slabs
+  transfer into the slot workspaces by value: <code>slots[0].buf</code> and
+  <code>slots[511].down</code> keep the <code>TrafficStorage</code>
+  allocation pointers, so no second traffic allocation occurs when the serving
+  workspaces are built). The mio allocation matrix
+  (<code>tests/mio_matrix.rs</code>, alloc-witness-only) measures the same
+  dependency seam: the retained <code>Events</code> heap buffer is attributed to
+  its boot allocation, a later named phase never carries its release, and steady
+  <code>poll</code>/registry/outbound-connect operations stay
+  <code>all_zero()</code>. These counts cover only the executed paths above;
+  they are not a universal bound on unexercised code or dependency-behaviour
+  seams. The swap/restore itself is measured by the owning witnesses asserting
+  zero heap activity once the boot-held <code>events</code> buffer exists; the
+  fixed stack <code>items</code> coalescing array is never a heap allocation at
+  any phase.</p>
   <p>The honest restatement of the fixed-memory contract is: first-party
   execution paths do not allocate or deallocate heap storage after boot
   (boot init is exempt; shutdown exits without deallocating), while dependency
