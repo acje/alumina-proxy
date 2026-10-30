@@ -141,7 +141,7 @@ INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh 
 # docslink gate roots: the exact nonempty argv docslink_check consumes. Shared
 # with the identity snapshot so the boundary content identity covers precisely
 # the bytes docslink_check reads (drift-proof by construction).
-DOCSLINK_ROOTS="docs/alumina-proxy.md docs/architecture.md docs/verification.md docs/qa-package/README.md README.md"
+DOCSLINK_ROOTS="docs/alumina-proxy.md docs/verification.md docs/qa-package/README.md README.md"
 
 # html-structure gate roots: structural artefacts docslink_check's Markdown
 # parser cannot see (check.mjs answers unsupported-target/html-anchor-unsupported

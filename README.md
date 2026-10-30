@@ -72,7 +72,7 @@ contract; it never yields to a feature.
 | Document | Role |
 | --- | --- |
 | [alumina-proxy.md](docs/alumina-proxy.md) | **Canonical spec** — sole governing requirements |
-| [docs/architecture.md](docs/architecture.md) | Conceptual design + as-built single-owner mapping (decisions D1–D7) |
+| [docs/architecture.html](docs/architecture.html) | **As-built architecture reference** — derived from source at a pinned revision; describes the system, never adjudicates |
 | [docs/benchmarks/e2micro-suite.md](docs/benchmarks/e2micro-suite.md) | e2-micro benchmark suite (1gbps + connection storms) vs Envoy/HAProxy — methodology + corrected M-04 results |
 | [docs/qa-package/README.md](docs/qa-package/README.md) | Local testQA run/validation instructions |
 | [Notify delivery: stdout collector reliability and drop-alerting runbook](#notify-delivery-stdout-collector-reliability-and-drop-alerting-runbook) | Deployment-owned collector runbook: liveness, drop-alerting, restart semantics, failure drill |

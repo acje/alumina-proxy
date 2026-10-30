@@ -93,9 +93,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   revision: the two forwarding barriers, the single-reactor serving loop, the
   typed enforcement lattice, the fixed-storage memory envelope, and the DoT-bound
   startup-to-serving DNS path that decides whether the process may listen at all.</p>
-  <p class="meta"><strong>Authority:</strong> alumina-proxy source tree at commit
+  <p class="meta"><strong>Authority:</strong> the as-built source revision
   <code>a3ddacb204e242c7a00637bf72bb7c4df05be5aa</code> (branch <code>main</code>).
-  All line citations are to that revision, were checked at HEAD, and were
+  All line citations are to that as-built source revision, were verified by the
+  docs gate at the documentation revision carrying this document, and were
   re-derived for every file whose code moved after the previous architectural
   reference; none is copied from another document.</p>
   <p class="meta"><strong>Identity:</strong> alumina is a single-binary, config-file
@@ -456,6 +457,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code></td></tr>
     </tbody>
   </table>
+
+  <p>Ownership of the retained serving state is a single boot-to-serving
+  transfer chain: <code>main</code> constructs <code>ServeStorage::boot</code>
+  over the parsed config, transfers the storage into
+  <code>Preallocated::preallocate</code> (which arms the serving workspaces and
+  the SIGTERM self-pipe), runs <code>run_startup</code> for the 90 s window
+  before any listener exists, and hands the owner to <code>attach</code> once
+  the listener and the shared DNS transport are in place, ending in
+  <code>Runtime::serve</code>. At every link exactly one owner holds the state;
+  ownership transfers by value and is never split
+  (<code>src/main.rs:62-107</code>, <code>src/serve.rs:168</code>,
+  <code>src/serving.rs:1023</code>).</p>
 </section>
 
 <section id="connect-sequence">
@@ -492,6 +505,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   fresh generation, freezes the setup deadline, registers the client on the
   reactor, and moves the stage to <code>ReadingConnect</code>
   (<code>src/serving.rs:1819-1836</code>).</p>
+  <p>Handles are linear and typed — <code>SlotIndex</code> during setup,
+  <code>TunnelIndex</code> after graduation, consumed on release — so a stale
+  handle can never free a reused slot (<code>src/worker.rs:159-202</code>,
+  <code>:344-354</code>).</p>
 
   <h3>3.2 The CONNECT head parse</h3>
   <p>The head is bounded by <code>MAX_HEADER_LINES = 16</code>
@@ -611,6 +628,24 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/serving.rs:201-202</code>, <code>:1808-1836</code></td></tr>
     </tbody>
   </table>
+
+  <h3>3.4 Tunnel lifetimes and the shutdown deadline</h3>
+  <p>The setup deadline starts at accept and is never reset, and connect
+  attempts are clipped to it (already stated in §3.1). The relay idle deadline
+  is 300 s, starting at gate open and reset only on successful tunnel-byte
+  writes — never by readiness alone (<code>IDLE_SECS</code>,
+  <code>src/serving.rs:84</code>). The first orderly EOF starts a 5 s drain
+  that is never reset (<code>DRAIN_SECS</code>, <code>src/serving.rs:88</code>).
+  The first SIGTERM stops admission, closes pending setups, cancels the DNS
+  transport, and fixes an 8 s grace that later signals cannot extend
+  (<code>SHUTDOWN_GRACE</code>, <code>src/serving.rs:93</code>;
+  <code>on_sigterm</code>, <code>src/serving.rs:1544-1558</code>). The single
+  poll timeout folds every deadline into one wait, and the expiry sweep runs
+  before dispatch (<code>poll_timeout</code>, <code>src/serving.rs:3163-3223</code>;
+  <code>expire_sweep</code>, <code>src/serving.rs:3245</code>). A drained
+  shutdown exits 0, a forced close exits 70, resources are released exactly
+  once, and the process exits without deallocating (<code>ShutdownExit</code>,
+  <code>src/serving.rs:178-196</code>).</p>
 </section>
 
 <section id="gate">
@@ -1286,6 +1321,19 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     bound over retained named buffers, never an RSS estimate
     (<code>src/inventory.rs:173-181</code>).</li>
   </ul>
+  <p>The printed bound deliberately excludes the remaining retained fixed
+  structures. Their retained capacities: a worker slot table
+  <code>[SlotState; 512]</code> plus <code>free_heap [u16; 512]</code>
+  (<code>src/worker.rs:371-378</code>), a deadline-presence bitmap
+  <code>[u64; 8]</code> = 64 B (<code>src/serving.rs:852-863</code>), the
+  preallocated <code>POLL_EVENTS_CAP = 1024</code>-event snapshot
+  (<code>src/serving.rs:117</code>), the JA4 baseline
+  <code>[[Ja4BaselineEntry;16];32]</code> = 512 × 36 B = 18 432 B
+  (<code>src/serving.rs:584-619</code>), the 64-entry capture ring
+  (<code>src/enforcement/monitor.rs:11-115</code>), 32 incident windows plus
+  512 slot markers (<code>src/incident_report.rs:243-244</code>), and the
+  enforcement control table <code>[Control;4]</code> with two
+  <code>[PerFqdnControl;32]</code> (<code>src/enforcement/action.rs:161-232</code>).</p>
   <p>Within the serving workspace the inspector dominates: each
   <code>ChInspector</code> retains two distinct 64 KiB arrays — <code>buf</code>
   and <code>scratch</code>, 128 KiB per slot — sized to
@@ -1350,6 +1398,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   generation-tagged — low bits are the local id, high bits the slot generation —
   so a stale event for a reused slot index is dropped before any socket is
   touched (<code>src/serving.rs:152-162</code>).</p>
+  <p>Registration tokens are disjoint by construction: the listener holds
+  token 0, client sockets occupy <code>1..=512</code>, each upstream uses
+  <code>UPSTREAM_BASE + index</code>, and <code>DNS_LOCAL</code> and
+  <code>SIGNAL_LOCAL</code> are reserved. Low bits select the source and high
+  bits carry the slot generation, so a reserved source can never alias a
+  connection; the SIGTERM self-pipe event is handled before every connection
+  event (<code>src/serving.rs:67</code>, <code>:135-162</code>, <code>:1281</code>,
+  <code>:1544-1558</code>).</p>
   <p>Slot reuse is metadata-only with one deliberate retention: on tunnel close,
   <code>SlotWorkspace::reset</code> rebuilds the parser, inspector, gate, capture,
   deadlines, and other slot metadata through their constructors, but the two
@@ -1704,8 +1760,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/startup_dns.rs:839-888</code>, <code>:1088-1098</code>;
         <code>src/main.rs:127-143</code></td></tr>
       <tr><th scope="row">Printed lower bound (214 665 002)</th>
-        <td><code>src/main.rs:34-40</code>; <code>src/inventory.rs:192-196</code>;
-        <code>docs/architecture.md:570</code></td></tr>
+        <td><code>src/main.rs:34-40</code>; <code>src/inventory.rs:192-196</code></td></tr>
       <tr><th scope="row">Spec intent citations</th>
         <td><code>docs/alumina-proxy.md</code> §Design philosophy, §Protocol
         contract, §Authorization, §Configuration &amp; DNS, §Memory, §Verification,
@@ -1732,8 +1787,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     single deliverable <code>docs/architecture.html</code>; documentation only —
     no source, test, or manifest change beyond the two verification-script
     adjustments already merged for this reference.</li>
-    <li><strong>Revision:</strong> HEAD <code>a3ddacb204e242c7a00637bf72bb7c4df05be5aa</code>,
-    branch <code>main</code>. All line citations are to that revision.</li>
+    <li><strong>Revision:</strong> as-built source revision
+    <code>a3ddacb204e242c7a00637bf72bb7c4df05be5aa</code>, branch <code>main</code>.
+    All line citations are to that revision.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
     <code>e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401</code>
     (unchanged); referenced as the governing specification only.</li>
