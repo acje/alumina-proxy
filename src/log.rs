@@ -1413,20 +1413,6 @@ struct SinkState {
     syscalls: usize,
 }
 
-/// The outcome of one bounded drain pass (F-09): whether the pass latched the
-/// sink failed on an unrecoverable write error. A pass that wrote records,
-/// stalled on backpressure, or found the sink already latched failed reports
-/// [`DrainOutcome::Ok`], so the failure outcome surfaces exactly once — at the
-/// pass that latches it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum DrainOutcome {
-    /// No new unrecoverable write failure was latched by this pass.
-    Ok,
-    /// A non-WouldBlock/Interrupted write error latched the sink failed on
-    /// this pass, stranding every queued record as a whole-record drop (L18).
-    SinkFailed,
-}
-
 /// Failure to construct the boot-owned store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogStoreError {
@@ -1705,8 +1691,9 @@ impl LogStore {
     }
 
     /// Whether the sink latched failed after a non-WouldBlock write error
-    /// (e.g. the stdout pipe closed).
-    #[cfg(test)]
+    /// (e.g. the stdout pipe closed). The latch is persistent state: no later
+    /// drain consumes or clears it, so the serving owner reads it after each
+    /// per-turn drain and exits `EX_IOERR` when it is set (F-09).
     pub(crate) const fn sink_has_failed(&self) -> bool {
         self.sink.failed
     }
@@ -2059,23 +2046,26 @@ impl LogStore {
     /// [`SINK_MAX_BYTES`] bytes, emitted in a single `write_vectored` call per
     /// turn. A `WouldBlock` retains the partial cursor and yields
     /// immediately; a write/close failure latches the sink failed so no later
-    /// drain spins or blocks, and surfaces as [`DrainOutcome::SinkFailed`] for
-    /// the owner-turn exit decision (F-09).
-    pub(crate) fn drain_sink(&mut self) -> DrainOutcome {
+    /// drain spins or blocks. The latch is the owner's signal: the serving
+    /// owner observes it through [`Self::sink_has_failed`] after each drain
+    /// (F-09), and it is persistent state — never consumed or cleared by a
+    /// later drain — so a startup-window or probe drain that latches it is
+    /// still seen by the first serving owner turn.
+    pub(crate) fn drain_sink(&mut self) {
         if self.sink.failed {
-            return DrainOutcome::Ok;
+            return;
         }
         let mut ops = 0usize;
         let mut bytes_out = 0usize;
         loop {
             if ops >= SINK_MAX_OPS || bytes_out >= SINK_MAX_BYTES {
-                return DrainOutcome::Ok;
+                return;
             }
             let (index, off) = if let Some(cursor) = self.cursor {
                 (self.front, cursor.off)
             } else {
                 if self.count == 0 {
-                    return DrainOutcome::Ok;
+                    return;
                 }
                 (self.front, 0)
             };
@@ -2104,7 +2094,7 @@ impl LogStore {
                 {
                     self.sink.blocked = true;
                     self.cursor = Some(Cursor { off });
-                    return DrainOutcome::Ok;
+                    return;
                 }
                 Err(_) => {
                     self.sink.failed = true;
@@ -2113,12 +2103,12 @@ impl LogStore {
                         self.count -= 1;
                     }
                     self.cursor = None;
-                    return DrainOutcome::SinkFailed;
+                    return;
                 }
                 Ok(0) => {
                     self.sink.blocked = true;
                     self.cursor = Some(Cursor { off });
-                    return DrainOutcome::Ok;
+                    return;
                 }
                 Ok(n) => {
                     ops += gathered;
@@ -2130,7 +2120,7 @@ impl LogStore {
                     bytes_out += n;
                     self.sink.blocked = false;
                     if self.consume_gathered(index, off, gathered, n) {
-                        return DrainOutcome::Ok;
+                        return;
                     }
                 }
             }
@@ -4172,21 +4162,21 @@ mod tests {
     }
 
     #[test]
-    fn logging_sink_failure_outcome_surfaces_once_and_wouldblock_never_fails() {
+    fn logging_sink_failure_latch_is_observed_by_owner_and_wouldblock_never_fails() {
         {
             let (reader, writer) = UnixStream::pair().expect("socketpair");
             drop(reader);
             let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
             store.startup_warning(1, "sub.example.org", Family::A);
-            assert_eq!(
-                store.drain_sink(),
-                DrainOutcome::SinkFailed,
-                "the latching pass surfaces the sink-failure outcome (F-09)"
+            store.drain_sink();
+            assert!(
+                store.sink_has_failed(),
+                "the non-WouldBlock write error latches the sink (F-09)"
             );
-            assert_eq!(
-                store.drain_sink(),
-                DrainOutcome::Ok,
-                "a later pass on the already-failed sink never re-reports, so the owner exits once (F-09)"
+            store.drain_sink();
+            assert!(
+                store.sink_has_failed(),
+                "a later drain on the already-failed sink never consumes or clears the latch, so the owner observes it at the turn"
             );
             let _ = writer;
         }
@@ -4200,10 +4190,10 @@ mod tests {
             }
             let mut turns = 0;
             while store.len() > 0 && turns < 8 * QUEUE_SLOTS {
-                assert_ne!(
-                    store.drain_sink(),
-                    DrainOutcome::SinkFailed,
-                    "a WouldBlock-stalled sink reports Ok, never SinkFailed (F-09)"
+                store.drain_sink();
+                assert!(
+                    !store.sink_has_failed(),
+                    "a WouldBlock-stalled sink never latches fatal (F-09)"
                 );
                 turns += 1;
             }

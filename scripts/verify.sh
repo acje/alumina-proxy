@@ -16,7 +16,7 @@ set -eu
 #   I0  per-gate `PHASE1-TIMING: <gate> <ms|NA>` lines and a total, so wall clock
 #       claims are measured. `NA` means no millisecond clock was available.
 #   I1  ONE Cargo test invocation per feature config (lib units + foundations +
-#       boot + the 5 gate-only binaries together) instead of three per config,
+#       boot + the gate-only binaries together) instead of three per config,
 #       and one target dir per feature config (`$VERIFY_AW_TARGET_DIR`) so
 #       witness-on/off artifacts never share a fingerprint graph. The boundary
 #       slow tier therefore dispatches `mid union` alone: union covers the
@@ -349,7 +349,7 @@ mid_boot() {
 # (gate-only suite), i.e. three invocations per feature config with cargo
 # re-resolving the unit graph each time and the witness-on/off graphs competing
 # for one target dir. now: one invocation per config covering lib units +
-# foundations + boot + the 5 gate-only binaries, with a dedicated target dir per
+# foundations + boot + the gate-only binaries (GATE_ONLY_TESTS), with a dedicated target dir per
 # config.
 #
 # Ordering is NOT free-form. The documented hazard (E0463 "can't find crate for
@@ -358,7 +358,14 @@ mid_boot() {
 # with the aw test runs AFTER the aw clippy pass. That sequence is preserved
 # here (non-aw clippy -> aw clippy -> aw tests), and the dedicated
 # ${ALT_AW_TARGET_DIR} removes the shared-dir interference entirely.
-ALT_TEST_TARGETS="--test foundations --test boot --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed"
+# The gate-only integration binaries (single-sourced here, F-04): eligibility,
+# mio_matrix, main_thread_stack, monitor_stdout, stdout_stall, stdout_closed.
+# Every gate selector that runs any of them references GATE_ONLY_TESTS, so the
+# list lives in exactly one place and `mid union` / `mid full` stay in lockstep.
+GATE_ONLY_TESTS="--test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed"
+
+# The whole-surface union: lib units + foundations + boot + the gate-only binaries.
+ALT_TEST_TARGETS="--test foundations --test boot $GATE_ONLY_TESTS"
 
 mid_union() {
     [ "$(uname -s)" = "Linux" ] || {
@@ -371,7 +378,7 @@ mid_union() {
     static_gate "target/release/alumina"
     echo "FMT:"
     cargo +${TOOLCHAIN} fmt --check
-    echo "COMBINED-SUITE-WITNESS-OFF (lib units + foundations + boot + 5 gate-only binaries):"
+    echo "COMBINED-SUITE-WITNESS-OFF (lib units + foundations + boot + gate-only binaries):"
     # shellcheck disable=SC2086
     cargo +${TOOLCHAIN} atest -p alumina --locked --lib $ALT_TEST_TARGETS
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
@@ -379,7 +386,7 @@ mid_union() {
     cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets -- -D warnings
     echo "CLIPPY (test-harness with alloc-witness; target dir ${ALT_AW_TARGET_DIR}):"
     cargo +${TOOLCHAIN} aclippy -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --all-targets --features alloc-witness -- -D warnings
-    echo "COMBINED-SUITE-WITNESS-ON (lib units + foundations + boot + 5 gate-only binaries, alloc-witness):"
+    echo "COMBINED-SUITE-WITNESS-ON (lib units + foundations + boot + gate-only binaries, alloc-witness):"
     # shellcheck disable=SC2086
     cargo +${TOOLCHAIN} atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $ALT_TEST_TARGETS
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
@@ -409,14 +416,14 @@ mid_clippy() {
 }
 
 # G8-C02 test-coverage closure: runs the gate-only test surface — lib unit tests
-# + the 5 integration binaries that run in NO other selector (eligibility,
-# mio_matrix, main_thread_stack, monitor_stdout, stdout_stall) — witness-off
-# then witness-on, closing the gate coverage hole where lib units and these 5
-# binaries never ran in any gate selector (all prior atest invocations carried
-# --test foundations|boot). foundations and boot are NOT re-run here: they
-# already run in mid union within the same BOUNDARY dispatch (and in the mid
-# foundations / mid boot inner loops), so re-running them here would duplicate
-# work without adding coverage.
+# + the gate-only integration binaries (GATE_ONLY_TESTS: eligibility,
+# mio_matrix, main_thread_stack, monitor_stdout, stdout_stall, stdout_closed) —
+# witness-off then witness-on, closing the gate coverage hole where lib units
+# and these binaries never ran in any gate selector (all prior atest
+# invocations carried --test foundations|boot). foundations and boot are NOT
+# re-run here: they already run in mid union within the same BOUNDARY dispatch
+# (and in the mid foundations / mid boot inner loops), so re-running them here
+# would duplicate work without adding coverage.
 # atest-only — no clippy/fmt/whitespace (those are mid_union's job) — so there
 # is no E0463 hazard within this selector itself. The cross-run interaction is
 # with a LATER mid_union's alloc-witness clippy over the shared target dir:
@@ -433,11 +440,13 @@ mid_full() {
         echo "mid full requires Linux execution" >&2
         exit 1
     }
-    echo "GATE-ONLY-SUITE (lib units + 5 gate-only binaries, witness-off):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall
+    echo "GATE-ONLY-SUITE (lib units + gate-only binaries, witness-off):"
+    # shellcheck disable=SC2086
+    cargo +${TOOLCHAIN} atest -p alumina --locked --lib $GATE_ONLY_TESTS
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
-    echo "GATE-ONLY-SUITE-WITNESS (lib units + 5 gate-only binaries incl. mio_matrix + eligibility witness, alloc-witness):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall
+    echo "GATE-ONLY-SUITE-WITNESS (lib units + gate-only binaries incl. mio_matrix + eligibility witness, alloc-witness):"
+    # shellcheck disable=SC2086
+    cargo +${TOOLCHAIN} atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $GATE_ONLY_TESTS
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"
 }

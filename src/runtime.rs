@@ -283,9 +283,9 @@ impl Runtime {
         self.serving
             .storage_mut()
             .report_incident_if_due(Instant::now());
-        match self.serving.storage_mut().logs_mut().drain_sink() {
-            crate::log::DrainOutcome::SinkFailed => std::process::exit(EX_IOERR),
-            crate::log::DrainOutcome::Ok => {}
+        self.serving.storage_mut().logs_mut().drain_sink();
+        if !self.serving.is_shutdown() && self.serving.storage().logs().sink_has_failed() {
+            std::process::exit(EX_IOERR);
         }
         Ok(())
     }

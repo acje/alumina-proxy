@@ -101,7 +101,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   reference; none is copied from another document.</p>
   <p class="meta"><strong>Identity pins cited bytes:</strong> the human revision
   above names the base commit; the mechanically enforced binding is the exact
-  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY d37223260d4e106fa31a9be8d8b122a40806db65786df3ecc5df6d17ef28b134</code> —
+  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY e751df9dc4a995bb5dc6eca7bdb282a578499ace60ebd8b9aa9e77dcc17d39c1</code> —
   a deterministic manifest over the current working-tree source set
   (<code>src/**</code>, <code>tests/*.rs</code>, <code>Cargo.toml</code>,
   <code>Cargo.lock</code>; docs and the specification digest excluded). The
@@ -122,7 +122,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   source at the commit named above. Every architectural claim cites
   <code>src/*.rs</code>, <code>tests/*.rs</code>, or the governing specification
   (<code>docs/alumina-proxy.md</code>, SHA-256
-  <code>69d91d17a53f7efc0380343b2c2404007fe676cddbdba0a21c4be77a61549b2d</code>).
+  <code>111e71a1d410295bbc260d9730157abff630a587d5e92ae2df6ae17b133d1543</code>).
   Values the code itself prints or asserts are recorded as measured. No review
   apparatus — findings, severities, proposals, or open questions — is carried here;
   the architecture is described as it is built.</p>
@@ -194,7 +194,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>75</code> <code>EX_TEMPFAIL</code> for the startup DNS verdict,
     <code>70</code> <code>EX_SOFTWARE</code> (given as program exit),
     <code>78</code> <code>EX_CONFIG</code> for configuration failure
-    (<code>src/runtime.rs:30</code>, <code>:285-288</code>;
+    (<code>src/runtime.rs:30</code>, <code>:286-289</code>;
     <code>src/main.rs:23-24</code>, <code>src/boot.rs:7</code>).</li>
     <li><strong>Listener conditionality.</strong> The listener is opened only
     when the startup window’s canonical readiness rule holds — the unresolved
@@ -471,7 +471,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/startup_dns.rs:48-49</code>, <code>:215-223</code>, <code>:2948-2959</code>, <code>:3168-3200</code>, <code>:3520-3597</code></td></tr>
       <tr><th scope="row"><code>log</code></th>
         <td>256 × 2 KiB boot-owned ring; per-turn 16-op/64 KiB drain budget; counted drops; reserved-priority displacement; terminal sink latch.</td>
-        <td><code>src/log.rs:53-59</code>, <code>:1637-1646</code>, <code>:2045-2123</code>, <code>:2094-2101</code>, <code>:2163-2266</code></td></tr>
+        <td><code>src/log.rs:53-59</code>, <code>:1637-1646</code>, <code>:2054-2128</code>, <code>:2099-2107</code>, <code>:2215-2271</code></td></tr>
       <tr><th scope="row"><code>incident_report</code></th>
         <td>Per-name windowed incident reporting (3600 s window), sticky snapshots, eligible-binding transition tracking.</td>
         <td><code>src/incident_report.rs:14-15</code>, <code>:99-110</code>, <code>:242-250</code></td></tr>
@@ -1456,28 +1456,28 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>Logging is a fixed 256-slot × 2 KiB ring (512 KiB) owned at boot
   (<code>QUEUE_SLOTS = 256</code>, <code>SLOT_BYTES = 2 * 1024</code>,
   <code>src/log.rs:53-54</code>), retained as <code>LogStore</code> for process
-  lifetime (<code>src/log.rs:1443-1455</code>), encoded in place, and drained by a
+  lifetime (<code>src/log.rs:1429-1441</code>), encoded in place, and drained by a
   single nonblocking <code>write_vectored</code> under a per-turn budget of 16
   fragments / 64 KiB (<code>SINK_MAX_OPS = 16</code>, <code>SINK_MAX_BYTES = 64 * 1024</code>,
-  <code>src/log.rs:66-67</code>, <code>:2045-2123</code>). Three properties are
+  <code>src/log.rs:66-67</code>, <code>:2054-2128</code>). Three properties are
   architectural:</p>
   <ol>
     <li><strong>The sink can never stall serving.</strong> fd 1 is made
     nonblocking once, after boot, by the binary only
-    (<code>prepare_stdout</code>, <code>src/log.rs:1593-1604</code>), and
+    (<code>prepare_stdout</code>, <code>src/log.rs:1579-1590</code>), and
     <code>write_vectored</code> either progresses or latches <code>WouldBlock</code>
     with a retained cursor and a 100 ms retry
-    (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:2085-2107</code>).
+    (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:2091-2098</code>).
     <code>tests/stdout_stall.rs</code> and <code>tests/monitor_stdout.rs</code> are
     the executable form of this claim.</li>
     <li><strong>Drops are always counted, never silent.</strong> Ring-full and
-    encode-failure both <code>drop_one</code> (<code>src/log.rs:2283-2289</code>),
+    encode-failure both <code>drop_one</code> (<code>src/log.rs:2273-2278</code>),
     a hard sink error drops the whole queue <em>through the same counter</em>
-    (<code>:2094-2101</code>), and exit paths strand-count the residue
-    (<code>strand_queued</code>, <code>src/log.rs:1682-1691</code>).</li>
+    (<code>:2099-2107</code>), and exit paths strand-count the residue
+    (<code>strand_queued</code>, <code>src/log.rs:1668-1677</code>).</li>
     <li><strong>Priority classes exist.</strong> A reserved record can displace
     the newest normal record on a full ring rather than being dropped
-    (<code>enqueue_reserved</code>, <code>src/log.rs:2225-2280</code>) — the
+    (<code>enqueue_reserved</code>, <code>src/log.rs:2215-2271</code>) — the
     mechanism that keeps shutdown/fatal evidence from being evicted by a monitor
     burst.</li>
   </ol>
@@ -1485,17 +1485,24 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>8.2 The terminal sink state and its failure consequences</h3>
   <div class="callout amber" role="note">
     <p>Once the sink latches <code>failed</code>, <code>next_drain</code> returns
-    <code>None</code> forever (<code>src/log.rs:1651-1660</code>): a broken stdout
+    <code>None</code> forever (<code>src/log.rs:1637-1646</code>): a broken stdout
     permanently ends observability. There is no second sink: boot diagnostics use
     stderr (<code>src/main.rs:65-80</code>, <code>:145-148</code>), but once the
     log store owns stdout there is no fallback channel
-    (<code>src/log.rs:1403-1410</code>). The serving owner therefore exits
-    <code>EX_IOERR</code> (74) at the owner-turn boundary: the drain pass that
-    latches the failure surfaces it (<code>src/log.rs:2109-2117</code>), and
-    <code>Runtime::turn</code> exits in place immediately after the per-turn
-    drain (<code>src/runtime.rs:285-288</code>). The in-memory
-    <code>dropped</code> counter cannot itself be emitted through the failed
-    sink, so the process-level exit is the operator’s log-loss signal. The
+    (<code>src/log.rs:1401-1414</code>). The latch is sticky state: no later
+    drain consumes or clears it, so a non-owner drain — the startup-window
+    drains (<code>src/serve.rs:1170</code>, <code>src/serving/startup.rs:184</code>,
+    <code>src/startup_dns.rs:2890</code>, <code>:3101</code>) or the
+    resolver-probe drain (<code>src/serve.rs:885</code>) — that latches the sink
+    is still observed by the first serving owner turn
+    (<code>sink_has_failed</code>, <code>src/log.rs:1697-1699</code>). The
+    serving owner therefore exits <code>EX_IOERR</code> (74) at the owner-turn
+    boundary: after the per-turn drain it reads that latch and exits in place
+    unless shutdown has begun (<code>src/runtime.rs:286-289</code>); a
+    shutdown-phase drain (<code>src/runtime.rs:146</code>, <code>:409</code>) is
+    exit-free, and the shutdown verdict always wins over a latched sink. The
+    in-memory <code>dropped</code> counter cannot itself be emitted through the
+    failed sink, so the process-level exit is the operator’s log-loss signal. The
     failed latch still cannot stall serving: the owner exits rather than linger
     with observability permanently lost, and a stalled (would-block) sink is
     never a failure and never exits.</p>
@@ -1545,12 +1552,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>:109-112</code>; <code>src/serve.rs:117-128</code>); the startup DNS
   verdict exits <code>EX_TEMPFAIL = 75</code> (<code>src/main.rs:103</code>).
   Exit <code>74</code> (<code>EX_IOERR</code>) is an unrecoverable stdout sink
-  failure: the owner-turn drain latches the failed sink and the owner exits in
-  place (<code>src/runtime.rs:30</code>, <code>:285-288</code>), which is the
+  failure: the per-turn drain passes the queue, and once the sticky failed latch
+  is set the owner exits in place at the turn unless shutdown has begun
+  (<code>src/runtime.rs:30</code>, <code>:286-289</code>), which is the
   operator’s log-loss signal for the terminal-sink latch of §8.2 — the one
   failure surface where log loss is counted and observability ends, so the
   process exits rather than continue externally unreportable
-  (<code>src/log.rs:1651-1660</code>, <code>:2109-2117</code>).</p>
+  (<code>src/log.rs:1637-1646</code>, <code>:2099-2107</code>).</p>
 
   <table>
     <caption>Table 8 — Exit codes and HTTP degradation surfaces.</caption>
@@ -1573,11 +1581,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>serve</code> error</td>
         <td><code>src/serving.rs:187</code>; <code>src/main.rs:24</code>, <code>:89-107</code></td></tr>
       <tr><th scope="row">74 (<code>EX_IOERR</code>)</th>
-        <td>Unrecoverable stdout sink failure: the owner-turn drain latches the
-        failed sink and the owner exits in place; backpressure (WouldBlock)
-        never exits</td>
-        <td><code>src/runtime.rs:30</code>, <code>:285-288</code>;
-        <code>src/log.rs:2109-2117</code></td></tr>
+        <td>Unrecoverable stdout sink failure: the sticky failed latch is read
+        after each per-turn drain and the owner exits in place unless shutdown
+        has begun; backpressure (WouldBlock) never exits</td>
+        <td><code>src/runtime.rs:30</code>, <code>:286-289</code>;
+        <code>src/log.rs:2099-2107</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
         <td><code>src/main.rs:23</code>, <code>:103</code>; <code>src/serve.rs:98</code></td></tr>
@@ -1596,13 +1604,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/serving/policy.rs:22-24</code></td></tr>
       <tr><th scope="row">Sink latch</th>
         <td>Stdout <code>failed</code>: drops counted, <code>next_drain</code> is
-        <code>None</code> forever; the drain pass that latches the failure
-        surfaces it and the owner exits <code>74</code> at the next owner-turn
-        boundary — the exit is the operator’s log-loss signal, since the
-        in-memory <code>dropped</code> counter cannot be emitted through the
-        failed sink</td>
-        <td><code>src/log.rs:1651-1660</code>, <code>:2109-2117</code>;
-        <code>src/runtime.rs:285-288</code></td></tr>
+        <code>None</code> forever; the owner reads the sticky latch after each
+        per-turn drain and exits <code>74</code> at an owner-turn boundary
+        (unless shutdown has begun) — the exit is the operator’s log-loss
+        signal, since the in-memory <code>dropped</code> counter cannot be
+        emitted through the failed sink</td>
+        <td><code>src/log.rs:2099-2107</code>, <code>:1697-1699</code>,
+        <code>:1637-1646</code>; <code>src/runtime.rs:286-289</code></td></tr>
     </tbody>
   </table>
 </section>
@@ -1768,8 +1776,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/runtime.rs:213</code>; <code>src/bin/parser_bench.rs:1-9</code>,
         <code>:45</code></td></tr>
       <tr><th scope="row">Terminal sink state</th>
-        <td><code>src/log.rs:2109-2117</code>, <code>:1651-1660</code>,
-        <code>:1682-1691</code></td></tr>
+        <td><code>src/log.rs:2099-2107</code>, <code>:1697-1699</code>,
+        <code>:1637-1646</code>, <code>:1668-1677</code></td></tr>
       <tr><th scope="row">Single clock / mount_clock re-anchor</th>
         <td><code>src/serve.rs:223</code>; <code>src/worker.rs:97-105</code>;
         <code>src/startup_dns.rs:1387-1393</code></td></tr>
@@ -1795,7 +1803,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/enforcement/monitor.rs:12-26</code>, <code>:178-290</code></td></tr>
       <tr><th scope="row">Log ring / drain / priority</th>
         <td><code>src/log.rs:53-72</code>, <code>:1429-1441</code>,
-        <code>:2045-2123</code>, <code>:2163-2174</code>, <code>:2205-2266</code></td></tr>
+        <code>:1637-1646</code>, <code>:2054-2128</code>, <code>:2215-2271</code></td></tr>
       <tr><th scope="row">Incident report</th>
         <td><code>src/incident_report.rs:14-15</code>, <code>:99-181</code>,
         <code>:242-250</code>; <code>src/serve.rs:423-485</code></td></tr>
@@ -1846,7 +1854,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     excluded from the set). The base commit names the revision; the content
     identity binds the currently cited bytes.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
-    <code>69d91d17a53f7efc0380343b2c2404007fe676cddbdba0a21c4be77a61549b2d</code>
+    <code>111e71a1d410295bbc260d9730157abff630a587d5e92ae2df6ae17b133d1543</code>
     (re-pinned by the governed gate-section amendment); referenced as the governing
     specification only.</li>
   </ul>
