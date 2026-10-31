@@ -573,7 +573,7 @@ Spec §Configuration & DNS and the hrdn4/V37 amendments own the validated `resol
 
 `AluminaServerCertVerifier` (`src/startup_dns.rs:702`) implements `ServerCertVerifier` over the ring provider's supported algorithms. The pinned branch: `ParsedCertificate::try_from` the end entity, then `verify_server_name` against the resolver FQDN as SNI/SAN, then ring SHA-256 of `subject_public_key_info()` compared to `SpiPin::as_bytes()` — a mismatch returns `InvalidCertificate(ApplicationVerificationFailure)`, and the pin branch **skips** CA-chain validation (TOFU-grade strictness, V5). The unpinned `IP#fqdn` branch validates the chain with `verify_server_cert_signed_by_trust_anchor` against `RootCertStore::empty()` (`src/startup_dns.rs:728-734`): with no trust anchors configured, chain validation deterministically fails (`UnknownIssuer`) for a self-signed or CA-untethered certificate, so an unpinned DoT entry fails closed and counts a connect failure.
 
-> **Caveat — empty root store.** No webpki-roots (or other) trust-anchor bundle is carried: `IP#fqdn` entries are validated against an **empty** root store and therefore cannot succeed against a publicly-trusted resolver until a trust-anchor intake lands. This is a deliberate chain-transition state, not a bypass: the entry fails closed and is operator-visible. A follow-up crate intake (`rust-dep-intake`) is required before unpinned DoT is operationally useful for public resolvers; strict-pinned entries are usable immediately because they need no CA chain.
+> **Caveat — empty root store.** No webpki-roots (or other) trust-anchor bundle is carried: `IP#fqdn` entries are validated against an **empty** root store and therefore cannot succeed against a publicly-trusted resolver until a trust-anchor intake lands. This is a deliberate chain-transition state, not a bypass: the entry fails closed and is operator-visible. A follow-up crate intake (`rust-dep-intake`) is required before unpinned DoT is operationally useful for public resolvers; strict-pinned entries are usable immediately because they need no CA chain. The intake, and the three other deferred intakes below, are tracked in §Open TODO — deferred intakes and architecture work.
 
 #### Transport confinement and lifecycle
 
@@ -1654,3 +1654,66 @@ suppressed. The summary always encodes the `dx` hex bitset of loss flags when an
 `logging_monitor_summary_exact_grammar_and_zero_suppression` (`src/log.rs:3145`) asserts the
 summary carries the fixed core and the `dx` bitset while the single nonzero domain block
 rides its `monitor_domain` batch.
+
+## Open TODO — deferred intakes and architecture work
+
+Authorized 2026-10-31. This section is a work list, not a behavioural clause: it amends no
+rule above and nothing in it is implemented. Each item names the seam it must land in and the
+decision that has to be taken before it can.
+
+### Trust-anchor intake (required before unpinned DoT is usable)
+
+`IP#fqdn` entries without `#pin-sha256=` validate the chain with
+`verify_server_cert_signed_by_trust_anchor` against `RootCertStore::empty()`
+(`src/startup_dns.rs:728-734`; §Verifier — strict pin + FQDN/SAN, or empty-root CA-chain), so
+an unpinned entry fails closed and cannot reach a publicly-trusted resolver. The intake is
+therefore a prerequisite, not an enhancement: a `rust-dep-intake` crate decision over which
+trust anchors are carried (a webpki-roots bundle or a first-party bundle), their provenance
+and update cadence, and the resulting verifier contract (chain validation plus
+`verify_server_name`), landed with the pinned branch above unchanged for entries that still
+carry `#pin-sha256=`.
+
+Operational driver (observed 2026-10-23 → 2026-10-30): one resolver operator's leaf-key
+rotation invalidated a strict pin in production within seven days — the probe recorded
+`verdict=ok` at pin `60uKZ6e4…` on 2026-10-23 and `verdict=failed reason2="tls_identity"` on
+2026-10-30, against a live leaf whose SPKI is `KqNGxFS8iQhImgoezWO+m52yL9fynH7xlDuIGRSq+h8`
+(`CN=dns.google`, `notAfter` 2026-12-30) — and of five configured resolvers that entry became
+silently unusable. A leaf pin's lifetime is the operator's rotation cadence, not our
+maintenance cadence. Until the intake lands, an unpinned entry may be carried only as an
+inert last-resort placeholder at the end of the resolver list and never as a working
+fallback.
+
+### Tarpit
+
+Tarpit remains `Connection`-scope, post-gate, byte-preserving time-only pacing with a separate
+per-connection credit counter, an integer bytes-per-second rate plus an explicit `Unlimited`
+variant, and no simulated packet or byte loss (§Tarpit (deferred)). It cannot be implemented
+until the trigger catalog admits a genuine establishment-allowed predicate — no current
+failure class can bind to it without widening a mandatory-denial class — so configuration
+that selects `Tarpit` continues to be rejected with the explicit deferred-status diagnostic.
+
+### Control → tripwire → action architecture and metrics
+
+The per-control schema (§Per-control enforcement schema (T2/T3/T4/T6)) gives every control key
+exactly one `{ action, scope }` pair, with `notify` | `block` as the action vocabulary and
+`tarpit` reserved. Before further controls or actions are admitted, the control → tripwire →
+action pipeline needs one designed mapping: which control key raises which tripwire class, how
+first-slot attribution and precedence resolve, where aggregation and implicit Notify scopes
+attach, and how a control is added without re-deriving the rest. It also needs a metrics
+surface over that pipeline. There is no metrics surface today — the bounded stdout log (the
+monitor summary plus `monitor_domain`/capture batches) is the only fact channel, and it is
+lossy by construction on detail overflow.
+
+### Durable events integration with `corundum`
+
+The proxy's facts are emitted only to the bounded stdout log. Its manager, `corundum`
+(https://github.com/acje/corundum — the managed-Alumina supervisor: signed image and config
+over NATS, warming standby, atomic host-level port swap, per-proxy metrics), carries **core
+NATS only** and lists JetStream or any NATS server-side feature as a non-goal
+(`docs/corundum.md` §2 Goals and non-goals, §7 Wire format). A durable events integration
+therefore needs an explicit decision rather than an assumption: an event schema for proxy
+lifecycle (startup, promotion, refusal) and for tripwire/action facts, a delivery guarantee
+that survives process and host restart, and the anchor for durability (a store owned by the
+manager, or a server-side feature corundum does not currently admit). The bounded stdout log
+stays the local diagnostic fallback; durability is additive and never a replacement for the
+fixed log slot.
