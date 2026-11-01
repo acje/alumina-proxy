@@ -543,14 +543,14 @@ const fn summary_types(summary: &IncidentSummary) -> &'static str {
     }
 }
 
-/// The fixed 31-field incident summary record (docs/alumina-proxy.md:80):
+/// The fixed 33-field incident summary record (docs/alumina-proxy.md:80):
 /// window span, coalescing and overflow flags, window activity, and the
 /// per-type incident/cache snapshot. Optional fields emit nothing when absent.
 fn incident_summary_fields<'a>(
     secs: u64,
     name: &'a str,
     summary: &'a IncidentSummary,
-) -> [Field<'a>; 31] {
+) -> [Field<'a>; 33] {
     [
         Field::new("secs", Val::U64(secs)),
         Field::new("name", Val::Str(name)),
@@ -567,6 +567,10 @@ fn incident_summary_fields<'a>(
         Field::new("a_elapsed", Val::U64(summary.types[0].elapsed)),
         Field::new("a_reason", Val::OptStr(summary.types[0].reason)),
         Field::new(
+            "a_resolver",
+            resolver_val(summary.types[0].reason.is_some(), summary.types[0].resolver),
+        ),
+        Field::new(
             "a_last_positive",
             Val::OptU64(summary.types[0].last_positive),
         ),
@@ -580,6 +584,10 @@ fn incident_summary_fields<'a>(
         Field::new("aaaa_elapsed", Val::U64(summary.types[1].elapsed)),
         Field::new("aaaa_reason", Val::OptStr(summary.types[1].reason)),
         Field::new(
+            "aaaa_resolver",
+            resolver_val(summary.types[1].reason.is_some(), summary.types[1].resolver),
+        ),
+        Field::new(
             "aaaa_last_positive",
             Val::OptU64(summary.types[1].last_positive),
         ),
@@ -590,6 +598,14 @@ fn incident_summary_fields<'a>(
         Field::new("aaaa_freshness", Val::OptU64(summary.types[1].freshness)),
         Field::new("aaaa_retirement", Val::OptU64(summary.types[1].retirement)),
     ]
+}
+
+fn resolver_val(emit: bool, origin: Option<u8>) -> Val<'static> {
+    match (emit, origin) {
+        (true, Some(index)) => Val::U64(u64::from(index)),
+        (true, None) => Val::Str("unknown"),
+        (false, _) => Val::OptU64(None),
+    }
 }
 
 fn push_quoted(w: &mut Entry<'_>, key: &[u8], text: &str) -> bool {
@@ -1708,26 +1724,41 @@ impl LogStore {
     /// The startup first-failure warning: exactly one attempt across all
     /// names and record types (docs/alumina-proxy.md:67), enqueued at the time of the
     /// first counted exchange failure inside the startup window.
-    pub(crate) fn startup_warning(&mut self, secs: u64, name: &str, family: Family) {
+    pub(crate) fn startup_warning(
+        &mut self,
+        secs: u64,
+        name: &str,
+        family: Family,
+        reason: &'static str,
+    ) {
         self.set_now(secs);
         let fields = [
             Field::new("secs", Val::U64(secs)),
             Field::new("name", Val::Str(name)),
             Field::new("family", Val::Family(family)),
+            Field::new("reason", Val::Str(reason)),
         ];
         self.enqueue(Level::Warn, Kind::StartupWarning, &fields);
     }
 
     /// One warn per counted exchange failure in the serving loop
     /// (docs/alumina-proxy.md:67): the allowlist name (when the ordinal is
-    /// still recoverable after the exchange settled) and the structural
-    /// failure reason.
-    pub(crate) fn exchange_failed(&mut self, secs: u64, name: Option<&str>, reason: &'static str) {
+    /// still recoverable after the exchange settled), the structural failure
+    /// reason, and the configured-resolver origin (`unknown` when metadata is
+    /// absent).
+    pub(crate) fn exchange_failed(
+        &mut self,
+        secs: u64,
+        name: Option<&str>,
+        reason: &'static str,
+        origin: Option<u8>,
+    ) {
         self.set_now(secs);
         let fields = [
             Field::new("secs", Val::U64(secs)),
             Field::new("name", Val::OptStr(name)),
             Field::new("reason", Val::Str(reason)),
+            Field::new("resolver", resolver_val(true, origin)),
         ];
         self.enqueue(Level::Warn, Kind::ExchangeFailed, &fields);
     }
@@ -1742,6 +1773,7 @@ impl LogStore {
         name: &str,
         family: Family,
         reason: &'static str,
+        origin: Option<u8>,
     ) {
         self.set_now(secs);
         let fields = [
@@ -1749,6 +1781,7 @@ impl LogStore {
             Field::new("name", Val::Str(name)),
             Field::new("family", Val::Family(family)),
             Field::new("reason", Val::Str(reason)),
+            Field::new("resolver", resolver_val(true, origin)),
         ];
         self.enqueue(Level::Warn, Kind::IncidentOpen, &fields);
     }
@@ -1762,6 +1795,7 @@ impl LogStore {
         name: &str,
         family: Family,
         duration: u64,
+        origin: Option<u8>,
     ) {
         self.set_now(secs);
         let fields = [
@@ -1769,6 +1803,7 @@ impl LogStore {
             Field::new("name", Val::Str(name)),
             Field::new("family", Val::Family(family)),
             Field::new("duration", Val::U64(duration)),
+            Field::new("resolver", resolver_val(true, origin)),
         ];
         self.enqueue(Level::Info, Kind::IncidentRecovered, &fields);
     }
@@ -2373,14 +2408,14 @@ mod tests {
     #[test]
     fn logging_encoder_frames_exchange_failed_with_name_and_reason() {
         let (mut store, mut file) = file_logstore();
-        store.exchange_failed(7, Some("sub.example.org"), "tls_identity");
+        store.exchange_failed(7, Some("sub.example.org"), "pin_mismatch", Some(2));
         flush_all(&mut store);
         let out = read_all(&mut file);
         let text = String::from_utf8(out).expect("ascii record");
         let line = text.lines().next().expect("one record");
         assert!(
             line.starts_with(
-                "level=warn kind=exchange_failed secs=7 name=\"sub.example.org\" reason=\"tls_identity\""
+                "level=warn kind=exchange_failed secs=7 name=\"sub.example.org\" reason=\"pin_mismatch\" resolver=2"
             ),
             "got: {line}"
         );
@@ -2389,14 +2424,14 @@ mod tests {
     #[test]
     fn logging_encoder_frames_incident_open_with_family_and_reason() {
         let (mut store, mut file) = file_logstore();
-        store.incident_open(7, "sub.example.org", Family::Aaaa, "tls_identity");
+        store.incident_open(7, "sub.example.org", Family::Aaaa, "pin_mismatch", Some(0));
         flush_all(&mut store);
         let out = read_all(&mut file);
         let text = String::from_utf8(out).expect("ascii record");
         let line = text.lines().next().expect("one record");
         assert!(
             line.starts_with(
-                "level=warn kind=incident_open secs=7 name=\"sub.example.org\" family=Aaaa reason=\"tls_identity\""
+                "level=warn kind=incident_open secs=7 name=\"sub.example.org\" family=Aaaa reason=\"pin_mismatch\" resolver=0"
             ),
             "got: {line}"
         );
@@ -2405,14 +2440,30 @@ mod tests {
     #[test]
     fn logging_encoder_frames_incident_recovered_with_family_and_duration() {
         let (mut store, mut file) = file_logstore();
-        store.incident_recovered(9, "sub.example.org", Family::A, 42);
+        store.incident_recovered(9, "sub.example.org", Family::A, 42, Some(1));
         flush_all(&mut store);
         let out = read_all(&mut file);
         let text = String::from_utf8(out).expect("ascii record");
         let line = text.lines().next().expect("one record");
         assert!(
             line.starts_with(
-                "level=info kind=incident_recovered secs=9 name=\"sub.example.org\" family=A duration=42"
+                "level=info kind=incident_recovered secs=9 name=\"sub.example.org\" family=A duration=42 resolver=1"
+            ),
+            "got: {line}"
+        );
+    }
+
+    #[test]
+    fn logging_encoder_exchange_failed_unknown_origin_is_explicit_quoted() {
+        let (mut store, mut file) = file_logstore();
+        store.exchange_failed(7, Some("sub.example.org"), "pin_mismatch", None);
+        flush_all(&mut store);
+        let out = read_all(&mut file);
+        let text = String::from_utf8(out).expect("ascii record");
+        let line = text.lines().next().expect("one record");
+        assert!(
+            line.starts_with(
+                "level=warn kind=exchange_failed secs=7 name=\"sub.example.org\" reason=\"pin_mismatch\" resolver=\"unknown\""
             ),
             "got: {line}"
         );
@@ -2427,7 +2478,7 @@ mod tests {
         name.push('\x01');
         name.push_str(".example.org");
         let (mut store, mut file) = file_logstore();
-        store.startup_warning(1, &name, Family::A);
+        store.startup_warning(1, &name, Family::A, "timeout");
         flush_all(&mut store);
         let out = read_all(&mut file);
         let text = String::from_utf8(out).expect("escaped ascii");
@@ -2590,6 +2641,7 @@ mod tests {
             Field::new("secs", Val::U64(u64::MAX)),
             Field::new("name", Val::Str(name)),
             Field::new("family", Val::Family(Family::Aaaa)),
+            Field::new("reason", Val::Str("window_closed")),
         ];
         worst.push((
             "startup_warning",
@@ -2694,7 +2746,8 @@ mod tests {
         let exchange = [
             Field::new("secs", Val::U64(u64::MAX)),
             Field::new("name", Val::OptStr(Some(name))),
-            Field::new("reason", Val::Str("tls_identity")),
+            Field::new("reason", Val::Str("pin_mismatch")),
+            Field::new("resolver", resolver_val(true, None)),
         ];
         worst.push((
             "exchange_failed",
@@ -2705,7 +2758,8 @@ mod tests {
             Field::new("secs", Val::U64(u64::MAX)),
             Field::new("name", Val::Str(name)),
             Field::new("family", Val::Family(Family::Aaaa)),
-            Field::new("reason", Val::Str("tls_identity")),
+            Field::new("reason", Val::Str("pin_mismatch")),
+            Field::new("resolver", resolver_val(true, None)),
         ];
         worst.push((
             "incident_open",
@@ -2718,6 +2772,7 @@ mod tests {
             Field::new("name", Val::Str(name)),
             Field::new("family", Val::Family(Family::Aaaa)),
             Field::new("duration", Val::U64(u64::MAX)),
+            Field::new("resolver", resolver_val(true, None)),
         ];
         worst.push((
             "incident_recovered",
@@ -2740,7 +2795,8 @@ mod tests {
                 TypeSummary {
                     start: Some(u64::MAX - 1),
                     elapsed: u64::MAX,
-                    reason: Some("tls_identity"),
+                    reason: Some("pin_mismatch"),
+                    resolver: None,
                     last_positive: Some(u64::MAX),
                     attempts: u64::MAX,
                     failures: u64::MAX,
@@ -2752,7 +2808,8 @@ mod tests {
                 TypeSummary {
                     start: Some(u64::MAX - 1),
                     elapsed: u64::MAX,
-                    reason: Some("tls_identity"),
+                    reason: Some("pin_mismatch"),
+                    resolver: None,
                     last_positive: Some(u64::MAX),
                     attempts: u64::MAX,
                     failures: u64::MAX,
@@ -2839,7 +2896,7 @@ mod tests {
                 addr: resolver.addr(),
                 fqdn: resolver.fqdn(),
                 pin: resolver.pin().is_some(),
-                verdict: ProbeVerdict::Failed(FailureReason::TlsIdentity),
+                verdict: ProbeVerdict::Failed(FailureReason::PinMismatch),
             };
         }
         worst.push((
@@ -2881,6 +2938,15 @@ mod tests {
         assert!(
             probe_len <= RESOLVER_PROBE_MAX,
             "measured resolver_probe worst case {probe_len} within the const bound {RESOLVER_PROBE_MAX}"
+        );
+        let summary_len = worst
+            .iter()
+            .find(|(k, _)| *k == "incident_summary")
+            .expect("summary measured")
+            .1;
+        assert!(
+            summary_len <= 2048,
+            "worst unknown resolver-shape incident summary {summary_len} fits the 2048 B record bound"
         );
         assert!(
             doc.len() <= CONFIG_DOC_LIMIT,
@@ -2992,7 +3058,7 @@ mod tests {
     fn logging_oversize_record_is_dropped_whole_and_counted() {
         let long = "z".repeat(SLOT_BYTES * 2);
         let (mut store, _file) = file_logstore();
-        store.startup_warning(1, &long, Family::A);
+        store.startup_warning(1, &long, Family::A, "timeout");
         assert_eq!(store.dropped(), 1, "oversize record dropped whole");
         assert_eq!(store.len(), 0, "nothing queued for the oversize record");
     }
@@ -3081,7 +3147,7 @@ mod tests {
     fn logging_queue_drops_when_full_and_counts() {
         let (mut store, _file) = file_logstore();
         for _ in 0..(QUEUE_SLOTS + 40) {
-            store.startup_warning(1, "sub.example.org", Family::A);
+            store.startup_warning(1, "sub.example.org", Family::A, "timeout");
         }
         assert!(store.is_full(), "queue must be full after overfilling");
         assert_eq!(store.len(), QUEUE_SLOTS, "capacity never exceeds the bound");
@@ -3098,7 +3164,7 @@ mod tests {
         use crate::enforcement::monitor::{CapturedDetail, SlotCapture};
         let (mut store, _file) = file_logstore();
         for _ in 0..QUEUE_SLOTS {
-            store.startup_warning(1, "sub.example.org", Family::A);
+            store.startup_warning(1, "sub.example.org", Family::A, "timeout");
         }
         assert!(store.is_full(), "ring is full before the monitor summary");
         let mut m = Monitor::new();
@@ -3266,7 +3332,7 @@ mod tests {
     fn logging_drop_counter_saturation_sets_overflow_state() {
         let (mut store, _file) = file_logstore();
         store.saturate_dropped_for_test();
-        store.startup_warning(1, "sub.example.org", Family::A);
+        store.startup_warning(1, "sub.example.org", Family::A, "timeout");
         assert_eq!(
             store.dropped(),
             u64::MAX,
@@ -3280,7 +3346,7 @@ mod tests {
         let (mut store, mut file) = file_logstore();
         let filler = "filler.example.org";
         for _ in 0..(SINK_MAX_BYTES / 512) {
-            store.startup_warning(1, filler, Family::A);
+            store.startup_warning(1, filler, Family::A, "timeout");
         }
         store.drain_sink();
         assert!(
@@ -3354,7 +3420,7 @@ mod tests {
     fn logging_queue_threshold_edges_real_secs_on_enqueue_and_drain() {
         let (mut store, mut file) = file_logstore();
         for _ in 0..249 {
-            store.startup_warning(100, "sub.example.org", Family::A);
+            store.startup_warning(100, "sub.example.org", Family::A, "timeout");
         }
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
@@ -3862,7 +3928,7 @@ mod tests {
         let (mut store, mut file) = file_logstore();
         let mut guard = 0;
         while store.len() < QUEUE_SLOTS - 1 && guard < 8 * QUEUE_SLOTS {
-            store.startup_warning(100, "sub.example.org", Family::A);
+            store.startup_warning(100, "sub.example.org", Family::A, "timeout");
             guard += 1;
         }
         assert_eq!(store.len(), QUEUE_SLOTS - 1, "fill leaves one free slot");
@@ -3901,7 +3967,7 @@ mod tests {
     fn logging_reserved_startup_final_displaces_newest_normal_when_full() {
         let (mut store, mut file) = file_logstore();
         for i in 0..(QUEUE_SLOTS - 1) {
-            store.startup_warning(100, &format!("n{i}.example.org"), Family::A);
+            store.startup_warning(100, &format!("n{i}.example.org"), Family::A, "timeout");
         }
         assert_eq!(
             store.len(),
@@ -3955,7 +4021,7 @@ mod tests {
         assert_eq!(store.len(), QUEUE_SLOTS, "reserved records fill the ring");
         let dropped_before = store.dropped();
         for _ in 0..16 {
-            store.startup_warning(200, "sub.example.org", Family::A);
+            store.startup_warning(200, "sub.example.org", Family::A, "timeout");
         }
         assert_eq!(
             store.dropped(),
@@ -4041,7 +4107,7 @@ mod tests {
         let big = "p".repeat(1000);
         let mut turns = 0;
         while turns < 8 * QUEUE_SLOTS && store.len() < QUEUE_SLOTS {
-            store.startup_warning(1, &big, Family::A);
+            store.startup_warning(1, &big, Family::A, "timeout");
             store.drain_sink();
             turns += 1;
         }
@@ -4056,7 +4122,7 @@ mod tests {
         );
         let dropped_before = store.dropped();
         for _ in 0..16 {
-            store.startup_warning(1, &big, Family::A);
+            store.startup_warning(1, &big, Family::A, "timeout");
         }
         assert_eq!(
             store.dropped(),
@@ -4093,7 +4159,7 @@ mod tests {
         let (mut store, _file) = file_logstore();
         let mut stdout_store = LogStore::new().expect("stdout sink store");
         let ((), counts) = run_phase(Phase::Logging, || {
-            store.startup_warning(1, "sub.example.org", Family::A);
+            store.startup_warning(1, "sub.example.org", Family::A, "timeout");
             for un in unresolved {
                 store.startup_name(2, un);
             }
@@ -4110,16 +4176,16 @@ mod tests {
             store.note_capacity(7, 410, 0);
             store.note_capacity(8, 410, 103);
             for _ in 0..20 {
-                store.startup_warning(9, &long, Family::A);
+                store.startup_warning(9, &long, Family::A, "timeout");
             }
             for _ in 0..(QUEUE_SLOTS + 4) {
-                store.startup_warning(10, "sub.example.org", Family::A);
+                store.startup_warning(10, "sub.example.org", Family::A, "timeout");
             }
             for _ in 0..(SINK_MAX_OPS + 4) {
                 store.drain_sink();
             }
             for _ in 0..(QUEUE_SLOTS + 4) {
-                stdout_store.startup_warning(11, "sub.example.org", Family::A);
+                stdout_store.startup_warning(11, "sub.example.org", Family::A, "timeout");
             }
             for _ in 0..(SINK_MAX_OPS + 4) {
                 stdout_store.drain_sink();
@@ -4136,7 +4202,7 @@ mod tests {
         let (reader, writer) = UnixStream::pair().expect("socketpair");
         drop(reader);
         let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
-        store.startup_warning(1, "sub.example.org", Family::A);
+        store.startup_warning(1, "sub.example.org", Family::A, "timeout");
         store.drain_sink();
         assert!(
             store.sink_has_failed(),
@@ -4167,7 +4233,7 @@ mod tests {
             let (reader, writer) = UnixStream::pair().expect("socketpair");
             drop(reader);
             let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
-            store.startup_warning(1, "sub.example.org", Family::A);
+            store.startup_warning(1, "sub.example.org", Family::A, "timeout");
             store.drain_sink();
             assert!(
                 store.sink_has_failed(),
@@ -4186,7 +4252,7 @@ mod tests {
             let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
             let big = "p".repeat(1000);
             for _ in 0..QUEUE_SLOTS {
-                store.startup_warning(1, &big, Family::A);
+                store.startup_warning(1, &big, Family::A, "timeout");
             }
             let mut turns = 0;
             while store.len() > 0 && turns < 8 * QUEUE_SLOTS {
@@ -4214,7 +4280,7 @@ mod tests {
         let big = "p".repeat(1000);
         let mut guard = 0;
         while guard < 8 * QUEUE_SLOTS && store.len() < QUEUE_SLOTS {
-            store.startup_warning(1, &big, Family::A);
+            store.startup_warning(1, &big, Family::A, "timeout");
             guard += 1;
         }
         assert_eq!(
@@ -4259,7 +4325,7 @@ mod tests {
             let (reader, writer) = UnixStream::pair().expect("socketpair");
             drop(reader);
             let mut epipe = LogStore::with_fd(&writer).expect("pipe sink store");
-            epipe.startup_warning(1, "sub.example.org", Family::A);
+            epipe.startup_warning(1, "sub.example.org", Family::A, "timeout");
             epipe.drain_sink();
             assert!(epipe.sink_has_failed());
             assert_eq!(
@@ -4275,7 +4341,7 @@ mod tests {
         let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
         let big = "p".repeat(1000);
         for _ in 0..QUEUE_SLOTS {
-            store.startup_warning(1, &big, Family::A);
+            store.startup_warning(1, &big, Family::A, "timeout");
         }
         let mut turns = 0;
         while store.len() > 0 && turns < 8 * QUEUE_SLOTS {
@@ -4290,7 +4356,7 @@ mod tests {
         );
 
         let (mut runnable, _file) = file_logstore();
-        runnable.startup_warning(1, "sub.example.org", Family::A);
+        runnable.startup_warning(1, "sub.example.org", Family::A, "timeout");
         assert_eq!(
             runnable.next_drain(now),
             Some(now),
@@ -4305,8 +4371,8 @@ mod tests {
         let (mut reference, mut reference_file) = file_logstore();
         for i in 0..SINK_MAX_OPS {
             let name = format!("host-{i}.example.org");
-            subject.startup_warning(1, &name, Family::A);
-            reference.startup_warning(1, &name, Family::A);
+            subject.startup_warning(1, &name, Family::A, "timeout");
+            reference.startup_warning(1, &name, Family::A, "timeout");
         }
         subject.drain_sink();
         assert_eq!(
@@ -4338,12 +4404,12 @@ mod tests {
         let mut subject = LogStore::with_fd(&writer).expect("pipe sink store");
         let big = "p".repeat(1000);
         for _ in 0..40 {
-            subject.startup_warning(1, &big, Family::A);
+            subject.startup_warning(1, &big, Family::A, "timeout");
         }
         let expected = {
             let (mut reference, mut file) = file_logstore();
             for _ in 0..40 {
-                reference.startup_warning(1, &big, Family::A);
+                reference.startup_warning(1, &big, Family::A, "timeout");
             }
             flush_all(&mut reference);
             read_all(&mut file)
@@ -4401,8 +4467,8 @@ mod tests {
         let (mut reference, mut reference_file) = file_logstore();
         for i in 0..40 {
             let name = format!("host-{i}.sub.example.org");
-            subject.startup_warning(1, &name, Family::A);
-            reference.startup_warning(1, &name, Family::A);
+            subject.startup_warning(1, &name, Family::A, "timeout");
+            reference.startup_warning(1, &name, Family::A, "timeout");
         }
         let enqueued = subject.len();
         subject.drain_sink();
@@ -4459,5 +4525,16 @@ mod tests {
     #[test]
     fn logging_writev_zero_progress_keeps_cursor_and_stream_identical() {
         assert_scripted_stall_preserves_cursor_and_stream(ScriptedFirst::Zero, "zero progress");
+    }
+
+    #[test]
+    fn startup_warning_carries_typed_first_failure_reason() {
+        let (mut store, _file) = file_logstore();
+        store.startup_warning(1, "sub.example.org", Family::A, "pin_mismatch");
+        let text = String::from_utf8_lossy(store.last_record_bytes().expect("one warning queued"));
+        assert!(
+            text.contains("reason=\"pin_mismatch\""),
+            "the first-failure startup warning must expose the typed reason token: {text}"
+        );
     }
 }

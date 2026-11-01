@@ -440,13 +440,14 @@ impl Runtime {
             {
                 self.dns_advances_last_turn += 1;
             }
-            let ordinal = self.serving.storage().dns().active_ordinal();
+            let identity = self.serving.storage().dns().active_identity();
+            let resolver = self.serving.storage().dns().current_resolver_index();
             match self.serving.storage_mut().advance_dns()? {
                 Some(TurnResult::Pending) => {}
                 Some(TurnResult::Failed(reason)) => {
                     self.serving
                         .storage_mut()
-                        .note_exchange_failed(ordinal, reason);
+                        .note_exchange_failed(identity, reason, resolver);
                     break;
                 }
                 None | Some(TurnResult::Published(_)) => break,

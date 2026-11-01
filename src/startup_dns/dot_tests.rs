@@ -677,6 +677,10 @@ fn pinned_dot_wrong_pin_fails_handshake_and_publishes_nothing() {
     assert_eq!(bindings_of(&cache, 0, Family::Aaaa), Vec::new());
     assert_eq!(bindings_of(&cache, 1, Family::A), Vec::new());
     assert_eq!(bindings_of(&cache, 1, Family::Aaaa), Vec::new());
+    match report.outcomes[0] {
+        NameOutcome::Failed(reason) => assert_eq!(reason.as_str(), "pin_mismatch"),
+        _ => panic!("wrong-pin exchange must conclude as a failed name outcome"),
+    }
     drop(responder);
 }
 
@@ -706,6 +710,10 @@ fn pinned_dot_san_mismatch_fails_identity_and_publishes_nothing() {
     assert_eq!(bindings_of(&cache, 0, Family::Aaaa), Vec::new());
     assert_eq!(bindings_of(&cache, 1, Family::A), Vec::new());
     assert_eq!(bindings_of(&cache, 1, Family::Aaaa), Vec::new());
+    match report.outcomes[0] {
+        NameOutcome::Failed(reason) => assert_eq!(reason.as_str(), "san_mismatch"),
+        _ => panic!("SAN-mismatch exchange must conclude as a failed name outcome"),
+    }
     drop(responder);
 }
 
@@ -733,6 +741,10 @@ fn unpinned_dot_with_empty_root_store_rejects_self_signed_and_publishes_nothing(
     assert_eq!(report.resolved_names, 0);
     assert_eq!(bindings_of(&cache, 0, Family::A), Vec::new());
     assert_eq!(bindings_of(&cache, 1, Family::A), Vec::new());
+    match report.outcomes[0] {
+        NameOutcome::Failed(reason) => assert_eq!(reason.as_str(), "no_anchor"),
+        _ => panic!("empty-root exchange must conclude as a failed name outcome"),
+    }
     drop(responder);
 }
 

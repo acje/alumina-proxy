@@ -103,7 +103,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   copied from another document.</p>
   <p class="meta"><strong>Identity pins cited bytes:</strong> the base revision
   above is historical provenance; the mechanically enforced binding is the exact
-  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY 18d9c757f127deb4bc2931cc9b0fa5359cc4a0f436364e7f1d1aea2bf0aa4068</code> —
+  source-content identity SHA-256 <code>SOURCE-CONTENT-IDENTITY 78f1c5f27491657ce34b03ece03a3556c441c1be442700754de609be5264623e</code> —
   a deterministic manifest over the current working-tree source set
   (<code>src/**</code>, <code>tests/*.rs</code>, <code>Cargo.toml</code>,
   <code>Cargo.lock</code>; docs and the specification digest excluded). The
@@ -201,7 +201,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <li><strong>Listener conditionality.</strong> The listener is opened only
     when the startup window’s canonical readiness rule holds — the unresolved
     count must be at most the configured allowance, otherwise the process exits
-    with status 75 (<code>src/serve.rs:98</code>, <code>:974-990</code>,
+    with status 75 (<code>src/serve.rs:98</code>, <code>:1005-1021</code>,
     <code>StartupDecision::{Serve,Exit75,Terminated}</code>). A first observed
     SIGTERM short-circuits the window and never binds.</li>
     <li><strong>Egress only.</strong> Upstream tunnels carry approved hostname
@@ -290,13 +290,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   only <code>std::thread</code> invocation in production code is the
   <code>thread::sleep</code>
   that parks the single thread inside the startup DNS driver
-  (<code>src/startup_dns.rs:25</code>, <code>:2901</code>; <code>resolve_window</code>
+  (<code>src/startup_dns.rs:25</code>, <code>:2964</code>; <code>resolve_window</code>
   runs synchronously on the reactor thread before the listener opens, at
-  <code>src/startup_dns.rs:2787</code>, and the serving-time DNS work is cooperative
+  <code>src/startup_dns.rs:2850</code>, and the serving-time DNS work is cooperative
   per-turn advance, not a second thread). No thread is ever spawned in production —
   the only <code>std::thread::spawn</code>/<code>Builder</code> sites in
   production-adjacent code are <code>#[cfg(test)]</code> doubles
-  (<code>src/serve.rs:1252</code>). The single thread observes traffic, log, DNS,
+  (<code>src/serve.rs:1283</code>). The single thread observes traffic, log, DNS,
   and shutdown readiness in one combined wait
   (<code>docs/alumina-proxy.md:146</code>).</p>
 
@@ -306,7 +306,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   when a startup window (or a test) establishes its own elapsed base
   (<code>src/serve.rs:223</code>; <code>WorkerClock</code> at
   <code>src/worker.rs:97-105</code>; the window anchor read back via
-  <code>window_start</code>, <code>src/startup_dns.rs:1387-1393</code>).</p>
+  <code>window_start</code>, <code>src/startup_dns.rs:1409-1411</code>).</p>
 </section>
 
 <section id="components">
@@ -340,7 +340,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>Cargo.toml:208</code>, <code>:209-213</code>, <code>:214-219</code>);
   two of them, <code>rustls</code> and <code>ring</code>, are direct source
   imports (<code>src/startup_dns.rs:31-38</code> for rustls;
-  <code>:851-853</code> for the ring digest): rustls supplies the
+  <code>:859-861</code> for the ring digest): rustls supplies the
   TLS 1.3 client (<code>default-features = false</code>), and ring is promoted to a
   direct dependency so the strict SPKI pin can hash the server’s SubjectPublicKeyInfo
   directly (rustls keeps its digest surface crate-private). <code>rustls-pki-types</code>
@@ -440,7 +440,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime.rs:159</code>, <code>:193</code>, <code>:213</code>, <code>:275</code>, <code>:359</code>, <code>:434</code></td></tr>
       <tr><th scope="row"><code>serve</code></th>
         <td>Readiness decision (Serve/Exit75/Terminated); <code>run_startup_within</code>; clock anchor and <code>mount_clock</code> re-anchor seam; per-turn incident pass.</td>
-        <td><code>src/serve.rs:98</code>, <code>:107</code>, <code>:223</code>, <code>:423-485</code>, <code>:974-990</code></td></tr>
+        <td><code>src/serve.rs:98</code>, <code>:107</code>, <code>:223</code>, <code>:434-488</code>, <code>:1005-1021</code></td></tr>
       <tr><th scope="row"><code>serving</code></th>
         <td>Slot table, <code>Stage</code> machine (10 stages), accept backoff, admission (503 on capacity), refusal bodies, run_once reactor turn, reset.</td>
         <td><code>src/serving.rs:87-98</code>, <code>:200-202</code>, <code>:340-351</code>, <code>:774-803</code>, <code>:1157</code>, <code>:1263-1308</code></td></tr>
@@ -471,13 +471,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/resolver.rs:215-235</code></td></tr>
       <tr><th scope="row"><code>startup_dns</code></th>
         <td>Nonblocking DNS state machine; exchange deadline 5 s; failback 900 s; CSPRNG tids; retained-resolver reuse; decision window 90 s; typed exchange class.</td>
-        <td><code>src/startup_dns.rs:48-49</code>, <code>:215-223</code>, <code>:2948-2959</code>, <code>:3168-3200</code>, <code>:3520-3597</code></td></tr>
+        <td><code>src/startup_dns.rs:48-49</code>, <code>:215-223</code>, <code>:687</code>, <code>:1393-1397</code>, <code>:3186-3197</code>, <code>:3231-3257</code>, <code>:3583-3637</code></td></tr>
       <tr><th scope="row"><code>log</code></th>
         <td>256 × 2 KiB boot-owned ring; per-turn 16-op/64 KiB drain budget; counted drops; reserved-priority displacement; terminal sink latch.</td>
-        <td><code>src/log.rs:53-59</code>, <code>:1637-1646</code>, <code>:2054-2128</code>, <code>:2099-2107</code>, <code>:2215-2271</code></td></tr>
+        <td><code>src/log.rs:53-59</code>, <code>:1653-1662</code>, <code>:2089-2163</code>, <code>:2134-2142</code>, <code>:2250-2306</code></td></tr>
       <tr><th scope="row"><code>incident_report</code></th>
         <td>Per-name windowed incident reporting (3600 s window), sticky snapshots, eligible-binding transition tracking.</td>
-        <td><code>src/incident_report.rs:14-15</code>, <code>:99-110</code>, <code>:242-250</code></td></tr>
+        <td><code>src/incident_report.rs:14-15</code>, <code>:102-113</code>, <code>:247-252</code></td></tr>
       <tr><th scope="row"><code>inventory</code></th>
         <td>Fixed-storage plan: traffic store, serving workspace, DNS named buffers, log queue; the printed lower bound.</td>
         <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code></td></tr>
@@ -851,7 +851,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 
   <p>Alumina performs its own resolution over one retained transport with one
   outstanding query — <code>StartupDns</code> is a hand-rolled nonblocking state
-  machine over a single reusable connection (<code>src/startup_dns.rs:1147-1282</code>).
+  machine over a single reusable connection (<code>src/startup_dns.rs:1173</code>).
   It carries four control planes: the refresh schedule per name × family, resolver
   failover on counted failure, failback after relocation, and sensor probes that
   never apply cache state. This section covers the classifier, the DoT profile,
@@ -878,17 +878,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   end-entity certificate’s SPKI compared against the pin when one is configured,
   and TLS 1.2/1.3 handshake-signature verification with the configured provider
   algorithms — the peer must prove possession of the pinned certificate’s private
-  key (<code>src/startup_dns.rs:839-888</code>; the verifier at
-  <code>:840</code> with SAN and pin checks at <code>:849-856</code> and
-  signature checks at <code>:873-888</code>). Certificate validity-window
+  key (<code>src/startup_dns.rs:847-896</code>; the verifier at
+  <code>:848</code> with SAN and pin checks at <code>:857-864</code> and
+  signature checks at <code>:881-896</code>). Certificate validity-window
   exclusion is best-effort and counted only when the DER validity parse succeeds
-  (<code>:858-860</code>, <code>expired_pin_certs</code>); the DER walk fails
-  open (<code>cert_outside_validity_window</code>, <code>:1092-1098</code>), so a
+  (<code>:866-868</code>, <code>expired_pin_certs</code>); the DER walk fails
+  open (<code>cert_outside_validity_window</code>, <code>:1100-1106</code>), so a
   parse anomaly reports no warning rather than a rejection — pin-or-nothing and
   fail-open validity parsing stay distinct facts. Without a pin, chain validation
   runs against an explicitly empty root store and therefore always fails — a
   deliberate “no trust anchors yet” position that surfaces as startup warnings
-  (<code>src/startup_dns.rs:863-870</code>, <code>src/main.rs:127-143</code>). The
+  (<code>src/startup_dns.rs:871-878</code>, <code>src/main.rs:127-143</code>). The
   result is deliberate: a pin is the only trust. “<code>IP#fqdn</code> without
   pin” is a deterministically unusable resolver rather than a degraded one.</p>
 
@@ -987,7 +987,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>Serving::run_startup_window</code> attaches the retained DNS transport
   to the serving poll <em>before</em> selection starts and advances the exchange
   per turn with an <code>ExchangeClass::Startup</code> exchange
-  (<code>src/serving/startup.rs:42-96</code>, <code>:147</code>), so a first
+  (<code>src/serving/startup.rs:42-96</code>, <code>:152</code>), so a first
   observed SIGTERM during the window is seen within one bounded poll instead of
   being invisible for the window’s full duration.</p>
   <p>Only fully validated outcomes reach the cache: <code>dns::apply_outcome</code>
@@ -1015,42 +1015,108 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p><code>ExchangeClass</code> — <code>Startup</code>, <code>Serving</code>, or
   <code>Probe</code> — is a parameter of the single <code>start_exchange</code>
   call, so an exchange’s class is fixed at its start seam rather than by a later
-  mark (<code>src/startup_dns.rs:215-223</code>, <code>:2948-2959</code>; the
+  mark (<code>src/startup_dns.rs:215-223</code>, <code>:3011-3049</code>; the
   class is stored on the <code>ActiveExchange</code>). The retained-resolver
   refresh path requests a <code>Serving</code> exchange
   (<code>src/runtime.rs:359</code>; <code>start_dns_exchange</code> in
-  <code>src/serve.rs:767</code>), and a cooperative startup window requests
-  <code>Startup</code> (<code>src/serving/startup.rs:147</code>). Per-turn
+  <code>src/serve.rs:798</code>), and a cooperative startup window requests
+  <code>Startup</code> (<code>src/serving/startup.rs:152</code>). Per-turn
   cleanup cancels exactly the <code>Startup</code>-class retained work while
   serving exchanges stay outstanding:
   <code>cancel_retained_startup_exchange</code>
-  (<code>src/startup_dns.rs:1606-1614</code>, driven from
+  (<code>src/startup_dns.rs:1651-1657</code>, driven from
   <code>src/runtime.rs:275</code>) is scoped to the startup class by the typed
   lifecycle, so no servicing or probe exchange is ever cancelled as leftover
   startup work. Overlap fails closed: a second <code>start_exchange</code> while
   one is active returns <code>ExchangeActive</code> and leaves the outstanding
   exchange, its schedule accounting, and its connection untouched
-  (<code>src/startup_dns.rs:2957-2959</code>).</p>
+  (<code>src/startup_dns.rs:3020-3022</code>).</p>
   <p>The DoT serving path refreshes on a single connection with a 5 s exchange
   deadline (<code>EXCHANGE_DEADLINE_SECS</code>, <code>src/startup_dns.rs:48</code>):
   a failed handshake forces a full reconnect — and a fresh rustls configuration —
-  on the next exchange (<code>:2083-2117</code>, <code>build_tls_connection</code>
-  at <code>:1113-1132</code>), with retries governed by the schedule backoff
-  ladder [1,2,4,8,16,30] (<code>src/schedule.rs:16</code>). Failover relocates to
+  on the next exchange (<code>:2117-2157</code>, <code>build_tls_connection</code>
+  at <code>:1121-1140</code>), with retries governed by the schedule backoff
+  ladder [1,2,4,8,16,30] (<code>src/schedule.rs:16</code>). The kept failure reason distinguishes a pin <code>SPKI</code> mismatch, a <code>SAN</code>/name mismatch, and a missing trust anchor from generic rustls protocol/socket/<code>EOF</code> causes: the cause is captured at the handshake probe and preserved through the initial flight into <code>note_failure</code>. Failover relocates to
   the next resolver on counted failures
-  (<code>on_exchange_failed</code>, <code>src/startup_dns.rs:3520-3597</code>);
+  (<code>on_exchange_failed</code>, <code>src/startup_dns.rs:3583-3637</code>);
   failback returns after a 900 s grace with three consecutive successes
-  (<code>FAILBACK_AFTER_SECS</code>, <code>src/startup_dns.rs:679</code>;
-  <code>maybe_begin_failback</code> at <code>:3168-3200</code>,
-  <code>on_exchange_succeeded</code> at <code>:3598-3638</code>). Sensor probes
+  (<code>FAILBACK_AFTER_SECS</code>, <code>src/startup_dns.rs:687</code>;
+  <code>maybe_begin_failback</code> at <code>:3231-3257</code>,
+  <code>on_exchange_succeeded</code> at <code>:3661-3700</code>). Sensor probes
   run behind the post-window sweep and sustained-negative corroboration and never
-  apply cache state (<code>maybe_begin_sweep</code> <code>:3222-3245</code>,
-  <code>sweep_next_probe</code> <code>:3310-3350</code>,
-  <code>step_corroboration</code> <code>:3374-3416</code>). A relocation that
+  apply cache state (<code>maybe_begin_sweep</code> <code>:3285-3305</code>,
+  <code>sweep_next_probe</code> <code>:3373-3406</code>,
+  <code>step_corroboration</code> <code>:3437-3473</code>). A relocation that
   would downgrade a DoT entry from TLS to plain DNS is counted as a
   <code>dp</code> monitor fact and never performed silently
   (<code>note_downgrade_if_dot_to_plain</code>,
-  <code>src/startup_dns.rs:3200-3221</code>; <code>src/resolver.rs:215-235</code>).</p>
+  <code>src/startup_dns.rs:3263-3277</code>; <code>src/resolver.rs:215-235</code>).</p>
+  <p>The retained transport also records a fixed configured-resolver origin on its
+  incident notes, captured at the failure instant so provenance survives failover: every non-probe
+  exchange failure captures the zero-based configured-resolver index active when
+  the exchange failed — before the failover state machine relocates or restores
+  it — into a per-name, per-family latest-failure table
+  (<code>last_failed</code>, <code>src/startup_dns.rs:1217</code>) and onto
+  <code>IncidentNote::Open</code> (<code>src/startup_dns.rs:1152-1169</code>); a
+  serving recovery names the resolver that actually performed it, read at the
+  published-success path (<code>src/startup_dns.rs:2600-2605</code>; an absent
+  resolver set is <code>None</code>, never the primary). The origin is recorded
+  by <code>note_failure</code> (<code>src/startup_dns.rs:3702-3736</code>) from
+  the bounded active-resolver index only, never from untrusted integers, and
+  the per-name, per-family write lands only after the schedule validates the
+  failure; probes never write it and recovery never clears it (historical
+  sticky), while a serving exchange's success never relocates or resets the
+  active index — only the failback counter advances. The per-event actor is
+  emitted immediately with the failed-exchange cause: the serving-loop
+  <code>exchange_failed</code> record's <code>resolver=</code> names the
+  active-resolver index captured before that advance — a pure-sensor Probe or
+  corroboration failure too, since those never write the name-history table,
+  and none of that capture mutates any name, report, or probe metadata; the
+  per-event <code>exchange_failed</code> actor is captured before the advance
+  that settles it (<code>cooperative_dns_turn</code>,
+  <code>src/runtime.rs:437-457</code>). The incident-open and
+  incident-recovery records instead carry the actor captured at the event
+  itself, never a saved-table read at emission: <code>note_failure</code>
+  places the failing origin into <code>IncidentNote::Open</code>
+  (<code>src/startup_dns.rs:3727-3732</code>), the published-success path
+  places the resolver that actually served into <code>IncidentNote::Recovered</code>
+  (<code>src/startup_dns.rs:2600-2605</code>; a recovery after failover reads
+  <code>1</code> where the failure origin read <code>0</code>), and
+  <code>drain_incident_notes</code> (<code>src/serve.rs:732-767</code>) hands
+  each carried actor straight to the <code>incident_open</code>/
+  <code>incident_recovered</code> emitters. Only the per-family summary pairs
+  <code>a_resolver</code>/<code>aaaa_resolver</code> beside each family
+  <code>reason</code>, read from the immutable <code>ClosedWindow</code> failure
+  snapshot — the frozen closed tuple <code>closed.incident[i]</code> at
+  <code>emit_incident_summary</code> (<code>src/serve.rs:493-553</code>), seeded
+  by the per-name/family <code>last_failed</code> table and reason at failure
+  time, never a live current-actor lookup at encoding;
+  every record carries <code>resolver=0</code>… or explicit
+  <code>resolver="unknown"</code> when metadata is absent — no resolver field
+  appears beside a healthy family (no reason present). Eligible loss/recovery records remain
+  name-scoped and never fabricate a resolver.</p>
+  <p>The <code>startup_warning</code> record (serializer at
+  <code>src/log.rs:1727-1742</code>) carries the first observed exchange failure's
+  typed cause in <code>reason=</code> and is enqueued at most once, only after the
+  first observed failure: a failure-free startup window enqueues none, and the
+  best-effort sink may drop before its drain, so delivery is not guaranteed. It is
+  latched behind the first counted failure, where <code>StartupDns::resolve_window</code>
+  emits it on the first <code>ExchangeResult::Failed</code>
+  (<code>src/startup_dns.rs:2940-2942</code>), and the cooperative
+  <code>Serving::run_startup_window</code> reaches the same record through
+  <code>ServeStorage::startup_warning_first</code>
+  (<code>src/serving/startup.rs:116-121</code>, <code>src/serve.rs:772-783</code>).
+  The once-guard means <code>reason=</code> is populated only by an actually
+  observed failure — never fabricated for an unattempted or successful exchange —
+  while <code>startup_name</code> stays immutable and
+  <code>startup_final</code> keeps its existing schema.</p>
+  <p>In the post-window probe sweep's <code>resolver_probe</code> verdict log, the
+  verdict <code>not_probed</code> means the resolver was skipped by the sweep, not
+  that it was unused or failed: the resolver already exercised as the active
+  resolver during the startup window must carry <code>not_probed</code>
+  (<code>docs/alumina-proxy.md:640,647</code>), separate from
+  <code>ok</code>/<code>failed</code> outcome verdicts. No new verdict or record
+  field is added beyond that existing taxonomy.</p>
   <p>The reconnect cost of that single-connection refresh path is an as-built
   measured quantity on the pinned native Linux release binary 4cce1daab61f
   (§7.2) against a strict-pinned loopback DoT responder
@@ -1399,7 +1465,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>[[Ja4BaselineEntry;16];32]</code> = 512 × 36 B = 18 432 B
   (<code>src/serving.rs:584-619</code>), the 64-entry capture ring
   (<code>src/enforcement/monitor.rs:11-115</code>), 32 incident windows plus
-  512 slot markers (<code>src/incident_report.rs:243-244</code>), and the
+  512 slot markers (<code>src/incident_report.rs:249</code>), and the
   enforcement control table <code>[Control;4]</code> with two
   <code>[PerFqdnControl;32]</code> (<code>src/enforcement/action.rs:161-232</code>).</p>
   <p>Within the serving workspace the inspector dominates: each
@@ -1429,9 +1495,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>epoll_wait</code> writing into the pre-existing buffer, and it is
   exercised by the steady-state allocation witnesses in
   <code>src/serving/tests.rs</code>.</p>
-  <p>The measured witness basis, on the native Linux candidate pinned by the
-  header's exact source-content identity (HEAD 3a7b4a9451f78c, release
-  4cce1daab61f, toolchain 1.99.0, alloc-witness enabled): two focused
+  <p>The measured witness basis below is historical evidence, recorded on the
+  native Linux candidate at its original revision (HEAD 3a7b4a9451f78c, release
+  4cce1daab61f, toolchain 1.99.0, alloc-witness enabled) — distinct from, and not
+  rebound to, the current header source-content identity, and therefore not a
+  claim of current-candidate native measurement. Two focused
   alloc-witness tests assert <code>Counts::all_zero()</code> — allocations,
   deallocations, reallocations, and unphased counts all zero — over the
   <code>Runtime::turn → Serving::run_once</code> poll/pump paths:
@@ -1439,11 +1507,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/runtime/tests.rs:177</code>, Serving phase, 17 hot relays + stalled
   DNS + backlog + expiry across 900 owner turns) and
   <code>due_refresh_owner_path_spends_zero_allocations</code>
-  (<code>src/runtime/tests.rs:2346</code>, BackgroundRefresh phase, 200 owner
+  (<code>src/runtime/tests.rs:2713</code>, BackgroundRefresh phase, 200 owner
   turns). A separate pointer-transfer witness, not a numeric allocation
   witness, covers the second claim:
   <code>serving_consumes_boot_traffic_buffers_by_value_not_reallocation</code>
-  (<code>src/serving/tests.rs:127</code>) asserts the boot traffic slabs transfer
+  (<code>src/serving/tests.rs:128</code>) asserts the boot traffic slabs transfer
   into the slot workspaces by value: <code>slots[0].buf</code> and
   <code>slots[511].down</code> keep the <code>TrafficStorage</code>
   allocation pointers, so no second traffic allocation occurs when the serving
@@ -1463,7 +1531,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (boot init is exempt; shutdown exits without deallocating), with one
   authorised first-party exception: each DoT dial builds its TLS state at the
   per-connect setup seam <code>build_tls_connection</code>
-  (<code>src/startup_dns.rs:1101-1120</code>, called from <code>:2085-2090</code>),
+  (<code>src/startup_dns.rs:1121-1140</code>, called at <code>:2131</code> in
+  <code>upgrade_to_tls</code> <code>:2117-2157</code>),
   which the specification records as the authorised first-party allocation point
   (<code>docs/alumina-proxy.md:625-627</code>). Dependency behaviour is a separate
   bounded seam outside the first-party scope: the pinned rustls performs
@@ -1473,8 +1542,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   must not allocate or reallocate (<code>counts.reallocs == 0</code>), while the
   bounded rustls seam — the dependency scope — may allocate at most
   <code>WARM_DOT_ALLOC_BOUND = 8</code> and deallocate at most 8 independently
-  (<code>src/startup_dns/dot_tests.rs:1371-1381</code>, <code>:1435-1472</code>;
-  per-TLS-upgrade allocation at <code>src/startup_dns.rs:2067-2091</code>). That
+  (<code>src/startup_dns/dot_tests.rs:1383-1393</code>, <code>:1447-1484</code>;
+  per-TLS-upgrade allocation at <code>src/startup_dns.rs:2117-2157</code>). That
   is a calibrated fixture bound — total heap activity on that single warm
   exchange, distinct from the retained named storage the inventory reports — never
   a universal or total-event maximum. The boot-window zero-allocation witness is
@@ -1495,7 +1564,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   most every <code>TIMER_RECHECK_EVERY = 256</code> ready-slots or I/O ops
   (<code>src/serving.rs:111</code>), and per-turn DNS progress advances toward the
   shared deadline by at most <code>DNS_ADVANCE_BOUND = 8</code> cooperative steps
-  (<code>src/runtime.rs:24</code>, <code>:434-453</code>), so a chatty or stalled
+  (<code>src/runtime.rs:24</code>, <code>:434-454</code>), so a chatty or stalled
   peer can never starve traffic within a turn. Every dispatched token is
   generation-tagged — low bits are the local id, high bits the slot generation —
   so a stale event for a reused slot index is dropped before any socket is
@@ -1565,35 +1634,35 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>Logging is a fixed 256-slot × 2 KiB ring (512 KiB) owned at boot
   (<code>QUEUE_SLOTS = 256</code>, <code>SLOT_BYTES = 2 * 1024</code>,
   <code>src/log.rs:53-54</code>), retained as <code>LogStore</code> for process
-  lifetime (<code>src/log.rs:1429-1441</code>), encoded in place, and drained by a
+  lifetime (<code>src/log.rs:1445-1457</code>), encoded in place, and drained by a
   single nonblocking <code>write_vectored</code> under a per-turn budget of 16
   fragments / 64 KiB (<code>SINK_MAX_OPS = 16</code>, <code>SINK_MAX_BYTES = 64 * 1024</code>,
-  <code>src/log.rs:66-67</code>, <code>:2054-2128</code>). Three properties are
+  <code>src/log.rs:66-67</code>, <code>:2089-2163</code>). Three properties are
   architectural:</p>
   <ol>
     <li><strong>The sink can never stall serving.</strong> fd 1 is made
     nonblocking once, after boot, by the binary only
-    (<code>prepare_stdout</code>, <code>src/log.rs:1579-1590</code>), and
+    (<code>prepare_stdout</code>, <code>src/log.rs:1595-1606</code>), and
     <code>write_vectored</code> either progresses or latches a recoverable
     backpressure condition — <code>WouldBlock</code>, <code>Interrupted</code>, or
     a zero-progress write — keeping the retained cursor and the 100 ms retry
-    (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:2091-2111</code>).
+    (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:2126-2146</code>).
     None of the three sets the persistent failed latch, so none can trigger the
-    sink-failure exit (<code>sink_has_failed</code>, <code>src/log.rs:1697</code>).
+    sink-failure exit (<code>sink_has_failed</code>, <code>src/log.rs:1713</code>).
     <code>tests/stdout_stall.rs</code> and <code>tests/monitor_stdout.rs</code>
     witness the full-pipe case; the injected Interrupted and zero-progress cases
     are witnessed by
     <code>logging_writev_interrupted_keeps_cursor_and_stream_identical</code> and
     <code>logging_writev_zero_progress_keeps_cursor_and_stream_identical</code>
-    (<code>src/log.rs:4451-4461</code>).</li>
+    (<code>src/log.rs:4517-4528</code>).</li>
     <li><strong>Drops are always counted, never silent.</strong> Ring-full and
-    encode-failure both <code>drop_one</code> (<code>src/log.rs:2273-2278</code>),
+    encode-failure both <code>drop_one</code> (<code>src/log.rs:2308-2313</code>),
     a hard sink error drops the whole queue <em>through the same counter</em>
-    (<code>:2099-2107</code>), and exit paths strand-count the residue
-    (<code>strand_queued</code>, <code>src/log.rs:1668-1677</code>).</li>
+    (<code>:2134-2142</code>), and exit paths strand-count the residue
+    (<code>strand_queued</code>, <code>src/log.rs:1684-1693</code>).</li>
     <li><strong>Priority classes exist.</strong> A reserved record can displace
     the newest normal record on a full ring rather than being dropped
-    (<code>enqueue_reserved</code>, <code>src/log.rs:2215-2271</code>) — the
+    (<code>enqueue_reserved</code>, <code>src/log.rs:2250-2306</code>) — the
     mechanism that keeps shutdown/fatal evidence from being evicted by a monitor
     burst.</li>
   </ol>
@@ -1601,17 +1670,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>8.2 The terminal sink state and its failure consequences</h3>
   <div class="callout amber" role="note">
     <p>Once the sink latches <code>failed</code>, <code>next_drain</code> returns
-    <code>None</code> forever (<code>src/log.rs:1637-1646</code>): a broken stdout
+    <code>None</code> forever (<code>src/log.rs:1653-1662</code>): a broken stdout
     permanently ends observability. There is no second sink: boot diagnostics use
     stderr (<code>src/main.rs:65-80</code>, <code>:145-148</code>), but once the
     log store owns stdout there is no fallback channel
-    (<code>src/log.rs:1401-1414</code>). The latch is sticky state: no later
+    (<code>src/log.rs:1417-1430</code>). The latch is sticky state: no later
     drain consumes or clears it, so a non-owner drain — the startup-window
-    drains (<code>src/serve.rs:1170</code>, <code>src/serving/startup.rs:184</code>,
-    <code>src/startup_dns.rs:2890</code>, <code>:3101</code>) or the
-    resolver-probe drain (<code>src/serve.rs:885</code>) — that latches the sink
+    drains (<code>src/serve.rs:1201</code>, <code>src/serving/startup.rs:189</code>,
+    <code>src/startup_dns.rs:2953</code>, <code>:3164</code>) or the
+    resolver-probe drain (<code>src/serve.rs:916</code>) — that latches the sink
     is still observed by the first serving owner turn
-    (<code>sink_has_failed</code>, <code>src/log.rs:1697-1699</code>). The
+    (<code>sink_has_failed</code>, <code>src/log.rs:1713-1715</code>). The
     serving owner therefore exits <code>EX_IOERR</code> (74) at the owner-turn
     boundary: after the per-turn drain it reads that latch and exits in place
     unless shutdown has begun (<code>src/runtime.rs:293-296</code>); a
@@ -1628,12 +1697,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>8.3 Incident reporting</h3>
   <p><code>IncidentReport</code> is the second observability axis: 32 preallocated
   per-name windows (<code>names: [NameReport; ALLOWLIST_MAX]</code>,
-  <code>src/incident_report.rs:99-119</code>) with <code>REPORT_WINDOW_SECS =
+  <code>src/incident_report.rs:102-122</code>) with <code>REPORT_WINDOW_SECS =
   3600</code> <em>recorded</em> rotation (<code>src/incident_report.rs:14</code>),
   coalesced skipped windows, sticky per-window incident snapshots, and
-  eligible-binding transition tracking (<code>src/incident_report.rs:99-181</code>,
-  <code>:242-250</code>). Its per-turn pass over all names
-  (<code>src/serve.rs:423-485</code>) is O(32) and bounded, but it runs every turn
+  eligible-binding transition tracking (<code>src/incident_report.rs:102-184</code>,
+  <code>:247-252</code>). Its per-turn pass over all names
+  (<code>src/serve.rs:434-488</code>) is O(32) and bounded, but it runs every turn
   regardless of whether any window is near a boundary — a small, constant,
   always-on cost.</p>
 
@@ -1675,7 +1744,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   operator’s log-loss signal for the terminal-sink latch of §8.2 — the one
   failure surface where log loss is counted and observability ends, so the
   process exits rather than continue externally unreportable
-  (<code>src/log.rs:1637-1646</code>, <code>:2099-2107</code>).</p>
+  (<code>src/log.rs:1653-1662</code>, <code>:2134-2142</code>).</p>
 
   <table>
     <caption>Table 8 — Exit codes and HTTP degradation surfaces.</caption>
@@ -1703,7 +1772,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         has begun; recoverable backpressure (WouldBlock, Interrupted,
         zero-progress) never sets the latch and never exits</td>
         <td><code>src/runtime.rs:30</code>, <code>:293-296</code>;
-        <code>src/log.rs:2099-2111</code>, <code>:1697</code></td></tr>
+        <code>src/log.rs:2134-2146</code>, <code>:1713</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
         <td><code>src/main.rs:23</code>, <code>:103</code>; <code>src/serve.rs:98</code></td></tr>
@@ -1727,8 +1796,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         (unless shutdown has begun) — the exit is the operator’s log-loss
         signal, since the in-memory <code>dropped</code> counter cannot be
         emitted through the failed sink</td>
-        <td><code>src/log.rs:2099-2107</code>, <code>:1697-1699</code>,
-        <code>:1637-1646</code>; <code>src/runtime.rs:293-296</code></td></tr>
+        <td><code>src/log.rs:2134-2142</code>, <code>:1713-1715</code>,
+        <code>:1653-1662</code>; <code>src/runtime.rs:293-296</code></td></tr>
     </tbody>
   </table>
 </section>
@@ -1828,13 +1897,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <li><strong>DoT is pin-or-nothing.</strong> With a pin, the peer is
     authenticated by SPKI + SNI/SAN matching and TLS 1.2/1.3 handshake-signature
     verification — possession of the pinned certificate's private key
-    (<code>src/startup_dns.rs:839-888</code>). Without a
+    (<code>src/startup_dns.rs:847-896</code>). Without a
     pinned SPKI, chain validation fails deterministically (empty root store) and
     the resolver is unusable with a startup warning — there is no CA-validated
-    mode in the current build (<code>src/startup_dns.rs:863-870</code>).</li>
+    mode in the current build (<code>src/startup_dns.rs:871-878</code>).</li>
     <li><strong>Failover never downgrades identity.</strong> Relocations cannot
     silently swap a DoT entry to plain DNS; a downgrade is counted as a
-    <code>dp</code> fact (<code>src/startup_dns.rs:3200-3221</code>).</li>
+    <code>dp</code> fact (<code>src/startup_dns.rs:3263-3277</code>).</li>
     <li><strong>Trust is homogeneous or boot fails.</strong> A mixed-trust
     resolver set is rejected at configuration time
     (<code>src/config.rs:827-842</code>).</li>
@@ -1865,7 +1934,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/preflight.rs:96-116</code>; <code>src/main.rs:23-24</code>;
         <code>src/boot.rs:7</code></td></tr>
       <tr><th scope="row">Listener conditionality / readiness rule</th>
-        <td><code>src/serve.rs:98</code>, <code>:974-990</code>;
+        <td><code>src/serve.rs:98</code>, <code>:1005-1021</code>;
         <code>src/startup_dns.rs:49</code>; spec <code>docs/alumina-proxy.md:110</code></td></tr>
       <tr><th scope="row">early_data block scope connection-only; the
       <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
@@ -1874,8 +1943,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>:1415-1450</code> (test); <code>docs/alumina-proxy.md:1018-1020</code>,
         <code>:822-828</code></td></tr>
       <tr><th scope="row">DoT seam allocation profile (warm fixture bound 8)</th>
-        <td><code>src/startup_dns.rs:1101-1120</code>, <code>:2083-2117</code>;
-        <code>src/startup_dns/dot_tests.rs:1379</code>, <code>:1437-1472</code>;
+        <td><code>src/startup_dns.rs:1121-1140</code>, <code>:2117-2157</code>;
+        <code>src/startup_dns/dot_tests.rs:1391</code>, <code>:1449-1484</code>;
         <code>src/startup_dns/tests.rs:1247-1252</code>, <code>:1283-1284</code></td></tr>
       <tr><th scope="row">Memory floor (printed named-buffer plan)</th>
         <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code>,
@@ -1884,11 +1953,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/client_hello.rs:6-21</code>, <code>:410-419</code></td></tr>
       <tr><th scope="row">Trust-verification dependency seam</th>
         <td><code>Cargo.toml:208</code>, <code>:209-213</code>, <code>:214-219</code>;
-        <code>src/startup_dns.rs:36</code>, <code>:851-853</code></td></tr>
+        <code>src/startup_dns.rs:36</code>, <code>:859-861</code></td></tr>
       <tr><th scope="row">Exchange class typed at the start seam</th>
-        <td><code>src/startup_dns.rs:215-223</code>, <code>:2948-2959</code>,
-        <code>:1606-1614</code>; <code>src/runtime.rs:275</code>, <code>:359</code>;
-        <code>src/serve.rs:767</code>; <code>src/serving/startup.rs:147</code></td></tr>
+        <td><code>src/startup_dns.rs:215-223</code>, <code>:3011-3049</code>,
+        <code>:1651-1657</code>; <code>src/runtime.rs:275</code>, <code>:359</code>;
+        <code>src/serve.rs:798</code>; <code>src/serving/startup.rs:152</code></td></tr>
       <tr><th scope="row">Slot reset reinitializes metadata (retained traffic
       slabs not zeroized)</th>
         <td><code>src/serving.rs:774-803</code></td></tr>
@@ -1897,11 +1966,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/runtime.rs:213</code>; <code>src/bin/parser_bench.rs:1-9</code>,
         <code>:45</code></td></tr>
       <tr><th scope="row">Terminal sink state</th>
-        <td><code>src/log.rs:2099-2107</code>, <code>:1697-1699</code>,
-        <code>:1637-1646</code>, <code>:1668-1677</code></td></tr>
+        <td><code>src/log.rs:2134-2142</code>, <code>:1713-1715</code>,
+        <code>:1653-1662</code>, <code>:1684-1693</code></td></tr>
       <tr><th scope="row">Single clock / mount_clock re-anchor</th>
         <td><code>src/serve.rs:223</code>; <code>src/worker.rs:97-105</code>;
-        <code>src/startup_dns.rs:1387-1393</code></td></tr>
+        <code>src/startup_dns.rs:1409-1411</code></td></tr>
       <tr><th scope="row">Per-entry CNAME bailiwick</th>
         <td><code>src/dns.rs:863-953</code>; <code>src/config.rs:1244-1262</code></td></tr>
       <tr><th scope="row">Stage machine (10 variants vs 9-step path)</th>
@@ -1923,11 +1992,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Monitor facts (10 recorders)</th>
         <td><code>src/enforcement/monitor.rs:12-26</code>, <code>:178-290</code></td></tr>
       <tr><th scope="row">Log ring / drain / priority</th>
-        <td><code>src/log.rs:53-72</code>, <code>:1429-1441</code>,
-        <code>:1637-1646</code>, <code>:2054-2128</code>, <code>:2215-2271</code></td></tr>
+        <td><code>src/log.rs:53-72</code>, <code>:1445-1457</code>,
+        <code>:1653-1662</code>, <code>:2089-2163</code>, <code>:2250-2306</code></td></tr>
       <tr><th scope="row">Incident report</th>
-        <td><code>src/incident_report.rs:14-15</code>, <code>:99-181</code>,
-        <code>:242-250</code>; <code>src/serve.rs:423-485</code></td></tr>
+        <td><code>src/incident_report.rs:14-15</code>, <code>:102-184</code>,
+        <code>:247-252</code>; <code>src/serve.rs:434-488</code></td></tr>
       <tr><th scope="row">DNS parse / bailiwick / tid+question match / RCODE</th>
         <td><code>src/dns.rs:366-428</code>, <code>:863-953</code>,
         <code>:983-1027</code>, <code>:1181-1183</code>, <code>:1199-1230</code></td></tr>
@@ -1935,15 +2004,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/resolver.rs:215-235</code></td></tr>
       <tr><th scope="row">Startup DNS machine / deadlines / failover / failback /
       probes</th>
-        <td><code>src/startup_dns.rs:48-49</code>, <code>:2787</code>,
-        <code>:2901</code>, <code>:2948-2959</code>, <code>:3168-3200</code>,
-        <code>:3222-3245</code>, <code>:3310-3350</code>, <code>:3374-3416</code>,
-        <code>:3520-3597</code></td></tr>
+        <td><code>src/startup_dns.rs:48-49</code>, <code>:2850</code>,
+        <code>:2964</code>, <code>:3186-3197</code>,
+        <code>:3231-3257</code>, <code>:3285-3305</code>, <code>:3373-3406</code>, <code>:3437-3473</code>,
+        <code>:3583-3637</code></td></tr>
       <tr><th scope="row">Single-reactor / run_once / events swap</th>
         <td><code>src/serving.rs:117</code>, <code>:1263-1308</code>;
         <code>src/runtime.rs:159</code>, <code>:193</code></td></tr>
       <tr><th scope="row">DoT trust / pin-or-nothing</th>
-        <td><code>src/startup_dns.rs:839-888</code>, <code>:1088-1098</code>;
+        <td><code>src/startup_dns.rs:847-896</code>, <code>:1100-1106</code>;
         <code>src/main.rs:127-143</code></td></tr>
       <tr><th scope="row">Printed lower bound (214 665 002)</th>
         <td><code>src/main.rs:34-40</code>; <code>src/inventory.rs:192-196</code></td></tr>

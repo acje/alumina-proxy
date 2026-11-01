@@ -113,7 +113,12 @@ impl Serving {
                                 ex_family,
                             ));
                             let now = self.storage.dns().now_u64();
-                            self.storage.startup_warning_first(now, ordinal, ex_family);
+                            self.storage.startup_warning_first(
+                                now,
+                                ordinal,
+                                ex_family,
+                                reason.as_str(),
+                            );
                         }
                         ledger.mark_failed(ordinal, reason);
                     }

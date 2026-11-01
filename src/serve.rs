@@ -402,17 +402,20 @@ impl ServeStorage {
     }
 
     /// The per-family incident snapshot for one allowlist name, read from the
-    /// schedule's current `TypeIncident` state: the opened-at second and latest
-    /// failure reason for each family currently in incident, `None` otherwise.
-    /// Used to seed the incident report's sticky per-window snapshot when a
-    /// window opens, so the closing summary reflects the window's actual
-    /// incident activity even when the incident recovers at the boundary turn.
+    /// schedule's current `TypeIncident` state: the opened-at second, latest
+    /// failure reason, and the paired configured-resolver origin from the
+    /// saved per-family failure table (never a live current-actor lookup) for
+    /// each family currently in incident, `None` otherwise. Used to seed the
+    /// incident report's sticky per-window snapshot when a window opens, so the
+    /// closing summary reflects the window's actual incident activity even when
+    /// the incident recovers at the boundary turn.
     fn incident_snapshot(&self, ordinal: usize) -> [IncidentSnapshot; 2] {
         let mut snap = [None, None];
         for (i, family) in Family::ALL.iter().copied().enumerate() {
             snap[i] = match self.schedules.incident(ordinal, family) {
                 Some(crate::schedule::TypeIncident::Open { opened_at, reason }) => {
-                    Some((opened_at, reason.as_str()))
+                    let origin = self.dns.last_failure_origin(ordinal, family);
+                    Some((opened_at, reason.as_str(), origin))
                 }
                 _ => None,
             };
@@ -501,9 +504,9 @@ impl ServeStorage {
             // into the closed window at rotation/close, not from the schedule
             // read live at emission — so a recovery coinciding with the window
             // boundary still reports the window's actual incident activity.
-            let (start, reason) = match closed.incident[i] {
-                Some((opened_at, reason)) => (Some(opened_at), Some(reason)),
-                None => (None, None),
+            let (start, reason, resolver) = match closed.incident[i] {
+                Some((opened_at, reason, origin)) => (Some(opened_at), Some(reason), origin),
+                None => (None, None, None),
             };
             let (addrs, state, freshness, retirement) = self
                 .cache
@@ -524,6 +527,7 @@ impl ServeStorage {
                 start,
                 elapsed: start.map_or(0, |s| closed.window_end.saturating_sub(s)),
                 reason,
+                resolver,
                 last_positive: closed.last_positive[i],
                 attempts: closed.per_type[i].attempts.value,
                 failures: closed.per_type[i].failures.value,
@@ -598,11 +602,13 @@ impl ServeStorage {
         if let Some(family) = family {
             match &result {
                 TurnResult::Failed(reason) => {
+                    let origin = self.dns.last_failure_origin(ordinal, family);
                     self.incident_report.note_exchange_failure(
                         ordinal,
                         family,
                         secs,
                         reason.as_str(),
+                        origin,
                     );
                 }
                 TurnResult::Published(PublishedKind::ResolvedPositive) => {
@@ -619,16 +625,30 @@ impl ServeStorage {
 
     /// Emits the per-failure `exchange_failed` record for a counted
     /// serving-loop exchange failure (G6-C04): the allowlist name is recovered
-    /// from the ordinal captured before the advance settled the exchange. The
-    /// startup window surfaces its own failures through the `startup_name` /
+    /// from the ordinal captured before the advance settled the exchange, and
+    /// the resolver origin is the per-event actor the transport was pointing at
+    /// when the failure was observed — captured before that advance, never read
+    /// back from the name-history origin table — so a pure-sensor Probe or
+    /// corroboration failure reports the resolver it actually used. The startup
+    /// window surfaces its own failures through the `startup_name` /
     /// `startup_final` records, so this serving-loop-only emission never
     /// duplicates that surface.
-    pub(crate) fn note_exchange_failed(&mut self, ordinal: Option<usize>, reason: FailureReason) {
-        let name = ordinal
-            .and_then(|o| self.config.allowlist().get(o))
-            .map(Fqdn::as_str);
+    pub(crate) fn note_exchange_failed(
+        &mut self,
+        identity: Option<(usize, Family)>,
+        reason: FailureReason,
+        resolver: Option<u8>,
+    ) {
+        let (name, origin) = match identity {
+            Some((ordinal, _)) => (
+                self.config.allowlist().get(ordinal).map(Fqdn::as_str),
+                resolver,
+            ),
+            None => (None, None),
+        };
         let secs = self.cache_secs(Instant::now());
-        self.logs.exchange_failed(secs, name, reason.as_str());
+        self.logs
+            .exchange_failed(secs, name, reason.as_str(), origin);
     }
 
     /// Folds any degraded-mode enter/exit crossings the DNS transport
@@ -727,16 +747,20 @@ impl ServeStorage {
                 continue;
             };
             match note {
-                IncidentNote::Open { reason, .. } => {
+                IncidentNote::Open {
+                    reason, resolver, ..
+                } => {
                     self.logs
-                        .incident_open(secs, fqdn.as_str(), family, reason.as_str());
+                        .incident_open(secs, fqdn.as_str(), family, reason.as_str(), resolver);
                     let snapshot = self.incident_snapshot(ordinal);
                     self.incident_report
                         .note_incident_open(ordinal, secs, snapshot);
                 }
-                IncidentNote::Recovered { duration, .. } => {
+                IncidentNote::Recovered {
+                    duration, resolver, ..
+                } => {
                     self.logs
-                        .incident_recovered(secs, fqdn.as_str(), family, duration);
+                        .incident_recovered(secs, fqdn.as_str(), family, duration, resolver);
                 }
             }
         }
@@ -745,9 +769,16 @@ impl ServeStorage {
     /// Emits the single per-window `startup_warning` for the first counted
     /// exchange failure, looking the name up from the allowlist internally so
     /// a shared owner never holds a config borrow across a log mutation.
-    pub(crate) fn startup_warning_first(&mut self, secs: u64, ordinal: usize, family: Family) {
+    pub(crate) fn startup_warning_first(
+        &mut self,
+        secs: u64,
+        ordinal: usize,
+        family: Family,
+        reason: &'static str,
+    ) {
         if let Some(name) = self.config.allowlist().get(ordinal) {
-            self.logs.startup_warning(secs, name.as_str(), family);
+            self.logs
+                .startup_warning(secs, name.as_str(), family, reason);
         }
     }
 
@@ -1637,7 +1668,7 @@ mod tests {
         {
             let ring = storage.logs_mut();
             for _ in 0..(crate::log::QUEUE_SLOTS) {
-                ring.startup_warning(DNS_EPOCH, "sub.example.org", Family::A);
+                ring.startup_warning(DNS_EPOCH, "sub.example.org", Family::A, "timeout");
             }
         }
         let next = one_second + Duration::from_secs(1);
@@ -1954,7 +1985,7 @@ mod tests {
         // Activity in window 1: one exchange failure, one forwarded tunnel byte.
         storage
             .incident_report_mut()
-            .note_exchange_failure(0, Family::A, 1010, "timeout");
+            .note_exchange_failure(0, Family::A, 1010, "timeout", None);
         storage
             .incident_report_mut()
             .note_tunnel_bytes(0, 0, 1, 50, 1020);
@@ -1962,7 +1993,7 @@ mod tests {
         {
             let ring = storage.logs_mut();
             for _ in 0..crate::log::QUEUE_SLOTS {
-                ring.startup_warning(1, "sub.example.org", Family::A);
+                ring.startup_warning(1, "sub.example.org", Family::A, "timeout");
             }
         }
         assert!(storage.logs().is_full(), "ring must be at capacity");
@@ -2095,6 +2126,27 @@ mod tests {
         assert!(
             text.contains("a_freshness=10") && text.contains("a_retirement=259210"),
             "a_freshness/a_retirement must be remaining seconds, not absolute: {text}"
+        );
+    }
+
+    #[test]
+    fn startup_warning_first_emits_typed_reason_on_probe_branch() {
+        let mut storage = booted(1, 0);
+        storage.startup_warning_first(1, 0, Family::A, "pin_mismatch");
+        assert_eq!(
+            storage.logs().len(),
+            1,
+            "prod-branch first warning emits exactly one record"
+        );
+        let text = String::from_utf8_lossy(
+            storage
+                .logs()
+                .last_record_bytes()
+                .expect("one warning queued"),
+        );
+        assert!(
+            text.contains("kind=startup_warning") && text.contains("reason=\"pin_mismatch\""),
+            "prod-branch first warning must carry the typed reason token: {text}"
         );
     }
 }

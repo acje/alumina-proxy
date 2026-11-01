@@ -361,25 +361,30 @@ enum HandshakeStep {
 enum HandshakeProbe {
     Waiting,
     Transition,
-    Failed,
+    Failed(FailureReason),
 }
 
 /// The reason a startup exchange failed, captured at the step where the
-/// failure was first observable (connect, send, recv, deadline, or the `DoT`
-/// TLS identity/handshake layer).
+/// failure was first observable (connect, send, recv, deadline, or a `DoT`
+/// TLS-layer cause).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureReason {
     Connect,
     Send,
     Receive,
     Timeout,
-    /// A `DoT` TLS-layer failure: the rustls client connection could not be
-    /// built for the target, or the handshake failed (certificate/pin/`SAN`
-    /// identity rejection, alert, `EOF`, or socket error). Distinct from
-    /// [`FailureReason::Connect`] so an operator with a misconfigured pin or
-    /// `FQDN` sees a TLS-specific reason instead of an indistinguishable
-    /// plain-TCP connect failure.
-    TlsIdentity,
+    /// The `DoT` certificate's SPKI digest did not match the configured
+    /// `#pin-sha256=` value.
+    PinMismatch,
+    /// The `DoT` certificate's `SAN` (or legacy `CN`) did not name the
+    /// resolver's `FQDN`/SNI.
+    NameMismatch,
+    /// The `DoT` chain did not validate against the configured trust anchors
+    /// (an empty root store rejects any self-signed cert as `UnknownIssuer`).
+    NoTrustAnchor,
+    /// A `DoT` TLS-layer failure outside certificate identity: rustls setup
+    /// or build failure, protocol error, alert, `EOF`, or socket error.
+    TlsProtocol,
 }
 
 impl FailureReason {
@@ -389,7 +394,10 @@ impl FailureReason {
             FailureReason::Send => "send",
             FailureReason::Receive => "receive",
             FailureReason::Timeout => "timeout",
-            FailureReason::TlsIdentity => "tls_identity",
+            FailureReason::PinMismatch => "pin_mismatch",
+            FailureReason::NameMismatch => "san_mismatch",
+            FailureReason::NoTrustAnchor => "no_anchor",
+            FailureReason::TlsProtocol => "tls_protocol",
         }
     }
 }
@@ -1146,11 +1154,17 @@ pub(crate) enum IncidentNote {
         ordinal: usize,
         family: Family,
         reason: FailureReason,
+        /// The zero-based configured-resolver index whose exchange failure
+        /// opened the incident, or `None` when no set was installed.
+        resolver: Option<u8>,
     },
     Recovered {
         ordinal: usize,
         family: Family,
         duration: u64,
+        /// The zero-based configured-resolver index that performed the
+        /// recovery, or `None` when no set was installed.
+        resolver: Option<u8>,
     },
 }
 
@@ -1198,6 +1212,9 @@ pub struct StartupDns {
     /// counter below records only entered/exited crossings, never the
     /// individual failures or resets that precede them.
     degradations: [ResolverDegradation; MAX_RESOLVERS],
+    /// The zero-based configured-resolver index whose last exchanged failure
+    /// was captured per name and family, indexed `[ordinal][family_index]`.
+    last_failed: [[Option<u8>; 2]; ALLOWLIST_MAX],
     /// The whole-second (`now0`-scale) time at which the next exchange must
     /// probe the primary again, armed when the active resolver is not the
     /// primary and cleared when the primary recovers. `None` while no probe is
@@ -1346,6 +1363,7 @@ impl StartupDns {
             resolvers: None,
             active_resolver: ActiveResolver::primary(1),
             degradations: [ResolverDegradation::default(); MAX_RESOLVERS],
+            last_failed: [[None; 2]; ALLOWLIST_MAX],
             failback_due: None,
             failback_source: None,
             failback_successes: 0,
@@ -1520,6 +1538,33 @@ impl StartupDns {
     /// verdicts into the `resolver_probe` log record. `None` before any window.
     pub(crate) const fn resolvers(&self) -> Option<ResolverSet> {
         self.resolvers
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "active resolver index is bounded by MAX_RESOLVERS (5), which always fits u8"
+    )]
+    fn active_index_u8(&self) -> u8 {
+        u8::try_from(self.active_resolver.index())
+            .expect("active resolver index bounded by MAX_RESOLVERS")
+    }
+
+    /// The configured resolver the transport currently points at, as a
+    /// zero-based index, or `None` when no resolver set is installed.
+    pub(crate) fn current_resolver_index(&self) -> Option<u8> {
+        self.resolvers.map(|_| self.active_index_u8())
+    }
+
+    /// The zero-based configured-resolver index whose last exchanged failure
+    /// for the name/family pair was captured; `None` while none is recorded.
+    /// The saved per-family table keeps the origin at failure time, so a
+    /// subsequent failover never moves it.
+    pub(crate) fn last_failure_origin(&self, ordinal: usize, family: Family) -> Option<u8> {
+        self.last_failed
+            .get(ordinal)
+            .and_then(|row| row.get(family_index(family)))
+            .copied()
+            .flatten()
     }
 
     /// Closes the transport connection exactly once. In private mode the
@@ -2067,8 +2112,8 @@ impl StartupDns {
     /// Upgrades an established plain TCP connection to the `DoT` TLS layer: the
     /// rustls client connection is built against the target (the bounded
     /// per-connect `DoT` setup allocations) and the retained connection becomes
-    /// a [`DnsConn::Tls`]. A build failure settles as a counted connect
-    /// failure; the upgrade never downgrades back to plain text.
+    /// a [`DnsConn::Tls`]. A build or initial-flight probe failure settles as a
+    /// counted connect failure; the upgrade never downgrades back to plain text.
     fn upgrade_to_tls(
         &mut self,
         ex: &mut ActiveExchange,
@@ -2089,8 +2134,15 @@ impl StartupDns {
                 tls: Box::new(conn),
                 expired_pin_certs,
             }));
-            self.probe_tls_handshake();
-            Ok(None)
+            match self.probe_tls_handshake() {
+                HandshakeProbe::Failed(cause) => {
+                    self.close_connection()?;
+                    let reason =
+                        self.note_failure(ex.ordinal, ex.family, ex.class, schedules, cause)?;
+                    Ok(Some(reason))
+                }
+                _ => Ok(None),
+            }
         } else {
             self.close_connection()?;
             let reason = self.note_failure(
@@ -2098,7 +2150,7 @@ impl StartupDns {
                 ex.family,
                 ex.class,
                 schedules,
-                FailureReason::TlsIdentity,
+                FailureReason::TlsProtocol,
             )?;
             Ok(Some(reason))
         }
@@ -2107,7 +2159,8 @@ impl StartupDns {
     /// One nonblocking `DoT` TLS-handshake step: at most one read and one write
     /// pass, then readiness is re-checked and the exchange deadline honoured.
     /// A failure (certificate/identity rejection, alert, EOF, socket error) is
-    /// settled as a counted connect failure, not an abort.
+    /// settled as a counted connect failure, not an abort; the cause captured
+    /// by the probe is preserved into the failure record.
     fn step_handshake(
         &mut self,
         ex: &mut ActiveExchange,
@@ -2116,15 +2169,10 @@ impl StartupDns {
         match self.probe_tls_handshake() {
             HandshakeProbe::Waiting => {}
             HandshakeProbe::Transition => return Ok(HandshakeStep::Transition),
-            HandshakeProbe::Failed => {
+            HandshakeProbe::Failed(cause) => {
                 self.close_connection()?;
-                let reason = self.note_failure(
-                    ex.ordinal,
-                    ex.family,
-                    ex.class,
-                    schedules,
-                    FailureReason::TlsIdentity,
-                )?;
+                let reason =
+                    self.note_failure(ex.ordinal, ex.family, ex.class, schedules, cause)?;
                 return Ok(HandshakeStep::Failed(reason));
             }
         }
@@ -2150,7 +2198,7 @@ impl StartupDns {
     /// `is_handshaking() == false`.
     fn probe_tls_handshake(&mut self) -> HandshakeProbe {
         let Some(DnsConn::Tls(conn)) = self.conn.as_mut() else {
-            return HandshakeProbe::Failed;
+            return HandshakeProbe::Failed(FailureReason::TlsProtocol);
         };
         let mut write_blocked = false;
         loop {
@@ -2160,7 +2208,7 @@ impl StartupDns {
                     write_blocked = true;
                     break;
                 }
-                Err(_) => return HandshakeProbe::Failed,
+                Err(_) => return HandshakeProbe::Failed(FailureReason::TlsProtocol),
                 Ok(_) => {}
             }
             if !conn.tls.wants_write() {
@@ -2170,17 +2218,31 @@ impl StartupDns {
         if !write_blocked {
             match conn.tls.read_tls(&mut conn.tcp) {
                 Ok(0) => {
-                    return HandshakeProbe::Failed;
+                    return HandshakeProbe::Failed(FailureReason::TlsProtocol);
                 }
                 Ok(_n) => {
-                    if conn.tls.process_new_packets().is_err() {
-                        return HandshakeProbe::Failed;
+                    if let Err(err) = conn.tls.process_new_packets() {
+                        let reason = match &err {
+                            rustls::Error::InvalidCertificate(
+                                rustls::CertificateError::ApplicationVerificationFailure,
+                            ) => FailureReason::PinMismatch,
+                            rustls::Error::InvalidCertificate(
+                                rustls::CertificateError::NotValidForName
+                                | rustls::CertificateError::NotValidForNameContext { .. },
+                            ) => FailureReason::NameMismatch,
+                            rustls::Error::InvalidCertificate(
+                                rustls::CertificateError::UnknownIssuer,
+                            ) => FailureReason::NoTrustAnchor,
+
+                            _ => FailureReason::TlsProtocol,
+                        };
+                        return HandshakeProbe::Failed(reason);
                     }
                     loop {
                         match conn.tls.write_tls(&mut conn.tcp) {
                             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(_) => return HandshakeProbe::Failed,
+                            Err(_) => return HandshakeProbe::Failed(FailureReason::TlsProtocol),
                             Ok(_) => {}
                         }
                         if !conn.tls.wants_write() {
@@ -2192,7 +2254,7 @@ impl StartupDns {
                     if e.kind() == io::ErrorKind::WouldBlock
                         || e.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => {
-                    return HandshakeProbe::Failed;
+                    return HandshakeProbe::Failed(FailureReason::TlsProtocol);
                 }
             }
         }
@@ -2539,6 +2601,7 @@ impl StartupDns {
                                     ordinal: ex.ordinal,
                                     family,
                                     duration,
+                                    resolver: self.current_resolver_index(),
                                 });
                             }
                         }
@@ -2875,7 +2938,7 @@ impl StartupDns {
                             let first = report.first_failure.is_none();
                             report.record_first_failure(ordinal, family);
                             if first {
-                                logs.startup_warning(now, name.as_str(), family);
+                                logs.startup_warning(now, name.as_str(), family, reason.as_str());
                             }
                             latest[ordinal].merge(ExchangeResult::Failed(reason));
                         }
@@ -3645,6 +3708,7 @@ impl StartupDns {
         reason: FailureReason,
     ) -> Result<FailureReason, StartupDnsError> {
         let now = self.now_u64();
+        let origin = self.current_resolver_index();
         self.on_exchange_failed(now);
         let probed = self
             .probe_sweep
@@ -3658,11 +3722,13 @@ impl StartupDns {
         }
         if !matches!(class, ExchangeClass::Probe) {
             let transition = schedules.note_exchange_failure(ordinal, family, now, reason)?;
+            self.last_failed[ordinal][family_index(family)] = origin;
             if class == ExchangeClass::Serving && matches!(transition, PerTypeTransition::Opened) {
                 self.note_incident(IncidentNote::Open {
                     ordinal,
                     family,
                     reason,
+                    resolver: origin,
                 });
             }
         }

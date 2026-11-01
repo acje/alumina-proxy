@@ -1,6 +1,6 @@
 use super::*;
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::net::SocketAddr;
 use std::net::{TcpListener as StdListener, TcpStream};
 use std::thread;
@@ -989,11 +989,12 @@ fn startup_starvation_falsifier_body() {
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
     let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
-    owner
-        .serving
-        .storage_mut()
-        .logs_mut()
-        .startup_warning(1000, "sub.example.org", Family::A);
+    owner.serving.storage_mut().logs_mut().startup_warning(
+        1000,
+        "sub.example.org",
+        Family::A,
+        "timeout",
+    );
     let dead = ephemeral_port();
     let dead_addr = SocketAddr::from(([127, 0, 0, 1], dead));
     owner
@@ -1013,6 +1014,121 @@ fn startup_starvation_falsifier_body() {
     assert!(
         outcome.listener.is_none(),
         "the terminated startup must never bind a listener"
+    );
+}
+
+fn test_sink_file() -> std::fs::File {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "alumina-runtime-log-{}-{}.log",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .expect(
+            "exclusive temp sink file: a pre-existing path is an explicit failure, never a clobber",
+        );
+    std::fs::remove_file(&path).expect("unlink exact test sink");
+    file
+}
+
+fn drain_sink_text(file: &mut std::fs::File) -> String {
+    file.rewind().expect("rewind the sink");
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).expect("read the sink");
+    String::from_utf8(buf).expect("ascii log records")
+}
+
+fn drained_warning_lines(file: &mut std::fs::File) -> Vec<String> {
+    let text = drain_sink_text(file);
+    text.lines()
+        .filter(|line| line.contains("kind=startup_warning"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn startup_warning_private_owner_reasons_observed_first_failure() {
+    let t = thread::Builder::new()
+        .name("startup-warning-private-owner".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(startup_warning_private_owner_body)
+        .expect("spawn private-owner warning falsifier");
+    t.join().expect("private-owner warning falsifier thread");
+}
+
+fn startup_warning_private_owner_body() {
+    let port = ephemeral_port();
+    let mut storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
+    let mut file = test_sink_file();
+    *storage.logs_mut() = crate::log::LogStore::with_fd(&file).expect("file sink store");
+    let dead_addr = SocketAddr::from(([127, 0, 0, 1], ephemeral_port()));
+    let outcome = storage
+        .run_startup_within(dead_addr, 1000, Duration::from_secs(2))
+        .expect("startup window");
+    assert!(
+        outcome.report.failed >= 2,
+        "the refused nameserver must produce several counted failures, observed {}",
+        outcome.report.failed
+    );
+    let warnings = drained_warning_lines(&mut file);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "exactly one private first-failure warning across {} failures, sink: {warnings:?}",
+        outcome.report.failed
+    );
+    assert!(
+        warnings[0].contains("reason=\"connect\""),
+        "the private warning must carry the actually observed refused-connect cause: {}",
+        warnings[0]
+    );
+}
+
+#[test]
+fn startup_warning_cooperative_owner_reasons_observed_first_failure() {
+    let t = thread::Builder::new()
+        .name("startup-warning-cooperative-owner".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(startup_warning_cooperative_owner_body)
+        .expect("spawn cooperative-owner warning falsifier");
+    t.join()
+        .expect("cooperative-owner warning falsifier thread");
+}
+
+fn startup_warning_cooperative_owner_body() {
+    let port = ephemeral_port();
+    let mut storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut file = test_sink_file();
+    *storage.logs_mut() = crate::log::LogStore::with_fd(&file).expect("file sink store");
+    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
+    let dead_addr = SocketAddr::from(([127, 0, 0, 1], ephemeral_port()));
+    let outcome = owner
+        .run_startup_within(dead_addr, 1000, Duration::from_secs(2))
+        .expect("startup window");
+    assert!(
+        outcome.report.failed >= 2,
+        "the cooperative owner must observe several counted failures, observed {}",
+        outcome.report.failed
+    );
+    let warnings = drained_warning_lines(&mut file);
+    assert_eq!(
+        warnings.len(),
+        1,
+        "exactly one cooperative first-failure warning across {} failures, sink: {warnings:?}",
+        outcome.report.failed
+    );
+    assert!(
+        warnings[0].contains("reason=\"connect\""),
+        "the cooperative warning must carry the actually observed refused-connect cause: {}",
+        warnings[0]
     );
 }
 
@@ -1770,6 +1886,257 @@ fn corroboration_concludes_through_serving_turns() {
         .spawn(corroboration_concludes_through_serving_turns_body)
         .expect("spawn corroboration-concludes thread");
     t.join().expect("corroboration-concludes thread");
+}
+
+fn probe_exchange_failed_reports_per_event_resolver_body() {
+    let port = ephemeral_port();
+    let mut storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let mut file = test_sink_file();
+    *storage.logs_mut() = crate::log::LogStore::with_fd(&file).expect("file sink store");
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+
+    let set = crate::resolver::ResolverSet::from_slice(&[
+        crate::resolver::select("127.0.0.1").expect("loopback resolver"),
+        crate::resolver::select("127.0.0.1").expect("loopback resolver"),
+    ])
+    .expect("two-resolver set");
+    let held = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind held peer");
+    let held_addr = held.local_addr().expect("held peer addr");
+    let now0 = runtime.serving.storage().dns().now_u64();
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .begin_window(held_addr, set, now0, Duration::from_secs(10))
+        .expect("begin window");
+
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(held_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(
+            0,
+            Family::A,
+            Instant::now() - Duration::from_secs(1),
+            ExchangeClass::Serving,
+        )
+        .expect("start serving exchange");
+    runtime.cooperative_dns_turn().expect("serving turn");
+
+    let dead = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("dead peer");
+    let dead_addr = dead.local_addr().expect("dead peer addr");
+    drop(dead);
+    let fqdn = crate::config::Fqdn::parse("sub.example.org:443").expect("fqdn");
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(dead_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .seed_corroboration_for_test(&fqdn)
+        .expect("seed corroboration");
+    for _ in 0..50 {
+        runtime
+            .turn(Some(Duration::from_millis(1)))
+            .expect("owner turn");
+        if !runtime.serving.storage().dns().has_active_exchange() {
+            break;
+        }
+    }
+    assert!(
+        !runtime.serving.storage().dns().has_active_exchange(),
+        "the seeded probe exchange must settle through the serving turns"
+    );
+
+    let text = drain_sink_text(&mut file);
+    let failed: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("kind=exchange_failed"))
+        .collect();
+    assert_eq!(failed.len(), 2, "one record per failure: {text}");
+    let probe = failed
+        .iter()
+        .find(|line| line.contains("reason=\"connect\""))
+        .expect("probe refused-connect record");
+    assert!(
+        probe.contains("resolver=1"),
+        "the probe must carry the per-event resolver 1, not the history origin 0: {probe}"
+    );
+    let serving = failed
+        .iter()
+        .find(|line| line.contains("reason=\"timeout\""))
+        .expect("serving timeout record");
+    assert!(
+        serving.contains("resolver=0"),
+        "serving keeps resolver 0: {serving}"
+    );
+    assert_eq!(
+        runtime.serving.storage().dns().current_resolver_index(),
+        Some(0),
+        "the failed probe must restore the pre-probe resolver 0"
+    );
+}
+
+#[test]
+fn probe_exchange_failed_reports_per_event_resolver() {
+    let t = thread::Builder::new()
+        .name("runtime-probe-exchange-failed-resolver".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(probe_exchange_failed_reports_per_event_resolver_body)
+        .expect("spawn probe-exchange-failed-resolver thread");
+    t.join().expect("probe-exchange-failed-resolver thread");
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "long real-pipeline falsifier: the causally ordered counted failures, relocation, real recovery, and per-record origin/summary assertions belong in one body"
+)]
+fn failover_and_recovery_emit_truthful_origin_body() {
+    let port = ephemeral_port();
+    let mut storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let mut file = test_sink_file();
+    *storage.logs_mut() = crate::log::LogStore::with_fd(&file).expect("file sink store");
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+    let set = crate::resolver::ResolverSet::from_slice(&[
+        crate::resolver::select("127.0.0.1").expect("loopback resolver 0"),
+        crate::resolver::select("127.0.0.1").expect("loopback resolver 1"),
+    ])
+    .expect("two-resolver set");
+    let dead = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("dead peer");
+    let dead_addr = dead.local_addr().expect("dead peer addr");
+    drop(dead);
+    let now0 = runtime.serving.storage().dns().now_u64();
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .begin_window(dead_addr, set, now0, Duration::from_secs(10))
+        .expect("begin window");
+    for _ in 0..3 {
+        runtime
+            .serving
+            .storage_mut()
+            .dns_mut()
+            .set_peer_for_test(dead_addr);
+        runtime
+            .serving
+            .storage_mut()
+            .start_dns_exchange(
+                0,
+                Family::A,
+                Instant::now() - Duration::from_secs(1),
+                ExchangeClass::Serving,
+            )
+            .expect("start serving exchange");
+        runtime
+            .turn(Some(Duration::from_millis(1)))
+            .expect("owner turn");
+    }
+    assert_eq!(
+        runtime.serving.storage().dns().current_resolver_index(),
+        Some(1),
+        "three counted failures must relocate the active resolver to 1"
+    );
+    let (responder_addr, responder) = spawn_responder_keep_alive();
+    std::thread::sleep(Duration::from_millis(1200));
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(
+            0,
+            Family::A,
+            Instant::now() + Duration::from_secs(10),
+            ExchangeClass::Serving,
+        )
+        .expect("start recovery exchange");
+    for _ in 0..50 {
+        runtime
+            .turn(Some(Duration::from_millis(1)))
+            .expect("recovery turn");
+        if name_published(&runtime, 0, Family::A) {
+            break;
+        }
+    }
+    assert!(
+        name_published(&runtime, 0, Family::A),
+        "the real validated answer must publish ordinal 0 family A"
+    );
+    assert_eq!(
+        runtime
+            .serving
+            .storage()
+            .dns()
+            .last_failure_origin(0, Family::A),
+        Some(0),
+        "the saved last-failed origin must survive the recovery"
+    );
+    drop(responder);
+    let text = drain_sink_text(&mut file);
+    let kind = |needle: &str| {
+        text.lines()
+            .filter(|line| line.contains(&format!("kind={needle}")))
+            .collect::<Vec<_>>()
+    };
+    let failed = kind("exchange_failed");
+    assert_eq!(failed.len(), 3, "three counted failures: {text}");
+    assert!(
+        failed.iter().all(|line| line.contains("resolver=0")),
+        "every counted failure keeps origin 0: {failed:?}"
+    );
+    let open = kind("incident_open");
+    assert_eq!(open.len(), 1, "one incident open: {text}");
+    assert!(
+        open[0].contains("resolver=0"),
+        "the open names origin 0: {}",
+        open[0]
+    );
+    let recovered = kind("incident_recovered");
+    assert_eq!(recovered.len(), 1, "one incident recovery: {text}");
+    assert!(
+        recovered[0].contains("resolver=1"),
+        "the recovery names resolver 1: {}",
+        recovered[0]
+    );
+    let summary = kind("incident_summary");
+    assert_eq!(summary.len(), 1, "one closed-window summary: {text}");
+    assert!(
+        summary[0].contains("a_resolver=0"),
+        "the closed summary keeps origin 0 despite current 1: {}",
+        summary[0]
+    );
+    assert!(
+        summary[0].contains("a_failures=3"),
+        "the closed window counted three failures: {}",
+        summary[0]
+    );
+}
+
+#[test]
+fn failover_and_recovery_emit_truthful_origin() {
+    let t = thread::Builder::new()
+        .name("runtime-failover-recovery-origin".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(failover_and_recovery_emit_truthful_origin_body)
+        .expect("spawn failover-recovery-origin thread");
+    t.join().expect("failover-recovery-origin thread");
 }
 
 enum SessionGate {

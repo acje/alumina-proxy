@@ -3358,6 +3358,11 @@ fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
         ActiveResolver::at(0, 3),
         "note_failure flows through the probe-mode restore"
     );
+    assert_eq!(
+        transport.last_failure_origin(0, Family::A),
+        None,
+        "a probe failure never writes name failure metadata"
+    );
 }
 
 #[test]
@@ -3381,6 +3386,7 @@ fn note_failure_serving_accumulates_open_note_on_first_failure() {
                 ordinal: 0,
                 family: Family::A,
                 reason: FailureReason::Connect,
+                resolver: Some(0),
             }),
             None,
         ],
@@ -3402,6 +3408,11 @@ fn note_failure_startup_suppresses_open_note_but_tracks_state() {
             FailureReason::Connect,
         )
         .expect("startup failure noted");
+    assert_eq!(
+        transport.last_failure_origin(0, Family::A),
+        Some(0),
+        "the startup failure retains its origin for incident-summary seeding"
+    );
     assert_eq!(
         transport.take_incident_notes(),
         [None, None],
@@ -3453,6 +3464,7 @@ fn note_failure_silent_update_does_not_accumulate_second_note() {
                 ordinal: 0,
                 family: Family::A,
                 reason: FailureReason::Connect,
+                resolver: Some(0),
             }),
             None,
         ],
@@ -3461,7 +3473,115 @@ fn note_failure_silent_update_does_not_accumulate_second_note() {
 }
 
 #[test]
-fn serving_positive_emits_recovered_note_for_open_incident() {
+fn note_failure_retains_failed_origin_per_family_after_third_failure_relocation() {
+    let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
+    let mut transport = seeded_transport(set);
+    let mut schedules = Schedules::new(2).unwrap();
+    assert_eq!(
+        transport.current_resolver_index(),
+        Some(0),
+        "the primary is current before any failure"
+    );
+    transport
+        .note_failure(
+            0,
+            Family::A,
+            ExchangeClass::Serving,
+            &mut schedules,
+            FailureReason::Connect,
+        )
+        .expect("first failure noted");
+    assert_eq!(
+        transport.take_incident_notes(),
+        [
+            Some(IncidentNote::Open {
+                ordinal: 0,
+                family: Family::A,
+                reason: FailureReason::Connect,
+                resolver: Some(0),
+            }),
+            None,
+        ],
+        "the open origin is the failing resolver 0, before any relocation"
+    );
+    for _ in 0..2 {
+        transport
+            .note_failure(
+                0,
+                Family::A,
+                ExchangeClass::Serving,
+                &mut schedules,
+                FailureReason::Timeout,
+            )
+            .expect("advance toward degradation");
+    }
+    assert_eq!(
+        transport.active_resolver.index(),
+        1,
+        "the third consecutive failure relocated the current resolver onto the backup"
+    );
+    assert_eq!(
+        transport.current_resolver_index(),
+        Some(1),
+        "current configured resolver is the relocated backup"
+    );
+    assert_eq!(
+        transport.last_failure_origin(0, Family::A),
+        Some(0),
+        "the A latest-failure origin stays with the failed resolver 0, not the current one"
+    );
+    assert_eq!(
+        transport.last_failure_origin(0, Family::Aaaa),
+        None,
+        "the AAAA slot is untouched by the A failures"
+    );
+    transport
+        .note_failure(
+            0,
+            Family::Aaaa,
+            ExchangeClass::Serving,
+            &mut schedules,
+            FailureReason::Receive,
+        )
+        .expect("backup AAAA failure noted");
+    assert_eq!(
+        transport.last_failure_origin(0, Family::Aaaa),
+        Some(1),
+        "a backup failure captures its own origin in the separate AAAA family slot"
+    );
+}
+
+#[test]
+fn note_failure_unadmitted_ordinal_returns_err_and_leaves_origin_untouched() {
+    let mut schedules = Schedules::new(1).unwrap();
+    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1"]));
+    for ordinal in [ALLOWLIST_MAX, 1, usize::MAX] {
+        let Err(err) = transport.note_failure(
+            ordinal,
+            Family::A,
+            ExchangeClass::Serving,
+            &mut schedules,
+            FailureReason::Connect,
+        ) else {
+            panic!("an unadmitted ordinal must be refused by the schedule");
+        };
+        assert!(
+            matches!(err, crate::startup_dns::StartupDnsError::Schedule(_)),
+            "the refusal must be a schedule error"
+        );
+    }
+    assert_eq!(
+        transport.last_failure_origin(1, Family::A),
+        None,
+        "an unadmitted ordinal must not mutate the origin table"
+    );
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "long two-arm serving-positive pipeline: the real advance loop and the open/relocation/recovery note assertions stay coherent across the configured and unconfigured arms"
+)]
+fn serving_positive_recovered_note_case(configured: bool) {
     let cfg = config();
     let responder = spawn_responder(vec![vec![
         Step::PositiveA {
@@ -3472,8 +3592,13 @@ fn serving_positive_emits_recovered_note_for_open_incident() {
     ]]);
     let mut cache = Cache::new(2).unwrap();
     let mut schedules = Schedules::new(2).unwrap();
-    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1"]));
-    transport.addr = ns(responder.port());
+    let mut transport = if configured {
+        seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8"]))
+    } else {
+        StartupDns::new().unwrap()
+    };
+    let expected_open = configured.then_some(0);
+    let expected_actor = configured.then_some(1);
     transport
         .note_failure(
             0,
@@ -3490,11 +3615,34 @@ fn serving_positive_emits_recovered_note_for_open_incident() {
                 ordinal: 0,
                 family: Family::A,
                 reason: FailureReason::Connect,
+                resolver: expected_open,
             }),
             None,
         ],
-        "the serving failure accumulates the open note before the exchange"
+        "the open origin is the failing resolver, or None with no set, before any relocation"
     );
+    for _ in 0..2 {
+        transport
+            .note_failure(
+                0,
+                Family::A,
+                ExchangeClass::Serving,
+                &mut schedules,
+                FailureReason::Timeout,
+            )
+            .expect("advance the serving A incident toward degradation");
+    }
+    assert_eq!(
+        transport.active_resolver.index(),
+        if configured { 1 } else { 0 },
+        "the third consecutive failure relocates onto the backup, or stays put with no set"
+    );
+    assert_eq!(
+        transport.take_incident_notes(),
+        [None, None],
+        "the relocation failures stay silent while the incident is open"
+    );
+    transport.addr = ns(responder.port());
     let fqdn = cfg.allowlist().get(0).unwrap();
     let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
     transport
@@ -3533,19 +3681,36 @@ fn serving_positive_emits_recovered_note_for_open_incident() {
         "a serving positive must publish, got {result:?}"
     );
     let notes = transport.take_incident_notes();
-    assert!(
-        matches!(
-            notes[0],
-            Some(IncidentNote::Recovered {
-                ordinal: 0,
-                family: Family::A,
-                ..
-            })
-        ),
-        "the serving positive must emit a Recovered note for the open A incident, got {notes:?}"
+    let Some(IncidentNote::Recovered {
+        ordinal: 0,
+        family: Family::A,
+        resolver,
+        ..
+    }) = notes[0]
+    else {
+        panic!("the recovery must be a serving A note, got {notes:?}");
+    };
+    assert_eq!(
+        resolver, expected_actor,
+        "the recovery actor is the resolver that served, or None with no set"
     );
     assert_eq!(notes[1], None, "no AAAA note is emitted");
+    assert_eq!(
+        transport.last_failure_origin(0, Family::A),
+        configured.then_some(0),
+        "the latest-failure origin is historical, survives recovery, and stays None with no set"
+    );
     drop(responder);
+}
+
+#[test]
+fn serving_positive_emits_recovered_note_for_open_incident() {
+    serving_positive_recovered_note_case(true);
+}
+
+#[test]
+fn serving_positive_emits_recovered_note_without_configured_set() {
+    serving_positive_recovered_note_case(false);
 }
 
 #[test]

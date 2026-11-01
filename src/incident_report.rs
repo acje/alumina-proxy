@@ -64,12 +64,15 @@ pub(crate) struct Activity {
 }
 
 /// The per-family incident snapshot captured when a window closes: the
-/// monotonic second the type incident opened and the latest failure reason
-/// while open, or `None` when the family had no incident during the window.
+/// monotonic second the type incident opened, the latest failure reason while
+/// open, and the zero-based configured-resolver origin captured with that
+/// reason, or `None` when the family had no incident during the window.
 /// Sticky within a window: a recovery mid-window does not clear it, so the
 /// closing summary reflects the window's actual incident activity even when
 /// the incident recovered at the boundary turn (docs/alumina-proxy.md:80).
-pub(crate) type IncidentSnapshot = Option<(u64, &'static str)>;
+/// The origin is the saved per-family table value at failure time, never a
+/// live current-actor lookup at emission.
+pub(crate) type IncidentSnapshot = Option<(u64, &'static str, Option<u8>)>;
 
 /// The closed-window snapshot captured at rotation or final recovery: the
 /// window span, the coalesced skipped-window count, the per-type and activity
@@ -199,6 +202,7 @@ pub(crate) struct TypeSummary {
     pub start: Option<u64>,
     pub elapsed: u64,
     pub reason: Option<&'static str>,
+    pub resolver: Option<u8>,
     pub last_positive: Option<u64>,
     pub attempts: u64,
     pub failures: u64,
@@ -213,6 +217,7 @@ impl TypeSummary {
         start: None,
         elapsed: 0,
         reason: None,
+        resolver: None,
         last_positive: None,
         attempts: 0,
         failures: 0,
@@ -258,9 +263,9 @@ impl IncidentReport {
     /// other type fails or recovers (docs/alumina-proxy.md:79). The passed
     /// per-family incident snapshot (from the schedule) refreshes the sticky
     /// window snapshot: families currently open are recorded with their
-    /// `opened_at` and latest reason, and a family already recorded is never
-    /// cleared, so a recovery mid-window does not erase the window's incident
-    /// activity.
+    /// `opened_at`, latest reason, and paired captured origin, and a family
+    /// already recorded is never cleared, so a recovery mid-window does not
+    /// erase the window's incident activity.
     pub(crate) const fn note_incident_open(
         &mut self,
         name: usize,
@@ -268,11 +273,11 @@ impl IncidentReport {
         incident: [IncidentSnapshot; 2],
     ) {
         let nr = &mut self.names[name];
-        if let Some((opened_at, reason)) = incident[0] {
-            nr.incident[0] = Some((opened_at, reason));
+        if let Some((opened_at, reason, origin)) = incident[0] {
+            nr.incident[0] = Some((opened_at, reason, origin));
         }
-        if let Some((opened_at, reason)) = incident[1] {
-            nr.incident[1] = Some((opened_at, reason));
+        if let Some((opened_at, reason, origin)) = incident[1] {
+            nr.incident[1] = Some((opened_at, reason, origin));
         }
         if nr.window_open {
             return;
@@ -305,21 +310,24 @@ impl IncidentReport {
     /// Records one exchange failure for `name` and `family`. Rotation precedes
     /// the recording; the failure is counted only while a window is open. The
     /// failure also updates the window's sticky per-family incident snapshot:
-    /// the family is recorded as in-incident with the latest failure reason,
-    /// keeping the earliest observed `opened_at`.
+    /// the family is recorded as in-incident with the latest failure reason and
+    /// its paired captured configured-resolver origin, keeping the earliest
+    /// observed `opened_at`. The closed snapshot keeps the window-captured
+    /// origin, never a live current-actor lookup at emission.
     pub(crate) fn note_exchange_failure(
         &mut self,
         name: usize,
         family: Family,
         now: u64,
         reason: &'static str,
+        resolver: Option<u8>,
     ) {
         let nr = &mut self.names[name];
         nr.rotate_if_due(now);
         let slot = family_slot(family);
         nr.incident[slot] = Some(match nr.incident[slot] {
-            Some((opened_at, _)) => (opened_at, reason),
-            None => (now, reason),
+            Some((opened_at, _, _)) => (opened_at, reason, resolver),
+            None => (now, reason, resolver),
         });
         if nr.window_open {
             nr.per_type[slot].failures.bump();
@@ -439,7 +447,7 @@ mod tests {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
         rep.note_exchange_attempt(0, Family::A, 1010);
-        rep.note_exchange_failure(0, Family::A, 1020, "timeout");
+        rep.note_exchange_failure(0, Family::A, 1020, "timeout", None);
         // Just before the boundary: no rotation.
         rep.note_exchange_attempt(0, Family::A, 1000 + W - 1);
         assert!(rep.take_pending_summary(0).is_none());
@@ -643,10 +651,10 @@ mod tests {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
         rep.note_exchange_attempt(0, Family::A, 1010);
-        rep.note_exchange_failure(0, Family::A, 1020, "timeout");
+        rep.note_exchange_failure(0, Family::A, 1020, "timeout", None);
         rep.note_positive(0, Family::A, 1030);
         rep.note_exchange_attempt(0, Family::Aaaa, 1040);
-        rep.note_exchange_failure(0, Family::Aaaa, 1050, "timeout");
+        rep.note_exchange_failure(0, Family::Aaaa, 1050, "timeout", None);
         let closed = rep.close_window(0, 1060).expect("closed");
         assert_eq!(closed.per_type[0].attempts.value, 1);
         assert_eq!(closed.per_type[0].failures.value, 1);
@@ -685,7 +693,7 @@ mod tests {
     fn close_window_returns_partial_summary_with_actual_duration() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
-        rep.note_exchange_failure(0, Family::A, 1005, "timeout");
+        rep.note_exchange_failure(0, Family::A, 1005, "timeout", None);
         let closed = rep.close_window(0, 2500).expect("partial window");
         assert_eq!(closed.window_start, 1000);
         assert_eq!(closed.window_end, 2500);
@@ -749,10 +757,10 @@ mod tests {
     fn delayed_rotation_coalesces_skipped_windows() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
-        rep.note_exchange_failure(0, Family::A, 1010, "timeout");
+        rep.note_exchange_failure(0, Family::A, 1010, "timeout", None);
         // The next event lands 2.5 windows later: two full windows elapsed.
         let late = 1000 + 2 * W + 1800;
-        rep.note_exchange_failure(0, Family::A, late, "timeout");
+        rep.note_exchange_failure(0, Family::A, late, "timeout", None);
         let closed = rep.take_pending_summary(0).expect("closed");
         assert_eq!(closed.window_start, 1000);
         assert_eq!(closed.window_end, 1000 + 2 * W);
@@ -774,13 +782,37 @@ mod tests {
     fn incident_snapshot_is_sticky_within_a_window() {
         let mut rep = IncidentReport::new();
         rep.note_incident_open(0, 1000, [None, None]);
-        rep.note_exchange_failure(0, Family::A, 1010, "timeout");
+        rep.note_exchange_failure(0, Family::A, 1010, "timeout", None);
         // A recovery mid-window must not erase the window's recorded incident
         // activity: the closing summary reflects what was failing during the
         // window even when the incident recovered before the window closed.
         rep.note_positive(0, Family::A, 1020);
         let closed = rep.close_window(0, 1060).expect("closed");
-        assert_eq!(closed.incident[0], Some((1010, "timeout")));
+        assert_eq!(closed.incident[0], Some((1010, "timeout", None)));
         assert_eq!(closed.incident[1], None);
+    }
+
+    #[test]
+    fn closed_window_keeps_paired_origin_through_reason_update_and_rotation() {
+        let mut rep = IncidentReport::new();
+        rep.note_incident_open(
+            0,
+            1000,
+            [
+                Some((1000, "timeout", Some(0))),
+                Some((1010, "timeout", Some(1))),
+            ],
+        );
+        rep.note_exchange_failure(0, Family::A, 1500, "connect", Some(2));
+        rep.note_exchange_attempt(0, Family::A, 1000 + W);
+        let closed = rep.take_pending_summary(0).expect("closed window 1");
+        assert_eq!(closed.incident[0], Some((1000, "connect", Some(2))));
+        assert_eq!(closed.incident[1], Some((1010, "timeout", Some(1))));
+        rep.note_exchange_failure(0, Family::A, 1000 + W + 1, "timeout", Some(3));
+        assert_eq!(
+            rep.take_pending_summary(0),
+            None,
+            "the closed record is already taken, never rewritten"
+        );
     }
 }

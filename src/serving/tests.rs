@@ -53,6 +53,7 @@ fn serving_poll_timeout_folds_queued_log_drain_into_earliest_wait() {
             1,
             "sub.example.org",
             crate::cache::Family::A,
+            "timeout",
         );
         assert_eq!(
             serving.poll_timeout(),
