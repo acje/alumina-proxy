@@ -4,6 +4,12 @@ Alumina is a single-binary, statically-linked HTTPS CONNECT egress proxy for
 constrained servers. Work here is governed by the fixed repository
 specification, not feature growth.
 
+## Rust style
+Select the `alox-style` pointer skill; canonical rules are the sf-sdlc SSOT
+docs `docs/rust-style.md` + `docs/alox-style.md` (global pointers only). The
+fixed governing spec, allocation limits, numeric bounds, and verification
+gates here are unchanged.
+
 ## Design direction
 
 Alumina is the castle's **exit gate** — deliberately narrow, permanently. It
