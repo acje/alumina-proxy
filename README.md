@@ -280,7 +280,7 @@ cannot observe its own unread pipe (writes succeed into a buffer nobody reads).
   fixed core is admitted even when the queue is full, and best-effort
   `monitor_domain` / `monitor_capture` detail batches
   ([docs/alumina-proxy.md](docs/alumina-proxy.md):340).
-- A failed sink latches permanently and the drain quiesces (`src/log.rs:1638`):
+- A failed sink latches permanently and the drain quiesces (`src/log.rs:736-744,792-797`):
   no further records of any kind are emitted until the proxy restarts.
 
 **Deployment-owned** — you must build and assure; no proxy test covers this:
@@ -378,7 +378,7 @@ never proof of a lossless exit window.
   itself. Alert instead on **silence where emission was expected**: a stream that
   had been delivering `kind=monitor` lines (or an open DNS incident per the
   incident-summary window) going quiet for > N s ⇒ the sink latched failed
-  (`src/log.rs:1638`, nothing more is ever emitted until proxy restart) **or**
+  (`src/log.rs:736-744,792-797`, nothing more is ever emitted until proxy restart) **or**
   the collector died. Distinguish by checking collector liveness out-of-band;
   a latched sink is cleared only by an operator-controlled proxy restart.
 - **A dropped record and a dropped counter can themselves be lost.** The summary
@@ -458,7 +458,7 @@ and `startup_final`/`shutdown_final` `dropped` all stay 0. The pipe buffer and
 the 256-slot in-memory queue absorb the burst. (b) **Loss branch (requires a
 sustained burst, not a few events):** `report_drops`/`capture_drops` move only
 if the in-memory queue is full **at report time** (a dropped `monitor_domain`
-/`monitor_capture` batch, `src/log.rs:1977,1988`), and generic `dropped` moves
+/`monitor_capture` batch, `src/log.rs:1070-1098`), and generic `dropped` moves
 only when the queue overflows — both need enough un-drained records to exhaust
 the 256 × 2 KiB queue, i.e. well over a hundred retained records with the
 collector stopped. With the small burst a small drill generates, do not expect

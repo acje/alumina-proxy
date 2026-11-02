@@ -18,13 +18,13 @@ level. Three clamps were confirmed at `30f943b`:
 2. **No observed identity.** A trust failure records the verdict only — no SPKI, issuer, SAN
    result, or validity. The 2026-10-30 resolver key rotation could not be explained from the
    logs at all; it took an `openssl` probe from a different machine.
-3. **No resolver attribution.** `exchange_failed` (`src/log.rs:1725`) and the incident family
+3. **No resolver attribution.** `exchange_failed` (`git:30f943b9689b21c23b123db6077cecd34b013b05:src/log.rs#L1725-L1732`) and the incident family
    carry the FQDN but never the resolver, so a mid-life trust failure cannot be tied to an
    entry, and the `rd=`/`ep=` counters have no subject.
 
 Two further ambiguities: `ProbeVerdict::NotProbed` (`src/startup_dns.rs:741`) means "exercised
 successfully in the window", "window closed", or "skipped" — indistinguishable; and
-`startup_warning` (`src/log.rs:1711`) carries no reason at all.
+`startup_warning` (`git:30f943b9689b21c23b123db6077cecd34b013b05:src/log.rs#L1711-L1719`) carries no reason at all.
 
 ### The clamp is upstream of the log layer
 

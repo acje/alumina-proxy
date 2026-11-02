@@ -136,7 +136,7 @@ alt_total_timing() {
     printf 'PHASE1-TIMING: total %ss\n' "$ALT_TOTAL"
 }
 
-INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/fault.rs src/fuzz.rs src/config.rs src/resolver.rs src/preflight.rs src/inventory.rs src/boot.rs src/cache.rs src/client_hello.rs src/connect.rs src/dns.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/policy.rs src/enforcement/state.rs src/gate.rs src/incident_report.rs src/log.rs src/runtime.rs src/schedule.rs src/serve.rs src/serving.rs src/startup_dns.rs src/worker.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
+INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/fault.rs src/fuzz.rs src/config.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/resolver.rs src/resolver/tests.rs src/preflight.rs src/inventory.rs src/boot.rs src/boot/tests.rs src/cache.rs src/cache/tests.rs src/client_hello.rs src/client_hello/ja4.rs src/client_hello/tests.rs src/connect.rs src/connect/tests.rs src/dns.rs src/dns/outcome.rs src/dns/publication.rs src/dns/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/gate.rs src/hostname.rs src/hostname/tests.rs src/incident_report.rs src/log.rs src/log/encoding.rs src/log/tests.rs src/runtime.rs src/schedule.rs src/schedule/tests.rs src/serve.rs src/serve/startup_integration.rs src/serve/tests.rs src/serving.rs src/startup_dns.rs src/worker.rs src/worker/tests.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
 
 # docslink gate roots: the exact nonempty argv docslink_check consumes. Shared
 # with the identity snapshot so the boundary content identity covers precisely
@@ -1023,31 +1023,36 @@ intended_coverage_gate() {
 }
 
 # F-new (gate-surface-truth M1, closes assurance alumina-ajyok): an admitted
-# src/*/tests.rs or src/*/dot_tests.rs is trusted as test-only unsafe surface
-# ONLY if the parent module (resolved <dir>.rs, else <dir>/mod.rs) declares the
-# module under #[cfg(test)]. A filename-only admission would let a production
-# `mod tests;` (whose unsafe compiles into the binary) pass the unsafe gate.
-# This is not a filename-only rule: it asserts the actual cfg(test) attribute
-# adjacent to the mod declaration in the parent. Enumerated via find over the
-# working tree (same universe as the unsafe scan, untracked included), exit
+# src/*/tests.rs or src/*/dot_tests.rs at any depth is trusted as test-only
+# unsafe surface ONLY if its actual immediate parent module (resolved
+# <parent>.rs, else <parent>/mod.rs at the unit module's own path; both
+# present is ambiguous and fails closed) declares the module under
+# #[cfg(test)]. A filename-only admission would let a production `mod tests;`
+# (whose unsafe compiles into the binary) pass the unsafe gate. This is not a
+# filename-only rule: it asserts the actual cfg(test) attribute adjacent to
+# the mod declaration in the parent. Enumerated via find over the working tree
+# (same universe as the unsafe scan, untracked included) at every depth, exit
 # captured so a scan failure fails closed and never reads as PASS.
 cfg_test_parentage_gate() {
     fsrc=0
-    umods="$(find src -mindepth 2 -maxdepth 2 -type f \( -name 'tests.rs' -o -name 'dot_tests.rs' \) 2>/dev/null)" || fsrc=$?
+    umods="$(find src -mindepth 2 -type f \( -name 'tests.rs' -o -name 'dot_tests.rs' \) 2>/dev/null)" || fsrc=$?
     [ "$fsrc" -eq 0 ] || {
         echo "CFG-TEST-PARENTAGE-SCAN-FAIL: unit-module scan producer exit $fsrc (tooling error, not PASS)" >&2
         exit 1
     }
     pg_bad=""
     for m in $umods; do
-        dir=$(printf '%s' "$m" | sed 's#^src/\([^/]*\)/.*#\1#')
+        d=$(dirname "$m")
         stem=$(basename "$m" .rs)
-        if [ -f "src/$dir.rs" ]; then
-            parent="src/$dir.rs"
-        elif [ -f "src/$dir/mod.rs" ]; then
-            parent="src/$dir/mod.rs"
+        if [ -f "$d.rs" ] && [ -f "$d/mod.rs" ]; then
+            pg_bad="$pg_bad $m(ambiguous parent: both $d.rs and $d/mod.rs)"
+            continue
+        elif [ -f "$d.rs" ]; then
+            parent="$d.rs"
+        elif [ -f "$d/mod.rs" ]; then
+            parent="$d/mod.rs"
         else
-            pg_bad="$pg_bad $m(no parent module)"
+            pg_bad="$pg_bad $m(no parent module: neither $d.rs nor $d/mod.rs)"
             continue
         fi
         # Assert the parent carries a #[cfg(test)] attribute immediately (modulo
@@ -1057,10 +1062,10 @@ cfg_test_parentage_gate() {
         prc=0
         decl=$(awk -v stem="$stem" '
             {
-                if (!found && $0 ~ ("^[[:space:]]*#\\[cfg\\(test\\)\\][[:space:]]*mod[[:space:]]+" stem "[[:space:]]*;")) { found = 1; next }
+                if (!found && $0 ~ ("^[[:space:]]*#\\[cfg\\(test\\)\\][[:space:]]*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) { found = 1; next }
                 if (!found && $0 ~ /^[[:space:]]*#\[cfg\(test\)\]/) { pending = 1; next }
                 if (pending && $0 ~ /^[[:space:]]*$/) next
-                if (pending && $0 ~ ("^[[:space:]]*mod[[:space:]]+" stem "[[:space:]]*;")) found = 1
+                if (pending && $0 ~ ("^[[:space:]]*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) found = 1
                 pending = 0
             }
             END { print (found ? "ok" : "missing") }

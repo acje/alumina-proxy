@@ -1,0 +1,572 @@
+use super::{LogStore, ServeStorage, ServingMode, StartupDecision, StartupReport};
+use crate::cache::Family;
+use crate::config::{Config, parse_config_document};
+use std::fmt::Write as _;
+use std::io::{self, ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::time::{Duration, Instant};
+
+const NOW0: u64 = 1000;
+
+fn config_with(names: &str, allowance: u8, listen_port: u16) -> Config {
+    let mut doc = format!(
+        "listen = \"127.0.0.1:{listen_port}\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n"
+    );
+    for name in names.split(", ") {
+        let name = name.trim_matches('"');
+        let _ = write!(
+            doc,
+            "[allowed_fqdn.\"{name}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+        );
+    }
+    parse_config_document(&doc).expect("valid test config")
+}
+
+fn ephemeral_port() -> u16 {
+    let probe = TcpListener::bind("127.0.0.1:0").expect("bind port probe");
+    let port = probe.local_addr().expect("probe address").port();
+    drop(probe);
+    port
+}
+
+fn read_query(sock: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut lenb = [0u8; 2];
+    if sock.read_exact(&mut lenb).is_err() {
+        return None;
+    }
+    let qlen = usize::from(u16::from_be_bytes(lenb));
+    if qlen == 0 || qlen > 2048 {
+        return None;
+    }
+    let mut q = vec![0u8; qlen];
+    if sock.read_exact(&mut q).is_err() {
+        return None;
+    }
+    Some(q)
+}
+
+fn write_message(sock: &mut TcpStream, msg: &[u8]) -> std::io::Result<()> {
+    let mut out = Vec::with_capacity(msg.len() + 2);
+    out.extend_from_slice(
+        &u16::try_from(msg.len())
+            .expect("dns message fits u16 length prefix")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(msg);
+    sock.write_all(&out)?;
+    sock.flush()
+}
+
+struct DnsResponder {
+    addr: SocketAddr,
+}
+
+impl DnsResponder {
+    fn spawn<F>(mut on_query: F) -> DnsResponder
+    where
+        F: FnMut(Vec<u8>) -> Option<Vec<u8>> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind responder");
+        let addr = listener.local_addr().expect("responder address");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else {
+                    break;
+                };
+                while let Some(query) = read_query(&mut sock) {
+                    let Some(reply) = on_query(query) else {
+                        break;
+                    };
+                    if write_message(&mut sock, &reply).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        DnsResponder { addr }
+    }
+}
+
+fn build_positive(query: &[u8]) -> Option<Vec<u8>> {
+    if query.len() < 16 {
+        return None;
+    }
+    let tid = u16::from_be_bytes([query[0], query[1]]);
+    let qname = &query[12..query.len() - 4];
+    let qtype = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+    let rdata: &[u8] = match qtype {
+        1 => &[1, 1, 1, 1],
+        28 => &[
+            0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+        ],
+        _ => return None,
+    };
+    let mut msg = Vec::with_capacity(query.len() + 22);
+    msg.extend_from_slice(&tid.to_be_bytes());
+    msg.extend_from_slice(&0x8000u16.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    msg.extend_from_slice(&query[12..]);
+    msg.extend_from_slice(qname);
+    msg.extend_from_slice(&qtype.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&300u32.to_be_bytes());
+    msg.extend_from_slice(
+        &u16::try_from(rdata.len())
+            .expect("rdata fits u16 wire length")
+            .to_be_bytes(),
+    );
+    msg.extend_from_slice(rdata);
+    Some(msg)
+}
+
+fn qname_contains(query: &[u8], label: &[u8]) -> bool {
+    query.windows(label.len()).any(|w| w == label)
+}
+
+#[test]
+fn full_serve_opens_listener_early_before_the_window_elapses() {
+    let window = Duration::from_secs(2);
+    let port = ephemeral_port();
+    let config = config_with(
+        "\"alpha.example.org:443\", \"beta.example.org:443\"",
+        0,
+        port,
+    );
+    let responder = DnsResponder::spawn(|q| build_positive(&q));
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let start = Instant::now();
+    let outcome = storage
+        .run_startup_within(responder.addr, NOW0, window)
+        .expect("startup");
+    let elapsed = start.elapsed();
+    assert_eq!(outcome.decision, StartupDecision::Serve(ServingMode::Full));
+    assert_eq!(outcome.report.resolved_names, 2);
+    let listener = outcome.listener.expect("listener bound for full serve");
+    assert_eq!(
+        listener.local_addr().expect("listener address").port(),
+        port
+    );
+    assert!(
+        elapsed < window,
+        "all-usable startup must return early, not wait the window"
+    );
+    let conn = TcpStream::connect(("127.0.0.1", port));
+    assert!(conn.is_ok(), "bound listener must accept connections");
+}
+
+#[test]
+fn exit75_is_decided_only_at_the_actual_window_deadline() {
+    let window = Duration::from_millis(300);
+    let port = ephemeral_port();
+    let config = config_with(
+        "\"alpha.example.org:443\", \"beta.example.org:443\"",
+        0,
+        port,
+    );
+    let responder = DnsResponder::spawn(|query| {
+        if qname_contains(&query, b"\x04beta") {
+            None
+        } else {
+            build_positive(&query)
+        }
+    });
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let start = Instant::now();
+    let outcome = storage
+        .run_startup_within(responder.addr, NOW0, window)
+        .expect("startup");
+    let elapsed = start.elapsed();
+    assert_eq!(outcome.decision, StartupDecision::Exit75 { unresolved: 1 });
+    assert!(
+        outcome.listener.is_none(),
+        "exit 75 must not bind a listener"
+    );
+    assert!(
+        elapsed >= window,
+        "unresolved startup must not be decided before the deadline (early snapshot)"
+    );
+    let conn = TcpStream::connect(("127.0.0.1", port));
+    assert!(
+        matches!(conn, Err(ref err) if err.kind() == ErrorKind::ConnectionRefused),
+        "exit 75 must leave the listen port unreachable"
+    );
+}
+
+#[test]
+fn degraded_is_decided_only_at_the_actual_window_deadline() {
+    let window = Duration::from_millis(300);
+    let port = ephemeral_port();
+    let config = config_with(
+        "\"alpha.example.org:443\", \"beta.example.org:443\"",
+        1,
+        port,
+    );
+    let responder = DnsResponder::spawn(|query| {
+        if qname_contains(&query, b"\x04beta") {
+            None
+        } else {
+            build_positive(&query)
+        }
+    });
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let start = Instant::now();
+    let outcome = storage
+        .run_startup_within(responder.addr, NOW0, window)
+        .expect("startup");
+    let elapsed = start.elapsed();
+    assert_eq!(
+        outcome.decision,
+        StartupDecision::Serve(ServingMode::Degraded)
+    );
+    assert!(
+        outcome.listener.is_some(),
+        "degraded serve must bind a listener"
+    );
+    assert!(
+        elapsed >= window,
+        "degraded startup must not be decided before the deadline (early snapshot)"
+    );
+}
+
+#[test]
+fn failed_lookup_retries_within_the_window_and_recovers_to_full() {
+    let window = Duration::from_secs(2);
+    let port = ephemeral_port();
+    let config = config_with("\"alpha.example.org:443\"", 0, port);
+    let mut queries = 0u32;
+    let responder = DnsResponder::spawn(move |query| {
+        queries += 1;
+        if queries <= 2 {
+            None
+        } else {
+            build_positive(&query)
+        }
+    });
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let start = Instant::now();
+    let outcome = storage
+        .run_startup_within(responder.addr, NOW0, window)
+        .expect("startup");
+    let elapsed = start.elapsed();
+    assert_eq!(
+        outcome.decision,
+        StartupDecision::Serve(ServingMode::Full),
+        "the windowed retry must recover the failed lookup"
+    );
+    assert_eq!(outcome.report.resolved_names, 1);
+    assert_eq!(outcome.report.failed, 2);
+    assert!(outcome.listener.is_some());
+    assert!(
+        elapsed < window,
+        "recovered startup must return early, not wait for the deadline"
+    );
+}
+
+#[test]
+fn retried_failures_and_never_attempted_sibling_report_truthful_not_attempted() {
+    let window = Duration::from_millis(1600);
+    let port = ephemeral_port();
+    let config = config_with(
+        "\"alpha.example.org:443\", \"beta.example.org:443\"",
+        1,
+        port,
+    );
+    let responder = DnsResponder::spawn(|query| {
+        if qname_contains(&query, b"\x04beta") {
+            None
+        } else {
+            build_positive(&query)
+        }
+    });
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let outcome = storage
+        .run_startup_within(responder.addr, NOW0, window)
+        .expect("startup");
+    assert_eq!(outcome.report.resolved_names, 1, "alpha usable");
+    assert!(
+        outcome.report.failed >= 4,
+        "beta retried at least once after its first failed exchange: {}",
+        outcome.report.failed
+    );
+    assert_eq!(
+        outcome.report.not_attempted, 1,
+        "only alpha's sibling family went un-attempted; retried failures must \
+             not erase the never-attempted slots (exchanges {}, failed {}, resolved {}):",
+        outcome.report.exchanges, outcome.report.failed, outcome.report.resolved_names,
+    );
+}
+
+#[test]
+fn resolved_names_family_schedule_survives_for_serving_refresh() {
+    let window = Duration::from_millis(1600);
+    let port = ephemeral_port();
+    let config = config_with(
+        "\"alpha.example.org:443\", \"beta.example.org:443\"",
+        1,
+        port,
+    );
+    let responder = DnsResponder::spawn(|query| {
+        if qname_contains(&query, b"\x04beta") {
+            None
+        } else {
+            build_positive(&query)
+        }
+    });
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let outcome = storage
+        .run_startup_within(responder.addr, NOW0, window)
+        .expect("startup");
+    assert_eq!(outcome.report.resolved_names, 1, "alpha usable");
+    assert_eq!(
+        storage.schedules().due_time(0, Family::Aaaa).unwrap(),
+        Some(NOW0),
+        "a resolved name's sibling family must keep its seeded due for the \
+             serving refresh, never be re-clobbered to a later now"
+    );
+}
+
+#[test]
+fn resolved_name_sibling_stays_selectable_after_startup_for_serving() {
+    let window = Duration::from_millis(1600);
+    let port = ephemeral_port();
+    let config = config_with(
+        "\"alpha.example.org:443\", \"beta.example.org:443\"",
+        1,
+        port,
+    );
+    let responder = DnsResponder::spawn(|query| {
+        if qname_contains(&query, b"\x04beta") {
+            None
+        } else {
+            build_positive(&query)
+        }
+    });
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let outcome = storage
+        .run_startup_within(responder.addr, NOW0, window)
+        .expect("startup");
+    assert_eq!(outcome.report.resolved_names, 1, "alpha usable");
+    assert_eq!(
+        storage.schedules.due_time(0, Family::Aaaa).unwrap(),
+        Some(NOW0),
+        "sibling due must be preserved for the serving refresh"
+    );
+    let selected = storage
+        .schedules
+        .select_due(NOW0 + 2)
+        .expect("a future serving refresh must be selectable")
+        .expect("alpha AAAA must not be stuck in-flight after the window");
+    assert_eq!(selected.name(), 0);
+    assert_eq!(selected.family(), Family::Aaaa);
+}
+
+/// The widest legal allowlist: `ALLOWLIST_MAX` keyed FQDNs, each exactly
+/// `FQDN_MAX_LEN` bytes (four labels, the longest three at the 63-byte
+/// bound), distinct per name, in one document under
+/// [`crate::config::CONFIG_DOC_LIMIT`]. Every name stays unresolved in the
+/// tests below, so the startup emission is the 32 + 1 record worst case.
+fn widest_allowlist_config() -> Config {
+    use crate::config::{ALLOWLIST_MAX, CONFIG_DOC_LIMIT, FQDN_MAX_LEN};
+    let mut doc = String::from(
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
+    );
+    for ordinal in 0..ALLOWLIST_MAX {
+        let mut first = format!("n{ordinal}");
+        while first.len() < 63 {
+            first.push('a');
+        }
+        let name = format!(
+            "{first}.{}.{}.{}",
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(FQDN_MAX_LEN - 3 * 63 - 3)
+        );
+        assert_eq!(name.len(), FQDN_MAX_LEN, "the widest legal FQDN");
+        let _ = write!(
+            doc,
+            "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+        );
+    }
+    assert!(
+        doc.len() <= CONFIG_DOC_LIMIT,
+        "the widest legal document ({} B) fits the {CONFIG_DOC_LIMIT} B bound",
+        doc.len()
+    );
+    let config = crate::config::parse_config_document(&doc).expect("widest legal config");
+    assert_eq!(config.allowlist().len(), ALLOWLIST_MAX);
+    assert!(
+        config
+            .allowlist()
+            .iter()
+            .all(|name| name.as_str().len() == FQDN_MAX_LEN),
+        "every allowlist entry sits at the 253-byte bound"
+    );
+    config
+}
+
+/// Every allowlisted name unresolved, with a full failed-exchange report.
+fn all_unresolved_report() -> StartupReport {
+    use crate::config::ALLOWLIST_MAX;
+    use crate::startup_dns::NameOutcome;
+    StartupReport {
+        exchanges: 64,
+        failed: 64,
+        cancelled: 0,
+        not_attempted: 0,
+        resolved_names: 0,
+        outcomes: [NameOutcome::Negative; ALLOWLIST_MAX],
+        first_failure: None,
+    }
+}
+
+/// A real file sink the store writes through its own unbuffered syscall
+/// path, so the drain is observed as bytes on a descriptor rather than
+/// through the test-only `flush_all` loop.
+fn temp_sink_file() -> std::fs::File {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "alumina-serve-log-{}-{}.log",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .expect("temp sink file")
+}
+
+/// A socketpair whose writer is already full, so every write is a real
+/// `WouldBlock` on a live nonblocking descriptor.
+fn stalled_sink() -> (
+    LogStore,
+    std::os::unix::net::UnixStream,
+    std::os::unix::net::UnixStream,
+) {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    let (reader, mut writer) = UnixStream::pair().expect("socketpair");
+    writer.set_nonblocking(true).expect("writer nonblocking");
+    let filler = [b'#'; 8 * 1024];
+    let mut accepted = 0usize;
+    while accepted < (1 << 20) {
+        match writer.write(&filler) {
+            Ok(0) => break,
+            Ok(n) => accepted += n,
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
+            Err(err) => panic!("filling the stalled sink: {err}"),
+        }
+    }
+    assert!(accepted > 0, "the socket buffer accepted the filler");
+    let store = LogStore::with_fd(&writer).expect("stalled sink store");
+    (store, reader, writer)
+}
+
+/// B-D1 regression: the readiness decision enqueues 33 records but one
+/// `drain_sink` turn carries at most 16 fragments, so the bounded turn loop
+/// must deliver every `startup_name` record and the summary to the real
+/// sink — in ascending ordinal order, summary last — before the `Exit75`
+/// decision that ends the process.
+#[test]
+fn startup_emission_over_widest_config_reaches_the_real_sink_before_exit75() {
+    use crate::config::ALLOWLIST_MAX;
+    use std::io::{Read, Seek};
+    let config = widest_allowlist_config();
+    let allowlist = config.allowlist();
+    assert_eq!(allowlist.len(), ALLOWLIST_MAX);
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let mut file = temp_sink_file();
+    storage.logs = LogStore::with_fd(&file).expect("file sink store");
+    storage.emit_startup_records(
+        9,
+        &all_unresolved_report(),
+        StartupDecision::Exit75 { unresolved: 32 },
+    );
+    assert_eq!(storage.logs.len(), 0, "the queue is empty after the drain");
+    assert_eq!(
+        storage.logs.dropped(),
+        0,
+        "all 33 records were enqueued and delivered, none dropped"
+    );
+    let mut out = Vec::new();
+    file.rewind().expect("rewind the sink");
+    file.read_to_end(&mut out).expect("read the sink");
+    let text = String::from_utf8(out).expect("ascii records");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        ALLOWLIST_MAX + 1,
+        "32 startup_name records plus the summary reach the sink"
+    );
+    for (ordinal, line) in lines[..ALLOWLIST_MAX].iter().enumerate() {
+        assert_eq!(
+            *line,
+            format!(
+                "level=info kind=startup_name secs=9 ordinal={ordinal} name=\"{}\" outcome=negative",
+                allowlist.get(ordinal).expect("allowlist ordinal").as_str()
+            ),
+            "record {ordinal}: ascending ordinal order and the full, untruncated FQDN"
+        );
+    }
+    assert_eq!(
+        lines[ALLOWLIST_MAX],
+        "level=info kind=startup_final secs=9 status=\"failure\" allowance=0 usable=0 unresolved=32 exchanges=64 failed=64 not_attempted=0 dropped=0 names_dropped=0",
+        "the aggregate readiness record is last and reports no loss"
+    );
+}
+
+/// The stalled-sink half of the bounded loop: a sink that answers
+/// `WouldBlock` stops the drain after the first refusing turn instead of
+/// spending the cap or spinning, records survive for a later turn on a
+/// serving decision, and a decision that exits counts each stranded record
+/// exactly once.
+#[test]
+fn startup_drain_stops_on_a_stalled_sink_and_counts_each_stranded_record_once() {
+    use crate::config::ALLOWLIST_MAX;
+
+    let config = widest_allowlist_config();
+    let report = all_unresolved_report();
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let (store, _reader, _writer) = stalled_sink();
+    storage.logs = store;
+    storage.emit_startup_records(9, &report, StartupDecision::Serve(ServingMode::Degraded));
+    assert_eq!(
+        storage.logs.len(),
+        ALLOWLIST_MAX + 1,
+        "a stalled sink ends the drain with every record still queued"
+    );
+    assert_eq!(
+        storage.logs.sink_ops(),
+        0,
+        "the stalled sink accepted no fragment"
+    );
+    assert!(
+        !storage.logs.sink_ready(),
+        "the stop reason is the stalled sink, not the iteration cap"
+    );
+    assert_eq!(
+        storage.logs.dropped(),
+        0,
+        "a serving decision counts nothing: the records are still deliverable"
+    );
+    let (store, _reader, _writer) = stalled_sink();
+    storage.logs = store;
+    storage.emit_startup_records(9, &report, StartupDecision::Exit75 { unresolved: 32 });
+    assert_eq!(
+        storage.logs.len(),
+        0,
+        "the queue an exiting owner cannot deliver is cleared"
+    );
+    assert_eq!(
+        storage.logs.dropped(),
+        (ALLOWLIST_MAX + 1) as u64,
+        "each undeliverable record is counted exactly once, never twice"
+    );
+}
