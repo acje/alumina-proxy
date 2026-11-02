@@ -2106,6 +2106,22 @@ fn seeded_transport(set: ResolverSet) -> StartupDns {
     transport
 }
 
+/// Builds the in-flight exchange a `note_failure` call reads, with the
+/// remaining fields as innocuous defaults for the direct-call tests.
+fn fixture_exchange(ordinal: usize, family: Family, class: ExchangeClass) -> ActiveExchange {
+    ActiveExchange {
+        ordinal,
+        family,
+        deadline: Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS),
+        step: ExchangeStep::Connecting,
+        qlen: 2,
+        connect_err: None,
+        tid: 0,
+        class,
+        generation: Generation::INITIAL,
+    }
+}
+
 #[test]
 fn failover_relocates_to_next_healthy_after_threshold_and_arms_failback() {
     let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
@@ -2922,9 +2938,7 @@ fn probe_sweep_skips_every_resolver_the_window_exercised() {
     let mut schedules = Schedules::new(2).unwrap();
     transport
         .note_failure(
-            0,
-            Family::A,
-            ExchangeClass::Probe,
+            &fixture_exchange(0, Family::A, ExchangeClass::Probe),
             &mut schedules,
             FailureReason::Connect,
         )
@@ -3339,9 +3353,7 @@ fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
     let mut schedules = Schedules::new(2).unwrap();
     transport
         .note_failure(
-            0,
-            Family::A,
-            ExchangeClass::Probe,
+            &fixture_exchange(0, Family::A, ExchangeClass::Probe),
             &mut schedules,
             FailureReason::Connect,
         )
@@ -3372,9 +3384,7 @@ fn note_failure_serving_accumulates_open_note_on_first_failure() {
     let mut schedules = Schedules::new(2).unwrap();
     transport
         .note_failure(
-            0,
-            Family::A,
-            ExchangeClass::Serving,
+            &fixture_exchange(0, Family::A, ExchangeClass::Serving),
             &mut schedules,
             FailureReason::Connect,
         )
@@ -3401,9 +3411,7 @@ fn note_failure_startup_suppresses_open_note_but_tracks_state() {
     let mut schedules = Schedules::new(2).unwrap();
     transport
         .note_failure(
-            0,
-            Family::A,
-            ExchangeClass::Startup,
+            &fixture_exchange(0, Family::A, ExchangeClass::Startup),
             &mut schedules,
             FailureReason::Connect,
         )
@@ -3420,9 +3428,7 @@ fn note_failure_startup_suppresses_open_note_but_tracks_state() {
     );
     transport
         .note_failure(
-            0,
-            Family::A,
-            ExchangeClass::Serving,
+            &fixture_exchange(0, Family::A, ExchangeClass::Serving),
             &mut schedules,
             FailureReason::Timeout,
         )
@@ -3441,18 +3447,14 @@ fn note_failure_silent_update_does_not_accumulate_second_note() {
     let mut schedules = Schedules::new(2).unwrap();
     transport
         .note_failure(
-            0,
-            Family::A,
-            ExchangeClass::Serving,
+            &fixture_exchange(0, Family::A, ExchangeClass::Serving),
             &mut schedules,
             FailureReason::Connect,
         )
         .expect("first failure noted");
     transport
         .note_failure(
-            0,
-            Family::A,
-            ExchangeClass::Serving,
+            &fixture_exchange(0, Family::A, ExchangeClass::Serving),
             &mut schedules,
             FailureReason::Timeout,
         )
@@ -3484,9 +3486,7 @@ fn note_failure_retains_failed_origin_per_family_after_third_failure_relocation(
     );
     transport
         .note_failure(
-            0,
-            Family::A,
-            ExchangeClass::Serving,
+            &fixture_exchange(0, Family::A, ExchangeClass::Serving),
             &mut schedules,
             FailureReason::Connect,
         )
@@ -3507,9 +3507,7 @@ fn note_failure_retains_failed_origin_per_family_after_third_failure_relocation(
     for _ in 0..2 {
         transport
             .note_failure(
-                0,
-                Family::A,
-                ExchangeClass::Serving,
+                &fixture_exchange(0, Family::A, ExchangeClass::Serving),
                 &mut schedules,
                 FailureReason::Timeout,
             )
@@ -3537,9 +3535,7 @@ fn note_failure_retains_failed_origin_per_family_after_third_failure_relocation(
     );
     transport
         .note_failure(
-            0,
-            Family::Aaaa,
-            ExchangeClass::Serving,
+            &fixture_exchange(0, Family::Aaaa, ExchangeClass::Serving),
             &mut schedules,
             FailureReason::Receive,
         )
@@ -3557,9 +3553,7 @@ fn note_failure_unadmitted_ordinal_returns_err_and_leaves_origin_untouched() {
     let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1"]));
     for ordinal in [ALLOWLIST_MAX, 1, usize::MAX] {
         let Err(err) = transport.note_failure(
-            ordinal,
-            Family::A,
-            ExchangeClass::Serving,
+            &fixture_exchange(ordinal, Family::A, ExchangeClass::Serving),
             &mut schedules,
             FailureReason::Connect,
         ) else {
@@ -3601,9 +3595,7 @@ fn serving_positive_recovered_note_case(configured: bool) {
     let expected_actor = configured.then_some(1);
     transport
         .note_failure(
-            0,
-            Family::A,
-            ExchangeClass::Serving,
+            &fixture_exchange(0, Family::A, ExchangeClass::Serving),
             &mut schedules,
             FailureReason::Connect,
         )
@@ -3624,9 +3616,7 @@ fn serving_positive_recovered_note_case(configured: bool) {
     for _ in 0..2 {
         transport
             .note_failure(
-                0,
-                Family::A,
-                ExchangeClass::Serving,
+                &fixture_exchange(0, Family::A, ExchangeClass::Serving),
                 &mut schedules,
                 FailureReason::Timeout,
             )

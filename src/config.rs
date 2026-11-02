@@ -15,7 +15,7 @@ use crate::resolver::{self, ResolverSet};
 pub const CONFIG_DOC_LIMIT: usize = 16384;
 pub const ALLOWLIST_MIN: usize = 1;
 pub const ALLOWLIST_MAX: usize = 32;
-pub const FQDN_MAX_LEN: usize = 253;
+pub const FQDN_MAX_LEN: usize = crate::name_rules::FQDN_MAX_LEN;
 pub const MAX_RESOLVERS: usize = resolver::MAX_RESOLVERS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,7 +34,7 @@ impl Fqdn {
             .rsplit_once(':')
             .ok_or_else(|| "allowlist entry lacks a <fqdn>:<port> port".to_string())?;
         let name = validate_bare_name(host)?;
-        if is_ip_literal_shape(name.as_bytes()) {
+        if crate::name_rules::is_ip_literal_shape(name.as_bytes()) {
             return Err("allowlist entry is an IP literal; use a DNS hostname".into());
         }
         let port = parse_config_port(port)?;
@@ -59,22 +59,13 @@ impl Fqdn {
 /// Validates one DNS label against the shared lowercase-ASCII rules: non-empty,
 /// ≤63 bytes, no leading/trailing hyphen, only `[a-z0-9-]`.
 fn validate_label(label: &str) -> Result<(), String> {
-    if label.is_empty() {
-        return Err("empty label".into());
-    }
-    if label.len() > 63 {
-        return Err("label exceeds 63 bytes".into());
-    }
-    if label.starts_with('-') || label.ends_with('-') {
-        return Err("label starts or ends with hyphen".into());
-    }
-    if !label
-        .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    {
-        return Err(format!("label {label:?} not lowercase ASCII [a-z0-9-]"));
-    }
-    Ok(())
+    use crate::name_rules::LabelFault::{BadHyphen, DisallowedByte, Empty, TooLong};
+    crate::name_rules::classify_label(label.as_bytes()).map_err(|fault| match fault {
+        Empty => "empty label".into(),
+        TooLong => "label exceeds 63 bytes".into(),
+        BadHyphen => "label starts or ends with hyphen".into(),
+        DisallowedByte => format!("label {label:?} not lowercase ASCII [a-z0-9-]"),
+    })
 }
 
 /// Validates a bare DNS name (no port): normalizes a single trailing dot,
@@ -100,7 +91,7 @@ fn validate_bare_name(name: &str) -> Result<String, String> {
 /// at least two labels (a one-label suffix like `com` cannot be a safe zone).
 fn parse_cname_bailiwick_suffix(input: &str) -> Result<String, String> {
     let name = validate_bare_name(input)?;
-    if is_ip_literal_shape(name.as_bytes()) {
+    if crate::name_rules::is_ip_literal_shape(name.as_bytes()) {
         return Err("declared suffix is an IP literal; use a DNS zone name".into());
     }
     if name.split('.').count() < 2 {
@@ -139,12 +130,6 @@ fn normalize_trailing_dot(name: &str) -> Result<&str, String> {
     } else {
         Ok(name)
     }
-}
-
-fn is_ip_literal_shape(bytes: &[u8]) -> bool {
-    !bytes.is_empty()
-        && bytes[0].is_ascii_digit()
-        && bytes.iter().all(|b| *b == b'.' || b.is_ascii_digit())
 }
 
 /// Fixed-capacity validated hostname (lowercase ASCII FQDN without a trailing
@@ -208,31 +193,12 @@ impl FixedHostname {
         for (i, &b) in input[..len].iter().enumerate() {
             out.bytes[i] = b.to_ascii_lowercase();
         }
-        let mut label_len = 0usize;
-        for i in 0..=out.len {
-            let b = if i == out.len { b'.' } else { out.bytes[i] };
-            match b {
-                b'.' => {
-                    if label_len == 0 || label_len > 63 {
-                        return None;
-                    }
-                    let start = i - label_len;
-                    if out.bytes[start] == b'-' || out.bytes[i - 1] == b'-' {
-                        return None;
-                    }
-                    for &c in &out.bytes[start..i] {
-                        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
-                            return None;
-                        }
-                    }
-                    label_len = 0;
-                }
-                _ => {
-                    label_len += 1;
-                }
+        for label in out.bytes[..out.len].split(|&b| b == b'.') {
+            if crate::name_rules::classify_label(label).is_err() {
+                return None;
             }
         }
-        if is_ip_literal_shape(&out.bytes[..out.len]) {
+        if crate::name_rules::is_ip_literal_shape(&out.bytes[..out.len]) {
             return None;
         }
         Some(out)
@@ -293,6 +259,8 @@ mod fixed_hostname_tests {
         assert!(FixedHostname::normalize(b"bad-.example.org").is_none());
         assert!(FixedHostname::normalize(b"double..dot.example.org").is_none());
         assert!(FixedHostname::normalize(b"under_score.example.org").is_none());
+        assert!(FixedHostname::normalize(b"example.org..").is_none());
+        assert!(FixedHostname::normalize(b".a").is_none());
     }
 
     #[test]
@@ -862,6 +830,16 @@ fn build_resolver_set(table: &toml::Table) -> Result<ResolverSet, ConfigError> {
 /// `{ action, scope }` table with `action` in `notify|block` (tarpit reserved)
 /// and `scope` in `connection|all`. Every control key is mandatory; a missing
 /// key is a startup failure, never a silent default.
+const ANY_ILLEGAL_CONTROL_KEYS: [(AnyIllegalControl, &str); AnyIllegalControl::COUNT] = [
+    (AnyIllegalControl::ConnectParse, "connect_parse"),
+    (
+        AnyIllegalControl::HostNotAllowlisted,
+        "host_not_allowlisted",
+    ),
+    (AnyIllegalControl::TlsProfile, "tls_profile"),
+    (AnyIllegalControl::Ech, "ech"),
+];
+
 fn parse_any_illegal(
     value: &toml::Value,
 ) -> Result<[Control; AnyIllegalControl::COUNT], ConfigError> {
@@ -873,25 +851,17 @@ fn parse_any_illegal(
     let mut controls = [Control::new(ActionKind::Block, Scope::All); AnyIllegalControl::COUNT];
     let mut seen = [false; AnyIllegalControl::COUNT];
     for (key, value) in table {
-        let control = match key.as_str() {
-            "connect_parse" => AnyIllegalControl::ConnectParse,
-            "host_not_allowlisted" => AnyIllegalControl::HostNotAllowlisted,
-            "tls_profile" => AnyIllegalControl::TlsProfile,
-            "ech" => AnyIllegalControl::Ech,
-            other => return Err(ConfigError::UnknownKey(format!("any_illegal.{other}"))),
+        let control = match ANY_ILLEGAL_CONTROL_KEYS
+            .iter()
+            .find(|(_, name)| *name == key.as_str())
+        {
+            Some((control, _)) => *control,
+            None => return Err(ConfigError::UnknownKey(format!("any_illegal.{key}"))),
         };
         controls[control as usize] = parse_any_illegal_control(value, key)?;
         seen[control as usize] = true;
     }
-    for (control, name) in [
-        (AnyIllegalControl::ConnectParse, "connect_parse"),
-        (
-            AnyIllegalControl::HostNotAllowlisted,
-            "host_not_allowlisted",
-        ),
-        (AnyIllegalControl::TlsProfile, "tls_profile"),
-        (AnyIllegalControl::Ech, "ech"),
-    ] {
+    for (control, name) in ANY_ILLEGAL_CONTROL_KEYS {
         if !seen[control as usize] {
             return Err(ConfigError::MissingField(format!("any_illegal.{name}")));
         }
@@ -899,27 +869,38 @@ fn parse_any_illegal(
     Ok(controls)
 }
 
+/// Reads the shared `{ action, scope }` control-table syntax used by the
+/// `any_illegal` controls and the per-FQDN `early_data`/`ja4` table form:
+/// rejects unrecognized keys, then requires the `action` string and the
+/// `scope` string, then parses the action keyword. Scope grammar and each
+/// consumer's policy are applied after this returns.
+fn read_action_scope_table(
+    table: &toml::Table,
+    prefix: &str,
+) -> Result<(ActionKind, String), ConfigError> {
+    for key in table.keys() {
+        if !matches!(key.as_str(), "action" | "scope") {
+            return Err(ConfigError::UnknownKey(format!("{prefix}.{key}")));
+        }
+    }
+    let action =
+        require_string(table, "action").map_err(|err| prefix_group_error(prefix, "action", err))?;
+    let scope =
+        require_string(table, "scope").map_err(|err| prefix_group_error(prefix, "scope", err))?;
+    let kind = parse_action_kind(&action, &format!("{prefix}.action"))?;
+    Ok((kind, scope))
+}
+
 /// Parses one `[any_illegal]` control value: a `{ action, scope }` table whose
 /// action is `notify|block` (tarpit reserved) and whose scope is
 /// `connection|all`.
 fn parse_any_illegal_control(value: &toml::Value, key: &str) -> Result<Control, ConfigError> {
-    let toml::Value::Table(table) = value else {
-        return Err(ConfigError::WrongType(format!(
-            "any_illegal.{key}: expected table"
-        )));
-    };
-    for k in table.keys() {
-        if !matches!(k.as_str(), "action" | "scope") {
-            return Err(ConfigError::UnknownKey(format!("any_illegal.{key}.{k}")));
-        }
-    }
     let prefix = format!("any_illegal.{key}");
-    let action = require_string(table, "action")
-        .map_err(|err| prefix_group_error(&prefix, "action", err))?;
-    let scope =
-        require_string(table, "scope").map_err(|err| prefix_group_error(&prefix, "scope", err))?;
-    let kind = parse_action_kind(&action, &format!("{prefix}.action"))?;
-    let scope = parse_any_illegal_scope(&scope, &format!("{prefix}.scope"))?;
+    let toml::Value::Table(table) = value else {
+        return Err(ConfigError::WrongType(format!("{prefix}: expected table")));
+    };
+    let (kind, scope_text) = read_action_scope_table(table, &prefix)?;
+    let scope = parse_any_illegal_scope(&scope_text, &format!("{prefix}.scope"))?;
     Ok(Control::new(kind, scope))
 }
 
@@ -1008,10 +989,6 @@ fn parse_gate_section(table: &toml::Table, name: &str) -> Result<AllScopeGate, C
     Ok(AllScopeGate::new(threshold, window_secs))
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "each key comes from table.keys() iteration, so it is present in the table by construction"
-)]
 fn parse_allowed_fqdn_table(
     value: &toml::Value,
     fqdn_key: &str,
@@ -1024,16 +1001,16 @@ fn parse_allowed_fqdn_table(
     let mut early_data = None;
     let mut ja4 = None;
     let mut bailiwick = Vec::new();
-    for key in table.keys() {
+    for (key, value) in table.iter() {
         match key.as_str() {
             "early_data" => {
-                early_data = Some(table.get(key).expect("key present in iteration"));
+                early_data = Some(value);
             }
             "ja4" => {
-                ja4 = Some(table.get(key).expect("key present in iteration"));
+                ja4 = Some(value);
             }
             "cname_bailiwick" => {
-                bailiwick = parse_cname_bailiwick(table, fqdn_key)?;
+                bailiwick = parse_cname_bailiwick(value, fqdn_key)?;
             }
             _ => {
                 return Err(ConfigError::UnknownKey(format!(
@@ -1051,14 +1028,7 @@ fn parse_allowed_fqdn_table(
     Ok((early, j4, bailiwick))
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "parse_allowed_fqdn_table only calls this from the iterated 'cname_bailiwick' arm, so the key is present"
-)]
-fn parse_cname_bailiwick(table: &toml::Table, fqdn_key: &str) -> Result<Vec<String>, ConfigError> {
-    let value = table
-        .get("cname_bailiwick")
-        .expect("key present in iteration");
+fn parse_cname_bailiwick(value: &toml::Value, fqdn_key: &str) -> Result<Vec<String>, ConfigError> {
     let toml::Value::Array(items) = value else {
         return Err(ConfigError::WrongType(format!(
             "allowed_fqdn.{fqdn_key}.cname_bailiwick: expected array of strings"
@@ -1106,16 +1076,7 @@ fn parse_per_fqdn_control(
             }),
         },
         toml::Value::Table(table) => {
-            for key in table.keys() {
-                if !matches!(key.as_str(), "action" | "scope") {
-                    return Err(ConfigError::UnknownKey(format!("{prefix}.{key}")));
-                }
-            }
-            let action = require_string(table, "action")
-                .map_err(|err| prefix_group_error(&prefix, "action", err))?;
-            let scope_text = require_string(table, "scope")
-                .map_err(|err| prefix_group_error(&prefix, "scope", err))?;
-            let kind = parse_action_kind(&action, &format!("{prefix}.action"))?;
+            let (kind, scope_text) = read_action_scope_table(table, &prefix)?;
             let scope = parse_per_fqdn_scope(&scope_text, &format!("{prefix}.scope"))?;
             if control_key == "early_data"
                 && kind == ActionKind::Block
@@ -1595,6 +1556,96 @@ mod enforcement_config_tests {
             matches!(&err, ConfigError::UnknownKey(k) if k == "any_illegal.early_data"),
             "expected UnknownKey(any_illegal.early_data), got {err:?}"
         );
+    }
+
+    #[test]
+    fn shared_action_scope_table_reports_combined_faults_in_order() {
+        let allow = entry_table(
+            "a.example:443",
+            "notify",
+            "connection",
+            "notify",
+            "connection",
+        );
+        let rest = "\
+host_not_allowlisted = { action = \"block\", scope = \"all\" }
+tls_profile = { action = \"block\", scope = \"all\" }
+ech = { action = \"block\", scope = \"connection\" }";
+        let connect_only = |control: &str| {
+            format!(
+                "{}{}{}",
+                base(),
+                format_args!("[any_illegal]\nconnect_parse = {control}\n{rest}\n"),
+                allow,
+            )
+        };
+        let with_early = |control: &str| {
+            format!(
+                "{}{}{}",
+                base(),
+                any_illegal_default(),
+                entry(
+                    "a.example:443",
+                    control,
+                    "{ action = \"notify\", scope = \"connection\" }",
+                ),
+            )
+        };
+
+        let err = parse_config_document(&connect_only(
+            "{ action = \"notify\", scope = \"connection\", bogus = 1 }",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::UnknownKey(k) if k == "any_illegal.connect_parse.bogus"),
+            "unknown key must precede any missing-field diagnostic: {err:?}"
+        );
+
+        let err = parse_config_document(&connect_only("{ scope = \"all\" }")).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::MissingField(f) if f == "any_illegal.connect_parse.action"),
+            "missing action must precede missing scope: {err:?}"
+        );
+
+        let err = parse_config_document(&connect_only("{ action = \"notify\" }")).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::MissingField(f) if f == "any_illegal.connect_parse.scope"),
+            "missing scope must be reported after a valid action string: {err:?}"
+        );
+
+        let err = parse_config_document(&connect_only("{ action = \"wire\", scope = \"fqdn\" }"))
+            .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::UnknownAction { key, value } if key == "any_illegal.connect_parse.action" && value == "wire"),
+            "action keyword must be parsed before the scope grammar: {err:?}"
+        );
+
+        for (build, prefix) in [
+            (
+                &connect_only as &dyn Fn(&str) -> String,
+                "any_illegal.connect_parse",
+            ),
+            (
+                &with_early as &dyn Fn(&str) -> String,
+                "allowed_fqdn.a.example:443.early_data",
+            ),
+        ] {
+            let err = parse_config_document(&build("{ bogus = 1 }")).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::UnknownKey(k) if k == &format!("{prefix}.bogus")),
+                "unknown key must precede missing action on {prefix}: {err:?}"
+            );
+            let err = parse_config_document(&build("{}")).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::MissingField(f) if f == &format!("{prefix}.action")),
+                "missing action must precede missing scope on {prefix}: {err:?}"
+            );
+            let err = parse_config_document(&build("{ action = \"wire\" }")).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::MissingField(f) if f == &format!("{prefix}.scope")),
+                "missing scope must precede unknown action keyword on {prefix}: {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -3089,5 +3140,91 @@ mod authorization_boundary_tests {
         // `rejects_malformed_labels`.
         assert!(FixedHostname::normalize("bücher.example".as_bytes()).is_none());
         assert!(FixedHostname::normalize("b\u{e9}cher.example".as_bytes()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod hostname_rules {
+    use super::*;
+
+    fn reason(input: &str) -> String {
+        Fqdn::parse(input).expect_err(input)
+    }
+
+    #[test]
+    fn hostname_rules_config_exact_reasons_and_original_spelling() {
+        for (input, expected) in [
+            (".:443", "empty hostname"),
+            ("a..b:443", "empty label"),
+            ("-bad.example:443", "label starts or ends with hyphen"),
+            (
+                "bad_host.example:443",
+                "label \"bad_host\" not lowercase ASCII [a-z0-9-]",
+            ),
+            (
+                "1.2.3.4:443",
+                "allowlist entry is an IP literal; use a DNS hostname",
+            ),
+            ("example.org..:443", "multiple trailing dots"),
+        ] {
+            assert_eq!(reason(input), expected, "FQDN reason for {input:?}");
+        }
+        assert_eq!(
+            reason(&format!("{}.example:443", "a".repeat(64))),
+            "label exceeds 63 bytes"
+        );
+        let displayed = ConfigError::InvalidFqdn {
+            name: "A.BAD.:443".to_owned(),
+            reason: reason("A.BAD.:443"),
+        }
+        .to_string();
+        assert_eq!(
+            displayed,
+            "config invalid FQDN \"A.BAD.:443\": label \"A\" not lowercase ASCII [a-z0-9-]"
+        );
+    }
+
+    #[test]
+    fn hostname_rules_config_first_error_precedence() {
+        let hyphen_long = format!("-{}.example:443", "a".repeat(63));
+        let over = format!("{0}.{0}.{0}.{1}:443", "a".repeat(63), "Z".repeat(62));
+        for (input, expected) in [
+            (hyphen_long.as_str(), "label exceeds 63 bytes"),
+            ("-_b.example:443", "label starts or ends with hyphen"),
+            ("good.-_b.example:443", "label starts or ends with hyphen"),
+            (
+                "bad_.-x.example:443",
+                "label \"bad_\" not lowercase ASCII [a-z0-9-]",
+            ),
+            (over.as_str(), "hostname exceeds 253 bytes"),
+        ] {
+            assert_eq!(reason(input), expected, "precedence for {input:?}");
+        }
+        let ok = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "c".repeat(61));
+        assert_eq!(ok.len(), 253);
+        assert!(
+            Fqdn::parse(&format!("{ok}.:443")).is_ok(),
+            "253 name plus trailing dot accepted"
+        );
+    }
+
+    #[test]
+    fn hostname_rules_cname_exact_reasons_and_precedence() {
+        for (input, expected) in [
+            (
+                "1.2.3.4",
+                "declared suffix is an IP literal; use a DNS zone name",
+            ),
+            (
+                "123",
+                "declared suffix is an IP literal; use a DNS zone name",
+            ),
+            ("com", "declared suffix must have at least 2 labels"),
+        ] {
+            assert_eq!(
+                parse_cname_bailiwick_suffix(input).expect_err(input),
+                expected
+            );
+        }
     }
 }

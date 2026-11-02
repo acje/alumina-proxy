@@ -94,6 +94,53 @@ impl ClosedWindow {
     pub(crate) const fn duration(&self) -> u64 {
         self.window_end - self.window_start
     }
+
+    pub(crate) fn to_summary(self, secs: u64, cache: [SummaryCache; 2]) -> IncidentSummary {
+        let mut types = [TypeSummary::EMPTY; 2];
+        let mut i = 0;
+        while i < 2 {
+            let (start, reason, resolver) = match self.incident[i] {
+                Some((opened_at, reason, origin)) => (Some(opened_at), Some(reason), origin),
+                None => (None, None, None),
+            };
+            types[i] = TypeSummary {
+                start,
+                elapsed: start.map_or(0, |s| self.window_end.saturating_sub(s)),
+                reason,
+                resolver,
+                last_positive: self.last_positive[i],
+                attempts: self.per_type[i].attempts.value,
+                failures: self.per_type[i].failures.value,
+                addrs: cache[i].addrs,
+                state: cache[i].state,
+                freshness: cache[i].freshness.map(|f| f.saturating_sub(secs)),
+                retirement: cache[i].retirement.map(|r| r.saturating_sub(secs)),
+            };
+            i += 1;
+        }
+        IncidentSummary {
+            window_start: self.window_start,
+            window_end: self.window_end,
+            duration: self.duration(),
+            skipped: self.skipped,
+            overflow: self.overflow,
+            types,
+            tunnels: self.activity.tunnels.value,
+            bytes: self.activity.bytes.value,
+            stale: self.activity.stale.value,
+        }
+    }
+}
+
+/// Live-cache facts folded into one per-type summary field: raw binding
+/// count, entry state at the shared emission second, and the absolute
+/// freshness and retirement deadlines.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct SummaryCache {
+    pub addrs: u64,
+    pub state: &'static str,
+    pub freshness: Option<u64>,
+    pub retirement: Option<u64>,
 }
 
 /// Per-name reporting state. One instance per configured allowlist name,
@@ -147,16 +194,20 @@ impl NameReport {
         let end = self.window_start + elapsed * REPORT_WINDOW_SECS;
         self.pending = Some(self.capture(self.window_start, end, elapsed - 1));
         self.window_start = end;
-        for t in &mut self.per_type {
-            t.attempts = Sat::ZERO;
-            t.failures = Sat::ZERO;
-        }
+        self.reset_window_counters();
+        self.incident = [None, None];
+    }
+
+    const fn reset_window_counters(&mut self) {
+        self.per_type = [TypeWindow {
+            attempts: Sat::ZERO,
+            failures: Sat::ZERO,
+        }; 2];
         self.activity = Activity {
             tunnels: Sat::ZERO,
             bytes: Sat::ZERO,
             stale: Sat::ZERO,
         };
-        self.incident = [None, None];
     }
 
     /// Captures the current window as a [`ClosedWindow`] spanning
@@ -192,11 +243,12 @@ pub(crate) enum EligibleTransition {
     Recovered,
 }
 
-/// The per-type summary fields for one record family, built by the serving
-/// side from the schedule's incident state and the cache entry at emission
-/// time (docs/alumina-proxy.md:80). `freshness`/`retirement` carry the
-/// remaining seconds until the entry's freshness and retirement deadlines
-/// (deadline minus the record's `secs`), not the absolute monotonic deadlines.
+/// The per-type summary fields for one record family, projected by
+/// [`ClosedWindow::to_summary`] from the window's captured incident snapshot
+/// and the serving-provided live cache facts (docs/alumina-proxy.md:80).
+/// `freshness`/`retirement` carry the remaining seconds until the entry's
+/// freshness and retirement deadlines (deadline minus the record's `secs`),
+/// not the absolute monotonic deadlines.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct TypeSummary {
     pub start: Option<u64>,
@@ -284,15 +336,7 @@ impl IncidentReport {
         }
         nr.window_open = true;
         nr.window_start = now;
-        nr.per_type = [TypeWindow {
-            attempts: Sat::ZERO,
-            failures: Sat::ZERO,
-        }; 2];
-        nr.activity = Activity {
-            tunnels: Sat::ZERO,
-            bytes: Sat::ZERO,
-            stale: Sat::ZERO,
-        };
+        nr.reset_window_counters();
     }
 
     /// Records one exchange attempt for `name` and `family`. Rotation precedes

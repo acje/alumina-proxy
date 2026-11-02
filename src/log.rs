@@ -45,7 +45,7 @@ use crate::cache::Family;
 use crate::enforcement::action::{DomainOrdinal, Scope};
 use crate::enforcement::monitor::{CapturedFact, DnsAnomalyKind, Monitor};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason};
-use crate::incident_report::IncidentSummary;
+use crate::incident_report::{EligibleTransition, IncidentSummary};
 use crate::inventory;
 use crate::resolver::Fqdn;
 use crate::startup_dns::{NameOutcome, ProbeVerdict};
@@ -1825,25 +1825,25 @@ impl LogStore {
         self.enqueue(level, Kind::IncidentSummary, &fields);
     }
 
-    /// One error when a hostname transitions from having eligible bindings to
-    /// having none (docs/alumina-proxy.md:79).
-    pub(crate) fn incident_eligible_loss(&mut self, secs: u64, name: &str) {
+    /// One typed eligible-binding transition for a hostname: `Lost` logs one
+    /// error when the name transitions to having no eligible bindings,
+    /// `Recovered` logs one info when they recover (docs/alumina-proxy.md:79).
+    pub(crate) fn incident_eligible(
+        &mut self,
+        secs: u64,
+        name: &str,
+        transition: EligibleTransition,
+    ) {
         self.set_now(secs);
         let fields = [
             Field::new("secs", Val::U64(secs)),
             Field::new("name", Val::Str(name)),
         ];
-        self.enqueue(Level::Error, Kind::IncidentEligibleLoss, &fields);
-    }
-
-    /// One info when a hostname's eligible bindings recover (docs/alumina-proxy.md:79).
-    pub(crate) fn incident_eligible_recovered(&mut self, secs: u64, name: &str) {
-        self.set_now(secs);
-        let fields = [
-            Field::new("secs", Val::U64(secs)),
-            Field::new("name", Val::Str(name)),
-        ];
-        self.enqueue(Level::Info, Kind::IncidentEligibleRecovered, &fields);
+        let (level, kind) = match transition {
+            EligibleTransition::Lost => (Level::Error, Kind::IncidentEligibleLoss),
+            EligibleTransition::Recovered => (Level::Info, Kind::IncidentEligibleRecovered),
+        };
+        self.enqueue(level, kind, &fields);
     }
 
     /// One `startup_name` record for a single unresolved name: `secs`, the
@@ -4535,6 +4535,24 @@ mod tests {
         assert!(
             text.contains("reason=\"pin_mismatch\""),
             "the first-failure startup warning must expose the typed reason token: {text}"
+        );
+    }
+
+    #[test]
+    fn incident_eligible_pair_carries_secs_name_level_and_kind() {
+        let (mut store, _file) = file_logstore();
+        store.incident_eligible(7, "sub.example.org", EligibleTransition::Lost);
+        let loss = String::from_utf8_lossy(store.last_record_bytes().expect("loss queued"));
+        assert_eq!(
+            loss, "level=error kind=incident_eligible_loss secs=7 name=\"sub.example.org\"\n",
+            "loss record pin"
+        );
+        store.incident_eligible(8, "sub.example.org", EligibleTransition::Recovered);
+        let recovery = String::from_utf8_lossy(store.last_record_bytes().expect("recovery queued"));
+        assert_eq!(
+            recovery,
+            "level=info kind=incident_eligible_recovered secs=8 name=\"sub.example.org\"\n",
+            "recovery record pin"
         );
     }
 }

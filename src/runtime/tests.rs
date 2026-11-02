@@ -1130,6 +1130,15 @@ fn startup_warning_cooperative_owner_body() {
         "the cooperative warning must carry the actually observed refused-connect cause: {}",
         warnings[0]
     );
+    let all = drain_sink_text(&mut file);
+    assert!(
+        all.contains("kind=startup_final"),
+        "the cooperative startup window must emit its own startup_final report (sink must not be empty), sink: {all}"
+    );
+    assert!(
+        !all.contains("kind=exchange_failed"),
+        "the cooperative startup window must never emit a serving exchange_failed record, sink: {all}"
+    );
 }
 
 #[test]
@@ -2792,4 +2801,86 @@ fn refresh_alloc_witness_body() {
 
     stop_and_join_responder(responder_addr, &stop, responder);
     std::mem::forget(runtime);
+}
+
+#[test]
+fn shutdown_finishing_records_raw_statuses_shared_clock_and_monitor() {
+    let t = thread::Builder::new()
+        .name("shutdown-finishing-characterize".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(shutdown_finishing_body)
+        .expect("spawn shutdown-finishing characterize thread");
+    t.join().expect("shutdown-finishing characterize thread");
+}
+
+fn shutdown_finishing_body() {
+    let port = ephemeral_port();
+    let mut storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut file = test_sink_file();
+    *storage.logs_mut() = crate::log::LogStore::with_fd(&file).expect("file sink store");
+    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate serving");
+
+    let mut previous_len = 0usize;
+
+    owner.emit_shutdown_and_drain();
+    let pre_attach = drain_sink_text(&mut file);
+    verify_shutdown_drain(&pre_attach, previous_len, "drained");
+    previous_len = pre_attach.len();
+
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind the listener");
+    let mut runtime = owner.attach(listener).expect("attach the listener");
+    runtime.emit_shutdown_record_and_drain(crate::serving::ShutdownExit::Forced);
+    let forced = drain_sink_text(&mut file);
+    verify_shutdown_drain(&forced, previous_len, "forced");
+    previous_len = forced.len();
+    runtime.emit_shutdown_record_and_drain(crate::serving::ShutdownExit::Drained);
+    let drained = drain_sink_text(&mut file);
+    verify_shutdown_drain(&drained, previous_len, "drained");
+}
+
+fn secs_of_line(line: &str) -> &str {
+    line.split_once("secs=")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .unwrap_or("")
+}
+
+fn verify_shutdown_drain(text: &str, previous_len: usize, status: &str) {
+    let frame = &text[previous_len..];
+    assert_eq!(
+        frame.matches("kind=shutdown_final ").count(),
+        1,
+        "each emit must append exactly one shutdown_final record: {frame}"
+    );
+    assert_eq!(
+        frame.matches("kind=monitor ").count(),
+        1,
+        "each emit must append exactly one monitor summary: {frame}"
+    );
+    let final_ix = frame
+        .find("kind=shutdown_final ")
+        .expect("a shutdown_final record within the read frame");
+    let monitor_ix = frame
+        .find("kind=monitor ")
+        .expect("a monitor summary within the read frame");
+    assert!(
+        final_ix < monitor_ix,
+        "shutdown_final must precede the forced monitor summary in the same emit: {frame}"
+    );
+    let final_line = frame[final_ix..].lines().next().unwrap_or("");
+    let monitor_line = frame[monitor_ix..].lines().next().unwrap_or("");
+    assert!(
+        final_line.contains(&format!("status=\"{status}\"")) && final_line.contains("dropped=0"),
+        "the shutdown record must carry the caller {status} verdict and the raw dropped tally: {final_line}"
+    );
+    assert!(
+        final_line.contains("secs=") && monitor_line.contains("secs="),
+        "both the shutdown and monitor records must carry the sampled clock field: {frame}"
+    );
+    assert_eq!(
+        secs_of_line(final_line),
+        secs_of_line(monitor_line),
+        "one emit samples one clock: shutdown_final and the forced monitor summary must share secs: {frame}"
+    );
 }

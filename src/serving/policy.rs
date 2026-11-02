@@ -23,22 +23,33 @@ const BODY_504: &[u8] =
     b"HTTP/1.1 504 Gateway Timeout\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 23\r\n\r\nsetup deadline expired\n";
 
 impl Refusal {
-    pub(super) const fn body(self) -> &'static [u8] {
+    pub(super) const fn descriptor(self) -> RefusalWire {
         match self {
-            Refusal::BadRequest => BODY_400,
-            Refusal::Forbidden => BODY_403,
-            Refusal::NoResolvedAddresses => BODY_502_NO_RESOLVED,
-            Refusal::DialFailed => BODY_502_DIAL_FAILED,
-            Refusal::SetupTimeout => BODY_504,
+            Refusal::BadRequest => RefusalWire {
+                body: BODY_400,
+                reason: RejectReason::BadRequest,
+            },
+            Refusal::Forbidden => RefusalWire {
+                body: BODY_403,
+                reason: RejectReason::Forbidden,
+            },
+            Refusal::NoResolvedAddresses => RefusalWire {
+                body: BODY_502_NO_RESOLVED,
+                reason: RejectReason::DialFailed,
+            },
+            Refusal::DialFailed => RefusalWire {
+                body: BODY_502_DIAL_FAILED,
+                reason: RejectReason::DialFailed,
+            },
+            Refusal::SetupTimeout => RefusalWire {
+                body: BODY_504,
+                reason: RejectReason::SetupTimeout,
+            },
         }
     }
+}
 
-    pub(super) const fn reason(self) -> RejectReason {
-        match self {
-            Refusal::BadRequest => RejectReason::BadRequest,
-            Refusal::Forbidden => RejectReason::Forbidden,
-            Refusal::NoResolvedAddresses | Refusal::DialFailed => RejectReason::DialFailed,
-            Refusal::SetupTimeout => RejectReason::SetupTimeout,
-        }
-    }
+pub(super) struct RefusalWire {
+    pub(super) body: &'static [u8],
+    pub(super) reason: RejectReason,
 }

@@ -657,14 +657,35 @@ fn read_name(msg: &[u8], at: usize, strict: bool) -> Result<(DnsName, usize), Dn
     }
 }
 
-fn read_rr(msg: &[u8], reader: &mut Reader) -> Result<(DnsName, u16, u16, u32), DnsError> {
+/// One raw resource-record header as read from the wire: the consumed owner
+/// name, type, class, and TTL, then the RDLENGTH and the rdata start offset
+/// that follow them in every RR section.
+struct RawRr {
+    owner: DnsName,
+    ty: u16,
+    class: u16,
+    ttl: u32,
+    rdlen: usize,
+    rd_start: usize,
+}
+
+fn read_rr(msg: &[u8], reader: &mut Reader) -> Result<RawRr, DnsError> {
     let start = reader.pos;
     let (owner, end) = read_name(msg, start, true)?;
     reader.pos = end;
     let ty = reader.u16()?;
     let class = reader.u16()?;
     let ttl = reader.u32()?;
-    Ok((owner, ty, class, ttl))
+    let rdlen = usize::from(reader.u16()?);
+    let rd_start = reader.pos;
+    Ok(RawRr {
+        owner,
+        ty,
+        class,
+        ttl,
+        rdlen,
+        rd_start,
+    })
 }
 
 #[expect(
@@ -678,6 +699,26 @@ enum Rdata {
     Soa { minimum: u32 },
 }
 
+/// Shared A/AAAA fixed-length guard: returns `BadRdataLength { ty, got,
+/// expected }` when an A record is not 4 bytes or an AAAA not 16; all other
+/// types pass through untouched.
+const fn check_fixed_addr_rdata_len(ty: u16, rdlen: usize) -> Result<(), DnsError> {
+    let expected = match ty {
+        TYPE_A => 4,
+        TYPE_AAAA => 16,
+        _ => return Ok(()),
+    };
+    if rdlen == expected {
+        Ok(())
+    } else {
+        Err(DnsError::BadRdataLength {
+            ty,
+            got: rdlen,
+            expected,
+        })
+    }
+}
+
 fn parse_rdata(msg: &[u8], rd_start: usize, rdlen: usize, ty: u16) -> Result<Rdata, DnsError> {
     let end = rd_start
         .checked_add(rdlen)
@@ -687,13 +728,7 @@ fn parse_rdata(msg: &[u8], rd_start: usize, rdlen: usize, ty: u16) -> Result<Rda
     }
     match ty {
         TYPE_A => {
-            if rdlen != 4 {
-                return Err(DnsError::BadRdataLength {
-                    ty,
-                    got: rdlen,
-                    expected: 4,
-                });
-            }
+            check_fixed_addr_rdata_len(ty, rdlen)?;
             Ok(Rdata::A(Ipv4Addr::new(
                 msg[rd_start],
                 msg[rd_start + 1],
@@ -702,13 +737,7 @@ fn parse_rdata(msg: &[u8], rd_start: usize, rdlen: usize, ty: u16) -> Result<Rda
             )))
         }
         TYPE_AAAA => {
-            if rdlen != 16 {
-                return Err(DnsError::BadRdataLength {
-                    ty,
-                    got: rdlen,
-                    expected: 16,
-                });
-            }
+            check_fixed_addr_rdata_len(ty, rdlen)?;
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&msg[rd_start..rd_start + 16]);
             Ok(Rdata::Aaaa(Ipv6Addr::from(octets)))
@@ -769,6 +798,44 @@ impl Owner {
             has_addr_data: false,
         }
     }
+
+    /// Appends one validated address binding: rejects a name that already
+    /// carries a CNAME, marks the name as having address data, and fails
+    /// (before any write) when the fixed address table is full.
+    fn push_address(&mut self, addr: NumericAddr, ttl: u32) -> Result<(), DnsError> {
+        if self.cname.is_some() {
+            return Err(DnsError::CnameCoexist);
+        }
+        self.has_addr_data = true;
+        let slot = usize::from(self.addr_len);
+        if slot >= MAX_ADDRESSES {
+            return Err(DnsError::CandidatesExceeded {
+                limit: MAX_ADDRESSES,
+            });
+        }
+        self.addrs[slot] = (addr, ttl);
+        self.addr_len += 1;
+        Ok(())
+    }
+
+    /// Records a validated CNAME: an identical earlier target keeps the
+    /// earliest TTL, a different target on the same name is a conflict, and a
+    /// name that already published address data cannot also carry a CNAME.
+    fn push_cname(&mut self, target: DnsName, ttl: u32) -> Result<(), DnsError> {
+        if let Some((existing, existing_ttl)) = &self.cname {
+            if !existing.eq_bytes(target.as_slice()) {
+                return Err(DnsError::ConflictingCname);
+            }
+            let earliest = (*existing_ttl).min(ttl);
+            self.cname = Some((target, earliest));
+            return Ok(());
+        }
+        if self.has_addr_data {
+            return Err(DnsError::CnameCoexist);
+        }
+        self.cname = Some((target, ttl));
+        Ok(())
+    }
 }
 
 /// Reusable fixed-capacity response-parse workspace, owned by the caller (a
@@ -820,10 +887,7 @@ fn ensure_owner(ws: &mut ResponseWorkspace, name: &DnsName) -> Result<usize, Dns
     }
     ws.owners[ws.owner_len] = Owner {
         name: *name,
-        cname: None,
-        addrs: [(NumericAddr::V4(Ipv4Addr::UNSPECIFIED), 0); MAX_ADDRESSES],
-        addr_len: 0,
-        has_addr_data: false,
+        ..Owner::empty()
     };
     ws.owner_len += 1;
     Ok(ws.owner_len - 1)
@@ -1027,18 +1091,16 @@ pub fn parse_response(
     }
 
     for _ in 0..answer_count {
-        let (owner, ty, class, ttl) = read_rr(msg, &mut reader)?;
-        let rdlen = usize::from(reader.u16()?);
-        let rd_start = reader.pos;
-        if class != CLASS_IN {
-            return Err(DnsError::BadClass { got: class });
+        let rr = read_rr(msg, &mut reader)?;
+        if rr.class != CLASS_IN {
+            return Err(DnsError::BadClass { got: rr.class });
         }
-        if matches!(ty, TYPE_A | TYPE_AAAA | TYPE_CNAME) && ttl > EXTREME_TTL_THRESHOLD {
+        if matches!(rr.ty, TYPE_A | TYPE_AAAA | TYPE_CNAME) && rr.ttl > EXTREME_TTL_THRESHOLD {
             ws.extreme_ttl = true;
         }
-        match ty {
+        match rr.ty {
             TYPE_A | TYPE_AAAA | TYPE_CNAME | TYPE_SOA => {
-                let rdata = parse_rdata(msg, rd_start, rdlen, ty)?;
+                let rdata = parse_rdata(msg, rr.rd_start, rr.rdlen, rr.ty)?;
                 match rdata {
                     Rdata::A(ip) => {
                         if family != Family::A {
@@ -1046,22 +1108,11 @@ pub fn parse_response(
                             // address data, no CNAME interaction, and no
                             // anomaly/telemetry emitted (docs/alumina-proxy.md
                             // :476; DnsAnomalyKind has no variant for this).
-                            reader.skip(rdlen)?;
+                            reader.skip(rr.rdlen)?;
                             continue;
                         }
-                        let idx = ensure_owner(ws, &owner)?;
-                        if ws.owners[idx].cname.is_some() {
-                            return Err(DnsError::CnameCoexist);
-                        }
-                        ws.owners[idx].has_addr_data = true;
-                        let slot = ws.owners[idx].addr_len as usize;
-                        if slot >= MAX_ADDRESSES {
-                            return Err(DnsError::CandidatesExceeded {
-                                limit: MAX_ADDRESSES,
-                            });
-                        }
-                        ws.owners[idx].addrs[slot] = (NumericAddr::V4(ip), ttl);
-                        ws.owners[idx].addr_len += 1;
+                        let idx = ensure_owner(ws, &rr.owner)?;
+                        ws.owners[idx].push_address(NumericAddr::V4(ip), rr.ttl)?;
                     }
                     Rdata::Aaaa(ip) => {
                         if family != Family::Aaaa {
@@ -1069,35 +1120,15 @@ pub fn parse_response(
                             // address data, no CNAME interaction, and no
                             // anomaly/telemetry emitted (docs/alumina-proxy.md
                             // :476; DnsAnomalyKind has no variant for this).
-                            reader.skip(rdlen)?;
+                            reader.skip(rr.rdlen)?;
                             continue;
                         }
-                        let idx = ensure_owner(ws, &owner)?;
-                        if ws.owners[idx].cname.is_some() {
-                            return Err(DnsError::CnameCoexist);
-                        }
-                        ws.owners[idx].has_addr_data = true;
-                        let slot = ws.owners[idx].addr_len as usize;
-                        if slot >= MAX_ADDRESSES {
-                            return Err(DnsError::CandidatesExceeded {
-                                limit: MAX_ADDRESSES,
-                            });
-                        }
-                        ws.owners[idx].addrs[slot] = (NumericAddr::V6(ip), ttl);
-                        ws.owners[idx].addr_len += 1;
+                        let idx = ensure_owner(ws, &rr.owner)?;
+                        ws.owners[idx].push_address(NumericAddr::V6(ip), rr.ttl)?;
                     }
                     Rdata::Cname(target) => {
-                        let idx = ensure_owner(ws, &owner)?;
-                        if let Some((existing, existing_ttl)) = &ws.owners[idx].cname {
-                            if !existing.eq_bytes(target.as_slice()) {
-                                return Err(DnsError::ConflictingCname);
-                            }
-                            ws.owners[idx].cname = Some((target, (*existing_ttl).min(ttl)));
-                        } else if ws.owners[idx].has_addr_data {
-                            return Err(DnsError::CnameCoexist);
-                        } else {
-                            ws.owners[idx].cname = Some((target, ttl));
-                        }
+                        let idx = ensure_owner(ws, &rr.owner)?;
+                        ws.owners[idx].push_cname(target, rr.ttl)?;
                     }
                     Rdata::Soa { .. } => {}
                 }
@@ -1105,77 +1136,42 @@ pub fn parse_response(
             TYPE_DNAME => return Err(DnsError::DnameUnsupported),
             _ => {}
         }
-        reader.skip(rdlen)?;
+        reader.skip(rr.rdlen)?;
     }
 
     for _ in 0..authority_count {
-        let (owner, ty, class, ttl) = read_rr(msg, &mut reader)?;
-        let rdlen = usize::from(reader.u16()?);
-        let rd_start = reader.pos;
-        if class != CLASS_IN {
-            return Err(DnsError::BadClass { got: class });
+        let rr = read_rr(msg, &mut reader)?;
+        if rr.class != CLASS_IN {
+            return Err(DnsError::BadClass { got: rr.class });
         }
-        if ty == TYPE_DNAME {
+        if rr.ty == TYPE_DNAME {
             return Err(DnsError::DnameUnsupported);
         }
         // E3 fail-closed guard: a malformed A/AAAA rdata in the authority
         // section aborts the entire parse (no skip/isolate path). The answer
         // section is guarded the same way inside parse_rdata.
-        match ty {
-            TYPE_A if rdlen != 4 => {
-                return Err(DnsError::BadRdataLength {
-                    ty,
-                    got: rdlen,
-                    expected: 4,
-                });
-            }
-            TYPE_AAAA if rdlen != 16 => {
-                return Err(DnsError::BadRdataLength {
-                    ty,
-                    got: rdlen,
-                    expected: 16,
-                });
-            }
-            _ => {}
-        }
-        if ty == TYPE_SOA
-            && let Rdata::Soa { minimum } = parse_rdata(msg, rd_start, rdlen, ty)?
+        check_fixed_addr_rdata_len(rr.ty, rr.rdlen)?;
+        if rr.ty == TYPE_SOA
+            && let Rdata::Soa { minimum } = parse_rdata(msg, rr.rd_start, rr.rdlen, rr.ty)?
         {
             if ws.soa.is_some() {
                 return Err(DnsError::SoaCount { got: 2 });
             }
-            ws.soa = Some((owner, ttl, minimum));
+            ws.soa = Some((rr.owner, rr.ttl, minimum));
         }
-        reader.skip(rdlen)?;
+        reader.skip(rr.rdlen)?;
     }
 
     for _ in 0..additional_count {
-        let (_, ty, _, _) = read_rr(msg, &mut reader)?;
-        let rdlen = usize::from(reader.u16()?);
-        if ty == TYPE_DNAME {
+        let rr = read_rr(msg, &mut reader)?;
+        if rr.ty == TYPE_DNAME {
             return Err(DnsError::DnameUnsupported);
         }
         // E3 fail-closed guard: the same strictness applies to
         // additional/glue records — any malformed A/AAAA rdata here rejects
         // the entire response rather than being skipped.
-        match ty {
-            TYPE_A if rdlen != 4 => {
-                return Err(DnsError::BadRdataLength {
-                    ty,
-                    got: rdlen,
-                    expected: 4,
-                });
-            }
-            TYPE_AAAA if rdlen != 16 => {
-                return Err(DnsError::BadRdataLength {
-                    ty,
-                    got: rdlen,
-                    expected: 16,
-                });
-            }
-            _ => {}
-        }
-        reader.skip(rdlen)?;
+        check_fixed_addr_rdata_len(rr.ty, rr.rdlen)?;
+        reader.skip(rr.rdlen)?;
     }
 
     if reader.remaining() > 0 {

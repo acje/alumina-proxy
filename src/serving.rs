@@ -647,7 +647,6 @@ struct SlotWorkspace {
     parse_rel: usize,
     insp_rel: usize,
     head_len: usize,
-    hello_end: Option<usize>,
     hello_consumed: usize,
     down: Box<[u8]>,
     down_len: usize,
@@ -696,6 +695,12 @@ struct SlotWorkspace {
     test_reads: std::vec::Vec<io::Result<usize>>,
 }
 
+#[derive(Clone, Copy)]
+enum Side {
+    Client,
+    Upstream,
+}
+
 impl SlotWorkspace {
     const fn with_traffic(up: Box<[u8]>, down: Box<[u8]>) -> SlotWorkspace {
         SlotWorkspace {
@@ -720,7 +725,6 @@ impl SlotWorkspace {
             parse_rel: 0,
             insp_rel: 0,
             head_len: 0,
-            hello_end: None,
             hello_consumed: 0,
             down,
             down_len: 0,
@@ -786,7 +790,6 @@ impl SlotWorkspace {
         self.parse_rel = 0;
         self.insp_rel = 0;
         self.head_len = 0;
-        self.hello_end = None;
         self.hello_consumed = 0;
         self.down_len = 0;
         self.down_off = 0;
@@ -802,6 +805,19 @@ impl SlotWorkspace {
         self.ja4_pending = false;
     }
 
+    fn side_pair(&mut self, index: usize, side: Side) -> Option<(&mut TcpStream, Token)> {
+        match side {
+            Side::Client => self
+                .client
+                .as_mut()
+                .map(|stream| (stream, client_token(self.slot_gen, index))),
+            Side::Upstream => self
+                .upstream
+                .as_mut()
+                .map(|stream| (stream, upstream_token(self.slot_gen, index))),
+        }
+    }
+
     /// Whether this slot currently feeds any deadline into
     /// [`Serving::poll_timeout`]: the C15 setup snapshot, the connect deadline
     /// (kept live conservatively beyond the `Dialing`-only fold guard so a
@@ -813,6 +829,30 @@ impl SlotWorkspace {
             || self.connect_deadline.is_some()
             || self.idle_deadline.is_some()
             || self.drain_deadline.is_some()
+    }
+
+    fn applicable_deadline(&self) -> Option<Instant> {
+        let mut candidate = self.setup_deadline;
+        if self.stage == Stage::Dialing
+            && let Some(connect) = self.connect_deadline
+        {
+            candidate = Some(candidate.map_or(connect.limit(), |c| c.min(connect.limit())));
+        }
+        if let Some(idle) = self.idle_deadline {
+            candidate = Some(candidate.map_or(idle, |c| c.min(idle)));
+        }
+        if let Some(drain) = self.drain_deadline {
+            candidate = Some(candidate.map_or(drain, |c| c.min(drain)));
+        }
+        candidate
+    }
+
+    fn arm_idle(&mut self, now: Instant) {
+        self.idle_deadline = Some(now + IDLE_SECS);
+    }
+
+    fn arm_drain(&mut self, now: Instant) {
+        self.drain_deadline = Some(now + DRAIN_SECS);
     }
 }
 
@@ -1821,17 +1861,17 @@ impl Serving {
             Ok(slot) => {
                 let index = ServeStorage::slot_index(&slot);
                 let setup_deadline = self.storage.setup_deadline(&slot).map(Deadline::limit);
+                self.apply_slot_deadline(index, |ws| {
+                    ws.setup_deadline = setup_deadline;
+                });
                 let ws = &mut self.slots[index];
                 ws.slot_gen = ws.slot_gen.wrapping_add(1);
                 ws.capture = SlotCapture::fresh(index, ws.slot_gen);
-                ws.setup_deadline = setup_deadline;
                 ws.handle = Some(slot);
                 ws.client = Some(stream);
                 ws.stage = Stage::ReadingConnect;
                 if self.register_client(index).is_err() {
                     self.close_slot(index);
-                } else {
-                    self.sync_live_deadline(index);
                 }
                 self.note_occupancy(now);
             }
@@ -1850,27 +1890,23 @@ impl Serving {
     }
 
     fn register_client(&mut self, index: usize) -> Result<(), ServeError> {
-        let token = client_token(self.slots[index].slot_gen, index);
-        match self.slots[index].client.as_mut() {
-            Some(client) => self
-                .poll
-                .registry()
-                .register(client, token, Interest::READABLE | Interest::WRITABLE)
-                .map_err(Into::into),
-            None => Ok(()),
-        }
+        let Some((client, token)) = self.slots[index].side_pair(index, Side::Client) else {
+            return Ok(());
+        };
+        self.poll
+            .registry()
+            .register(client, token, Interest::READABLE | Interest::WRITABLE)
+            .map_err(Into::into)
     }
 
     fn register_upstream(&mut self, index: usize) -> Result<(), ServeError> {
-        let token = upstream_token(self.slots[index].slot_gen, index);
-        match self.slots[index].upstream.as_mut() {
-            Some(up) => self
-                .poll
-                .registry()
-                .register(up, token, Interest::READABLE | Interest::WRITABLE)
-                .map_err(Into::into),
-            None => Ok(()),
-        }
+        let Some((upstream, token)) = self.slots[index].side_pair(index, Side::Upstream) else {
+            return Ok(());
+        };
+        self.poll
+            .registry()
+            .register(upstream, token, Interest::READABLE | Interest::WRITABLE)
+            .map_err(Into::into)
     }
 
     fn reregister_listener(&mut self) -> Result<(), ServeError> {
@@ -1883,27 +1919,23 @@ impl Serving {
     }
 
     fn reregister_client(&mut self, index: usize) -> Result<(), ServeError> {
-        let token = client_token(self.slots[index].slot_gen, index);
-        match self.slots[index].client.as_mut() {
-            Some(client) => self
-                .poll
-                .registry()
-                .reregister(client, token, Interest::READABLE | Interest::WRITABLE)
-                .map_err(Into::into),
-            None => Ok(()),
-        }
+        let Some((client, token)) = self.slots[index].side_pair(index, Side::Client) else {
+            return Ok(());
+        };
+        self.poll
+            .registry()
+            .reregister(client, token, Interest::READABLE | Interest::WRITABLE)
+            .map_err(Into::into)
     }
 
     fn reregister_upstream(&mut self, index: usize) -> Result<(), ServeError> {
-        let token = upstream_token(self.slots[index].slot_gen, index);
-        match self.slots[index].upstream.as_mut() {
-            Some(up) => self
-                .poll
-                .registry()
-                .reregister(up, token, Interest::READABLE | Interest::WRITABLE)
-                .map_err(Into::into),
-            None => Ok(()),
-        }
+        let Some((upstream, token)) = self.slots[index].side_pair(index, Side::Upstream) else {
+            return Ok(());
+        };
+        self.poll
+            .registry()
+            .reregister(upstream, token, Interest::READABLE | Interest::WRITABLE)
+            .map_err(Into::into)
     }
 
     fn buf_room(&mut self, index: usize) -> usize {
@@ -2230,7 +2262,6 @@ impl Serving {
                 let slot = &mut self.slots[index];
                 slot.head_len = head_len;
                 slot.insp_rel = head_len;
-                slot.hello_end = None;
                 slot.hello_consumed = 0;
                 slot.gate.on_connect_head(head_len);
                 slot.stage = Stage::RunningDecision;
@@ -2411,16 +2442,20 @@ impl Serving {
                 connect_deadline,
             }) => {
                 self.note_peer_freshness(&request, family, now, index);
-                let slot = &mut self.slots[index];
-                slot.report_name = self
-                    .storage
-                    .ordinal_for_request(&request)
-                    .map(DomainOrdinal::get);
-                slot.approved = Some(approved);
-                slot.approved_port = request.port();
-                slot.gate.on_authorized();
-                slot.connect_deadline = Some(connect_deadline);
-                slot.stage = Stage::Dialing;
+                {
+                    let slot = &mut self.slots[index];
+                    slot.report_name = self
+                        .storage
+                        .ordinal_for_request(&request)
+                        .map(DomainOrdinal::get);
+                    slot.approved = Some(approved);
+                    slot.approved_port = request.port();
+                    slot.gate.on_authorized();
+                    slot.stage = Stage::Dialing;
+                }
+                self.apply_slot_deadline(index, |ws| {
+                    ws.connect_deadline = Some(connect_deadline);
+                });
                 self.dial(index, addr)
             }
         }
@@ -2508,7 +2543,9 @@ impl Serving {
             .as_ref()
             .and_then(|h| self.storage.setup_deadline(h))
             .unwrap_or_else(|| Deadline::setup(now));
-        self.slots[index].connect_deadline = Some(Deadline::connect_attempt(now, setup));
+        self.apply_slot_deadline(index, |ws| {
+            ws.connect_deadline = Some(Deadline::connect_attempt(now, setup));
+        });
         match TcpStream::connect(sock) {
             Ok(stream) => {
                 if stream.set_nodelay(true).is_err() {
@@ -2626,7 +2663,7 @@ impl Serving {
                         Activity::Reset => ActivityKind::Reset,
                     };
                     let approved = self.slots[index].approved;
-                    let validated = self.slots[index].hello_end.is_some();
+                    let validated = self.slots[index].gate.hello_end().is_some();
                     {
                         let ws = &mut self.slots[index];
                         ws.gate.observe_upstream_activity(activity);
@@ -2736,7 +2773,6 @@ impl Serving {
         };
         let ws = &mut self.slots[index];
         let end = ws.head_len + ws.hello_consumed;
-        ws.hello_end = Some(end);
         ws.gate
             .on_hello_validated(ValidatedHello::new(accepted, end));
         ws.stage = Stage::WritingHello;
@@ -2835,7 +2871,7 @@ impl Serving {
                             Ok(n) => {
                                 ws.fwd += n;
                                 if ws.gate.is_open() {
-                                    ws.idle_deadline = Some(Instant::now() + IDLE_SECS);
+                                    ws.arm_idle(Instant::now());
                                 }
                                 WriteOutcome::Wrote(n)
                             }
@@ -2893,13 +2929,14 @@ impl Serving {
                 if let Some(slot) = slot {
                     let tunnel = self.storage.finish_setup(slot);
                     self.slots[index].tunnel = Some(tunnel);
-                    self.slots[index].setup_deadline = None;
                     self.note_occupancy(Instant::now());
                 }
             }
-            self.slots[index].stage = Stage::Relay;
-            self.slots[index].idle_deadline = Some(Instant::now() + IDLE_SECS);
-            self.sync_live_deadline(index);
+            self.apply_slot_deadline(index, |ws| {
+                ws.setup_deadline = None;
+                ws.idle_deadline = Some(Instant::now() + IDLE_SECS);
+                ws.stage = Stage::Relay;
+            });
             let (written2, failed2) = self.drain_to_upstream(index);
             if failed2 {
                 self.close_slot(index);
@@ -2934,7 +2971,7 @@ impl Serving {
                             Ok(n) => {
                                 ws.down_off += n;
                                 if ws.gate.is_open() {
-                                    ws.idle_deadline = Some(Instant::now() + IDLE_SECS);
+                                    ws.arm_idle(Instant::now());
                                 }
                                 (false, false, Some(n))
                             }
@@ -3080,7 +3117,7 @@ impl Serving {
             if matches!(ws.directional.up, SideEof::Open) {
                 ws.directional.up = SideEof::Eof { half_closed: false };
                 if ws.drain_deadline.is_none() {
-                    ws.drain_deadline = Some(Instant::now() + DRAIN_SECS);
+                    ws.arm_drain(Instant::now());
                 }
             }
         }
@@ -3097,7 +3134,7 @@ impl Serving {
             if matches!(ws.directional.down, SideEof::Open) {
                 ws.directional.down = SideEof::Eof { half_closed: false };
                 if ws.drain_deadline.is_none() {
-                    ws.drain_deadline = Some(Instant::now() + DRAIN_SECS);
+                    ws.arm_drain(Instant::now());
                 }
             }
         }
@@ -3160,23 +3197,16 @@ impl Serving {
         }
     }
 
+    fn apply_slot_deadline(&mut self, index: usize, update: impl FnOnce(&mut SlotWorkspace)) {
+        update(&mut self.slots[index]);
+        self.sync_live_deadline(index);
+    }
+
     fn poll_timeout(&mut self) -> Option<Duration> {
         let mut earliest: Option<Instant> = None;
         if !self.live_deadline.is_empty() {
             for i in self.live_deadline.iter_live() {
-                let mut candidate = self.slots[i].setup_deadline;
-                if self.slots[i].stage == Stage::Dialing
-                    && let Some(connect) = self.slots[i].connect_deadline
-                {
-                    candidate = Some(candidate.map_or(connect.limit(), |c| c.min(connect.limit())));
-                }
-                if let Some(idle) = self.slots[i].idle_deadline {
-                    candidate = Some(candidate.map_or(idle, |c| c.min(idle)));
-                }
-                if let Some(drain) = self.slots[i].drain_deadline {
-                    candidate = Some(candidate.map_or(drain, |c| c.min(drain)));
-                }
-                if let Some(c) = candidate
+                if let Some(c) = self.slots[i].applicable_deadline()
                     && earliest.is_none_or(|e| c < e)
                 {
                     earliest = Some(c);

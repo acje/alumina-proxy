@@ -496,35 +496,20 @@ pub struct StartupReport {
     pub first_failure: Option<(u16, Family)>,
 }
 
-impl StartupReport {
-    /// Records the first counted exchange failure (name ordinal + family) if
-    /// none has been captured yet.
-    #[expect(
-        clippy::expect_used,
-        reason = "any name ordinal is below ALLOWLIST_MAX=32, which fits u16"
-    )]
-    pub(crate) fn record_first_failure(&mut self, ordinal: usize, family: Family) {
-        if self.first_failure.is_none() {
-            self.first_failure = Some((
-                u16::try_from(ordinal).expect("name ordinal bounded by ALLOWLIST_MAX"),
-                family,
-            ));
-        }
-    }
-}
-
 /// The per-name, per-family bookkeeping of one startup window, shared between
 /// the private blocking driver (`resolve_window`) and the shared owner's
 /// cooperative window so both produce the identical typed report from the
-/// identical selection/backoff rule set. Kept here so the private [`Latest`]
-/// classification and [`PublishedKind`] resolution stay encapsulated: the
-/// selected/exchanged/report math never leaks raw stages to an owner.
+/// identical selection/backoff rule set. It owns the exchange/failure/
+/// first-failure tallies and applies them at report time.
 #[derive(Debug)]
 pub(crate) struct WindowLedger {
     resolved: [bool; ALLOWLIST_MAX],
     attempted: [bool; ALLOWLIST_MAX * 2],
     latest: [Latest; ALLOWLIST_MAX],
     names: usize,
+    exchanges: u32,
+    failed: u32,
+    first_failure: Option<(u16, Family)>,
 }
 
 impl WindowLedger {
@@ -534,6 +519,9 @@ impl WindowLedger {
             attempted: [false; ALLOWLIST_MAX * 2],
             latest: [Latest::Unattempted; ALLOWLIST_MAX],
             names,
+            exchanges: 0,
+            failed: 0,
+            first_failure: None,
         }
     }
 
@@ -557,11 +545,12 @@ impl WindowLedger {
         self.attempted[ordinal * 2 + family_index(family)] = true;
     }
 
-    /// Merges a concluded exchange into the ledger: a resolved-positive answer
-    /// (with at least one eligible binding) marks the name usable and terminal;
-    /// a validated negative or no-eligible answer is recorded as its own class
-    /// and never re-attempted as resolved.
+    /// Merges a concluded exchange into the ledger and counts it: a
+    /// resolved-positive answer (with at least one eligible binding) marks the
+    /// name usable and terminal; a validated negative or no-eligible answer is
+    /// recorded as its own class and never re-attempted as resolved.
     pub(crate) fn mark_published(&mut self, ordinal: usize, kind: PublishedKind) {
+        self.exchanges += 1;
         match kind {
             PublishedKind::ResolvedPositive => self.resolved[ordinal] = true,
             PublishedKind::Negative | PublishedKind::NoEligible => {}
@@ -571,13 +560,38 @@ impl WindowLedger {
 
     /// Overlays the "usable name" binding check: a name counts as resolved only
     /// when a published positive answer actually left at least one eligible
-    /// binding, exactly as the private driver computes it.
+    /// binding.
     pub(crate) const fn resolve(&mut self, ordinal: usize, has: bool) {
         self.resolved[ordinal] |= has;
     }
 
-    pub(crate) fn mark_failed(&mut self, ordinal: usize, reason: FailureReason) {
+    /// Counts a concluded failed exchange, merges its reason as the name's
+    /// latest classified outcome, and records the first counted exchange
+    /// failure (name ordinal + family) when none has been captured yet — all
+    /// three atomically in one call. Returns whether this call recorded the
+    /// first failure, on which the caller emits the single first-failure
+    /// warning.
+    #[expect(
+        clippy::expect_used,
+        reason = "any name ordinal is below ALLOWLIST_MAX=32, which fits u16"
+    )]
+    pub(crate) fn mark_failed(
+        &mut self,
+        ordinal: usize,
+        family: Family,
+        reason: FailureReason,
+    ) -> bool {
+        self.failed += 1;
         self.latest[ordinal].merge(ExchangeResult::Failed(reason));
+        if self.first_failure.is_none() {
+            self.first_failure = Some((
+                u16::try_from(ordinal).expect("name ordinal bounded by ALLOWLIST_MAX"),
+                family,
+            ));
+            true
+        } else {
+            false
+        }
     }
 
     /// Finishes the window ledger into the typed startup report, applying the
@@ -589,12 +603,7 @@ impl WindowLedger {
         clippy::expect_used,
         reason = "ledger counts (attempted, resolved, names*2) are bounded by 2*ALLOWLIST_MAX=64, fitting u32"
     )]
-    pub(crate) fn finish(
-        &self,
-        exchanges: u32,
-        failed: u32,
-        first_failure: Option<(u16, Family)>,
-    ) -> StartupReport {
+    pub(crate) fn finish(&self) -> StartupReport {
         let attempted_count = u32::try_from(
             self.attempted[..self.names * 2]
                 .iter()
@@ -606,14 +615,14 @@ impl WindowLedger {
             u32::try_from(self.resolved[..self.names].iter().filter(|&&r| r).count())
                 .expect("resolved count bounded by ALLOWLIST_MAX");
         let mut report = StartupReport {
-            exchanges,
-            failed,
+            exchanges: self.exchanges,
+            failed: self.failed,
             cancelled: 0,
             not_attempted: u32::try_from(self.names * 2).expect("names bounded by ALLOWLIST_MAX")
                 - attempted_count,
             resolved_names,
             outcomes: [NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed); ALLOWLIST_MAX],
-            first_failure,
+            first_failure: self.first_failure,
         };
         for ordinal in 0..self.names {
             report.outcomes[ordinal] = if self.resolved[ordinal] {
@@ -2014,37 +2023,19 @@ impl StartupDns {
     ) -> Result<ConnectStep, StartupDnsError> {
         if let Some(_kind) = ex.connect_err.take() {
             self.close_connection()?;
-            let reason = self.note_failure(
-                ex.ordinal,
-                ex.family,
-                ex.class,
-                schedules,
-                FailureReason::Connect,
-            )?;
+            let reason = self.note_failure(ex, schedules, FailureReason::Connect)?;
             return Ok(ConnectStep::Failed(reason));
         }
         match self.probe_connect() {
             ConnectProbe::SocketError => {
                 self.close_connection()?;
-                let reason = self.note_failure(
-                    ex.ordinal,
-                    ex.family,
-                    ex.class,
-                    schedules,
-                    FailureReason::Connect,
-                )?;
+                let reason = self.note_failure(ex, schedules, FailureReason::Connect)?;
                 return Ok(ConnectStep::Failed(reason));
             }
             ConnectProbe::PeerMismatch => {
                 self.close_connection()?;
                 self.note_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
-                let reason = self.note_failure(
-                    ex.ordinal,
-                    ex.family,
-                    ex.class,
-                    schedules,
-                    FailureReason::Connect,
-                )?;
+                let reason = self.note_failure(ex, schedules, FailureReason::Connect)?;
                 return Ok(ConnectStep::Failed(reason));
             }
             ConnectProbe::Connected => {
@@ -2070,13 +2061,7 @@ impl StartupDns {
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            let reason = self.note_failure(
-                ex.ordinal,
-                ex.family,
-                ex.class,
-                schedules,
-                FailureReason::Timeout,
-            )?;
+            let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
             return Ok(ConnectStep::Failed(reason));
         }
         Ok(ConnectStep::Waiting)
@@ -2137,21 +2122,14 @@ impl StartupDns {
             match self.probe_tls_handshake() {
                 HandshakeProbe::Failed(cause) => {
                     self.close_connection()?;
-                    let reason =
-                        self.note_failure(ex.ordinal, ex.family, ex.class, schedules, cause)?;
+                    let reason = self.note_failure(ex, schedules, cause)?;
                     Ok(Some(reason))
                 }
                 _ => Ok(None),
             }
         } else {
             self.close_connection()?;
-            let reason = self.note_failure(
-                ex.ordinal,
-                ex.family,
-                ex.class,
-                schedules,
-                FailureReason::TlsProtocol,
-            )?;
+            let reason = self.note_failure(ex, schedules, FailureReason::TlsProtocol)?;
             Ok(Some(reason))
         }
     }
@@ -2171,20 +2149,13 @@ impl StartupDns {
             HandshakeProbe::Transition => return Ok(HandshakeStep::Transition),
             HandshakeProbe::Failed(cause) => {
                 self.close_connection()?;
-                let reason =
-                    self.note_failure(ex.ordinal, ex.family, ex.class, schedules, cause)?;
+                let reason = self.note_failure(ex, schedules, cause)?;
                 return Ok(HandshakeStep::Failed(reason));
             }
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            let reason = self.note_failure(
-                ex.ordinal,
-                ex.family,
-                ex.class,
-                schedules,
-                FailureReason::Timeout,
-            )?;
+            let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
             return Ok(HandshakeStep::Failed(reason));
         }
         Ok(HandshakeStep::Waiting)
@@ -2286,10 +2257,6 @@ impl StartupDns {
     /// honoured even at the boundary (faithful to the original `send_query`
     /// loop). A would-block is reported as `Blocked` so the stage moves to
     /// `AwaitWritable`; any other partial progress stays sendable.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "faithful plain-write loop with test force-write scaffolding; each failure arm threads the counted reason"
-    )]
     fn step_send_plain(
         &mut self,
         ex: &mut ActiveExchange,
@@ -2310,13 +2277,8 @@ impl StartupDns {
                         match stream.write(&self.query_buf[self.written..end]) {
                             Ok(0) => {
                                 self.close_connection()?;
-                                let reason = self.note_failure(
-                                    ex.ordinal,
-                                    ex.family,
-                                    ex.class,
-                                    schedules,
-                                    FailureReason::Send,
-                                )?;
+                                let reason =
+                                    self.note_failure(ex, schedules, FailureReason::Send)?;
                                 return Ok(SendStep::Failed(reason));
                             }
                             Ok(w) => {
@@ -2326,13 +2288,8 @@ impl StartupDns {
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                             Err(_) => {
                                 self.close_connection()?;
-                                let reason = self.note_failure(
-                                    ex.ordinal,
-                                    ex.family,
-                                    ex.class,
-                                    schedules,
-                                    FailureReason::Send,
-                                )?;
+                                let reason =
+                                    self.note_failure(ex, schedules, FailureReason::Send)?;
                                 return Ok(SendStep::Failed(reason));
                             }
                         }
@@ -2345,13 +2302,7 @@ impl StartupDns {
                 match stream.write(&self.query_buf[self.written..ex.qlen]) {
                     Ok(0) => {
                         self.close_connection()?;
-                        let reason = self.note_failure(
-                            ex.ordinal,
-                            ex.family,
-                            ex.class,
-                            schedules,
-                            FailureReason::Send,
-                        )?;
+                        let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
                         return Ok(SendStep::Failed(reason));
                     }
                     Ok(n) => {
@@ -2365,25 +2316,13 @@ impl StartupDns {
                     }
                     Err(_) => {
                         self.close_connection()?;
-                        let reason = self.note_failure(
-                            ex.ordinal,
-                            ex.family,
-                            ex.class,
-                            schedules,
-                            FailureReason::Send,
-                        )?;
+                        let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
                         return Ok(SendStep::Failed(reason));
                     }
                 }
             } else {
                 self.close_connection()?;
-                let reason = self.note_failure(
-                    ex.ordinal,
-                    ex.family,
-                    ex.class,
-                    schedules,
-                    FailureReason::Send,
-                )?;
+                let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
                 return Ok(SendStep::Failed(reason));
             }
         }
@@ -2393,13 +2332,7 @@ impl StartupDns {
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            let reason = self.note_failure(
-                ex.ordinal,
-                ex.family,
-                ex.class,
-                schedules,
-                FailureReason::Timeout,
-            )?;
+            let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
             return Ok(SendStep::Failed(reason));
         }
         if blocked {
@@ -2440,13 +2373,7 @@ impl StartupDns {
                 self.set_stream_interest_writable()?;
                 if Instant::now() >= ex.deadline {
                     self.close_connection()?;
-                    let reason = self.note_failure(
-                        ex.ordinal,
-                        ex.family,
-                        ex.class,
-                        schedules,
-                        FailureReason::Timeout,
-                    )?;
+                    let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
                     return Ok(SendStep::Failed(reason));
                 }
                 Ok(SendStep::Blocked)
@@ -2454,13 +2381,7 @@ impl StartupDns {
             TlsSendProbe::Progress => {
                 if Instant::now() >= ex.deadline {
                     self.close_connection()?;
-                    let reason = self.note_failure(
-                        ex.ordinal,
-                        ex.family,
-                        ex.class,
-                        schedules,
-                        FailureReason::Timeout,
-                    )?;
+                    let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
                     return Ok(SendStep::Failed(reason));
                 }
                 Ok(SendStep::Waiting)
@@ -2480,13 +2401,7 @@ impl StartupDns {
         schedules: &mut Schedules,
     ) -> Result<SendStep, StartupDnsError> {
         self.close_connection()?;
-        let reason = self.note_failure(
-            ex.ordinal,
-            ex.family,
-            ex.class,
-            schedules,
-            FailureReason::Send,
-        )?;
+        let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
         Ok(SendStep::Failed(reason))
     }
 
@@ -2509,13 +2424,7 @@ impl StartupDns {
             match self.try_recv() {
                 RecvTry::Failure => {
                     self.close_connection()?;
-                    let reason = self.note_failure(
-                        ex.ordinal,
-                        ex.family,
-                        ex.class,
-                        schedules,
-                        FailureReason::Receive,
-                    )?;
+                    let reason = self.note_failure(ex, schedules, FailureReason::Receive)?;
                     return Ok(RecvStep::Failed(reason));
                 }
                 RecvTry::Wait | RecvTry::Progress => {}
@@ -2525,13 +2434,7 @@ impl StartupDns {
             let len = usize::from(u16::from_be_bytes([self.recv_buf[0], self.recv_buf[1]]));
             if len == 0 || len > DNS_MSG_LIMIT {
                 self.close_connection()?;
-                let reason = self.note_failure(
-                    ex.ordinal,
-                    ex.family,
-                    ex.class,
-                    schedules,
-                    FailureReason::Receive,
-                )?;
+                let reason = self.note_failure(ex, schedules, FailureReason::Receive)?;
                 return Ok(RecvStep::Failed(reason));
             }
             self.msglen = Some(len);
@@ -2554,13 +2457,7 @@ impl StartupDns {
                 Ok(outcome) => {
                     if Instant::now() >= ex.deadline {
                         self.close_connection()?;
-                        let reason = self.note_failure(
-                            ex.ordinal,
-                            ex.family,
-                            ex.class,
-                            schedules,
-                            FailureReason::Timeout,
-                        )?;
+                        let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
                         return Ok(RecvStep::Failed(reason));
                     }
                     let kind = classify_published(&outcome);
@@ -2616,26 +2513,14 @@ impl StartupDns {
                         self.note_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
                     }
                     self.close_connection()?;
-                    let reason = self.note_failure(
-                        ex.ordinal,
-                        ex.family,
-                        ex.class,
-                        schedules,
-                        FailureReason::Receive,
-                    )?;
+                    let reason = self.note_failure(ex, schedules, FailureReason::Receive)?;
                     return Ok(RecvStep::Failed(reason));
                 }
             }
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
-            let reason = self.note_failure(
-                ex.ordinal,
-                ex.family,
-                ex.class,
-                schedules,
-                FailureReason::Timeout,
-            )?;
+            let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
             return Ok(RecvStep::Failed(reason));
         }
         Ok(RecvStep::Waiting)
@@ -2770,14 +2655,11 @@ impl StartupDns {
         let allowlist = config.allowlist();
         self.bailiwick = BailiwickZones::from_allowlist(allowlist, config.cname_bailiwick())?;
         let names = allowlist.len();
-        let mut report = StartupReport::default();
-        let mut resolved = [false; ALLOWLIST_MAX];
-        let mut latest = [Latest::Unattempted; ALLOWLIST_MAX];
+        let mut ledger = WindowLedger::new(names);
 
         for (ordinal, name) in allowlist.iter().enumerate() {
             for family in Family::ALL {
                 if Instant::now() >= window_deadline {
-                    report.not_attempted += 1;
                     continue;
                 }
                 let name_index = cache
@@ -2786,6 +2668,7 @@ impl StartupDns {
                 let remaining = window_deadline.duration_since(Instant::now());
                 let exchange_deadline =
                     Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS).min(remaining);
+                ledger.track_attempt(ordinal, family);
                 match self.exchange(
                     name,
                     family,
@@ -2796,31 +2679,19 @@ impl StartupDns {
                     logs,
                 ) {
                     Ok(ExchangeResult::Published(kind)) => {
-                        report.exchanges += 1;
                         let has = !cache.entry(name_index, family)?.bindings().is_empty();
-                        resolved[ordinal] |= has;
-                        latest[ordinal].merge(ExchangeResult::Published(kind));
+                        ledger.mark_published(ordinal, kind);
+                        ledger.resolve(ordinal, has);
                     }
                     Ok(ExchangeResult::Failed(reason)) => {
-                        report.failed += 1;
-                        report.record_first_failure(ordinal, family);
-                        latest[ordinal].merge(ExchangeResult::Failed(reason));
+                        ledger.mark_failed(ordinal, family, reason);
                     }
                     Err(err) => return Err(err),
                 }
             }
         }
-        report.resolved_names = u32::try_from(resolved[..names].iter().filter(|&&r| r).count())
-            .expect("resolved count bounded by ALLOWLIST_MAX");
-        for ordinal in 0..names {
-            report.outcomes[ordinal] = if resolved[ordinal] {
-                NameOutcome::Resolved
-            } else {
-                latest[ordinal].to_outcome()
-            };
-        }
         self.close_connection()?;
-        Ok(report)
+        Ok(ledger.finish())
     }
 
     /// Resolves the allowlist inside one absolute startup window whose
@@ -2842,10 +2713,6 @@ impl StartupDns {
     #[expect(
         clippy::too_many_lines,
         reason = "long resolve-window driver covering exchange steps, timeouts, and publish bookkeeping"
-    )]
-    #[expect(
-        clippy::expect_used,
-        reason = "window ledger counts (attempted, names*2, resolved) are bounded by 2*ALLOWLIST_MAX=64, fitting u32"
     )]
     pub(crate) fn resolve_window(
         &mut self,
@@ -2881,10 +2748,7 @@ impl StartupDns {
         let allowlist = config.allowlist();
         self.bailiwick = BailiwickZones::from_allowlist(allowlist, config.cname_bailiwick())?;
         let names = allowlist.len();
-        let mut report = StartupReport::default();
-        let mut resolved = [false; ALLOWLIST_MAX];
-        let mut attempted = [false; ALLOWLIST_MAX * 2];
-        let mut latest = [Latest::Unattempted; ALLOWLIST_MAX];
+        let mut ledger = WindowLedger::new(names);
 
         for ordinal in 0..names {
             for family in Family::ALL {
@@ -2893,7 +2757,7 @@ impl StartupDns {
         }
 
         loop {
-            if resolved[..names].iter().all(|&r| r) {
+            if ledger.all_resolved() {
                 break;
             }
             if Instant::now() >= window_deadline {
@@ -2904,7 +2768,7 @@ impl StartupDns {
                 Ok(Some(token)) => {
                     let ordinal = token.name();
                     let family = token.family();
-                    if resolved[ordinal] {
+                    if ledger.is_resolved(ordinal) {
                         schedules.release_selection(ordinal, family)?;
                         continue;
                     }
@@ -2917,7 +2781,7 @@ impl StartupDns {
                     let name_index = cache
                         .name_index(ordinal)
                         .ok_or(CacheError::NameOutOfRange)?;
-                    attempted[ordinal * 2 + family_index(family)] = true;
+                    ledger.track_attempt(ordinal, family);
                     match self.exchange(
                         name,
                         family,
@@ -2928,19 +2792,14 @@ impl StartupDns {
                         logs,
                     ) {
                         Ok(ExchangeResult::Published(kind)) => {
-                            report.exchanges += 1;
                             let has = !cache.entry(name_index, family)?.bindings().is_empty();
-                            resolved[ordinal] |= has;
-                            latest[ordinal].merge(ExchangeResult::Published(kind));
+                            ledger.mark_published(ordinal, kind);
+                            ledger.resolve(ordinal, has);
                         }
                         Ok(ExchangeResult::Failed(reason)) => {
-                            report.failed += 1;
-                            let first = report.first_failure.is_none();
-                            report.record_first_failure(ordinal, family);
-                            if first {
+                            if ledger.mark_failed(ordinal, family, reason) {
                                 logs.startup_warning(now, name.as_str(), family, reason.as_str());
                             }
-                            latest[ordinal].merge(ExchangeResult::Failed(reason));
                         }
                         Err(err) => return Err(err),
                     }
@@ -2951,8 +2810,8 @@ impl StartupDns {
                         break;
                     }
                     logs.drain_sink();
-                    let dns_wait =
-                        wait_until_next_step(self, schedules, names, &resolved)?.min(remaining);
+                    let dns_wait = wait_until_next_step(self, schedules, names, ledger.resolved())?
+                        .min(remaining);
                     let now_i = Instant::now();
                     let log_wait = logs
                         .next_drain(now_i)
@@ -2967,20 +2826,7 @@ impl StartupDns {
             }
         }
         self.close_connection()?;
-        let attempted_count = u32::try_from(attempted[..names * 2].iter().filter(|&&t| t).count())
-            .expect("attempted count bounded by ALLOWLIST_MAX * 2");
-        report.not_attempted =
-            u32::try_from(names * 2).expect("names bounded by ALLOWLIST_MAX") - attempted_count;
-        report.resolved_names = u32::try_from(resolved[..names].iter().filter(|&&r| r).count())
-            .expect("resolved count bounded by ALLOWLIST_MAX");
-        for ordinal in 0..names {
-            report.outcomes[ordinal] = if resolved[ordinal] {
-                NameOutcome::Resolved
-            } else {
-                latest[ordinal].to_outcome()
-            };
-        }
-        Ok((report, self.start.elapsed().as_secs()))
+        Ok((ledger.finish(), self.start.elapsed().as_secs()))
     }
 
     /// Starts a cooperative DNS exchange without waiting for network
@@ -3514,6 +3360,17 @@ impl StartupDns {
             })
     }
 
+    /// Replaces one resolver's degradation state and records exactly one
+    /// resolver-transition crossing when the write changes whether the resolver
+    /// is degraded.
+    fn replace_degradation(&mut self, index: usize, replacement: ResolverDegradation) {
+        let was_degraded = self.degradations[index] == ResolverDegradation::Degraded;
+        self.degradations[index] = replacement;
+        if was_degraded != (self.degradations[index] == ResolverDegradation::Degraded) {
+            self.resolver_transitions += 1;
+        }
+    }
+
     /// Concludes the in-flight corroboration exchange from its captured
     /// outcome: a positive with eligible bindings from the different
     /// configured resolver while the active resolver returned a negative is a
@@ -3539,11 +3396,7 @@ impl StartupDns {
         if conflict {
             self.note_dns_anomaly(DnsAnomalyKind::CorroborationConflict);
             let active_index = corr.active_before.index();
-            let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
-            self.degradations[active_index] = self.degradations[active_index].note_failure();
-            if !was_degraded && self.degradations[active_index] == ResolverDegradation::Degraded {
-                self.resolver_transitions += 1;
-            }
+            self.replace_degradation(active_index, self.degradations[active_index].note_failure());
             if self.degradations[active_index] == ResolverDegradation::Degraded
                 && let Some(next) = self.next_healthy_after_active(corr.active_before)
             {
@@ -3597,22 +3450,14 @@ impl StartupDns {
                 .map(|target| (target.index(), sweep.active_before))
         });
         if let Some((probed, active_before)) = probe {
-            let was_degraded = self.degradations[probed] == ResolverDegradation::Degraded;
-            self.degradations[probed] = self.degradations[probed].note_failure();
-            if !was_degraded && self.degradations[probed] == ResolverDegradation::Degraded {
-                self.resolver_transitions += 1;
-            }
+            self.replace_degradation(probed, self.degradations[probed].note_failure());
             self.active_resolver = active_before;
             self.repoint_to_active();
             return;
         }
         let active = self.active_resolver;
         let active_index = active.index();
-        let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
-        self.degradations[active_index] = self.degradations[active_index].note_failure();
-        if !was_degraded && self.degradations[active_index] == ResolverDegradation::Degraded {
-            self.resolver_transitions += 1;
-        }
+        self.replace_degradation(active_index, self.degradations[active_index].note_failure());
         if let Some(source) = self.failback_source {
             self.note_downgrade_if_dot_to_plain(active, source);
             self.active_resolver = source;
@@ -3668,11 +3513,7 @@ impl StartupDns {
                 .map(|target| (target.index(), sweep.active_before))
         });
         if let Some((probed, active_before)) = probe {
-            let was_degraded = self.degradations[probed] == ResolverDegradation::Degraded;
-            self.degradations[probed] = ResolverDegradation::note_success();
-            if was_degraded {
-                self.resolver_transitions += 1;
-            }
+            self.replace_degradation(probed, ResolverDegradation::note_success());
             if let Some(sweep) = &mut self.probe_sweep {
                 sweep.verdicts[probed] = ProbeVerdict::Ok;
                 sweep.current = None;
@@ -3683,11 +3524,7 @@ impl StartupDns {
             return Ok(());
         }
         let active_index = self.active_resolver.index();
-        let was_degraded = self.degradations[active_index] == ResolverDegradation::Degraded;
-        self.degradations[active_index] = ResolverDegradation::note_success();
-        if was_degraded {
-            self.resolver_transitions += 1;
-        }
+        self.replace_degradation(active_index, ResolverDegradation::note_success());
         if self.failback_source.is_some() && self.active_resolver.is_primary() {
             self.failback_successes += 1;
             if self.failback_successes >= FAILBACK_SUCCESSES {
@@ -3701,9 +3538,7 @@ impl StartupDns {
 
     fn note_failure(
         &mut self,
-        ordinal: usize,
-        family: Family,
-        class: ExchangeClass,
+        ex: &ActiveExchange,
         schedules: &mut Schedules,
         reason: FailureReason,
     ) -> Result<FailureReason, StartupDnsError> {
@@ -3720,13 +3555,14 @@ impl StartupDns {
             sweep.verdicts[index] = ProbeVerdict::Failed(reason);
             sweep.current = None;
         }
-        if !matches!(class, ExchangeClass::Probe) {
-            let transition = schedules.note_exchange_failure(ordinal, family, now, reason)?;
-            self.last_failed[ordinal][family_index(family)] = origin;
-            if class == ExchangeClass::Serving && matches!(transition, PerTypeTransition::Opened) {
+        if !matches!(ex.class, ExchangeClass::Probe) {
+            let transition = schedules.note_exchange_failure(ex.ordinal, ex.family, now, reason)?;
+            self.last_failed[ex.ordinal][family_index(ex.family)] = origin;
+            if ex.class == ExchangeClass::Serving && matches!(transition, PerTypeTransition::Opened)
+            {
                 self.note_incident(IncidentNote::Open {
-                    ordinal,
-                    family,
+                    ordinal: ex.ordinal,
+                    family: ex.family,
                     reason,
                     resolver: origin,
                 });

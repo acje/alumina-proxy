@@ -9,17 +9,6 @@ use crate::startup_dns::{
 
 use super::Serving;
 
-/// The counted-exchange tallies of one startup window, accumulated by the
-/// cooperative shared owner exactly as the private driver does: published
-/// exchanges, counted failures, and the first failure's name ordinal and
-/// family (for the single `startup_warning`).
-#[derive(Default)]
-struct StartupTallies {
-    exchanges: u32,
-    failed: u32,
-    first_failure: Option<(u16, Family)>,
-}
-
 impl Serving {
     /// Drives the startup DNS window cooperatively over the single serving
     /// poll. The retained DNS transport is attached to the serving poll
@@ -34,10 +23,6 @@ impl Serving {
     #[expect(
         clippy::too_many_lines,
         reason = "long cooperative startup-DNS window loop folding poll/exchange/selection phases"
-    )]
-    #[expect(
-        clippy::expect_used,
-        reason = "name ordinal is below ALLOWLIST_MAX=32, which fits u16"
     )]
     pub(crate) fn run_startup_window(
         &mut self,
@@ -66,7 +51,6 @@ impl Serving {
             }
         }
         let mut ledger = WindowLedger::new(names);
-        let mut tallies = StartupTallies::default();
         let mut terminated = false;
         loop {
             if self.is_shutdown() {
@@ -90,7 +74,6 @@ impl Serving {
                 match self.storage.advance_dns()? {
                     None | Some(TurnResult::Pending) => {}
                     Some(TurnResult::Published(kind)) => {
-                        tallies.exchanges += 1;
                         let name_index = self
                             .storage
                             .cache()
@@ -106,12 +89,7 @@ impl Serving {
                         ledger.resolve(ordinal, has);
                     }
                     Some(TurnResult::Failed(reason)) => {
-                        tallies.failed += 1;
-                        if tallies.first_failure.is_none() {
-                            tallies.first_failure = Some((
-                                u16::try_from(ordinal).expect("ordinal bounded by ALLOWLIST_MAX"),
-                                ex_family,
-                            ));
+                        if ledger.mark_failed(ordinal, ex_family, reason) {
                             let now = self.storage.dns().now_u64();
                             self.storage.startup_warning_first(
                                 now,
@@ -120,7 +98,6 @@ impl Serving {
                                 reason.as_str(),
                             );
                         }
-                        ledger.mark_failed(ordinal, reason);
                     }
                 }
             }
@@ -221,11 +198,7 @@ impl Serving {
             })
         })?;
         let elapsed = self.storage.dns().window_start().elapsed().as_secs();
-        self.storage.settle_startup(
-            now0,
-            ledger.finish(tallies.exchanges, tallies.failed, tallies.first_failure),
-            elapsed,
-            terminated,
-        )
+        self.storage
+            .settle_startup(now0, ledger.finish(), elapsed, terminated)
     }
 }

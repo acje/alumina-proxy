@@ -18,20 +18,7 @@ pub const MAX_RESOLVERS: usize = 5;
 
 /// The maximum byte length of a validated resolver FQDN (RFC 1035 logical
 /// name, no trailing dot).
-pub const FQDN_MAX_LEN: usize = 253;
-
-const FQDN_MAX_LABEL: usize = 63;
-
-/// True when `value` is shaped like an IP literal or numeric shorthand
-/// (first byte a digit and every byte a digit or `.`): rejected so the
-/// resolver FQDN grammar stays strict even though an all-numeric final
-/// label (RFC 1123 DNS-name syntax) is otherwise accepted.
-fn is_ip_literal_shape(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && bytes[0].is_ascii_digit()
-        && bytes.iter().all(|b| *b == b'.' || b.is_ascii_digit())
-}
+pub const FQDN_MAX_LEN: usize = crate::name_rules::FQDN_MAX_LEN;
 
 /// A validated resolver FQDN (the `fqdn` in an `IP#fqdn` entry): lowercase
 /// ASCII DNS-name syntax (labels 1..=63 `[a-z0-9-]`, no leading/trailing
@@ -71,20 +58,11 @@ impl Fqdn {
             return Err(FqdnError::Invalid);
         }
         for label in value.split('.') {
-            if label.is_empty() || label.len() > FQDN_MAX_LABEL {
-                return Err(FqdnError::Invalid);
-            }
-            if label.starts_with('-') || label.ends_with('-') {
-                return Err(FqdnError::Invalid);
-            }
-            if !label
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            {
+            if crate::name_rules::classify_label(label.as_bytes()).is_err() {
                 return Err(FqdnError::Invalid);
             }
         }
-        if is_ip_literal_shape(value) {
+        if crate::name_rules::is_ip_literal_shape(value.as_bytes()) {
             return Err(FqdnError::Invalid);
         }
         let mut bytes = [0u8; FQDN_MAX_LEN];
@@ -797,5 +775,40 @@ mod tests {
             .map(|ns| ns.fqdn().map_or("<none>", Fqdn::as_str))
             .collect();
         assert_eq!(iterated, ["dns.google", "<none>"]);
+    }
+}
+
+#[cfg(test)]
+mod hostname_rules {
+    use super::*;
+
+    fn err(token: &str) -> String {
+        select(token).expect_err(token).to_string()
+    }
+
+    #[test]
+    fn hostname_rules_resolver_mixed_fault_class_order_and_text() {
+        let wildcard =
+            |t: &str| format!("resolver nameserver {t:?} FQDN part is a wildcard (not allowed)");
+        let idn = |t: &str| {
+            format!(
+                "resolver nameserver {t:?} FQDN part carries non-ASCII/IDN characters (use A-label form)"
+            )
+        };
+        let over_wild = format!("1.1.1.1#*.{}", "a".repeat(253));
+        let idn_over = format!("1.1.1.1#{}", "ü".repeat(127));
+        for (token, expected) in [
+            ("1.1.1.1#*ü", wildcard("1.1.1.1#*ü")),
+            ("1.1.1.1#ü*", wildcard("1.1.1.1#ü*")),
+            (over_wild.as_str(), wildcard(&over_wild)),
+            ("1.1.1.1#-.ü", idn("1.1.1.1#-.ü")),
+            (idn_over.as_str(), idn(&idn_over)),
+        ] {
+            assert_eq!(err(token), expected, "class/order for {token:?}");
+        }
+        assert_eq!(
+            err("1.1.1.1#-bad"),
+            "resolver nameserver \"1.1.1.1#-bad\" FQDN part invalid: expected lowercase ASCII DNS-name syntax (labels 1-63 [a-z0-9-], total <= 253, no leading or trailing dot)"
+        );
     }
 }

@@ -369,7 +369,6 @@ fn drive_hello(serving: &mut Serving, wire: &[u8], approved: &str) {
     ws.parse_rel = 0;
     ws.insp_rel = 0;
     ws.head_len = 0;
-    ws.hello_end = None;
     ws.hello_consumed = 0;
     ws.fwd = 0;
     ws.approved = FixedHostname::normalize(approved.as_bytes());
@@ -562,7 +561,7 @@ fn matching_hello_is_accepted_and_enters_the_hello_write() {
         drive_hello(serving, &wire, "sub.example.org");
         let ws = &serving.slots[0];
         assert!(matches!(ws.stage, Stage::WritingHello));
-        assert_eq!(ws.hello_end, Some(wire.len()));
+        assert_eq!(ws.gate.hello_end(), Some(wire.len()));
         assert_eq!(ws.fwd, 0, "no upstream socket yet; nothing forwarded");
     });
 }
@@ -758,7 +757,6 @@ fn setup_deadline_frees_partial_hello_pseudo_handshake_seat() {
             ws.parse_rel = 0;
             ws.insp_rel = 0;
             ws.head_len = 0;
-            ws.hello_end = None;
             ws.hello_consumed = 0;
             ws.fwd = 0;
             ws.approved = FixedHostname::normalize(b"sub.example.org");
@@ -2151,7 +2149,6 @@ fn relay_pending_tail_then_fresh_bytes_preserve_order_and_count() {
         let ws = &mut serving.slots[index];
         ws.upstream = Some(up);
         ws.head_len = 4;
-        ws.hello_end = Some(10);
         ws.buf_base = 0;
         ws.buf_len = 20;
         ws.fwd = 4;
@@ -2206,7 +2203,6 @@ fn forced_compaction_preserves_absolute_cursor_and_retained_suffix() {
             let ws = &mut serving.slots[index];
             ws.upstream = Some(up);
             ws.head_len = 4;
-            ws.hello_end = Some(10);
             ws.buf_base = 0;
             ws.fwd = 4;
             ws.stage = Stage::Relay;
@@ -2240,7 +2236,7 @@ fn forced_compaction_preserves_absolute_cursor_and_retained_suffix() {
         };
         let hello_end_before = {
             let ws = &mut serving.slots[index];
-            ws.hello_end
+            ws.gate.hello_end()
         };
         let suffix_before: Vec<u8> = {
             let ws = &mut serving.slots[index];
@@ -2256,7 +2252,8 @@ fn forced_compaction_preserves_absolute_cursor_and_retained_suffix() {
             "compaction must preserve the absolute committed cursor (base + fwd - head_len)"
         );
         assert_eq!(
-            ws.hello_end, hello_end_before,
+            ws.gate.hello_end(),
+            hello_end_before,
             "the absolute hello end must not shift when the base moves"
         );
         assert_eq!(
@@ -5117,7 +5114,6 @@ fn fabric_relay_slot(serving: &mut Serving, index: usize, approved: &[u8], pendi
         ws.approved = FixedHostname::normalize(approved);
         ws.upstream = Some(up);
         ws.head_len = 4;
-        ws.hello_end = Some(10);
         ws.buf_base = 0;
         ws.buf_len = 0;
         ws.down_off = 0;
@@ -5128,6 +5124,7 @@ fn fabric_relay_slot(serving: &mut Serving, index: usize, approved: &[u8], pendi
         ws.gate.on_authorized();
         ws.gate.on_upstream_connected();
         ws.gate.on_response_ok();
+        ws.gate.on_hello_validated(ValidatedHello::test_new(10));
     }
     serving.register_upstream(index).expect("register upstream");
 }
@@ -5179,9 +5176,13 @@ fn fresh_client_source() -> mio::net::TcpStream {
 
 /// Fire one validated-early-data event on the given slot.
 fn fire_early_data(serving: &mut Serving, index: usize, test_data: Option<usize>) {
-    serving.slots[index].hello_end = Some(10);
     serving.slots[index].client = Some(fresh_client_source());
     fabric_validated_early_data_at(serving, index, test_data);
+    {
+        let ws = &mut serving.slots[index];
+        ws.gate.on_response_ok();
+        ws.gate.on_hello_validated(ValidatedHello::test_new(10));
+    }
     let token = upstream_token(serving.slots[index].slot_gen, index);
     serving
         .dispatch_readiness(
@@ -5203,8 +5204,12 @@ fn validated_early_data_flare_is_reporting_only_and_setup_still_terminates() {
         let _client = connect(port);
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
-        serving.slots[0].hello_end = Some(10);
         fabric_validated_early_data(serving, Some(5));
+        {
+            let ws = &mut serving.slots[0];
+            ws.gate.on_response_ok();
+            ws.gate.on_hello_validated(ValidatedHello::test_new(10));
+        }
         let token = upstream_token(serving.slots[0].slot_gen, 0);
         serving
             .dispatch_readiness(
@@ -5267,7 +5272,6 @@ fn prevalidated_early_data_folds_unknown_without_any_block() {
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
         fabric_validated_early_data(serving, Some(5));
-        serving.slots[0].hello_end = None;
         serving.slots[0].approved = None;
         let token = upstream_token(serving.slots[0].slot_gen, 0);
         serving
@@ -5447,8 +5451,12 @@ fn early_data_on_unconfigured_pair_folds_unattributed() {
         let _client = connect(port);
         pump(serving, 20);
         assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
-        serving.slots[0].hello_end = Some(10);
         fabric_validated_early_data_pair(serving, 0, b"a.example", 9999, Some(5));
+        {
+            let ws = &mut serving.slots[0];
+            ws.gate.on_response_ok();
+            ws.gate.on_hello_validated(ValidatedHello::test_new(10));
+        }
         let token = upstream_token(serving.slots[0].slot_gen, 0);
         serving
             .dispatch_readiness(
@@ -5513,7 +5521,6 @@ fn block_all_guard_refuses_pending_relay_write_after_latch() {
             let ws = &mut serving.slots[index];
             ws.upstream = Some(up);
             ws.head_len = 4;
-            ws.hello_end = Some(10);
             ws.buf_base = 0;
             ws.buf_len = 8;
             ws.fwd = 4;
@@ -5621,7 +5628,6 @@ fn client_writable_latch_guard_closes_live_relay_without_draining() {
             ws.gate.on_authorized();
             ws.gate.on_upstream_connected();
             ws.gate.on_response_ok();
-            ws.hello_end = Some(10);
         }
         assert!(
             serving.slots[0].client.is_some() && matches!(serving.slots[0].stage, Stage::Relay),
@@ -5724,7 +5730,6 @@ fn internal_missing_approval_is_unknown_closes_locally_and_unrelated_flow_surviv
             ws.parse_rel = 0;
             ws.insp_rel = 0;
             ws.head_len = 0;
-            ws.hello_end = None;
             ws.hello_consumed = 0;
             ws.fwd = 0;
             ws.approved = None;
@@ -5965,9 +5970,13 @@ fn early_data_projection_spends_zero_allocations() {
         let cfg = cfg_doc1(port, "connection", "block", "connection");
         let mut serving = serve_on_cfg(port, &cfg);
 
-        serving.slots[0].hello_end = Some(10);
         serving.slots[0].client = Some(fresh_client_source());
         fabric_validated_early_data_at(&mut serving, 0, Some(5));
+        {
+            let ws = &mut serving.slots[0];
+            ws.gate.on_response_ok();
+            ws.gate.on_hello_validated(ValidatedHello::test_new(10));
+        }
 
         let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
             let token = upstream_token(serving.slots[0].slot_gen, 0);

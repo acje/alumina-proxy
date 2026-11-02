@@ -29,6 +29,18 @@ const DNS_ADVANCE_BOUND: usize = 8;
 /// log-loss signal (docs/alumina-proxy.md §F-09).
 pub(crate) const EX_IOERR: i32 = 74;
 
+fn emit_terminal_shutdown_finish(
+    storage: &mut ServeStorage,
+    sample: (Instant, u64),
+    status: crate::log::ShutdownStatus,
+) {
+    let (now, secs) = sample;
+    let dropped = storage.log_dropped();
+    storage.logs_mut().shutdown_final(secs, status, dropped);
+    storage.report_monitor_if_due(now, true);
+    storage.logs_mut().drain_sink();
+}
+
 /// The pre-attach owner: the retained serving workspaces are preallocated over
 /// boot-completed storage, and the startup window runs over that complete
 /// owner, exactly as main wires it. It carries no serving loop: [`Self::turn`]
@@ -137,13 +149,7 @@ impl Preallocated {
             .serving
             .shutdown_exit()
             .map_or(crate::log::ShutdownStatus::Drained, ShutdownExit::status);
-        let dropped = self.serving.storage().log_dropped();
-        self.serving
-            .storage_mut()
-            .logs_mut()
-            .shutdown_final(secs, status, dropped);
-        self.serving.storage_mut().report_monitor_if_due(now, true);
-        self.serving.storage_mut().logs_mut().drain_sink();
+        emit_terminal_shutdown_finish(self.serving.storage_mut(), (now, secs), status);
     }
 
     /// Completes the owner after the startup window opened the listener,
@@ -407,13 +413,7 @@ impl Runtime {
     pub(crate) fn emit_shutdown_record_and_drain(&mut self, exit: ShutdownExit) {
         let now = Instant::now();
         let secs = self.serving.storage().cache_secs(now);
-        let dropped = self.serving.storage().log_dropped();
-        self.serving
-            .storage_mut()
-            .logs_mut()
-            .shutdown_final(secs, exit.status(), dropped);
-        self.serving.storage_mut().report_monitor_if_due(now, true);
-        self.serving.storage_mut().logs_mut().drain_sink();
+        emit_terminal_shutdown_finish(self.serving.storage_mut(), (now, secs), exit.status());
     }
 
     /// DNS work is due without a freshness event when the outstanding exchange
@@ -440,17 +440,9 @@ impl Runtime {
             {
                 self.dns_advances_last_turn += 1;
             }
-            let identity = self.serving.storage().dns().active_identity();
-            let resolver = self.serving.storage().dns().current_resolver_index();
-            match self.serving.storage_mut().advance_dns()? {
+            match self.serving.storage_mut().advance_dns_serving()? {
                 Some(TurnResult::Pending) => {}
-                Some(TurnResult::Failed(reason)) => {
-                    self.serving
-                        .storage_mut()
-                        .note_exchange_failed(identity, reason, resolver);
-                    break;
-                }
-                None | Some(TurnResult::Published(_)) => break,
+                None | Some(TurnResult::Published(_) | TurnResult::Failed(_)) => break,
             }
         }
         Ok(())

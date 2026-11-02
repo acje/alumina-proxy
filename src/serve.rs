@@ -14,8 +14,7 @@ use crate::enforcement::action::DomainOrdinal;
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::enforcement::state::Enforcement;
 use crate::incident_report::{
-    ClosedWindow, EligibleTransition, IncidentReport, IncidentSnapshot, IncidentSummary,
-    TypeSummary,
+    ClosedWindow, EligibleTransition, IncidentReport, IncidentSnapshot, SummaryCache,
 };
 use crate::log::{Level, LogStore, ResolverProbeSegment};
 use crate::resolver::MAX_RESOLVERS;
@@ -458,13 +457,11 @@ impl ServeStorage {
                 continue;
             };
             let has_eligible = usable_name(&self.cache, name_index, secs).unwrap_or(false);
-            match self
+            if let Some(event) = self
                 .incident_report
                 .note_eligible_state(ordinal, has_eligible)
             {
-                Some(EligibleTransition::Lost) => self.emit_eligible_loss(ordinal, secs),
-                Some(EligibleTransition::Recovered) => self.emit_eligible_recovered(ordinal, secs),
-                None => {}
+                self.emit_eligible(ordinal, secs, event);
             }
         }
         for ordinal in 0..name_count {
@@ -487,9 +484,9 @@ impl ServeStorage {
         }
     }
 
-    /// Emits one incident summary record for a closed window, folding the
-    /// schedule's incident state and the cache entry snapshot for each family
-    /// into the window counters (docs/alumina-proxy.md:80).
+    /// Emits one incident summary record for a closed window, after sampling
+    /// the shared record second and folding the live cache facts
+    /// (docs/alumina-proxy.md:80).
     fn emit_incident_summary(&mut self, ordinal: usize, closed: ClosedWindow, level: Level) {
         let Some(fqdn) = self.config.allowlist().get(ordinal) else {
             return;
@@ -498,73 +495,35 @@ impl ServeStorage {
             return;
         };
         let secs = self.cache_secs(Instant::now());
-        let mut types = [TypeSummary::EMPTY; 2];
+        let mut cache = [SummaryCache {
+            addrs: 0,
+            state: "empty",
+            freshness: None,
+            retirement: None,
+        }; 2];
         for (i, family) in Family::ALL.iter().copied().enumerate() {
-            // M1: the per-type incident fields come from the snapshot captured
-            // into the closed window at rotation/close, not from the schedule
-            // read live at emission — so a recovery coinciding with the window
-            // boundary still reports the window's actual incident activity.
-            let (start, reason, resolver) = match closed.incident[i] {
-                Some((opened_at, reason, origin)) => (Some(opened_at), Some(reason), origin),
-                None => (None, None, None),
+            let Ok(entry) = self.cache.entry(name_index, family) else {
+                continue;
             };
-            let (addrs, state, freshness, retirement) = self
-                .cache
-                .entry(name_index, family)
-                .map_or((0, "empty", None, None), |entry| {
-                    let (freshness, retirement) = entry.deadlines();
-                    (
-                        entry.bindings().len() as u64,
-                        entry.state(secs).as_str(),
-                        // L2: report remaining seconds until the freshness and
-                        // retirement deadlines (docs/alumina-proxy.md:80), not
-                        // the absolute monotonic deadlines.
-                        freshness.map(|f| f.saturating_sub(secs)),
-                        retirement.map(|r| r.saturating_sub(secs)),
-                    )
-                });
-            types[i] = TypeSummary {
-                start,
-                elapsed: start.map_or(0, |s| closed.window_end.saturating_sub(s)),
-                reason,
-                resolver,
-                last_positive: closed.last_positive[i],
-                attempts: closed.per_type[i].attempts.value,
-                failures: closed.per_type[i].failures.value,
-                addrs,
-                state,
+            let (freshness, retirement) = entry.deadlines();
+            cache[i] = SummaryCache {
+                addrs: entry.bindings().len() as u64,
+                state: entry.state(secs).as_str(),
                 freshness,
                 retirement,
             };
         }
-        let summary = IncidentSummary {
-            window_start: closed.window_start,
-            window_end: closed.window_end,
-            duration: closed.duration(),
-            skipped: closed.skipped,
-            overflow: closed.overflow,
-            types,
-            tunnels: closed.activity.tunnels.value,
-            bytes: closed.activity.bytes.value,
-            stale: closed.activity.stale.value,
-        };
+        let summary = closed.to_summary(secs, cache);
         self.logs
             .incident_summary(secs, fqdn.as_str(), level, &summary);
     }
 
-    /// Emits the immediate error for a hostname that lost its eligible
-    /// bindings (docs/alumina-proxy.md:79).
-    fn emit_eligible_loss(&mut self, ordinal: usize, secs: u64) {
+    /// Emits one typed eligible-binding transition record for a hostname:
+    /// `Lost` is the immediate error when it loses its eligible bindings,
+    /// `Recovered` the info when they return (docs/alumina-proxy.md:79).
+    fn emit_eligible(&mut self, ordinal: usize, secs: u64, event: EligibleTransition) {
         if let Some(fqdn) = self.config.allowlist().get(ordinal) {
-            self.logs.incident_eligible_loss(secs, fqdn.as_str());
-        }
-    }
-
-    /// Emits the info notification for a hostname whose eligible bindings
-    /// recovered (docs/alumina-proxy.md:79).
-    fn emit_eligible_recovered(&mut self, ordinal: usize, secs: u64) {
-        if let Some(fqdn) = self.config.allowlist().get(ordinal) {
-            self.logs.incident_eligible_recovered(secs, fqdn.as_str());
+            self.logs.incident_eligible(secs, fqdn.as_str(), event);
         }
     }
 
@@ -591,12 +550,7 @@ impl ServeStorage {
         let result = self
             .dns
             .advance_exchange(fqdn, &mut self.cache, &mut self.schedules)?;
-        self.drain_resolver_transitions();
-        self.drain_dns_anomalies();
-        self.drain_downgrade_to_plain();
-        self.drain_probe_relocations();
-        self.drain_expired_pin_certs();
-        self.drain_incident_transitions();
+        self.drain_common_six();
         self.drain_incident_notes();
         let secs = self.cache_secs(Instant::now());
         if let Some(family) = family {
@@ -623,17 +577,23 @@ impl ServeStorage {
         Ok(Some(result))
     }
 
+    /// One serving-loop DNS turn: captures the per-event actor identity and
+    /// resolver, advances through the shared [`Self::advance_dns`], and emits
+    /// the per-failure `exchange_failed` record only when the advance settled
+    /// as `Failed`.
+    pub(crate) fn advance_dns_serving(&mut self) -> Result<Option<TurnResult>, StartupDnsError> {
+        let identity = self.dns.active_identity();
+        let resolver = self.dns.current_resolver_index();
+        let result = self.advance_dns()?;
+        if let Some(TurnResult::Failed(reason)) = &result {
+            self.note_exchange_failed(identity, *reason, resolver);
+        }
+        Ok(result)
+    }
+
     /// Emits the per-failure `exchange_failed` record for a counted
-    /// serving-loop exchange failure (G6-C04): the allowlist name is recovered
-    /// from the ordinal captured before the advance settled the exchange, and
-    /// the resolver origin is the per-event actor the transport was pointing at
-    /// when the failure was observed — captured before that advance, never read
-    /// back from the name-history origin table — so a pure-sensor Probe or
-    /// corroboration failure reports the resolver it actually used. The startup
-    /// window surfaces its own failures through the `startup_name` /
-    /// `startup_final` records, so this serving-loop-only emission never
-    /// duplicates that surface.
-    pub(crate) fn note_exchange_failed(
+    /// serving-loop exchange failure, with the per-event resolver origin.
+    fn note_exchange_failed(
         &mut self,
         identity: Option<(usize, Family)>,
         reason: FailureReason,
@@ -649,6 +609,19 @@ impl ServeStorage {
         let secs = self.cache_secs(Instant::now());
         self.logs
             .exchange_failed(secs, name, reason.as_str(), origin);
+    }
+
+    /// The six ordered post-exchange monitor drains shared by the serving
+    /// advance and the startup window: resolver crossings, DNS anomalies, the
+    /// `DoT`-to-plain downgrade, probe relocations, expired pin certificates,
+    /// and incident transitions, in the protocol order.
+    fn drain_common_six(&mut self) {
+        self.drain_resolver_transitions();
+        self.drain_dns_anomalies();
+        self.drain_downgrade_to_plain();
+        self.drain_probe_relocations();
+        self.drain_expired_pin_certs();
+        self.drain_incident_transitions();
     }
 
     /// Folds any degraded-mode enter/exit crossings the DNS transport
@@ -1070,12 +1043,7 @@ impl ServeStorage {
             },
             &mut self.logs,
         )?;
-        self.drain_resolver_transitions();
-        self.drain_dns_anomalies();
-        self.drain_downgrade_to_plain();
-        self.drain_probe_relocations();
-        self.drain_expired_pin_certs();
-        self.drain_incident_transitions();
+        self.drain_common_six();
         self.settle_startup(now0, report, decision_seconds, false)
     }
 

@@ -28,17 +28,17 @@ impl Serving {
     }
 
     fn refuse_impl(&mut self, index: usize, refusal: Refusal, hostname: Option<FixedHostname>) {
-        let body = refusal.body();
-        self.emit_reject(index, refusal.reason(), hostname);
+        let wire = refusal.descriptor();
+        self.emit_reject(index, wire.reason, hostname);
         if self.block_all_latched() {
             self.close_slot(index);
             return;
         }
         let ws = &mut self.slots[index];
         ws.down_off = 0;
-        ws.down[..body.len()].copy_from_slice(body);
-        ws.down_len = body.len();
-        ws.stage = Stage::Refusing(body);
+        ws.down[..wire.body.len()].copy_from_slice(wire.body);
+        ws.down_len = wire.body.len();
+        ws.stage = Stage::Refusing(wire.body);
         self.flush_down(index);
         if self.slots[index].down_len == 0 {
             self.close_slot(index);
