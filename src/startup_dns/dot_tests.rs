@@ -960,10 +960,7 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
         fqdn: *fqdn,
         pin: cfg.resolver_set().primary().pin().copied(),
     });
-    transport.registration = Registration::Shared {
-        token: Token(0),
-        armed: None,
-    };
+    transport.registration = Registration::shared(Token(0));
     let mut poll = Poll::new().expect("external poll");
     let mut events = Events::with_capacity(8);
     let fqdn = cfg.allowlist().get(0).unwrap();
@@ -1319,10 +1316,7 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
         fqdn: *fqdn,
         pin: cfg.resolver_set().primary().pin().copied(),
     });
-    transport.registration = Registration::Shared {
-        token: Token(0),
-        armed: None,
-    };
+    transport.registration = Registration::shared(Token(0));
     let mut poll = Poll::new().expect("external poll");
     let mut events = Events::with_capacity(8);
     let fqdn = cfg.allowlist().get(0).unwrap();
@@ -1404,10 +1398,7 @@ fn dot_warm_serving_exchange_alloc_witness() {
         fqdn: *fqdn,
         pin: cfg.resolver_set().primary().pin().copied(),
     });
-    transport.registration = Registration::Shared {
-        token: Token(0),
-        armed: None,
-    };
+    transport.registration = Registration::shared(Token(0));
     let mut poll = Poll::new().expect("external poll");
     let mut events = Events::with_capacity(8);
     let fqdn = cfg.allowlist().get(0).unwrap();

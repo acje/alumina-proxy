@@ -1226,7 +1226,7 @@ impl LogStore {
                     }
                     bytes_out += n;
                     self.sink.blocked = false;
-                    if self.consume_gathered(index, off, gathered, n) {
+                    if self.consume_gathered(gathered, n) {
                         return;
                     }
                 }
@@ -1239,13 +1239,9 @@ impl LogStore {
     /// watermark edges observe true per-record occupancy. Returns `true` when
     /// the write stopped mid-record (a partial write): the turn must end with
     /// the cursor retained for the drain to resume at the exact residue.
-    fn consume_gathered(
-        &mut self,
-        index: usize,
-        off: usize,
-        gathered: usize,
-        mut n: usize,
-    ) -> bool {
+    fn consume_gathered(&mut self, gathered: usize, mut n: usize) -> bool {
+        let index = self.front;
+        let off = self.cursor.map_or(0, |c| c.off);
         for k in 0..gathered {
             let start = if k == 0 { off } else { 0 };
             let remain = self.slots[(index + k) & QUEUE_MASK].bytes - start;

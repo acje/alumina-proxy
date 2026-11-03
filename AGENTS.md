@@ -79,7 +79,7 @@ because one side "wins".
 ## Rules
 
 - `docs/alumina-proxy.md` is the sole, byte-canonical governing
-  specification (sha256 `a1548ebd8e697035f41040ae35aa85f4f9e12cbd31681c636510991e96f51c7c`). Never edit it; documents only
+  specification (sha256 `c1a6dbd69bd727482ebe5d436bef0ca7eef17cbd6a843e8a8abb577b328f1667`). Never edit it; documents only
   restate or cite it.
 - Native verification entry point, QA run and prerequisite ownership are
   `docs/qa-package/README.md`; the verify command set is in
