@@ -6,6 +6,7 @@ use std::net::{TcpListener as StdListener, TcpStream};
 use std::thread;
 
 use crate::cache::Family;
+use crate::startup_dns::ExchangeClass;
 
 fn config(port: u16) -> crate::config::Config {
     let doc = format!(
@@ -1692,9 +1693,10 @@ fn retained_startup_exchange_cannot_advance_body() {
 }
 
 /// F-06 regression, production-path pin: a due schedule and an idle serving
-/// owner must auto-start a refresh through [`Runtime::starts_due_dns_if_idle`]
-/// (runtime.rs:323-351) — the only serving classification site — and that
-/// started exchange must carry [`ExchangeClass::Serving`]. The startup
+/// owner must auto-start a refresh through
+/// [`ServeStorage::start_due_serving_refresh`] (serve.rs:811) — the only
+/// serving classification site — and that started exchange must carry
+/// [`ExchangeClass::Serving`]. The startup
 /// cancellation guard at the top of every turn (runtime.rs:258-262) cancels
 /// only a retained [`ExchangeClass::Startup`] exchange; a refresh whose class
 /// were mis-started at the production site would read as retained startup work
@@ -1746,7 +1748,7 @@ fn serving_refresh_survives_next_turn_body() {
     assert!(
         started,
         "an idle serving owner must auto-start the due refresh through \
-         the production starts_due_dns_if_idle path"
+         the production start_due_serving_refresh path"
     );
     assert!(
         runtime.serving().storage().dns().active_is_serving(),

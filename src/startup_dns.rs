@@ -1660,6 +1660,27 @@ impl StartupDns {
         self.tls_target = None;
     }
 
+    /// Test-only constant seam that forces the monotonic token generation to
+    /// exhaustion so the immediate post-selection start is deterministically
+    /// refused as `TokenExhausted` before any connect I/O. `usize::MAX` is a
+    /// valid monotonic-counter state reached only under this seam; no token is
+    /// reused and no normal public surface is added by the constant action.
+    #[cfg(test)]
+    pub(crate) const fn exhaust_tokens_for_test(&mut self) {
+        self.token_gen = usize::MAX;
+    }
+
+    /// Test-only clock seam that pins the whole-second DNS epoch clock to its
+    /// maximum representable value, so the owner-path start-rate guard
+    /// deterministically overflows on the next `select_due`. `now0 = u64::MAX`
+    /// is a reachable saturating-clock state (as in the serving `cache_secs`
+    /// boundary); only test code seats it, and no production clock arithmetic
+    /// is added or changed by the constant action.
+    #[cfg(test)]
+    pub(crate) const fn force_now_overflow_for_test(&mut self) {
+        self.now0 = u64::MAX;
+    }
+
     /// Whether a completed nonblocking connect landed on the configured
     /// transport peer. Under test the seam can force a mismatch so the
     /// resolver-peer-anomaly branch is exercised end to end (vec-22).

@@ -23,8 +23,8 @@ use crate::log::{Level, LogStore, ResolverProbeSegment};
 use crate::resolver::MAX_RESOLVERS;
 use crate::schedule::Schedules;
 use crate::startup_dns::{
-    ExchangeClass, FailureReason, IncidentNote, ProbeVerdict, PublishedKind, STARTUP_WINDOW_SECS,
-    StartupDns, StartupDnsError, StartupReport, TurnResult,
+    EXCHANGE_DEADLINE_SECS, ExchangeClass, FailureReason, IncidentNote, ProbeVerdict,
+    PublishedKind, STARTUP_WINDOW_SECS, StartupDns, StartupDnsError, StartupReport, TurnResult,
 };
 use crate::worker::{
     AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, ResolvedRequest, SlotIndex,
@@ -217,6 +217,34 @@ impl ServeStorage {
     pub(crate) fn schedule_due_instant(&self, due: u64) -> Instant {
         let secs = due.saturating_sub(self.now0).min(SCHEDULE_FAR_FUTURE_SECS);
         self.origin + Duration::from_secs(secs)
+    }
+
+    /// The absolute wake moment a shared owner folds for one due serving
+    /// refresh, projected purely on the serving clock and schedule with no
+    /// mutation and no transport lease. `None` while an exchange is already
+    /// in flight (its own deadline already bounds the wait, and the owner
+    /// folds [`Self::dns`]'s exchange deadline separately), or when no slot
+    /// is currently selectable — nothing scheduled, or only a consumed
+    /// pending slot. Otherwise the mapped instant: an overdue due wakes
+    /// `now` directly, or after the bounded 100 ms anti-spin floor while the
+    /// post-boot probing sweep is active or the caller is suspended; a
+    /// future due always maps exactly, even under sweep or suspension, so a
+    /// suspended owner still wakes when the refresh becomes due.
+    pub(crate) fn refresh_wake(&self, now: Instant, overdue_suspended: bool) -> Option<Instant> {
+        if self.dns.has_active_exchange() {
+            return None;
+        }
+        let due = self.schedules.next_selectable_due(self.cache_secs(now))?;
+        let wake = self.schedule_due_instant(due);
+        if wake <= now {
+            if self.dns.sweep_active() || overdue_suspended {
+                Some(now + Duration::from_millis(100))
+            } else {
+                Some(now)
+            }
+        } else {
+            Some(wake)
+        }
     }
 
     /// Re-anchors the retained worker and cache-seconds authority to the exact
@@ -788,6 +816,50 @@ impl ServeStorage {
         self.incident_report
             .note_exchange_attempt(ordinal, family, secs);
         Ok(())
+    }
+
+    /// Starts a due serving refresh when the retained DNS transport is idle:
+    /// owned refresh admission. A refresh is suppressed while a post-window
+    /// probe sweep owns the transport between probes — the sweep restores the
+    /// pre-sweep active resolver after each probe, and an interleaved refresh
+    /// would corrupt that restore (the suppression is bounded, at most
+    /// `MAX_RESOLVERS − 1` probes at `EXCHANGE_DEADLINE_SECS` each, once at
+    /// boot, latched by `sweep_ran`, so it can never starve refresh
+    /// scheduling) — and while a serving exchange is already in flight. The
+    /// clock sample is taken after those guards, exactly once, and a separate
+    /// fresh exchange deadline is minted only after `select_due` returns a
+    /// token, so selection failure leaves the due table untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed [`StartupDnsError`]: a selection error
+    /// (`ScheduleError::DeadlineOverflow` when the start-rate guard
+    /// overflows) surfaces before any due-table mutation, leaving the
+    /// schedule untouched. Once a token is selected, subsequent errors
+    /// propagate from [`Self::start_dns_exchange`] without rolling the
+    /// selection back: the `active_exchange_family` marker is set before the
+    /// fallible DNS start and the attempt report is recorded only on success,
+    /// while the resolution and cache lookups that precede the marker leave it
+    /// untouched.
+    pub(crate) fn start_due_serving_refresh(&mut self) -> Result<(), StartupDnsError> {
+        if self.dns.sweep_active() || self.dns.has_active_exchange() {
+            return Ok(());
+        }
+        let secs = self.dns.now_u64();
+        let Some(selected) = self
+            .schedules
+            .select_due(secs)
+            .map_err(StartupDnsError::from)?
+        else {
+            return Ok(());
+        };
+        let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+        self.start_dns_exchange(
+            selected.name(),
+            selected.family(),
+            deadline,
+            ExchangeClass::Serving,
+        )
     }
 
     /// Advances the post-window probe sweep one step on the retained transport:

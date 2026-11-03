@@ -1,6 +1,7 @@
 use super::*;
 use crate::cache::{Generation, StagedPositive};
 use crate::eligibility::NumericAddr;
+use crate::schedule::ScheduleError;
 use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -635,6 +636,139 @@ fn schedule_due_instant_saturates_instead_of_collapsing_to_now() {
     );
 }
 
+/// I06 owner-path fault characterisation, selection-overflow branch: a due
+/// selection whose start-rate guard cannot be represented on the DNS clock
+/// (`now == u64::MAX`) surfaces the typed wrapped overflow
+/// `StartupDnsError::Schedule(ScheduleError::DeadlineOverflow)` through the
+/// moved owner op before any slot or family marker is mutated and before any
+/// transport I/O begins. The runtime forwards the same typed error via
+/// `ServeError::from` unchanged (runtime.rs:284), and `select_due` documents
+/// "no slot is changed" on overflow (schedule.rs `select_due`).
+#[test]
+fn owner_path_select_overflow_surfaces_typed_schedule_error_without_mutation() {
+    let mut storage = booted(1, 0);
+    storage
+        .schedules_mut()
+        .overwrite_due_at(0, Family::A, u64::MAX)
+        .expect("due the A slot at the clock maximum");
+    storage.dns_mut().force_now_overflow_for_test();
+    let before = *storage.schedules();
+    assert_eq!(
+        storage.start_due_serving_refresh(),
+        Err(StartupDnsError::Schedule(ScheduleError::DeadlineOverflow)),
+        "the owner path must surface the typed selection overflow untouched"
+    );
+    assert_eq!(
+        *storage.schedules(),
+        before,
+        "an overflowing selection must not mutate any schedule slot"
+    );
+    assert_eq!(
+        storage.schedules().due_time(0, Family::A).unwrap(),
+        Some(u64::MAX),
+        "the due time must remain exactly as scheduled"
+    );
+    assert!(
+        storage.active_exchange_family.is_none(),
+        "an overflow before selection leaves no active-family residue"
+    );
+    assert!(
+        !storage.dns().has_active_exchange(),
+        "an overflowing selection must never begin transport I/O"
+    );
+}
+
+/// I06 owner-path fault characterisation, immediate-start-refusal branch: once
+/// `select_due` commits the SELECTED `pending/not_before/rotation` state, an
+/// immediate `TokenExhausted` from `start_dns_exchange` surfaces typed and
+/// leaves the exact legacy residue — the consumed pending slot (not
+/// re-selectable, dropped from the selectable horizon, due untouched), the
+/// `active_exchange_family` marker seated with no active DNS exchange, and no
+/// attempt recorded in an open incident window. `start_dns_exchange` seats the
+/// marker before the fallible start and the attempt note is reached only on
+/// success, so a refusal is not an attempt and there is no auto cleanup.
+#[test]
+fn owner_path_start_refusal_leaves_typed_token_exhausted_residue() {
+    let mut storage = booted(1, 0);
+    let secs = storage.dns().now_u64();
+    storage
+        .schedules_mut()
+        .overwrite_due_at(0, Family::A, secs)
+        .expect("due the A slot now");
+    storage
+        .incident_report
+        .note_incident_open(0, secs, [None, None]);
+    assert_eq!(
+        storage
+            .schedules()
+            .next_selectable_due(secs.saturating_add(1)),
+        Some(secs.saturating_add(1)),
+        "the due A slot must sit on the selectable horizon before the refusal"
+    );
+    storage.dns_mut().exhaust_tokens_for_test();
+
+    let err = storage
+        .start_due_serving_refresh()
+        .expect_err("token exhaustion must refuse the immediate start");
+    assert!(
+        matches!(err, StartupDnsError::TokenExhausted),
+        "the refusal must surface the typed token-exhaustion error: {err:?}"
+    );
+    assert_eq!(
+        storage.schedules_mut().select_due(secs).unwrap(),
+        None,
+        "the consumed pending slot must not be re-selectable at the selection second"
+    );
+    assert_eq!(
+        storage
+            .schedules_mut()
+            .select_due(secs.saturating_add(2))
+            .unwrap(),
+        None,
+        "the pending residue must still block re-selection after the start guard"
+    );
+    assert_eq!(
+        storage
+            .schedules()
+            .next_selectable_due(secs.saturating_add(2)),
+        None,
+        "the refused start must drop the consumed slot from the selectable horizon"
+    );
+    assert_eq!(
+        storage.schedules().due_time(0, Family::A).unwrap(),
+        Some(secs),
+        "the refusal must leave the due time untouched"
+    );
+    assert_eq!(
+        storage.active_exchange_family,
+        Some(Family::A),
+        "the family marker seated before the fallible start must remain"
+    );
+    assert!(
+        !storage.dns().has_active_exchange(),
+        "a refused start must never begin transport I/O or touch the active state"
+    );
+    let closed = storage
+        .incident_report
+        .close_window(0, secs)
+        .expect("the incident window is open");
+    assert_eq!(
+        closed.per_type[0].attempts.value, 0,
+        "a TokenExhausted refusal must not be recorded as an exchange attempt"
+    );
+    assert_eq!(
+        storage.start_due_serving_refresh(),
+        Ok(()),
+        "with the slot stuck pending the next owner turn finds no due work"
+    );
+    assert_eq!(
+        storage.active_exchange_family,
+        Some(Family::A),
+        "the family residue must not be auto-cleaned by a later idle turn"
+    );
+    assert!(!storage.dns().has_active_exchange());
+}
+
 #[test]
 fn report_incident_if_due_emits_window_summary_through_real_path() {
     let mut storage = booted(1, 0);
@@ -924,5 +1058,291 @@ fn startup_warning_first_emits_typed_reason_on_probe_branch() {
     assert!(
         text.contains("kind=startup_warning") && text.contains("reason=\"pin_mismatch\""),
         "prod-branch first warning must carry the typed reason token: {text}"
+    );
+}
+
+#[test]
+fn owner_path_refresh_wake_projects_pure_wake_none_and_now_cases() {
+    with_boot_stack(|| {
+        fn with_store(now: Instant) -> (ServeStorage, Instant) {
+            let origin = now - Duration::from_millis(980);
+            let mut storage = booted(1, 0);
+            storage.mount_clock(origin, 1000);
+            (storage, origin)
+        }
+        fn check(
+            storage: &ServeStorage,
+            now: Instant,
+            overdue_suspended: bool,
+            want: Option<Instant>,
+            what: &str,
+        ) {
+            let before = *storage.schedules();
+            assert_eq!(storage.refresh_wake(now, overdue_suspended), want, "{what}");
+            assert_eq!(
+                *storage.schedules(),
+                before,
+                "{what}: the pure wake query must not mutate any schedule slot"
+            );
+        }
+
+        let now = Instant::now();
+        {
+            let (at, _origin) = with_store(now);
+            check(&at, now, false, None, "no selectable due folds no wake");
+            check(
+                &at,
+                now,
+                true,
+                None,
+                "no due folds no wake even while suspended",
+            );
+        }
+
+        {
+            let (mut pending, _o) = with_store(now);
+            pending
+                .schedules_mut()
+                .overwrite_due_at(0, Family::A, 1000)
+                .expect("due the A slot now");
+            pending
+                .schedules_mut()
+                .select_due(1000)
+                .expect("select")
+                .expect("a due token");
+            check(
+                &pending,
+                now,
+                false,
+                None,
+                "a consumed pending slot contributes no wake",
+            );
+        }
+
+        {
+            let (mut eq, _o) = with_store(now);
+            eq.schedules_mut()
+                .overwrite_due_at(0, Family::A, 1000)
+                .expect("due the A slot now");
+            check(
+                &eq,
+                now,
+                false,
+                Some(now),
+                "a due selectable this second folds an immediate now wake when idle",
+            );
+        }
+
+        {
+            let (mut past, _o) = with_store(now);
+            past.schedules_mut()
+                .overwrite_due_at(0, Family::A, 999)
+                .expect("due the A slot already past");
+            check(
+                &past,
+                now,
+                false,
+                Some(now),
+                "an already-past due still folds an immediate now wake when idle",
+            );
+        }
+    });
+}
+
+#[test]
+fn owner_path_refresh_wake_projects_pure_wake_floor_and_future_cases() {
+    with_boot_stack(|| {
+        fn with_store(now: Instant) -> (ServeStorage, Instant) {
+            let origin = now - Duration::from_millis(980);
+            let mut storage = booted(1, 0);
+            storage.mount_clock(origin, 1000);
+            (storage, origin)
+        }
+        fn check(
+            storage: &ServeStorage,
+            now: Instant,
+            overdue_suspended: bool,
+            want: Option<Instant>,
+            what: &str,
+        ) {
+            let before = *storage.schedules();
+            assert_eq!(storage.refresh_wake(now, overdue_suspended), want, "{what}");
+            assert_eq!(
+                *storage.schedules(),
+                before,
+                "{what}: the pure wake query must not mutate any schedule slot"
+            );
+        }
+
+        let now = Instant::now();
+        let want = Some(now + Duration::from_millis(20));
+        {
+            let (mut sweep, _o) = with_store(now);
+            sweep.dns_mut().seed_probe_sweep_for_test();
+            sweep
+                .schedules_mut()
+                .overwrite_due_at(0, Family::A, 1000)
+                .expect("due the A slot now");
+            check(
+                &sweep,
+                now,
+                false,
+                Some(now + Duration::from_millis(100)),
+                "an overdue due under the probe sweep folds the bounded 100ms floor",
+            );
+        }
+
+        {
+            let (mut suspended, _o) = with_store(now);
+            suspended
+                .schedules_mut()
+                .overwrite_due_at(0, Family::A, 1000)
+                .expect("due the A slot now");
+            check(
+                &suspended,
+                now,
+                true,
+                Some(now + Duration::from_millis(100)),
+                "an overdue due while suspended folds the bounded 100ms floor, not now",
+            );
+        }
+
+        {
+            let (mut future, _o) = with_store(now);
+            future
+                .schedules_mut()
+                .overwrite_due_at(0, Family::A, 1001)
+                .expect("due the A slot next second");
+            check(
+                &future,
+                now,
+                false,
+                want,
+                "a future due maps exactly to its mapped wake when idle",
+            );
+            check(
+                &future,
+                now,
+                true,
+                want,
+                "a future due still maps exactly while suspended",
+            );
+        }
+
+        {
+            let (mut future_sweep, _o2) = with_store(now);
+            future_sweep.dns_mut().seed_probe_sweep_for_test();
+            future_sweep
+                .schedules_mut()
+                .overwrite_due_at(0, Family::A, 1001)
+                .expect("due the A slot next second");
+            check(
+                &future_sweep,
+                now,
+                false,
+                want,
+                "a future due still maps exactly under the probe sweep",
+            );
+        }
+    });
+}
+
+#[test]
+fn owner_path_refresh_wake_returns_none_while_a_local_active_exchange_runs() {
+    let mut storage = booted(1, 0);
+    let listener =
+        std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), 0))
+            .expect("local listener");
+    storage
+        .dns_mut()
+        .set_peer_for_test(listener.local_addr().expect("local addr"));
+    storage
+        .start_dns_exchange(
+            0,
+            Family::A,
+            Instant::now() + Duration::from_secs(5),
+            ExchangeClass::Serving,
+        )
+        .expect("seat a real local exchange");
+    let before = *storage.schedules();
+    let now = Instant::now();
+    assert_eq!(
+        storage.refresh_wake(now, false),
+        None,
+        "an in-flight exchange folds no refresh wake of its own (its deadline bounds the wait)"
+    );
+    assert_eq!(
+        storage.refresh_wake(now, true),
+        None,
+        "an in-flight exchange folds no wake while suspended either"
+    );
+    assert_eq!(
+        *storage.schedules(),
+        before,
+        "the in-flight wake query must not mutate any schedule slot"
+    );
+}
+
+#[test]
+fn owner_path_refresh_wake_keeps_store_and_dns_epochs_distinct() {
+    let origin = Instant::now();
+    let mut storage = booted(1, 0);
+    storage.mount_clock(origin, 1000);
+    let nameserver = crate::resolver::select("1.1.1.1").expect("one resolver");
+    let resolvers = crate::resolver::ResolverSet::from_slice(std::slice::from_ref(&nameserver))
+        .expect("one-resolver set");
+    storage
+        .dns_mut()
+        .begin_window(
+            SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), 53),
+            resolvers,
+            2000,
+            Duration::from_secs(30),
+        )
+        .expect("begin a distinct DNS window epoch");
+    storage
+        .schedules_mut()
+        .overwrite_due_at(0, Family::A, 1500)
+        .expect("due between the two epochs");
+    let before = *storage.schedules();
+    assert_eq!(
+        storage.refresh_wake(origin, false),
+        Some(origin + Duration::from_secs(500)),
+        "the pure wake must project on the STORE epoch (now0 1000): due 1500 maps +500s at the \
+         store origin, never the DNS window epoch (now0 2000)"
+    );
+    assert_eq!(
+        *storage.schedules(),
+        before,
+        "the wake query must not mutate any schedule slot"
+    );
+    storage.dns_mut().exhaust_tokens_for_test();
+    let err = storage
+        .start_due_serving_refresh()
+        .expect_err("token exhaustion must refuse");
+    assert!(
+        matches!(err, StartupDnsError::TokenExhausted),
+        "selection runs on the DNS epoch: due 1500 selects at DNS now0 2000 and the exhausted \
+         token refuses; if the clocks were wrongly unified to the store 1000, select_due(1000) \
+         would see no selectable due and return Ok: {err:?}"
+    );
+    assert_eq!(
+        storage.active_exchange_family,
+        Some(Family::A),
+        "the family marker seated before the fallible start remains (P1 reflection)"
+    );
+    assert!(
+        !storage.dns().has_active_exchange(),
+        "the refused start never begins transport I/O"
+    );
+    assert_eq!(
+        storage.schedules().due_time(0, Family::A).unwrap(),
+        Some(1500),
+        "the due time stays intact"
+    );
+    assert_eq!(
+        storage.schedules_mut().select_due(2000).unwrap(),
+        None,
+        "the refused selection leaves the slot pending, not re-selectable"
     );
 }

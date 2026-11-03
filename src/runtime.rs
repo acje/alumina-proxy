@@ -15,9 +15,7 @@ use mio::net::TcpListener;
 
 use crate::serve::{ServeStorage, StartupError, StartupOutcome};
 use crate::serving::{ServeError, Serving, Shutdown, ShutdownExit};
-use crate::startup_dns::{
-    EXCHANGE_DEADLINE_SECS, ExchangeClass, STARTUP_WINDOW_SECS, StartupDnsError, TurnResult,
-};
+use crate::startup_dns::{STARTUP_WINDOW_SECS, StartupDnsError, TurnResult};
 
 /// The bounded number of cooperative DNS advances a single owner turn may make,
 /// so a chatty or stalled peer can never starve traffic within a turn.
@@ -281,7 +279,10 @@ impl Runtime {
                 .cancel_retained_startup_exchange();
             self.step_sweep()?;
             self.step_corroboration()?;
-            self.starts_due_dns_if_idle()?;
+            self.serving
+                .storage_mut()
+                .start_due_serving_refresh()
+                .map_err(ServeError::from)?;
             let event_seen = self.serving.take_dns_event();
             let sendable = self.dns_sendable_without_wait();
             let deadline_due = self.dns_deadline_due();
@@ -333,43 +334,6 @@ impl Runtime {
             .storage_mut()
             .step_corroboration()
             .map_err(ServeError::from)
-    }
-
-    /// Starts a due refresh exchange only when the retained DNS transport is
-    /// idle. A refresh is suppressed while a post-window probe sweep owns the
-    /// transport between probes: the sweep restores the pre-sweep active
-    /// resolver after each probe, and an interleaved refresh would corrupt that
-    /// restore. The suppression is bounded — at most `MAX_RESOLVERS − 1` probes
-    /// at `EXCHANGE_DEADLINE_SECS` each, once at boot, latched by `sweep_ran` —
-    /// so it can never starve refresh scheduling permanently.
-    fn starts_due_dns_if_idle(&mut self) -> Result<(), ServeError> {
-        if self.serving.storage().dns().sweep_active()
-            || self.serving.storage().dns().has_active_exchange()
-        {
-            return Ok(());
-        }
-        let secs = self.serving.storage().dns().now_u64();
-        let Some(selected) = self
-            .serving
-            .storage_mut()
-            .schedules_mut()
-            .select_due(secs)
-            .map_err(StartupDnsError::from)
-            .map_err(ServeError::from)?
-        else {
-            return Ok(());
-        };
-        let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
-        self.serving
-            .storage_mut()
-            .start_dns_exchange(
-                selected.name(),
-                selected.family(),
-                deadline,
-                ExchangeClass::Serving,
-            )
-            .map_err(ServeError::from)?;
-        Ok(())
     }
 
     /// Enter the serving loop for the process lifetime: the attached listener

@@ -118,8 +118,100 @@ fn serving_poll_timeout_keeps_bounded_floor_while_draining_due_slot() {
             matches!(wait, Some(d) if d >= Duration::from_millis(50) && d <= Duration::from_millis(200)),
             "a selectable-now due slot during draining must fold a bounded floor wake, NOT ZERO: \
              cancel_for_shutdown has cleared the active exchange and probe sweep, and \
-             is_shutdown() suppresses starts_due_dns_if_idle, so no refresh can start; folding \
+             is_shutdown() suppresses start_due_serving_refresh, so no refresh can start; folding \
              now would busy-spin the poll for the whole drain window: {wait:?}"
+        );
+    });
+}
+
+#[test]
+fn serving_poll_timeout_returns_exact_future_due_wake_not_a_floor() {
+    with_serving_stack_cfg(0, config(1), |serving| {
+        let secs = serving.storage().dns().now_u64();
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .overwrite_due_at(0, crate::cache::Family::A, secs + 4)
+            .expect("due the A family four seconds ahead");
+        let wait = serving.poll_timeout();
+        assert!(
+            matches!(wait, Some(d) if d > Duration::from_secs(3) && d <= Duration::from_secs(4)),
+            "a future due must fold its exact mapped wake, never the 100ms anti-spin floor or \
+             ZERO: the refresh is only genuinely due at the mapped instant: {wait:?}"
+        );
+    });
+}
+
+#[test]
+fn serving_poll_timeout_keeps_exact_future_due_wake_not_floor_while_probe_sweep_active() {
+    with_serving_stack_cfg(0, config(1), |serving| {
+        serving.storage_mut().dns_mut().seed_probe_sweep_for_test();
+        let secs = serving.storage().dns().now_u64();
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .overwrite_due_at(0, crate::cache::Family::A, secs + 4)
+            .expect("due the A family four seconds ahead");
+        let wait = serving.poll_timeout();
+        assert!(
+            matches!(wait, Some(d) if d > Duration::from_secs(3) && d <= Duration::from_secs(4)),
+            "the probe sweep must floor only an overdue wake; a future due still folds its exact \
+             mapped wake so the refresh starts no earlier and no later than due: {wait:?}"
+        );
+    });
+}
+
+#[test]
+fn serving_poll_timeout_keeps_exact_future_due_wake_not_floor_while_draining_due_slot() {
+    with_serving_stack_cfg(0, config(1), |serving| {
+        let secs = serving.storage().dns().now_u64();
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .overwrite_due_at(0, crate::cache::Family::A, secs + 4)
+            .expect("due the A family four seconds ahead");
+        serving.on_sigterm().expect("first SIGTERM observation");
+        let wait = serving.poll_timeout();
+        assert!(
+            matches!(wait, Some(d) if d > Duration::from_secs(3) && d <= Duration::from_secs(4)),
+            "draining floors only an overdue wake; a future due still folds its exact mapped wake \
+             so the poll never wakes early before the refresh is due: {wait:?}"
+        );
+    });
+}
+
+#[test]
+fn serving_poll_timeout_folds_earliest_globally_between_slot_deadline_and_due_wake() {
+    with_serving_stack_cfg(0, config(1), |serving| {
+        let now = Instant::now();
+        serving.slots[0].idle_deadline = Some(now + Duration::from_secs(2));
+        serving.sync_live_deadline(0);
+        let secs = serving.storage().dns().now_u64();
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .overwrite_due_at(0, crate::cache::Family::A, secs + 4)
+            .expect("due the A family four seconds ahead");
+        let wait = serving.poll_timeout();
+        assert!(
+            matches!(wait, Some(d) if d > Duration::from_secs(1) && d <= Duration::from_secs(2)),
+            "the globally earliest deadline must win across every folded source: the 2s slot \
+             deadline precedes the 4s due wake and must bound the poll, never the reverse: {wait:?}"
+        );
+    });
+}
+
+#[test]
+fn serving_poll_timeout_keeps_slot_deadline_wake_when_no_due_selectable() {
+    with_serving_stack_cfg(0, config(1), |serving| {
+        let now = Instant::now();
+        serving.slots[0].idle_deadline = Some(now + Duration::from_secs(2));
+        serving.sync_live_deadline(0);
+        let wait = serving.poll_timeout();
+        assert!(
+            matches!(wait, Some(d) if d > Duration::from_secs(1) && d <= Duration::from_secs(2)),
+            "a live slot deadline must keep folding its own wake even when no refresh due is \
+             selectable, so the slot-bound work still wakes the poll on time: {wait:?}"
         );
     });
 }
