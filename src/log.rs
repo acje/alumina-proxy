@@ -41,14 +41,14 @@ use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use crate::cache::Family;
+use crate::dns::cache::Family;
 use crate::dns::outcome::{NameOutcome, ProbeVerdict};
+use crate::dns::resolver::Fqdn;
 use crate::enforcement::action::{DomainOrdinal, Scope};
 use crate::enforcement::monitor::{CapturedFact, DnsAnomalyKind, Monitor};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason};
 use crate::incident_report::{EligibleTransition, IncidentSummary};
 use crate::inventory;
-use crate::resolver::Fqdn;
 
 pub(crate) const QUEUE_SLOTS: usize = 256;
 pub(crate) const SLOT_BYTES: usize = 2 * 1024;

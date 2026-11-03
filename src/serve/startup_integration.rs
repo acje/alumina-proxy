@@ -1,6 +1,6 @@
 use super::{LogStore, ServeStorage, ServingMode, StartupDecision, StartupError, StartupReport};
-use crate::cache::Family;
 use crate::config::{Config, ConfigError, parse_config_document};
+use crate::dns::cache::Family;
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -453,7 +453,7 @@ fn widest_allowlist_config() -> Config {
 /// Every allowlisted name unresolved, with a full failed-exchange report.
 fn all_unresolved_report() -> StartupReport {
     use crate::config::ALLOWLIST_MAX;
-    use crate::startup_dns::NameOutcome;
+    use crate::dns::transport::NameOutcome;
     StartupReport {
         exchanges: 64,
         failed: 64,

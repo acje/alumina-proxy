@@ -43,7 +43,9 @@ impl BootReport {
     /// `port 53`) but cannot be `SNI`/`SAN`-authenticated for the `DoT`
     /// handshake (`port 853`, V1); the binary renders each as one stderr
     /// startup warning line.
-    pub fn ip_only_resolvers(&self) -> impl Iterator<Item = &crate::resolver::Nameserver> + '_ {
+    pub fn ip_only_resolvers(
+        &self,
+    ) -> impl Iterator<Item = &crate::dns::resolver::Nameserver> + '_ {
         self.config
             .resolver_set()
             .iter()
@@ -59,7 +61,7 @@ impl BootReport {
     /// degradation.
     pub fn unpinned_dot_resolvers(
         &self,
-    ) -> impl Iterator<Item = &crate::resolver::Nameserver> + '_ {
+    ) -> impl Iterator<Item = &crate::dns::resolver::Nameserver> + '_ {
         self.config
             .resolver_set()
             .iter()

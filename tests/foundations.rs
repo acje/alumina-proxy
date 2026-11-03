@@ -1,5 +1,9 @@
 #[cfg(feature = "alloc-witness")]
 use alumina::alloc::{self, Phase};
+use alumina::dns::{
+    BailiwickZones, BindingList, DNS_MSG_LIMIT, DnsError, EXTREME_TTL_THRESHOLD, MAX_CNAME_LINKS,
+    MAX_TOTAL_RR, Outcome as DnsOutcome, ResponseWorkspace, build_query, parse_response,
+};
 use alumina::fault::{Clock, Outcome, REQUIRED_CATEGORIES, Replay, Replayed, Script};
 use alumina::fuzz::{
     CorpusOwnership, DeterministicGen, DriveOutcome, FuzzRun, ParserTarget, RegisterError, Seed,
@@ -383,4 +387,25 @@ fn f5_deterministic_campaign_generates_inputs_panic_free_and_folds_into_ownershi
             "{target:?} records the last generated input hash for reproduction"
         );
     }
+}
+
+/// External compatibility guard: every legacy public `dns::` path stays
+/// nameable by downstream consumers after the I07 canonical `src/dns/` landing.
+/// The eleven historical public DNS items are re-exported from the private
+/// canonical tree; the braced `use` above is the red-green seam (E0432 before
+/// the re-exports exist). Compile-time only: no fixtures, no heap, no network.
+#[test]
+fn legacy_dns_public_api_paths_remain_available() {
+    let _ = std::mem::size_of::<BailiwickZones>();
+    let _ = std::mem::size_of::<BindingList>();
+    let _ = std::mem::size_of::<DnsError>();
+    let _ = std::mem::size_of::<DnsOutcome>();
+    let _ = std::mem::size_of::<ResponseWorkspace>();
+    let _ = std::mem::size_of::<Option<DnsError>>();
+    let _ = DNS_MSG_LIMIT;
+    let _ = EXTREME_TTL_THRESHOLD;
+    let _ = MAX_CNAME_LINKS;
+    let _ = MAX_TOTAL_RR;
+    let _ = build_query;
+    let _ = parse_response;
 }

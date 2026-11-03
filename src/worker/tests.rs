@@ -1,7 +1,7 @@
 use super::*;
-use crate::cache::{Generation, StagedPositive};
 use crate::config::parse_config_document;
 use crate::connect::ConnectParser;
+use crate::dns::cache::{Generation, StagedPositive};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 const CONFIG: &str = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"z.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
@@ -870,7 +870,7 @@ fn name_out_of_range_precedes_deadline_expiry_and_attempt_exhaust() {
     );
     assert_eq!(
         result,
-        Err(crate::cache::CacheError::NameOutOfRange),
+        Err(crate::dns::cache::CacheError::NameOutOfRange),
         "a cache-name lookup miss precedes the expired deadline and the exhausted budget"
     );
 }

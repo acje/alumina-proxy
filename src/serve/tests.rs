@@ -1,13 +1,13 @@
 use super::*;
-use crate::cache::{Generation, StagedPositive};
+use crate::dns::cache::{Generation, StagedPositive};
+use crate::dns::schedule::ScheduleError;
 use crate::eligibility::NumericAddr;
-use crate::schedule::ScheduleError;
 use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 const FRESH: u64 = 1000;
 const TTL: u64 = 10;
-const RETIREMENT: u64 = FRESH + TTL + crate::cache::STALE_GRACE;
+const RETIREMENT: u64 = FRESH + TTL + crate::dns::cache::STALE_GRACE;
 
 fn idx(cache: &Cache, ordinal: usize) -> NameIndex {
     cache.name_index(ordinal).expect("admitted name ordinal")
@@ -469,7 +469,7 @@ fn monitor_report_emits_at_whole_second_cadence_clears_on_commit_and_admits_ring
 fn startup_split_emission_over_full_allowlist_spends_zero_allocations() {
     use crate::alloc::{Phase, run_phase};
     use crate::config::ALLOWLIST_MAX;
-    use crate::startup_dns::{FailureReason, NameOutcome, StartupReport};
+    use crate::dns::transport::{FailureReason, NameOutcome, StartupReport};
     let mut doc = String::from(
         "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
     );
@@ -883,7 +883,7 @@ fn delayed_window_summary_reports_skip_count_instead_of_one_hour_merger() {
 /// changes authorization or retry scheduling: the schedule still holds the
 /// open A incident after the failed enqueue (docs/alumina-proxy.md:193).
 fn enqueue_failure_drops_summary_resets_window_and_counts_drop() {
-    use crate::schedule::TypeIncident;
+    use crate::dns::schedule::TypeIncident;
     let mut storage = booted(1, 0);
     let origin = Instant::now();
     storage.mount_clock(origin, 1000);
@@ -1288,9 +1288,10 @@ fn owner_path_refresh_wake_keeps_store_and_dns_epochs_distinct() {
     let origin = Instant::now();
     let mut storage = booted(1, 0);
     storage.mount_clock(origin, 1000);
-    let nameserver = crate::resolver::select("1.1.1.1").expect("one resolver");
-    let resolvers = crate::resolver::ResolverSet::from_slice(std::slice::from_ref(&nameserver))
-        .expect("one-resolver set");
+    let nameserver = crate::dns::resolver::select("1.1.1.1").expect("one resolver");
+    let resolvers =
+        crate::dns::resolver::ResolverSet::from_slice(std::slice::from_ref(&nameserver))
+            .expect("one-resolver set");
     storage
         .dns_mut()
         .begin_window(

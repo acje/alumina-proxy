@@ -1,8 +1,8 @@
 use super::*;
 use crate::config::parse_config_document;
-use crate::dns::classify_published;
+use crate::dns::schedule::{INCIDENT_N, INCIDENT_WINDOW};
+use crate::dns::wire::classify_published;
 use crate::enforcement::monitor::DnsAnomalyKind;
-use crate::schedule::{INCIDENT_N, INCIDENT_WINDOW};
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -419,7 +419,7 @@ fn storage_failure_escapes_resolve_as_err_not_a_counted_failure() {
             "a schedule-storage refusal on a later name must escape resolve as a fatal error",
         );
     assert!(
-        matches!(err, StartupDnsError::Dns(dns::DnsError::Cache(_))),
+        matches!(err, StartupDnsError::Dns(wire::DnsError::Cache(_))),
         "storage refusal surfaces as Dns(Cache): {err:?}"
     );
 }
@@ -429,7 +429,7 @@ fn extreme_ttl_positive_is_counted_as_a_dns_anomaly() {
     let cfg = config();
     let responder = spawn_responder(vec![vec![
         Step::PositiveA {
-            ttl: dns::EXTREME_TTL_THRESHOLD + 1,
+            ttl: wire::EXTREME_TTL_THRESHOLD + 1,
             octets: [93, 184, 216, 34],
         },
         Step::NodataWithSoa { ttl: 300, min: 60 },
@@ -744,9 +744,9 @@ fn ineligible_only_positive_does_not_count_as_resolved_name() {
 
 #[test]
 fn ineligible_only_positive_classifies_as_no_eligible() {
-    let outcome = dns::Outcome::Positive {
+    let outcome = wire::Outcome::Positive {
         family: Family::A,
-        bindings: dns::BindingList::from_slice(&[crate::eligibility::NumericAddr::V4(
+        bindings: wire::BindingList::from_slice(&[crate::eligibility::NumericAddr::V4(
             std::net::Ipv4Addr::new(10, 0, 0, 1),
         )])
         .expect("bindings"),
@@ -1197,7 +1197,7 @@ fn stale_generation_is_refused_at_apply() {
         .unwrap();
     // Bump the cache entry generation while the exchange is in flight so the
     // generation captured at start is stale when the response is applied.
-    let staged = crate::cache::StagedPositive::stage(
+    let staged = crate::dns::cache::StagedPositive::stage(
         name_index,
         Family::A,
         captured,
@@ -2088,9 +2088,9 @@ fn zero_or_oversized_length_prefix_is_refused_fail_closed() {
 /// failover/failback state-machine tests (loopback dialing is impossible:
 /// `Nameserver` fixes the port at 53, and the relay would reach a real host).
 fn resolver_set_of(addrs: &[&str]) -> ResolverSet {
-    let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+    let mut entries = [crate::dns::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
     for (slot, addr) in addrs.iter().enumerate() {
-        entries[slot] = crate::resolver::select(addr).expect("ns");
+        entries[slot] = crate::dns::resolver::select(addr).expect("ns");
     }
     ResolverSet::from_slice(&entries[..addrs.len()]).expect("resolver count fits")
 }
@@ -2163,9 +2163,9 @@ fn dot_to_plain_failover_counts_a_downgrade_but_dot_to_dot_and_plain_to_plain_do
     let now = 1_000_000u64;
     // A DoT primary (`IP#fqdn`) relocating onto a plain backup is a downgrade.
     let dot_set = {
-        let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
-        entries[0] = crate::resolver::select("1.1.1.1#dns.google").expect("dot ns");
-        entries[1] = crate::resolver::select("8.8.8.8").expect("plain ns");
+        let mut entries = [crate::dns::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+        entries[0] = crate::dns::resolver::select("1.1.1.1#dns.google").expect("dot ns");
+        entries[1] = crate::dns::resolver::select("8.8.8.8").expect("plain ns");
         ResolverSet::from_slice(&entries[..2]).expect("resolver count fits")
     };
     let mut transport = seeded_transport(dot_set);
@@ -2180,9 +2180,9 @@ fn dot_to_plain_failover_counts_a_downgrade_but_dot_to_dot_and_plain_to_plain_do
     );
     // A DoT primary relocating onto a DoT backup is not a downgrade.
     let dot_dot_set = {
-        let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
-        entries[0] = crate::resolver::select("1.1.1.1#dns.google").expect("dot ns");
-        entries[1] = crate::resolver::select("8.8.8.8#dns.example").expect("dot ns");
+        let mut entries = [crate::dns::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+        entries[0] = crate::dns::resolver::select("1.1.1.1#dns.google").expect("dot ns");
+        entries[1] = crate::dns::resolver::select("8.8.8.8#dns.example").expect("dot ns");
         ResolverSet::from_slice(&entries[..2]).expect("resolver count fits")
     };
     let mut transport = seeded_transport(dot_dot_set);
@@ -2376,9 +2376,9 @@ fn failed_probe_mid_regime_resets_counter_and_reseats() {
 #[test]
 fn failed_dot_probe_reseating_onto_plain_backup_counts_a_downgrade() {
     let dot_set = {
-        let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
-        entries[0] = crate::resolver::select("1.1.1.1#dns.google").expect("dot ns");
-        entries[1] = crate::resolver::select("8.8.8.8").expect("plain ns");
+        let mut entries = [crate::dns::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+        entries[0] = crate::dns::resolver::select("1.1.1.1#dns.google").expect("dot ns");
+        entries[1] = crate::dns::resolver::select("8.8.8.8").expect("plain ns");
         ResolverSet::from_slice(&entries[..2]).expect("resolver count fits")
     };
     let mut transport = seeded_transport(dot_set);
@@ -2414,9 +2414,9 @@ fn failback_begin_from_dot_backup_onto_plain_primary_counts_a_downgrade() {
     // not a downgrade, but the failback-begin relocation back onto the plain
     // primary IS a DoT→plain downgrade that must be counted (G6-C01).
     let plain_dot_set = {
-        let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
-        entries[0] = crate::resolver::select("1.1.1.1").expect("plain ns");
-        entries[1] = crate::resolver::select("8.8.8.8#dns.google").expect("dot ns");
+        let mut entries = [crate::dns::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+        entries[0] = crate::dns::resolver::select("1.1.1.1").expect("plain ns");
+        entries[1] = crate::dns::resolver::select("8.8.8.8#dns.google").expect("dot ns");
         ResolverSet::from_slice(&entries[..2]).expect("resolver count fits")
     };
     let mut transport = seeded_transport(plain_dot_set);
@@ -3561,7 +3561,7 @@ fn note_failure_unadmitted_ordinal_returns_err_and_leaves_origin_untouched() {
             panic!("an unadmitted ordinal must be refused by the schedule");
         };
         assert!(
-            matches!(err, crate::startup_dns::StartupDnsError::Schedule(_)),
+            matches!(err, crate::dns::transport::StartupDnsError::Schedule(_)),
             "the refusal must be a schedule error"
         );
     }
@@ -3777,9 +3777,9 @@ fn shutdown_aborts_the_sweep_and_drops_partial_verdicts() {
 #[test]
 fn relocate_for_probe_counts_a_probe_relocation_and_restores_without_extra() {
     let dot_set = {
-        let mut entries = [crate::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
-        entries[0] = crate::resolver::select("1.1.1.1#dns.google").expect("dot ns");
-        entries[1] = crate::resolver::select("8.8.8.8").expect("plain ns");
+        let mut entries = [crate::dns::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
+        entries[0] = crate::dns::resolver::select("1.1.1.1#dns.google").expect("dot ns");
+        entries[1] = crate::dns::resolver::select("8.8.8.8").expect("plain ns");
         ResolverSet::from_slice(&entries[..2]).expect("resolver count fits")
     };
     let mut transport = seeded_transport(dot_set);
@@ -3832,12 +3832,12 @@ fn seeded_bailiwick_transport() -> StartupDns {
 
 /// Builds the exact reply the startup receive path would parse for a positive A
 /// answer at `ttl`: the outstanding query is assembled by the same
-/// `dns::build_query` the send path uses, so the response question and owner
+/// `wire::build_query` the send path uses, so the response question and owner
 /// always match the fqdn/family/tid under test.
 fn positive_a_reply(fqdn: &Fqdn, family: Family, tid: u16, ttl: u32, octets: [u8; 4]) -> Vec<u8> {
     let mut query = [0u8; QUERY_BUF_LEN];
     let qlen =
-        dns::build_query(fqdn, family, tid, &mut query).expect("query fits the fixed buffer");
+        wire::build_query(fqdn, family, tid, &mut query).expect("query fits the fixed buffer");
     positive_a_message(&query[..qlen], ttl, octets)
 }
 
@@ -3872,7 +3872,7 @@ fn probe_observes_extreme_once_sets_kind_but_never_applies_state() {
         fqdn,
         Family::A,
         ex.tid,
-        dns::EXTREME_TTL_THRESHOLD + 1,
+        wire::EXTREME_TTL_THRESHOLD + 1,
         [1, 1, 1, 1],
     );
     fill_frame(&mut transport, &reply);
@@ -3918,7 +3918,7 @@ fn malformed_after_extreme_answer_is_a_receive_failure_not_an_extreme_anomaly() 
         fqdn,
         Family::A,
         ex.tid,
-        dns::EXTREME_TTL_THRESHOLD + 1,
+        wire::EXTREME_TTL_THRESHOLD + 1,
         [1, 1, 1, 1],
     );
     reply.push(0xff);
@@ -3956,7 +3956,7 @@ fn valid_extreme_reply_past_the_deadline_times_out_before_any_observation() {
         fqdn,
         Family::A,
         ex.tid,
-        dns::EXTREME_TTL_THRESHOLD + 1,
+        wire::EXTREME_TTL_THRESHOLD + 1,
         [1, 1, 1, 1],
     );
     fill_frame(&mut transport, &reply);
@@ -4013,7 +4013,7 @@ fn stale_generation_apply_is_the_exact_typed_error_with_no_partial_commit() {
             fqdn,
             Family::A,
             stale.tid,
-            dns::EXTREME_TTL_THRESHOLD + 1,
+            wire::EXTREME_TTL_THRESHOLD + 1,
             [10, 0, 0, 2],
         ),
     );

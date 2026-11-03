@@ -4,8 +4,8 @@ use std::mem::size_of;
 use crate::client_hello::ChInspector;
 use crate::config::CONFIG_DOC_LIMIT;
 use crate::connect::ConnectParser;
-use crate::dns::ResponseWorkspace;
-use crate::startup_dns::{QUERY_BUF_LEN, RECV_BUF_LEN};
+use crate::dns::transport::{QUERY_BUF_LEN, RECV_BUF_LEN};
+use crate::dns::wire::ResponseWorkspace;
 
 pub const TUNNEL_SLOTS: usize = 512;
 pub const BUFFERS_PER_SLOT: usize = 2;

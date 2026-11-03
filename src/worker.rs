@@ -32,9 +32,9 @@
 
 use std::time::{Duration, Instant};
 
-use crate::cache::{Cache, CacheError, Entry, EntryState, Family, NameIndex};
 use crate::config::Config;
 use crate::connect::{CONNECT_LIMIT, ConnectRequest};
+use crate::dns::cache::{Cache, CacheError, Entry, EntryState, Family, NameIndex};
 use crate::eligibility::NumericAddr;
 use crate::inventory::{BUFFER_BYTES, TUNNEL_SLOTS};
 

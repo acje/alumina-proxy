@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 use std::net::{TcpListener as StdListener, TcpStream};
 use std::thread;
 
-use crate::cache::Family;
-use crate::startup_dns::ExchangeClass;
+use crate::dns::cache::Family;
+use crate::dns::transport::ExchangeClass;
 
 fn config(port: u16) -> crate::config::Config {
     let doc = format!(
@@ -92,7 +92,7 @@ fn falsifier_body() {
         accepted |= runtime.serving.storage().occupied() > 0;
         dns_query_written |= matches!(
             runtime.serving.storage().dns().exchange_step(),
-            Some(crate::startup_dns::ExchangeStep::Receiving)
+            Some(crate::dns::transport::ExchangeStep::Receiving)
         );
         if accepted && dns_query_written {
             break;
@@ -331,7 +331,7 @@ fn hot_relay_many_slots_body() {
             }
             dns_receiving |= matches!(
                 runtime.serving.storage().dns().exchange_step(),
-                Some(crate::startup_dns::ExchangeStep::Receiving)
+                Some(crate::dns::transport::ExchangeStep::Receiving)
             );
             if dns_receiving && all_complete && expired_closed && backlog_admitted {
                 break;
@@ -1287,7 +1287,7 @@ fn selfpipe_receiving_cancellation_body() {
             .expect("owner turn to Receiving");
         if matches!(
             runtime.serving.storage().dns().exchange_step(),
-            Some(crate::startup_dns::ExchangeStep::Receiving)
+            Some(crate::dns::transport::ExchangeStep::Receiving)
         ) {
             saw_receiving = true;
             break;
@@ -1909,9 +1909,9 @@ fn probe_exchange_failed_reports_per_event_resolver_body() {
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
     let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
 
-    let set = crate::resolver::ResolverSet::from_slice(&[
-        crate::resolver::select("127.0.0.1").expect("loopback resolver"),
-        crate::resolver::select("127.0.0.1").expect("loopback resolver"),
+    let set = crate::dns::resolver::ResolverSet::from_slice(&[
+        crate::dns::resolver::select("127.0.0.1").expect("loopback resolver"),
+        crate::dns::resolver::select("127.0.0.1").expect("loopback resolver"),
     ])
     .expect("two-resolver set");
     let held = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind held peer");
@@ -2021,9 +2021,9 @@ fn failover_and_recovery_emit_truthful_origin_body() {
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
     let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
-    let set = crate::resolver::ResolverSet::from_slice(&[
-        crate::resolver::select("127.0.0.1").expect("loopback resolver 0"),
-        crate::resolver::select("127.0.0.1").expect("loopback resolver 1"),
+    let set = crate::dns::resolver::ResolverSet::from_slice(&[
+        crate::dns::resolver::select("127.0.0.1").expect("loopback resolver 0"),
+        crate::dns::resolver::select("127.0.0.1").expect("loopback resolver 1"),
     ])
     .expect("two-resolver set");
     let dead = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("dead peer");
@@ -2575,7 +2575,7 @@ fn refresh_retry_body() {
             .expect("owner turn advancing the first refresh");
         if matches!(
             runtime.serving().storage().dns().exchange_step(),
-            Some(crate::startup_dns::ExchangeStep::Receiving)
+            Some(crate::dns::transport::ExchangeStep::Receiving)
         ) {
             receiving = true;
             break;

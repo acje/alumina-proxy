@@ -7,11 +7,17 @@ use std::time::{Duration, Instant};
 
 use mio::net::TcpListener;
 
-use crate::cache::{Cache, CacheError, Family, NameIndex};
 #[cfg(test)]
 use crate::config::FixedHostname;
 use crate::config::{Config, Fqdn};
 use crate::connect::ConnectRequest;
+use crate::dns::cache::{Cache, CacheError, Family, NameIndex};
+use crate::dns::resolver::MAX_RESOLVERS;
+use crate::dns::schedule::Schedules;
+use crate::dns::transport::{
+    EXCHANGE_DEADLINE_SECS, ExchangeClass, FailureReason, IncidentNote, ProbeVerdict,
+    PublishedKind, STARTUP_WINDOW_SECS, StartupDns, StartupDnsError, StartupReport, TurnResult,
+};
 #[cfg(test)]
 use crate::enforcement::action::DomainOrdinal;
 use crate::enforcement::monitor::DnsAnomalyKind;
@@ -20,12 +26,6 @@ use crate::incident_report::{
     ClosedWindow, EligibleTransition, IncidentReport, IncidentSnapshot, SummaryCache,
 };
 use crate::log::{Level, LogStore, ResolverProbeSegment};
-use crate::resolver::MAX_RESOLVERS;
-use crate::schedule::Schedules;
-use crate::startup_dns::{
-    EXCHANGE_DEADLINE_SECS, ExchangeClass, FailureReason, IncidentNote, ProbeVerdict,
-    PublishedKind, STARTUP_WINDOW_SECS, StartupDns, StartupDnsError, StartupReport, TurnResult,
-};
 use crate::worker::{
     AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, ResolvedRequest, SlotIndex,
     TunnelIndex, Worker, WorkerClock, WorkerView,
@@ -333,7 +333,7 @@ impl ServeStorage {
 
     #[cfg(test)]
     pub(crate) fn publish_test_a(&mut self, ordinal: usize) {
-        use crate::cache::{Generation, StagedPositive};
+        use crate::dns::cache::{Generation, StagedPositive};
         use crate::eligibility::NumericAddr;
         use std::net::Ipv4Addr;
         let name = self
@@ -355,7 +355,7 @@ impl ServeStorage {
         addr: crate::eligibility::NumericAddr,
         family: Family,
     ) {
-        use crate::cache::{Generation, StagedPositive};
+        use crate::dns::cache::{Generation, StagedPositive};
         let name = self
             .cache
             .name_index(ordinal)
@@ -432,7 +432,7 @@ impl ServeStorage {
         let mut snap = [None, None];
         for (i, family) in Family::ALL.iter().copied().enumerate() {
             snap[i] = match self.schedules.incident(ordinal, family) {
-                Some(crate::schedule::TypeIncident::Open { opened_at, reason }) => {
+                Some(crate::dns::schedule::TypeIncident::Open { opened_at, reason }) => {
                     let origin = self.dns.last_failure_origin(ordinal, family);
                     Some((opened_at, reason.as_str(), origin))
                 }
@@ -457,7 +457,7 @@ impl ServeStorage {
             let in_incident = Family::ALL.iter().any(|&family| {
                 matches!(
                     self.schedules.incident(ordinal, family),
-                    Some(crate::schedule::TypeIncident::Open { .. })
+                    Some(crate::dns::schedule::TypeIncident::Open { .. })
                 )
             });
             if in_incident {
@@ -488,7 +488,7 @@ impl ServeStorage {
             let both_closed = Family::ALL.iter().all(|&family| {
                 matches!(
                     self.schedules.incident(ordinal, family),
-                    Some(crate::schedule::TypeIncident::Closed)
+                    Some(crate::dns::schedule::TypeIncident::Closed)
                 )
             });
             // L1: a full recovery coinciding with the boundary turn closes a
@@ -1111,7 +1111,7 @@ impl ServeStorage {
         window: Duration,
     ) -> Result<StartupOutcome, StartupError> {
         let (report, decision_seconds) = self.dns.resolve_window(
-            crate::startup_dns::WindowInputs {
+            crate::dns::transport::WindowInputs {
                 config: &self.config,
                 cache: &mut self.cache,
                 schedules: &mut self.schedules,
@@ -1179,8 +1179,8 @@ impl ServeStorage {
         decision: StartupDecision,
     ) {
         use crate::config::ALLOWLIST_MAX;
+        use crate::dns::transport::NameOutcome;
         use crate::log::{FinalCounts, StartupStatus, StartupUnresolved};
-        use crate::startup_dns::NameOutcome;
         let allowlist = self.config.allowlist();
         let names = allowlist.len() as u64;
         let status = match decision {

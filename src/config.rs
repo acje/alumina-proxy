@@ -6,11 +6,11 @@ use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 use std::ops::Range;
 
+use crate::dns::resolver::{self, ResolverSet};
 use crate::enforcement::action::{
     ActionKind, AnyIllegalControl, Control, ControlTable, PerFqdnControl, Scope,
 };
 use crate::enforcement::state::{AllScopeGate, GateSet};
-use crate::resolver::{self, ResolverSet};
 
 pub const CONFIG_DOC_LIMIT: usize = 16384;
 pub const ALLOWLIST_MIN: usize = 1;

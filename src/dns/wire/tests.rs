@@ -1,7 +1,7 @@
 use super::*;
-use crate::cache::Cache;
 use crate::config::{Config, parse_config_document};
-use crate::schedule::{PerTypeTransition, Schedules};
+use crate::dns::cache::Cache;
+use crate::dns::schedule::{PerTypeTransition, Schedules};
 use std::fmt::Write as _;
 
 fn config() -> Config {
@@ -1169,7 +1169,7 @@ fn apply_publishes_positive_to_cache_and_schedule() {
     .expect("apply");
     let entry = cache.entry(name, Family::A).expect("entry");
     assert_eq!(entry.deadlines(), (Some(1120), Some(1120 + 259_200)));
-    assert_eq!(entry.state(1100), crate::cache::EntryState::Fresh);
+    assert_eq!(entry.state(1100), crate::dns::cache::EntryState::Fresh);
     let due = schedules
         .due_time(0, Family::A)
         .expect("due")
@@ -1334,7 +1334,7 @@ fn apply_nxdomain_recovers_both_exchange_incidents() {
             0,
             Family::A,
             1000,
-            crate::startup_dns::FailureReason::Connect,
+            crate::dns::transport::FailureReason::Connect,
         )
         .expect("open the A incident");
     schedules
@@ -1342,7 +1342,7 @@ fn apply_nxdomain_recovers_both_exchange_incidents() {
             0,
             Family::Aaaa,
             1000,
-            crate::startup_dns::FailureReason::Connect,
+            crate::dns::transport::FailureReason::Connect,
         )
         .expect("open the AAAA incident");
     let incidents = apply_outcome(
@@ -1377,7 +1377,7 @@ fn apply_positive_recovers_only_its_own_family_incident() {
             0,
             Family::A,
             1000,
-            crate::startup_dns::FailureReason::Connect,
+            crate::dns::transport::FailureReason::Connect,
         )
         .expect("open the A incident");
     schedules
@@ -1385,7 +1385,7 @@ fn apply_positive_recovers_only_its_own_family_incident() {
             0,
             Family::Aaaa,
             1000,
-            crate::startup_dns::FailureReason::Connect,
+            crate::dns::transport::FailureReason::Connect,
         )
         .expect("open the AAAA incident");
     let a_incidents = apply_outcome(
@@ -1449,7 +1449,7 @@ fn apply_nodata_leaves_exchange_incidents_untouched() {
             0,
             Family::A,
             1000,
-            crate::startup_dns::FailureReason::Connect,
+            crate::dns::transport::FailureReason::Connect,
         )
         .expect("open the A incident");
     schedules
@@ -1457,7 +1457,7 @@ fn apply_nodata_leaves_exchange_incidents_untouched() {
             0,
             Family::Aaaa,
             1000,
-            crate::startup_dns::FailureReason::Connect,
+            crate::dns::transport::FailureReason::Connect,
         )
         .expect("open the AAAA incident");
     let incidents = apply_outcome(

@@ -10,7 +10,7 @@ review. Implementation is tracked in the issue tracker, not here.
 Alumina reports DNS outcomes honestly at the *volume* level and dishonestly at the *trust*
 level. Three clamps were confirmed at `30f943b`:
 
-1. **One token for four situations.** `FailureReason::TlsIdentity` (`src/startup_dns.rs:377`)
+1. **One token for four situations.** `FailureReason::TlsIdentity` (`git:30f943b9689b21c23b123db6077cecd34b013b05:src/startup_dns.rs#L376-L382`)
    covers strict pin mismatch, structural empty-trust-anchor failure, SAN/FQDN mismatch, and
    generic handshake alert/EOF. In production on 2026-10-30 an entry that is *deliberately
    unpinned* was reported as `verdict=failed reason="tls_identity"` — the log said "identity
@@ -22,17 +22,17 @@ level. Three clamps were confirmed at `30f943b`:
    carry the FQDN but never the resolver, so a mid-life trust failure cannot be tied to an
    entry, and the `rd=`/`ep=` counters have no subject.
 
-Two further ambiguities: `ProbeVerdict::NotProbed` (`src/startup_dns.rs:741`) means "exercised
+Two further ambiguities: `ProbeVerdict::NotProbed` (`git:30f943b9689b21c23b123db6077cecd34b013b05:src/startup_dns.rs#L738-L746`) means "exercised
 successfully in the window", "window closed", or "skipped" — indistinguishable; and
 `startup_warning` (`git:30f943b9689b21c23b123db6077cecd34b013b05:src/log.rs#L1711-L1719`) carries no reason at all.
 
 ### The clamp is upstream of the log layer
 
-`HandshakeProbe` (`src/startup_dns.rs:361`) is `{ Waiting, Transition, Failed }`. The
-handshake probe returns a bare `Failed` from six sites; `src/startup_dns.rs:2176` is where
+`HandshakeProbe` (`git:30f943b9689b21c23b123db6077cecd34b013b05:src/startup_dns.rs#L361-L365`) is `{ Waiting, Transition, Failed }`. The
+handshake probe returns a bare `Failed` from six sites; `git:30f943b9689b21c23b123db6077cecd34b013b05:src/startup_dns.rs#L2176-L2178` is where
 `rustls` reports `ApplicationVerificationFailure` (the pin mismatch), `NotValidForName`,
 `UnknownIssuer`, `Expired`/`NotValidYet`, or an unsupported signature algorithm — all
-discarded by `.is_err()`. The caller (`src/startup_dns.rs:2119`) then stamps `TlsIdentity` on
+discarded by `.is_err()`. The caller (`git:30f943b9689b21c23b123db6077cecd34b013b05:src/startup_dns.rs#L2119-L2127`) then stamps `TlsIdentity` on
 every one of them.
 
 The fix is therefore *stop discarding the cause, then map it* — not *widen a log enum*.

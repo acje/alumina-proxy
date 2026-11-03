@@ -1,16 +1,11 @@
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::cache::{Cache, CacheError, Family, Generation, MAX_ADDRESSES};
 use crate::config::{ALLOWLIST_MAX, Allowlist, Fqdn};
+use crate::dns::apply_outcome;
+use crate::dns::cache::{Cache, CacheError, Family, Generation, MAX_ADDRESSES};
+use crate::dns::schedule::{OutcomeIncidents, Schedules, Soa};
 use crate::eligibility::NumericAddr;
-use crate::schedule::{OutcomeIncidents, Schedules, Soa};
-
-mod publication;
-
-pub use publication::apply_outcome;
-
-pub(crate) mod outcome;
 
 /// Maximum DNS message size accepted over the wire (16 KiB).
 pub const DNS_MSG_LIMIT: usize = 16 * 1024;

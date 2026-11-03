@@ -136,7 +136,7 @@ alt_total_timing() {
     printf 'PHASE1-TIMING: total %ss\n' "$ALT_TOTAL"
 }
 
-INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/fault.rs src/fuzz.rs src/config.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/resolver.rs src/resolver/tests.rs src/preflight.rs src/inventory.rs src/boot.rs src/boot/tests.rs src/cache.rs src/cache/tests.rs src/client_hello.rs src/client_hello/ja4.rs src/client_hello/tests.rs src/connect.rs src/connect/tests.rs src/dns.rs src/dns/outcome.rs src/dns/publication.rs src/dns/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/gate.rs src/hostname.rs src/hostname/tests.rs src/incident_report.rs src/log.rs src/log/encoding.rs src/log/tests.rs src/runtime.rs src/schedule.rs src/schedule/tests.rs src/serve.rs src/serve/startup_integration.rs src/serve/tests.rs src/serving.rs src/startup_dns.rs src/startup_dns/registration.rs src/worker.rs src/worker/tests.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/startup_dns/tests.rs src/startup_dns/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
+INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/fault.rs src/fuzz.rs src/config.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/resolver.rs src/dns/resolver.rs src/dns/resolver/tests.rs src/preflight.rs src/inventory.rs src/boot.rs src/boot/tests.rs src/cache.rs src/dns/cache.rs src/dns/cache/tests.rs src/client_hello.rs src/client_hello/ja4.rs src/client_hello/tests.rs src/connect.rs src/connect/tests.rs src/dns/mod.rs src/dns/outcome.rs src/dns/publication.rs src/dns/wire.rs src/dns/wire/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/gate.rs src/hostname.rs src/hostname/tests.rs src/incident_report.rs src/log.rs src/log/encoding.rs src/log/tests.rs src/runtime.rs src/schedule.rs src/dns/schedule.rs src/dns/schedule/tests.rs src/serve.rs src/serve/startup_integration.rs src/serve/tests.rs src/serving.rs src/startup_dns.rs src/dns/transport.rs src/dns/transport/registration.rs src/worker.rs src/worker/tests.rs src/serving/policy.rs src/serving/reject.rs src/serving/startup.rs src/serving/tests.rs src/runtime/tests.rs src/dns/transport/tests.rs src/dns/transport/dot_tests.rs tests/foundations.rs tests/boot.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
 
 # docslink gate roots: the exact nonempty argv docslink_check consumes. Shared
 # with the identity snapshot so the boundary content identity covers precisely
@@ -996,30 +996,41 @@ unsafe_surface_gate() {
 }
 
 # F-new (gate-surface-truth M1): the reviewed identity set (INTENDED) must cover
-# EVERY tracked src/**/*.rs and tests/*.rs file. A tracked file absent from
-# INTENDED sits outside every identity snapshot and can drift (accumulate
-# unsafe, behaviour, …) while the boundary identity checks stay green. Producer
-# is git ls-files with its exit captured: a tooling failure (exit >= 2) fails
-# closed and can never read as a PASS on an empty offender list.
+# EVERY physical src/tests .rs file in the current working tree. Physical
+# enumeration (find over both roots, all depths, exit captured) includes
+# not-yet-staged additions (approved landing could emplace untracked .rs before
+# the native-qualified source packet is staged) and excludes already-deleted
+# indexed paths (their admission tokens leave INTENDED when the move lands), so
+# INTENDED stays the single authoritative admission map while the snapshot set
+# tracks reality. A .rs leaf symlink is enumerated, never silently dropped; an
+# enumerated symlink that does not resolve to a regular file fails closed, and
+# directory symlinks are not traversed. Producer find failure fails closed and
+# can never read as a PASS on an empty offender list.
 intended_coverage_gate() {
-    lsrc=0
-    tracked_rs="$(git ls-files 'src/**/*.rs' 'src/*.rs' 'tests/*.rs' 2>&1)" || lsrc=$?
-    [ "$lsrc" -lt 2 ] || {
-        echo "INTENDED-COVERAGE-FAIL: git ls-files exit $lsrc (tooling error, not PASS)" >&2
+    prc=0
+    covered_rs="$(find src tests \( -type f -o -type l \) -name '*.rs' 2>&1)" || prc=$?
+    [ "$prc" -eq 0 ] || {
+        echo "INTENDED-COVERAGE-FAIL: find exit $prc (tooling error, not PASS)" >&2
         exit 1
     }
+    for f in $covered_rs; do
+        if [ -L "$f" ] && [ ! -f "$f" ]; then
+            echo "INTENDED-COVERAGE-FAIL: .rs symlink does not resolve to a regular file: $f" >&2
+            exit 1
+        fi
+    done
     missing=""
-    for f in $tracked_rs; do
+    for f in $covered_rs; do
         case " $INTENDED " in
             *" $f "*) ;;
             *) missing="$missing $f" ;;
         esac
     done
     if [ -n "$missing" ]; then
-        echo "INTENDED-COVERAGE-FAIL: tracked src/tests .rs absent from INTENDED (drifts outside every identity snapshot):$missing" >&2
+        echo "INTENDED-COVERAGE-FAIL: physical src/tests .rs absent from INTENDED (drifts outside every identity snapshot):$missing" >&2
         exit 1
     fi
-    echo "INTENDED-COVERAGE-OK: every tracked src/**/*.rs and tests/*.rs is listed in INTENDED"
+    echo "INTENDED-COVERAGE-OK: every physical src/tests .rs (find, untracked included, deleted-indexed excluded) is listed in INTENDED"
 }
 
 # F-new (gate-surface-truth M1, closes assurance alumina-ajyok): an admitted

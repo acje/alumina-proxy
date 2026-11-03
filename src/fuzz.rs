@@ -5,11 +5,11 @@
 //! Campaigns are test-augmented (`cargo test`); the harness is never called on
 //! a production path, so it adds no post-boot allocation or runtime surface.
 
-use crate::cache::Family;
 use crate::client_hello::{ChInspector, Inspect};
 use crate::config::Fqdn;
 use crate::connect::{ConnectParser, Feed};
-use crate::dns::{BailiwickZones, DNS_MSG_LIMIT, ResponseWorkspace, parse_response};
+use crate::dns::cache::Family;
+use crate::dns::wire::{BailiwickZones, DNS_MSG_LIMIT, ResponseWorkspace, parse_response};
 
 /// The fixed transaction id every DNS-wire input is anchored on: the corpus
 /// message answers `(sub.example.org, A, tid 0x0ded)`.

@@ -422,7 +422,7 @@ fn serve_queries(
                         write_tls_message(tls, sock, &wrong_tid_reply(&query))?;
                     }
                     AdversarialReply::Oversize => {
-                        let oversize = vec![0u8; crate::dns::DNS_MSG_LIMIT + 1];
+                        let oversize = vec![0u8; crate::dns::wire::DNS_MSG_LIMIT + 1];
                         write_tls_message(tls, sock, &oversize)?;
                     }
                     AdversarialReply::Mangled => {
@@ -861,9 +861,25 @@ fn dot_exchange_traverses_handshake_before_send_and_receive() {
         )
         .unwrap();
     let mut seen: Vec<ExchangeStep> = Vec::new();
+    let mut handshake_seen: Option<usize> = None;
     let mut terminal = None;
     for _ in 0..256 {
         if let Some(step) = transport.exchange_step() {
+            if step == ExchangeStep::TlsHandshake && handshake_seen.is_none() {
+                handshake_seen = Some(seen.len());
+            }
+            if matches!(step, ExchangeStep::SendReady | ExchangeStep::Receiving) {
+                let is_tls = matches!(&transport.conn, Some(DnsConn::Tls(_)));
+                let is_handshaking = matches!(
+                    &transport.conn,
+                    Some(DnsConn::Tls(conn)) if conn.tls.is_handshaking()
+                );
+                assert!(
+                    is_tls && !is_handshaking,
+                    "DoT crypto must be fully verified before the query is sent or a response is received: step={step:?} at boundary index {}, seen={seen:?}, conn_is_tls={is_tls}, is_handshaking={is_handshaking}",
+                    seen.len()
+                );
+            }
             seen.push(step);
         }
         match transport
@@ -890,14 +906,18 @@ fn dot_exchange_traverses_handshake_before_send_and_receive() {
         "a pin-matching DoT exchange must publish at the primitive level, got {terminal:?}"
     );
     let at = |step: ExchangeStep| seen.iter().position(|&candidate| candidate == step);
-    let handshake =
-        at(ExchangeStep::TlsHandshake).expect("the TLS handshake stage must be observed");
     let send_ready = at(ExchangeStep::SendReady).expect("the send stage must be observed");
     let receiving = at(ExchangeStep::Receiving).expect("the receive stage must be observed");
     assert!(
-        handshake < send_ready && send_ready < receiving,
-        "the DoT handshake must complete before the query is sent and a response received: {seen:?}"
+        send_ready < receiving,
+        "the query must be sent before the response is received: {seen:?}"
     );
+    if let Some(handshake_seen) = handshake_seen {
+        assert!(
+            handshake_seen < send_ready,
+            "when the TLS handshake stage is observed it must precede the send stage: {seen:?}"
+        );
+    }
     assert_eq!(
         bindings_of(&cache, 0, Family::A),
         vec![crate::eligibility::NumericAddr::V4(

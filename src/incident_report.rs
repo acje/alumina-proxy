@@ -7,8 +7,8 @@
 //! serving side owns the emission seam; this module only decides *what* a
 //! closed window contains and *when* a window rotates.
 
-use crate::cache::Family;
 use crate::config::ALLOWLIST_MAX;
+use crate::dns::cache::Family;
 use crate::inventory::TUNNEL_SLOTS;
 
 /// The fixed reporting-window length in seconds (docs/alumina-proxy.md:79).

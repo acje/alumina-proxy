@@ -52,7 +52,7 @@ fn serving_poll_timeout_folds_queued_log_drain_into_earliest_wait() {
         serving.storage_mut().logs_mut().startup_warning(
             1,
             "sub.example.org",
-            crate::cache::Family::A,
+            crate::dns::cache::Family::A,
             "timeout",
         );
         assert_eq!(
@@ -70,7 +70,7 @@ fn serving_poll_timeout_folds_zero_for_idle_selectable_now_due_not_sweeping() {
         serving
             .storage_mut()
             .schedules_mut()
-            .overwrite_due_at(0, crate::cache::Family::A, secs)
+            .overwrite_due_at(0, crate::dns::cache::Family::A, secs)
             .expect("due the A family now");
         let wait = serving.poll_timeout();
         assert_eq!(
@@ -91,7 +91,7 @@ fn serving_poll_timeout_keeps_bounded_floor_while_probe_sweep_active() {
         serving
             .storage_mut()
             .schedules_mut()
-            .overwrite_due_at(0, crate::cache::Family::A, secs)
+            .overwrite_due_at(0, crate::dns::cache::Family::A, secs)
             .expect("due the A family now");
         let wait = serving.poll_timeout();
         assert!(
@@ -110,7 +110,7 @@ fn serving_poll_timeout_keeps_bounded_floor_while_draining_due_slot() {
         serving
             .storage_mut()
             .schedules_mut()
-            .overwrite_due_at(0, crate::cache::Family::A, secs)
+            .overwrite_due_at(0, crate::dns::cache::Family::A, secs)
             .expect("due the A family now");
         serving.on_sigterm().expect("first SIGTERM observation");
         let wait = serving.poll_timeout();
@@ -131,7 +131,7 @@ fn serving_poll_timeout_returns_exact_future_due_wake_not_a_floor() {
         serving
             .storage_mut()
             .schedules_mut()
-            .overwrite_due_at(0, crate::cache::Family::A, secs + 4)
+            .overwrite_due_at(0, crate::dns::cache::Family::A, secs + 4)
             .expect("due the A family four seconds ahead");
         let wait = serving.poll_timeout();
         assert!(
@@ -150,7 +150,7 @@ fn serving_poll_timeout_keeps_exact_future_due_wake_not_floor_while_probe_sweep_
         serving
             .storage_mut()
             .schedules_mut()
-            .overwrite_due_at(0, crate::cache::Family::A, secs + 4)
+            .overwrite_due_at(0, crate::dns::cache::Family::A, secs + 4)
             .expect("due the A family four seconds ahead");
         let wait = serving.poll_timeout();
         assert!(
@@ -168,7 +168,7 @@ fn serving_poll_timeout_keeps_exact_future_due_wake_not_floor_while_draining_due
         serving
             .storage_mut()
             .schedules_mut()
-            .overwrite_due_at(0, crate::cache::Family::A, secs + 4)
+            .overwrite_due_at(0, crate::dns::cache::Family::A, secs + 4)
             .expect("due the A family four seconds ahead");
         serving.on_sigterm().expect("first SIGTERM observation");
         let wait = serving.poll_timeout();
@@ -190,7 +190,7 @@ fn serving_poll_timeout_folds_earliest_globally_between_slot_deadline_and_due_wa
         serving
             .storage_mut()
             .schedules_mut()
-            .overwrite_due_at(0, crate::cache::Family::A, secs + 4)
+            .overwrite_due_at(0, crate::dns::cache::Family::A, secs + 4)
             .expect("due the A family four seconds ahead");
         let wait = serving.poll_timeout();
         assert!(
@@ -1114,8 +1114,8 @@ fn drain_deadline_expired_still_closes_slot_through_gate() {
 /// — not only via direct `expire_sweep` — so the connect arm is proven present
 /// in the poll fold from an admitted, bitmap-live slot.
 fn connect_deadline_expired_still_retries_through_gate() {
-    use crate::cache::Family;
     use crate::connect::Feed;
+    use crate::dns::cache::Family;
     use crate::eligibility::NumericAddr;
     use std::net::Ipv4Addr;
     let port = ephemeral_port();
@@ -5701,8 +5701,8 @@ fn early_data_on_unconfigured_pair_folds_unattributed() {
     reason = "combined two-phase owner-truth serving precedence: real ja4-overflow Domain latch + exhausted-ledger blocked CONNECT"
 )]
 fn blocked_pair_forbids_before_exhausted_ledger_through_real_decision() {
-    use crate::cache::Family;
     use crate::connect::Feed;
+    use crate::dns::cache::Family;
     let port = ephemeral_port();
     let doc = format!(
         "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\n"
@@ -7381,8 +7381,8 @@ fn config_pair(port: u16, upstream_port: u16) -> crate::config::Config {
 /// "no resolved addresses", the body that proves a retry occurred rather than
 /// the single-attempt "upstream connection failed".
 fn first_dial_failure_records_and_re_decides_to_no_binding_502() {
-    use crate::cache::Family;
     use crate::connect::Feed;
+    use crate::dns::cache::Family;
     use crate::eligibility::NumericAddr;
     use std::net::Ipv4Addr;
     let port = ephemeral_port();
@@ -7509,8 +7509,8 @@ fn dial_sets_tcp_nodelay_on_the_upstream_socket() {
     reason = "long retry-loop exhaustion assertion over four dials"
 )]
 fn full_family_alternation_retry_loop_exhausts_at_four_real_dials() {
-    use crate::cache::Family;
     use crate::connect::Feed;
+    use crate::dns::cache::Family;
     use crate::eligibility::NumericAddr;
     use std::net::{Ipv4Addr, Ipv6Addr};
     let port = ephemeral_port();
@@ -7642,8 +7642,8 @@ fn full_family_alternation_retry_loop_exhausts_at_four_real_dials() {
 )]
 fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
     enforcement_witness_thread(|| {
-        use crate::cache::Family;
         use crate::connect::Feed;
+        use crate::dns::cache::Family;
         use crate::eligibility::NumericAddr;
         use std::net::{Ipv4Addr, Ipv6Addr};
         let port = ephemeral_port();
@@ -7767,8 +7767,8 @@ fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
 /// attempt budget through the real run loop and pins the "upstream connection
 /// failed" wire body once `CandidatesExhausted` resolves.
 fn closed_dial_exhausts_the_full_attempt_budget_to_502_upstream_failed() {
-    use crate::cache::Family;
     use crate::connect::Feed;
+    use crate::dns::cache::Family;
     use crate::eligibility::NumericAddr;
     use std::net::Ipv4Addr;
     let port = ephemeral_port();
@@ -7832,7 +7832,7 @@ fn closed_dial_exhausts_the_full_attempt_budget_to_502_upstream_failed() {
 /// holds the dialing family and a deadline freshly clipped from the setup
 /// deadline, never a carried-over expired one.
 fn dial_re_anchors_a_fresh_connect_deadline_at_initiation() {
-    use crate::cache::Family;
+    use crate::dns::cache::Family;
     use crate::eligibility::NumericAddr;
     use std::net::Ipv4Addr;
     let port = ephemeral_port();
@@ -7895,8 +7895,8 @@ fn dial_re_anchors_a_fresh_connect_deadline_at_initiation() {
 /// record one retry and re-decide, via `expire_sweep`, rather than sit frozen
 /// on the stalled attempt (M1/I26 enforcement).
 fn expired_connect_deadline_while_dialing_records_a_retry_through_expire_sweep() {
-    use crate::cache::Family;
     use crate::connect::Feed;
+    use crate::dns::cache::Family;
     use crate::eligibility::NumericAddr;
     use std::net::Ipv4Addr;
     let port = ephemeral_port();
@@ -7962,8 +7962,8 @@ fn expired_connect_deadline_while_dialing_records_a_retry_through_expire_sweep()
 /// is now alloc-witness-covered.
 fn expire_sweep_dialing_expired_seam_records_retry_with_zero_allocations() {
     enforcement_witness_thread(|| {
-        use crate::cache::Family;
         use crate::connect::Feed;
+        use crate::dns::cache::Family;
         use crate::eligibility::NumericAddr;
         use std::net::Ipv4Addr;
         let port = ephemeral_port();
@@ -8071,8 +8071,8 @@ fn saturated_generation_tokens_fail_closed_without_panic() {
 /// requires an actual eligible upstream dial, which is not hermetic; the
 /// one-line Peer-branch wiring itself is covered by review.
 fn peer_admission_freshness_folds_serving_stale_level_bit() {
-    use crate::cache::Family;
     use crate::connect::Feed;
+    use crate::dns::cache::Family;
     use crate::eligibility::NumericAddr;
     use std::net::Ipv4Addr;
     let port = ephemeral_port();
@@ -8156,10 +8156,10 @@ fn peer_admission_freshness_folds_serving_stale_level_bit() {
 
 #[test]
 fn admitted_stale_peer_folds_through_real_decision_and_retry_does_not_recount() {
-    use crate::cache::Family;
     use crate::connect::Feed;
+    use crate::dns::cache::Family;
+    use crate::dns::transport::FailureReason;
     use crate::eligibility::NumericAddr;
-    use crate::startup_dns::FailureReason;
     use std::net::Ipv4Addr;
     let port = ephemeral_port();
     let upstream_port = ephemeral_port();
@@ -8263,8 +8263,8 @@ fn admitted_stale_peer_folds_through_real_decision_and_retry_does_not_recount() 
 /// `note_incident_tunnel_bytes`, and the boundary rotation emits them in the
 /// summary. Only `Stage::Relay` writes with a committed `report_name` count.
 fn incident_tunnel_bytes_counted_through_real_path() {
-    use crate::cache::Family;
-    use crate::startup_dns::FailureReason;
+    use crate::dns::cache::Family;
+    use crate::dns::transport::FailureReason;
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
         let origin = Instant::now();
@@ -8306,10 +8306,10 @@ fn incident_tunnel_bytes_counted_through_real_path() {
 /// `note_peer_freshness`; a retry (the slot already carries a `connect_family`)
 /// is not a new admission and must not double-count.
 fn stale_admission_counted_once_per_connection_through_real_path() {
-    use crate::cache::Family;
     use crate::connect::Feed;
+    use crate::dns::cache::Family;
+    use crate::dns::transport::FailureReason;
     use crate::eligibility::NumericAddr;
-    use crate::startup_dns::FailureReason;
     use std::net::Ipv4Addr;
     let port = ephemeral_port();
     let upstream_port = ephemeral_port();

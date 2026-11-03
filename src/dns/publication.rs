@@ -1,8 +1,8 @@
-use crate::cache::{Cache, CacheError, Family, Generation, StagedPositive};
-use crate::dns::{DnsError, Outcome};
-use crate::schedule::{
+use crate::dns::cache::{Cache, CacheError, Family, Generation, StagedPositive};
+use crate::dns::schedule::{
     IncidentTransition, OutcomeIncidents, PerTypeTransition, Schedules, family_slot,
 };
+use crate::dns::wire::{DnsError, Outcome};
 
 /// Applies a validated `outcome` to the cache and schedule for one allowlist
 /// `index`, using the in-flight `generation` and the monotonic `receipt` and
@@ -96,9 +96,9 @@ pub fn apply_outcome(
     }
 }
 
-const fn map_schedule(err: crate::schedule::ScheduleError) -> CacheError {
+const fn map_schedule(err: crate::dns::schedule::ScheduleError) -> CacheError {
     match err {
-        crate::schedule::ScheduleError::NameOutOfRange => CacheError::NameOutOfRange,
-        crate::schedule::ScheduleError::DeadlineOverflow => CacheError::DeadlineOverflow,
+        crate::dns::schedule::ScheduleError::NameOutOfRange => CacheError::NameOutOfRange,
+        crate::dns::schedule::ScheduleError::DeadlineOverflow => CacheError::DeadlineOverflow,
     }
 }

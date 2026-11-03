@@ -1,11 +1,11 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::cache::{CacheError, Family};
-use crate::serve::{StartupError, StartupOutcome};
-use crate::startup_dns::{
+use crate::dns::cache::{CacheError, Family};
+use crate::dns::transport::{
     EXCHANGE_DEADLINE_SECS, ExchangeClass, StartupDnsError, TurnResult, WindowLedger,
 };
+use crate::serve::{StartupError, StartupOutcome};
 
 use super::Serving;
 
