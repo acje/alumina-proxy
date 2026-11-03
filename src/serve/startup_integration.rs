@@ -613,3 +613,139 @@ fn startup_drain_stops_on_a_stalled_sink_and_counts_each_stranded_record_once() 
         "each undeliverable record is counted exactly once, never twice"
     );
 }
+
+/// A DNS reply that points the queried allowlist name to an explicitly
+/// configured `cname_bailiwick` suffix and terminates it there: CNAME RR
+/// owner = the queried name, target = the declared suffix; the terminal
+/// A/AAAA RR owner = the same declared suffix with valid TTL/RDATA. This is
+/// the exact cross-suffix shape the bailiwick parser reaches (dns tests
+/// `accepts_declared_suffix_cname_target`), at a real loopback responder.
+fn build_cross_suffix_cname(query: &[u8]) -> Option<Vec<u8>> {
+    if query.len() < 16 {
+        return None;
+    }
+    let tid = u16::from_be_bytes([query[0], query[1]]);
+    let qname = &query[12..query.len() - 4];
+    let qtype = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+    let rdata: &[u8] = match qtype {
+        1 => &[1, 1, 1, 1],
+        28 => &[
+            0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+        ],
+        _ => return None,
+    };
+    let target = b"\x03cdn\x07example\x03net\x00";
+    let mut msg = Vec::with_capacity(query.len() + 40);
+    msg.extend_from_slice(&tid.to_be_bytes());
+    msg.extend_from_slice(&0x8000u16.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&2u16.to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    msg.extend_from_slice(&query[12..]);
+    msg.extend_from_slice(qname);
+    msg.extend_from_slice(&5u16.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&200u32.to_be_bytes());
+    msg.extend_from_slice(
+        &u16::try_from(target.len())
+            .expect("cname target wire length fits u16")
+            .to_be_bytes(),
+    );
+    msg.extend_from_slice(target);
+    msg.extend_from_slice(target);
+    msg.extend_from_slice(&qtype.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&40u32.to_be_bytes());
+    msg.extend_from_slice(
+        &u16::try_from(rdata.len())
+            .expect("terminal rdata wire length fits u16")
+            .to_be_bytes(),
+    );
+    msg.extend_from_slice(rdata);
+    Some(msg)
+}
+
+/// The same parsed Config and the same CNAME answers must drive the legacy
+/// blocking storage window and the shared preallocated startup to one
+/// identical result: with an explicit `cname_bailiwick` suffix the entry
+/// resolves on both owners and decides `Serve(Full)`; without that suffix the
+/// same cross-suffix CNAME is rejected on both owners, which decide `Exit75`
+/// with zero resolved names and no cached CNAME broadening.
+#[test]
+fn configured_cross_suffix_cname_resolves_identically_on_shared_and_legacy_startup() {
+    use crate::runtime::Preallocated;
+    let window = Duration::from_millis(700);
+    let cases = [
+        (
+            Some("cdn.example.net"),
+            StartupDecision::Serve(ServingMode::Full),
+            1,
+            true,
+        ),
+        (None, StartupDecision::Exit75 { unresolved: 1 }, 0, false),
+    ];
+    for (suffix, expected_decision, expected_resolved, binds_listener) in cases {
+        let config = parse_config_document(&cross_suffix_startup_doc(suffix))
+            .expect("valid test config")
+            .with_kernel_assigned_test_listener();
+        let responder = DnsResponder::spawn(|q| build_cross_suffix_cname(&q));
+
+        let legacy_outcome = ServeStorage::boot(&config)
+            .expect("boot serving storage")
+            .run_startup_within(responder.addr, NOW0, window)
+            .expect("legacy startup window");
+
+        let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+        let mut owner = Preallocated::preallocate(
+            ServeStorage::boot(&config).expect("boot serving storage"),
+            traffic,
+        )
+        .expect("preallocate serving workspaces");
+        let shared_outcome = owner
+            .run_startup_within(responder.addr, NOW0, window)
+            .expect("shared startup window");
+
+        assert_eq!(
+            shared_outcome.decision, legacy_outcome.decision,
+            "the shared MAIN path must take the identical readiness decision to the legacy storage window"
+        );
+        assert_eq!(
+            shared_outcome.decision, expected_decision,
+            "a configured-suffix admission must decide exactly this readiness result"
+        );
+        assert_eq!(
+            shared_outcome.report.resolved_names, expected_resolved,
+            "the shared MAIN owner must resolve exactly the names its configured suffix admits"
+        );
+        assert_eq!(
+            shared_outcome.report.resolved_names, legacy_outcome.report.resolved_names,
+            "legacy is the independent baseline: same config, same answers, same resolved count"
+        );
+        assert_eq!(
+            shared_outcome.listener.is_some(),
+            binds_listener,
+            "a full-serving path binds the startup listener; an exit-75 path does not"
+        );
+    }
+}
+
+fn cross_suffix_startup_doc(bailiwick_target: Option<&str>) -> String {
+    let bailiwick_clause = bailiwick_target
+        .map(|host| format!("cname_bailiwick = [\"{host}\"]\n"))
+        .unwrap_or_default();
+    format!(
+        "listen = \"127.0.0.1:9\"\n\
+         startup_unresolved_allowance = 0\n\
+         resolver = [\"1.1.1.1\"]\n\
+         [any_illegal]\n\
+         connect_parse = {{ action = \"notify\", scope = \"connection\" }}\n\
+         host_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\n\
+         tls_profile = {{ action = \"block\", scope = \"all\" }}\n\
+         ech = {{ action = \"block\", scope = \"connection\" }}\n\
+         [allowed_fqdn.\"alpha.example.org:443\"]\n\
+         {bailiwick_clause}\
+         early_data = {{ action = \"notify\", scope = \"connection\" }}\n\
+         ja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+    )
+}

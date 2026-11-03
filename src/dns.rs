@@ -1,10 +1,10 @@
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use crate::cache::{CacheError, Family, MAX_ADDRESSES};
+use crate::cache::{Cache, CacheError, Family, Generation, MAX_ADDRESSES};
 use crate::config::{ALLOWLIST_MAX, Allowlist, Fqdn};
 use crate::eligibility::NumericAddr;
-use crate::schedule::Soa;
+use crate::schedule::{OutcomeIncidents, Schedules, Soa};
 
 mod publication;
 
@@ -918,6 +918,138 @@ impl BailiwickZones {
             .iter()
             .zip(&self.suffix_owner[..self.suffix_len])
             .any(|(suffix, &owner)| owner == index && soa_covers(name, suffix.as_slice()))
+    }
+}
+
+/// What a fully validated published exchange left in the cache, so the startup
+/// report can tell a validated negative from an attempted positive with no
+/// eligible bindings instead of collapsing both into one catch-all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishedKind {
+    /// A positive answer published at least one eligible binding.
+    ResolvedPositive,
+    /// A positive answer whose candidates were all ineligible; nothing was
+    /// published.
+    NoEligible,
+    /// A validated NXDOMAIN or NODATA answer was applied.
+    Negative,
+}
+
+/// Classifies a validated DNS outcome into the window-level published kind: a
+/// positive contributes a usable name only when at least one of its binding
+/// candidates is eligible, so an all-ineligible positive is `NoEligible`.
+pub(crate) fn classify_published(outcome: &Outcome) -> PublishedKind {
+    match outcome {
+        Outcome::Positive { bindings, .. }
+            if bindings.as_slice().iter().any(|b| b.is_eligible()) =>
+        {
+            PublishedKind::ResolvedPositive
+        }
+        Outcome::Positive { .. } => PublishedKind::NoEligible,
+        Outcome::NxDomain { .. } | Outcome::NoData { .. } => PublishedKind::Negative,
+    }
+}
+
+/// The validated outcome of one response parse bound to the extreme-TTL
+/// flag captured from that same successful parse, owned by the receiver so a
+/// later reuse of the parse workspace cannot repurpose the observation.
+pub(crate) struct ParsedReply {
+    outcome: Outcome,
+    extreme_ttl: bool,
+}
+
+impl ParsedReply {
+    /// Parses a response through the unchanged public [`parse_response`],
+    /// binding the extreme-TTL observation from that same successful parse;
+    /// on error no [`ParsedReply`] exists and the workspace flag is left as
+    /// the parse left it.
+    ///
+    /// # Errors
+    ///
+    /// Returns exactly the errors [`parse_response`] returns.
+    pub(crate) fn parse_reply(
+        ws: &mut ResponseWorkspace,
+        zones: &BailiwickZones,
+        fqdn: &Fqdn,
+        family: Family,
+        tid: u16,
+        msg: &[u8],
+    ) -> Result<ParsedReply, DnsError> {
+        let outcome = parse_response(ws, zones, fqdn, family, tid, msg)?;
+        let extreme_ttl = ws.extreme_ttl();
+        Ok(ParsedReply {
+            outcome,
+            extreme_ttl,
+        })
+    }
+
+    /// Observes this reply into a private borrowed view: the published-kind
+    /// classification is computed exactly once here and the extreme-TTL flag is
+    /// bound from the same reply, so the receive path reads one consistent fact
+    /// set for the whole exchange.
+    pub(crate) fn observe(&self) -> ObservedReply<'_> {
+        ObservedReply {
+            outcome: &self.outcome,
+            kind: classify_published(&self.outcome),
+            extreme: self.extreme_ttl,
+        }
+    }
+
+    /// Whether the same parse that produced this outcome observed an
+    /// answer-section record with a TTL above [`EXTREME_TTL_THRESHOLD`]. The
+    /// receive path reads this through the observed view; the test payload
+    /// oracle keeps the direct getter under `cfg(test)`.
+    #[cfg(test)]
+    pub(crate) const fn extreme_ttl(&self) -> bool {
+        self.extreme_ttl
+    }
+}
+
+/// A private borrowed view over a local [`ParsedReply`] created by
+/// [`ParsedReply::observe`]: the published-kind classification and the
+/// extreme-TTL flag are captured at observe time so the receive path reads one
+/// consistent observation. The borrow is bounded to the local reply value and
+/// is never stored on the receiver, the cache, or a schedule.
+pub(crate) struct ObservedReply<'a> {
+    outcome: &'a Outcome,
+    kind: PublishedKind,
+    extreme: bool,
+}
+
+impl<'a> ObservedReply<'a> {
+    /// The pure probe-sensor facts of the observed reply — the published kind
+    /// and the extreme-TTL flag — with no cache or schedule side effects.
+    pub(crate) const fn probe_facts(&self) -> (PublishedKind, bool) {
+        (self.kind, self.extreme)
+    }
+
+    /// Applies the observed reply through the unchanged public
+    /// [`apply_outcome`], returning the kind and the extreme flag captured at
+    /// observe time alongside the incidents the apply produced. On error, no
+    /// kind, flag or incidents are returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns exactly the errors [`apply_outcome`] returns.
+    pub(crate) fn apply(
+        self,
+        cache: &mut Cache,
+        schedules: &mut Schedules,
+        ordinal: usize,
+        generation: Generation,
+        receipt: u64,
+        now: u64,
+    ) -> Result<(PublishedKind, bool, OutcomeIncidents), DnsError> {
+        let incidents = apply_outcome(
+            cache,
+            schedules,
+            ordinal,
+            generation,
+            receipt,
+            now,
+            self.outcome,
+        )?;
+        Ok((self.kind, self.extreme, incidents))
     }
 }
 

@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::parse_config_document;
+use crate::dns::classify_published;
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::schedule::{INCIDENT_N, INCIDENT_WINDOW};
 use std::io::{Read, Write};
@@ -3815,6 +3816,231 @@ fn relocate_for_probe_counts_a_probe_relocation_and_restores_without_extra() {
         transport.take_probe_relocations(),
         0,
         "restoring the pre-sweep resolver counts no additional probe relocation"
+    );
+}
+
+/// Seats a receiver onto a configured two-resolver set with the primary active
+/// and the allowlist bailiwick installed, the state the boot route leaves
+/// before a lookups turn, so `step_recv` can be driven with a filled frame.
+fn seeded_bailiwick_transport() -> StartupDns {
+    let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8"]));
+    transport
+        .configure_bailiwick(&config())
+        .expect("allowlist bailiwick installs over the seeded transport");
+    transport
+}
+
+/// Builds the exact reply the startup receive path would parse for a positive A
+/// answer at `ttl`: the outstanding query is assembled by the same
+/// `dns::build_query` the send path uses, so the response question and owner
+/// always match the fqdn/family/tid under test.
+fn positive_a_reply(fqdn: &Fqdn, family: Family, tid: u16, ttl: u32, octets: [u8; 4]) -> Vec<u8> {
+    let mut query = [0u8; QUERY_BUF_LEN];
+    let qlen =
+        dns::build_query(fqdn, family, tid, &mut query).expect("query fits the fixed buffer");
+    positive_a_message(&query[..qlen], ttl, octets)
+}
+
+/// Places a complete length-prefixed reply into `recv_buf` exactly as a full
+/// socket read would, with `msglen`/`filled` consistent, so `step_recv` parses
+/// it with no connection and no wait.
+fn fill_frame(transport: &mut StartupDns, msg: &[u8]) {
+    let len = u16::try_from(msg.len()).expect("reply fits the u16 wire length");
+    transport.recv_buf[..2].copy_from_slice(&len.to_be_bytes());
+    transport.recv_buf[2..2 + msg.len()].copy_from_slice(msg);
+    transport.filled = 2 + msg.len();
+    transport.msglen = Some(msg.len());
+}
+
+#[test]
+fn probe_observes_extreme_once_sets_kind_but_never_applies_state() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = seeded_bailiwick_transport();
+    transport.corroboration = Some(Corroboration {
+        target: ActiveResolver::at(1, 2),
+        active_before: ActiveResolver::at(0, 2),
+        ordinal: 0,
+        family: Family::A,
+    });
+    let mut ex = fixture_exchange(0, Family::A, ExchangeClass::Probe);
+    ex.tid = 0x1224;
+    let due_before = schedules.due_time(0, Family::A);
+    let reply = positive_a_reply(
+        fqdn,
+        Family::A,
+        ex.tid,
+        dns::EXTREME_TTL_THRESHOLD + 1,
+        [1, 1, 1, 1],
+    );
+    fill_frame(&mut transport, &reply);
+    let result = transport
+        .step_recv(&mut ex, fqdn, &mut cache, &mut schedules)
+        .unwrap();
+    assert!(
+        matches!(result, RecvStep::Published(PublishedKind::ResolvedPositive)),
+        "a validated probe reply publishes the resolved-positive kind"
+    );
+    assert_eq!(
+        transport.corroboration_outcome,
+        Some(PublishedKind::ResolvedPositive),
+        "a probe with a latched corroboration records the classified kind"
+    );
+    assert_eq!(
+        transport.dns_anomalies[DnsAnomalyKind::ExtremeTtl.index()],
+        1,
+        "the probe counts the extreme TTL exactly once"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        Vec::new(),
+        "a probe never publishes bindings"
+    );
+    assert_eq!(
+        schedules.due_time(0, Family::A),
+        due_before,
+        "a probe never advances the refresh schedule"
+    );
+}
+
+#[test]
+fn malformed_after_extreme_answer_is_a_receive_failure_not_an_extreme_anomaly() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = seeded_bailiwick_transport();
+    let mut ex = fixture_exchange(0, Family::A, ExchangeClass::Startup);
+    ex.tid = 0x1225;
+    let mut reply = positive_a_reply(
+        fqdn,
+        Family::A,
+        ex.tid,
+        dns::EXTREME_TTL_THRESHOLD + 1,
+        [1, 1, 1, 1],
+    );
+    reply.push(0xff);
+    fill_frame(&mut transport, &reply);
+    let result = transport
+        .step_recv(&mut ex, fqdn, &mut cache, &mut schedules)
+        .unwrap();
+    assert!(
+        matches!(result, RecvStep::Failed(FailureReason::Receive)),
+        "a reply malformed after its extreme answer settles as a receive failure"
+    );
+    assert_eq!(
+        transport.dns_anomalies[DnsAnomalyKind::ExtremeTtl.index()],
+        0,
+        "a parse failure never counts an extreme TTL the parse did not complete"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        Vec::new(),
+        "a failed receive commits no bindings"
+    );
+}
+
+#[test]
+fn valid_extreme_reply_past_the_deadline_times_out_before_any_observation() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = seeded_bailiwick_transport();
+    let mut ex = fixture_exchange(0, Family::A, ExchangeClass::Startup);
+    ex.tid = 0x1226;
+    ex.deadline = Instant::now() - Duration::from_millis(1);
+    let reply = positive_a_reply(
+        fqdn,
+        Family::A,
+        ex.tid,
+        dns::EXTREME_TTL_THRESHOLD + 1,
+        [1, 1, 1, 1],
+    );
+    fill_frame(&mut transport, &reply);
+    let result = transport
+        .step_recv(&mut ex, fqdn, &mut cache, &mut schedules)
+        .unwrap();
+    assert!(
+        matches!(result, RecvStep::Failed(FailureReason::Timeout)),
+        "a reply arriving after the exchange deadline settles as a timeout"
+    );
+    assert_eq!(
+        transport.dns_anomalies[DnsAnomalyKind::ExtremeTtl.index()],
+        0,
+        "the deadline closes the exchange before any observation is counted"
+    );
+    assert_eq!(
+        transport.corroboration_outcome, None,
+        "the timeout records no published kind"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        Vec::new(),
+        "the timeout commits no cache state"
+    );
+}
+
+#[test]
+fn stale_generation_apply_is_the_exact_typed_error_with_no_partial_commit() {
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = seeded_bailiwick_transport();
+    let mut first = fixture_exchange(0, Family::A, ExchangeClass::Startup);
+    first.tid = 0x1227;
+    fill_frame(
+        &mut transport,
+        &positive_a_reply(fqdn, Family::A, first.tid, 120, [1, 1, 1, 1]),
+    );
+    assert!(
+        matches!(
+            transport
+                .step_recv(&mut first, fqdn, &mut cache, &mut schedules)
+                .unwrap(),
+            RecvStep::Published(PublishedKind::ResolvedPositive)
+        ),
+        "the current-generation exchange publishes"
+    );
+    let mut stale = fixture_exchange(0, Family::A, ExchangeClass::Startup);
+    stale.tid = 0x1228;
+    fill_frame(
+        &mut transport,
+        &positive_a_reply(
+            fqdn,
+            Family::A,
+            stale.tid,
+            dns::EXTREME_TTL_THRESHOLD + 1,
+            [10, 0, 0, 2],
+        ),
+    );
+    let result = transport.step_recv(&mut stale, fqdn, &mut cache, &mut schedules);
+    match result {
+        Err(err) => assert_eq!(
+            err,
+            StartupDnsError::Dns(DnsError::Cache(CacheError::StaleGeneration)),
+            "the apply refusal surfaces as the exact typed stale-generation error"
+        ),
+        Ok(_other) => panic!("an obsolete result must be refused, never published"),
+    }
+    assert_eq!(
+        transport.dns_anomalies[DnsAnomalyKind::ExtremeTtl.index()],
+        0,
+        "a refused apply never counts the extreme TTL"
+    );
+    assert_eq!(
+        transport.incident_opens, 0,
+        "a refused apply never opens an incident"
+    );
+    assert_eq!(
+        bindings_of(&cache, 0, Family::A),
+        vec![crate::eligibility::NumericAddr::V4(
+            std::net::Ipv4Addr::new(1, 1, 1, 1,)
+        )],
+        "the refused apply leaves the first exchange's published bindings intact"
     );
 }
 

@@ -172,7 +172,8 @@ impl ServeStorage {
         let logs = LogStore::new().map_err(StartupDnsError::from)?;
         let cache = Cache::new(name_count).map_err(StartupDnsError::from)?;
         let schedules = Schedules::new(name_count).map_err(StartupDnsError::from)?;
-        let dns = StartupDns::new()?;
+        let mut dns = StartupDns::new()?;
+        dns.configure_bailiwick(config)?;
         let origin = Instant::now();
         let worker = Worker::boot(WorkerClock::new(origin, 0));
         let enforcement = Enforcement::new(*config.control(), config.gates());

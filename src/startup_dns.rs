@@ -173,36 +173,10 @@ impl From<ScheduleError> for StartupDnsError {
     }
 }
 
-/// What a fully validated published exchange left in the cache, so the
-/// startup report can tell a validated negative from an attempted positive
-/// with no eligible bindings instead of collapsing both into one catch-all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PublishedKind {
-    /// A positive answer published at least one eligible binding.
-    ResolvedPositive,
-    /// A positive answer whose candidates were all ineligible; nothing was
-    /// published.
-    NoEligible,
-    /// A validated NXDOMAIN or NODATA answer was applied.
-    Negative,
-}
-
-/// Classifies a validated DNS outcome into the window-level published kind: a
-/// positive contributes a usable name only when at least one of its binding
-/// candidates is eligible, so an all-ineligible positive is `NoEligible`.
-fn classify_published(outcome: &crate::dns::Outcome) -> PublishedKind {
-    match outcome {
-        crate::dns::Outcome::Positive { bindings, .. }
-            if bindings.as_slice().iter().any(|b| b.is_eligible()) =>
-        {
-            PublishedKind::ResolvedPositive
-        }
-        crate::dns::Outcome::Positive { .. } => PublishedKind::NoEligible,
-        crate::dns::Outcome::NxDomain { .. } | crate::dns::Outcome::NoData { .. } => {
-            PublishedKind::Negative
-        }
-    }
-}
+/// The validated-outcome published-kind classification lives in `dns` beside
+/// the outcome it classifies; this re-export preserves the legacy
+/// `startup_dns::PublishedKind` path for the receiver and its tests.
+pub(crate) use crate::dns::PublishedKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExchangeResult {
@@ -1368,6 +1342,18 @@ impl StartupDns {
         self.degradations[self.active_resolver.index()] == ResolverDegradation::Degraded
     }
 
+    /// Installs the exact per-entry `cname_bailiwick` zones from the already
+    /// validated `Config` onto this retained owner, so the shared booted
+    /// STARTUP window resolves declared cross-suffix CNAME targets. Called
+    /// once at [`crate::serve::ServeStorage::boot`]; public
+    /// [`StartupDns::new`] and the legacy blocking window's own reinstall are
+    /// unchanged.
+    pub(crate) fn configure_bailiwick(&mut self, config: &Config) -> Result<(), StartupDnsError> {
+        self.bailiwick =
+            BailiwickZones::from_allowlist(config.allowlist(), config.cname_bailiwick())?;
+        Ok(())
+    }
+
     /// Starts a startup window on the retained transport without owning the
     /// wait: it anchors the DNS epoch and monotonic origin, seats the failover
     /// state machine onto the configured resolver set with the primary active,
@@ -2259,7 +2245,7 @@ impl StartupDns {
             && self.filled >= len + 2
         {
             let message = &self.recv_buf[2..2 + len];
-            let outcome = dns::parse_response(
+            let reply = dns::ParsedReply::parse_reply(
                 &mut self.workspace,
                 &self.bailiwick,
                 fqdn,
@@ -2269,16 +2255,17 @@ impl StartupDns {
             );
             self.msglen = None;
             self.filled = 0;
-            match outcome {
-                Ok(outcome) => {
+            match reply {
+                Ok(reply) => {
                     if Instant::now() >= ex.deadline {
                         self.close_connection()?;
                         let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
                         return Ok(RecvStep::Failed(reason));
                     }
-                    let kind = classify_published(&outcome);
+                    let observed = reply.observe();
                     if ex.class == ExchangeClass::Probe {
-                        if self.workspace.extreme_ttl() {
+                        let (kind, extreme) = observed.probe_facts();
+                        if extreme {
                             self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
                         }
                         if self.corroboration.is_some() {
@@ -2287,14 +2274,13 @@ impl StartupDns {
                         return Ok(RecvStep::Published(kind));
                     }
                     let receipt = self.now_u64();
-                    let incidents = dns::apply_outcome(
+                    let (kind, extreme, incidents) = observed.apply(
                         cache,
                         schedules,
                         ex.ordinal,
                         ex.generation,
                         receipt,
                         self.now_u64(),
-                        &outcome,
                     )?;
                     match incidents.sustained {
                         crate::schedule::IncidentTransition::Opened => {
@@ -2319,7 +2305,7 @@ impl StartupDns {
                             }
                         }
                     }
-                    if self.workspace.extreme_ttl() {
+                    if extreme {
                         self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
                     }
                     return Ok(RecvStep::Published(kind));

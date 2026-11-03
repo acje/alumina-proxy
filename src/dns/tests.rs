@@ -703,6 +703,182 @@ fn extreme_ttl_at_threshold_does_not_flag() {
     assert!(!flag, "exactly the threshold is not extreme");
 }
 
+fn parse_response_flagged(
+    ws: &mut ResponseWorkspace,
+    name: &str,
+    family: Family,
+    tid: u16,
+    msg: &[u8],
+) -> Result<Outcome, DnsError> {
+    let zones = BailiwickZones::from_allowlist(config().allowlist(), config().cname_bailiwick())
+        .expect("validated config keeps suffix count within ALLOWLIST_MAX");
+    parse_response(ws, &zones, &fqdn(name), family, tid, msg)
+}
+
+#[test]
+fn wire_parser_reused_workspace_extreme_flag_survives_late_error_then_clears() {
+    let mut ws = ResponseWorkspace::default();
+    let high = direct_a("sub.example.org", 0x1320, [1, 2, 3, 4], 400_000);
+    assert!(parse_response_flagged(&mut ws, "sub.example.org", Family::A, 0x1320, &high).is_ok());
+    assert!(ws.extreme_ttl(), "a high-TTL success flags on first use");
+    let mut malformed = header(0x1321, true, 0, 1, 2, 0, 0);
+    malformed.extend_from_slice(&qname_bytes("sub.example.org"));
+    malformed.extend_from_slice(&1u16.to_be_bytes());
+    malformed.extend_from_slice(&1u16.to_be_bytes());
+    malformed.extend_from_slice(&a_record("sub.example.org", [1, 2, 3, 4], 400_000));
+    let mut truncated = qname_bytes("sub.example.org");
+    truncated.extend_from_slice(&1u16.to_be_bytes());
+    truncated.extend_from_slice(&1u16.to_be_bytes());
+    truncated.extend_from_slice(&60u32.to_be_bytes());
+    truncated.extend_from_slice(&4u16.to_be_bytes());
+    truncated.extend_from_slice(&[9, 9]);
+    malformed.extend_from_slice(&truncated);
+    assert!(
+        parse_response_flagged(&mut ws, "sub.example.org", Family::A, 0x1321, &malformed).is_err()
+    );
+    assert!(
+        ws.extreme_ttl(),
+        "an error after a high-TTL record leaves that parse's flag set"
+    );
+    let normal = direct_a("sub.example.org", 0x1322, [9, 9, 9, 9], 120);
+    assert!(parse_response_flagged(&mut ws, "sub.example.org", Family::A, 0x1322, &normal).is_ok());
+    assert!(
+        !ws.extreme_ttl(),
+        "the flag describes the most recent parse only"
+    );
+}
+
+#[test]
+fn wire_parser_oversized_reply_error_retains_prior_extreme_flag() {
+    let mut ws = ResponseWorkspace::default();
+    let high = direct_a("sub.example.org", 0x1323, [1, 2, 3, 4], 400_000);
+    assert!(parse_response_flagged(&mut ws, "sub.example.org", Family::A, 0x1323, &high).is_ok());
+    assert!(ws.extreme_ttl());
+    let oversized = vec![0u8; DNS_MSG_LIMIT + 1];
+    assert!(matches!(
+        parse_response_flagged(&mut ws, "sub.example.org", Family::A, 0x1324, &oversized),
+        Err(DnsError::MessageTooLong)
+    ));
+    assert!(
+        ws.extreme_ttl(),
+        "an overlong parse errors before the per-parse flag reset and keeps the prior flag"
+    );
+}
+
+fn parse_reply_into(
+    ws: &mut ResponseWorkspace,
+    name: &str,
+    family: Family,
+    tid: u16,
+    msg: &[u8],
+) -> Result<ParsedReply, DnsError> {
+    let zones = BailiwickZones::from_allowlist(config().allowlist(), config().cname_bailiwick())
+        .expect("validated config keeps suffix count within ALLOWLIST_MAX");
+    ParsedReply::parse_reply(ws, &zones, &fqdn(name), family, tid, msg)
+}
+
+#[test]
+fn parse_reply_binds_its_own_flag_and_payload_across_workspace_reuse() {
+    let mut ws = ResponseWorkspace::default();
+    let high = direct_a("sub.example.org", 0x1330, [1, 2, 3, 4], 400_000);
+    let high_reply =
+        parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x1330, &high).expect("high reply");
+    assert!(high_reply.extreme_ttl());
+    let normal = direct_a("sub.example.org", 0x1331, [9, 9, 9, 9], 120);
+    let normal_reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x1331, &normal)
+        .expect("normal reply");
+    assert!(!normal_reply.extreme_ttl());
+    assert!(
+        high_reply.extreme_ttl(),
+        "an owned reply keeps its own parse's flag after the workspace is reused"
+    );
+    match (&high_reply.outcome, &normal_reply.outcome) {
+        (
+            Outcome::Positive {
+                family: hf,
+                bindings: hb,
+                ttl: ht,
+            },
+            Outcome::Positive {
+                family: nf,
+                bindings: nb,
+                ttl: nt,
+            },
+        ) => {
+            assert_eq!(*hf, Family::A);
+            assert_eq!(*ht, 400_000);
+            assert_eq!(hb.as_slice(), &[NumericAddr::V4(Ipv4Addr::new(1, 2, 3, 4))]);
+            assert_eq!(*nf, Family::A);
+            assert_eq!(*nt, 120);
+            assert_eq!(nb.as_slice(), &[NumericAddr::V4(Ipv4Addr::new(9, 9, 9, 9))]);
+        }
+        other => panic!("expected positives, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_reply_err_carries_no_success_value_and_retains_the_flag() {
+    let mut ws = ResponseWorkspace::default();
+    let high = direct_a("sub.example.org", 0x1340, [1, 2, 3, 4], 400_000);
+    let high_reply =
+        parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x1340, &high).expect("high reply");
+    assert!(high_reply.extreme_ttl());
+    let oversized = vec![0u8; DNS_MSG_LIMIT + 1];
+    assert!(matches!(
+        parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x1341, &oversized),
+        Err(DnsError::MessageTooLong)
+    ));
+    assert!(
+        ws.extreme_ttl(),
+        "an overlong parse error is pre-reset and can construct no reply value"
+    );
+    assert!(high_reply.extreme_ttl());
+}
+
+#[test]
+fn observe_carries_kind_and_extreme_from_the_same_wire_reply() {
+    let mut ws = ResponseWorkspace::default();
+    let high = direct_a("sub.example.org", 0x1350, [1, 2, 3, 4], 400_000);
+    let reply =
+        parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x1350, &high).expect("high reply");
+    let observed = reply.observe();
+    let (kind, extreme) = observed.probe_facts();
+    assert_eq!(
+        kind,
+        classify_published(&reply.outcome),
+        "observe classifies the same reply the classifier does"
+    );
+    assert_eq!(extreme, reply.extreme_ttl());
+    assert_eq!(kind, PublishedKind::ResolvedPositive);
+    assert!(
+        extreme,
+        "the observed view carries the extreme flag from its reply"
+    );
+}
+
+#[test]
+fn parsed_reply_layout_is_bounded_by_the_outcome_plus_alignment() {
+    println!(
+        "parsed_reply_layout size_reply={} align_reply={} size_outcome={} align_outcome={} size_observed={} align_observed={}",
+        std::mem::size_of::<ParsedReply>(),
+        std::mem::align_of::<ParsedReply>(),
+        std::mem::size_of::<Outcome>(),
+        std::mem::align_of::<Outcome>(),
+        std::mem::size_of::<ObservedReply<'_>>(),
+        std::mem::align_of::<ObservedReply<'_>>(),
+    );
+    assert!(
+        std::mem::size_of::<ParsedReply>()
+            <= std::mem::size_of::<Outcome>() + std::mem::align_of::<Outcome>(),
+        "the owned reply must stay within one outcome plus one alignment unit"
+    );
+    assert!(
+        std::mem::size_of::<ObservedReply<'_>>() <= 16,
+        "the borrowed observed view stays within the two-pointer budget: {} bytes",
+        std::mem::size_of::<ObservedReply<'_>>()
+    );
+}
+
 #[test]
 fn parses_nxdomain_with_soa() {
     let mut msg = header(11, true, 3, 1, 0, 1, 0);
