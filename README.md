@@ -269,18 +269,18 @@ cannot observe its own unread pipe (writes succeed into a buffer nobody reads).
 **Proxy-owned, tested** — rely on, do not re-verify:
 
 - Nonblocking stdout: fd 1 is made nonblocking once
-  ([src/log.rs](src/log.rs):1579), writes are `write_vectored` against a
-  16-op / 64 KiB per-turn budget ([src/log.rs](src/log.rs):66-67), and a
-  stalled or full pipe can never stall serving ([src/log.rs](src/log.rs):1579-1582).
+  ([src/log/sink.rs](src/log/sink.rs):16-27), writes are `write_vectored` against a
+  16-op / 64 KiB per-turn budget ([src/log/mod.rs](src/log/mod.rs):66-67), and a
+  stalled or full pipe can never stall serving ([src/log/sink.rs](src/log/sink.rs):100-179).
   A `WouldBlock` retains the partial cursor and retries
-  ([src/log.rs](src/log.rs):2049-2123); byte conservation is exact.
-- Bounded queue: 256 × 2 KiB (`src/log.rs:53-54`); on overflow a whole record is
+  ([src/log/sink.rs](src/log/sink.rs):100-179); byte conservation is exact.
+- Bounded queue: 256 × 2 KiB (`src/log/mod.rs:53-54`); on overflow a whole record is
   dropped and counted (`dropped`), never truncated.
 - The monitor family is split into a reserved `kind=monitor` summary whose
   fixed core is admitted even when the queue is full, and best-effort
   `monitor_domain` / `monitor_capture` detail batches
   ([docs/alumina-proxy.md](docs/alumina-proxy.md):340).
-- A failed sink latches permanently and the drain quiesces (`src/log.rs:736-744,792-797`):
+- A failed sink latches permanently and the drain quiesces (`src/log/sink.rs:87-99,100-179`):
   no further records of any kind are emitted until the proxy restarts.
 
 **Deployment-owned** — you must build and assure; no proxy test covers this:
@@ -330,7 +330,7 @@ warn/info records (≤ 2 KiB each, e.g. `reject` / `early_activity`) as **their
 own records**, plus the event-driven monitor family as a separate aggregate: a
 reserved `kind=monitor` summary (≤ 2048 B fixed core) and best-effort
 `monitor_domain` / `monitor_capture` detail batches (≤ 2048 B each, up to 3+3
-per dirty second, `src/log.rs:60-63`); the summary emits at most once per dirty
+per dirty second, `src/log/mod.rs:60-63`); the summary emits at most once per dirty
 whole-second (`src/enforcement/monitor.rs:351-353`). Budget collector CPU/RAM in
 the same order of magnitude as the proxy's recorded footprint above and never
 assume the proxy slows down for a slow reader.
@@ -347,23 +347,23 @@ exit-accounting note below.
 
 | Signal | Where | Unit (exact) | Means |
 | --- | --- | --- | --- |
-| `dropped` | `startup_final` ([src/log.rs](src/log.rs):1853) and `shutdown_final` (:1957) **only** — never in the monitor summary core (:883-909) | 1 per whole record lost, all classes | Whole-record loss over boot/full run. Long-run loss surfaces **only** at these two boundaries while serving (not refreshed in-band); serving-exit residue after the single bounded drain is **uncounted, unobservable** (exit-accounting note below) |
-| `report_drops` / `oreport_drops` | every `kind=monitor` summary fixed core ([src/log.rs](src/log.rs):890-894) | 1 per dropped `monitor_domain` **batch** at report time (:1977; `src/enforcement/monitor.rs:320`) — a batch is up to 11 domain blocks, never per block | Queue-full refusal of a domain detail batch |
-| `capture_drops` / `ocapture_drops` | every `kind=monitor` summary fixed core ([src/log.rs](src/log.rs):895-899) | **mixed, by design**: 1 per detail at capture time (later-relation suppression [reactor.rs](src/runtime/reactor.rs):2372-2388; 64-detail window eviction [monitor.rs](src/enforcement/monitor.rs):335) **and** 1 per dropped `monitor_capture` batch at report time ([log.rs](src/log.rs):1988) — a batch is up to 22 details | Capture-detail loss in mixed units; a nonzero value means detail loss, never treat "1" as "one detail" |
-| `dx=` | `kind=monitor`, square brackets loss bitset, present only when nonzero ([src/log.rs](src/log.rs):984-995) | 1 bit per allowlist ordinal, hex | That ordinal's JA4-change facts overflowed the bounded detail |
+| `dropped` | `startup_final` ([src/log/mod.rs](src/log/mod.rs):836-860) and `shutdown_final` (:935-944) **only** — never in the monitor summary core (:945-980) | 1 per whole record lost, all classes | Whole-record loss over boot/full run. Long-run loss surfaces **only** at these two boundaries while serving (not refreshed in-band); serving-exit residue after the single bounded drain is **uncounted, unobservable** (exit-accounting note below) |
+| `report_drops` / `oreport_drops` | every `kind=monitor` summary fixed-core wire grammar ([src/log/encoding.rs](src/log/encoding.rs):572-581) | 1 per dropped `monitor_domain` **batch** at report time ([src/log/mod.rs](src/log/mod.rs):953-962; `src/enforcement/monitor.rs:320`) — a batch is up to 11 domain blocks, never per block | Queue-full refusal of a domain detail batch |
+| `capture_drops` / `ocapture_drops` | every `kind=monitor` summary fixed-core wire grammar ([src/log/encoding.rs](src/log/encoding.rs):572-581) | **mixed, by design**: 1 per detail at capture time (later-relation suppression [reactor.rs](src/runtime/reactor.rs):2372-2388; 64-detail window eviction [monitor.rs](src/enforcement/monitor.rs):335) **and** 1 per dropped `monitor_capture` batch at report time ([src/log/mod.rs](src/log/mod.rs):945-980) — a batch is up to 22 details | Capture-detail loss in mixed units; a nonzero value means detail loss, never treat "1" as "one detail" |
+| `dx=` | `kind=monitor`, square brackets loss bitset, present only when nonzero ([src/log/encoding.rs](src/log/encoding.rs):666-675) | 1 bit per allowlist ordinal, hex | That ordinal's JA4-change facts overflowed the bounded detail |
 
 **Notification drop path (exit accounting — counted vs unobservable).** Queue
 residue a drain cannot deliver is accounted differently per path, never as
 `report_drops`/`capture_drops`. **Counted residue:** a sink failure drops and
 counts every remaining queued record exactly once in the shared `dropped` tally
-([src/log.rs](src/log.rs):2094-2102), and a startup-termination exit
+([src/log/sink.rs](src/log/sink.rs):145-153, per-record via [src/log/queue.rs](src/log/queue.rs):176-181), and a startup-termination exit
 (`Exit75`/`Terminated`) additionally strands whatever its bounded startup drains
 did not deliver, each counted once in the same tally
 ([src/runtime/storage.rs](src/runtime/storage.rs):1244-1253, `strand_queued`'s only call site).
 **Unobservable residue:** the serving exit
 ([src/runtime/owner.rs](src/runtime/owner.rs):30-40, :356-367) reads `dropped`, enqueues
 `shutdown_final` with that snapshot, performs exactly **one** bounded drain
-(16 ops / 64 KiB, [src/log.rs](src/log.rs):64-67), then `process::exit` — records
+(16 ops / 64 KiB, [src/log/mod.rs](src/log/mod.rs):66-67), then `process::exit` — records
 still queued at that moment are destroyed **uncounted**, and a stalled sink can
 make that single drain deliver nothing at all, so even `shutdown_final` itself
 is lost. Therefore any `dropped` value in `shutdown_final` is a **lower bound**,
@@ -378,7 +378,7 @@ never proof of a lossless exit window.
   itself. Alert instead on **silence where emission was expected**: a stream that
   had been delivering `kind=monitor` lines (or an open DNS incident per the
   incident-summary window) going quiet for > N s ⇒ the sink latched failed
-  (`src/log.rs:736-744,792-797`, nothing more is ever emitted until proxy restart) **or**
+  (`src/log/sink.rs:87-99,100-179`, nothing more is ever emitted until proxy restart) **or**
   the collector died. Distinguish by checking collector liveness out-of-band;
   a latched sink is cleared only by an operator-controlled proxy restart.
 - **A dropped record and a dropped counter can themselves be lost.** The summary
@@ -458,7 +458,7 @@ and `startup_final`/`shutdown_final` `dropped` all stay 0. The pipe buffer and
 the 256-slot in-memory queue absorb the burst. (b) **Loss branch (requires a
 sustained burst, not a few events):** `report_drops`/`capture_drops` move only
 if the in-memory queue is full **at report time** (a dropped `monitor_domain`
-/`monitor_capture` batch, `src/log.rs:1070-1098`), and generic `dropped` moves
+/`monitor_capture` batch, `src/log/mod.rs:945-980`), and generic `dropped` moves
 only when the queue overflows — both need enough un-drained records to exhaust
 the 256 × 2 KiB queue, i.e. well over a hundred retained records with the
 collector stopped. With the small burst a small drill generates, do not expect
@@ -493,7 +493,14 @@ surface (rp2e amendment); `src/dns/mod.rs` canonical DNS namespace (private
 `src/dns/transport/registration.rs` and sibling tests);
 `src/{startup_dns,cache,schedule,resolver}.rs` thin public same-item re-export
 facades over that namespace, not implementation core or boot;
-`src/{connect,client_hello,eligibility,log}.rs` parser/service core (real bodies);
+`src/{connect,client_hello}.rs` thin public same-item re-export facades over the
+private `src/inspection/` canonical tree (`src/inspection/{connect,client_hello}.rs`
+with `ja4` and sibling unit tests) — I09 compat roots completing the I07/I08
+facade set, not unlanded work;
+`src/eligibility.rs` parser/service core (real body); `src/names/` private
+kernel/value (`{hostname,rules}.rs` with sibling tests), consumed by
+config/connect; `src/log/mod.rs` public log root; `src/log/{queue,sink}.rs`
+private implementation children on the crate-private `LogStore`;
 `src/{alloc,fault,fuzz}.rs` F1/F2/F4 scaffolds;
 `scripts/` verification owners; `tests/` integration corpus.
 

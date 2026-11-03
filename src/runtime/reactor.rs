@@ -13,7 +13,7 @@
 //! bytes or allocating per event.
 //!
 //! Barrier A (client->upstream) stays closed until the complete `ClientHello`
-//! passes [`crate::client_hello::validate`] against the approved CONNECT
+//! passes [`crate::inspection::client_hello::validate`] against the approved CONNECT
 //! hostname; the gate opens in the same successful write that crosses the
 //! validated hello end. Barrier B (upstream->client) stays closed until the
 //! gate opens; any actual upstream data/EOF/reset observed pre-open
@@ -43,15 +43,15 @@ use mio::{Events, Interest, Poll, Registry, Token};
 
 use signal_hook::consts::SIGTERM;
 
-use crate::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
 use crate::config::{ALLOWLIST_MAX, FixedHostname};
-use crate::connect::{ConnectHeadReason, ConnectParser, Feed};
 use crate::dns::cache::{EntryState, Family, MAX_ADDRESSES};
 use crate::dns::transport::StartupDnsError;
 use crate::eligibility::NumericAddr;
 use crate::enforcement::action::{DomainOrdinal, FirstSlot, PerFqdnControl, Scope};
 use crate::enforcement::monitor::{CapturedDetail, CapturedFact, SlotCapture};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason, Violation};
+use crate::inspection::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
+use crate::inspection::connect::{ConnectHeadReason, ConnectParser, Feed};
 use crate::log::{ActivityKind, RejectReason};
 use crate::runtime::gate::{Activity, TunnelGate, UpstreamWrite, ValidatedHello};
 use crate::runtime::storage::ServeStorage;

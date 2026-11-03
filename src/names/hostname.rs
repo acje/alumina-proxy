@@ -1,4 +1,4 @@
-pub const FQDN_MAX_LEN: usize = crate::name_rules::FQDN_MAX_LEN;
+pub const FQDN_MAX_LEN: usize = crate::names::rules::FQDN_MAX_LEN;
 
 /// Fixed-capacity validated hostname (lowercase ASCII FQDN without a trailing
 /// dot), used on serving paths and protocol gates to avoid per-request or
@@ -62,11 +62,11 @@ impl FixedHostname {
             out.bytes[i] = b.to_ascii_lowercase();
         }
         for label in out.bytes[..out.len].split(|&b| b == b'.') {
-            if crate::name_rules::classify_label(label).is_err() {
+            if crate::names::rules::classify_label(label).is_err() {
                 return None;
             }
         }
-        if crate::name_rules::is_ip_literal_shape(&out.bytes[..out.len]) {
+        if crate::names::rules::is_ip_literal_shape(&out.bytes[..out.len]) {
             return None;
         }
         Some(out)

@@ -216,7 +216,7 @@ fingerprints differ. The change is a **fact** that selects the configured per-FQ
 with the example config's `ja4 = { action = "notify", scope = "connection" }` the
 change fires a **Notify** — never a Block. The client must be pinned
 to TLS 1.3 on both offers — the version-offer gate (`docs/alumina-proxy.md:47`;
-`validate_versions` at `src/client_hello.rs:652-665`) requires `supported_versions`
+`validate_versions` at `src/inspection/client_hello.rs:712-727`) requires `supported_versions`
 with `0x0304` as the only non-GREASE version, so a TLS 1.2-capable offer is
 `InvalidVersionOffer` → `any_illegal` → the configured `any_illegal` action
 (**Block** in the example config), not a JA4 change signal.

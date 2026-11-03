@@ -254,7 +254,7 @@ fn domain_block_action_and_later_refusal_are_distinct_channels() {
 
 #[test]
 fn two_saturated_counters_total_exactly_2x_u32_max_without_panic_or_wrap() {
-    use crate::connect::ConnectHeadReason;
+    use crate::inspection::connect::ConnectHeadReason;
     let mut m = Monitor::new();
     m.saturate_facts_any_illegal_for_test(AnyIllegalCause::HostNotAllowlisted);
     m.saturate_facts_any_illegal_for_test(AnyIllegalCause::ConnectParse(

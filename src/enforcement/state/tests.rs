@@ -1,9 +1,9 @@
 use super::*;
-use crate::client_hello::HelloRejectReason;
-use crate::connect::ConnectHeadReason;
 use crate::enforcement::action::{ActionKind, AnyIllegalControl, Control, PerFqdnControl};
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::enforcement::policy::{AnyIllegalCause, UnknownReason};
+use crate::inspection::client_hello::HelloRejectReason;
+use crate::inspection::connect::ConnectHeadReason;
 
 fn any_controls(kind: ActionKind, scope: Scope) -> [Control; AnyIllegalControl::COUNT] {
     [Control::new(kind, scope); AnyIllegalControl::COUNT]

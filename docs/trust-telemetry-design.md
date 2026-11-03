@@ -102,7 +102,7 @@ The four RCODE classes stay separate because the operator action differs (delega
 outage, ACL, upstream defect). The parse and size families group within class because the
 action is identical.
 
-`REASON_TOKEN_MAX` (`src/log.rs:83`) grows 13 → 20.
+`REASON_TOKEN_MAX` (`src/log/mod.rs:83`) grows 13 → 20.
 
 ## 4. Enum segmentation
 

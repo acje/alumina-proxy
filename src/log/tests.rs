@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::{Read, Seek};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 fn temp_file() -> File {
     static COUNTER: AtomicU64 = AtomicU64::new(0);

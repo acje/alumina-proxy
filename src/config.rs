@@ -15,7 +15,7 @@ use crate::enforcement::state::{AllScopeGate, GateSet};
 pub const CONFIG_DOC_LIMIT: usize = 16384;
 pub const ALLOWLIST_MIN: usize = 1;
 pub const ALLOWLIST_MAX: usize = 32;
-pub use crate::hostname::{FQDN_MAX_LEN, FixedHostname};
+pub use crate::names::hostname::{FQDN_MAX_LEN, FixedHostname};
 pub const MAX_RESOLVERS: usize = resolver::MAX_RESOLVERS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,7 +34,7 @@ impl Fqdn {
             .rsplit_once(':')
             .ok_or_else(|| "allowlist entry lacks a <fqdn>:<port> port".to_string())?;
         let name = validate_bare_name(host)?;
-        if crate::name_rules::is_ip_literal_shape(name.as_bytes()) {
+        if crate::names::rules::is_ip_literal_shape(name.as_bytes()) {
             return Err("allowlist entry is an IP literal; use a DNS hostname".into());
         }
         let port = parse_config_port(port)?;
@@ -59,8 +59,8 @@ impl Fqdn {
 /// Validates one DNS label against the shared lowercase-ASCII rules: non-empty,
 /// ≤63 bytes, no leading/trailing hyphen, only `[a-z0-9-]`.
 fn validate_label(label: &str) -> Result<(), String> {
-    use crate::name_rules::LabelFault::{BadHyphen, DisallowedByte, Empty, TooLong};
-    crate::name_rules::classify_label(label.as_bytes()).map_err(|fault| match fault {
+    use crate::names::rules::LabelFault::{BadHyphen, DisallowedByte, Empty, TooLong};
+    crate::names::rules::classify_label(label.as_bytes()).map_err(|fault| match fault {
         Empty => "empty label".into(),
         TooLong => "label exceeds 63 bytes".into(),
         BadHyphen => "label starts or ends with hyphen".into(),
@@ -91,7 +91,7 @@ fn validate_bare_name(name: &str) -> Result<String, String> {
 /// at least two labels (a one-label suffix like `com` cannot be a safe zone).
 fn parse_cname_bailiwick_suffix(input: &str) -> Result<String, String> {
     let name = validate_bare_name(input)?;
-    if crate::name_rules::is_ip_literal_shape(name.as_bytes()) {
+    if crate::names::rules::is_ip_literal_shape(name.as_bytes()) {
         return Err("declared suffix is an IP literal; use a DNS zone name".into());
     }
     if name.split('.').count() < 2 {

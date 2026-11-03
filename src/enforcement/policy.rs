@@ -2,8 +2,8 @@ use super::action::{
     ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstSlot, PerFqdnControl,
     Scope,
 };
-use crate::client_hello::HelloRejectReason;
-use crate::connect::ConnectHeadReason;
+use crate::inspection::client_hello::HelloRejectReason;
+use crate::inspection::connect::ConnectHeadReason;
 
 /// The finite, unattributable illegal-class discriminants. Each maps to
 /// exactly one [`AnyIllegalControl`] key; `Ech` is a separate control from

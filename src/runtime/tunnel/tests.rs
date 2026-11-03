@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::parse_config_document;
-use crate::connect::ConnectParser;
 use crate::dns::cache::{Generation, StagedPositive};
+use crate::inspection::connect::ConnectParser;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 const CONFIG: &str = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"z.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
@@ -118,8 +118,10 @@ fn name(cache: &Cache, ordinal: usize) -> NameIndex {
 fn parse_head(head: &[u8]) -> ConnectRequest {
     let mut parser = ConnectParser::new();
     match parser.feed(head).expect("head feed") {
-        crate::connect::Feed::Complete { .. } => parser.result().copied().expect("result"),
-        crate::connect::Feed::Incomplete => panic!("head incomplete"),
+        crate::inspection::connect::Feed::Complete { .. } => {
+            parser.result().copied().expect("result")
+        }
+        crate::inspection::connect::Feed::Incomplete => panic!("head incomplete"),
     }
     .expect("valid connect")
 }
@@ -745,8 +747,8 @@ fn chunked_connect_feed_still_authorizes() {
     let mut parser = ConnectParser::new();
     for chunk in head.chunks(3) {
         match parser.feed(chunk).expect("head feed") {
-            crate::connect::Feed::Incomplete => {}
-            crate::connect::Feed::Complete { .. } => break,
+            crate::inspection::connect::Feed::Incomplete => {}
+            crate::inspection::connect::Feed::Complete { .. } => break,
         }
     }
     let req = parser.result().copied().expect("result").expect("valid");

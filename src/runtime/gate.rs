@@ -6,7 +6,7 @@
 //!
 //! Barrier A (client->upstream): no client bytes, including `ClientHello`, are
 //! forwarded before complete validation with exactly-one SNI normalized-equal
-//! to the approved CONNECT hostname, no ECH, TLS1.3 profile ([`crate::client_hello::validate`]
+//! to the approved CONNECT hostname, no ECH, TLS1.3 profile ([`crate::inspection::client_hello::validate`]
 //! supplies the verdict; the gate tracks the hello boundary in the stream).
 //! Barrier B (upstream->client): no upstream bytes are forwarded before the
 //! gate opens. A successful CONNECT response alone authorizes neither
@@ -24,7 +24,7 @@
 
 use std::fmt;
 
-use crate::client_hello::HelloAccepted;
+use crate::inspection::client_hello::HelloAccepted;
 
 /// How far a client->upstream write may currently go (barrier A), and what
 /// happened to the gate as a result.
@@ -114,7 +114,7 @@ pub struct TunnelGate {
 /// A capability record that the complete `ClientHello` validated against the
 /// approved hostname: the exclusive end offset H of the validated hello in the
 /// client stream. Mintable only with a [`HelloAccepted`] witness, which only
-/// [`crate::client_hello::validate`] can produce, so a gate can never be told
+/// [`crate::inspection::client_hello::validate`] can produce, so a gate can never be told
 /// a caller-invented hello boundary (xz3f N7). Test code uses the
 /// non-production [`ValidatedHello::test_new`] constructor.
 pub struct ValidatedHello {

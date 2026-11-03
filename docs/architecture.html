@@ -108,7 +108,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   source. Every architectural claim cites
   <code>src/*.rs</code>, <code>tests/*.rs</code>, or the governing specification
   (<code>docs/alumina-proxy.md</code>, SHA-256
-  <code>dc7171974b7485b399c65df9402a79d831686d173359d32cd5a752e3abd09674</code>).
+  <code>cabc4df84b94e7ba2d02133f13535a1e5ab7ee03c8867340c9eb16b3523697f0</code>).
   Values the code itself prints or asserts are recorded as measured. No review
   apparatus — findings, severities, proposals, or open questions — is carried here;
   the architecture is described as it is built.</p>
@@ -315,7 +315,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/dns/publication.rs:17-104</code>), named-re-exported as
   <code>dns::apply_outcome</code> (<code>src/dns/mod.rs:3</code>); the serving-surface
   inspector depends on the private-root <code>hostname</code> type
-  <code>FixedHostname</code> (<code>src/client_hello.rs:3</code>), which
+  <code>FixedHostname</code> (<code>src/inspection/client_hello.rs:3</code>), which
   <code>config</code> names-re-exports rather than owns
   (<code>src/config.rs:18</code>); and the gate’s two-barrier authority depends on
   the serving-surface <code>HelloAccepted</code> witness (<code>src/runtime/gate.rs:27</code>).
@@ -326,29 +326,36 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   and adapter homes that the public surface re-exports rather than owns:
   <code>enforcement</code> (<code>src/lib.rs:12</code>; a directory module whose
   <code>mod.rs</code> re-declares the policy/state/action/monitor submodules),
-  <code>hostname</code> (<code>src/lib.rs:17</code>, <code>src/hostname.rs</code>),
-  <code>incident_report</code> (<code>src/lib.rs:18</code>,
-  <code>src/incident_report.rs</code>), and <code>name_rules</code>
-  (<code>src/lib.rs:30-65</code>) — the 21 declared public modules are in
+  <code>incident_report</code> (<code>src/lib.rs:17</code>,
+  <code>src/incident_report.rs</code>), <code>inspection</code>
+  (<code>src/lib.rs:18</code>; the canonical CONNECT/ClientHello tree
+  <code>src/inspection/{connect,client_hello}.rs</code> with the private
+  <code>connect</code>/<code>client_hello</code> child directories for sibling
+  unit tests and the <code>ja4</code> fingerprint), and <code>names</code>
+  (<code>src/lib.rs:21</code>; <code>src/names/{hostname,rules}.rs</code>, the
+  canonical home of the legacy <code>hostname</code> and <code>name_rules</code>
+  kernels) — the 21 declared public modules are in
   addition to these four root-private ownings.</p>
   <p><code>hostname.rs</code> is the single owner of the untrusted-network
   hostname carrier: <code>FixedHostname</code> with private
   <code>bytes</code>/<code>len</code> storage, copy semantics, and the
   <code>normalize</code>-only constructor that lowercases, strips one trailing
-  dot, and applies the shared label rules (<code>src/hostname.rs:7-73</code>).
+  dot, and applies the shared label rules
+  (<code>src/names/hostname.rs:42-71</code>, rules at
+  <code>src/names/rules.rs:11-34</code>).
   The old public path still resolves: <code>config</code> names-re-exports the
   same item as <code>config::FixedHostname</code> (<code>src/config.rs:18</code>),
   so CONNECT and other consumers keep reading the allowlist type while
   <code>ClientHello</code> imports the canonical <code>hostname</code> carrier
-  with no configuration reference (<code>src/client_hello.rs:3</code>).</p>
-  <p><code>name_rules</code> (<code>src/lib.rs:30-65</code>) is the shared
+  with no configuration reference (<code>src/inspection/client_hello.rs:3</code>).</p>
+  <p><code>name_rules</code> (<code>src/names/rules.rs:1-34</code>) is the shared
   hostname-grammar byte kernel: the 253-byte full-name bound
-  (<code>FQDN_MAX_LEN</code>, <code>:31</code>), the 63-byte label bound
-  (<code>MAX_LABEL</code>, <code>:32</code>), a closed four-variant label
+  (<code>FQDN_MAX_LEN</code>, <code>src/names/rules.rs:1</code>), the 63-byte label
+  bound (<code>MAX_LABEL</code>, <code>:2</code>), a closed four-variant label
   classifier (<code>LabelFault</code>: <code>Empty</code>/<code>TooLong</code>/
-  <code>BadHyphen</code>/<code>DisallowedByte</code>, <code>:34-39</code>) behind the
-  crate-private <code>classify_label</code> (<code>:41-58</code>), and the
-  IP-literal-shape predicate <code>is_ip_literal_shape</code> (<code>:60-64</code>).
+  <code>BadHyphen</code>/<code>DisallowedByte</code>, <code>:4-9</code>) behind the
+  crate-private <code>classify_label</code> (<code>:11-28</code>), and the
+  IP-literal-shape predicate <code>is_ip_literal_shape</code> (<code>:30-34</code>).
   The DNS wire codec is a separate protocol scope, not unified with this policy:
   it applies its own independent 63-byte wire-label bound on query encoding
   (<code>write_qname</code>, <code>src/dns/wire.rs:364-398</code>) and on response-name
@@ -414,7 +421,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <rect x="20" y="202" width="800" height="78" rx="8" fill="#f4f8fc" stroke="#1a4d80" stroke-width="1.5"/>
       <text x="420" y="224" text-anchor="middle" font-size="14" font-weight="700">Serving surface</text>
       <text x="420" y="242" text-anchor="middle" font-size="12">runtime/reactor.rs — slot table, Stage machine, admit/refuse, run_once reactor turn</text>
-      <text x="420" y="258" text-anchor="middle" font-size="12">client_hello.rs — ChInspector + ClientHello validation + JA4 fingerprint</text>
+      <text x="420" y="258" text-anchor="middle" font-size="12">inspection/client_hello.rs — ChInspector + ClientHello validation + JA4 fingerprint</text>
       <rect x="40" y="232" width="170" height="26" rx="5" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
       <text x="125" y="249" text-anchor="middle" font-size="11">serving</text>
       <rect x="220" y="232" width="180" height="26" rx="5" fill="#fff" stroke="#1a4d80" stroke-width="1"/>
@@ -423,7 +430,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <rect x="20" y="300" width="800" height="78" rx="8" fill="#fdf4f4" stroke="#7c2d12" stroke-width="1.5"/>
       <text x="420" y="322" text-anchor="middle" font-size="14" font-weight="700">Validation and authorization</text>
       <text x="420" y="340" text-anchor="middle" font-size="12">runtime/gate.rs — two-barrier forwarding authority (pure state machine)</text>
-      <text x="420" y="356" text-anchor="middle" font-size="12">connect.rs — CONNECT head parser + bare-CR/LF rejection · eligibility.rs — destination policy</text>
+      <text x="420" y="356" text-anchor="middle" font-size="12">inspection/connect.rs — CONNECT head parser + bare-CR/LF rejection · eligibility.rs — destination policy</text>
       <rect x="40" y="330" width="140" height="26" rx="5" fill="#fff" stroke="#7c2d12" stroke-width="1"/>
       <text x="110" y="347" text-anchor="middle" font-size="11">gate</text>
       <rect x="190" y="330" width="140" height="26" rx="5" fill="#fff" stroke="#7c2d12" stroke-width="1"/>
@@ -433,10 +440,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 
       <rect x="20" y="398" width="800" height="92" rx="8" fill="#fbf7ec" stroke="#8a5a00" stroke-width="1.5"/>
       <text x="420" y="420" text-anchor="middle" font-size="14" font-weight="700">Enforcement, observability, DNS internals + shared kernels</text>
-      <text x="420" y="438" text-anchor="middle" font-size="12">enforcement/{policy,state,action,monitor}.rs · log.rs · incident_report.rs · dns/schedule.rs</text>
+      <text x="420" y="438" text-anchor="middle" font-size="12">enforcement/{policy,state,action,monitor}.rs · log/{mod,queue,sink,encoding}.rs · incident_report.rs · dns/schedule.rs</text>
       <text x="420" y="453" text-anchor="middle" font-size="12">dns/wire.rs · dns/resolver.rs · dns/transport.rs — DoT/plain transport</text>
-      <text x="420" y="468" text-anchor="middle" font-size="11.5" fill="#444">private child leafs: dns/outcome.rs (value carriers) · dns/publication.rs (outcome apply) · client_hello/ja4.rs (JA4) · log/encoding.rs (record serializers)</text>
-      <text x="420" y="483" text-anchor="middle" font-size="11.5" fill="#444">private root: hostname.rs (FixedHostname) — config/ClientHello read it via same-item re-export</text>
+      <text x="420" y="468" text-anchor="middle" font-size="11.5" fill="#444">private child leafs: dns/outcome.rs (value carriers) · dns/publication.rs (outcome apply) · inspection/client_hello/ja4.rs (JA4) · log/encoding.rs (record serializers)</text>
+      <text x="420" y="483" text-anchor="middle" font-size="11.5" fill="#444">private root: names/{hostname,rules}.rs (FixedHostname + grammar) — config/ClientHello read it via same-item re-export</text>
     </svg>
     <figcaption>Figure 2 — Component ownership. The binary and boot path feed the
     reactor core; the serving surface owns slots and inspection; validation and
@@ -444,8 +451,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     consume typed deviations and emit logs and incident reports. The private
     implementation leafs are crate-visible children of their owning modules —
     <code>dns/outcome.rs</code>, <code>dns/publication.rs</code>,
-    <code>client_hello/ja4.rs</code>, and <code>log/encoding.rs</code> — plus the
-    private root <code>hostname.rs</code>; each is re-exported as the old public
+    <code>inspection/client_hello/ja4.rs</code>, and <code>log/encoding.rs</code> — plus the
+    private root <code>names/{hostname,rules}.rs</code>; each is re-exported as the old public
     same item (<code>dns::apply_outcome</code>, <code>config::FixedHostname</code>,
     <code>client_hello::ja4_fingerprint</code>). DNS/DoT and the resolver sit
     below the reactor core and are driven through <code>StartupDns</code>.</figcaption>
@@ -486,8 +493,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>ChInspector</code> (2 × 64 KiB), ClientHello validation; JA4
         fingerprint retained per slot and computed by the private
         <code>client_hello/ja4.rs</code> child, re-exported unchanged.</td>
-        <td><code>src/client_hello.rs:6-22</code>, <code>:416-420</code>, <code>:886</code>;
-        <code>src/client_hello/ja4.rs:22-248</code></td></tr>
+        <td><code>src/inspection/client_hello.rs:6-22</code>, <code>:416-420</code>, <code>:886</code>;
+        <code>src/inspection/client_hello/ja4.rs:22-248</code></td></tr>
       <tr><th scope="row"><code>client_hello/ja4</code> (private child)</th>
         <td><code>Ja4Error</code> + <code>Display</code> +
         <code>ja4_fingerprint</code> and helpers over flat borrowed slices, with
@@ -495,11 +502,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         preserved; parent keeps <code>ClientHello</code>/<code>validate</code>/
         <code>HelloAccepted</code> minting, <code>is_grease</code>, and the
         profile constants.</td>
-        <td><code>src/client_hello/ja4.rs:22</code>, <code>:54</code>;
-        <code>src/client_hello.rs:7</code></td></tr>
+        <td><code>src/inspection/client_hello/ja4.rs:22</code>, <code>:54</code>;
+        <code>src/inspection/client_hello.rs:7</code></td></tr>
       <tr><th scope="row"><code>connect</code></th>
         <td>CONNECT head parser, 16-line bound, bare-CR/LF rejection, CRLFCRLF head delimiter.</td>
-        <td><code>src/connect.rs:13</code>, <code>:332-340</code>, <code>:896-907</code></td></tr>
+        <td><code>src/inspection/connect.rs:13</code>, <code>:183-187</code>, <code>:331-341</code></td></tr>
       <tr><th scope="row"><code>runtime/gate</code></th>
         <td>The two-barrier forwarding authority: pure state machine, <code>UpstreamWrite</code> verdicts, <code>Activity</code>, witness-minted <code>ValidatedHello</code>.</td>
         <td><code>src/runtime/gate.rs:1-43</code>, <code>:45-78</code>, <code>:114-142</code></td></tr>
@@ -535,16 +542,16 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/wire.rs:9-14</code>, <code>:919-1049</code></td></tr>
       <tr><th scope="row"><code>name_rules</code> (private)</th>
         <td>Hostname-grammar byte rules common to the three name adapters (config <code>Fqdn</code>, <code>FixedHostname</code>, resolver <code>Fqdn</code>): 253/63 bounds, four-variant label classifier, IP-literal-shape predicate; the DNS wire codec keeps its own label bound.</td>
-        <td><code>src/lib.rs:30-65</code>; <code>src/dns/wire.rs:364-398</code>, <code>:1064-1221</code></td></tr>
-      <tr><th scope="row"><code>hostname</code> (private root)</th>
+        <td><code>src/names/rules.rs:1-34</code>; <code>src/dns/wire.rs:364-398</code>, <code>:1064-1221</code></td></tr>
+      <tr><th scope="row"><code>hostname</code> (private child of <code>names</code>)</th>
         <td><code>FixedHostname</code> + <code>FQDN_MAX_LEN</code> alias: private
         <code>bytes</code>/<code>len</code>, the <code>normalize</code>-only
         constructor, copy storage unchanged. <code>config::FixedHostname</code>/
         <code>FQDN_MAX_LEN</code> are same-item named re-exports
         (<code>src/config.rs:18</code>); <code>ClientHello</code> imports the
         canonical carrier directly.</td>
-        <td><code>src/hostname.rs:1-73</code>; <code>src/config.rs:18</code>;
-        <code>src/client_hello.rs:3</code></td></tr>
+        <td><code>src/names/mod.rs:1-2</code>; <code>src/names/hostname.rs:1-77</code>; <code>src/config.rs:18</code>;
+        <code>src/inspection/client_hello.rs:3</code></td></tr>
       <tr><th scope="row"><code>dns/resolver</code></th>
         <td>DoT/plain classification: FQDN ⇒ port 853 + pin; bare IP ⇒ port 53; no silent plain fallback.</td>
         <td><code>src/dns/resolver.rs:202-208</code> (<code>Nameserver::port()</code>),
@@ -556,8 +563,19 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>Opaque <code>Registration(Mode)</code> transport-registration owner: Private against the DNS-private poll, or Shared at the serving owner's single poll <code>token</code> with the armed-interest cache; register/re-register/deregister policy branches live here, and during I/O-performing synchronization the armed cache is updated only after a successful registry call, while lifecycle invalidation clears it without a registry call where appropriate.</td>
         <td><code>src/dns/transport/registration.rs:18</code>, <code>:25</code>, <code>:61</code>, <code>:88</code>, <code>:115</code>, <code>:171</code>, <code>:194</code></td></tr>
       <tr><th scope="row"><code>log</code></th>
-        <td>256 × 2 KiB boot-owned ring; per-turn 16-op/64 KiB drain budget; counted drops; reserved-priority displacement (begun-front excluded); terminal sink latch. Record serializers live in the private <code>log/encoding.rs</code> child; the parent keeps the queue/sink/watermarks.</td>
-        <td><code>src/log.rs:53-67</code>, <code>:736</code>, <code>:1165-1237</code>, <code>:1208-1215</code>, <code>:1364-1380</code>, <code>:1382-1401</code>; <code>src/log/encoding.rs:11-963</code></td></tr>
+        <td>Public <code>log</code> root owning the fixed 256 × 2 KiB boot-owned ring, the per-turn
+        16-op / 64 KiB drain budget, counted drops, reserved-priority displacement (begun-front
+        excluded) and the terminal sink latch. <code>log/mod.rs</code> retains all models, state and
+        factories and composes every record; the private <code>queue</code> and <code>sink</code> are
+        inherent <code>impl LogStore</code> blocks on the same crate-private store, while
+        <code>encoding</code> supplies private borrowed-buffer serializers, with no
+        <code>impl LogStore</code> block and no owned <code>LogStore</code> state — queue owns enqueue/drop/watermark and
+        reserved-victim selection, sink owns readiness/stranding/drain/partial-cursor and the
+        hard-error latch — and
+        <code>LogStoreError</code> is the only externally-visible error.</td>
+        <td><code>src/log/mod.rs:53-67</code>, <code>src/log/sink.rs:32-47</code>, <code>:100-179</code>,
+        <code>src/log/queue.rs:159-175</code>, <code>:176-181</code>, <code>:186-200</code>;
+        <code>src/log/encoding.rs:11-963</code></td></tr>
       <tr><th scope="row"><code>incident_report</code></th>
         <td>Per-name windowed incident reporting (3600 s window), sticky snapshots, eligible-binding transition tracking.</td>
         <td><code>src/incident_report.rs:14-15</code>, <code>:149-160</code>, <code>:299-304</code></td></tr>
@@ -661,11 +679,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
 
   <h3>3.2 The CONNECT head parse</h3>
   <p>The head is bounded by <code>MAX_HEADER_LINES = 16</code>
-  (<code>src/connect.rs:13</code>; the “too many header lines” rejection at
+  (<code>src/inspection/connect.rs:13</code>; the “too many header lines” rejection at
   <code>:103</code>, <code>:289</code>) and ends at the first <code>CRLFCRLF</code>
   (<code>:185</code>). Two hardening details are architectural: a bare line feed
   (a <code>0x0a</code> not preceded by <code>0x0d</code>) and a bare carriage
-  return are both rejected rather than tolerated (<code>src/connect.rs:332-340</code>),
+  return are both rejected rather than tolerated (<code>src/inspection/connect.rs:332-340</code>),
   as required by the spec’s L3 bare-CR rejection. The result limits the parser to
   the head only — tunnel bytes after the delimiter are never treated as metadata.</p>
 
@@ -754,7 +772,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row"><code>BadRequest</code></th>
         <td><code>400 Bad Request</code>, content-length 0</td>
         <td>CONNECT head malformed, too many header lines, bare-CR/LF</td>
-        <td><code>src/runtime/reactor/policy.rs:16</code>; <code>src/connect.rs:103,289,332-340</code></td></tr>
+        <td><code>src/runtime/reactor/policy.rs:16</code>; <code>src/inspection/connect.rs:103,289,332-340</code></td></tr>
       <tr><th scope="row"><code>Forbidden</code></th>
         <td><code>403 Forbidden</code>, content-length 0</td>
         <td>Hostname not allowlisted (blocked-domain refusal)</td>
@@ -1722,7 +1740,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Log queue</th>
         <td>256 slots × 2 KiB</td>
         <td>524 288 (0.5 MiB)</td>
-        <td><code>src/inventory.rs:47-49</code>; <code>src/log.rs:53-54</code></td></tr>
+        <td><code>src/inventory.rs:47-49</code>; <code>src/log/mod.rs:53-54</code></td></tr>
       <tr><th scope="row"><strong>Printed lower bound</strong></th>
         <td>traffic + serving + dns named buffers</td>
         <td><strong>214 665 002 (≈ 204.7 MiB)</strong></td>
@@ -1770,7 +1788,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   and <code>scratch</code>, 128 KiB per slot — sized to
   <code>MAX_CLIENT_HELLO = 64 * 1024</code> to inspect a handshake capped at
   <code>MAX_HANDSHAKE_LEN = 16 * 1024</code>
-  (<code>src/client_hello.rs:6-21</code>, <code>:410-419</code>). Across 512 slots
+  (<code>src/inspection/client_hello.rs:6-21</code>, <code>:410-419</code>). Across 512 slots
   the two arrays’ retained capacity is 64 MiB of the 76.6 MiB serving workspace,
   ≈ 83%. That capacity is <em>retained capacity with distinct roles</em>, not
   reclaimable headroom: each 64 KiB buffer is 4× the 16 KiB message bound, and a
@@ -1971,11 +1989,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>8.1 The boot-owned log ring</h3>
   <p>Logging is a fixed 256-slot × 2 KiB ring (512 KiB) owned at boot
   (<code>QUEUE_SLOTS = 256</code>, <code>SLOT_BYTES = 2 * 1024</code>,
-  <code>src/log.rs:53-54</code>), retained as <code>LogStore</code> for process
-  lifetime (<code>src/log.rs:526-528</code>), encoded in place, and drained by a
+  <code>src/log/mod.rs:53-54</code>), retained as <code>LogStore</code> for process
+  lifetime (<code>src/log/mod.rs:530-544</code>, constructed at <code>:616-674</code>), encoded in place, and drained by a
   single nonblocking <code>write_vectored</code> under a per-turn budget of 16
   fragments / 64 KiB (<code>SINK_MAX_OPS = 16</code>, <code>SINK_MAX_BYTES = 64 * 1024</code>,
-  <code>src/log.rs:66-67</code>, <code>:1165-1237</code>). Three properties are
+  <code>src/log/mod.rs:66-67</code>, <code>src/log/sink.rs:100-179</code>). Three properties are
   architectural:</p>
   <p>Written bytes commit across one private boundary: <code>drain_sink</code>
   gathers the fragment set and passes <code>consume_gathered</code> only the
@@ -1983,17 +2001,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>self.front</code> and the saved <code>cursor.off</code> (or 0) once on
   entry, before any front advance or watermark callback, and reports a
   mid-record partial so the drain resumes at the exact residue — a zero-written
-  outcome is valid (<code>src/log.rs:1165</code>, <code>:1246-1260</code>).</p>
+  outcome is valid (<code>src/log/sink.rs:100-179</code>, <code>:180-194</code>).</p>
   <ol>
     <li><strong>The sink can never stall serving.</strong> fd 1 is made
     nonblocking once, after boot, by the binary only
-    (<code>prepare_stdout</code>, <code>src/log.rs:678</code>), and
+    (<code>prepare_stdout</code>, <code>src/log/sink.rs:16-31</code>), and
     <code>write_vectored</code> either progresses or latches a recoverable
     backpressure condition — <code>WouldBlock</code>, <code>Interrupted</code>, or
     a zero-progress write — keeping the retained cursor and the 100 ms retry
-    (<code>LOG_RETRY</code>, <code>src/log.rs:72</code>, <code>:1200-1214</code>).
+    (<code>LOG_RETRY</code>, <code>src/log/mod.rs:72</code>, clamp in
+    <code>src/log/sink.rs:100-179</code>).
     None of the three sets the persistent failed latch, so none can trigger the
-    sink-failure exit (<code>sink_has_failed</code>, <code>src/log.rs:796</code>).
+    sink-failure exit (<code>sink_has_failed</code>, <code>src/log/sink.rs:87-99</code>).
     <code>tests/stdout_stall.rs</code> and <code>tests/monitor_stdout.rs</code>
     witness the full-pipe case; the injected Interrupted and zero-progress cases
     are witnessed by
@@ -2001,20 +2020,20 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>logging_writev_zero_progress_keeps_cursor_and_stream_identical</code>
     (<code>src/log/tests.rs:2181-2207</code>).</li>
     <li><strong>Drops are always counted, never silent.</strong> Ring-full and
-    encode-failure both <code>drop_one</code> (<code>src/log.rs:1382</code>),
+    encode-failure both <code>drop_one</code> (<code>src/log/queue.rs:176-185</code>),
     a hard sink error drops the whole queue <em>through the same counter</em>
-    (<code>:1208-1215</code>), and exit paths strand-count the residue
-    (<code>strand_queued</code>, <code>src/log.rs:767</code>).</li>
+    (<code>src/log/sink.rs:100-179</code>), and exit paths strand-count the residue
+    (<code>strand_queued</code>, <code>src/log/sink.rs:61-73</code>).</li>
     <li><strong>Priority classes exist.</strong> A reserved record can displace
     the newest normal record on a full ring rather than being dropped
-    (<code>enqueue_reserved</code>, <code>src/log.rs:1322</code>) — the
+    (<code>enqueue_reserved</code>, <code>src/log/queue.rs:119-147</code>) — the
     mechanism that keeps shutdown/fatal evidence from being evicted by a monitor
     burst. The displacement victim is never a begun span: a front record with an
     in-progress sink cursor (<code>cursor.off &gt; 0</code>) finishes unchanged
     before it can be evicted, an unstarted (off 0) front stays eligible, and when
     every held record is reserved the newest reserved record is the
     bounded-not-lossless fallback — <code>displace_reserved</code>
-    (<code>src/log.rs:1364-1380</code>); the witnessed legal-input cases run
+    (<code>src/log/queue.rs:159-175</code>); the witnessed legal-input cases run
     through a scripted <code>Partial(NonZeroUsize)</code> sink in
     <code>src/log/tests.rs:2205-2294</code>.</li>
   </ol>
@@ -2022,17 +2041,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>8.2 The terminal sink state and its failure consequences</h3>
   <div class="callout amber" role="note">
     <p>Once the sink latches <code>failed</code>, <code>next_drain</code> returns
-    <code>None</code> forever (<code>src/log.rs:736</code>): a broken stdout
+    <code>None</code> forever (<code>src/log/sink.rs:32-47</code>): a broken stdout
     permanently ends observability. There is no second sink: boot diagnostics use
     stderr (<code>src/main.rs:65-80</code>, <code>:145-148</code>), but once the
     log store owns stdout there is no fallback channel
-    (<code>src/log.rs:678</code>). The latch is sticky state: no later
+    (<code>src/log/sink.rs:16-31</code>). The latch is sticky state: no later
     drain consumes or clears it, so a non-owner drain — the startup-window
     drains (<code>src/runtime/storage.rs:1247</code>, <code>src/runtime/reactor/startup.rs:166</code>,
     <code>src/dns/transport.rs:2616</code>, <code>:2812</code>) or the
     resolver-probe drain (<code>src/runtime/storage.rs:953</code>) — that latches the sink
     is still observed by the first serving owner turn
-    (<code>sink_has_failed</code>, <code>src/log.rs:796</code>). The
+    (<code>sink_has_failed</code>, <code>src/log/sink.rs:87-99</code>). The
     serving owner therefore exits <code>EX_IOERR</code> (74) at the owner-turn
     boundary: after the per-turn drain it reads that latch and exits in place
     unless shutdown has begun (<code>src/runtime/owner.rs:301-303</code>); a
@@ -2053,7 +2072,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   record, force-runs the monitor summary
   (<code>report_monitor_if_due(now, true)</code>), then performs exactly one
   bounded sink drain (<code>SINK_MAX_OPS</code> 16 / <code>SINK_MAX_BYTES</code>
-  64&nbsp;KiB, <code>src/log.rs:66-67</code>). Each caller samples the clock once
+  64&nbsp;KiB, <code>src/log/mod.rs:66-67</code>). Each caller samples the clock once
   and passes the grouped <code>(now, secs)</code> pair with an explicit
   <code>ShutdownStatus</code> — no new invariant type. The pre-attach owner
   (<code>Preallocated::emit_shutdown_and_drain</code>, <code>src/runtime/owner.rs:143-151</code>)
@@ -2118,7 +2137,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   operator’s log-loss signal for the terminal-sink latch of §8.2 — the one
   failure surface where log loss is counted and observability ends, so the
   process exits rather than continue externally unreportable
-  (<code>src/log.rs:736</code>, <code>:1208-1215</code>).</p>
+  (<code>src/log/sink.rs:32-47</code>, <code>:100-179</code>).</p>
 
   <table>
     <caption>Table 8 — Exit codes and HTTP degradation surfaces.</caption>
@@ -2146,7 +2165,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         has begun; recoverable backpressure (WouldBlock, Interrupted,
         zero-progress) never sets the latch and never exits</td>
         <td><code>src/runtime/owner.rs:28</code>, <code>:301-303</code>;
-        <code>src/log.rs:1200-1214</code>, <code>:796</code></td></tr>
+        <code>src/log/sink.rs:100-179</code>, <code>:87-99</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
         <td><code>src/main.rs:23</code>, <code>:103</code>; <code>src/runtime/storage.rs:100</code></td></tr>
@@ -2170,8 +2189,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         (unless shutdown has begun) — the exit is the operator’s log-loss
         signal, since the in-memory <code>dropped</code> counter cannot be
         emitted through the failed sink</td>
-        <td><code>src/log.rs:1208-1215</code>, <code>:796</code>,
-        <code>:736</code>; <code>src/runtime/owner.rs:301-303</code></td></tr>
+        <td><code>src/log/sink.rs:100-179</code>, <code>:87-99</code>,
+        <code>:32-47</code>; <code>src/runtime/owner.rs:301-303</code></td></tr>
     </tbody>
   </table>
 </section>
@@ -2250,24 +2269,24 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>The ClientHello surface is deliberately narrow. Validation enforces a TLS 1.3
   profile with no ECH: the record-layer legacy version must be the TLS 1.2
   compatibility value (<code>scan_available</code>,
-  <code>src/client_hello.rs:514-520</code>, <code>:610</code>) and the offered
+  <code>src/inspection/client_hello.rs:514-520</code>, <code>:610</code>) and the offered
   <code>supported_versions</code> must contain non-GREASE TLS 1.3 only
-  (<code>validate_versions</code>, <code>src/client_hello.rs:712-727</code>);
+  (<code>validate_versions</code>, <code>src/inspection/client_hello.rs:712-727</code>);
   an <code>encrypted_client_hello</code> extension is marked present at parse
   (<code>:677</code>) and rejected by <code>validate</code>
   (<code>:887-888</code>). Exactly one SNI <code>host_name</code> is required and
   it must normalize-equal the approved hostname, with non-<code>host_name</code>
   <code>server_name</code> entries rejected
-  (<code>parse_server_names</code>, <code>L8</code>, <code>src/client_hello.rs:775-821</code>;
+  (<code>parse_server_names</code>, <code>L8</code>, <code>src/inspection/client_hello.rs:775-821</code>;
   the count and equality checks in <code>validate</code> at
   <code>:889-899</code>), and a minimum initial TLS record payload
   (<code>L9</code>) rejects degenerate framing
-  (<code>src/client_hello.rs:526-530</code>). The inspector holds the
+  (<code>src/inspection/client_hello.rs:526-530</code>). The inspector holds the
   flattened message across feeds, copying each record payload exactly once
-  regardless of fragmentation (<code>src/client_hello.rs:491-560</code>). The JA4
+  regardless of fragmentation (<code>src/inspection/client_hello.rs:491-560</code>). The JA4
   fingerprint is computed by the private <code>client_hello/ja4.rs</code> child
-  (<code>ja4_fingerprint</code>, <code>src/client_hello/ja4.rs:54</code>,
-  re-exported unchanged at <code>src/client_hello.rs:7</code>) and retained
+  (<code>ja4_fingerprint</code>, <code>src/inspection/client_hello/ja4.rs:54</code>,
+  re-exported unchanged at <code>src/inspection/client_hello.rs:7</code>) and retained
   per slot (the <code>Option&lt;ClientHello&gt;</code>
   inside <code>ChInspector</code>) as the baseline for the <code>ja4</code> gate —
   a per-class gate whose <code>Block{All}</code> scope is legal and reachable,
@@ -2356,7 +2375,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code>,
         <code>:273-285</code>; <code>src/main.rs:34-40</code></td></tr>
       <tr><th scope="row">Inspector retained capacity</th>
-        <td><code>src/client_hello.rs:6-22</code>, <code>:416-420</code></td></tr>
+        <td><code>src/inspection/client_hello.rs:6-22</code>, <code>:416-420</code></td></tr>
       <tr><th scope="row">Trust-verification dependency seam</th>
         <td><code>Cargo.toml:208</code>, <code>:209-213</code>, <code>:214-219</code>;
         <code>src/dns/transport.rs:36</code>, <code>:728-729</code></td></tr>
@@ -2378,8 +2397,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/runtime/owner.rs:217-223</code>; <code>src/bin/parser_bench.rs:1-9</code>,
         <code>:45</code></td></tr>
       <tr><th scope="row">Terminal sink state / shutdown-finish emit protocol</th>
-        <td><code>src/log.rs:1208-1215</code>, <code>:796</code>,
-        <code>:736</code>, <code>:767</code>; <code>src/runtime/owner.rs:30-40</code>,
+        <td><code>src/log/sink.rs:100-179</code>, <code>:87-99</code>,
+        <code>:32-47</code>, <code>:61-73</code>; <code>src/runtime/owner.rs:30-40</code>,
         <code>:143-151</code>, <code>:377-381</code>; <code>src/runtime/owner/tests.rs:2809</code></td></tr>
       <tr><th scope="row">Single clock / mount_clock re-anchor</th>
         <td><code>src/runtime/storage.rs:254</code>; <code>src/runtime/tunnel.rs:97-105</code>;
@@ -2389,7 +2408,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Stage machine (10 variants vs 9-step path)</th>
         <td><code>src/runtime/reactor.rs:340-351</code></td></tr>
       <tr><th scope="row">CONNECT parse bounds &amp; bare-CR/LF</th>
-        <td><code>src/connect.rs:13</code>, <code>:103</code>, <code>:185</code>,
+        <td><code>src/inspection/connect.rs:13</code>, <code>:103</code>, <code>:185</code>,
         <code>:289</code>, <code>:332-340</code></td></tr>
       <tr><th scope="row">Admission / 503 / backoff</th>
         <td><code>src/runtime/reactor.rs:98</code>, <code>:201-202</code>,
@@ -2406,8 +2425,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Monitor facts (10 recorders)</th>
         <td><code>src/enforcement/monitor.rs:12-26</code>, <code>:178-290</code></td></tr>
       <tr><th scope="row">Log ring / drain / priority</th>
-        <td><code>src/log.rs:53-72</code>, <code>:526-528</code>,
-        <code>:736</code>, <code>:1165-1237</code>, <code>:1364-1380</code>, <code>:1382-1401</code>;
+        <td><code>src/log/mod.rs:53-72</code>, <code>:530-544</code>, <code>:616-674</code>,
+        <code>src/log/sink.rs:32-47</code>, <code>:100-179</code>, <code>src/log/queue.rs:159-175</code>, <code>:176-181</code>, <code>:186-200</code>;
         <code>src/log/encoding.rs:11-963</code></td></tr>
       <tr><th scope="row">Incident report</th>
         <td><code>src/incident_report.rs:14-15</code>, <code>:149-235</code>,
@@ -2422,26 +2441,26 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/mod.rs:3</code> (named re-export of the body)</td></tr>
       <tr><th scope="row">Neutral DNS outcome / verdict carriers</th>
         <td><code>src/dns/outcome.rs:1-99</code></td></tr>
-      <tr><th scope="row"><code>FixedHostname</code> private root (same-item config re-export)</th>
-        <td><code>src/hostname.rs:1-73</code>; <code>src/config.rs:18</code>; <code>src/client_hello.rs:3</code></td></tr>
+      <tr><th scope="row"><code>FixedHostname</code> private child of <code>names</code> (same-item config re-export)</th>
+        <td><code>src/names/mod.rs:1-2</code>; <code>src/names/hostname.rs:1-77</code>; <code>src/config.rs:18</code>; <code>src/inspection/client_hello.rs:3</code></td></tr>
       <tr><th scope="row">JA4 fingerprint child (same-item re-export)</th>
-        <td><code>src/client_hello/ja4.rs:22-248</code>; <code>src/client_hello.rs:7</code></td></tr>
+        <td><code>src/inspection/client_hello/ja4.rs:22-248</code>; <code>src/inspection/client_hello.rs:7</code></td></tr>
       <tr><th scope="row">Log record serializers child</th>
-        <td><code>src/log/encoding.rs:11-963</code>; parent queue/sink at <code>src/log.rs:528</code></td></tr>
+        <td><code>src/log/encoding.rs:11-963</code>; private <code>queue</code>/<code>sink</code> children run on the crate-private <code>LogStore</code> declared at <code>src/log/mod.rs:530-544</code>, constructed at <code>:616-674</code></td></tr>
       <tr><th scope="row">Reserved-ring displacement (begun-front protection)</th>
-        <td><code>src/log.rs:1364-1380</code>, <code>:1322</code>;
+        <td><code>src/log/queue.rs:159-175</code>, <code>:119-147</code>;
         <code>src/log/tests.rs:2205-2294</code> (scripted <code>Partial(NonZeroUsize)</code>)</td></tr>
       <tr><th scope="row">Unit-test placement: owner-colocated <code>cfg(test)</code> files</th>
         <td>Inline unit modules moved to their owning module's <code>tests.rs</code> —
-        <code>src/dns/wire/tests.rs</code>, <code>src/client_hello/tests.rs</code>,
+        <code>src/dns/wire/tests.rs</code>, <code>src/inspection/client_hello/tests.rs</code>,
         <code>src/log/tests.rs</code>, <code>src/runtime/reactor/tests.rs</code>,
         <code>src/runtime/owner/tests.rs</code>, <code>src/runtime/tunnel/tests.rs</code>,
         <code>src/dns/cache/tests.rs</code>, <code>src/dns/schedule/tests.rs</code>,
-        <code>src/connect/tests.rs</code>, <code>src/dns/resolver/tests.rs</code>,
+        <code>src/inspection/connect/tests.rs</code>, <code>src/dns/resolver/tests.rs</code>,
         <code>src/boot/tests.rs</code>, <code>src/enforcement/state/tests.rs</code> &amp; co.,
-        <code>src/config/_tests.rs</code> (three themed files),
+        <code>src/config/cname_bailiwick_config_tests.rs</code>, <code>src/config/enforcement_config_tests.rs</code>, <code>src/config/resolver_config_tests.rs</code>,
         <code>src/runtime/storage/tests.rs</code> + <code>startup_integration.rs</code>,
-        <code>src/hostname/tests.rs</code>, <code>src/dns/transport/dot_tests.rs</code></td></tr>
+        <code>src/names/hostname/tests.rs</code>, <code>src/dns/transport/dot_tests.rs</code></td></tr>
       <tr><th scope="row">Resolver classifier</th>
         <td><code>src/dns/resolver.rs:202-208</code>, <code>:305-340</code></td></tr>
       <tr><th scope="row">Startup DNS machine / deadlines / failover / failback /
@@ -2482,7 +2501,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>src/*.rs</code>, <code>tests/*.rs</code>, or the specification, and no
     claim is stated at a strength the reading cannot support.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
-    <code>dc7171974b7485b399c65df9402a79d831686d173359d32cd5a752e3abd09674</code>;
+    <code>cabc4df84b94e7ba2d02133f13535a1e5ab7ee03c8867340c9eb16b3523697f0</code>;
     referenced as the current canonical governing specification only.</li>
   </ul>
 </section>

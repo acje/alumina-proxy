@@ -1,11 +1,11 @@
 use std::fmt;
 use std::mem::size_of;
 
-use crate::client_hello::ChInspector;
 use crate::config::CONFIG_DOC_LIMIT;
-use crate::connect::ConnectParser;
 use crate::dns::transport::{QUERY_BUF_LEN, RECV_BUF_LEN};
 use crate::dns::wire::ResponseWorkspace;
+use crate::inspection::client_hello::ChInspector;
+use crate::inspection::connect::ConnectParser;
 
 pub const TUNNEL_SLOTS: usize = 512;
 pub const BUFFERS_PER_SLOT: usize = 2;
@@ -19,7 +19,7 @@ pub const CONFIG_DOC_BUFFER_BYTES: usize = CONFIG_DOC_LIMIT + 1;
 /// The retained per-slot serving workspace: the fixed [`ConnectParser`] head
 /// and the [`ChInspector`] retained once per tunnel slot for the process
 /// lifetime and reused across connections. The inspector stores its parsed
-/// [`crate::client_hello::ClientHello`] by value — including the fixed
+/// [`crate::inspection::client_hello::ClientHello`] by value — including the fixed
 /// cipher-suite, extension, ALPN, and signature-algorithm arrays that back the
 /// JA4 fingerprint — so `size_of` over the two retained types accounts for
 /// every retained parsing/inspection byte with no second hand-maintained
@@ -251,8 +251,8 @@ mod alloc_fault {
 #[cfg(test)]
 mod workspace_byte_constants {
     use super::*;
-    use crate::client_hello::{ChInspector, ClientHello};
-    use crate::connect::ConnectParser;
+    use crate::inspection::client_hello::{ChInspector, ClientHello};
+    use crate::inspection::connect::ConnectParser;
 
     #[test]
     fn slot_workspace_derives_from_retained_parser_and_inspector() {

@@ -668,7 +668,7 @@ impl Monitor {
                 generation: u64::MAX,
                 detail: CapturedDetail {
                     fact: CapturedFact::AnyIllegal(AnyIllegalCause::TlsProfile(
-                        crate::client_hello::HelloRejectReason::Profile,
+                        crate::inspection::client_hello::HelloRejectReason::Profile,
                     )),
                     effect: Effect::Block {
                         scope: crate::enforcement::action::Scope::Domain,

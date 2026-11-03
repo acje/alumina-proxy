@@ -18,7 +18,7 @@ pub const MAX_RESOLVERS: usize = 5;
 
 /// The maximum byte length of a validated resolver FQDN (RFC 1035 logical
 /// name, no trailing dot).
-pub const FQDN_MAX_LEN: usize = crate::name_rules::FQDN_MAX_LEN;
+pub const FQDN_MAX_LEN: usize = crate::names::rules::FQDN_MAX_LEN;
 
 /// A validated resolver FQDN (the `fqdn` in an `IP#fqdn` entry): lowercase
 /// ASCII DNS-name syntax (labels 1..=63 `[a-z0-9-]`, no leading/trailing
@@ -58,11 +58,11 @@ impl Fqdn {
             return Err(FqdnError::Invalid);
         }
         for label in value.split('.') {
-            if crate::name_rules::classify_label(label.as_bytes()).is_err() {
+            if crate::names::rules::classify_label(label.as_bytes()).is_err() {
                 return Err(FqdnError::Invalid);
             }
         }
-        if crate::name_rules::is_ip_literal_shape(value.as_bytes()) {
+        if crate::names::rules::is_ip_literal_shape(value.as_bytes()) {
             return Err(FqdnError::Invalid);
         }
         let mut bytes = [0u8; FQDN_MAX_LEN];

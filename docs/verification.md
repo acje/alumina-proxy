@@ -71,7 +71,7 @@ Verification is tiered; each tier backs a different claim:
     --check`, audit/deny — and an identity AFTER/compare. No Linux MID, no
     fixtures. Fails fast so a cheap-gate failure aborts before the ~90-min
     compile-dominated dispatch. The unsafe-surface gate confines the `unsafe`
-    keyword to the production surface (`src/alloc.rs`, `src/log.rs`,
+    keyword to the production surface (`src/alloc.rs`, `src/log/`,
     `tests/*`) plus `#[cfg(test)]` unit-test modules under `src/`
     (`src/*/tests.rs`, `src/*/dot_tests.rs` — test-only, never compiled into
     the production binary); production confinement is unchanged.
