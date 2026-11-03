@@ -46,7 +46,7 @@ use signal_hook::consts::SIGTERM;
 use crate::cache::{EntryState, Family, MAX_ADDRESSES};
 use crate::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
 use crate::config::{ALLOWLIST_MAX, FixedHostname};
-use crate::connect::{ConnectHeadReason, ConnectParser, ConnectRequest, Feed};
+use crate::connect::{ConnectHeadReason, ConnectParser, Feed};
 use crate::eligibility::NumericAddr;
 use crate::enforcement::action::{DomainOrdinal, FirstSlot, PerFqdnControl, Scope};
 use crate::enforcement::monitor::{CapturedDetail, CapturedFact, SlotCapture};
@@ -2323,9 +2323,9 @@ impl Serving {
 
     fn slot_ordinal(&self, index: usize) -> Option<DomainOrdinal> {
         let slot = &self.slots[index];
-        slot.approved
-            .as_ref()
-            .and_then(|host| self.storage.ordinal_for_pair(host, slot.approved_port))
+        slot.approved.as_ref()?;
+        let raw = slot.report_name?;
+        self.storage.enforcement().control().ordinal(raw)
     }
 
     fn any_illegal(&mut self, index: usize, cause: AnyIllegalCause) -> Effect {
@@ -2408,8 +2408,13 @@ impl Serving {
                 return Ok(());
             }
         };
-        let approved = *request.fixed_hostname();
-        if let Some(ordinal) = self.storage.ordinal_for_request(&request)
+        let resolved = self.storage.resolve_request(&request);
+        let approved = *resolved.request().fixed_hostname();
+        let approved_port = resolved.request().port();
+        let ordinal = resolved
+            .ordinal()
+            .and_then(|i| self.storage.enforcement().control().ordinal(i));
+        if let Some(ordinal) = ordinal
             && self.storage.enforcement().is_blocked(ordinal)
         {
             self.storage.enforcement_mut().note_domain_block(ordinal);
@@ -2417,7 +2422,7 @@ impl Serving {
             return Ok(());
         }
         let now = Instant::now();
-        let phase = self.storage.decide(slot, &request, now);
+        let phase = self.storage.decide(slot, &resolved, now);
         match phase {
             Err(_) | Ok(ConnectPhase::CandidatesExhausted) => {
                 self.refuse_with_hostname(index, Refusal::DialFailed, approved);
@@ -2441,15 +2446,13 @@ impl Serving {
                 family,
                 connect_deadline,
             }) => {
-                self.note_peer_freshness(&request, family, now, index);
+                let observed = ordinal.and_then(|_| resolved.peer_state(family, now));
+                self.note_peer_freshness(observed, ordinal, now, index);
                 {
                     let slot = &mut self.slots[index];
-                    slot.report_name = self
-                        .storage
-                        .ordinal_for_request(&request)
-                        .map(DomainOrdinal::get);
+                    slot.report_name = ordinal.map(DomainOrdinal::get);
                     slot.approved = Some(approved);
-                    slot.approved_port = request.port();
+                    slot.approved_port = approved_port;
                     slot.gate.on_authorized();
                     slot.stage = Stage::Dialing;
                 }
@@ -2461,33 +2464,29 @@ impl Serving {
         }
     }
 
-    /// Folds the admitted peer's cache freshness into the persistent
+    /// Folds the admitted peer's selected-entry freshness into the persistent
     /// "serving from a stale cache entry" monitor level bit (W6-H6b-F5): a
-    /// `Peer` admission on a `Stale` entry latches the bit, a `Fresh`
-    /// admission clears it. `Empty`/`Retired` are unreachable on a granted
-    /// `Peer` (usable-peer gates on `Fresh | Stale`) and are no-ops. A first
+    /// `Stale` observation latches the bit, a `Fresh` observation clears it.
+    /// `Empty`/`Retired` and `None` are unreachable on a granted `Peer`
+    /// (usable-peer gates on `Fresh | Stale`) and are no-ops. A first
     /// admission on a `Stale` entry also records a stale-binding admission in
     /// the name's incident report window (docs/alumina-proxy.md:80): retries
     /// (the slot already carries a `connect_family`) and relay activity are
-    /// not admissions.
+    /// not admissions. The state arrives from the bound-context observation
+    /// ([`crate::worker::ResolvedRequest::peer_state`]); this helper never
+    /// re-reads the cache, clock, or ordinal chain.
     fn note_peer_freshness(
         &mut self,
-        request: &ConnectRequest,
-        family: Family,
+        observed: Option<EntryState>,
+        ordinal: Option<DomainOrdinal>,
         now: Instant,
         index: usize,
     ) {
-        let Some(ordinal) = self.storage.ordinal_for_request(request) else {
+        let Some(ordinal) = ordinal else {
             return;
         };
-        let Some(name) = self.storage.cache().name_index(ordinal.get()) else {
-            return;
-        };
-        let Ok(entry) = self.storage.cache().entry(name, family) else {
-            return;
-        };
-        match entry.state(self.storage.cache_secs(now)) {
-            EntryState::Stale => {
+        match observed {
+            Some(EntryState::Stale) => {
                 self.storage.enforcement_mut().note_serving_stale();
                 if self.slots[index].connect_family.is_none() {
                     let secs = self.storage.cache_secs(now);
@@ -2496,8 +2495,8 @@ impl Serving {
                         .note_stale_admission(ordinal.get(), secs);
                 }
             }
-            EntryState::Fresh => self.storage.enforcement_mut().note_serving_fresh(),
-            EntryState::Empty | EntryState::Retired => {}
+            Some(EntryState::Fresh) => self.storage.enforcement_mut().note_serving_fresh(),
+            Some(EntryState::Empty | EntryState::Retired) | None => {}
         }
     }
 
@@ -2670,15 +2669,10 @@ impl Serving {
                     }
                     if activity == Activity::Data {
                         let violation = if validated {
-                            match approved {
-                                Some(host) => self
-                                    .storage
-                                    .ordinal_for_pair(&host, self.slots[index].approved_port)
-                                    .map_or(Violation::Unattributed, |ordinal| {
-                                        Violation::EarlyUpstreamData { ordinal }
-                                    }),
-                                None => Violation::Unattributed,
-                            }
+                            self.slot_ordinal(index)
+                                .map_or(Violation::Unattributed, |ordinal| {
+                                    Violation::EarlyUpstreamData { ordinal }
+                                })
                         } else {
                             Violation::EvidenceInsufficient
                         };
@@ -2795,13 +2789,7 @@ impl Serving {
             self.slots[index].ja4_pending = true;
             return;
         };
-        let Some(approved) = self.slots[index].approved else {
-            return;
-        };
-        let Some(ordinal) = self
-            .storage
-            .ordinal_for_pair(&approved, self.slots[index].approved_port)
-        else {
+        let Some(ordinal) = self.slot_ordinal(index) else {
             return;
         };
         let Some(ja4) = self.slots[index]

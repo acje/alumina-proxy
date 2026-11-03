@@ -1,8 +1,8 @@
-use super::{LogStore, ServeStorage, ServingMode, StartupDecision, StartupReport};
+use super::{LogStore, ServeStorage, ServingMode, StartupDecision, StartupError, StartupReport};
 use crate::cache::Family;
-use crate::config::{Config, parse_config_document};
+use crate::config::{Config, ConfigError, parse_config_document};
 use std::fmt::Write as _;
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -22,11 +22,8 @@ fn config_with(names: &str, allowance: u8, listen_port: u16) -> Config {
     parse_config_document(&doc).expect("valid test config")
 }
 
-fn ephemeral_port() -> u16 {
-    let probe = TcpListener::bind("127.0.0.1:0").expect("bind port probe");
-    let port = probe.local_addr().expect("probe address").port();
-    drop(probe);
-    port
+fn ephemeral_config(names: &str, allowance: u8) -> Config {
+    config_with(names, allowance, 9).with_kernel_assigned_test_listener()
 }
 
 fn read_query(sock: &mut TcpStream) -> Option<Vec<u8>> {
@@ -129,12 +126,7 @@ fn qname_contains(query: &[u8], label: &[u8]) -> bool {
 #[test]
 fn full_serve_opens_listener_early_before_the_window_elapses() {
     let window = Duration::from_secs(2);
-    let port = ephemeral_port();
-    let config = config_with(
-        "\"alpha.example.org:443\", \"beta.example.org:443\"",
-        0,
-        port,
-    );
+    let config = ephemeral_config("\"alpha.example.org:443\", \"beta.example.org:443\"", 0);
     let responder = DnsResponder::spawn(|q| build_positive(&q));
     let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
     let start = Instant::now();
@@ -145,26 +137,34 @@ fn full_serve_opens_listener_early_before_the_window_elapses() {
     assert_eq!(outcome.decision, StartupDecision::Serve(ServingMode::Full));
     assert_eq!(outcome.report.resolved_names, 2);
     let listener = outcome.listener.expect("listener bound for full serve");
+    let addr = listener.local_addr().expect("listener address");
     assert_eq!(
-        listener.local_addr().expect("listener address").port(),
-        port
+        addr.ip(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        "test listener must stay loopback"
+    );
+    assert_ne!(
+        addr.port(),
+        0,
+        "kernel-assigned listener must have a real port"
     );
     assert!(
         elapsed < window,
         "all-usable startup must return early, not wait the window"
     );
-    let conn = TcpStream::connect(("127.0.0.1", port));
+    let conn = TcpStream::connect(addr);
     assert!(conn.is_ok(), "bound listener must accept connections");
 }
 
 #[test]
 fn exit75_is_decided_only_at_the_actual_window_deadline() {
     let window = Duration::from_millis(300);
-    let port = ephemeral_port();
+    let guard = TcpListener::bind("127.0.0.1:0").expect("reserved listen guard");
+    let guard_port = guard.local_addr().expect("guard address").port();
     let config = config_with(
         "\"alpha.example.org:443\", \"beta.example.org:443\"",
         0,
-        port,
+        guard_port,
     );
     let responder = DnsResponder::spawn(|query| {
         if qname_contains(&query, b"\x04beta") {
@@ -182,28 +182,18 @@ fn exit75_is_decided_only_at_the_actual_window_deadline() {
     assert_eq!(outcome.decision, StartupDecision::Exit75 { unresolved: 1 });
     assert!(
         outcome.listener.is_none(),
-        "exit 75 must not bind a listener"
+        "exit 75 must not bind a listener even with its configured address occupied"
     );
     assert!(
         elapsed >= window,
         "unresolved startup must not be decided before the deadline (early snapshot)"
-    );
-    let conn = TcpStream::connect(("127.0.0.1", port));
-    assert!(
-        matches!(conn, Err(ref err) if err.kind() == ErrorKind::ConnectionRefused),
-        "exit 75 must leave the listen port unreachable"
     );
 }
 
 #[test]
 fn degraded_is_decided_only_at_the_actual_window_deadline() {
     let window = Duration::from_millis(300);
-    let port = ephemeral_port();
-    let config = config_with(
-        "\"alpha.example.org:443\", \"beta.example.org:443\"",
-        1,
-        port,
-    );
+    let config = ephemeral_config("\"alpha.example.org:443\", \"beta.example.org:443\"", 1);
     let responder = DnsResponder::spawn(|query| {
         if qname_contains(&query, b"\x04beta") {
             None
@@ -234,8 +224,7 @@ fn degraded_is_decided_only_at_the_actual_window_deadline() {
 #[test]
 fn failed_lookup_retries_within_the_window_and_recovers_to_full() {
     let window = Duration::from_secs(2);
-    let port = ephemeral_port();
-    let config = config_with("\"alpha.example.org:443\"", 0, port);
+    let config = ephemeral_config("\"alpha.example.org:443\"", 0);
     let mut queries = 0u32;
     let responder = DnsResponder::spawn(move |query| {
         queries += 1;
@@ -268,12 +257,7 @@ fn failed_lookup_retries_within_the_window_and_recovers_to_full() {
 #[test]
 fn retried_failures_and_never_attempted_sibling_report_truthful_not_attempted() {
     let window = Duration::from_millis(1600);
-    let port = ephemeral_port();
-    let config = config_with(
-        "\"alpha.example.org:443\", \"beta.example.org:443\"",
-        1,
-        port,
-    );
+    let config = ephemeral_config("\"alpha.example.org:443\", \"beta.example.org:443\"", 1);
     let responder = DnsResponder::spawn(|query| {
         if qname_contains(&query, b"\x04beta") {
             None
@@ -302,12 +286,7 @@ fn retried_failures_and_never_attempted_sibling_report_truthful_not_attempted() 
 #[test]
 fn resolved_names_family_schedule_survives_for_serving_refresh() {
     let window = Duration::from_millis(1600);
-    let port = ephemeral_port();
-    let config = config_with(
-        "\"alpha.example.org:443\", \"beta.example.org:443\"",
-        1,
-        port,
-    );
+    let config = ephemeral_config("\"alpha.example.org:443\", \"beta.example.org:443\"", 1);
     let responder = DnsResponder::spawn(|query| {
         if qname_contains(&query, b"\x04beta") {
             None
@@ -331,12 +310,7 @@ fn resolved_names_family_schedule_survives_for_serving_refresh() {
 #[test]
 fn resolved_name_sibling_stays_selectable_after_startup_for_serving() {
     let window = Duration::from_millis(1600);
-    let port = ephemeral_port();
-    let config = config_with(
-        "\"alpha.example.org:443\", \"beta.example.org:443\"",
-        1,
-        port,
-    );
+    let config = ephemeral_config("\"alpha.example.org:443\", \"beta.example.org:443\"", 1);
     let responder = DnsResponder::spawn(|query| {
         if qname_contains(&query, b"\x04beta") {
             None
@@ -361,6 +335,75 @@ fn resolved_name_sibling_stays_selectable_after_startup_for_serving() {
         .expect("alpha AAAA must not be stuck in-flight after the window");
     assert_eq!(selected.name(), 0);
     assert_eq!(selected.family(), Family::Aaaa);
+}
+
+#[test]
+fn kernel_assigned_test_listener_avoids_the_released_port_rebind_race() {
+    let window = Duration::from_millis(1600);
+    let contender = TcpListener::bind("127.0.0.1:0").expect("held listener");
+    let held_port = contender.local_addr().expect("held address").port();
+    let config =
+        config_with("\"alpha.example.org:443\"", 0, held_port).with_kernel_assigned_test_listener();
+    let responder = DnsResponder::spawn(|query| build_positive(&query));
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let outcome = storage
+        .run_startup_within(responder.addr, NOW0, window)
+        .expect("startup");
+    let listener = outcome.listener.expect("listener bound");
+    let addr = listener.local_addr().expect("listener address");
+    assert_eq!(
+        addr.ip(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        "test listener must stay loopback"
+    );
+    assert_ne!(
+        addr.port(),
+        0,
+        "kernel-assigned listener must have a real port"
+    );
+    assert_ne!(
+        addr.port(),
+        held_port,
+        "listener must not reuse the still-held contender port"
+    );
+    assert_eq!(outcome.decision, StartupDecision::Serve(ServingMode::Full));
+    let conn = TcpStream::connect(addr);
+    assert!(
+        conn.is_ok(),
+        "kernel-assigned listener must accept connections"
+    );
+    drop(contender);
+}
+
+#[test]
+fn normally_configured_occupied_listen_addr_is_a_bind_error_after_ready() {
+    let window = Duration::from_millis(1600);
+    let guard = TcpListener::bind("127.0.0.1:0").expect("occupied-address guard");
+    let guard_port = guard.local_addr().expect("guard address").port();
+    let config = config_with("\"alpha.example.org:443\"", 0, guard_port);
+    let responder = DnsResponder::spawn(|query| build_positive(&query));
+    let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let Err(err) = storage.run_startup_within(responder.addr, NOW0, window) else {
+        panic!("expected a bind error for an occupied configured listen address")
+    };
+    match err {
+        StartupError::Listener { kind, detail } => {
+            assert_eq!(kind, io::ErrorKind::AddrInUse);
+            assert_eq!(detail, "connect listener bind");
+        }
+        other => panic!("unexpected startup error: {other:?}"),
+    }
+    let zero_parse = parse_config_document(
+        "listen = \"127.0.0.1:0\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
+    );
+    parse_config_document(
+        "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
+    )
+    .expect("the identical document at a legal port must stay valid");
+    match zero_parse {
+        Err(ConfigError::InvalidListen { value }) => assert_eq!(value, "127.0.0.1:0"),
+        other => panic!("public parse of a zero listen port must yield InvalidListen: {other:?}"),
+    }
 }
 
 /// The widest legal allowlist: `ALLOWLIST_MAX` keyed FQDNs, each exactly

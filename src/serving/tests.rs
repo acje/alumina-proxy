@@ -362,21 +362,29 @@ fn hello_wire_no_sni() -> Vec<u8> {
 
 fn drive_hello(serving: &mut Serving, wire: &[u8], approved: &str) {
     let index = 0;
-    let ws = &mut serving.slots[index];
-    ws.buf_base = 0;
-    ws.buf_len = wire.len();
-    ws.buf[..wire.len()].copy_from_slice(wire);
-    ws.parse_rel = 0;
-    ws.insp_rel = 0;
-    ws.head_len = 0;
-    ws.hello_consumed = 0;
-    ws.fwd = 0;
-    ws.approved = FixedHostname::normalize(approved.as_bytes());
-    ws.stage = Stage::ValidatingHello;
-    ws.gate.on_connect_head(0);
-    ws.gate.on_authorized();
-    ws.gate.on_upstream_connected();
-    ws.gate.on_response_ok();
+    let approved = FixedHostname::normalize(approved.as_bytes()).expect("approved hostname");
+    {
+        let ws = &mut serving.slots[index];
+        ws.buf_base = 0;
+        ws.buf_len = wire.len();
+        ws.buf[..wire.len()].copy_from_slice(wire);
+        ws.parse_rel = 0;
+        ws.insp_rel = 0;
+        ws.head_len = 0;
+        ws.hello_consumed = 0;
+        ws.fwd = 0;
+        ws.approved = Some(approved);
+        ws.stage = Stage::ValidatingHello;
+        ws.gate.on_connect_head(0);
+        ws.gate.on_authorized();
+        ws.gate.on_upstream_connected();
+        ws.gate.on_response_ok();
+    }
+    let committed = serving
+        .storage()
+        .ordinal_for_pair(&approved, serving.slots[index].approved_port)
+        .map(crate::enforcement::action::DomainOrdinal::get);
+    serving.slots[index].report_name = committed;
     serving.buffer_and_validate(index, &[]);
 }
 
@@ -3779,15 +3787,22 @@ fn read_direction_held_peer_drains_across_budget_splits_without_new_edges() {
     });
 }
 
-#[test]
-fn client_read_visit_shares_combined_read_write_budget() {
-    let port = ephemeral_port();
+#[expect(
+    clippy::too_many_lines,
+    reason = "deterministic budget-visit fixture; staged relay setup is long by design"
+)]
+fn run_budget_visit_fixture(
+    port: u16,
+    first_n: usize,
+    peek_target: usize,
+    assert_first_visit: impl FnOnce(&mut Serving, usize) + Send + 'static,
+) {
     with_serving_stack(port, move |serving| {
         let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
         let sink_addr = sink.local_addr().expect("sink addr");
         let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
         let mut sink_stream = sink.accept().expect("accept sink side").0;
-        let _ = sink_stream.set_nonblocking(true);
+        sink_stream.set_nonblocking(true).expect("sink nonblocking");
 
         let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
         let peer_addr = peer_l.local_addr().expect("peer addr");
@@ -3824,24 +3839,39 @@ fn client_read_visit_shares_combined_read_write_budget() {
         });
 
         let payload = test_offset_pattern(96 * 1024, 10);
-        peer_stream.write_all(&payload).expect("write burst");
-
         let token = client_token(serving.slots[index].slot_gen, index);
+        assert!(
+            first_n <= payload.len(),
+            "pre-visit slice must fit the payload"
+        );
+        peer_stream
+            .write_all(&payload[..first_n])
+            .expect("pre-visit burst");
+
+        let mut peekbuf = vec![0u8; 32 * 1024];
         let avail_start = Instant::now();
-        while serving.slots[index]
-            .client
-            .as_ref()
-            .expect("client present")
-            .peek(&mut [0u8; 1])
-            .is_err()
-        {
+        loop {
+            let queued = match serving.slots[index]
+                .client
+                .as_ref()
+                .expect("client present")
+                .peek(&mut peekbuf)
+            {
+                Ok(n) => n,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => 0,
+                Err(e) => panic!("client peek failed: {e}"),
+            };
+            if queued >= peek_target {
+                break;
+            }
             assert!(
                 avail_start.elapsed() < Duration::from_secs(2),
-                "the client burst never became readable"
+                "the client burst never queued {peek_target} bytes before the visit (peek showed {queued})"
             );
             std::thread::yield_now();
         }
 
+        let arms_before = serving.reschedule_client_arms;
         serving
             .dispatch_readiness(
                 token,
@@ -3851,11 +3881,12 @@ fn client_read_visit_shares_combined_read_write_budget() {
                 },
             )
             .expect("one client-readable visit");
+        let armed = serving.reschedule_client_arms.saturating_sub(arms_before);
+        assert_first_visit(serving, index);
 
-        assert!(
-            serving.visit.exhausted(),
-            "a large read+write burst must exhaust the complete-visit budget in one visit"
-        );
+        peer_stream
+            .write_all(&payload[first_n..])
+            .expect("post-visit burst");
 
         let start = Instant::now();
         while received.lock().unwrap().len() < payload.len() {
@@ -3874,14 +3905,78 @@ fn client_read_visit_shares_combined_read_write_budget() {
                 .expect("resume client visit");
             std::thread::sleep(Duration::from_millis(1));
         }
+        let got = received.lock().unwrap();
+        assert_eq!(
+            got.len(),
+            payload.len(),
+            "relayed length must match the payload"
+        );
+        assert_eq!(
+            &got[..],
+            &payload[..],
+            "relayed bytes must match the offset pattern byte-for-byte"
+        );
+        assert!(
+            armed > 0,
+            "the first visit must have re-armed its owner for unfinished work"
+        );
+
         drop(peer_stream);
         serving.close_slot(index);
         sink_reader.join().expect("sink reader");
-        let got = received.lock().unwrap().len();
-        assert_eq!(
-            got,
-            payload.len(),
-            "bytes relayed across budget-split visits must arrive intact and once"
+    });
+}
+
+#[test]
+fn client_read_visit_shares_combined_read_write_budget() {
+    run_budget_visit_fixture(ephemeral_port(), 96 * 1024, 32 * 1024, |serving, _index| {
+        match serving.visit {
+            VisitState::Live { ops, bytes, .. } => {
+                assert!(
+                    ops <= 16 && bytes <= 65536,
+                    "shared combined budget exceeded the independent norm: {ops} ops / {bytes} bytes"
+                );
+                assert!(
+                    (2..=16).contains(&ops),
+                    "a controlled full-window visit must stay within {ops} combined ops"
+                );
+                assert_eq!(
+                    bytes, 65536,
+                    "a controlled full-window read+flush must use the full shared 64 KiB budget"
+                );
+            }
+            VisitState::Idle => panic!("a client-readable visit must open a live visit"),
+        }
+        assert!(
+            serving.visit.exhausted(),
+            "a large read+write burst must exhaust the complete-visit budget in one visit"
+        );
+    });
+}
+
+#[test]
+fn partial_client_window_yields_legal_visit_residual_and_reschedules() {
+    run_budget_visit_fixture(ephemeral_port(), 32664, 32664, |serving, _index| {
+        match serving.visit {
+            VisitState::Live { ops, bytes, .. } => {
+                assert!(
+                    ops <= 16 && bytes <= 65536,
+                    "shared combined budget exceeded the independent norm: {ops} ops / {bytes} bytes"
+                );
+                assert!(
+                    (2..=16).contains(&ops),
+                    "a legal partial visit must stay within {ops} combined ops"
+                );
+                assert_eq!(
+                    bytes, 65328,
+                    "a 32,664 read + 32,664 flush must leave the exact 65,328 shared-budget ledger"
+                );
+            }
+            VisitState::Idle => panic!("a client-readable visit must open a live visit"),
+        }
+        assert!(
+            !serving.visit.exhausted(),
+            "a 65,328-byte partial ledger is a legal residual below the combined budget"
         );
     });
 }
@@ -5097,6 +5192,14 @@ fn fabric_validated_early_data_at(serving: &mut Serving, index: usize, test_data
         ws.stage = Stage::Dialing;
         ws.upstream = Some(up);
     }
+    let committed = serving
+        .storage()
+        .ordinal_for_pair(
+            &FixedHostname::normalize(b"sub.example.org").expect("approved hostname"),
+            serving.slots[index].approved_port,
+        )
+        .map(crate::enforcement::action::DomainOrdinal::get);
+    serving.slots[index].report_name = committed;
     serving.register_upstream(index).expect("register upstream");
     if let Some(n) = test_data {
         serving.slots[index].test_reads = Vec::new();
@@ -5496,6 +5599,144 @@ fn early_data_on_unconfigured_pair_folds_unattributed() {
             !serving.storage().enforcement().is_blocked(first)
                 && !serving.storage().enforcement().is_blocked(second),
             "an unconfigured pair must not block any configured ordinal"
+        );
+    });
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "combined two-phase owner-truth serving precedence: real ja4-overflow Domain latch + exhausted-ledger blocked CONNECT"
+)]
+fn blocked_pair_forbids_before_exhausted_ledger_through_real_decision() {
+    use crate::cache::Family;
+    use crate::connect::Feed;
+    let port = ephemeral_port();
+    let doc = format!(
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\n"
+    );
+    let cfg = crate::config::parse_config_document(&doc).expect("valid two-port ja4-block config");
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let wire_a = hello_wire(b"a.example", false);
+        let wire_b = hello_wire_ext(
+            b"a.example",
+            false,
+            &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+        );
+
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_a, "a.example");
+        let host = FixedHostname::normalize(b"a.example").expect("normalize");
+        let blocked = serving
+            .storage()
+            .ordinal_for_pair(&host, 443)
+            .expect("443 ordinal");
+        let sibling = serving
+            .storage()
+            .ordinal_for_pair(&host, 8443)
+            .expect("8443 ordinal");
+        assert!(
+            !serving.storage().enforcement().is_blocked(blocked),
+            "a first-seen seeding must not latch the blocked bit"
+        );
+
+        for i in 0..MAX_ADDRESSES - 1 {
+            let mut synthetic = [b'x'; 36];
+            synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
+            assert_eq!(
+                serving.ja4_baseline.record(blocked, synthetic),
+                BaselineOutcome::FirstSeen,
+                "each fresh synthetic JA4 seeds the exact pair's set"
+            );
+        }
+
+        serving.slots[0].reset();
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, &wire_b, "a.example");
+        assert!(
+            serving.storage().enforcement().is_blocked(blocked),
+            "the Domain-scope ja4 decision must latch the exact 443 pair blocked"
+        );
+        assert!(
+            !serving.storage().enforcement().is_blocked(sibling),
+            "the sibling 8443 pair must stay unblocked"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .actions_domain_block(blocked),
+            1,
+            "the Domain-scope ja4 decision counts one domain block"
+        );
+
+        let mut client = connect(port);
+        pump(serving, 20);
+        let index = serving
+            .slots
+            .iter()
+            .position(|slot| slot.handle.is_some() && slot.stage == Stage::ReadingConnect)
+            .expect("an in-setup slot reading the blocked CONNECT head");
+        match serving.slots[index]
+            .parser
+            .feed(b"CONNECT a.example:443 HTTP/1.1\r\n\r\n")
+            .expect("blocked-pair head feed")
+        {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("the full head must parse to completion"),
+        }
+        let handle = serving.slots[index].handle.take().expect("in-setup handle");
+        for _ in 0..crate::worker::MAX_UPSTREAM_ATTEMPTS {
+            serving
+                .storage_mut()
+                .record_attempt(&handle, Family::A)
+                .expect("ledger record against the granted slot");
+        }
+        let request = serving.slots[index]
+            .parser
+            .result()
+            .copied()
+            .expect("parsed request")
+            .expect("valid request");
+        let resolved = serving.storage().resolve_request(&request);
+        assert_eq!(
+            serving
+                .storage()
+                .decide(&handle, &resolved, Instant::now())
+                .expect("decision on the exhausted ledger"),
+            ConnectPhase::CandidatesExhausted,
+            "the exhausted ledger alone would refuse DialFailed/502"
+        );
+        serving.slots[index].handle = Some(handle);
+        serving.run_decision(index).expect("blocked-pair decision");
+        let body = read_until(&mut client, b"\r\n\r\n");
+        assert!(
+            body.starts_with(b"HTTP/1.1 403"),
+            "the blocked exact pair must Forbid (403) before the exhausted ledger 502, got {body:?}"
+        );
+        let record = serving
+            .storage()
+            .logs()
+            .last_record_bytes()
+            .expect("Forbidden reject record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=reject") && text.contains("reason=\"forbidden\""),
+            "the Forbidden refusal must emit a reject record: {text}"
+        );
+        assert!(
+            text.contains("hostname=\"a.example\""),
+            "the Forbidden reject record must carry the requested hostname: {text}"
+        );
+        assert_eq!(
+            serving
+                .storage()
+                .enforcement()
+                .counters()
+                .refusals_blocked_domain(blocked),
+            1,
+            "the once-minted block precheck must record the blocked-domain refusal"
         );
     });
 }
@@ -7757,42 +7998,170 @@ fn peer_admission_freshness_folds_serving_stale_level_bit() {
             .copied()
             .expect("parsed request")
             .expect("valid request");
+        let resolved = serving.storage().resolve_request(&request);
+        let ordinal = resolved
+            .ordinal()
+            .and_then(|i| serving.storage().enforcement().control().ordinal(i));
         assert!(
             !serving.storage().enforcement().monitor().serving_stale(),
             "a fresh monitor must not be serving stale"
         );
 
-        // A fresh family-A binding, folded immediately: the level bit stays clear.
         serving.storage_mut().publish_test_addr(
             0,
             NumericAddr::V4(Ipv4Addr::from([1, 1, 1, 1])),
             Family::A,
         );
         let receipt = serving.storage().cache_secs(Instant::now());
-        serving.note_peer_freshness(&request, Family::A, Instant::now(), 0);
+        let observed = serving
+            .storage()
+            .resolve_request(&request)
+            .peer_state(Family::A, Instant::now());
+        serving.note_peer_freshness(observed, ordinal, Instant::now(), 0);
         assert!(
             !serving.storage().enforcement().monitor().serving_stale(),
             "a fresh admission must not latch the stale-serving level bit"
         );
 
-        // Advance the clock past the 600 s freshness deadline (still inside the
-        // retirement grace): the same entry is now Stale and must latch.
         serving
             .storage_mut()
             .mount_clock(Instant::now(), receipt + 601);
-        serving.note_peer_freshness(&request, Family::A, Instant::now(), 0);
+        let observed = serving
+            .storage()
+            .resolve_request(&request)
+            .peer_state(Family::A, Instant::now());
+        serving.note_peer_freshness(observed, ordinal, Instant::now(), 0);
         assert!(
             serving.storage().enforcement().monitor().serving_stale(),
             "a stale admission must latch the persistent stale-serving level bit"
         );
 
-        // A later fresh admission clears the level bit again.
+        serving
+            .storage_mut()
+            .mount_clock(Instant::now(), receipt + 259_801);
+        let observed = serving
+            .storage()
+            .resolve_request(&request)
+            .peer_state(Family::A, Instant::now());
+        serving.note_peer_freshness(observed, ordinal, Instant::now(), 0);
+        assert!(
+            serving.storage().enforcement().monitor().serving_stale(),
+            "a retired admission must not clear the persistent stale-serving level bit"
+        );
+
         serving.storage_mut().mount_clock(Instant::now(), receipt);
-        serving.note_peer_freshness(&request, Family::A, Instant::now(), 0);
+        let observed = serving
+            .storage()
+            .resolve_request(&request)
+            .peer_state(Family::A, Instant::now());
+        serving.note_peer_freshness(observed, ordinal, Instant::now(), 0);
         assert!(
             !serving.storage().enforcement().monitor().serving_stale(),
             "a later fresh admission must clear the stale-serving level bit"
         );
+    });
+}
+
+#[test]
+fn admitted_stale_peer_folds_through_real_decision_and_retry_does_not_recount() {
+    use crate::cache::Family;
+    use crate::connect::Feed;
+    use crate::eligibility::NumericAddr;
+    use crate::startup_dns::FailureReason;
+    use std::net::Ipv4Addr;
+    let port = ephemeral_port();
+    let upstream_port = ephemeral_port();
+    let cfg = config_pair(port, upstream_port);
+    with_serving_stack_cfg(port, cfg, move |serving| {
+        let origin = Instant::now();
+        let client = connect(port);
+        pump(serving, 10);
+        let index = serving
+            .slots
+            .iter()
+            .position(|slot| slot.handle.is_some() && slot.stage == Stage::ReadingConnect)
+            .expect("an in-setup slot reading the CONNECT head");
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        match serving.slots[index]
+            .parser
+            .feed(head.as_bytes())
+            .expect("head feed")
+        {
+            Feed::Complete { .. } => {}
+            Feed::Incomplete => panic!("the full head must parse to completion"),
+        }
+        serving.storage_mut().mount_clock(origin, 1000);
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .expect("open A incident");
+        serving.storage_mut().report_incident_if_due(origin);
+        serving.storage_mut().publish_test_addr(
+            0,
+            NumericAddr::V4(Ipv4Addr::from([1, 1, 1, 1])),
+            Family::A,
+        );
+        serving.storage_mut().mount_clock(origin, 1601);
+        assert!(
+            !serving.storage().enforcement().monitor().serving_stale(),
+            "a fresh monitor must not be serving stale"
+        );
+        let request = serving.slots[index]
+            .parser
+            .result()
+            .copied()
+            .expect("parsed request")
+            .expect("valid request");
+        let handle = serving.slots[index].handle.take().expect("in-setup handle");
+        let resolved = serving.storage().resolve_request(&request);
+        let ordinal = resolved
+            .ordinal()
+            .and_then(|i| serving.storage().enforcement().control().ordinal(i));
+        let now = Instant::now();
+        let family = match serving
+            .storage()
+            .decide(&handle, &resolved, now)
+            .expect("real stale-grant decision")
+        {
+            ConnectPhase::Peer { family, .. } => family,
+            other => panic!("the stale binding must grant a peer, got {other:?}"),
+        };
+        let observed = resolved.peer_state(family, now);
+        serving.note_peer_freshness(observed, ordinal, now, index);
+        assert!(
+            serving.storage().enforcement().monitor().serving_stale(),
+            "a real stale Peer grant must latch the serving-stale level bit"
+        );
+        serving
+            .storage_mut()
+            .record_attempt(&handle, family)
+            .expect("record the failed attempt onto the ledger");
+        let fresh = serving.storage().resolve_request(&request);
+        assert!(
+            !matches!(
+                serving
+                    .storage()
+                    .decide(&handle, &fresh, now)
+                    .expect("re-decision after the failed attempt"),
+                ConnectPhase::Peer { .. }
+            ),
+            "the exhausted single binding must not regrant a peer on retry"
+        );
+        serving
+            .storage_mut()
+            .report_incident_if_due(origin + Duration::from_secs(3600));
+        let record = serving
+            .storage()
+            .logs()
+            .last_record_bytes()
+            .expect("incident summary record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=incident_summary") && text.contains("stale=1"),
+            "the summary must count the stale admission once per connection: {text}"
+        );
+        drop(client);
     });
 }
 
@@ -7880,12 +8249,21 @@ fn stale_admission_counted_once_per_connection_through_real_path() {
             .copied()
             .expect("parsed request")
             .expect("valid request");
-        // First admission on the stale entry: counted once.
-        serving.note_peer_freshness(&request, Family::A, origin, 0);
-        // A retry (the slot already carries a connect_family) is not a new
-        // admission and must not double-count.
+        let resolved = serving.storage().resolve_request(&request);
+        let ordinal = resolved
+            .ordinal()
+            .and_then(|i| serving.storage().enforcement().control().ordinal(i));
+        let observed = serving
+            .storage()
+            .resolve_request(&request)
+            .peer_state(Family::A, origin);
+        serving.note_peer_freshness(observed, ordinal, origin, 0);
         serving.slots[0].connect_family = Some(Family::A);
-        serving.note_peer_freshness(&request, Family::A, origin, 0);
+        let observed = serving
+            .storage()
+            .resolve_request(&request)
+            .peer_state(Family::A, origin);
+        serving.note_peer_freshness(observed, ordinal, origin, 0);
         // The boundary rotation emits the summary with stale=1.
         serving
             .storage_mut()

@@ -6,6 +6,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 const CONFIG: &str = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"z.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
 
+const ALLOWLIST_XY: &str = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"x.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"y.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
+
+const ALLOWLIST_AX: &str = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"x.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
+
 fn config() -> Config {
     parse_config_document(CONFIG).expect("valid config")
 }
@@ -135,8 +139,7 @@ fn forbidden_host_is_effect_nonreachable_even_with_usable_cache() {
     let req = auth_request("evil.example.net");
     let t0 = anchor();
     let phase = next_phase(
-        &req,
-        &view,
+        &view.resolve(&req),
         later(t0, 1),
         AttemptCounts::new(),
         None,
@@ -159,8 +162,7 @@ fn same_host_different_port_is_forbidden_even_with_usable_cache() {
     let req = parse_head(b"CONNECT sub.example.org:8443 HTTP/1.1\r\n\r\n");
     let t0 = anchor();
     let phase = next_phase(
-        &req,
-        &view,
+        &view.resolve(&req),
         later(t0, 1),
         AttemptCounts::new(),
         None,
@@ -186,7 +188,8 @@ fn allowlisted_authorizes_and_selects_ipv4_first_when_both_families_remain() {
     let t0 = anchor();
     let now = later(t0, 1);
     let setup = setup_at(t0);
-    let phase = next_phase(&req, &view, now, AttemptCounts::new(), None, setup).expect("decision");
+    let phase =
+        next_phase(&view.resolve(&req), now, AttemptCounts::new(), None, setup).expect("decision");
     assert_eq!(
         phase,
         ConnectPhase::Peer {
@@ -210,7 +213,8 @@ fn alternates_to_aaaa_after_a_first_attempt() {
     let t0 = anchor();
     let now = later(t0, 1);
     let setup = setup_at(t0);
-    let phase = next_phase(&req, &view, now, counts, Some(Family::A), setup).expect("decision");
+    let phase =
+        next_phase(&view.resolve(&req), now, counts, Some(Family::A), setup).expect("decision");
     assert_eq!(
         phase,
         ConnectPhase::Peer {
@@ -233,7 +237,7 @@ fn address_index_equals_earlier_attempts_in_family() {
     let t0 = anchor();
     let now = later(t0, 1);
     let setup = setup_at(t0);
-    let phase = next_phase(&req, &view, now, counts, None, setup).expect("decision");
+    let phase = next_phase(&view.resolve(&req), now, counts, None, setup).expect("decision");
     assert_eq!(
         phase,
         ConnectPhase::Peer {
@@ -255,7 +259,8 @@ fn single_family_remains_uses_it() {
     let t0 = anchor();
     let now = later(t0, 1);
     let setup = setup_at(t0);
-    let phase = next_phase(&req, &view, now, AttemptCounts::new(), None, setup).expect("decision");
+    let phase =
+        next_phase(&view.resolve(&req), now, AttemptCounts::new(), None, setup).expect("decision");
     assert_eq!(
         phase,
         ConnectPhase::Peer {
@@ -288,7 +293,8 @@ fn family_exhausted_at_current_address_count_uses_other_family() {
     let t0 = anchor();
     let now = later(t0, 1);
     let setup = setup_at(t0);
-    let phase = next_phase(&req, &view, now, counts, Some(Family::A), setup).expect("decision");
+    let phase =
+        next_phase(&view.resolve(&req), now, counts, Some(Family::A), setup).expect("decision");
     assert_eq!(
         phase,
         ConnectPhase::Peer {
@@ -309,8 +315,7 @@ fn setup_deadline_expiry_returns_deadline_exhausted() {
     let req = auth_request("sub.example.org");
     let t0 = anchor();
     let phase = next_phase(
-        &req,
-        &view,
+        &view.resolve(&req),
         later(t0, 10),
         AttemptCounts::new(),
         None,
@@ -331,7 +336,8 @@ fn expired_prior_connect_deadline_retries_while_setup_is_live() {
     let t0 = anchor();
     let now = later(t0, 9);
     let setup = setup_at(t0);
-    let phase = next_phase(&req, &view, now, AttemptCounts::new(), None, setup).expect("decision");
+    let phase =
+        next_phase(&view.resolve(&req), now, AttemptCounts::new(), None, setup).expect("decision");
     let ConnectPhase::Peer {
         addr,
         family,
@@ -359,8 +365,14 @@ fn attempt_budget_exhausted_returns_candidates_exhausted() {
         .record(Family::A)
         .record(Family::Aaaa);
     let t0 = anchor();
-    let phase =
-        next_phase(&req, &view, later(t0, 1), counts, None, setup_at(t0)).expect("decision");
+    let phase = next_phase(
+        &view.resolve(&req),
+        later(t0, 1),
+        counts,
+        None,
+        setup_at(t0),
+    )
+    .expect("decision");
     assert_eq!(phase, ConnectPhase::CandidatesExhausted);
 }
 
@@ -694,8 +706,7 @@ fn never_resolved_and_exhausted_attempts_are_distinct_502_verdicts() {
     let req = auth_request("sub.example.org");
     let t0 = anchor();
     let never_resolved = next_phase(
-        &req,
-        &view,
+        &view.resolve(&req),
         later(t0, 1),
         AttemptCounts::new(),
         None,
@@ -714,8 +725,14 @@ fn never_resolved_and_exhausted_attempts_are_distinct_502_verdicts() {
         .record(Family::Aaaa)
         .record(Family::A)
         .record(Family::Aaaa);
-    let exhausted =
-        next_phase(&req, &view, later(t0, 1), counts, None, setup_at(t0)).expect("decision");
+    let exhausted = next_phase(
+        &view.resolve(&req),
+        later(t0, 1),
+        counts,
+        None,
+        setup_at(t0),
+    )
+    .expect("decision");
     assert_eq!(exhausted, ConnectPhase::CandidatesExhausted);
 }
 
@@ -738,7 +755,8 @@ fn chunked_connect_feed_still_authorizes() {
     let t0 = anchor();
     let now = later(t0, 1);
     let setup = setup_at(t0);
-    let phase = next_phase(&req, &view, now, AttemptCounts::new(), None, setup).expect("decision");
+    let phase =
+        next_phase(&view.resolve(&req), now, AttemptCounts::new(), None, setup).expect("decision");
     assert_eq!(
         phase,
         ConnectPhase::Peer {
@@ -780,7 +798,7 @@ fn worker_decide_reads_the_slot_deadline_instead_of_a_free_setup() {
     let slot = worker.admit(t0).expect("admitted");
     let req = auth_request("sub.example.org");
     let phase = worker
-        .decide(&view, &slot, &req, later(t0, 1))
+        .decide(&slot, &view.resolve(&req), later(t0, 1))
         .expect("decision from the slot-bound deadline");
     assert!(
         matches!(
@@ -805,6 +823,108 @@ fn worker_decide_reads_the_slot_deadline_instead_of_a_free_setup() {
     );
     worker.release(slot);
     assert_eq!(worker.occupied(), 0);
+}
+
+#[test]
+fn unknown_pair_forbids_even_when_setup_expired_and_cache_usable() {
+    let mut cache = cache_with(2);
+    let n = name(&cache, 0);
+    publish(&mut cache, n, Family::A, &[pub_v4()], 100, 3600);
+    let cfg = config();
+    let view = view_of(&cfg, &cache);
+    let req = auth_request("evil.example.net");
+    let t0 = anchor();
+    let phase = next_phase(
+        &view.resolve(&req),
+        later(t0, 10),
+        AttemptCounts::new(),
+        None,
+        setup_at(t0),
+    )
+    .expect("decision");
+    assert_eq!(
+        phase,
+        ConnectPhase::Forbidden,
+        "a pair miss must Forbid before the expired setup deadline is consulted"
+    );
+}
+
+#[test]
+fn name_out_of_range_precedes_deadline_expiry_and_attempt_exhaust() {
+    let cache = cache_with(1);
+    let cfg = config();
+    let view = view_of(&cfg, &cache);
+    let req = auth_request("z.example.org");
+    let t0 = anchor();
+    let counts = AttemptCounts::new()
+        .record(Family::A)
+        .record(Family::Aaaa)
+        .record(Family::A)
+        .record(Family::Aaaa);
+    let result = next_phase(
+        &view.resolve(&req),
+        later(t0, 10),
+        counts,
+        None,
+        setup_at(t0),
+    );
+    assert_eq!(
+        result,
+        Err(crate::cache::CacheError::NameOutOfRange),
+        "a cache-name lookup miss precedes the expired deadline and the exhausted budget"
+    );
+}
+
+#[test]
+fn setup_deadline_expiry_precedes_attempt_budget_exhaust() {
+    let mut cache = cache_with(2);
+    let n = name(&cache, 0);
+    publish(&mut cache, n, Family::A, &[pub_v4()], 100, 3600);
+    let cfg = config();
+    let view = view_of(&cfg, &cache);
+    let req = auth_request("sub.example.org");
+    let t0 = anchor();
+    let counts = AttemptCounts::new()
+        .record(Family::A)
+        .record(Family::Aaaa)
+        .record(Family::A)
+        .record(Family::Aaaa);
+    let phase = next_phase(
+        &view.resolve(&req),
+        later(t0, 10),
+        counts,
+        None,
+        setup_at(t0),
+    )
+    .expect("decision");
+    assert_eq!(
+        phase,
+        ConnectPhase::DeadlineExhausted,
+        "setup-deadline expiry is decided before the attempt-budget exhaust is consulted"
+    );
+}
+
+#[test]
+fn invalid_slot_handle_stays_notinsetup_before_unknown_pair_is_consulted() {
+    let t0 = anchor();
+    let clock = WorkerClock::new(t0, DNS_EPOCH);
+    let cfg = config();
+    let mut cache = cache_with(2);
+    let n = name(&cache, 0);
+    publish(&mut cache, n, Family::A, &[pub_v4()], DNS_EPOCH, 3600);
+    let view = view_of_clocked(&cfg, &cache, clock);
+    let worker = Worker::boot(clock);
+    let mut other = Worker::boot(clock);
+    let slot = other.admit(t0).expect("admitted in the other worker");
+    let req = auth_request("evil.example.net");
+    let err = worker
+        .decide(&slot, &view.resolve(&req), later(t0, 1))
+        .expect_err("a foreign slot handle does not name a live setup in this worker");
+    assert_eq!(
+        err,
+        DecideError::NotInSetup,
+        "the invalid setup handle precedes the unknown-pair Forbidden decision"
+    );
 }
 
 #[test]
@@ -839,7 +959,7 @@ fn decide_reads_its_budget_from_the_slot_ledger_not_a_caller_arg() {
     let slot = worker.admit(t0).expect("admitted");
     let req = auth_request("sub.example.org");
     let phase = worker
-        .decide(&view, &slot, &req, later(t0, 1))
+        .decide(&slot, &view.resolve(&req), later(t0, 1))
         .expect("decision from the slot-bound budget");
     assert!(
         matches!(
@@ -854,7 +974,11 @@ fn decide_reads_its_budget_from_the_slot_ledger_not_a_caller_arg() {
     let mut seen = Vec::new();
     for i in 1..=MAX_UPSTREAM_ATTEMPTS {
         let phase = worker
-            .decide(&view, &slot, &req, later(t0, u64::try_from(i).unwrap()))
+            .decide(
+                &slot,
+                &view.resolve(&req),
+                later(t0, u64::try_from(i).unwrap()),
+            )
             .expect("decision within budget");
         let ConnectPhase::Peer { family, .. } = phase else {
             panic!("an in-budget decision must offer a peer, got {phase:?}");
@@ -870,7 +994,7 @@ fn decide_reads_its_budget_from_the_slot_ledger_not_a_caller_arg() {
         "the slot ledger must alternate to the family not used last time"
     );
     let phase = worker
-        .decide(&view, &slot, &req, later(t0, 5))
+        .decide(&slot, &view.resolve(&req), later(t0, 5))
         .expect("decision past the budget");
     assert_eq!(
         phase,
@@ -954,7 +1078,7 @@ fn serving_decision_path_does_not_allocate_or_deallocate() {
     let (outcome, counts) = run_phase(Phase::Serving, || {
         let mut counts = AttemptCounts::new();
         for _ in 0..=MAX_UPSTREAM_ATTEMPTS {
-            let _phase = next_phase(&req, &view, now, counts, None, setup);
+            let _phase = next_phase(&view.resolve(&req), now, counts, None, setup);
             counts = counts.record(Family::A);
         }
         counts.total()
@@ -980,5 +1104,55 @@ fn serving_decision_path_does_not_allocate_or_deallocate() {
     assert!(
         select_counts.all_zero(),
         "select_peer allocated: {select_counts:?}"
+    );
+}
+
+#[test]
+fn each_view_binds_the_same_request_to_its_own_config_position() {
+    let cfg_a = parse_config_document(ALLOWLIST_XY).expect("cfg_a");
+    let cfg_b = parse_config_document(ALLOWLIST_AX).expect("cfg_b");
+    let mut cache_a = cache_with(2);
+    let x_a = name(&cache_a, 0);
+    publish(&mut cache_a, x_a, Family::A, &[pub_v4()], 100, 3600);
+    let y_a = name(&cache_a, 1);
+    publish(&mut cache_a, y_a, Family::A, &[pub_v4_b()], 100, 3600);
+    let mut cache_b = cache_with(2);
+    let a_b = name(&cache_b, 0);
+    publish(&mut cache_b, a_b, Family::A, &[pub_v4_b()], 100, 3600);
+    let x_b = name(&cache_b, 1);
+    publish(&mut cache_b, x_b, Family::A, &[pub_v4()], 100, 3600);
+    let view_a = view_of(&cfg_a, &cache_a);
+    let view_b = view_of(&cfg_b, &cache_b);
+    let request = auth_request("x.example.org");
+    let t0 = anchor();
+    let now = later(t0, 1);
+    let expected = || ConnectPhase::Peer {
+        addr: pub_v4(),
+        family: Family::A,
+        connect_deadline: Deadline::connect_attempt(now, setup_at(t0)),
+    };
+    assert_eq!(view_a.resolve(&request).ordinal(), Some(0));
+    assert_eq!(
+        next_phase(
+            &view_a.resolve(&request),
+            now,
+            AttemptCounts::new(),
+            None,
+            setup_at(t0),
+        )
+        .expect("decision under cfg_a"),
+        expected()
+    );
+    assert_eq!(view_b.resolve(&request).ordinal(), Some(1));
+    assert_eq!(
+        next_phase(
+            &view_b.resolve(&request),
+            now,
+            AttemptCounts::new(),
+            None,
+            setup_at(t0),
+        )
+        .expect("decision under cfg_b"),
+        expected()
     );
 }

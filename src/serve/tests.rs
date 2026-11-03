@@ -285,7 +285,7 @@ fn work_view_is_bound_to_the_owning_storages_state() {
         .expect("valid connect request");
     let slot = storage.accept(t0).expect("admitted via the owned seam");
     let phase = storage
-        .decide(&slot, &req, now)
+        .decide(&slot, &storage.resolve_request(&req), now)
         .expect("decision via the owned seam");
     assert!(
         matches!(
@@ -350,7 +350,9 @@ fn storage_decide_reads_slot_deadline_and_epoch_scale() {
         .expect("connect result present")
         .as_ref()
         .expect("valid connect request");
-    let phase = storage.decide(&slot, &req, t0).expect("decision");
+    let phase = storage
+        .decide(&slot, &storage.resolve_request(&req), t0)
+        .expect("decision");
     assert!(
         matches!(
             phase,
@@ -597,19 +599,28 @@ fn connect_request(head: &[u8]) -> crate::connect::ConnectRequest {
 }
 
 #[test]
-fn ordinal_for_request_resolves_exact_port_via_shared_allowlist_position_only() {
+fn resolve_request_binds_exact_port_to_allowlist_position_without_re_resolution() {
     let storage = booted(2, 1);
     let exact = connect_request(b"CONNECT alpha.example.org:443 HTTP/1.1\r\n\r\n");
+    let resolved_exact = storage.resolve_request(&exact);
     assert_eq!(
-        storage.ordinal_for_request(&exact),
+        resolved_exact.ordinal(),
+        Some(0),
+        "the exact allowlist pair binds to its shared allowlist position"
+    );
+    assert_eq!(
+        resolved_exact
+            .ordinal()
+            .and_then(|i| storage.enforcement().control().ordinal(i)),
         storage.enforcement().control().ordinal(0),
-        "the exact allowlist pair resolves to its entry ordinal"
+        "the minted raw position converts to the exact entry's enforcement ordinal"
     );
     let other_port = connect_request(b"CONNECT alpha.example.org:8443 HTTP/1.1\r\n\r\n");
+    let resolved_other = storage.resolve_request(&other_port);
     assert_eq!(
-        storage.ordinal_for_request(&other_port),
+        resolved_other.ordinal(),
         None,
-        "same hostname on an unlisted port resolves to no ordinal (9t6w B1)"
+        "same hostname on an unlisted port binds to no position (9t6w B1)"
     );
 }
 

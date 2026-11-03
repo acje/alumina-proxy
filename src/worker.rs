@@ -32,7 +32,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::cache::{Cache, CacheError, Entry, Family, NameIndex};
+use crate::cache::{Cache, CacheError, Entry, EntryState, Family, NameIndex};
 use crate::config::Config;
 use crate::connect::{CONNECT_LIMIT, ConnectRequest};
 use crate::eligibility::NumericAddr;
@@ -498,7 +498,8 @@ impl Worker {
     /// selection against the current cache, with the setup deadline and the
     /// attempt budget both read from the granted slot (never supplied by a
     /// caller) and cache seconds from this worker's clock authority (never a
-    /// free clock) (9mq9 M2r/M3).
+    /// free clock) (9mq9 M2r/M3). Consumes the caller-minted `resolved` context
+    /// so authorization never re-resolves identity.
     ///
     /// # Errors
     ///
@@ -507,22 +508,14 @@ impl Worker {
     /// underlying current-cache lookup error.
     pub(crate) fn decide(
         &self,
-        view: &WorkerView,
         slot: &SlotIndex,
-        request: &ConnectRequest,
+        resolved: &ResolvedRequest<'_>,
         now: Instant,
     ) -> Result<ConnectPhase, DecideError> {
         let setup = self.setup_deadline(slot).ok_or(DecideError::NotInSetup)?;
         let attempts = self.attempt_ledger(slot).ok_or(DecideError::NotInSetup)?;
-        next_phase(
-            request,
-            view,
-            now,
-            attempts.counts(),
-            attempts.previous(),
-            setup,
-        )
-        .map_err(DecideError::Cache)
+        next_phase(resolved, now, attempts.counts(), attempts.previous(), setup)
+            .map_err(DecideError::Cache)
     }
 
     /// Records one failed attempt in `family` on the granted in-setup slot,
@@ -773,6 +766,22 @@ impl<'a> WorkerView<'a> {
         }
     }
 
+    /// The single exact-pair resolution of an already-validated CONNECT bound
+    /// to this view: resolves `request` against this view's config and carries
+    /// the view itself, so the returned context can only ever be decided
+    /// against the config/cache/clock it was resolved against
+    /// (destination-binding, docs/alumina-proxy.md:145).
+    pub(crate) fn resolve(self, request: &'a ConnectRequest) -> ResolvedRequest<'a> {
+        let ordinal = self
+            .config
+            .allowlist_position(request.hostname(), request.port());
+        ResolvedRequest {
+            request,
+            view: self,
+            ordinal,
+        }
+    }
+
     /// The single clock authority bound to this config/cache pair.
     #[expect(
         dead_code,
@@ -783,13 +792,52 @@ impl<'a> WorkerView<'a> {
     }
 }
 
-/// The ordinal of `request` in `view.config.allowlist()`, or `None` when the
-/// CONNECT (hostname, port) pair is not allowlisted. Authorization requires
-/// the exact configured `<fqdn>:<port>` pair: a same-name different-port
-/// request is denied. Resolution shares the single allowlist-pair predicate
-/// with the serving domain-block/attribution ordinals (alumina-sechd L14).
-fn allowlist_ordinal(request: &ConnectRequest, config: &Config) -> Option<usize> {
-    config.allowlist_position(request.hostname(), request.port())
+/// The single exact-pair resolution of an already-validated CONNECT carried
+/// through one decision: the original request bound to its raw allowlist
+/// position and the [`WorkerView`] it was resolved against, minted only by
+/// [`WorkerView::resolve`]. The serving block precheck, the current-cache
+/// decision, peer freshness and report attribution all share this one
+/// resolution; none re-resolves identity (alumina-sechd L14).
+///
+/// The mint binds the request to the view's config, so no caller can pair the
+/// ordinal with a foreign cache or clock: `ordinal()` is always the allowlist
+/// position of `request()` in the carried view's config, and every consumer
+/// decides against that carried view. The raw index is distinct from the
+/// enforcement `DomainOrdinal` and the cache `NameIndex` and is not
+/// interchangeable with either; sites that need one convert from this value
+/// themselves. All fields are private; the only read surface is the getters.
+pub(crate) struct ResolvedRequest<'a> {
+    request: &'a ConnectRequest,
+    view: WorkerView<'a>,
+    ordinal: Option<usize>,
+}
+
+impl<'a> ResolvedRequest<'a> {
+    /// The bound original request with unchanged bytes.
+    pub(crate) const fn request(&self) -> &'a ConnectRequest {
+        self.request
+    }
+
+    /// The raw allowlist position of the bound request, or `None` when its
+    /// exact `<fqdn>:<port>` pair is not allowlisted.
+    pub(crate) const fn ordinal(&self) -> Option<usize> {
+        self.ordinal
+    }
+
+    /// The bound request's selected-family entry state at `now` on this view's
+    /// clock authority: `None` when the request is not allowlisted or its
+    /// current-cache entry cannot be read, which callers treat as an
+    /// observation with no effect, matching the serving freshness fold's
+    /// pre-existing fallibility. The family is the just-selected peer's
+    /// family, so the observation is bound to this resolution and never takes
+    /// a caller-supplied view, raw index, or clock.
+    pub(crate) fn peer_state(&self, family: Family, now: Instant) -> Option<EntryState> {
+        let view = &self.view;
+        let ordinal = self.ordinal()?;
+        let name = view.cache.name_index(ordinal)?;
+        let entry = view.cache.entry(name, family).ok()?;
+        Some(entry.state(view.clock.cache_secs(now)))
+    }
 }
 
 /// Decides the next CONNECT-phase action for a tunnel from the current cache.
@@ -797,7 +845,9 @@ fn allowlist_ordinal(request: &ConnectRequest, config: &Config) -> Option<usize>
 /// Authorization is allowlist membership of the already-validated CONNECT
 /// (hostname, port) pair, requiring the exact configured `<fqdn>:<port>`; the
 /// 1..=65535 port range and non-literal hostname forms are enforced upstream
-/// in the parser. After authorization, the fixed setup deadline and the attempt
+/// in the parser. The caller mints the single exact-pair resolution once
+/// ([`ResolvedRequest`]); this core consumes that context and never re-resolves
+/// identity. After authorization, the fixed setup deadline and the attempt
 /// budget are checked before any address is selected, so a refusal never
 /// reaches the peer-selection step and no upstream socket is opened. The
 /// per-attempt connect deadline is freshly clipped inside the returned
@@ -814,14 +864,14 @@ fn allowlist_ordinal(request: &ConnectRequest, config: &Config) -> Option<usize>
 /// cache is owned and sized by the same validated allowlist, an allowlisted
 /// ordinal is always admitted.
 pub(crate) fn next_phase(
-    request: &ConnectRequest,
-    view: &WorkerView,
+    resolved: &ResolvedRequest<'_>,
     now: Instant,
     counts: AttemptCounts,
     previous: Option<Family>,
     setup_deadline: Deadline,
 ) -> Result<ConnectPhase, CacheError> {
-    let Some(ordinal) = allowlist_ordinal(request, view.config) else {
+    let view = &resolved.view;
+    let Some(ordinal) = resolved.ordinal() else {
         return Ok(ConnectPhase::Forbidden);
     };
     let name = view

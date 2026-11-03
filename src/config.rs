@@ -1325,3 +1325,14 @@ mod hostname_rules {
         }
     }
 }
+
+#[cfg(test)]
+impl Config {
+    pub(crate) fn with_kernel_assigned_test_listener(mut self) -> Self {
+        self.listen = ListenAddr {
+            ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: 0,
+        };
+        self
+    }
+}

@@ -8,8 +8,11 @@ use std::time::{Duration, Instant};
 use mio::net::TcpListener;
 
 use crate::cache::{Cache, CacheError, Family, NameIndex};
-use crate::config::{Config, FixedHostname, Fqdn};
+#[cfg(test)]
+use crate::config::FixedHostname;
+use crate::config::{Config, Fqdn};
 use crate::connect::ConnectRequest;
+#[cfg(test)]
 use crate::enforcement::action::DomainOrdinal;
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::enforcement::state::Enforcement;
@@ -24,8 +27,8 @@ use crate::startup_dns::{
     StartupDns, StartupDnsError, StartupReport, TurnResult,
 };
 use crate::worker::{
-    AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, SlotIndex, TunnelIndex,
-    Worker, WorkerClock, WorkerView,
+    AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, ResolvedRequest, SlotIndex,
+    TunnelIndex, Worker, WorkerClock, WorkerView,
 };
 
 /// The explicit far-future boundary for [`ServeStorage::schedule_due_instant`].
@@ -281,19 +284,6 @@ impl ServeStorage {
         &mut self.enforcement
     }
 
-    /// The ordinal of a CONNECT that matches an allowlist entry **exactly**,
-    /// entry hostname and entry port together. A same-hostname different-port
-    /// request is such a miss (no ordinal), so it is authoritatively denied by
-    /// `decide` as `HostNotAllowlisted` rather than routed by bare hostname
-    /// (alumina-9t6w B1). Resolution shares the single allowlist-pair predicate
-    /// with the worker decision (alumina-sechd L14).
-    pub(crate) fn ordinal_for_request(&self, request: &ConnectRequest) -> Option<DomainOrdinal> {
-        let index = self
-            .config
-            .allowlist_position(request.hostname(), request.port())?;
-        self.enforcement.control().ordinal(index)
-    }
-
     /// The ordinal of a connection already authorized as the exact
     /// `<fqdn>:<port>` pair, derived from the slot's `approved` hostname and
     /// `approved_port` together. Enforcement attribution (early-data
@@ -302,6 +292,7 @@ impl ServeStorage {
     /// a configured Block on one port can never over-close or under-close the
     /// other (alumina-9t6w B1). Shares the single allowlist-pair predicate with
     /// the worker decision (alumina-sechd L14).
+    #[cfg(test)]
     pub(crate) fn ordinal_for_pair(
         &self,
         hostname: &FixedHostname,
@@ -901,10 +892,24 @@ impl ServeStorage {
         self.worker.admit(now)
     }
 
-    /// The one owned CONNECT decision for an admitted slot: reads the setup
-    /// deadline and the attempt ledger from the slot and cache seconds from
-    /// this storage's clock authority. Does not consume the handle; the event
-    /// processor still needs it to graduate or release.
+    /// The single exact-pair resolution of an already-validated CONNECT for
+    /// one decision: binds the request to the allowlist position computed once
+    /// from this storage's config, so the serving block precheck, `decide`,
+    /// peer freshness and report attribution all share one resolution
+    /// (alumina-sechd L14). Decision-scoped and borrowing the caller's local
+    /// request, never copying it. See [`ResolvedRequest`].
+    pub(crate) fn resolve_request<'a>(
+        &'a self,
+        request: &'a ConnectRequest,
+    ) -> ResolvedRequest<'a> {
+        self.work_view().resolve(request)
+    }
+
+    /// The one owned CONNECT decision for an admitted slot: consumes the
+    /// caller-minted `resolved` context and reads the setup deadline and the
+    /// attempt ledger from the slot and cache seconds from this storage's
+    /// clock authority. Does not consume the handle; the event processor still
+    /// needs it to graduate or release.
     ///
     /// # Errors
     ///
@@ -913,10 +918,10 @@ impl ServeStorage {
     pub(crate) fn decide(
         &self,
         slot: &SlotIndex,
-        request: &ConnectRequest,
+        resolved: &ResolvedRequest<'_>,
         now: Instant,
     ) -> Result<ConnectPhase, DecideError> {
-        self.worker.decide(&self.work_view(), slot, request, now)
+        self.worker.decide(slot, resolved, now)
     }
 
     /// Records one failed attempt on the granted in-setup slot, advancing its
