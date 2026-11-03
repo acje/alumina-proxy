@@ -266,7 +266,7 @@ fn serve_storage_boot_corresponds_allowlist_at_boundary() {
 #[test]
 fn work_view_is_bound_to_the_owning_storages_state() {
     use crate::connect::{ConnectParser, Feed};
-    use crate::worker::{ConnectPhase, Deadline};
+    use crate::runtime::tunnel::{ConnectPhase, Deadline};
     use std::time::Instant;
     let mut storage = booted(1, 0);
     publish_a(&mut storage.cache, 0, FRESH + 5, TTL);
@@ -331,7 +331,7 @@ fn storage_cache_secs_is_mounted_on_the_dns_epoch() {
 #[test]
 fn storage_decide_reads_slot_deadline_and_epoch_scale() {
     use crate::connect::{ConnectParser, Feed};
-    use crate::worker::ConnectPhase;
+    use crate::runtime::tunnel::ConnectPhase;
     use std::time::Instant;
     const DNS_EPOCH: u64 = 1_700_000_000;
     let mut storage = booted(1, 0);
@@ -372,7 +372,7 @@ fn storage_decide_reads_slot_deadline_and_epoch_scale() {
     };
     assert_eq!(
         connect_deadline.limit(),
-        t0 + Duration::from_secs(crate::worker::CONNECT_DEADLINE_SECS),
+        t0 + Duration::from_secs(crate::runtime::tunnel::CONNECT_DEADLINE_SECS),
         "the per-attempt deadline clips to the slot's setup deadline from its own fresh span"
     );
     storage.release(slot);

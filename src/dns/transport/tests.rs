@@ -1252,7 +1252,7 @@ fn stale_generation_is_refused_at_apply() {
 /// boot, which allocates in-window via the documented rustls bounded seam (`alumina-zai`).
 fn startup_dns_phase_is_allocation_free_including_reconnect() {
     use crate::alloc::{self, Phase};
-    use crate::serve::{ServeStorage, StartupDecision};
+    use crate::runtime::storage::{ServeStorage, StartupDecision};
 
     let ((), control) = alloc::run_phase(Phase::StartupDns, || {
         let bytes = Box::new([0u8; 64]);

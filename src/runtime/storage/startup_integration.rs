@@ -674,7 +674,7 @@ fn build_cross_suffix_cname(query: &[u8]) -> Option<Vec<u8>> {
 /// with zero resolved names and no cached CNAME broadening.
 #[test]
 fn configured_cross_suffix_cname_resolves_identically_on_shared_and_legacy_startup() {
-    use crate::runtime::Preallocated;
+    use crate::runtime::owner::Preallocated;
     let window = Duration::from_millis(700);
     let cases = [
         (

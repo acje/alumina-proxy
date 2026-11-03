@@ -244,7 +244,7 @@ fn hot_relay_many_slots_body() {
             .test_setup_relay(FIRST_HOT_INDEX + i, up, client)
             .expect("install relay");
 
-        let pattern = crate::serving::test_offset_pattern(
+        let pattern = crate::runtime::reactor::test_offset_pattern(
             per_slot,
             30 + u32::try_from(i).expect("hot-slot index fits u32"),
         );
@@ -286,7 +286,7 @@ fn hot_relay_many_slots_body() {
         .test_setup_relay(EXPIRED_INDEX, up, client)
         .expect("install expired-timer relay");
     peer_stream
-        .write_all(&crate::serving::test_offset_pattern(4096, 99))
+        .write_all(&crate::runtime::reactor::test_offset_pattern(4096, 99))
         .expect("preload expired-timer relay");
     holds.push(peer_stream);
     runtime.serving_mut().test_mark_idle_expired(EXPIRED_INDEX);
@@ -391,7 +391,7 @@ fn hot_relay_many_slots_body() {
             per_slot,
             "hot relay {i} must complete under DNS + backlog load"
         );
-        let pattern = crate::serving::test_offset_pattern(
+        let pattern = crate::runtime::reactor::test_offset_pattern(
             per_slot,
             30 + u32::try_from(i).expect("hot-slot index fits u32"),
         );
@@ -911,7 +911,7 @@ fn reconnect_falsifier_body() {
     );
 }
 
-use crate::serve::{ServingMode, StartupDecision};
+use crate::runtime::storage::{ServingMode, StartupDecision};
 
 #[test]
 fn preallocate_then_startup_then_attach_accepts_in_main_order() {
@@ -2833,11 +2833,11 @@ fn shutdown_finishing_body() {
     let listener =
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind the listener");
     let mut runtime = owner.attach(listener).expect("attach the listener");
-    runtime.emit_shutdown_record_and_drain(crate::serving::ShutdownExit::Forced);
+    runtime.emit_shutdown_record_and_drain(crate::runtime::reactor::ShutdownExit::Forced);
     let forced = drain_sink_text(&mut file);
     verify_shutdown_drain(&forced, previous_len, "forced");
     previous_len = forced.len();
-    runtime.emit_shutdown_record_and_drain(crate::serving::ShutdownExit::Drained);
+    runtime.emit_shutdown_record_and_drain(crate::runtime::reactor::ShutdownExit::Drained);
     let drained = drain_sink_text(&mut file);
     verify_shutdown_drain(&drained, previous_len, "drained");
 }

@@ -349,7 +349,7 @@ exit-accounting note below.
 | --- | --- | --- | --- |
 | `dropped` | `startup_final` ([src/log.rs](src/log.rs):1853) and `shutdown_final` (:1957) **only** — never in the monitor summary core (:883-909) | 1 per whole record lost, all classes | Whole-record loss over boot/full run. Long-run loss surfaces **only** at these two boundaries while serving (not refreshed in-band); serving-exit residue after the single bounded drain is **uncounted, unobservable** (exit-accounting note below) |
 | `report_drops` / `oreport_drops` | every `kind=monitor` summary fixed core ([src/log.rs](src/log.rs):890-894) | 1 per dropped `monitor_domain` **batch** at report time (:1977; `src/enforcement/monitor.rs:320`) — a batch is up to 11 domain blocks, never per block | Queue-full refusal of a domain detail batch |
-| `capture_drops` / `ocapture_drops` | every `kind=monitor` summary fixed core ([src/log.rs](src/log.rs):895-899) | **mixed, by design**: 1 per detail at capture time (later-relation suppression [serving.rs](src/serving.rs):2341-2358; 64-detail window eviction [monitor.rs](src/enforcement/monitor.rs):335) **and** 1 per dropped `monitor_capture` batch at report time ([log.rs](src/log.rs):1988) — a batch is up to 22 details | Capture-detail loss in mixed units; a nonzero value means detail loss, never treat "1" as "one detail" |
+| `capture_drops` / `ocapture_drops` | every `kind=monitor` summary fixed core ([src/log.rs](src/log.rs):895-899) | **mixed, by design**: 1 per detail at capture time (later-relation suppression [reactor.rs](src/runtime/reactor.rs):2372-2388; 64-detail window eviction [monitor.rs](src/enforcement/monitor.rs):335) **and** 1 per dropped `monitor_capture` batch at report time ([log.rs](src/log.rs):1988) — a batch is up to 22 details | Capture-detail loss in mixed units; a nonzero value means detail loss, never treat "1" as "one detail" |
 | `dx=` | `kind=monitor`, square brackets loss bitset, present only when nonzero ([src/log.rs](src/log.rs):984-995) | 1 bit per allowlist ordinal, hex | That ordinal's JA4-change facts overflowed the bounded detail |
 
 **Notification drop path (exit accounting — counted vs unobservable).** Queue
@@ -359,9 +359,9 @@ counts every remaining queued record exactly once in the shared `dropped` tally
 ([src/log.rs](src/log.rs):2094-2102), and a startup-termination exit
 (`Exit75`/`Terminated`) additionally strands whatever its bounded startup drains
 did not deliver, each counted once in the same tally
-([src/serve.rs](src/serve.rs):1170, `strand_queued`'s only call site).
+([src/runtime/storage.rs](src/runtime/storage.rs):1244-1253, `strand_queued`'s only call site).
 **Unobservable residue:** the serving exit
-([src/runtime.rs](src/runtime.rs):388-400) reads `dropped`, enqueues
+([src/runtime/owner.rs](src/runtime/owner.rs):30-40, :356-367) reads `dropped`, enqueues
 `shutdown_final` with that snapshot, performs exactly **one** bounded drain
 (16 ops / 64 KiB, [src/log.rs](src/log.rs):64-67), then `process::exit` — records
 still queued at that moment are destroyed **uncounted**, and a stalled sink can
@@ -407,7 +407,7 @@ never proof of a lossless exit window.
   domain block-latch bitset
   ([src/enforcement/state.rs](src/enforcement/state.rs):219,232,348) and the
   all-scope block latch (:218,231,302-305), plus the JA4 first-seen baselines
-  ([src/serving.rs](src/serving.rs):951-953, "reset on restart"). A previously
+  ([src/runtime/reactor.rs](src/runtime/reactor.rs):578-597, :1098, "reset on restart"). A previously
   blocked or baselined identity is treated as first-seen again, and the monitor
   aggregate (including the drop counters in the summary) starts at zero. Treat a
   proxy restart as a clean-slate for block and baseline state; a restarted proxy
@@ -480,13 +480,21 @@ proxy's stdout pipe is the only path exercised.
 
 ## Repository layout
 
-`src/main.rs` boot owner → `src/runtime.rs` shared-readiness serving loop;
-`src/{serve,boot,config,resolver,preflight,inventory}.rs` boot path;
+`src/main.rs` boot owner → `src/runtime/mod.rs` serving/runtime root;
+`src/runtime/{owner,storage,reactor,tunnel,gate}.rs` serving owners, with
+`src/runtime/reactor/{policy,reject,startup}.rs` children and
+`src/runtime/{owner,storage,reactor,tunnel}/tests.rs` +
+`src/runtime/storage/startup_integration.rs` sibling/startup tests;
+`src/{serve,serving,worker,gate}.rs` thin re-export facades over that tree;
+`src/{boot,config,preflight,inventory}.rs` boot path;
 `src/enforcement/{mod,action,monitor,policy,state}.rs` tripwire/action/monitoring
-surface (rp2e amendment); `src/{dns,connect,client_hello,startup_dns,cache,schedule,worker,gate,serving,eligibility,log}.rs`
-serving/parser core; `src/serving/{policy,reject,startup,tests}.rs`,
-`src/runtime/tests.rs`, `src/startup_dns/tests.rs` serving/startup decomposition
-and sibling test modules; `src/{alloc,fault,fuzz}.rs` F1/F2/F4 scaffolds;
+surface (rp2e amendment); `src/dns/mod.rs` canonical DNS namespace (private
+`{wire,outcome,publication,transport,cache,schedule,resolver}.rs`, with
+`src/dns/transport/registration.rs` and sibling tests);
+`src/{startup_dns,cache,schedule,resolver}.rs` thin public same-item re-export
+facades over that namespace, not implementation core or boot;
+`src/{connect,client_hello,eligibility,log}.rs` parser/service core (real bodies);
+`src/{alloc,fault,fuzz}.rs` F1/F2/F4 scaffolds;
 `scripts/` verification owners; `tests/` integration corpus.
 
 ## License

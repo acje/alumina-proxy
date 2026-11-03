@@ -178,7 +178,7 @@ impl BootInventory {
     /// retained types). Constant-derived plan, not an observation and never a
     /// measured RSS / process or kernel memory figure: the traffic store
     /// initializes at boot, the serving workspaces at
-    /// [`Preallocated::preallocate`](crate::runtime::Preallocated::preallocate),
+    /// [`Preallocated::preallocate`](crate::runtime::owner::Preallocated::preallocate),
     /// and the DNS buffers at the DNS transport's own construction.
     ///
     /// The bound sums three distinct categories — traffic storage, the

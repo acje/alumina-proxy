@@ -14,8 +14,8 @@ use mio::Token;
 use mio::net::TcpListener;
 
 use crate::dns::transport::{STARTUP_WINDOW_SECS, StartupDnsError, TurnResult};
-use crate::serve::{ServeStorage, StartupError, StartupOutcome};
-use crate::serving::{ServeError, Serving, Shutdown, ShutdownExit};
+use crate::runtime::reactor::{ServeError, Serving, Shutdown, ShutdownExit};
+use crate::runtime::storage::{ServeStorage, StartupError, StartupOutcome};
 
 /// The bounded number of cooperative DNS advances a single owner turn may make,
 /// so a chatty or stalled peer can never starve traffic within a turn.

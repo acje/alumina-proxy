@@ -5,7 +5,7 @@ use crate::dns::cache::{CacheError, Family};
 use crate::dns::transport::{
     EXCHANGE_DEADLINE_SECS, ExchangeClass, StartupDnsError, TurnResult, WindowLedger,
 };
-use crate::serve::{StartupError, StartupOutcome};
+use crate::runtime::storage::{StartupError, StartupOutcome};
 
 use super::Serving;
 

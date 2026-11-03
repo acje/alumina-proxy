@@ -1345,7 +1345,7 @@ impl StartupDns {
     /// Installs the exact per-entry `cname_bailiwick` zones from the already
     /// validated `Config` onto this retained owner, so the shared booted
     /// STARTUP window resolves declared cross-suffix CNAME targets. Called
-    /// once at [`crate::serve::ServeStorage::boot`]; public
+    /// once at [`crate::runtime::storage::ServeStorage::boot`]; public
     /// [`StartupDns::new`] and the legacy blocking window's own reinstall are
     /// unchanged.
     pub(crate) fn configure_bailiwick(&mut self, config: &Config) -> Result<(), StartupDnsError> {

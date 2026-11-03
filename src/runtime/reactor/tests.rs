@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, TcpListener as StdListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use crate::enforcement::policy::UnknownReason;
-use crate::worker::{MAX_PENDING_SETUPS, SETUP_DEADLINE_SECS};
+use crate::runtime::tunnel::{MAX_PENDING_SETUPS, SETUP_DEADLINE_SECS};
 
 const RETAINED_OFFSET: usize = 137;
 
@@ -258,7 +258,7 @@ fn pump(serving: &mut Serving, times: usize) {
 }
 
 #[cfg(all(test, feature = "alloc-witness"))]
-fn turn_pump(runtime: &mut crate::runtime::Runtime, times: usize) {
+fn turn_pump(runtime: &mut crate::runtime::owner::Runtime, times: usize) {
     for _ in 0..times {
         runtime
             .turn(Some(Duration::from_millis(2)))
@@ -954,7 +954,7 @@ fn expired_idle_deadline_still_closes_slot_through_gate() {
 /// be skipped on the C50 poll-timeout fold regardless of which source arms or
 /// clears it. Also proves the highest-index slot reaches the final bitmap word.
 fn c50_live_deadline_bitmap_tracks_slot_four_sources_in_lockstep() {
-    use crate::worker::Deadline;
+    use crate::runtime::tunnel::Deadline;
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
         assert!(
@@ -1032,7 +1032,7 @@ fn c50_live_deadline_bitmap_tracks_slot_four_sources_in_lockstep() {
 /// bitmap while multi-armed, so no armed deadline can silently fall out of the
 /// C16/C50 poll fold.
 fn s1_fold_min_is_exact_min_over_all_four_arm_sources() {
-    use crate::worker::Deadline;
+    use crate::runtime::tunnel::Deadline;
     let port = ephemeral_port();
     with_serving_stack(port, move |serving| {
         let _client = connect(port);
@@ -1152,10 +1152,11 @@ fn connect_deadline_expired_still_retries_through_gate() {
         serving.slots[0].approved_port = upstream_port;
         serving.slots[0].stage = Stage::Dialing;
         serving.slots[0].connect_family = Some(Family::A);
-        serving.slots[0].connect_deadline = Some(crate::worker::Deadline::connect_attempt(
-            Instant::now() - Duration::from_secs(3),
-            setup,
-        ));
+        serving.slots[0].connect_deadline =
+            Some(crate::runtime::tunnel::Deadline::connect_attempt(
+                Instant::now() - Duration::from_secs(3),
+                setup,
+            ));
         serving.sync_live_deadline(0);
         pump(serving, 10);
         assert_eq!(
@@ -4727,7 +4728,8 @@ fn expiry_never_reinjects_after_a_begun_response() {
         while serving.storage().occupied() > 0 {
             serving.run_once(None).expect("block to expiry");
             assert!(
-                start.elapsed() <= Duration::from_secs(crate::worker::SETUP_DEADLINE_SECS + 5),
+                start.elapsed()
+                    <= Duration::from_secs(crate::runtime::tunnel::SETUP_DEADLINE_SECS + 5),
                 "a begun-response slot must be released at its deadline"
             );
         }
@@ -4954,7 +4956,7 @@ fn shutdown_alloc_witness_body() {
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), port))
         .expect("bind listener");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut runtime = crate::runtime::Runtime::new(storage, listener, traffic)
+    let mut runtime = crate::runtime::owner::Runtime::new(storage, listener, traffic)
         .expect("runtime owner (preallocate + attach)");
 
     let pending_client = connect(port);
@@ -5779,7 +5781,7 @@ fn blocked_pair_forbids_before_exhausted_ledger_through_real_decision() {
             Feed::Incomplete => panic!("the full head must parse to completion"),
         }
         let handle = serving.slots[index].handle.take().expect("in-setup handle");
-        for _ in 0..crate::worker::MAX_UPSTREAM_ATTEMPTS {
+        for _ in 0..crate::runtime::tunnel::MAX_UPSTREAM_ATTEMPTS {
             serving
                 .storage_mut()
                 .record_attempt(&handle, Family::A)
@@ -7700,7 +7702,7 @@ fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
             ),
             (Family::Aaaa, NumericAddr::V6(Ipv6Addr::LOCALHOST), &v6),
         ];
-        let mut seen = [None; crate::worker::MAX_UPSTREAM_ATTEMPTS];
+        let mut seen = [None; crate::runtime::tunnel::MAX_UPSTREAM_ATTEMPTS];
         let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
             for (round, (family, addr, listener)) in plan.into_iter().enumerate() {
                 serving
@@ -7857,10 +7859,11 @@ fn dial_re_anchors_a_fresh_connect_deadline_at_initiation() {
         serving.slots[0].gate.on_authorized();
         serving.slots[0].stage = Stage::Dialing;
         serving.slots[0].connect_family = Some(Family::A);
-        serving.slots[0].connect_deadline = Some(crate::worker::Deadline::connect_attempt(
-            Instant::now() - Duration::from_secs(3),
-            setup,
-        ));
+        serving.slots[0].connect_deadline =
+            Some(crate::runtime::tunnel::Deadline::connect_attempt(
+                Instant::now() - Duration::from_secs(3),
+                setup,
+            ));
         let dial_start = Instant::now();
         serving
             .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
@@ -7874,9 +7877,9 @@ fn dial_re_anchors_a_fresh_connect_deadline_at_initiation() {
         let deadline = ws.connect_deadline.expect("dial re-anchored deadline");
         assert!(
             deadline.limit()
-                >= dial_start + Duration::from_secs(crate::worker::CONNECT_DEADLINE_SECS),
+                >= dial_start + Duration::from_secs(crate::runtime::tunnel::CONNECT_DEADLINE_SECS),
             "the re-anchored deadline must run the full {} s from dial initiation, got {:?}",
-            crate::worker::CONNECT_DEADLINE_SECS,
+            crate::runtime::tunnel::CONNECT_DEADLINE_SECS,
             deadline.limit()
         );
         let _origin_stream = origin.accept().expect("accept origin side").0;
@@ -7933,10 +7936,11 @@ fn expired_connect_deadline_while_dialing_records_a_retry_through_expire_sweep()
         serving.slots[0].approved_port = upstream_port;
         serving.slots[0].stage = Stage::Dialing;
         serving.slots[0].connect_family = Some(Family::A);
-        serving.slots[0].connect_deadline = Some(crate::worker::Deadline::connect_attempt(
-            Instant::now() - Duration::from_secs(3),
-            setup,
-        ));
+        serving.slots[0].connect_deadline =
+            Some(crate::runtime::tunnel::Deadline::connect_attempt(
+                Instant::now() - Duration::from_secs(3),
+                setup,
+            ));
         serving.expire_sweep(Instant::now());
         pump(serving, 10);
         assert_eq!(
@@ -8000,10 +8004,11 @@ fn expire_sweep_dialing_expired_seam_records_retry_with_zero_allocations() {
         serving.slots[0].approved_port = upstream_port;
         serving.slots[0].stage = Stage::Dialing;
         serving.slots[0].connect_family = Some(Family::A);
-        serving.slots[0].connect_deadline = Some(crate::worker::Deadline::connect_attempt(
-            Instant::now() - Duration::from_secs(3),
-            setup,
-        ));
+        serving.slots[0].connect_deadline =
+            Some(crate::runtime::tunnel::Deadline::connect_attempt(
+                Instant::now() - Duration::from_secs(3),
+                setup,
+            ));
         let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
             serving.expire_sweep(Instant::now());
             pump(&mut serving, 10);

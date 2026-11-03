@@ -61,7 +61,7 @@ Cases (each exercises the ACTUAL shipped shutdown path):
                               that accepted/read/unanswered observation before
                               signal.
                               Handled-signal DNS suppression is claimed by the
-                              native owner witness (src/runtime.rs
+                              native owner witness (src/runtime/owner.rs
                               sigterm_stops_due_refresh_flow), not from this
                               fixture's accept roster.
     SIMULTANEOUS-COMPLETION-NOBIND
@@ -322,7 +322,7 @@ class DnsResponder:
         # sendall of an AAAA NODATA answer returns, so a cancelled/failed send
         # can never publish it. It proves the responder transmitted the answer,
         # never that the owner consumed or published the result (owner-side
-        # publication is native-witness territory, src/runtime.rs
+        # publication is native-witness territory, src/runtime/owner.rs
         # sigterm_stops_due_refresh_flow). Session numbering is NOT the
         # discriminator: the startup window never attempts AAAA (its slots stay
         # due) and the retained transport (docs/alumina-proxy.md:603) reuses the
@@ -1358,7 +1358,7 @@ def case_silent_dns(fixtures):
     signal. Observed session counts are printed as an observation only (with
     the retained transport the count is expected to stay at the single startup
     session): handled-SIGTERM DNS SUPPRESSION is NOT claimed from this
-    fixture's accept roster -- it is the native owner witness (src/runtime.rs
+    fixture's accept roster -- it is the native owner witness (src/runtime/owner.rs
     sigterm_stops_due_refresh_flow re-arms A+AAAA due after a real self-pipe
     SIGTERM and asserts no new DNS initiation), run separately with its
     no-signal negative control."""
@@ -1418,7 +1418,7 @@ def case_silent_dns(fixtures):
         elif elapsed > GRACE_HI:
             fail(name, f"DNS left a deadline that delayed the forced closure: {elapsed:.2f}s (> {GRACE_HI:.1f}s first-deadline window)")
         else:
-            pass_(name, f"current AAAA refresh answer TRANSMITTED on the retained serving connection (responder-side witness) and a next-due serving DNS query accepted/queried-and-left-unanswered in the silent-zone segment (second serving AAAA) before the signal (dead-resolver serving negative; responder-observed, due-family scheduling from fixed inputs); {queries} queries over {sess_exit} session(s) observed (timeline {[(s, f'{t:.2f}') for s, t in timeline]} rel. signal {t0:.2f}; the retained transport docs/alumina-proxy.md:603 reuses the startup session, so the count is expected to stay at the single observed connection); forced exit 70 in {elapsed:.2f}s within the first-deadline window with that accepted/read/unanswered serving DNS query observed before signal (responder-observed; sibling AAAA-family by fixed inputs, asserts neither qtype nor continued owner activity). Session counts are an observation only; owner-side active-cancellation and suppression are covered natively by src/runtime.rs runtime_self_pipe_sigterm_cancels_active_receiving + sigterm_stops_due_refresh_flow (run separately), not claimed from this fixture's accept roster")
+            pass_(name, f"current AAAA refresh answer TRANSMITTED on the retained serving connection (responder-side witness) and a next-due serving DNS query accepted/queried-and-left-unanswered in the silent-zone segment (second serving AAAA) before the signal (dead-resolver serving negative; responder-observed, due-family scheduling from fixed inputs); {queries} queries over {sess_exit} session(s) observed (timeline {[(s, f'{t:.2f}') for s, t in timeline]} rel. signal {t0:.2f}; the retained transport docs/alumina-proxy.md:603 reuses the startup session, so the count is expected to stay at the single observed connection); forced exit 70 in {elapsed:.2f}s within the first-deadline window with that accepted/read/unanswered serving DNS query observed before signal (responder-observed; sibling AAAA-family by fixed inputs, asserts neither qtype nor continued owner activity). Session counts are an observation only; owner-side active-cancellation and suppression are covered natively by src/runtime/owner.rs runtime_self_pipe_sigterm_cancels_active_receiving + sigterm_stops_due_refresh_flow (run separately), not claimed from this fixture's accept roster")
     finally:
         if s is not None:
             try:

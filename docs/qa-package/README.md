@@ -230,7 +230,7 @@ Procedure (Go client pinned to TLS 1.3):
    JA4 change fact.
 2. Open a second tunnel to the same ordinal and send a ClientHello yielding a
    **distinct JA4** (e.g. a different ALPN set in `NextProtos`). The serving path
-   records `note_fact_ja4_change` (`src/serving.rs:2815-2818`) — the change fact
+   records `note_fact_ja4_change` (`src/runtime/reactor.rs:2815-2818`) — the change fact
    that selects the per-FQDN `ja4` control action.
 3. Read the monitor records. The `kind=monitor_domain` detail batch carries the
    change signal — `d0j=1` (per-ordinal change counter) with

@@ -1105,13 +1105,17 @@ impl LogStore {
     /// setups (docs/alumina-proxy.md:193). Call after any occupancy transition.
     pub(crate) fn note_capacity(&mut self, secs: u64, occupied: usize, pending: usize) {
         self.secs = secs;
-        if let Some(edge) = note_usage(&mut self.slots_wm, occupied, crate::worker::MAX_TUNNELS) {
+        if let Some(edge) = note_usage(
+            &mut self.slots_wm,
+            occupied,
+            crate::runtime::tunnel::MAX_TUNNELS,
+        ) {
             self.capacity_edge(Dimension::Slots, edge);
         }
         if let Some(edge) = note_usage(
             &mut self.setups_wm,
             pending,
-            crate::worker::MAX_PENDING_SETUPS,
+            crate::runtime::tunnel::MAX_PENDING_SETUPS,
         ) {
             self.capacity_edge(Dimension::Setups, edge);
         }
