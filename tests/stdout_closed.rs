@@ -377,12 +377,14 @@ fn run_start_up() -> Result<Runtime, String> {
     let outcome = owner
         .run_startup(nameserver, NOW0)
         .map_err(|e| e.to_string())?;
-    let StartupDecision::Serve(_) = outcome.decision else {
+    let StartupDecision::Serve(_) = outcome.decision() else {
         return Err(format!(
             "startup did not decide to serve: {:?}",
-            outcome.decision
+            outcome.decision()
         ));
     };
-    let listener = outcome.listener.expect("serving decision binds a listener");
+    let listener = outcome
+        .into_listener()
+        .expect("serving decision binds a listener");
     owner.attach(listener).map_err(|e| e.to_string())
 }

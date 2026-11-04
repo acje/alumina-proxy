@@ -941,7 +941,7 @@ fn main_wiring_body() {
     let outcome = owner
         .run_startup_within(responder_addr, 1000, Duration::from_secs(2))
         .expect("startup window");
-    let decision = *outcome.decision();
+    let decision = outcome.decision();
     assert_eq!(decision, StartupDecision::Serve(ServingMode::Full));
     let listener = outcome
         .into_listener()
@@ -1008,7 +1008,7 @@ fn startup_starvation_falsifier_body() {
         .run_startup_within(dead_addr, 1000, Duration::from_secs(2))
         .expect("startup window");
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Terminated,
         "a queued SIGTERM during a queued-runnable retry backoff must settle as the \
          terminated outcome instead of being starved by the queued runnable warning"
@@ -1237,7 +1237,7 @@ fn startup_reuse_window_body() {
     drop(responder);
 
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "both allowlist names must resolve on a single reusable startup connection"
     );
@@ -1372,7 +1372,7 @@ fn post_all_resolved_settlement_body() {
     drop(responder);
 
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Terminated,
         "a SIGTERM readable at the post-all-resolved pre-settlement checkpoint must settle \
          Terminated through the zero-wait recheck"
@@ -1472,7 +1472,7 @@ fn both_ready_settlement_body() {
     drop(responder);
 
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Terminated,
         "same-batch DNS-ready + pending signal must settle Terminated, never Serve"
     );
@@ -2345,7 +2345,7 @@ fn idle_refresh_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the startup window must resolve the allowlist name"
     );
@@ -2448,7 +2448,7 @@ fn multicycle_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "startup must resolve the allowlist name"
     );
@@ -2532,7 +2532,7 @@ fn refresh_retry_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the first responder session must resolve the allowlist name"
     );
@@ -2650,7 +2650,7 @@ fn sigterm_suppression_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the startup window must resolve the allowlist name"
     );
@@ -2743,7 +2743,7 @@ fn refresh_alloc_witness_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "startup resolves before the witness"
     );

@@ -1285,7 +1285,7 @@ fn startup_dns_phase_is_allocation_free_including_reconnect() {
         "the ACTUAL startup DNS window (resolve_window over booted storage, not the test driver resolve_body) must be allocation-free including a reconnect: {counts:?}"
     );
     assert!(
-        matches!(*outcome.decision(), StartupDecision::Exit75 { .. }),
+        matches!(outcome.decision(), StartupDecision::Exit75 { .. }),
         "both names unresolved under allowance 1 must exit 75 without binding a listener"
     );
     assert_eq!(outcome.report.resolved_names, 0);

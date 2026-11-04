@@ -1287,8 +1287,8 @@ mod startup_integration;
 
 impl StartupOutcome {
     /// The terminal readiness decision for the startup window.
-    pub const fn decision(&self) -> &StartupDecision {
-        &self.decision
+    pub const fn decision(&self) -> StartupDecision {
+        self.decision
     }
 
     /// The bound CONNECT listener when a serving decision was taken; `None`

@@ -134,7 +134,7 @@ fn full_serve_opens_listener_early_before_the_window_elapses() {
         .run_startup_within(responder.addr, NOW0, window)
         .expect("startup");
     let elapsed = start.elapsed();
-    let decision = *outcome.decision();
+    let decision = outcome.decision();
     assert_eq!(decision, StartupDecision::Serve(ServingMode::Full));
     assert_eq!(outcome.report.resolved_names, 2);
     let listener = outcome
@@ -182,7 +182,7 @@ fn exit75_is_decided_only_at_the_actual_window_deadline() {
         .run_startup_within(responder.addr, NOW0, window)
         .expect("startup");
     let elapsed = start.elapsed();
-    let decision = *outcome.decision();
+    let decision = outcome.decision();
     assert_eq!(decision, StartupDecision::Exit75 { unresolved: 1 });
     assert!(
         outcome.listener().is_none(),
@@ -212,7 +212,7 @@ fn degraded_is_decided_only_at_the_actual_window_deadline() {
         .expect("startup");
     let elapsed = start.elapsed();
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Serve(ServingMode::Degraded)
     );
     assert!(
@@ -245,7 +245,7 @@ fn failed_lookup_retries_within_the_window_and_recovers_to_full() {
         .expect("startup");
     let elapsed = start.elapsed();
     assert_eq!(
-        *outcome.decision(),
+        outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the windowed retry must recover the failed lookup"
     );
@@ -353,7 +353,7 @@ fn kernel_assigned_test_listener_avoids_the_released_port_rebind_race() {
     let outcome = storage
         .run_startup_within(responder.addr, NOW0, window)
         .expect("startup");
-    let decision = *outcome.decision();
+    let decision = outcome.decision();
     let listener = outcome.into_listener().expect("listener bound");
     let addr = listener.local_addr().expect("listener address");
     assert_eq!(
@@ -713,12 +713,12 @@ fn configured_cross_suffix_cname_resolves_identically_on_shared_and_legacy_start
             .expect("shared startup window");
 
         assert_eq!(
-            *shared_outcome.decision(),
-            *legacy_outcome.decision(),
+            shared_outcome.decision(),
+            legacy_outcome.decision(),
             "the shared MAIN path must take the identical readiness decision to the legacy storage window"
         );
         assert_eq!(
-            *shared_outcome.decision(),
+            shared_outcome.decision(),
             expected_decision,
             "a configured-suffix admission must decide exactly this readiness result"
         );
