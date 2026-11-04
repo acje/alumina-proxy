@@ -9,7 +9,6 @@ use super::{ALPN, MAX_CIPHERS, MAX_EXTENSIONS, SERVER_NAME, TLS10, TLS12, TLS13,
 /// non-GREASE, non-SNI, non-ALPN extensions than `MAX_EXTENSIONS` receives an
 /// explicit error instead of an out-of-bounds panic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Ja4Error {
     /// More than `MAX_CIPHERS` non-GREASE cipher suites were offered.
     TooManyCiphers,

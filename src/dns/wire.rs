@@ -186,7 +186,6 @@ pub enum Outcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum DnsError {
     BufferExhausted,
     MessageTooLong,

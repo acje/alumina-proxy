@@ -503,7 +503,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         fingerprint retained per slot and computed by the private
         <code>client_hello/ja4.rs</code> child, re-exported unchanged.</td>
         <td><code>src/inspection/client_hello.rs:10-22</code>, <code>:405-409</code>, <code>:875</code>;
-        <code>src/inspection/client_hello/ja4.rs:22-248</code></td></tr>
+        <code>src/inspection/client_hello/ja4.rs:21-247</code></td></tr>
       <tr><th scope="row"><code>client_hello/ja4</code> (private child)</th>
         <td><code>Ja4Error</code> + <code>Display</code> +
         <code>ja4_fingerprint</code> and helpers over flat borrowed slices, with
@@ -2460,7 +2460,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row"><code>FixedHostname</code> in the private child of public <code>names</code></th>
         <td><code>src/names/mod.rs:1-4</code>; <code>src/names/hostname.rs:1-77</code>; <code>src/inspection/client_hello.rs:3</code></td></tr>
       <tr><th scope="row">JA4 fingerprint child (same-item re-export)</th>
-        <td><code>src/inspection/client_hello/ja4.rs:22-248</code>; <code>src/inspection/client_hello.rs:7</code></td></tr>
+        <td><code>src/inspection/client_hello/ja4.rs:21-247</code>; <code>src/inspection/client_hello.rs:7</code></td></tr>
       <tr><th scope="row">Log record serializers child</th>
         <td><code>src/log/encoding.rs:11-963</code>; private <code>queue</code>/<code>sink</code> children run on the crate-private <code>LogStore</code> declared at <code>src/log/mod.rs:530-544</code>, constructed at <code>:616-674</code></td></tr>
       <tr><th scope="row">Reserved-ring displacement (begun-front protection)</th>

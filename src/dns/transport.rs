@@ -56,7 +56,6 @@ pub const QUERY_BUF_LEN: usize = 512;
 pub const RECV_BUF_LEN: usize = DNS_MSG_LIMIT + 2;
 
 #[derive(Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum StartupDnsError {
     Dns(DnsError),
     Cache(CacheError),
