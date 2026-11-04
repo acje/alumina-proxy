@@ -1021,6 +1021,10 @@ pub struct Serving {
     pre_settlement: Option<Box<dyn FnOnce()>>,
     #[cfg(test)]
     pre_poll: Option<PrePollHook>,
+    #[cfg(test)]
+    poll_interrupts_remaining: u64,
+    #[cfg(test)]
+    poll_attempts: u64,
 }
 
 #[cfg(test)]
@@ -1115,6 +1119,10 @@ impl Serving {
             pre_settlement: None,
             #[cfg(test)]
             pre_poll: None,
+            #[cfg(test)]
+            poll_interrupts_remaining: 0,
+            #[cfg(test)]
+            poll_attempts: 0,
         };
         serving.register_signal_source()?;
         Ok(serving)
@@ -1287,6 +1295,12 @@ impl Serving {
             .map_err(ServeError::from)
     }
 
+    /// Maximum poll invocations in a single [`Serving::run_once`] call,
+    /// `Interrupted` results included; on exhaustion the call returns
+    /// normally (`Ok(())`) with an empty event batch, so signal/timer
+    /// handling still runs this turn and stale events are never replayed.
+    const SERVING_POLL_INTERRUPT_ALLOWANCE: usize = 16;
+
     /// Runs one poll iteration, dispatching every ready event and enforcing
     /// the earliest pending deadline (setup, relay idle, or FIN drain).
     ///
@@ -1305,15 +1319,39 @@ impl Serving {
     pub fn run_once(&mut self, timeout: Option<Duration>) -> Result<(), ServeError> {
         self.resume_listener(Instant::now())?;
         let mut batch = std::mem::replace(&mut self.events, Events::with_capacity(0));
+        let mut attempts = 0usize;
         loop {
+            attempts += 1;
             let effective = match (self.poll_timeout(), timeout) {
                 (Some(d), Some(t)) => Some(d.min(t)),
                 (Some(d), None) => Some(d),
                 (None, t) => t,
             };
-            match self.poll.poll(&mut batch, effective) {
+            #[cfg(test)]
+            let storm = {
+                if self.poll_interrupts_remaining > 0 {
+                    self.poll_interrupts_remaining -= 1;
+                    self.poll_attempts += 1;
+                    true
+                } else {
+                    false
+                }
+            };
+            #[cfg(not(test))]
+            let storm = false;
+            let outcome = if storm {
+                Err(io::Error::from(io::ErrorKind::Interrupted))
+            } else {
+                self.poll.poll(&mut batch, effective)
+            };
+            match outcome {
                 Ok(()) => break,
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {
+                    if attempts >= Self::SERVING_POLL_INTERRUPT_ALLOWANCE {
+                        batch.clear();
+                        break;
+                    }
+                }
                 Err(err) => return Err(err.into()),
             }
         }

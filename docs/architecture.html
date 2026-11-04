@@ -274,15 +274,22 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   only <code>std::thread</code> invocation in production code is the
   <code>thread::sleep</code>
   that parks the single thread inside the startup DNS driver
-  (<code>src/dns/transport.rs:2620</code>, <code>:2726</code>; <code>resolve_window</code>
+  (<code>src/dns/transport.rs:2658</code>, <code>:2764</code>; <code>resolve_window</code>
   runs synchronously on the reactor thread before the listener opens, at
-  <code>src/dns/transport.rs:2620</code>, and the serving-time DNS work is cooperative
+  <code>src/dns/transport.rs:2658</code>, and the serving-time DNS work is cooperative
   per-turn advance, not a second thread). No thread is ever spawned in production —
   the only <code>std::thread::spawn</code>/<code>Builder</code> sites in
   production-adjacent code are <code>#[cfg(test)]</code> doubles
   (<code>src/runtime/storage/startup_integration.rs:68</code>). The single thread observes traffic, log, DNS,
   and shutdown readiness in one combined wait
-  (<code>docs/alumina-proxy.md:146</code>).</p>
+  (<code>docs/alumina-proxy.md:146</code>). Both waits are bounded — the serving
+  poll and the startup DNS wait each cap at 16 poll invocations per call,
+  <code>Interrupted</code> results included, and yield normally on exhaustion
+  (<code>Serving::SERVING_POLL_INTERRUPT_ALLOWANCE</code> at
+  <code>src/runtime/reactor.rs:1302</code>, in <code>run_once</code> at
+  <code>src/runtime/reactor.rs:1319</code>; <code>StartupDns::POLL_INTERRUPTED_ALLOWANCE</code>
+  at <code>src/dns/transport.rs:1864</code>, in <code>wait_dns_readiness</code> at
+  <code>src/dns/transport.rs:1876</code>).</p>
 
   <p>Clock authority is single and explicit: one <code>now0</code> origin plus
   whole-second offsets threads through worker, cache, DNS, and serving, with the
@@ -290,7 +297,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   when a startup window (or a test) establishes its own elapsed base
   (<code>src/runtime/storage.rs:255</code>; <code>WorkerClock</code> at
   <code>src/runtime/tunnel.rs:88-96</code>; the window anchor read back via
-  <code>window_start</code>, <code>src/dns/transport.rs:1312</code>).</p>
+  <code>window_start</code>, <code>src/dns/transport.rs:1320</code>).</p>
 </section>
 
 <section id="components">
@@ -494,7 +501,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime/storage.rs:100</code>, <code>:106</code>, <code>:234-249</code>, <code>:255</code>, <code>:458-510</code>, <code>:849-868</code>, <code>:1061-1079</code></td></tr>
       <tr><th scope="row"><code>runtime/reactor</code></th>
         <td>Slot table, <code>Stage</code> machine (10 stages), accept backoff, admission (503 on capacity), refusal bodies, run_once reactor turn, reset.</td>
-        <td><code>src/runtime/reactor.rs:88-99</code>, <code>:202-203</code>, <code>:341-352</code>, <code>:779-807</code>, <code>:1305</code>, <code>:1307-1351</code></td></tr>
+        <td><code>src/runtime/reactor.rs:88-99</code>, <code>:202-203</code>, <code>:341-352</code>, <code>:779-807</code>, <code>:1319</code>, <code>:1321-1389</code></td></tr>
       <tr><th scope="row"><code>runtime/tunnel</code></th>
         <td>Per-slot <code>SlotState</code> (free/in-setup/established), <code>SlotIndex</code>/<code>TunnelIndex</code> handles, upstream attempt pacing, worker clock.</td>
         <td><code>src/runtime/tunnel.rs:44-57</code>, <code>:88-96</code>, <code>:309-330</code>, <code>:337-347</code>, <code>:563-571</code></td></tr>
@@ -567,7 +574,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>:305-340</code> (<code>select</code>)</td></tr>
       <tr><th scope="row"><code>dns/transport</code></th>
         <td>Nonblocking DNS state machine; exchange deadline 5 s; failback 900 s; CSPRNG tids; retained-resolver reuse; decision window 90 s; typed exchange class.</td>
-        <td><code>src/dns/transport.rs:53-54</code>, <code>:592</code>, <code>:1005</code>, <code>:1312</code>, <code>:2760-2771</code>, <code>:2981-3011</code>, <code>:3340-3409</code></td></tr>
+        <td><code>src/dns/transport.rs:53-54</code>, <code>:591</code>, <code>:1005</code>, <code>:1320</code>, <code>:2798-2809</code>, <code>:3019-3049</code>, <code>:3378-3447</code></td></tr>
       <tr><th scope="row"><code>dns/transport/registration</code> (private child)</th>
         <td>Opaque <code>Registration(Mode)</code> transport-registration owner: Private against the DNS-private poll, or Shared at the serving owner's single poll <code>token</code> with the armed-interest cache; register/re-register/deregister policy branches live here, and during I/O-performing synchronization the armed cache is updated only after a successful registry call, while lifecycle invalidation clears it without a registry call where appropriate.</td>
         <td><code>src/dns/transport/registration.rs:18</code>, <code>:25</code>, <code>:61</code>, <code>:88</code>, <code>:115</code>, <code>:171</code>, <code>:194</code></td></tr>
@@ -604,7 +611,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>Runtime::serve</code>. At every link exactly one owner holds the state;
   ownership transfers by value and is never split
   (<code>src/main.rs:61-106</code>, <code>src/runtime/storage.rs:170</code>,
-  <code>src/runtime/reactor.rs:1064</code>).</p>
+  <code>src/runtime/reactor.rs:1068</code>).</p>
 
   <p>The serving state is physically organized under the
   <code>runtime</code> directory root (<code>src/runtime/mod.rs</code>, whose
@@ -660,15 +667,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   clipped to the setup deadline (<code>src/runtime/tunnel.rs:50-57</code>).</p>
   <p>On admission failure the code writes the fixed <code>BODY_503 = "HTTP/1.1
   503 Service Unavailable … no capacity\n"</code> and records a
-  <code>RejectReason::Capacity</code> log (<code>src/runtime/reactor.rs:1852-1864</code>;
+  <code>RejectReason::Capacity</code> log (<code>src/runtime/reactor.rs:1890-1902</code>;
   body constant at <code>:203</code>). Accept re-arms are backed off 100 ms
   after a transient failure so a hot loop cannot spin (<code>ACCEPT_BACKOFF</code>,
   <code>src/runtime/reactor.rs:99</code>). A successful admission assigns the slot’s
   fresh generation, freezes the setup deadline, registers the client on the
   reactor, and moves the stage to <code>ReadingConnect</code>
-  (<code>src/runtime/reactor.rs:1852-1883</code>).</p>
+  (<code>src/runtime/reactor.rs:1890-1921</code>).</p>
   <p>Peer attribution is resolved once per attempt, before the domain-block
-  precheck: <code>run_decision</code> (<code>src/runtime/reactor.rs:2415-2429</code>)
+  precheck: <code>run_decision</code> (<code>src/runtime/reactor.rs:2453-2467</code>)
   performs the exact-pair lookup — requested host, approved port, and
   configured control ordinal — via <code>WorkerView::resolve</code>
   (<code>src/runtime/tunnel.rs:773-782</code>), then samples <code>Instant::now()</code>
@@ -681,7 +688,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/runtime/tunnel.rs:824</code>). Each retry re-resolves the pair fresh from
   the immutable configuration; only the resolved context and its freshness
   observation are not persisted — the worker’s attempt ledger and the
-  committed slot identity (<code>src/runtime/reactor.rs:2457-2459</code>) do remain.
+  committed slot identity (<code>src/runtime/reactor.rs:2495-2497</code>) do remain.
   A pre-Peer refusal carries the requested hostname without setting
   <code>approved</code>; the reject emitter accepts either the requested or
   the approved hostname — one hostname, never a second host/port pair
@@ -808,7 +815,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">(capacity)</th>
         <td><code>503 Service Unavailable</code> “no capacity”</td>
         <td>No free slot at admission</td>
-        <td><code>src/runtime/reactor.rs:203</code>, <code>:1852-1864</code></td></tr>
+        <td><code>src/runtime/reactor.rs:203</code>, <code>:1890-1902</code></td></tr>
     </tbody>
   </table>
 
@@ -823,10 +830,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   The first SIGTERM stops admission, closes pending setups, cancels the DNS
   transport, and fixes an 8 s grace that later signals cannot extend
   (<code>SHUTDOWN_GRACE</code>, <code>src/runtime/reactor.rs:94</code>;
-  <code>on_sigterm</code>, <code>src/runtime/reactor.rs:1588-1601</code>). The single
+  <code>on_sigterm</code>, <code>src/runtime/reactor.rs:1626-1639</code>). The single
   poll timeout folds every deadline into one wait, and the expiry sweep runs
-  before dispatch (<code>poll_timeout</code>, <code>src/runtime/reactor.rs:3197-3234</code>;
-  <code>expire_sweep</code>, <code>src/runtime/reactor.rs:3252</code>). A drained
+  before dispatch (<code>poll_timeout</code>, <code>src/runtime/reactor.rs:3235-3272</code>;
+  <code>expire_sweep</code>, <code>src/runtime/reactor.rs:3290</code>). A drained
   shutdown exits 0, a forced close exits 70, resources are released exactly
   once, and the process exits without deallocating (<code>ShutdownExit</code>,
   <code>src/runtime/reactor.rs:179-197</code>).</p>
@@ -937,7 +944,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>on_hello_validated</code> records the end in the gate alone
   (<code>src/runtime/gate.rs:196-201</code>), and <code>gate.hello_end()</code>
   (<code>src/runtime/gate.rs:267</code>) is the single read authority — the serving path
-  asks the gate for it (<code>src/runtime/reactor.rs:2669</code>) and the workspace
+  asks the gate for it (<code>src/runtime/reactor.rs:2707</code>) and the workspace
   carries no mirror.</p>
 
   <h3>4.3 Gate opening is atomic with the crossing write</h3>
@@ -984,7 +991,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row"><code>AwaitResponse</code></th>
         <td>Upstream TCP connected; the proxy's 200 Connection established response to the client is being written; ClientHello validation begins once that write completes</td>
         <td>A and B closed</td>
-        <td><code>src/runtime/reactor.rs:2583-2595</code>, <code>:3069-3085</code></td></tr>
+        <td><code>src/runtime/reactor.rs:2621-2633</code>, <code>:3107-3123</code></td></tr>
       <tr><th scope="row"><code>Validating</code></th>
         <td>CONNECT response OK (<code>SENT_200</code>); ClientHello being
         validated</td>
@@ -1211,12 +1218,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   from the already validated <code>Config</code>
   (<code>configure_bailiwick</code>, <code>src/runtime/storage.rs:176</code>), so the
   shared STARTUP window resolves declared cross-suffix CNAME targets with the
-  same per-entry scope. The boot method (<code>src/dns/transport.rs:1385</code>)
+  same per-entry scope. The boot method (<code>src/dns/transport.rs:1393</code>)
   rebuilds the zones from the allowlist and its declared suffix lists via
   <code>BailiwickZones::from_allowlist</code>
-  (<code>src/dns/transport.rs:1387</code>); the legacy window performs the same
+  (<code>src/dns/transport.rs:1395</code>); the legacy window performs the same
   reinstall from its own <code>Config</code> at its admission sites
-  (<code>src/dns/transport.rs:2559</code>, <code>:2652</code>). The public
+  (<code>src/dns/transport.rs:2597</code>, <code>:2690</code>). The public
   <code>StartupDns::new</code> default remains a legitimate standalone API; the
   boot route simply installs the validated <code>Config</code> before the first
   resolve. One paired fixture exercises both owners against identical allowlists
@@ -1232,7 +1239,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>Probe</code> — is a parameter of the single <code>start_exchange</code>
   call, so an exchange’s class is fixed at its start seam rather than by a later
   mark (the class is stored on the <code>ActiveExchange</code>;
-  <code>start_exchange</code> at <code>src/dns/transport.rs:2760-2771</code>). The retained-resolver
+  <code>start_exchange</code> at <code>src/dns/transport.rs:2798-2809</code>). The retained-resolver
   refresh path requests a <code>Serving</code> exchange
   (<code>src/runtime/owner.rs:298</code>; <code>start_dns_exchange</code> in
   <code>src/runtime/storage.rs:796</code>), and a cooperative startup window requests
@@ -1240,13 +1247,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   cleanup cancels exactly the <code>Startup</code>-class retained work while
   serving exchanges stay outstanding:
   <code>cancel_retained_startup_exchange</code>
-  (<code>src/dns/transport.rs:1554-1562</code>, driven from
+  (<code>src/dns/transport.rs:1562-1570</code>, driven from
   <code>src/runtime/owner.rs:293</code>) is scoped to the startup class by the typed
   lifecycle, so no servicing or probe exchange is ever cancelled as leftover
   startup work. Overlap fails closed: a second <code>start_exchange</code> while
   one is active returns <code>ExchangeActive</code> and leaves the outstanding
   exchange, its schedule accounting, and its connection untouched
-  (<code>src/dns/transport.rs:2770-2772</code>).</p>
+  (<code>src/dns/transport.rs:2808-2810</code>).</p>
   <p>The receive path turns one parsed reply into cache or probe state through
   an observer owned by <code>src/dns/wire.rs</code>: <code>ParsedReply</code> binds the
   parsed <code>Outcome</code> to the extreme-TTL flag — a pure boolean copy of
@@ -1261,16 +1268,16 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>PublishedKind</code> <code>:923</code>). Only after a successful parse
   and the existing deadline check does <code>step_recv</code> call
   <code>observe</code>: the receive path resets the frame cursors before the
-  match (<code>src/dns/transport.rs:2355-2356</code>), and a successful reply
+  match (<code>src/dns/transport.rs:2393-2394</code>), and a successful reply
   whose deadline has not expired is observed exactly once — after the deadline
   check and before both separate current-clock reads, the receipt read and the
   apply-time clock
-  (<code>src/dns/transport.rs:2347-2412</code>: parse <code>:2347</code>, deadline
-  <code>:2359-2363</code>, <code>observe</code> <code>:2364</code>, receipt
-  <code>:2375</code>, apply-time clock <code>:2382</code>). A <code>Probe</code>
+  (<code>src/dns/transport.rs:2385-2450</code>: parse <code>:2385</code>, deadline
+  <code>:2397-2401</code>, <code>observe</code> <code>:2402</code>, receipt
+  <code>:2413</code>, apply-time clock <code>:2420</code>). A <code>Probe</code>
   exchange reads the pure sensor facts with no cache or schedule side effects
   (<code>probe_facts</code>, <code>src/dns/wire.rs:1017</code>, called at
-  <code>src/dns/transport.rs:2366</code>), while a <code>Startup</code> or
+  <code>src/dns/transport.rs:2404</code>), while a <code>Startup</code> or
   <code>Serving</code> exchange applies the observed reply through
   <code>ObservedReply::apply</code>, whose body invokes the unchanged public
   <code>dns::apply_outcome</code> — which returns <code>OutcomeIncidents</code>
@@ -1279,9 +1286,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   triple to the Root as <code>kind</code>/<code>extreme</code>/<code>incidents</code>
   (<code>ObservedReply::apply</code>, <code>src/dns/wire.rs:1029-1047</code>; the
   re-export at <code>src/dns/mod.rs:3</code>). The Root reads the triple only on
-  <code>Ok</code> at <code>src/dns/transport.rs:2376-2383</code> (a parse success
+  <code>Ok</code> at <code>src/dns/transport.rs:2414-2421</code> (a parse success
   alone does not reach the return), then folds the same effects into incident,
-  TTL, and corroboration accounting (<code>src/dns/transport.rs:2384-2412</code>). The borrowed
+  TTL, and corroboration accounting (<code>src/dns/transport.rs:2422-2450</code>). The borrowed
   <code>ObservedReply</code> is a two-pointer-sized view — bounded at 16 bytes
   by
   <code>parsed_reply_layout_is_bounded_by_the_outcome_plus_alignment</code>
@@ -1305,38 +1312,38 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>close</code> versus infallible <code>abandon</code> — so no root site
   writes the armed cache directly and shared attach is guarded against
   double-registration (<code>:61</code>, <code>:88</code>, <code>:171</code>,
-  <code>:194</code>; <code>src/dns/transport.rs:1606-1607</code>,
-  <code>:1755-1762</code>, <code>:1774</code>). Interest differs by mode even in
+  <code>:194</code>; <code>src/dns/transport.rs:1614-1615</code>,
+  <code>:1763-1770</code>, <code>:1782</code>). Interest differs by mode even in
   one phase: a private connect registers <code>READABLE | WRITABLE</code> while
   the shared phase-intent map asks only <code>WRITABLE</code> for
   <code>Connecting</code> and read-only once the query is sent
   (<code>src/dns/transport/registration.rs:68-69</code>; <code>sync_shared</code> /
-  <code>shared_desired_interest</code>, <code>src/dns/transport.rs:1774</code>,
-  <code>:1788</code>), and each lifecycle edge resets the exchange frame's
+  <code>shared_desired_interest</code>, <code>src/dns/transport.rs:1782</code>,
+  <code>:1795</code>), and each lifecycle edge resets the exchange frame's
   filled/written/msglen cursor once (<code>reset_exchange_frame</code>,
-  <code>src/dns/transport.rs:1521</code>) after close's deregister outcome clears
-  the cache (<code>:1493-1510</code>).</p>
+  <code>src/dns/transport.rs:1529</code>) after close's deregister outcome clears
+  the cache (<code>:1501-1518</code>).</p>
   <p>The DoT serving path refreshes on a single connection with a 5 s exchange
   deadline (<code>EXCHANGE_DEADLINE_SECS</code>, <code>src/dns/transport.rs:53</code>):
   a failed handshake forces a full reconnect — and a fresh rustls configuration —
-  on the next exchange (<code>:1979-2012</code>, <code>upgrade_to_tls</code>;
+  on the next exchange (<code>:2017-2050</code>, <code>upgrade_to_tls</code>;
   <code>build_tls_connection</code>
   at <code>:1005-1035</code>), with retries governed by the schedule backoff
   ladder [1,2,4,8,16,30] (<code>src/dns/schedule.rs:16</code>). The kept failure reason distinguishes a pin <code>SPKI</code> mismatch, a <code>SAN</code>/name mismatch, and a missing trust anchor from generic rustls protocol/socket/<code>EOF</code> causes: the cause is captured at the handshake probe and preserved through the initial flight into <code>note_failure</code>. Failover relocates to
   the next resolver on counted failures
-  (<code>on_exchange_failed</code>, <code>src/dns/transport.rs:3340-3409</code>);
+  (<code>on_exchange_failed</code>, <code>src/dns/transport.rs:3378-3447</code>);
   failback returns after a 900 s grace with three consecutive successes
-  (<code>FAILBACK_AFTER_SECS</code>, <code>src/dns/transport.rs:592</code>;
-  <code>maybe_begin_failback</code> at <code>:2981-3011</code>,
-  <code>on_exchange_succeeded</code> at <code>:3410-3441</code>). Sensor probes
+  (<code>FAILBACK_AFTER_SECS</code>, <code>src/dns/transport.rs:591</code>;
+  <code>maybe_begin_failback</code> at <code>:3019-3049</code>,
+  <code>on_exchange_succeeded</code> at <code>:3448-3479</code>). Sensor probes
   run behind the post-window sweep and sustained-negative corroboration and never
-  apply cache state (<code>maybe_begin_sweep</code> <code>:3035-3122</code>,
-  <code>sweep_next_probe</code> <code>:3123-3186</code>,
-  <code>step_corroboration</code> <code>:3187-3339</code>). A relocation that
+  apply cache state (<code>maybe_begin_sweep</code> <code>:3073-3160</code>,
+  <code>sweep_next_probe</code> <code>:3161-3224</code>,
+  <code>step_corroboration</code> <code>:3225-3377</code>). A relocation that
   would downgrade a DoT entry from TLS to plain DNS is counted as a
   <code>dp</code> monitor fact and never performed silently
   (<code>note_downgrade_if_dot_to_plain</code>,
-  <code>src/dns/transport.rs:3013-3032</code>; <code>Nameserver::port()</code>
+  <code>src/dns/transport.rs:3051-3070</code>; <code>Nameserver::port()</code>
   <code>src/dns/resolver.rs:202-208</code>).</p>
   <p>The retained transport also records a fixed configured-resolver origin on its
   incident notes, captured at the failure instant so provenance survives failover: every non-probe
@@ -1344,11 +1351,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   the exchange failed — before the failover state machine relocates or restores
   it — into a per-name, per-family latest-failure table
   (<code>last_failed</code>, <code>src/dns/transport.rs:1108</code>) and onto
-  <code>IncidentNote::Open</code> (<code>src/dns/transport.rs:3467</code>); a
+  <code>IncidentNote::Open</code> (<code>src/dns/transport.rs:3505</code>); a
   serving recovery names the resolver that actually performed it, read at the
-  published-success path (<code>src/dns/transport.rs:2400</code>; an absent
+  published-success path (<code>src/dns/transport.rs:2438</code>; an absent
   resolver set is <code>None</code>, never the primary). The origin is recorded
-  by <code>note_failure</code> (<code>src/dns/transport.rs:3443</code>) from
+  by <code>note_failure</code> (<code>src/dns/transport.rs:3481</code>) from
   the bounded active-resolver index only, never from untrusted integers, and
   the per-name, per-family write lands only after the schedule validates the
   failure; probes never write it and recovery never clears it (historical
@@ -1368,9 +1375,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   incident-recovery records instead carry the actor captured at the event
   itself, never a saved-table read at emission: <code>note_failure</code>
   places the failing origin into <code>IncidentNote::Open</code>
-  (<code>src/dns/transport.rs:3467-3473</code>), the published-success path
+  (<code>src/dns/transport.rs:3505-3511</code>), the published-success path
   places the resolver that actually served into <code>IncidentNote::Recovered</code>
-  (<code>src/dns/transport.rs:2400</code>; a recovery after failover reads
+  (<code>src/dns/transport.rs:2438</code>; a recovery after failover reads
   <code>1</code> where the failure origin read <code>0</code>), and
   <code>drain_incident_notes</code> (<code>src/runtime/storage.rs:730-765</code>) hands
   each carried actor straight to the <code>incident_open</code>/
@@ -1397,7 +1404,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   best-effort sink may drop before its drain, so delivery is not guaranteed. It is
   latched behind the first counted failure, where <code>StartupDns::resolve_window</code>
   emits it on the first <code>ExchangeResult::Failed</code>
-  (<code>src/dns/transport.rs:2704</code>, where
+  (<code>src/dns/transport.rs:2742</code>, where
   <code>WindowLedger::mark_failed</code> returns the one-per-ledger first-failure
   capture at <code>:490-510</code>), and the cooperative
   <code>Serving::run_startup_window</code> reaches the same record through
@@ -1467,23 +1474,23 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   remaining length-prefixed plaintext through the rustls in-memory writer, a
   memory step never charged against the socket attempt budget, then flushes the
   outbound ciphertext nonblockingly under a fixed 16 socket attempts per advance
-  (<code>src/dns/transport.rs:3613</code>, <code>:3557</code>, <code>:3575</code>). The TLS handshake spends that
+  (<code>src/dns/transport.rs:3651</code>, <code>:3595</code>, <code>:3613</code>). The TLS handshake spends that
   same single allowance for the advance across its prewrite drain, one read and
   postwrite drain — never an additive 16 + read + 16 — and the in-memory rustls
   plaintext reader is bounded by that same constant
-  (<code>src/dns/transport.rs:2057</code>, <code>:3587</code>, <code>:2434</code>). Exhausting that budget defers as a
+  (<code>src/dns/transport.rs:2095</code>, <code>:3625</code>, <code>:2472</code>). Exhausting that budget defers as a
   cooperative yield without fabricating <code>WouldBlock</code> — the send as
   <code>TlsSendProbe::Yield</code>, the handshake parked in the sendable
   <code>HandshakeContinue</code> stage — and a resumed probe never writes an empty
   remainder, so an <code>Ok(0)</code> with bytes remaining still settles as a
-  counted send failure (<code>src/dns/transport.rs:3619-3621</code>). A real
+  counted send failure (<code>src/dns/transport.rs:3657-3659</code>). A real
   <code>WouldBlock</code> still re-arms writable interest
-  (<code>src/dns/transport.rs:2272-2273</code>). While the active exchange is
+  (<code>src/dns/transport.rs:2310-2311</code>). While the active exchange is
   sendable-without-wait the serving owner zeroes its single poll
   (<code>src/runtime/owner.rs:415-426</code>) and the startup window does the same
   inside its cooperative loop
   (<code>src/runtime/reactor/startup.rs:27-176</code>;
-  <code>src/dns/transport.rs:1653</code>, <code>:1839</code>), so a
+  <code>src/dns/transport.rs:1661</code>, <code>:1847</code>), so a
   <code>HandshakeContinue</code>/<code>SendReady</code> park is re-advanced
   immediately with no readiness edge instead of riding the exchange/window
   deadline; a real would-block still waits via the armed socket edge. With the
@@ -1720,13 +1727,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   projection, not a second lookup. After an approved-slot presence guard,
   serving resolves the committed identity — the <code>report_name</code> field
   the peer-commitment branch wrote together with <code>approved</code> and
-  <code>approved_port</code> (<code>src/runtime/reactor.rs:2457-2459</code>) and that <code>reset</code>
+  <code>approved_port</code> (<code>src/runtime/reactor.rs:2495-2497</code>) and that <code>reset</code>
   clears together with them (<code>src/runtime/reactor.rs:779-807</code>) — through one fixed
   <code>ControlTable::ordinal</code> projection (<code>slot_ordinal</code>,
-  <code>src/runtime/reactor.rs:2328</code>). The three late consumers — the
-  domain-sweep closure (<code>src/runtime/reactor.rs:2321</code>), the early-upstream-data
-  violation (<code>src/runtime/reactor.rs:2676-2679</code>), and the JA4 baseline
-  (<code>src/runtime/reactor.rs:2796-2798</code>) — all read through this same owned projection, so
+  <code>src/runtime/reactor.rs:2366</code>). The three late consumers — the
+  domain-sweep closure (<code>src/runtime/reactor.rs:2359</code>), the early-upstream-data
+  violation (<code>src/runtime/reactor.rs:2714-2717</code>), and the JA4 baseline
+  (<code>src/runtime/reactor.rs:2834-2836</code>) — all read through this same owned projection, so
   the pair is not re-looked-up late in the request; the hostname-logging,
   destination-IP deferral, and JA4 deferred-recording guards keep their
   existing meaning. There is no extra mirror, cache, or field.</p>
@@ -1842,14 +1849,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>7.2 The zero-allocation discipline and the DoT seam</h3>
   <p>The serving steady state is allocation-free by construction after boot:
   the slot table is built once by <code>collect()</code> over an exact-size
-  iterator (<code>src/runtime/reactor.rs:1069-1076</code>), so it is one boot allocation
+  iterator (<code>src/runtime/reactor.rs:1073-1080</code>), so it is one boot allocation
   and any later growth would allocate post-boot. Per turn, run_once coalesces the
   poll batch into a fixed stack <code>items</code> array
-  (<code>[(Token, Readiness); POLL_EVENTS_CAP]</code>, <code>src/runtime/reactor.rs:1332</code>)
+  (<code>[(Token, Readiness); POLL_EVENTS_CAP]</code>, <code>src/runtime/reactor.rs:1370</code>)
   — a separate stack-owned buffer, not a reallocated Vec. Distinct from that, the
   reactor’s boot-retained per-turn <code>events</code> buffer is swapped with
   <code>Events::with_capacity(0)</code> and restored after polling
-  (<code>src/runtime/reactor.rs:1307</code>, <code>:1351</code>); that swap/restore
+  (<code>src/runtime/reactor.rs:1321</code>, <code>:1389</code>); that swap/restore
   property depends on mio not allocating for a zero-capacity buffer and on
   <code>epoll_wait</code> writing into the pre-existing buffer, and it is
   exercised by the steady-state allocation witnesses in
@@ -1870,7 +1877,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   turns). A separate pointer-transfer witness, not a numeric allocation
   witness, covers the second claim:
   <code>serving_consumes_boot_traffic_buffers_by_value_not_reallocation</code>
-  (<code>src/runtime/reactor/tests.rs:220</code>) asserts the boot traffic slabs transfer
+  (<code>src/runtime/reactor/tests.rs:267</code>) asserts the boot traffic slabs transfer
   into the slot workspaces by value: <code>slots[0].buf</code> and
   <code>slots[511].down</code> keep the <code>TrafficStorage</code>
   allocation pointers, so no second traffic allocation occurs when the serving
@@ -1890,8 +1897,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (boot init is exempt; shutdown exits without deallocating), with one
   authorised first-party exception: each DoT dial builds its TLS state at the
   per-connect setup seam <code>build_tls_connection</code>
-  (<code>src/dns/transport.rs:1005-1035</code>, called at <code>:1994</code> in
-  <code>upgrade_to_tls</code> <code>:1979-2012</code>),
+  (<code>src/dns/transport.rs:1005-1035</code>, called at <code>:2032</code> in
+  <code>upgrade_to_tls</code> <code>:2017-2050</code>),
   which the specification records as the authorised first-party allocation point
   (<code>docs/alumina-proxy.md:625-627</code>). Dependency behaviour is a separate
   bounded seam outside the first-party scope: the pinned rustls performs
@@ -1902,7 +1909,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   bounded rustls seam — the dependency scope — may allocate at most
   <code>WARM_DOT_ALLOC_BOUND = 8</code> and deallocate at most 8 independently
   (<code>src/dns/transport/dot_tests.rs:1401-1413</code>, <code>:1458-1495</code>;
-  per-TLS-upgrade allocation at <code>src/dns/transport.rs:1979-2012</code>). That
+  per-TLS-upgrade allocation at <code>src/dns/transport.rs:2017-2050</code>). That
   is a calibrated fixture bound — total heap activity on that single warm
   exchange, distinct from the retained named storage the inventory reports — never
   a universal or total-event maximum. The boot-window zero-allocation witness is
@@ -1917,7 +1924,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>CoalescedBatch</code> — a two-pass structure whose first pass folds
   arrivals in order and whose second pass re-dispatches each slot contiguously
   within a single complete visit (<code>src/runtime/reactor.rs:479-489</code>,
-  <code>:1385</code>). Per-visit I/O is bounded — <code>VISIT_OPS = 16</code> ops
+  <code>:1423</code>). Per-visit I/O is bounded — <code>VISIT_OPS = 16</code> ops
   or 64 KiB per connection visit, whichever comes first, combined across both
   directions (<code>src/runtime/reactor.rs:106-107</code>) — timers rejoin the turn at
   most every <code>TIMER_RECHECK_EVERY = 256</code> ready-slots or I/O ops
@@ -1942,32 +1949,32 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   always maps exactly, even while suspended. It never samples a clock and never
   selects or mutates work.
   <code>Serving::poll_timeout</code> itself is not pure
-  (<code>src/runtime/reactor.rs:3197-3234</code>): it samples <code>now</code>, commits
+  (<code>src/runtime/reactor.rs:3235-3272</code>): it samples <code>now</code>, commits
   the cached <b>slot-only</b> <code>next_expiry</code> snapshot from slot
-  deadlines alone (<code>src/runtime/reactor.rs:3208</code>), then folds the global
+  deadlines alone (<code>src/runtime/reactor.rs:3246</code>), then folds the global
   minimum over slot, DNS-exchange, shutdown, log and schedule wakes and returns
   the resulting <code>Duration</code> — the final wait is global, never
   slot-only. The distinct startup-window ledger, window-clipped deadline and
   sibling-release selection (<code>src/runtime/reactor/startup.rs:104-127</code>) remain
   a separate scheduling seam.</p>
   <p>The deterministic visit-budget fixture
-  (<code>run_budget_visit_fixture</code>, <code>src/runtime/reactor/tests.rs:3887-4021</code>)
+  (<code>run_budget_visit_fixture</code>, <code>src/runtime/reactor/tests.rs:3934-4068</code>)
   proves the shared per-visit ledger as built: a full 32&nbsp;KiB read window, observed via a
   non-consuming peek within the unchanged 2-second bound, yields one 32&nbsp;KiB read plus an
   equal flush and a saturated <code>VisitState</code> ledger of exactly 65,536 bytes
-  (<code>src/runtime/reactor/tests.rs:4024-4048</code>); a 32,664-byte prefix yields a 65,328-byte
+  (<code>src/runtime/reactor/tests.rs:4071-4095</code>); a 32,664-byte prefix yields a 65,328-byte
   ledger with 208 bytes remaining — not exhausted — and is rescheduled under the same
   independent 16-op/64&nbsp;KiB caps while the wire payload pattern is conserved byte-for-byte
-  (<code>src/runtime/reactor/tests.rs:4051-4075</code>; <code>read_room</code> at
-  <code>src/runtime/reactor.rs:2014</code>).</p>
+  (<code>src/runtime/reactor/tests.rs:4098-4122</code>; <code>read_room</code> at
+  <code>src/runtime/reactor.rs:2052</code>).</p>
   <p>Registration tokens are disjoint by construction: the listener holds
   token 0, client sockets occupy <code>1..=512</code>, each upstream uses
   <code>UPSTREAM_BASE + index</code>, and <code>DNS_LOCAL</code> and
   <code>SIGNAL_LOCAL</code> are reserved. Low bits select the source and high
   bits carry the slot generation, so a reserved source can never alias a
   connection; the SIGTERM self-pipe event is handled before every connection
-  event (<code>src/runtime/reactor.rs:68</code>, <code>:136-163</code>, <code>:1321-1326</code>,
-  <code>:1587-1600</code>).</p>
+  event (<code>src/runtime/reactor.rs:68</code>, <code>:136-163</code>, <code>:1359-1364</code>,
+  <code>:1625-1638</code>).</p>
   <p>Socket-token pairing is centralized: <code>SlotWorkspace::side_pair(index,
   Side)</code> returns the <code>(&amp;mut TcpStream, Token)</code> borrowed pair
   for the chosen side, and the client/upstream register and reregister helpers —
@@ -1975,7 +1982,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>reregister_client</code>, <code>reregister_upstream</code> — all obtain
   socket and token through that single seam (<code>Side</code> at
   <code>src/runtime/reactor.rs:700</code>, <code>side_pair</code> at <code>:809</code>,
-  helpers at <code>:1896-1943</code>), so per-side token arithmetic lives in
+  helpers at <code>:1934-1981</code>), so per-side token arithmetic lives in
   exactly one place.</p>
   <p>Slot reuse is metadata-only with one deliberate retention: on tunnel close,
   <code>SlotWorkspace::reset</code> rebuilds the parser, inspector, gate, capture,
@@ -2092,7 +2099,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     (<code>src/log/sink.rs:16-31</code>). The latch is sticky state: no later
     drain consumes or clears it, so a non-owner drain — the startup-window
     drains (<code>src/runtime/storage.rs:1252</code>, <code>src/runtime/reactor/startup.rs:171</code>,
-    <code>src/dns/transport.rs:2694</code>, <code>:2893</code>) or the
+    <code>src/dns/transport.rs:2732</code>, <code>:2931</code>) or the
     resolver-probe drain (<code>src/runtime/storage.rs:958</code>) — that latches the sink
     is still observed by the first serving owner turn
     (<code>sink_has_failed</code>, <code>src/log/sink.rs:87-99</code>). The
@@ -2222,7 +2229,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>:102-105</code>; <code>src/runtime/storage.rs:119-130</code></td></tr>
       <tr><th scope="row">503 (HTTP)</th>
         <td>Admission: no free slot — typed capacity answer, fixed body</td>
-        <td><code>src/runtime/reactor.rs:203</code>, <code>:1852-1864</code></td></tr>
+        <td><code>src/runtime/reactor.rs:203</code>, <code>:1890-1902</code></td></tr>
       <tr><th scope="row">504 (HTTP)</th>
         <td><code>SetupTimeout</code>: setup deadline expired before the gate opened</td>
         <td><code>src/runtime/reactor/policy.rs:22-24</code></td></tr>
@@ -2281,7 +2288,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       the gate is closed ⇒ terminate setup, no forwarding, no logging of upstream
       bytes</th>
         <td><code>Activity::{Data,Eof,Reset}</code> observation (D4)</td>
-        <td><code>src/runtime/gate.rs:54-58</code>; <code>src/runtime/reactor.rs:2652-2695</code></td></tr>
+        <td><code>src/runtime/gate.rs:54-58</code>; <code>src/runtime/reactor.rs:2690-2733</code></td></tr>
       <tr><th scope="row">Ambiguous evidence cannot become a clean pass</th>
         <td><code>Effect::Unknown</code> variants; no first-slot latch consumption</td>
         <td><code>src/enforcement/policy.rs:136-145</code></td></tr>
@@ -2344,18 +2351,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   clock (<code>src/runtime/tunnel.rs:743-747</code>) — plus the raw allowlist index
   minted by <code>WorkerView::resolve</code> (<code>src/runtime/tunnel.rs:773-782</code>).
   The context’s last read is <code>peer_state</code>
-  (<code>src/runtime/reactor.rs:2453</code>), before the mutable freshness consumer
-  and the slot writes and dial that follow (<code>src/runtime/reactor.rs:2454-2466</code>),
+  (<code>src/runtime/reactor.rs:2491</code>), before the mutable freshness consumer
+  and the slot writes and dial that follow (<code>src/runtime/reactor.rs:2492-2504</code>),
   so it is not held to the end of the dial. Nothing is stored back — no
   context, cache reference, or lease in the slot and no selected-peer lease
   across retries; a retry re-resolves from the same cache. Every granted peer
   folds its per-grant freshness observation into the monitor — Stale sets,
-  Fresh clears (<code>src/runtime/reactor.rs:2448-2454</code>) — and only incident
+  Fresh clears (<code>src/runtime/reactor.rs:2486-2492</code>) — and only incident
   admission counting is guarded by <code>connect_family.is_none()</code>
-  (<code>src/runtime/reactor.rs:2492-2503</code>); a stale observation never denies a
+  (<code>src/runtime/reactor.rs:2530-2541</code>); a stale observation never denies a
   retry, which may select another servable candidate
   (<code>src/runtime/tunnel.rs:877-886</code>). The mutable peer-freshness consumer
-  (<code>src/runtime/reactor.rs:2482</code>) performs no cache lookup of its own.</p>
+  (<code>src/runtime/reactor.rs:2520</code>) performs no cache lookup of its own.</p>
 
   <h3>9.4 Trust boundary summary — pin-or-nothing, no silent downgrade</h3>
   <p>Three trust statements summarize the boundary:</p>
@@ -2369,7 +2376,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     mode in the current build (<code>src/dns/transport.rs:755-761</code>).</li>
     <li><strong>Failover never downgrades identity.</strong> Relocations cannot
     silently swap a DoT entry to plain DNS; a downgrade is counted as a
-    <code>dp</code> fact (<code>src/dns/transport.rs:3013-3032</code>).</li>
+    <code>dp</code> fact (<code>src/dns/transport.rs:3051-3070</code>).</li>
     <li><strong>Trust is homogeneous or boot fails.</strong> A mixed-trust
     resolver set is rejected at configuration time
     (<code>src/config/mod.rs:654</code>).</li>
@@ -2412,7 +2419,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/enforcement/state/tests.rs:1123</code> (test); <code>docs/alumina-proxy.md:1018-1020</code>,
         <code>:822-828</code></td></tr>
       <tr><th scope="row">DoT seam allocation profile (warm fixture bound 8)</th>
-        <td><code>src/dns/transport.rs:1005-1035</code>, <code>:1979-2012</code>;
+        <td><code>src/dns/transport.rs:1005-1035</code>, <code>:2017-2050</code>;
         <code>src/dns/transport/dot_tests.rs:1405</code>, <code>:1458-1495</code>;
         <code>src/dns/transport/tests.rs:1248-1253</code>, <code>:1284-1285</code></td></tr>
       <tr><th scope="row">Memory floor (printed named-buffer plan)</th>
@@ -2424,20 +2431,20 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>Cargo.toml:208</code>, <code>:209-213</code>, <code>:214-219</code>;
         <code>src/dns/transport.rs:36</code>, <code>:743-744</code></td></tr>
       <tr><th scope="row">Exchange class typed at the start seam</th>
-        <td><code>src/dns/transport.rs:2760-2771</code>,
-        <code>:1554-1562</code>; <code>src/runtime/owner.rs:293</code>, <code>:298</code>;
+        <td><code>src/dns/transport.rs:2798-2809</code>,
+        <code>:1562-1570</code>; <code>src/runtime/owner.rs:293</code>, <code>:298</code>;
         <code>src/runtime/storage.rs:796</code>; <code>src/runtime/reactor/startup.rs:129</code></td></tr>
       <tr><th scope="row">Slot reset reinitializes metadata (retained traffic
       slabs not zeroized)</th>
         <td><code>src/runtime/reactor.rs:779-807</code></td></tr>
       <tr><th scope="row">Socket-token pairing single-sourced</th>
         <td><code>src/runtime/reactor.rs:700</code>, <code>:809-820</code>,
-        <code>:1896-1943</code></td></tr>
+        <code>:1934-1981</code></td></tr>
       <tr><th scope="row">Validated hello end: single gate authority</th>
         <td><code>src/runtime/gate.rs:196-201</code>, <code>:267</code>;
-        <code>src/runtime/reactor.rs:2669</code></td></tr>
+        <code>src/runtime/reactor.rs:2707</code></td></tr>
       <tr><th scope="row">Public module surface / consumer classes</th>
-        <td><code>src/lib.rs:4-15</code>; <code>src/runtime/reactor.rs:1064</code>;
+        <td><code>src/lib.rs:4-15</code>; <code>src/runtime/reactor.rs:1068</code>;
         <code>src/runtime/owner.rs:223-229</code>; <code>src/bin/parser_bench.rs:1-9</code>,
         <code>:45</code></td></tr>
       <tr><th scope="row">Terminal sink state / shutdown-finish emit protocol</th>
@@ -2446,7 +2453,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>:143-151</code>, <code>:391-395</code>; <code>src/runtime/owner/tests.rs:3008</code></td></tr>
       <tr><th scope="row">Single clock / mount_clock re-anchor</th>
         <td><code>src/runtime/storage.rs:255</code>; <code>src/runtime/tunnel.rs:88-96</code>;
-        <code>src/dns/transport.rs:1312</code></td></tr>
+        <code>src/dns/transport.rs:1320</code></td></tr>
       <tr><th scope="row">Per-entry CNAME bailiwick</th>
         <td><code>src/dns/wire.rs:827-893</code>; <code>src/config/mod.rs:1066</code></td></tr>
       <tr><th scope="row">Stage machine (10 variants vs 9-step path)</th>
@@ -2456,7 +2463,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>:292</code>, <code>:333-343</code></td></tr>
       <tr><th scope="row">Admission / 503 / backoff</th>
         <td><code>src/runtime/reactor.rs:99</code>, <code>:203</code>,
-        <code>:1852-1864</code>; <code>src/runtime/tunnel.rs:44-57</code></td></tr>
+        <code>:1890</code>; <code>src/runtime/tunnel.rs:44-57</code></td></tr>
       <tr><th scope="row">Refusal matrix</th>
         <td><code>src/runtime/reactor/policy.rs:8-24</code></td></tr>
       <tr><th scope="row">Violation lattice (6) / effects (4)</th>
@@ -2509,18 +2516,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/dns/resolver.rs:202-208</code>, <code>:305-340</code></td></tr>
       <tr><th scope="row">Startup DNS machine / deadlines / failover / failback /
       probes</th>
-        <td><code>src/dns/transport.rs:53-54</code>, <code>:592</code>,
-        <code>:2760-2771</code>, <code>:2981-3011</code>, <code>:3035-3122</code>, <code>:3123-3186</code>, <code>:3187-3339</code>,
-        <code>:3340-3409</code>, <code>:3410-3441</code></td></tr>
+        <td><code>src/dns/transport.rs:53-54</code>, <code>:591</code>,
+        <code>:2798-2809</code>, <code>:3019-3049</code>, <code>:3073-3160</code>, <code>:3161-3224</code>, <code>:3225-3377</code>,
+        <code>:3378-3447</code>, <code>:3448-3479</code></td></tr>
       <tr><th scope="row">Transport registration owner (private
       <code>Registration</code> child)</th>
         <td><code>src/dns/transport/registration.rs:18</code>, <code>:25</code>,
         <code>:61</code>, <code>:88</code>, <code>:115</code>, <code>:171</code>,
-        <code>:194</code>; <code>src/dns/transport.rs:1493-1510</code>,
-        <code>:1521</code>, <code>:1606-1607</code>, <code>:1755-1762</code>,
-        <code>:1774</code>, <code>:1788</code></td></tr>
+        <code>:194</code>; <code>src/dns/transport.rs:1501-1518</code>,
+        <code>:1529</code>, <code>:1614-1615</code>, <code>:1763-1770</code>,
+        <code>:1782</code>, <code>:1795</code></td></tr>
       <tr><th scope="row">Single-reactor / run_once / events swap</th>
-        <td><code>src/runtime/reactor.rs:118</code>, <code>:1307-1351</code>;
+        <td><code>src/runtime/reactor.rs:118</code>, <code>:1321-1389</code>;
         <code>src/runtime/owner.rs:163-184</code>, <code>:200-211</code>,
         <code>:370-383</code></td></tr>
       <tr><th scope="row">DoT trust / pin-or-nothing</th>

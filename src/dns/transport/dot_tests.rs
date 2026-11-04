@@ -1826,3 +1826,54 @@ fn handshake_budget_deferral_stays_sendable_and_resumes() {
     transport.close_connection().unwrap();
     drop(responder);
 }
+
+#[test]
+fn wait_dns_readiness_bounds_interrupted_poll_storm_and_yields_promptly() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let cfg = dot_config(&pinned_resolver());
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(listener.local_addr().unwrap().port());
+    transport.now0 = 1_000_000;
+    transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
+        fqdn: *fqdn,
+        pin: cfg.resolver_set().primary().pin().copied(),
+    });
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    transport
+        .start_exchange(
+            fqdn,
+            Family::A,
+            0,
+            Instant::now() + Duration::from_millis(60),
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
+        .unwrap();
+    assert!(
+        transport.needs_wait(),
+        "a freshly started exchange must sit in Connecting and wait for the connect edge"
+    );
+    transport.poll_interrupted_remaining = 64;
+    transport.poll_attempts = 0;
+    let ready = transport
+        .wait_dns_readiness(Instant::now() + Duration::from_millis(10))
+        .expect("an interrupted poll storm is a bounded yield, not a fatal error");
+    assert!(
+        !ready,
+        "no readiness may be claimed for the DNS source while every poll was interrupted"
+    );
+    assert!(
+        transport.events.is_empty(),
+        "exhaustion must clear the DNS event batch so no stale readiness is claimed"
+    );
+    assert_eq!(
+        transport.poll_attempts,
+        StartupDns::POLL_INTERRUPTED_ALLOWANCE as u64,
+        "a sustained interrupted poll storm must cap at the allowance, not spin"
+    );
+    assert!(
+        transport.needs_wait(),
+        "the Connecting exchange must survive the storm so the owner can re-advance it"
+    );
+    drop(listener);
+}

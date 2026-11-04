@@ -143,6 +143,53 @@ fn serving_poll_timeout_returns_exact_future_due_wake_not_a_floor() {
 }
 
 #[test]
+fn run_once_bounds_interrupted_poll_storm_yields_promptly_and_stays_healthy() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        serving.poll_interrupts_remaining = 64;
+        serving.poll_attempts = 0;
+        serving
+            .run_once(Some(Duration::from_millis(2)))
+            .expect("an interrupted poll storm is a bounded yield, never a fatal serve error");
+        assert_eq!(
+            serving.poll_attempts,
+            Serving::SERVING_POLL_INTERRUPT_ALLOWANCE as u64,
+            "a sustained interrupted poll storm must cap at the allowance, not spin (got {})",
+            serving.poll_attempts
+        );
+        assert!(
+            serving.events.is_empty(),
+            "exhaustion must leave an empty batch so no stale events are replayed"
+        );
+        serving.poll_interrupts_remaining = 0;
+        serving
+            .run_once(Some(Duration::from_millis(2)))
+            .expect("a clean poll turn after the storm still succeeds");
+    });
+}
+
+#[test]
+fn run_once_interrupted_storm_leaves_draining_timer_floor_intact() {
+    with_serving_stack(ephemeral_port(), |serving| {
+        let secs = serving.storage().dns().now_u64();
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .overwrite_due_at(0, crate::dns::cache::Family::A, secs)
+            .expect("due the A family now");
+        serving.on_sigterm().expect("first SIGTERM observation");
+        serving.poll_interrupts_remaining = 64;
+        serving
+            .run_once(Some(Duration::from_millis(2)))
+            .expect("storm yields; the draining timer floor stays armed");
+        let wait = serving.poll_timeout();
+        assert!(
+            matches!(wait, Some(d) if d >= Duration::from_millis(50) && d <= Duration::from_millis(200)),
+            "a due slot's bounded floor wake must survive an interrupted storm, not be lost: {wait:?}"
+        );
+    });
+}
+
+#[test]
 fn serving_poll_timeout_keeps_exact_future_due_wake_not_floor_while_probe_sweep_active() {
     with_serving_stack_cfg(0, config(1), |serving| {
         serving.storage_mut().dns_mut().seed_probe_sweep_for_test();

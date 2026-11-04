@@ -1204,6 +1204,10 @@ pub struct StartupDns {
     hold_handshake_defer: bool,
     #[cfg(test)]
     handshake_defer_remaining: u32,
+    #[cfg(test)]
+    poll_interrupted_remaining: u64,
+    #[cfg(test)]
+    poll_attempts: u64,
 }
 
 /// The borrowed startup-window resolution context fed to
@@ -1289,6 +1293,10 @@ impl StartupDns {
             hold_handshake_defer: false,
             #[cfg(test)]
             handshake_defer_remaining: 0,
+            #[cfg(test)]
+            poll_interrupted_remaining: 0,
+            #[cfg(test)]
+            poll_attempts: 0,
         })
     }
 
@@ -1849,6 +1857,12 @@ impl StartupDns {
         )
     }
 
+    /// Maximum poll invocations in a single [`Self::wait_dns_readiness`]
+    /// call, `Interrupted` results included; on exhaustion the call returns
+    /// normally (`Ok(false)`) with an empty event batch rather than failing
+    /// or spinning.
+    const POLL_INTERRUPTED_ALLOWANCE: usize = 16;
+
     /// The single owner-owned DNS wait: exactly one poll over the DNS-private
     /// registry, with the timeout clipped to `until` and to the outstanding
     /// exchange deadline so the wait never outlives the exchange. This is the
@@ -1868,16 +1882,40 @@ impl StartupDns {
             self.poll_ticks += 1;
         }
         let deadline = self.exchange_deadline().unwrap_or(until);
+        let mut attempts = 0usize;
         loop {
+            attempts += 1;
             let now = Instant::now();
             let timeout = if now >= deadline || now >= until {
                 Duration::ZERO
             } else {
                 deadline.min(until).saturating_duration_since(now)
             };
-            match self.poll.poll(&mut self.events, Some(timeout)) {
+            #[cfg(test)]
+            let storm = {
+                if self.poll_interrupted_remaining > 0 {
+                    self.poll_interrupted_remaining -= 1;
+                    self.poll_attempts += 1;
+                    true
+                } else {
+                    false
+                }
+            };
+            #[cfg(not(test))]
+            let storm = false;
+            let outcome = if storm {
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            } else {
+                self.poll.poll(&mut self.events, Some(timeout))
+            };
+            match outcome {
                 Ok(()) => break,
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                    if attempts >= Self::POLL_INTERRUPTED_ALLOWANCE {
+                        self.events.clear();
+                        break;
+                    }
+                }
                 Err(err) => {
                     return Err(StartupDnsError::Transport {
                         kind: err.kind(),
