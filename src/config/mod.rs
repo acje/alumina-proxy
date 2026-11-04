@@ -12,18 +12,26 @@ use crate::enforcement::action::{
     ActionKind, AnyIllegalControl, Control, ControlTable, PerFqdnControl, Scope,
 };
 use crate::enforcement::state::{AllScopeGate, GateSet};
-use crate::names::hostname::FQDN_MAX_LEN;
-#[cfg(test)]
-use crate::names::hostname::FixedHostname;
+use crate::names::hostname::{FQDN_MAX_LEN, FixedHostname};
 
 pub const CONFIG_DOC_LIMIT: usize = 16384;
 pub const ALLOWLIST_MIN: usize = 1;
 pub const ALLOWLIST_MAX: usize = 32;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Fqdn {
-    name: String,
+    name: FixedHostname,
     port: u16,
+}
+
+/// Preserves the historical `Fqdn { name: "...", port: 443 }` debug shape.
+impl std::fmt::Debug for Fqdn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fqdn")
+            .field("name", &self.as_str())
+            .field("port", &self.port)
+            .finish()
+    }
 }
 
 impl Fqdn {
@@ -40,7 +48,14 @@ impl Fqdn {
             return Err("allowlist entry is an IP literal; use a DNS hostname".into());
         }
         let port = parse_config_port(port)?;
-        Ok(Fqdn { name, port })
+        let payload = FixedHostname::normalize(name.as_bytes()).ok_or_else(|| {
+            "internal: validated allowlist hostname rejected by FixedHostname::normalize"
+                .to_string()
+        })?;
+        Ok(Fqdn {
+            name: payload,
+            port,
+        })
     }
 
     /// The normalized bare `<fqdn>` (no port, no trailing dot): the key used
@@ -48,7 +63,7 @@ impl Fqdn {
     /// keyed by the bare name.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.name
+        self.name.as_str()
     }
 
     /// The validated upstream dial port for this allowlist entry (1..=65535).
@@ -136,7 +151,7 @@ fn normalize_trailing_dot(name: &str) -> Result<&str, String> {
 
 #[cfg(test)]
 mod fqdn_tests {
-    use super::Fqdn;
+    use super::{ALLOWLIST_MAX, Fqdn};
 
     #[test]
     fn rejects_ip_literal_allowlist_entry() {
@@ -179,6 +194,93 @@ mod fqdn_tests {
     fn rejects_empty_host_allowlist_entry_without_panic() {
         assert!(Fqdn::parse(":443").is_err());
         assert!(Fqdn::parse(":443.").is_err());
+    }
+
+    #[test]
+    fn characterize_config_fqdn_parse_and_debug_baseline() {
+        let l = |c: char| std::iter::repeat_n(c, 63).collect::<String>();
+        for (input, name, port) in [
+            ("example.com:443", "example.com", 443u16),
+            ("example.com.:443", "example.com", 443),
+            ("4example.com:443", "4example.com", 443),
+            ("0x123.example.org:53", "0x123.example.org", 53),
+            ("123.example.com:443", "123.example.com", 443),
+        ] {
+            let fqdn =
+                Fqdn::parse(input).unwrap_or_else(|e| panic!("{input:?} should accept: {e}"));
+            assert_eq!(fqdn.as_str(), name, "{input} normalized name");
+            assert_eq!(fqdn.port(), port, "{input} port");
+        }
+        let max253 = format!("{}.{}.{}.{}", l('a'), l('b'), l('c'), "d".repeat(61));
+        assert_eq!(max253.len(), 253);
+        let fqdn = Fqdn::parse(&format!("{max253}:1"))
+            .unwrap_or_else(|e| panic!("253-max should accept: {e}"));
+        assert_eq!(fqdn.as_str(), max253);
+        let fqdn = Fqdn::parse(&format!("{max253}.:1"))
+            .unwrap_or_else(|e| panic!("253+dot should accept: {e}"));
+        assert_eq!(fqdn.as_str(), max253);
+        let over254 = format!("{}.{}.{}.{}", l('a'), l('b'), l('c'), "d".repeat(62));
+        assert_eq!(over254.len(), 254);
+        for (input, reason) in [
+            ("example.com", "allowlist entry lacks a <fqdn>:<port> port"),
+            (
+                "1.2.3.4:443",
+                "allowlist entry is an IP literal; use a DNS hostname",
+            ),
+            (
+                "93.184.216.34:443",
+                "allowlist entry is an IP literal; use a DNS hostname",
+            ),
+            (
+                "123:443",
+                "allowlist entry is an IP literal; use a DNS hostname",
+            ),
+            (
+                "999.999.999.999:443",
+                "allowlist entry is an IP literal; use a DNS hostname",
+            ),
+            (
+                "Bad.example:443",
+                "label \"Bad\" not lowercase ASCII [a-z0-9-]",
+            ),
+            (
+                "bad_.example:443",
+                "label \"bad_\" not lowercase ASCII [a-z0-9-]",
+            ),
+            (
+                "bücher.example:443",
+                "label \"bücher\" not lowercase ASCII [a-z0-9-]",
+            ),
+            (":443", "empty hostname"),
+            (&format!("{over254}:1"), "hostname exceeds 253 bytes"),
+            ("a..b:443", "empty label"),
+            ("a.example..:443", "multiple trailing dots"),
+            ("-a.example:443", "label starts or ends with hyphen"),
+            ("a-.example:443", "label starts or ends with hyphen"),
+            ("example.com:000", "port has a leading zero"),
+            ("example.com:0", "port 0 is invalid"),
+            ("example.com:65536", "port exceeds 65535"),
+            ("example.com:abc", "port is not canonical decimal"),
+            ("example.com:", "port is empty"),
+        ] {
+            let err = Fqdn::parse(input).expect_err("should reject");
+            assert_eq!(err, reason, "{input:?} reason");
+        }
+        let err = Fqdn::parse("bad_.example:000").expect_err("host error must precede port error");
+        assert_eq!(err, "label \"bad_\" not lowercase ASCII [a-z0-9-]");
+        let err = Fqdn::parse("1.2.3.4:000").expect_err("IP-literal error must precede port error");
+        assert_eq!(err, "allowlist entry is an IP literal; use a DNS hostname");
+        let fqdn = Fqdn::parse("example.com:443").expect("fqdn");
+        assert_eq!(
+            format!("{fqdn:?}"),
+            "Fqdn { name: \"example.com\", port: 443 }"
+        );
+    }
+
+    #[test]
+    fn config_fqdn_fixed_stored_size_is_inline_and_bounded() {
+        assert_eq!(std::mem::size_of::<Fqdn>(), 256);
+        assert_eq!(std::mem::size_of::<Fqdn>() * ALLOWLIST_MAX, 8192);
     }
 }
 

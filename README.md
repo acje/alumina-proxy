@@ -19,7 +19,7 @@ or workload type in a VPC that limits egress to be exclusively through the
 Alumina Proxy. In case of component compromise the attacker will have limited
 opportunities for establishing egress; policy violations and early-upstream-data
 events trigger configurable tripwire actions (`notify` / `block`) with bounded
-stdout monitoring (`src/config/mod.rs:908-909`; `src/enforcement/action.rs:28-31`;
+stdout monitoring (`src/config/mod.rs:858-859`; `src/enforcement/action.rs:28-31`;
 spec §Tripwire actions, monitoring, and pacing → §Action catalog and
 attribution). External delivery of `notify` events is a **deployment
 responsibility** — see the [stdout collector runbook](#notify-delivery-stdout-collector-reliability-and-drop-alerting-runbook).
@@ -52,7 +52,7 @@ hidden inside the encrypted tunnel or riding an admitted endpoint's own
 capabilities — is outside its detection reach. The action taken
 (`notify` or `block`) is your configuration choice; Alumina does not always
 panic by blocking all egress. Tarpit is reserved/deferred — it is not accepted
-as an operational setting (`src/config/mod.rs:910,1067`; spec §Tripwire actions →
+as an operational setting (`src/config/mod.rs:860,1018`; spec §Tripwire actions →
 Tarpit (deferred)). The all-scope block bar is operator-configurable
 too: by default the first deviation arms all-scope block, and raising the bar
 is your deliberate choice to tolerate a bounded burst — never a hidden
