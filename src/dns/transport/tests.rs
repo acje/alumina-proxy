@@ -2101,7 +2101,7 @@ fn resolver_set_of(addrs: &[&str]) -> ResolverSet {
 fn seeded_transport(set: ResolverSet) -> StartupDns {
     let mut transport = StartupDns::new().unwrap();
     transport.resolvers = Some(set);
-    transport.active_resolver = ActiveResolver::primary(set.len());
+    transport.active_resolver = ActiveResolver::primary_of(&set);
     transport.window_exercised[0] = true;
     transport.now0 = 1_000_000;
     transport
@@ -2252,7 +2252,7 @@ fn failback_probes_primary_after_grace_and_success_recovers_it() {
     assert_eq!(transport.peer().ip().to_string(), "1.1.1.1");
     assert_eq!(
         transport.failback_source,
-        Some(ActiveResolver::at(1, 2)),
+        Some(active_at(2, 1)),
         "the backup is remembered so a failed probe re-seats onto it"
     );
     assert!(transport.failback_due.is_none());
@@ -2268,7 +2268,7 @@ fn failback_probes_primary_after_grace_and_success_recovers_it() {
             .expect("success settles without a transport error");
         assert_eq!(
             transport.failback_source,
-            Some(ActiveResolver::at(1, 2)),
+            Some(active_at(2, 1)),
             "a single success does not settle the failback"
         );
         assert!(transport.failback_due.is_none());
@@ -2314,7 +2314,7 @@ fn failback_does_not_settle_on_one_or_two_probe_successes() {
         .expect("success settles without a transport error");
     assert_eq!(
         transport.failback_source,
-        Some(ActiveResolver::at(1, 2)),
+        Some(active_at(2, 1)),
         "one success leaves the probe armed"
     );
     assert_eq!(transport.failback_successes, 1);
@@ -2324,7 +2324,7 @@ fn failback_does_not_settle_on_one_or_two_probe_successes() {
         .expect("success settles without a transport error");
     assert_eq!(
         transport.failback_source,
-        Some(ActiveResolver::at(1, 2)),
+        Some(active_at(2, 1)),
         "two successes leave the probe armed"
     );
     assert_eq!(transport.failback_successes, 2);
@@ -2537,7 +2537,7 @@ fn probe_begin_mid_regime_does_not_reset_the_failback_counter() {
     assert_eq!(transport.failback_successes, 0);
     assert_eq!(
         transport.failback_source,
-        Some(ActiveResolver::at(1, 2)),
+        Some(active_at(2, 1)),
         "the backup is remembered so a failed probe re-seats onto it"
     );
     // The first probe success advances the counter into the middle of the
@@ -2715,8 +2715,8 @@ fn next_healthy_wraps_within_the_set() {
     let mut transport = seeded_transport(set);
     transport.degradations[0] = ResolverDegradation::Degraded;
     assert_eq!(
-        transport.next_healthy_after_active(ActiveResolver::at(2, 3)),
-        Some(ActiveResolver::at(1, 3)),
+        transport.next_healthy_after_active(active_at(3, 2)),
+        Some(active_at(3, 1)),
         "the scan wraps past the degraded primary back to the first healthy backup"
     );
 
@@ -2724,8 +2724,8 @@ fn next_healthy_wraps_within_the_set() {
     let mut transport = seeded_transport(set);
     transport.degradations[2] = ResolverDegradation::Degraded;
     assert_eq!(
-        transport.next_healthy_after_active(ActiveResolver::at(2, 3)),
-        Some(ActiveResolver::at(0, 3)),
+        transport.next_healthy_after_active(active_at(3, 2)),
+        Some(active_at(3, 0)),
         "a wrap around the set edge prefers a healthy primary"
     );
 
@@ -2733,7 +2733,7 @@ fn next_healthy_wraps_within_the_set() {
     let mut transport = seeded_transport(set);
     transport.degradations = [ResolverDegradation::Degraded; MAX_RESOLVERS];
     assert_eq!(
-        transport.next_healthy_after_active(ActiveResolver::at(1, 3)),
+        transport.next_healthy_after_active(active_at(3, 1)),
         None,
         "every candidate degraded yields no relocation"
     );
@@ -2741,7 +2741,7 @@ fn next_healthy_wraps_within_the_set() {
     let set = resolver_set_of(&["1.1.1.1"]);
     let transport = seeded_transport(set);
     assert_eq!(
-        transport.next_healthy_after_active(ActiveResolver::primary(1)),
+        transport.next_healthy_after_active(ActiveResolver::singleton()),
         None,
         "a single-resolver set never relocates"
     );
@@ -2895,7 +2895,7 @@ fn probe_sweep_begins_for_multi_resolver_set_skipping_the_active_resolver() {
     let sweep = transport.probe_sweep.expect("sweep began");
     assert_eq!(
         sweep.active_before,
-        ActiveResolver::at(0, 3),
+        active_at(3, 0),
         "the pre-sweep active resolver (the primary) is remembered for restore"
     );
     assert_eq!(
@@ -2915,7 +2915,7 @@ fn probe_sweep_begins_for_multi_resolver_set_skipping_the_active_resolver() {
 fn probe_sweep_skips_every_resolver_the_window_exercised() {
     let set = resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
     let mut transport = seeded_transport(set);
-    transport.active_resolver = ActiveResolver::at(1, 3);
+    transport.active_resolver = active_at(3, 1);
     transport.window_exercised = [true, true, false, false, false];
     transport.maybe_begin_sweep();
     assert!(
@@ -2933,7 +2933,7 @@ fn probe_sweep_skips_every_resolver_the_window_exercised() {
     assert!(!done, "the single untouched resolver is probed");
     assert_eq!(
         transport.probe_sweep.as_ref().expect("sweep").current,
-        Some(ActiveResolver::at(2, 3)),
+        Some(active_at(3, 2)),
         "the probe targets the only unexercised resolver"
     );
     let mut schedules = Schedules::new(2).unwrap();
@@ -2979,7 +2979,7 @@ fn probe_sweep_does_not_re_begin_after_verdicts_are_taken() {
 fn probe_sweep_does_not_begin_while_a_failback_probe_is_in_flight() {
     let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
     let mut transport = seeded_transport(set);
-    transport.failback_source = Some(ActiveResolver::at(1, 2));
+    transport.failback_source = Some(active_at(2, 1));
     transport.maybe_begin_sweep();
     assert!(
         !transport.sweep_active(),
@@ -2998,7 +2998,7 @@ fn sweep_next_probe_relocates_and_starts_the_first_unprobed_resolver() {
     let sweep = transport.probe_sweep.expect("sweep still active");
     assert_eq!(
         sweep.current,
-        Some(ActiveResolver::at(1, 3)),
+        Some(active_at(3, 1)),
         "the first unprobed resolver is index 1"
     );
     assert_eq!(
@@ -3008,7 +3008,7 @@ fn sweep_next_probe_relocates_and_starts_the_first_unprobed_resolver() {
     );
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(1, 3),
+        active_at(3, 1),
         "the transport relocates onto the probe target"
     );
     assert_eq!(transport.peer().ip().to_string(), "8.8.8.8");
@@ -3032,7 +3032,7 @@ fn sweep_next_probe_returns_done_when_every_resolver_is_probed() {
     let mut transport = seeded_transport(set);
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, false, false, false, false],
-        active_before: ActiveResolver::at(0, 2),
+        active_before: active_at(2, 0),
         verdicts: [
             ProbeVerdict::Ok,
             ProbeVerdict::Failed(FailureReason::Connect),
@@ -3071,7 +3071,7 @@ fn sweep_next_probe_returns_false_while_a_probe_is_in_flight() {
     let sweep = transport.probe_sweep.expect("sweep still active");
     assert_eq!(
         sweep.current,
-        Some(ActiveResolver::at(1, 3)),
+        Some(active_at(3, 1)),
         "the in-flight probe is untouched"
     );
 }
@@ -3083,16 +3083,16 @@ fn failed_probe_advances_probed_degradation_restores_active_and_records_no_failb
     let now = 1_000_000u64;
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, false, true, false, false],
-        active_before: ActiveResolver::at(0, 3),
+        active_before: active_at(3, 0),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(ActiveResolver::at(2, 3)),
+        current: Some(active_at(3, 2)),
     });
-    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.active_resolver = active_at(3, 2);
     transport.repoint_to_active();
     transport.on_exchange_failed(now);
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(0, 3),
+        active_at(3, 0),
         "a failed probe restores the pre-sweep active resolver"
     );
     assert_eq!(transport.peer().ip().to_string(), "1.1.1.1");
@@ -3115,7 +3115,7 @@ fn failed_probe_advances_probed_degradation_restores_active_and_records_no_failb
             .as_ref()
             .expect("sweep active")
             .current,
-        Some(ActiveResolver::at(2, 3)),
+        Some(active_at(3, 2)),
         "the probe target stays current so the caller records the verdict with its reason"
     );
 }
@@ -3127,11 +3127,11 @@ fn failed_probe_at_threshold_emits_degraded_enter_crossing_for_the_probed_resolv
     let now = 1_000_000u64;
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, false, true, false, false],
-        active_before: ActiveResolver::at(0, 3),
+        active_before: active_at(3, 0),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(ActiveResolver::at(2, 3)),
+        current: Some(active_at(3, 2)),
     });
-    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.active_resolver = active_at(3, 2);
     transport.repoint_to_active();
     for _ in 0..3 {
         transport.on_exchange_failed(now);
@@ -3143,7 +3143,7 @@ fn failed_probe_at_threshold_emits_degraded_enter_crossing_for_the_probed_resolv
     );
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(0, 3),
+        active_at(3, 0),
         "the probe failure still restores the pre-sweep active resolver"
     );
 }
@@ -3154,18 +3154,18 @@ fn successful_probe_records_ok_resets_probed_and_restores_active() {
     let mut transport = seeded_transport(set);
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, false, true, false, false],
-        active_before: ActiveResolver::at(0, 3),
+        active_before: active_at(3, 0),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(ActiveResolver::at(2, 3)),
+        current: Some(active_at(3, 2)),
     });
-    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.active_resolver = active_at(3, 2);
     transport.repoint_to_active();
     transport
         .on_exchange_succeeded()
         .expect("success settles without a transport error");
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(0, 3),
+        active_at(3, 0),
         "a successful probe restores the pre-sweep active resolver"
     );
     assert_eq!(transport.peer().ip().to_string(), "1.1.1.1");
@@ -3188,11 +3188,11 @@ fn successful_probe_closes_retained_connection_so_the_next_exchange_redials() {
     let mut transport = seeded_transport(set);
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, false, true, false, false],
-        active_before: ActiveResolver::at(0, 3),
+        active_before: active_at(3, 0),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(ActiveResolver::at(2, 3)),
+        current: Some(active_at(3, 2)),
     });
-    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.active_resolver = active_at(3, 2);
     transport.repoint_to_active();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe peer");
     let client = mio::net::TcpStream::connect(listener.local_addr().unwrap()).expect("connect");
@@ -3216,7 +3216,7 @@ fn successful_probe_closes_retained_connection_so_the_next_exchange_redials() {
     );
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(0, 3),
+        active_at(3, 0),
         "the pre-sweep active resolver is restored"
     );
     assert_eq!(
@@ -3260,7 +3260,7 @@ fn probe_exchange_publishes_no_name_authorization_state() {
     transport.resolvers = None;
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, true, false, false, false],
-        active_before: ActiveResolver::at(0, 3),
+        active_before: active_at(3, 0),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
         current: None,
     });
@@ -3323,7 +3323,7 @@ fn probe_exchange_publishes_no_name_authorization_state() {
     );
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(0, 3),
+        active_at(3, 0),
         "the probe restores the pre-sweep active resolver"
     );
     assert_eq!(
@@ -3345,11 +3345,11 @@ fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
     let mut transport = seeded_transport(set);
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, false, true, false, false],
-        active_before: ActiveResolver::at(0, 3),
+        active_before: active_at(3, 0),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(ActiveResolver::at(2, 3)),
+        current: Some(active_at(3, 2)),
     });
-    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.active_resolver = active_at(3, 2);
     transport.repoint_to_active();
     let mut schedules = Schedules::new(2).unwrap();
     transport
@@ -3368,7 +3368,7 @@ fn note_failure_records_failed_verdict_with_reason_and_clears_current() {
     );
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(0, 3),
+        active_at(3, 0),
         "note_failure flows through the probe-mode restore"
     );
     assert_eq!(
@@ -3710,18 +3710,18 @@ fn sweep_probe_to_non_primary_is_never_hijacked_into_a_failback_probe() {
     let mut transport = seeded_transport(set);
     let now = 1_000_000u64;
     // A window failover to the backup arms the failback grace with no source.
-    transport.active_resolver = ActiveResolver::at(1, 3);
+    transport.active_resolver = active_at(3, 1);
     transport.repoint_to_active();
     transport.failback_due = Some(now + FAILBACK_AFTER_SECS);
     transport.failback_source = None;
     // The sweep begins and probes the non-primary index 2.
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, true, true, false, false],
-        active_before: ActiveResolver::at(1, 3),
+        active_before: active_at(3, 1),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(ActiveResolver::at(2, 3)),
+        current: Some(active_at(3, 2)),
     });
-    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.active_resolver = active_at(3, 2);
     transport.repoint_to_active();
     let fqdn = crate::config::Fqdn::parse("example.com:443").expect("fqdn");
     let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
@@ -3737,7 +3737,7 @@ fn sweep_probe_to_non_primary_is_never_hijacked_into_a_failback_probe() {
         .expect("probe exchange begins");
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(2, 3),
+        active_at(3, 2),
         "the sweep probe to a non-primary is not re-routed to the primary by failback"
     );
     assert_eq!(
@@ -3757,11 +3757,11 @@ fn shutdown_aborts_the_sweep_and_drops_partial_verdicts() {
     let mut transport = seeded_transport(set);
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, true, true, false, false],
-        active_before: ActiveResolver::at(0, 3),
+        active_before: active_at(3, 0),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(ActiveResolver::at(2, 3)),
+        current: Some(active_at(3, 2)),
     });
-    transport.active_resolver = ActiveResolver::at(2, 3);
+    transport.active_resolver = active_at(3, 2);
     transport.repoint_to_active();
     transport.cancel_for_shutdown();
     assert!(
@@ -3784,11 +3784,11 @@ fn relocate_for_probe_counts_a_probe_relocation_and_restores_without_extra() {
     };
     let mut transport = seeded_transport(dot_set);
     transport
-        .relocate_for_probe(ActiveResolver::at(1, 2))
+        .relocate_for_probe(active_at(2, 1))
         .expect("relocation succeeds");
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(1, 2),
+        active_at(2, 1),
         "the probe relocation seats the transport onto the probe target"
     );
     assert_eq!(transport.peer().ip().to_string(), "8.8.8.8");
@@ -3806,12 +3806,12 @@ fn relocate_for_probe_counts_a_probe_relocation_and_restores_without_extra() {
     // sweep restore, not a relocation, so no second probe relocation is counted.
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, false, false, false, false],
-        active_before: ActiveResolver::at(0, 2),
+        active_before: active_at(2, 0),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(ActiveResolver::at(1, 2)),
+        current: Some(active_at(2, 1)),
     });
     transport.on_exchange_failed(1_000_000u64);
-    assert_eq!(transport.active_resolver, ActiveResolver::at(0, 2));
+    assert_eq!(transport.active_resolver, active_at(2, 0));
     assert_eq!(
         transport.take_probe_relocations(),
         0,
@@ -3860,8 +3860,8 @@ fn probe_observes_extreme_once_sets_kind_but_never_applies_state() {
     let mut schedules = Schedules::new(2).unwrap();
     let mut transport = seeded_bailiwick_transport();
     transport.corroboration = Some(Corroboration {
-        target: ActiveResolver::at(1, 2),
-        active_before: ActiveResolver::at(0, 2),
+        target: active_at(2, 1),
+        active_before: active_at(2, 0),
         ordinal: 0,
         family: Family::A,
     });
@@ -4130,12 +4130,12 @@ fn step_corroboration_begins_single_exchange_against_the_next_resolver() {
     let corr = transport.corroboration.expect("corroboration in flight");
     assert_eq!(
         corr.target,
-        ActiveResolver::at(1, 2),
+        active_at(2, 1),
         "the corroboration targets the next configured resolver, not the active one"
     );
     assert_eq!(
         corr.active_before,
-        ActiveResolver::at(0, 2),
+        active_at(2, 0),
         "the active resolver at trigger time is remembered for restore"
     );
     assert_eq!(
@@ -4149,7 +4149,7 @@ fn step_corroboration_begins_single_exchange_against_the_next_resolver() {
     );
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(1, 2),
+        active_at(2, 1),
         "the transport relocates onto the corroboration target"
     );
     assert_eq!(
@@ -4223,9 +4223,9 @@ fn step_corroboration_defers_while_another_exchange_or_probe_is_in_flight() {
     });
     transport.probe_sweep = Some(ProbeSweep {
         remaining: [false, true, false, false, false],
-        active_before: ActiveResolver::at(0, 2),
+        active_before: active_at(2, 0),
         verdicts: [ProbeVerdict::NotProbed; MAX_RESOLVERS],
-        current: Some(ActiveResolver::at(1, 2)),
+        current: Some(active_at(2, 1)),
     });
     let done = transport.step_corroboration(&fqdn).expect("defers");
     assert!(!done, "an in-flight probe sweep defers the corroboration");
@@ -4272,12 +4272,12 @@ fn corroboration_consistent_negative_restores_active_and_leaves_cache_unchanged(
     let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8"]));
     transport.resolvers = None;
     transport.corroboration = Some(Corroboration {
-        target: ActiveResolver::at(1, 2),
-        active_before: ActiveResolver::at(0, 2),
+        target: active_at(2, 1),
+        active_before: active_at(2, 0),
         ordinal: 0,
         family: Family::A,
     });
-    transport.active_resolver = ActiveResolver::at(1, 2);
+    transport.active_resolver = active_at(2, 1);
     transport.addr = ns(responder.port());
     let bindings_before = bindings_of(&cache, 0, Family::A);
     let due_before = schedules.due_time(0, Family::A).unwrap();
@@ -4307,7 +4307,7 @@ fn corroboration_consistent_negative_restores_active_and_leaves_cache_unchanged(
     );
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(0, 2),
+        active_at(2, 0),
         "consistent negatives restore the active resolver with no relocation"
     );
     assert_eq!(
@@ -4363,12 +4363,12 @@ fn corroboration_conflict_advances_degradation_and_relocates_when_degraded() {
     let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]));
     transport.resolvers = None;
     transport.corroboration = Some(Corroboration {
-        target: ActiveResolver::at(1, 3),
-        active_before: ActiveResolver::at(0, 3),
+        target: active_at(3, 1),
+        active_before: active_at(3, 0),
         ordinal: 0,
         family: Family::A,
     });
-    transport.active_resolver = ActiveResolver::at(1, 3);
+    transport.active_resolver = active_at(3, 1);
     // The active resolver is two failures from degraded; the conflict advance
     // crosses the threshold and relocates to the next healthy resolver.
     transport.degradations[0] = ResolverDegradation::Healthy { consecutive: 2 };
@@ -4405,7 +4405,7 @@ fn corroboration_conflict_advances_degradation_and_relocates_when_degraded() {
     );
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(1, 3),
+        active_at(3, 1),
         "a degraded active resolver relocates to the next healthy resolver"
     );
     assert_eq!(
@@ -4441,12 +4441,12 @@ fn corroboration_conflict_below_threshold_advances_without_relocating() {
     let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8", "9.9.9.9"]));
     transport.resolvers = None;
     transport.corroboration = Some(Corroboration {
-        target: ActiveResolver::at(1, 3),
-        active_before: ActiveResolver::at(0, 3),
+        target: active_at(3, 1),
+        active_before: active_at(3, 0),
         ordinal: 0,
         family: Family::A,
     });
-    transport.active_resolver = ActiveResolver::at(1, 3);
+    transport.active_resolver = active_at(3, 1);
     transport.addr = ns(responder.port());
     let cache_before = cache;
     let schedules_before = schedules;
@@ -4480,7 +4480,7 @@ fn corroboration_conflict_below_threshold_advances_without_relocating() {
     );
     assert_eq!(
         transport.active_resolver,
-        ActiveResolver::at(0, 3),
+        active_at(3, 0),
         "a below-threshold advance leaves the active resolver in place"
     );
     assert_eq!(
@@ -4695,5 +4695,93 @@ fn shared_armed_cache_clears_on_close_and_rearms_fresh_dial() {
         raw_stream(&mut transport.conn).unwrap(),
         Token(11),
         "freshly dialed shared fd after the close-then-redial re-register",
+    );
+}
+
+/// Test-only derived route: an active resolver at `index` over a validated
+/// non-empty `ResolverSet` of exactly `len` resolvers (1..=`MAX_RESOLVERS`) — the
+/// set length comes from the set, never from a scalar `ActiveResolver`
+/// argument; `with_index` then validates the selection.
+fn active_at(len: usize, index: usize) -> ActiveResolver {
+    let set = match len {
+        2 => resolver_set_of(&["10.0.0.1", "10.0.0.2"]),
+        _ => resolver_set_of(&["10.0.0.1", "10.0.0.2", "10.0.0.3"]),
+    };
+    ActiveResolver::primary_of(&set)
+        .with_index(index)
+        .expect("in-range fixture")
+}
+
+/// Construction boundary with the derived-only routes: every route keeps
+/// `index < set_len` and `set_len` in `1..=MAX_RESOLVERS` (the length travels
+/// only from a validated non-empty [`ResolverSet`] or the fixed singleton
+/// seat, never from a caller-supplied scalar), so an active resolver cannot
+/// point past the fixed `MAX_RESOLVERS` arrays. The selected-index route is
+/// fallible: `None` for an index equal to the set length or an out-of-range
+/// index (including `usize::MAX`) — never a partial value and never a panic.
+#[test]
+fn active_resolver_construction_boundary() {
+    let sets = [
+        resolver_set_of(&["1.1.1.1"]),
+        resolver_set_of(&["1.1.1.1", "2.2.2.2"]),
+        resolver_set_of(&["1.1.1.1", "2.2.2.2", "3.3.3.3"]),
+        resolver_set_of(&["1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4"]),
+        resolver_set_of(&["1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4", "5.5.5.5"]),
+    ];
+    for (len, set) in sets.into_iter().enumerate().map(|(i, s)| (i + 1, s)) {
+        assert_eq!(
+            ActiveResolver::primary_of(&set),
+            ActiveResolver {
+                index: 0,
+                set_len: len
+            }
+        );
+        for index in 0..len {
+            let Some(active) = ActiveResolver::primary_of(&set).with_index(index) else {
+                panic!("in-range index {index} of a {len}-resolver set must be a candidate");
+            };
+            assert_eq!(
+                active,
+                ActiveResolver {
+                    index,
+                    set_len: len
+                }
+            );
+        }
+        assert_eq!(
+            ActiveResolver::primary_of(&set).with_index(len),
+            None,
+            "index equal to the set length is out of range"
+        );
+        assert_eq!(
+            ActiveResolver::primary_of(&set).with_index(usize::MAX),
+            None,
+            "an out-of-range selected index is no candidate"
+        );
+    }
+    assert_eq!(
+        ActiveResolver::singleton(),
+        ActiveResolver {
+            index: 0,
+            set_len: 1
+        }
+    );
+    let last_backup =
+        ActiveResolver::primary_of(&resolver_set_of(&["1.1.1.1", "2.2.2.2", "3.3.3.3"]))
+            .with_index(2)
+            .expect("the last configured resolver is a valid backup");
+    assert_eq!(
+        last_backup,
+        ActiveResolver {
+            index: 2,
+            set_len: 3
+        }
+    );
+    assert_eq!(
+        last_backup.to_primary(),
+        ActiveResolver {
+            index: 0,
+            set_len: 3
+        }
     );
 }

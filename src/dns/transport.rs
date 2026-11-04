@@ -612,12 +612,15 @@ impl ResolverDegradation {
 }
 
 /// Which resolver of the configured [`ResolverSet`] the transport currently
-/// points at. The index and the set length travel together as one value, so an
-/// out-of-range active resolver is unrepresentable: construction starts at the
-/// primary and every failover transition advances within `0..set_len` by the
-/// state machine, never by an unbounded caller-supplied index. A length below
-/// the index is a build-time impossibility (`ResolverSet` never holds zero
-/// entries, `src/resolver.rs:89`).
+/// points at. The index and the set length travel together as one value, and
+/// every construction route keeps `index < set_len` with `set_len` in
+/// `1..=MAX_RESOLVERS`, so an active resolver cannot point past the fixed
+/// `MAX_RESOLVERS` arrays: the selected-index route is fallible (`None` for an
+/// out-of-range index) and never accepts a caller-supplied set length — the
+/// length always travels from an already-validated value, rooted in the
+/// non-empty set built only by
+/// [`ResolverSet::from_slice`](super::resolver::ResolverSet::from_slice) or the
+/// fixed singleton pre-set seat. The raw struct literal remains module-private.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ActiveResolver {
     index: usize,
@@ -625,13 +628,44 @@ struct ActiveResolver {
 }
 
 impl ActiveResolver {
-    const fn at(index: usize, set_len: usize) -> ActiveResolver {
-        ActiveResolver { index, set_len }
+    /// The primary resolver of a validated non-empty set (index 0 in range).
+    const fn primary_of(set: &ResolverSet) -> ActiveResolver {
+        ActiveResolver {
+            index: 0,
+            set_len: set.len(),
+        }
     }
 
-    /// The primary resolver is index 0 of the set.
-    const fn primary(set_len: usize) -> ActiveResolver {
-        ActiveResolver { index: 0, set_len }
+    /// Re-seats an already-validated resolver onto its set's primary.
+    const fn to_primary(self) -> ActiveResolver {
+        ActiveResolver {
+            index: 0,
+            set_len: self.set_len,
+        }
+    }
+
+    /// The guarded pre-set seat: a validated single-resolver (index 0, len 1).
+    const fn singleton() -> ActiveResolver {
+        ActiveResolver {
+            index: 0,
+            set_len: 1,
+        }
+    }
+
+    /// Selects the resolver at `index` of this set (index 0 is the primary),
+    /// validating `index < set_len`. `None` for an out-of-range index; the set
+    /// length is carried unchanged from this already-validated value, so it
+    /// stays in `1..=MAX_RESOLVERS` by construction and never leaves the fixed
+    /// `MAX_RESOLVERS` arrays.
+    const fn with_index(self, index: usize) -> Option<ActiveResolver> {
+        if index < self.set_len {
+            Some(ActiveResolver {
+                index,
+                set_len: self.set_len,
+            })
+        } else {
+            None
+        }
     }
 
     const fn index(&self) -> usize {
@@ -1261,7 +1295,7 @@ impl StartupDns {
             registration: Registration::private(),
             active: None,
             resolvers: None,
-            active_resolver: ActiveResolver::primary(1),
+            active_resolver: ActiveResolver::singleton(),
             degradations: [ResolverDegradation::default(); MAX_RESOLVERS],
             last_failed: [[None; 2]; ALLOWLIST_MAX],
             failback_due: None,
@@ -1418,7 +1452,7 @@ impl StartupDns {
             .ok_or(StartupDnsError::DeadlineOverflow)?;
         self.addr = nameserver;
         self.resolvers = Some(resolvers);
-        self.active_resolver = ActiveResolver::primary(resolvers.len());
+        self.active_resolver = ActiveResolver::primary_of(&resolvers);
         self.mark_window_exercised(self.active_resolver);
         self.tls_target = resolvers.primary().fqdn().map(|fqdn| TlsTarget {
             fqdn: *fqdn,
@@ -2582,7 +2616,7 @@ impl StartupDns {
             .ok_or(StartupDnsError::DeadlineOverflow)?;
         self.addr = nameserver;
         self.resolvers = Some(*config.resolver_set());
-        self.active_resolver = ActiveResolver::primary(config.resolver_set().len());
+        self.active_resolver = ActiveResolver::primary_of(config.resolver_set());
         self.mark_window_exercised(self.active_resolver);
         self.tls_target = config
             .resolver_set()
@@ -2675,7 +2709,7 @@ impl StartupDns {
             .ok_or(StartupDnsError::DeadlineOverflow)?;
         self.addr = nameserver;
         self.resolvers = Some(*config.resolver_set());
-        self.active_resolver = ActiveResolver::primary(config.resolver_set().len());
+        self.active_resolver = ActiveResolver::primary_of(config.resolver_set());
         self.mark_window_exercised(self.active_resolver);
         self.tls_target = config
             .resolver_set()
@@ -3003,7 +3037,7 @@ impl StartupDns {
         for step in 1..=active.set_len() {
             let index = (active.index() + step) % active.set_len();
             if self.degradations[index] != ResolverDegradation::Degraded {
-                return Some(ActiveResolver::at(index, active.set_len()));
+                return active.with_index(index);
             }
         }
         None
@@ -3034,7 +3068,7 @@ impl StartupDns {
         self.close_connection()?;
         self.failback_source = Some(from);
         self.failback_successes = 0;
-        let to = ActiveResolver::primary(from.set_len());
+        let to = from.to_primary();
         self.note_downgrade_if_dot_to_plain(from, to);
         self.active_resolver = to;
         self.mark_window_exercised(self.active_resolver);
@@ -3129,8 +3163,17 @@ impl StartupDns {
         &mut self,
         fqdn: &Fqdn,
     ) -> Result<(), StartupDnsError> {
-        let active = ActiveResolver::primary(2);
-        let target = ActiveResolver::at(1, 2);
+        let two = ResolverSet::from_slice(&[
+            crate::dns::resolver::select("203.0.113.1").expect("ns"),
+            crate::dns::resolver::select("203.0.113.2").expect("ns"),
+        ])
+        .expect("two-entry test set");
+        let active = ActiveResolver::primary_of(&two)
+            .with_index(0)
+            .expect("in-range test seed");
+        let target = ActiveResolver::primary_of(&two)
+            .with_index(1)
+            .expect("in-range test seed");
         self.active_resolver = target;
         self.corroboration = Some(Corroboration {
             target,
@@ -3168,8 +3211,10 @@ impl StartupDns {
             let Some(index) = sweep.remaining.iter().position(|&r| r) else {
                 return Ok(true);
             };
-            let set_len = self.active_resolver.set_len();
-            (index, ActiveResolver::at(index, set_len))
+            let Some(target) = self.active_resolver.with_index(index) else {
+                return Ok(true);
+            };
+            (index, target)
         };
         self.relocate_for_probe(target)?;
         let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
@@ -3237,7 +3282,10 @@ impl StartupDns {
             return Ok(true);
         }
         let active = self.active_resolver;
-        let target = ActiveResolver::at((active.index() + 1) % set.len(), set.len());
+        let Some(target) = active.with_index((active.index() + 1) % active.set_len()) else {
+            self.corroboration_pending = None;
+            return Ok(true);
+        };
         self.corroboration_pending = None;
         self.corroboration = Some(Corroboration {
             target,
