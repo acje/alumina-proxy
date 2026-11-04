@@ -216,7 +216,7 @@ fingerprints differ. The change is a **fact** that selects the configured per-FQ
 with the example config's `ja4 = { action = "notify", scope = "connection" }` the
 change fires a **Notify** — never a Block. The client must be pinned
 to TLS 1.3 on both offers — the version-offer gate (`docs/alumina-proxy.md:47`;
-`validate_versions` at `src/inspection/client_hello.rs:720-735`) requires `supported_versions`
+`validate_versions` at `src/inspection/client_hello.rs:701-716`) requires `supported_versions`
 with `0x0304` as the only non-GREASE version, so a TLS 1.2-capable offer is
 `InvalidVersionOffer` → `any_illegal` → the configured `any_illegal` action
 (**Block** in the example config), not a JA4 change signal.
@@ -230,7 +230,7 @@ Procedure (Go client pinned to TLS 1.3):
    JA4 change fact.
 2. Open a second tunnel to the same ordinal and send a ClientHello yielding a
    **distinct JA4** (e.g. a different ALPN set in `NextProtos`). The serving path
-   records `note_fact_ja4_change` (`src/runtime/reactor.rs:2816-2819`) — the change fact
+   records `note_fact_ja4_change` (`src/runtime/reactor.rs:2819-2822`) — the change fact
    that selects the per-FQDN `ja4` control action.
 3. Read the monitor records. The `kind=monitor_domain` detail batch carries the
    change signal — `d0j=1` (per-ordinal change counter) with

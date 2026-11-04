@@ -35,8 +35,10 @@ use std::time::{Duration, Instant};
 use crate::config::Config;
 use crate::dns::cache::{Cache, CacheError, Entry, EntryState, Family, NameIndex};
 use crate::eligibility::NumericAddr;
-use crate::inspection::connect::{CONNECT_LIMIT, ConnectRequest};
-use crate::inventory::{BUFFER_BYTES, TUNNEL_SLOTS};
+use crate::inspection::connect::ConnectRequest;
+#[cfg(test)]
+use crate::inventory::BUFFER_BYTES;
+use crate::inventory::TUNNEL_SLOTS;
 
 /// Maximum concurrent tunnels, including pending setups (docs/alumina-proxy.md:160).
 pub const MAX_TUNNELS: usize = TUNNEL_SLOTS;
@@ -54,23 +56,10 @@ pub const SETUP_DEADLINE_SECS: u64 = 10;
 /// (docs/alumina-proxy.md:169,82).
 pub const CONNECT_DEADLINE_SECS: u64 = 2;
 
-/// CONNECT request-head bound reused from the parser (docs/alumina-proxy.md:163).
-#[expect(
-    dead_code,
-    reason = "Retained pending a separate purpose/regression investigation"
-)]
-pub const CONNECT_HEAD_LIMIT: usize = CONNECT_LIMIT;
-
 /// One directional traffic buffer handed to a tunnel from boot storage
 /// (docs/alumina-proxy.md:183). Sized here so the worker owns the storage contract;
 /// instances live in the boot pool, never on this core's stack.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Retained pending a separate purpose/regression investigation"
-    )
-)]
+#[cfg(test)]
 pub type TrafficBuffer = [u8; BUFFER_BYTES];
 
 /// The service's single clock authority: a precise monotonic boot anchor for
@@ -94,15 +83,6 @@ impl WorkerClock {
     /// worker constructs this pairing exactly once.
     pub(crate) const fn new(epoch: Instant, dns0: u64) -> WorkerClock {
         WorkerClock { epoch, dns0 }
-    }
-
-    /// The precise monotonic boot anchor, shared by all precise deadlines.
-    #[expect(
-        dead_code,
-        reason = "designed WorkerClock boot-anchor accessor; no consumer yet"
-    )]
-    pub(crate) const fn epoch(self) -> Instant {
-        self.epoch
     }
 
     /// The whole-second DNS/cache value for `now`, mounted on `dns0`: `dns0`
@@ -310,13 +290,7 @@ impl ConnectPhase {
     /// parser-owned and never reaches the worker. Pinned by
     /// `refusal_statuses_follow_the_canonical_fixed_matrix`.
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Retained pending a separate purpose/regression investigation"
-        )
-    )]
+    #[cfg(test)]
     pub const fn status(self) -> u16 {
         match self {
             ConnectPhase::Forbidden => 403,
@@ -575,6 +549,13 @@ impl Worker {
     /// re-graduate this tunnel. A no-op when the slot is not in setup (the
     /// grant flow guarantees that), so a misplaced call can never corrupt a
     /// different slot.
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(
+            clippy::missing_const_for_fn,
+            reason = "Debug counter validation is non-const; preserve one implementation across profiles"
+        )
+    )]
     #[expect(
         clippy::needless_pass_by_value,
         reason = "by value encodes the consume-once linear-handle discipline (the setup handle is consumed, converting it into exactly one established handle)"
@@ -799,15 +780,6 @@ impl<'a> WorkerView<'a> {
             ordinal,
         }
     }
-
-    /// The single clock authority bound to this config/cache pair.
-    #[expect(
-        dead_code,
-        reason = "designed WorkerView clock accessor; referenced by rustdoc worker.rs:666, no consumer yet"
-    )]
-    pub(crate) const fn clock(&self) -> WorkerClock {
-        self.clock
-    }
 }
 
 /// The single exact-pair resolution of an already-validated CONNECT carried
@@ -871,7 +843,7 @@ impl<'a> ResolvedRequest<'a> {
 /// per-attempt connect deadline is freshly clipped inside the returned
 /// `Peer`, never passed in (9pac M1); deadlines use the precise `now` instant
 /// while cache freshness uses the view's own clock authority
-/// ([`WorkerView::clock`] → [`WorkerClock::cache_secs`], 1cws M2r).
+/// ([`WorkerClock::cache_secs`] on the view's stored clock, 1cws M2r).
 ///
 /// Crate-internal: the owning storage supplies `setup_deadline` from the
 /// granted slot via [`Worker::decide`], never from a caller (9mq9 M3).

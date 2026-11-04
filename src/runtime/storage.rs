@@ -196,6 +196,7 @@ impl ServeStorage {
     /// [`crate::runtime::tunnel::WorkerView`] bound to this storage's own config, cache,
     /// and clock authority, so no code can pair an unrelated config or clock
     /// with this cache (1cws M4r/M2r; destination-binding, docs/alumina-proxy.md:145).
+    #[must_use]
     pub const fn work_view(&self) -> WorkerView<'_> {
         WorkerView::new(&self.config, &self.cache, self.worker.clock())
     }
@@ -258,6 +259,7 @@ impl ServeStorage {
     }
 
     /// The retained cache, read-only.
+    #[must_use]
     pub const fn cache(&self) -> &Cache {
         &self.cache
     }
@@ -268,6 +270,7 @@ impl ServeStorage {
     }
 
     /// The retained refresh schedules, read-only.
+    #[must_use]
     pub const fn schedules(&self) -> &Schedules {
         &self.schedules
     }
@@ -279,6 +282,7 @@ impl ServeStorage {
     }
 
     /// The retained DNS transport with its fixed response workspace.
+    #[must_use]
     pub const fn dns(&self) -> &StartupDns {
         &self.dns
     }
@@ -371,6 +375,7 @@ impl ServeStorage {
 
     /// Whole-record log drops so far, saturating at `u64::MAX`: the
     /// documented dropped-record metric (docs/alumina-proxy.md:193).
+    #[must_use]
     pub const fn log_dropped(&self) -> u64 {
         self.logs.dropped()
     }

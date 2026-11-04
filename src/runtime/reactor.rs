@@ -1206,6 +1206,7 @@ impl Serving {
     }
 
     /// The retained storage, for host tests inspecting slot occupancy.
+    #[must_use]
     pub const fn storage(&self) -> &ServeStorage {
         &self.storage
     }
@@ -1217,6 +1218,7 @@ impl Serving {
 
     /// The single poll registry, exposed so the retained DNS transport is
     /// attached to the same readiness wait as the listener and connections.
+    #[must_use]
     pub fn registry(&self) -> &Registry {
         self.poll.registry()
     }
@@ -1236,6 +1238,7 @@ impl Serving {
     }
 
     /// The owner's shutdown phase, for host tests inspecting lifecycle state.
+    #[must_use]
     pub const fn shutdown(&self) -> Shutdown {
         self.shutdown
     }

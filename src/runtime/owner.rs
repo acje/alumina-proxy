@@ -182,6 +182,7 @@ impl Preallocated {
     }
 
     /// The serving engine, for host observation of pre-attach readiness state.
+    #[must_use]
     pub const fn serving(&self) -> &Serving {
         &self.serving
     }
@@ -223,6 +224,7 @@ impl Runtime {
     }
 
     /// The serving engine, for host observation.
+    #[must_use]
     pub const fn serving(&self) -> &Serving {
         &self.serving
     }
@@ -237,11 +239,13 @@ impl Runtime {
     }
 
     /// The token the retained DNS source is attached under on the single poll.
+    #[must_use]
     pub const fn dns_token(&self) -> Token {
         self.dns_token
     }
 
     /// The owner's shutdown phase, for host observation of the lifecycle.
+    #[must_use]
     pub const fn shutdown(&self) -> Shutdown {
         self.serving.shutdown()
     }

@@ -349,7 +349,7 @@ exit-accounting note below.
 | --- | --- | --- | --- |
 | `dropped` | `startup_final` ([src/log/mod.rs](src/log/mod.rs):836-860) and `shutdown_final` (:935-944) **only** — never in the monitor summary core (:945-980) | 1 per whole record lost, all classes | Whole-record loss over boot/full run. Long-run loss surfaces **only** at these two boundaries while serving (not refreshed in-band); serving-exit residue after the single bounded drain is **uncounted, unobservable** (exit-accounting note below) |
 | `report_drops` / `oreport_drops` | every `kind=monitor` summary fixed-core wire grammar ([src/log/encoding.rs](src/log/encoding.rs):572-581) | 1 per dropped `monitor_domain` **batch** at report time ([src/log/mod.rs](src/log/mod.rs):953-962; `src/enforcement/monitor.rs:320`) — a batch is up to 11 domain blocks, never per block | Queue-full refusal of a domain detail batch |
-| `capture_drops` / `ocapture_drops` | every `kind=monitor` summary fixed-core wire grammar ([src/log/encoding.rs](src/log/encoding.rs):572-581) | **mixed, by design**: 1 per detail at capture time (later-relation suppression [reactor.rs](src/runtime/reactor.rs):2372-2388; 64-detail window eviction [monitor.rs](src/enforcement/monitor.rs):335) **and** 1 per dropped `monitor_capture` batch at report time ([src/log/mod.rs](src/log/mod.rs):945-980) — a batch is up to 22 details | Capture-detail loss in mixed units; a nonzero value means detail loss, never treat "1" as "one detail" |
+| `capture_drops` / `ocapture_drops` | every `kind=monitor` summary fixed-core wire grammar ([src/log/encoding.rs](src/log/encoding.rs):572-581) | **mixed, by design**: 1 per detail at capture time (later-relation suppression [reactor.rs](src/runtime/reactor.rs):2376-2391; 64-detail window eviction [monitor.rs](src/enforcement/monitor.rs):335) **and** 1 per dropped `monitor_capture` batch at report time ([src/log/mod.rs](src/log/mod.rs):945-980) — a batch is up to 22 details | Capture-detail loss in mixed units; a nonzero value means detail loss, never treat "1" as "one detail" |
 | `dx=` | `kind=monitor`, square brackets loss bitset, present only when nonzero ([src/log/encoding.rs](src/log/encoding.rs):666-675) | 1 bit per allowlist ordinal, hex | That ordinal's JA4-change facts overflowed the bounded detail |
 
 **Notification drop path (exit accounting — counted vs unobservable).** Queue
@@ -359,9 +359,9 @@ counts every remaining queued record exactly once in the shared `dropped` tally
 ([src/log/sink.rs](src/log/sink.rs):145-153, per-record via [src/log/queue.rs](src/log/queue.rs):176-181), and a startup-termination exit
 (`Exit75`/`Terminated`) additionally strands whatever its bounded startup drains
 did not deliver, each counted once in the same tally
-([src/runtime/storage.rs](src/runtime/storage.rs):1244-1253, `strand_queued`'s only call site).
+([src/runtime/storage.rs](src/runtime/storage.rs):1249-1258, `strand_queued`'s only call site).
 **Unobservable residue:** the serving exit
-([src/runtime/owner.rs](src/runtime/owner.rs):30-40, :356-367) reads `dropped`, enqueues
+([src/runtime/owner.rs](src/runtime/owner.rs):30-40, :360-371) reads `dropped`, enqueues
 `shutdown_final` with that snapshot, performs exactly **one** bounded drain
 (16 ops / 64 KiB, [src/log/mod.rs](src/log/mod.rs):66-67), then `process::exit` — records
 still queued at that moment are destroyed **uncounted**, and a stalled sink can
@@ -407,7 +407,7 @@ never proof of a lossless exit window.
   domain block-latch bitset
   ([src/enforcement/state.rs](src/enforcement/state.rs):219,232,348) and the
   all-scope block latch (:218,231,302-305), plus the JA4 first-seen baselines
-  ([src/runtime/reactor.rs](src/runtime/reactor.rs):578-597, :1098, "reset on restart"). A previously
+  ([src/runtime/reactor.rs](src/runtime/reactor.rs):579-598, :1098, "reset on restart"). A previously
   blocked or baselined identity is treated as first-seen again, and the monitor
   aggregate (including the drop counters in the summary) starts at zero. Treat a
   proxy restart as a clean-slate for block and baseline state; a restarted proxy

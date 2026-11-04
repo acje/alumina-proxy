@@ -383,7 +383,7 @@ SNI handling must satisfy RFC 6066 `host_name` and resolve trailing-dot normaliz
 
 ### L11 — Extension/version caps promoted into the resource profile
 
-The code-invented hard caps are promoted to spec resource-profile limits, keeping the numbers identical to the code (`src/inspection/client_hello.rs:10,13,28,25`; `src/inspection/connect.rs:9`):
+The code-invented hard caps are promoted to spec resource-profile limits, keeping the numbers identical to the code (`src/inspection/client_hello.rs:10,13,28,25`; `src/inspection/connect.rs:10`):
 
 | Resource | Limit |
 | --- | --- |
@@ -436,7 +436,7 @@ The retained serving workspace is a fixed per-slot allocation, made once at boot
 | Per-slot ClientHello inspector buffers (`buf` + `scratch`) | 512 × 2 | 64 KiB | 65 536 KiB |
 | **Retained serving workspace total** | 512 slots | 136 KiB | **68 MiB** |
 
-This is the `SLOT_WORKSPACE_BYTES` / `SERVING_WORKSPACE_BYTES` accounting in `src/inventory.rs:30,36` and the two `[u8; 64 KiB]` buffers (`buf`, `scratch`) in each `ChInspector` at `src/inspection/client_hello.rs:424,428`, preallocated for all 512 slots at boot (`src/runtime/reactor.rs:1064`). It is included in the boot inventory's named-fixed-buffer lower bound (`BootInventory::named_fixed_buffer_bytes` = 128 MiB traffic + 68 MiB serving workspace + DNS named buffers ≈ 196 MiB), consistent with the observed ~204 MiB VmRSS in `docs/benchmarks/e2micro-workload.md`.
+This is the `SLOT_WORKSPACE_BYTES` / `SERVING_WORKSPACE_BYTES` accounting in `src/inventory.rs:30,36` and the two `[u8; 64 KiB]` buffers (`buf`, `scratch`) in each `ChInspector` at `src/inspection/client_hello.rs:405,409`, preallocated for all 512 slots at boot (`src/runtime/reactor.rs:1064`). It is included in the boot inventory's named-fixed-buffer lower bound (`BootInventory::named_fixed_buffer_bytes` = 128 MiB traffic + 68 MiB serving workspace + DNS named buffers ≈ 196 MiB), consistent with the observed ~204 MiB VmRSS in `docs/benchmarks/e2micro-workload.md`.
 
 The DNS transport's fixed 512-byte query buffer (`QUERY_BUF_LEN`, `src/dns/transport.rs:55`) is likewise a retained named buffer and is accounted with the DNS named buffers.
 
@@ -453,11 +453,11 @@ Spec §Configuration & DNS (DNS provenance) already rejects coexistence of CNAME
 
 #### Vec 34 — ClientHello handshake-message length bound
 
-Spec §TLS ClientHello profile bounds each plaintext record payload to 16 KiB (§Initial resource profile). This increment adds the matching bound on the TLS handshake message length at 16 KiB (`MAX_HANDSHAKE_LEN`, 4-byte header plus body, `src/inspection/client_hello.rs:22`). A handshake whose declared length exceeds the bound is rejected as `ChError::HandshakeTooLarge { got }` at the scan gate (`src/inspection/client_hello.rs:558`) instead of being buffered toward the 64 KiB `MAX_CLIENT_HELLO` inspection total (§Initial resource profile). This is a content-level classification bound, not a buffer change: the retained serving workspace (`SLOT_WORKSPACE_BYTES`, `src/inventory.rs`, resource profile §Initial resource profile) and the two reused 64 KiB inspector buffers are unchanged. The TLS profile fold maps the new cause to the existing `Profile` reject kind (`src/inspection/client_hello.rs:350-376`), and a claim exactly at the 16 KiB cap is a complete-at-bound, not a length rejection (`src/inspection/client_hello/tests.rs:504-513`).
+Spec §TLS ClientHello profile bounds each plaintext record payload to 16 KiB (§Initial resource profile). This increment adds the matching bound on the TLS handshake message length at 16 KiB (`MAX_HANDSHAKE_LEN`, 4-byte header plus body, `src/inspection/client_hello.rs:22`). A handshake whose declared length exceeds the bound is rejected as `ChError::HandshakeTooLarge { got }` at the scan gate (`src/inspection/client_hello.rs:539`) instead of being buffered toward the 64 KiB `MAX_CLIENT_HELLO` inspection total (§Initial resource profile). This is a content-level classification bound, not a buffer change: the retained serving workspace (`SLOT_WORKSPACE_BYTES`, `src/inventory.rs`, resource profile §Initial resource profile) and the two reused 64 KiB inspector buffers are unchanged. The TLS profile fold maps the new cause to the existing `Profile` reject kind (`src/inspection/client_hello.rs:350-376`), and a claim exactly at the 16 KiB cap is a complete-at-bound, not a length rejection (`src/inspection/client_hello/tests.rs:504-513`).
 
 #### Vec 36 — Split CONNECT error discriminants and remove the `NotHttp` catch-all
 
-Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment replaces the coarse parse-failure classification with exact, finite discriminants: a request line that is not exactly three whitespace-separated tokens is `MalformedRequestLine`; a method other than `CONNECT` is `MethodNotConnect`; an HTTP version other than `HTTP/1.1` is `UnsupportedVersion`; and a target that is not authority-form `host:port` — starting with `/`, `*`, or a `scheme://` prefix (e.g. `windows(3)://`), or lacking a colon — is `TargetNotAuthorityForm` (`src/inspection/connect.rs:370-401`, `:444-494`). The coarse `NotHttp` variant is removed from both `ConnectError` and `ConnectHeadReason` (`src/inspection/connect.rs:48-64`, `:117-132`); `ConnectHeadReason::COUNT` is now 13 (`git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/connect.rs#L148`) and `AnyIllegalCause::KIND_COUNT` is 18 (`git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/enforcement/policy.rs#L21`). The monitoring grammar's fixed kind labels follow (`c13`, `a13`; `git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/log.rs#L1850`, `:1937`). The eliminated `NotHttp` row is deliberately not re-added: every prior `NotHttp` rejection is now attributable to exactly one of the new discriminants, so the coarser catch-all carried no additional information.
+Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment replaces the coarse parse-failure classification with exact, finite discriminants: a request line that is not exactly three whitespace-separated tokens is `MalformedRequestLine`; a method other than `CONNECT` is `MethodNotConnect`; an HTTP version other than `HTTP/1.1` is `UnsupportedVersion`; and a target that is not authority-form `host:port` — starting with `/`, `*`, or a `scheme://` prefix (e.g. `windows(3)://`), or lacking a colon — is `TargetNotAuthorityForm` (`src/inspection/connect.rs:371-402`, `:445-495`). The coarse `NotHttp` variant is removed from both `ConnectError` and `ConnectHeadReason` (`src/inspection/connect.rs:49-65`, `:118-133`); `ConnectHeadReason::COUNT` is now 13 (`git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/connect.rs#L148`) and `AnyIllegalCause::KIND_COUNT` is 18 (`git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/enforcement/policy.rs#L21`). The monitoring grammar's fixed kind labels follow (`c13`, `a13`; `git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/log.rs#L1850`, `:1937`). The eliminated `NotHttp` row is deliberately not re-added: every prior `NotHttp` rejection is now attributable to exactly one of the new discriminants, so the coarser catch-all carried no additional information.
 
 ## Hardening: CONNECT header-line count bound, passive resolver degraded signaling, widened refresh band
 
@@ -466,11 +466,11 @@ Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment 
 
 #### Vec 35 — CONNECT header-line count bound
 
-Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment bounds the number of header lines a CONNECT request head may carry at 16 header fields (`MAX_HEADER_LINES`, `src/inspection/connect.rs:14`). Every line the header loop yields is counted (`src/inspection/connect.rs:287-291`), incrementing before the empty-line continue as defense in depth — the head is truncated at the first CRLFCRLF delimiter, so each header field yields exactly one header-loop line and the empty line never appears in a bounded head. A request whose count exceeds 16 is rejected with the new exact discriminant `ConnectError::TooManyHeaderLines`, mapped to `ConnectHeadReason::TooManyHeaderLines` (`src/inspection/connect.rs:63`, `:132`, `:156`). `ConnectHeadReason::COUNT` is now 14 (`git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/connect.rs#L160`), `AnyIllegalCause::KIND_COUNT` is 19 (`git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/enforcement/policy.rs#L21`), and the monitoring grammar's fixed kind labels follow (`c14`, `a14`; `git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/log.rs#L1864`, `:1951`). The bound is a parse-classification bound, not a buffer change: the fixed request-head buffer and its size limits are unchanged, and a head of exactly 16 fields is accepted at the boundary.
+Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment bounds the number of header lines a CONNECT request head may carry at 16 header fields (`MAX_HEADER_LINES`, `src/inspection/connect.rs:15`). Every line the header loop yields is counted (`src/inspection/connect.rs:288-292`), incrementing before the empty-line continue as defense in depth — the head is truncated at the first CRLFCRLF delimiter, so each header field yields exactly one header-loop line and the empty line never appears in a bounded head. A request whose count exceeds 16 is rejected with the new exact discriminant `ConnectError::TooManyHeaderLines`, mapped to `ConnectHeadReason::TooManyHeaderLines` (`src/inspection/connect.rs:64`, `:133`, `:157`). `ConnectHeadReason::COUNT` is now 14 (`git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/connect.rs#L160`), `AnyIllegalCause::KIND_COUNT` is 19 (`git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/enforcement/policy.rs#L21`), and the monitoring grammar's fixed kind labels follow (`c14`, `a14`; `git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/log.rs#L1864`, `:1951`). The bound is a parse-classification bound, not a buffer change: the fixed request-head buffer and its size limits are unchanged, and a head of exactly 16 fields is accepted at the boundary.
 
 #### Vec 19 — Passive resolver degraded signaling
 
-The startup-resolution and refresh clauses (§Configuration & DNS) govern the resolver stub. This increment adds a passive degradation state machine: after three consecutive counted exchange failures the resolver relocates into `Degraded` mode (`DEGRADED_AFTER`, `src/dns/transport.rs:566`; the `ResolverDegradation` state at `:553-579` makes the count-degradation boundary structural — `Healthy` can never hold three consecutive failures), and any subsequently successful publication relocates it back to healthy, restarting the consecutive-failure count from zero (`note_success`). A valid negative response counts as a successful exchange. The state machine emits exactly one enter crossing on relocation into degraded and exactly one exit crossing on recovery — never one per individual failure — accumulated as a drainable transition count (`record_resolver_failure`/`record_resolver_success`, `git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/startup_dns.rs#L1804-L1821`; drained via `take_resolver_transitions`). The shared serving owner drains pending crossings each turn and after the startup window (`drain_resolver_transitions`, `src/runtime/storage.rs:651`, `:573`, `:1124`) into enforcement via `Enforcement::note_fact_resolver_degraded()` (`src/enforcement/state.rs`), landing in the saturating `FactCounters::resolver_degraded` (`src/enforcement/monitor.rs`). The monitor grammar folds the counter into `facts_total()`, surfaces it as the zero-suppressed `rd=` key, and counts its overflow into `ofacts` (`src/log/encoding.rs`). The fact is edge-triggered, so an operator observing `rd=` sees each degraded-mode transition instead of a per-failure flood, at zero new allocations and zero new log surfaces.
+The startup-resolution and refresh clauses (§Configuration & DNS) govern the resolver stub. This increment adds a passive degradation state machine: after three consecutive counted exchange failures the resolver relocates into `Degraded` mode (`DEGRADED_AFTER`, `src/dns/transport.rs:566`; the `ResolverDegradation` state at `:553-579` makes the count-degradation boundary structural — `Healthy` can never hold three consecutive failures), and any subsequently successful publication relocates it back to healthy, restarting the consecutive-failure count from zero (`note_success`). A valid negative response counts as a successful exchange. The state machine emits exactly one enter crossing on relocation into degraded and exactly one exit crossing on recovery — never one per individual failure — accumulated as a drainable transition count (`record_resolver_failure`/`record_resolver_success`, `git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/startup_dns.rs#L1804-L1821`; drained via `take_resolver_transitions`). The shared serving owner drains pending crossings each turn and after the startup window (`drain_resolver_transitions`, `src/runtime/storage.rs:656`, `:578`, `:1129`) into enforcement via `Enforcement::note_fact_resolver_degraded()` (`src/enforcement/state.rs`), landing in the saturating `FactCounters::resolver_degraded` (`src/enforcement/monitor.rs`). The monitor grammar folds the counter into `facts_total()`, surfaces it as the zero-suppressed `rd=` key, and counts its overflow into `ofacts` (`src/log/encoding.rs`). The fact is edge-triggered, so an operator observing `rd=` sees each degraded-mode transition instead of a per-failure flood, at zero new allocations and zero new log surfaces.
 
 #### Vec 14 — Widened refresh band with a split negative floor
 
@@ -491,7 +491,7 @@ Spec §Configuration & DNS governs the response-provenance rules and the CNAME w
 
 #### Vec 21 — DNS anomaly fact surface
 
-The startup-resolution and refresh clauses (§Configuration & DNS) and the `alumina-rp2e` monitoring vocabulary govern the resolver stub and monitor, and vector 21's "detect unexpected TTLs" is realized as one of the anomaly kinds. This increment adds a typed DNS-anomaly surface to the monitor: `DnsAnomalyKind` with the three variants `BailiwickViolation`, `ResolverPeerMismatch`, and `ExtremeTtl` and a structural `COUNT`/`index`/`from_index` (`git:cae94e1c8f3c97c85e76810a61669c9252535fc5:src/enforcement/monitor.rs#L55-L65`), carried as `FactCounters::dns_anomaly: [SaturatingCounter; 3]` (`git:cae94e1c8f3c97c85e76810a61669c9252535fc5:src/enforcement/monitor.rs#L17`). The `ExtremeTtl` variant is fed by a per-exchange detection for an answer whose address- or CNAME-carrying resource-record TTL exceeds the threshold `EXTREME_TTL_THRESHOLD = 345_600` (96 h; `src/dns/wire.rs:26`): the flag lives on the reused `ResponseWorkspace` (`extreme_ttl`, `src/dns/wire.rs:749`), reset at each parse start (`:1077`), set in the answer loop when an A/AAAA/CNAME record's TTL crosses the threshold (`:1131`), read back through the `extreme_ttl()` accessor (`:771`), and noted once per affected exchange after a successful publish (`src/dns/transport.rs:2331-2332`). The existing honored-TTL cap at `src/dns/cache.rs:18` is unchanged: a received TTL is never raised on its way into the cache; this increment only observes and counts the extreme value. The transport retains a matching fixed `dns_anomalies: [u32; 3]` (`git:cae94e1c8f3c97c85e76810a61669c9252535fc5:src/startup_dns.rs#L1182`), notes each detection saturatingly (`note_dns_anomaly`, `:1694`), and drains it once with `mem::take` so a drain never double-counts (`take_dns_anomalies`, `:1700`). The shared serving owner drains pending anomalies each turn and after the startup window (`drain_dns_anomalies`, `src/runtime/storage.rs:661`, `:1124`) into enforcement via `Enforcement::note_fact_dns_anomaly()` (`src/enforcement/state.rs`), landing in the saturating monitor counter. The monitor grammar folds the counters into `facts_total()`, counts any overflow into `ofacts` (`src/log/encoding.rs:569`), and surfaces them as the zero-suppressed, deterministic-order `bv=`/`rpm=`/`xttl=` keys emitted after the `rd=` block (`src/log/encoding.rs:623-633`), at zero new allocations and zero new log surfaces.
+The startup-resolution and refresh clauses (§Configuration & DNS) and the `alumina-rp2e` monitoring vocabulary govern the resolver stub and monitor, and vector 21's "detect unexpected TTLs" is realized as one of the anomaly kinds. This increment adds a typed DNS-anomaly surface to the monitor: `DnsAnomalyKind` with the three variants `BailiwickViolation`, `ResolverPeerMismatch`, and `ExtremeTtl` and a structural `COUNT`/`index`/`from_index` (`git:cae94e1c8f3c97c85e76810a61669c9252535fc5:src/enforcement/monitor.rs#L55-L65`), carried as `FactCounters::dns_anomaly: [SaturatingCounter; 3]` (`git:cae94e1c8f3c97c85e76810a61669c9252535fc5:src/enforcement/monitor.rs#L17`). The `ExtremeTtl` variant is fed by a per-exchange detection for an answer whose address- or CNAME-carrying resource-record TTL exceeds the threshold `EXTREME_TTL_THRESHOLD = 345_600` (96 h; `src/dns/wire.rs:26`): the flag lives on the reused `ResponseWorkspace` (`extreme_ttl`, `src/dns/wire.rs:749`), reset at each parse start (`:1077`), set in the answer loop when an A/AAAA/CNAME record's TTL crosses the threshold (`:1131`), read back through the `extreme_ttl()` accessor (`:771`), and noted once per affected exchange after a successful publish (`src/dns/transport.rs:2331-2332`). The existing honored-TTL cap at `src/dns/cache.rs:18` is unchanged: a received TTL is never raised on its way into the cache; this increment only observes and counts the extreme value. The transport retains a matching fixed `dns_anomalies: [u32; 3]` (`git:cae94e1c8f3c97c85e76810a61669c9252535fc5:src/startup_dns.rs#L1182`), notes each detection saturatingly (`note_dns_anomaly`, `:1694`), and drains it once with `mem::take` so a drain never double-counts (`take_dns_anomalies`, `:1700`). The shared serving owner drains pending anomalies each turn and after the startup window (`drain_dns_anomalies`, `src/runtime/storage.rs:666`, `:1129`) into enforcement via `Enforcement::note_fact_dns_anomaly()` (`src/enforcement/state.rs`), landing in the saturating monitor counter. The monitor grammar folds the counters into `facts_total()`, counts any overflow into `ofacts` (`src/log/encoding.rs:569`), and surfaces them as the zero-suppressed, deterministic-order `bv=`/`rpm=`/`xttl=` keys emitted after the `rd=` block (`src/log/encoding.rs:623-633`), at zero new allocations and zero new log surfaces.
 
 #### Vec 22 — Resolver peer assertion
 
@@ -605,7 +605,7 @@ The `alumina-hrdn4` failback clause governs the bounded failback probe of the pr
 
 The `alumina-dot-chain-v1-v5` warm-reuse clause (§Transport confinement and lifecycle) retained one established TLS connection across the startup window's exchanges. This increment extends that retention to the serving lifetime: the DoT connection established during the startup window is retained (idle) across serving refreshes and reused for subsequent DNS exchanges — no rebuild, no fresh handshake, and no re-allocation of TLS state on refresh. The prior window-end close is removed: the transport is no longer torn down when the startup window settles.
 
-The retention mechanism is the shared registration's `armed` interest: it clears to `None` while the exchange is idle (`sync_shared`, `src/dns/transport.rs:1740,1754-1765`, `src/dns/transport/registration.rs:115-156`), so the owner's poll never waits on the retained socket (no spin), while the connection itself stays owned in the transport (`self.conn`). The owner re-aligns the shared registration every serving turn (`sync_dns_shared`, `src/runtime/owner.rs:292`) and once at window end (`src/runtime/reactor/startup.rs:194`); `start_exchange` (`src/dns/transport.rs:2682`) reuses the retained connection when one is present, and `attach_shared` (`src/dns/transport.rs:1716`) accepts a retained connection (a no-op when the registration is already shared). TLS state and its heap allocations remain confined to the per-connect DoT setup seam `build_tls_connection` (`src/dns/transport.rs:990`) exactly as before.
+The retention mechanism is the shared registration's `armed` interest: it clears to `None` while the exchange is idle (`sync_shared`, `src/dns/transport.rs:1740,1754-1765`, `src/dns/transport/registration.rs:115-156`), so the owner's poll never waits on the retained socket (no spin), while the connection itself stays owned in the transport (`self.conn`). The owner re-aligns the shared registration every serving turn (`sync_dns_shared`, `src/runtime/owner.rs:296`) and once at window end (`src/runtime/reactor/startup.rs:194`); `start_exchange` (`src/dns/transport.rs:2682`) reuses the retained connection when one is present, and `attach_shared` (`src/dns/transport.rs:1716`) accepts a retained connection (a no-op when the registration is already shared). TLS state and its heap allocations remain confined to the per-connect DoT setup seam `build_tls_connection` (`src/dns/transport.rs:990`) exactly as before.
 
 The close-on-failure, close-on-relocation, and close-on-shutdown lifecycle is unchanged: a handshake or identity failure never reuses a poisoned connection and each failed exchange is counted individually; failover relocation and the failback re-seat close the connection before repointing (`maybe_begin_failback`, `src/dns/transport.rs`); and owner shutdown closes via `cancel_for_shutdown` (`src/dns/transport.rs:1501`), with the retained transport and its heap staying owned until process exit. Only idle retention is added; every close path that existed before remains.
 
@@ -1300,7 +1300,7 @@ recorded even when every detail batch is dropped. The detail batches are best-ef
 blocks the summary: `report_drops` counts each dropped `monitor_domain` batch once per batch;
 `capture_drops` counts capture-detail loss with mixed units — once per detail at capture time
 (a later detection relation on an already-captured connection is suppressed,
-`src/runtime/reactor.rs:2373-2388`, or a detail is evicted when the 64-detail window is full,
+`src/runtime/reactor.rs:2376-2391`, or a detail is evicted when the 64-detail window is full,
 `src/enforcement/monitor.rs:330`) and once per batch when a `monitor_capture` batch is
 dropped at report time (`src/log/tests.rs:828-882`, up to 22 details lost in one counted batch) — the
 per-batch/per-detail unit mixing is intentional and documented; both are saturating counters
@@ -1405,16 +1405,16 @@ the originating setup.
 The CONNECT request head is rejected when it contains a bare carriage return (a `0x0d` not
 immediately followed by `0x0a`) or a bare line feed (`0x0a` not immediately preceded by
 `0x0d`), located incrementally while scanning for the `\r\n\r\n` head terminator
-(`src/inspection/connect.rs:275`/`:278`, `bare_line_feed` `src/inspection/connect.rs:332`, `bare_carriage_return`
-`src/inspection/connect.rs:340`). Tests: `rejects_bare_lf` (`src/inspection/connect/tests.rs:315`),
+(`src/inspection/connect.rs:276`/`:279`, `bare_line_feed` `src/inspection/connect.rs:333`, `bare_carriage_return`
+`src/inspection/connect.rs:341`). Tests: `rejects_bare_lf` (`src/inspection/connect/tests.rs:315`),
 `rejects_bare_carriage_return_in_header_value` (`src/inspection/connect/tests.rs:321`),
 `rejects_bare_carriage_return_before_delimiter` (`src/inspection/connect/tests.rs:330`).
 
 #### L8 — Non-`host_name` `server_name` rejection
 
 Within the `server_name` extension, any entry whose name type is not `host_name` (0) is
-rejected as `non-host_name name type` rather than ignored (`src/inspection/client_hello.rs:805-807` in
-`parse_server_names` `src/inspection/client_hello.rs:783`). Test: `non_host_name_sni_rejected`
+rejected as `non-host_name name type` rather than ignored (`src/inspection/client_hello.rs:786-788` in
+`parse_server_names` `src/inspection/client_hello.rs:764`). Test: `non_host_name_sni_rejected`
 (`src/inspection/client_hello/tests.rs:568`).
 
 #### SP-006 — >64 sigalgs rejected; `count:02` overflow saturates
@@ -1422,7 +1422,7 @@ rejected as `non-host_name name type` rather than ignored (`src/inspection/clien
 The `signature_algorithms` list is bounded at `MAX_SIGALGS = 64` (`src/inspection/client_hello.rs:44`);
 a list declaring more than 64 entries is rejected as `TooManySigAlgs` — an AnyIllegal profile
 violation, not a JA4 admit/reject — so the JA4 hash input is never silently truncated
-(`parse_sig_algs` `src/inspection/client_hello.rs:859`). The `count:02` token saturates at 99 with no
+(`parse_sig_algs` `src/inspection/client_hello.rs:840`). The `count:02` token saturates at 99 with no
 literal marker (`count_token` `src/inspection/client_hello/ja4.rs:101`). Tests:
 `sigalgs_over_max_sigalgs_rejected` (`src/inspection/client_hello/tests.rs:1073`),
 `sigalgs_at_max_sigalgs_accepted` (`src/inspection/client_hello/tests.rs:1081`),
@@ -1505,15 +1505,15 @@ summaries (`src/dns/schedule.rs:23`/`:27`/`:30`). Test: `sustained_negative_stre
 #### SP-005 — per-ordinal JA4 set up to K=16
 
 Each ordinal holds a set of up to `MAX_ADDRESSES` (16) distinct JA4 strings; overflow
-suppresses adds and increments a count; seeding events are recorded (`src/runtime/reactor.rs:569-579`,
-`src/runtime/reactor.rs:569-579`, `src/dns/cache.rs:7`). Test: `ja4_baseline_set_overflow_suppresses_and_dedups_unchanged`
+suppresses adds and increments a count; seeding events are recorded (`src/runtime/reactor.rs:605-619`,
+`src/runtime/reactor.rs:2811-2825`, `src/dns/cache.rs:7`). Test: `ja4_baseline_set_overflow_suppresses_and_dedups_unchanged`
 (`src/runtime/reactor/tests.rs:8767`).
 
 #### RT-001 — sigalg-list bound at 64
 
 The `signature_algorithms` list is bounded at `MAX_SIGALGS = 64` with no silent truncation
 of the JA4 hash input (`src/inspection/client_hello.rs:44`, `TooManySigAlgs` `src/inspection/client_hello.rs:243`,
-`src/inspection/client_hello.rs:859`). Tests: `sigalgs_over_max_sigalgs_rejected`
+`src/inspection/client_hello.rs:840`). Tests: `sigalgs_over_max_sigalgs_rejected`
 (`src/inspection/client_hello/tests.rs:1073`), `sigalgs_at_max_sigalgs_accepted` (`src/inspection/client_hello/tests.rs:1081`).
 
 #### SP-009 — probe-relocation counter disjoint from `dp=`
@@ -1549,7 +1549,7 @@ The `0xffce` codepoint is treated as ECH-present and rejected fail-closed, consi
 
 The `encrypted_server_name` codepoint is folded into the same `has_ech` profile
 fact as `encrypted_client_hello` (`src/inspection/client_hello.rs:102`, match arm
-`src/inspection/client_hello.rs:684`), so `validate` rejects it with `ChError::EchPresent`
+`src/inspection/client_hello.rs:665`), so `validate` rejects it with `ChError::EchPresent`
 (`src/inspection/client_hello/tests.rs:336-341`). Test: `rejects_esni_codepoint`
 (`src/inspection/client_hello/tests.rs:346`).
 
@@ -1582,7 +1582,7 @@ caller, and `ActiveExchange` carries it (`src/dns/transport.rs:231`); the apply 
 in-flight result is refused with `StaleGeneration` exactly as the guard intends. The
 startup blocking driver captures the current entry generation before starting
 (`src/dns/transport.rs:2822`), and the serving seam does the same
-(`src/runtime/storage.rs:809-812`). A post-window probe is a pure sensor that never applies cache
+(`src/runtime/storage.rs:814-817`). A post-window probe is a pure sensor that never applies cache
 state, so its exchange carries `Generation::INITIAL` and never compares
 (`src/dns/transport.rs:3058-3062`). Test: `stale_generation_is_refused_at_apply`
 (`src/dns/transport/tests.rs:1169`) bumps the entry generation while an exchange is in
@@ -1643,7 +1643,7 @@ ordinals span 3 batches, never the fixed core. The counters live in
 `[SaturatingCounter; ALLOWLIST_MAX]`, `ja4_change_loss` `[bool; ALLOWLIST_MAX]`, `ja4_value`
 `[[u8; 36]; ALLOWLIST_MAX]`, `ja4_seed`, `ja4_peer_ip` `NumericAddr`, `ja4_peer_ordinal`
 `Option<DomainOrdinal>`. The serving path keeps a fixed 512-entry zero-heap
-`Ja4BaselineTable` (`src/runtime/reactor.rs:585-599`, `ALLOWLIST_MAX` × `MAX_ADDRESSES` = 32 × 16)
+`Ja4BaselineTable` (`src/runtime/reactor.rs:585-598`, `ALLOWLIST_MAX` × `MAX_ADDRESSES` = 32 × 16)
 with `BaselineOutcome { FirstSeen, Unchanged, Overflow }`; overflow counts as a change signal.
 
 Third, an explicit loss flag exists on detail suppression:
