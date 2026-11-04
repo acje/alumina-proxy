@@ -1,6 +1,7 @@
 use std::fmt;
 
-use crate::config::{Allowlist, FixedHostname};
+use crate::config::Allowlist;
+use crate::names::hostname::FixedHostname;
 
 /// Maximum CONNECT request-head size, including headers and the terminating
 /// CRLF sequence. The bound applies to the head only, never to tunnel bytes
@@ -507,6 +508,13 @@ fn trim_ascii(mut value: &[u8]) -> &[u8] {
 /// port must equal the entry's port, so a same-name different-port request is
 /// denied (403) even when the hostname is allowlisted.
 #[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Retained pending a separate purpose/regression investigation"
+    )
+)]
 pub fn is_allowlisted(request: &ConnectRequest, allowlist: &Allowlist) -> bool {
     allowlist.iter().any(|entry| {
         entry.as_str().as_bytes() == request.hostname().as_bytes() && entry.port() == request.port()

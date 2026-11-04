@@ -1,9 +1,9 @@
 use std::time::Instant;
 
-use crate::config::FixedHostname;
 use crate::enforcement::policy::AnyIllegalCause;
 use crate::inspection::client_hello::HelloRejectReason;
 use crate::log::RejectReason;
+use crate::names::hostname::FixedHostname;
 
 use super::Refusal;
 use super::{Serving, Stage};

@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use alumina::boot::preflight::{self, KernelFacts, PreflightError};
 use alumina::config::{self, ConfigError};
+use alumina::dns;
 use alumina::inventory::{self, BootInventory, TrafficStorage};
-use alumina::preflight::{self, KernelFacts, PreflightError};
-use alumina::resolver;
 
 struct TempDir(PathBuf);
 
@@ -443,7 +443,7 @@ fn resolver_from_config_primary_and_count() {
         "1.1.1.1",
         "primary is index 0"
     );
-    assert_eq!(cfg.resolver_set().primary().port(), resolver::RESOLVER_PORT);
+    assert_eq!(cfg.resolver_set().primary().port(), dns::RESOLVER_PORT);
     assert_eq!(
         cfg.resolver_set()
             .get(1)
@@ -478,12 +478,12 @@ fn resolver_missing_empty_and_oversize_rejected() {
         config::parse_config_document(&resolver_doc("resolver = []\n")),
         Err(ConfigError::ResolverCountOutOfRange { got: 0 })
     ));
-    let over = std::iter::repeat_n("\"1.1.1.1\"", resolver::MAX_RESOLVERS + 1)
+    let over = std::iter::repeat_n("\"1.1.1.1\"", dns::MAX_RESOLVERS + 1)
         .collect::<Vec<_>>()
         .join(", ");
     assert!(matches!(
         config::parse_config_document(&resolver_doc(&format!("resolver = [{over}]\n"))),
-        Err(ConfigError::ResolverCountOutOfRange { got }) if got == resolver::MAX_RESOLVERS + 1
+        Err(ConfigError::ResolverCountOutOfRange { got }) if got == dns::MAX_RESOLVERS + 1
     ));
 }
 

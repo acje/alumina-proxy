@@ -379,11 +379,19 @@ impl HelloRejectReason {
     /// (offset from the CONNECT-head kinds by [`ConnectHeadReason::COUNT`] +
     /// the single `HostNotAllowlisted` kind).
     #[must_use]
+    #[expect(
+        dead_code,
+        reason = "Retained pending a separate purpose/regression investigation"
+    )]
     pub const fn index(self) -> usize {
         self as usize
     }
 
     /// The number of finite hello-rejection discriminants.
+    #[expect(
+        dead_code,
+        reason = "Retained pending a separate purpose/regression investigation"
+    )]
     pub const COUNT: usize = 4;
 }
 

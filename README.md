@@ -19,7 +19,7 @@ or workload type in a VPC that limits egress to be exclusively through the
 Alumina Proxy. In case of component compromise the attacker will have limited
 opportunities for establishing egress; policy violations and early-upstream-data
 events trigger configurable tripwire actions (`notify` / `block`) with bounded
-stdout monitoring (`src/config.rs:906-907`; `src/enforcement/action.rs:28-31`;
+stdout monitoring (`src/config/mod.rs:908-909`; `src/enforcement/action.rs:28-31`;
 spec §Tripwire actions, monitoring, and pacing → §Action catalog and
 attribution). External delivery of `notify` events is a **deployment
 responsibility** — see the [stdout collector runbook](#notify-delivery-stdout-collector-reliability-and-drop-alerting-runbook).
@@ -48,7 +48,7 @@ detected and acted on; there is no tolerated rate of bad behavior. Tripwires
 react on the first sign of deviation and are highly accurate. The action taken
 (`notify` or `block`) is your configuration choice; Alumina does not always
 panic by blocking all egress. Tarpit is reserved/deferred — it is not accepted
-as an operational setting (`src/config.rs:908,1065`; spec §Tripwire actions →
+as an operational setting (`src/config/mod.rs:910,1067`; spec §Tripwire actions →
 Tarpit (deferred)). The all-scope block bar is operator-configurable
 too: by default the first deviation arms all-scope block, and raising the bar
 is your deliberate choice to tolerate a bounded burst — never a hidden
@@ -236,7 +236,7 @@ it is **not tracked in this repository**; see
   ```
 
   `--user 65534:65534`, `--cap-drop ALL`, and `--security-opt no-new-privileges`
-  satisfy `src/preflight.rs` (`UID != 0`, `CapEff == CapPrm == CapAmb == 0`,
+  satisfy `src/boot/preflight.rs` (`UID != 0`, `CapEff == CapPrm == CapAmb == 0`,
   `no_new_privs == 1`); `--network host` binds `0.0.0.0:5353` directly on the
   internal VPC interface without bridge NAT overhead; `--read-only` plus the
   `--tmpfs /tmp:size=64m` scratch mount keep the root filesystem immutable at
@@ -485,23 +485,26 @@ proxy's stdout pipe is the only path exercised.
 `src/runtime/reactor/{policy,reject,startup}.rs` children and
 `src/runtime/{owner,storage,reactor,tunnel}/tests.rs` +
 `src/runtime/storage/startup_integration.rs` sibling/startup tests;
-`src/{serve,serving,worker,gate}.rs` thin re-export facades over that tree;
-`src/{boot,config,preflight,inventory}.rs` boot path;
+`src/boot/mod.rs`, `src/boot/preflight.rs`, `src/config/mod.rs` and
+`src/inventory.rs` boot path;
 `src/enforcement/{mod,action,monitor,policy,state}.rs` tripwire/action/monitoring
 surface (rp2e amendment); `src/dns/mod.rs` canonical DNS namespace (private
 `{wire,outcome,publication,transport,cache,schedule,resolver}.rs`, with
 `src/dns/transport/registration.rs` and sibling tests);
-`src/{startup_dns,cache,schedule,resolver}.rs` thin public same-item re-export
-facades over that namespace, not implementation core or boot;
-`src/{connect,client_hello}.rs` thin public same-item re-export facades over the
-private `src/inspection/` canonical tree (`src/inspection/{connect,client_hello}.rs`
-with `ja4` and sibling unit tests) — I09 compat roots completing the I07/I08
-facade set, not unlanded work;
-`src/eligibility.rs` parser/service core (real body); `src/names/` private
-kernel/value (`{hostname,rules}.rs` with sibling tests), consumed by
+`src/dns/incident_report.rs` crate-private reporting state, retained by runtime storage;
+`src/inspection/mod.rs` public inspection API over crate-private CONNECT/ClientHello
+implementation children (`src/inspection/{connect,client_hello}.rs`, with `ja4`
+and sibling unit tests);
+`src/eligibility.rs` parser/service core; `src/names/mod.rs` public hostname
+value API over crate-private `{hostname,rules}.rs` children, consumed by
 config/connect; `src/log/mod.rs` public log root; `src/log/{queue,sink}.rs`
 private implementation children on the crate-private `LogStore`;
-`src/{alloc,fault,fuzz}.rs` F1/F2/F4 scaffolds;
+`src/alloc.rs` F1 allocation witness; `src/qa/mod.rs` owns F2/F4 helpers:
+`src/qa/fault.rs` is public only under test/debug assertions, while
+`src/qa/fuzz.rs` is public in release too. Canonical domain roots expose the
+interfaces used by the binary, benchmark and integration tests; no legacy
+root facade or compatibility namespace remains. The five root Rust files are
+`main.rs`, `lib.rs`, `alloc.rs`, `eligibility.rs` and `inventory.rs`;
 `scripts/` verification owners; `tests/` integration corpus.
 
 ## License

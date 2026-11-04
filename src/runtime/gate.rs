@@ -270,12 +270,26 @@ impl TunnelGate {
 
     /// Cumulative client->upstream bytes successfully written.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained pending a separate purpose/regression investigation"
+        )
+    )]
     pub const fn upstream_committed(&self) -> usize {
         self.upstream_committed
     }
 
     /// Phase of the gate.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained pending a separate purpose/regression investigation"
+        )
+    )]
     pub const fn phase(&self) -> GatePhase {
         self.phase
     }

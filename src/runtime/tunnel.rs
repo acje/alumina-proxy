@@ -55,11 +55,22 @@ pub const SETUP_DEADLINE_SECS: u64 = 10;
 pub const CONNECT_DEADLINE_SECS: u64 = 2;
 
 /// CONNECT request-head bound reused from the parser (docs/alumina-proxy.md:163).
+#[expect(
+    dead_code,
+    reason = "Retained pending a separate purpose/regression investigation"
+)]
 pub const CONNECT_HEAD_LIMIT: usize = CONNECT_LIMIT;
 
 /// One directional traffic buffer handed to a tunnel from boot storage
 /// (docs/alumina-proxy.md:183). Sized here so the worker owns the storage contract;
 /// instances live in the boot pool, never on this core's stack.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Retained pending a separate purpose/regression investigation"
+    )
+)]
 pub type TrafficBuffer = [u8; BUFFER_BYTES];
 
 /// The service's single clock authority: a precise monotonic boot anchor for
@@ -299,6 +310,13 @@ impl ConnectPhase {
     /// parser-owned and never reaches the worker. Pinned by
     /// `refusal_statuses_follow_the_canonical_fixed_matrix`.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained pending a separate purpose/regression investigation"
+        )
+    )]
     pub const fn status(self) -> u16 {
         match self {
             ConnectPhase::Forbidden => 403,

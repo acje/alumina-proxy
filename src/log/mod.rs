@@ -42,12 +42,12 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use crate::dns::cache::Family;
+use crate::dns::incident_report::{EligibleTransition, IncidentSummary};
 use crate::dns::outcome::{NameOutcome, ProbeVerdict};
 use crate::dns::resolver::Fqdn;
 use crate::enforcement::action::{DomainOrdinal, Scope};
 use crate::enforcement::monitor::{CapturedFact, DnsAnomalyKind, Monitor};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason};
-use crate::incident_report::{EligibleTransition, IncidentSummary};
 use crate::inventory;
 
 pub(crate) const QUEUE_SLOTS: usize = 256;
@@ -86,7 +86,7 @@ const IP_ADDR_TEXT_MAX: usize = 45;
 
 /// Deterministic worst-case encoded length of one `startup_name` record,
 /// including framing: header, `secs` and `ordinal` at their maximum decimal
-/// widths, the full [`crate::config::FQDN_MAX_LEN`] name inside its quotes, the
+/// widths, the full [`crate::names::hostname::FQDN_MAX_LEN`] name inside its quotes, the
 /// longest outcome token, and the longest reason token inside its quotes. A
 /// validated FQDN is lowercase `[a-z0-9-.]` ASCII, so escaping never widens it.
 const STARTUP_NAME_MAX: usize = b"level=info kind=startup_name".len()
@@ -95,7 +95,7 @@ const STARTUP_NAME_MAX: usize = b"level=info kind=startup_name".len()
     + b" ordinal=".len()
     + ORDINAL_DIGITS
     + b" name=\"".len()
-    + crate::config::FQDN_MAX_LEN
+    + crate::names::hostname::FQDN_MAX_LEN
     + 1
     + b" outcome=".len()
     + OUTCOME_TOKEN_MAX
@@ -114,7 +114,7 @@ const RESOLVER_PROBE_SEGMENT_MAX: usize = b" resolver=\"".len()
     + 1
     + b" fqdn=\"".len()
     + 1
-    + crate::config::FQDN_MAX_LEN
+    + crate::names::hostname::FQDN_MAX_LEN
     + 1
     + b" pin=".len()
     + 1
@@ -133,7 +133,7 @@ const RESOLVER_PROBE_SEGMENT_MAX: usize = b" resolver=\"".len()
 const RESOLVER_PROBE_MAX: usize = b"level=info kind=resolver_probe".len()
     + b" secs=".len()
     + U64_DIGITS
-    + crate::config::MAX_RESOLVERS * RESOLVER_PROBE_SEGMENT_MAX
+    + crate::dns::resolver::MAX_RESOLVERS * RESOLVER_PROBE_SEGMENT_MAX
     + 1;
 
 const _: () = assert!(

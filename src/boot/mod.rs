@@ -1,8 +1,10 @@
 use std::fmt;
 
+use crate::boot::preflight::{KernelFacts, PreflightError};
 use crate::config::{self, Config, ConfigError};
 use crate::inventory::{self, BootInventory, StorageUnavailable, TrafficStorage};
-use crate::preflight::{self, KernelFacts, PreflightError};
+
+pub mod preflight;
 
 pub const EX_CONFIG: i32 = 78;
 

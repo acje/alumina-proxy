@@ -43,7 +43,7 @@ use mio::{Events, Interest, Poll, Registry, Token};
 
 use signal_hook::consts::SIGTERM;
 
-use crate::config::{ALLOWLIST_MAX, FixedHostname};
+use crate::config::ALLOWLIST_MAX;
 use crate::dns::cache::{EntryState, Family, MAX_ADDRESSES};
 use crate::dns::transport::StartupDnsError;
 use crate::eligibility::NumericAddr;
@@ -53,6 +53,7 @@ use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason, Violati
 use crate::inspection::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
 use crate::inspection::connect::{ConnectHeadReason, ConnectParser, Feed};
 use crate::log::{ActivityKind, RejectReason};
+use crate::names::hostname::FixedHostname;
 use crate::runtime::gate::{Activity, TunnelGate, UpstreamWrite, ValidatedHello};
 use crate::runtime::storage::ServeStorage;
 use crate::runtime::tunnel::{ConnectPhase, Deadline, MAX_TUNNELS, SlotIndex, TunnelIndex};

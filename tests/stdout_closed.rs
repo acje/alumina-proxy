@@ -8,9 +8,9 @@ use mio::net::TcpListener as MioListener;
 
 use alumina::config::parse_config_document;
 use alumina::inventory::TrafficStorage;
+use alumina::runtime::ServeError;
 use alumina::runtime::{Preallocated, Runtime};
-use alumina::serve::{ServeStorage, StartupDecision};
-use alumina::serving::ServeError;
+use alumina::runtime::{ServeStorage, StartupDecision};
 
 const BODY_403: &str = "403 Forbidden";
 const CLOSED_TIMEOUT: Duration = Duration::from_secs(120);

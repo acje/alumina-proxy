@@ -75,7 +75,7 @@ import time
 PROXY = ("127.0.0.1", 8080)
 CONNECT_PORT = 443
 
-# Wire constants mirrored from src/client_hello.rs (E2E crafts ClientHelios the
+# Wire constants mirrored from src/inspection/client_hello.rs (E2E crafts ClientHelios the
 # production parser must accept or reject for the stated reason, never as
 # malformed).
 CONTENT_HANDSHAKE = 22
@@ -412,8 +412,8 @@ class DnsResponder:
                     # The name EXISTS for A, so a type-absence answer must be
                     # NOERROR with zero answers plus a covering SOA (RFC 2308),
                     # never a whole-name NXDOMAIN. NODATA lets the runtime evict
-                    # only the queried family (src/dns.rs classify_soa,
-                    # src/cache.rs evict_nodata), keeping the A binding, so a
+# only the queried family (src/dns/wire.rs classify_soa,
+# src/dns/cache.rs evict_nodata), keeping the A binding, so a
                     # query of the other family cannot take an existing
                     # IPv4-only name down.
                     ancount = 0
@@ -472,7 +472,7 @@ def soa_record(owner, ttl, minimum):
     """A synthetic single-name authoritative-zone SOA covering `owner`. The
     zone apex of the queried name is the queried name itself, so the owner
     always covers it -- exactly what the runtime's NODATA classification
-    requires (src/dns.rs classify_soa/soa_covers)."""
+    requires (src/dns/wire.rs classify_soa/soa_covers)."""
     mname = qname_literal(b"ns1.example.org")
     rname = qname_literal(b"hostmaster.example.org")
     rdata_len = len(mname) + len(rname) + 20

@@ -412,7 +412,8 @@ fn normally_configured_occupied_listen_addr_is_a_bind_error_after_ready() {
 /// [`crate::config::CONFIG_DOC_LIMIT`]. Every name stays unresolved in the
 /// tests below, so the startup emission is the 32 + 1 record worst case.
 fn widest_allowlist_config() -> Config {
-    use crate::config::{ALLOWLIST_MAX, CONFIG_DOC_LIMIT, FQDN_MAX_LEN};
+    use crate::config::{ALLOWLIST_MAX, CONFIG_DOC_LIMIT};
+    use crate::names::hostname::FQDN_MAX_LEN;
     let mut doc = String::from(
         "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
     );

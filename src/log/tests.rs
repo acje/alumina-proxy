@@ -2,7 +2,8 @@ use super::*;
 
 use std::fmt::Write as _;
 
-use crate::config::{CONFIG_DOC_LIMIT, FQDN_MAX_LEN};
+use crate::config::CONFIG_DOC_LIMIT;
+use crate::names::hostname::FQDN_MAX_LEN;
 
 use std::fs::File;
 use std::io::{Read, Seek};
@@ -178,7 +179,8 @@ fn widest_name(index: usize) -> String {
 /// all inside `CONFIG_DOC_LIMIT`. The name-bearing worst cases are measured
 /// from this real document rather than a synthetic string.
 fn widest_legal_config() -> (crate::config::Config, String) {
-    use crate::config::{ALLOWLIST_MAX, MAX_RESOLVERS};
+    use crate::config::ALLOWLIST_MAX;
+    use crate::dns::resolver::MAX_RESOLVERS;
     let pin = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
     let mut doc = String::new();
     doc.push_str("listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [");
@@ -294,9 +296,9 @@ fn logging_startup_split_records_fit_widest_legal_config() {
     reason = "one measurement table building the worst-case input for every record kind"
 )]
 fn logging_worst_case_record_per_kind_fits_the_slot_with_margin() {
+    use crate::dns::incident_report::TypeSummary;
     use crate::dns::outcome::{FailureReason, NotAttemptedReason, ProbeVerdict};
     use crate::enforcement::monitor::Monitor;
-    use crate::incident_report::TypeSummary;
     let (config, doc) = widest_legal_config();
     let name = config.allowlist().get(0).expect("widest name").as_str();
     assert_eq!(name.len(), FQDN_MAX_LEN);
@@ -552,7 +554,7 @@ fn logging_worst_case_record_per_kind_fits_the_slot_with_margin() {
         fqdn: None,
         pin: false,
         verdict: ProbeVerdict::NotProbed,
-    }; crate::config::MAX_RESOLVERS];
+    }; crate::dns::resolver::MAX_RESOLVERS];
     for (i, seg) in segments.iter_mut().enumerate() {
         let resolver = set.get(i).expect("widest resolver");
         *seg = ResolverProbeSegment {

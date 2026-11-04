@@ -14,8 +14,7 @@
 //! with a diagnostic naming the field/source.
 
 use alumina::boot::{BootReport, EX_CONFIG, run_boot};
-use alumina::runtime::Preallocated;
-use alumina::serve::{ServeStorage, StartupDecision};
+use alumina::runtime::{Preallocated, ServeStorage, StartupDecision};
 
 /// Fixed documented input path, relative to the working directory. No CLI
 /// arguments or environment variables are read as policy (see README).
@@ -149,7 +148,7 @@ fn write_stderr(args: std::fmt::Arguments<'_>) {
 
 #[cfg(feature = "fixture-facts")]
 fn emit_kernel_facts() {
-    match alumina::preflight::read_kernel_facts() {
+    match alumina::boot::preflight::read_kernel_facts() {
         Ok(facts) => eprintln!(
             "kernel-facts: ruid={} euid={} suid={} fsuid={} cap_eff={:x} cap_prm={:x} cap_amb={:x} no_new_privs={}",
             facts.ruid,

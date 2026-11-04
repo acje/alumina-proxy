@@ -42,7 +42,7 @@ use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::Instant;
 
-use alumina::client_hello::{ChInspector, Inspect, ja4_fingerprint};
+use alumina::inspection::{ChInspector, Inspect, ja4_fingerprint};
 
 const RECORD_CONTENT_HANDSHAKE: u8 = 22;
 const HANDSHAKE_CLIENT_HELLO: u8 = 1;

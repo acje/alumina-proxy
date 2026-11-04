@@ -7,10 +7,11 @@ use std::time::{Duration, Instant};
 
 use mio::net::TcpListener;
 
-#[cfg(test)]
-use crate::config::FixedHostname;
 use crate::config::{Config, Fqdn};
 use crate::dns::cache::{Cache, CacheError, Family, NameIndex};
+use crate::dns::incident_report::{
+    ClosedWindow, EligibleTransition, IncidentReport, IncidentSnapshot, SummaryCache,
+};
 use crate::dns::resolver::MAX_RESOLVERS;
 use crate::dns::schedule::Schedules;
 use crate::dns::transport::{
@@ -21,11 +22,10 @@ use crate::dns::transport::{
 use crate::enforcement::action::DomainOrdinal;
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::enforcement::state::Enforcement;
-use crate::incident_report::{
-    ClosedWindow, EligibleTransition, IncidentReport, IncidentSnapshot, SummaryCache,
-};
 use crate::inspection::connect::ConnectRequest;
 use crate::log::{Level, LogStore, ResolverProbeSegment};
+#[cfg(test)]
+use crate::names::hostname::FixedHostname;
 use crate::runtime::tunnel::{
     AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, ResolvedRequest, SlotIndex,
     TunnelIndex, Worker, WorkerClock, WorkerView,

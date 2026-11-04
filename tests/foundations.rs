@@ -4,8 +4,8 @@ use alumina::dns::{
     BailiwickZones, BindingList, DNS_MSG_LIMIT, DnsError, EXTREME_TTL_THRESHOLD, MAX_CNAME_LINKS,
     MAX_TOTAL_RR, Outcome as DnsOutcome, ResponseWorkspace, build_query, parse_response,
 };
-use alumina::fault::{Clock, Outcome, REQUIRED_CATEGORIES, Replay, Replayed, Script};
-use alumina::fuzz::{
+use alumina::qa::fault::{Clock, Outcome, REQUIRED_CATEGORIES, Replay, Replayed, Script};
+use alumina::qa::fuzz::{
     CorpusOwnership, DeterministicGen, DriveOutcome, FuzzRun, ParserTarget, RegisterError, Seed,
     corpus, drive_unwind, fnv1a64, fuzz_target,
 };
@@ -142,7 +142,7 @@ fn f2_all_outcome_categories_are_representable() {
     let present: Vec<_> = script
         .points()
         .flat_map(|(_, outcomes)| outcomes.iter())
-        .map(alumina::fault::Outcome::category)
+        .map(alumina::qa::fault::Outcome::category)
         .collect();
     for required in REQUIRED_CATEGORIES {
         assert!(

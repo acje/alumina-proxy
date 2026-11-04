@@ -336,7 +336,7 @@ ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all
 - The action vocabulary is `notify` | `block` (T3). `notify` is the renamed `flare_only`: a notification and aggregation context only — it never authorizes forwarding, never delays baseline denial, and never widens scope; implicit Notify for an applied Block inherits that Block's scope. `block` is a scoped Block with the §Block and Notify semantics above. `tarpit` is reserved for a future action and is not configurable.
 - **Breaking change:** the pre-per-control grammar is removed. The old `[any_illegal] scope = "..."` single-key form, the positional `[actions]` `kind`/`scope` arrays, and the `flare_only` literal are gone; a document using them fails startup with exit 78. The old `flare_only`/`connection` semantics are reproduced by `action = "notify", scope = "connection"`. The `ja4` control is new and mandatory on every allowlist entry.
 - Every control key is mandatory with no defaults and no environment or command-line override; unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as before. Configuration validation timing and procedure are unchanged.
-- Capacity: the enforcement group counts toward the 16 KiB document bound (CONFIG_DOC_LIMIT, §Keyed configuration schema). Measured with the exact document serializer the parser reads (pinned by parser-real assertions in `src/config.rs`), the 32-entry × 100-byte `<fqdn>:<port>` worst case with the full per-control group fits under 16 KiB in both the `block`/`connection` and `notify`/`connection` spellings, with and without a realistic `IP#fqdn`/pinned resolver entry (`compact_32_names_with_group_fit_16kib`, `notify_32_hundred_byte_names_fit_and_parse`, `compact_32_hundred_byte_names_with_ip_fqdn_resolver_fit_16kib`, `compact_32_hundred_byte_names_with_pinned_resolver_fit_16kib`). Each total is serialization- and layout-dependent; neither a cap expansion, an alias, a silent compact migration, nor a change to the legal literal set is implied.
+- Capacity: the enforcement group counts toward the 16 KiB document bound (CONFIG_DOC_LIMIT, §Keyed configuration schema). Measured with the exact document serializer the parser reads (pinned by parser-real assertions in `src/config/mod.rs`), the 32-entry × 100-byte `<fqdn>:<port>` worst case with the full per-control group fits under 16 KiB in both the `block`/`connection` and `notify`/`connection` spellings, with and without a realistic `IP#fqdn`/pinned resolver entry (`compact_32_names_with_group_fit_16kib`, `notify_32_hundred_byte_names_fit_and_parse`, `compact_32_hundred_byte_names_with_ip_fqdn_resolver_fit_16kib`, `compact_32_hundred_byte_names_with_pinned_resolver_fit_16kib`). Each total is serialization- and layout-dependent; neither a cap expansion, an alias, a silent compact migration, nor a change to the legal literal set is implied.
 
 ### Monitoring
 
@@ -383,7 +383,7 @@ SNI handling must satisfy RFC 6066 `host_name` and resolve trailing-dot normaliz
 
 ### L11 — Extension/version caps promoted into the resource profile
 
-The code-invented hard caps are promoted to spec resource-profile limits, keeping the numbers identical to the code (`src/inspection/client_hello.rs:10,13,28,25`; `src/inspection/connect.rs:8`):
+The code-invented hard caps are promoted to spec resource-profile limits, keeping the numbers identical to the code (`src/inspection/client_hello.rs:10,13,28,25`; `src/inspection/connect.rs:9`):
 
 | Resource | Limit |
 | --- | --- |
@@ -436,7 +436,7 @@ The retained serving workspace is a fixed per-slot allocation, made once at boot
 | Per-slot ClientHello inspector buffers (`buf` + `scratch`) | 512 × 2 | 64 KiB | 65 536 KiB |
 | **Retained serving workspace total** | 512 slots | 136 KiB | **68 MiB** |
 
-This is the `SLOT_WORKSPACE_BYTES` / `SERVING_WORKSPACE_BYTES` accounting in `src/inventory.rs:30,36` and the two `[u8; 64 KiB]` buffers (`buf`, `scratch`) in each `ChInspector` at `src/inspection/client_hello.rs:416,420`, preallocated for all 512 slots at boot (`src/runtime/reactor.rs:1063`). It is included in the boot inventory's named-fixed-buffer lower bound (`BootInventory::named_fixed_buffer_bytes` = 128 MiB traffic + 68 MiB serving workspace + DNS named buffers ≈ 196 MiB), consistent with the observed ~204 MiB VmRSS in `docs/benchmarks/e2micro-workload.md`.
+This is the `SLOT_WORKSPACE_BYTES` / `SERVING_WORKSPACE_BYTES` accounting in `src/inventory.rs:30,36` and the two `[u8; 64 KiB]` buffers (`buf`, `scratch`) in each `ChInspector` at `src/inspection/client_hello.rs:424,428`, preallocated for all 512 slots at boot (`src/runtime/reactor.rs:1064`). It is included in the boot inventory's named-fixed-buffer lower bound (`BootInventory::named_fixed_buffer_bytes` = 128 MiB traffic + 68 MiB serving workspace + DNS named buffers ≈ 196 MiB), consistent with the observed ~204 MiB VmRSS in `docs/benchmarks/e2micro-workload.md`.
 
 The DNS transport's fixed 512-byte query buffer (`QUERY_BUF_LEN`, `src/dns/transport.rs:55`) is likewise a retained named buffer and is accounted with the DNS named buffers.
 
@@ -453,11 +453,11 @@ Spec §Configuration & DNS (DNS provenance) already rejects coexistence of CNAME
 
 #### Vec 34 — ClientHello handshake-message length bound
 
-Spec §TLS ClientHello profile bounds each plaintext record payload to 16 KiB (§Initial resource profile). This increment adds the matching bound on the TLS handshake message length at 16 KiB (`MAX_HANDSHAKE_LEN`, 4-byte header plus body, `src/inspection/client_hello.rs:22`). A handshake whose declared length exceeds the bound is rejected as `ChError::HandshakeTooLarge { got }` at the scan gate (`src/inspection/client_hello.rs:550`) instead of being buffered toward the 64 KiB `MAX_CLIENT_HELLO` inspection total (§Initial resource profile). This is a content-level classification bound, not a buffer change: the retained serving workspace (`SLOT_WORKSPACE_BYTES`, `src/inventory.rs`, resource profile §Initial resource profile) and the two reused 64 KiB inspector buffers are unchanged. The TLS profile fold maps the new cause to the existing `Profile` reject kind (`src/inspection/client_hello.rs:350-376`), and a claim exactly at the 16 KiB cap is a complete-at-bound, not a length rejection (`src/inspection/client_hello/tests.rs:504-513`).
+Spec §TLS ClientHello profile bounds each plaintext record payload to 16 KiB (§Initial resource profile). This increment adds the matching bound on the TLS handshake message length at 16 KiB (`MAX_HANDSHAKE_LEN`, 4-byte header plus body, `src/inspection/client_hello.rs:22`). A handshake whose declared length exceeds the bound is rejected as `ChError::HandshakeTooLarge { got }` at the scan gate (`src/inspection/client_hello.rs:558`) instead of being buffered toward the 64 KiB `MAX_CLIENT_HELLO` inspection total (§Initial resource profile). This is a content-level classification bound, not a buffer change: the retained serving workspace (`SLOT_WORKSPACE_BYTES`, `src/inventory.rs`, resource profile §Initial resource profile) and the two reused 64 KiB inspector buffers are unchanged. The TLS profile fold maps the new cause to the existing `Profile` reject kind (`src/inspection/client_hello.rs:350-376`), and a claim exactly at the 16 KiB cap is a complete-at-bound, not a length rejection (`src/inspection/client_hello/tests.rs:504-513`).
 
 #### Vec 36 — Split CONNECT error discriminants and remove the `NotHttp` catch-all
 
-Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment replaces the coarse parse-failure classification with exact, finite discriminants: a request line that is not exactly three whitespace-separated tokens is `MalformedRequestLine`; a method other than `CONNECT` is `MethodNotConnect`; an HTTP version other than `HTTP/1.1` is `UnsupportedVersion`; and a target that is not authority-form `host:port` — starting with `/`, `*`, or a `scheme://` prefix (e.g. `windows(3)://`), or lacking a colon — is `TargetNotAuthorityForm` (`src/inspection/connect.rs:369-400`, `:443-493`). The coarse `NotHttp` variant is removed from both `ConnectError` and `ConnectHeadReason` (`src/inspection/connect.rs:47-63`, `:116-131`); `ConnectHeadReason::COUNT` is now 13 (`git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/connect.rs#L148`) and `AnyIllegalCause::KIND_COUNT` is 18 (`git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/enforcement/policy.rs#L21`). The monitoring grammar's fixed kind labels follow (`c13`, `a13`; `git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/log.rs#L1850`, `:1937`). The eliminated `NotHttp` row is deliberately not re-added: every prior `NotHttp` rejection is now attributable to exactly one of the new discriminants, so the coarser catch-all carried no additional information.
+Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment replaces the coarse parse-failure classification with exact, finite discriminants: a request line that is not exactly three whitespace-separated tokens is `MalformedRequestLine`; a method other than `CONNECT` is `MethodNotConnect`; an HTTP version other than `HTTP/1.1` is `UnsupportedVersion`; and a target that is not authority-form `host:port` — starting with `/`, `*`, or a `scheme://` prefix (e.g. `windows(3)://`), or lacking a colon — is `TargetNotAuthorityForm` (`src/inspection/connect.rs:370-401`, `:444-494`). The coarse `NotHttp` variant is removed from both `ConnectError` and `ConnectHeadReason` (`src/inspection/connect.rs:48-64`, `:117-132`); `ConnectHeadReason::COUNT` is now 13 (`git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/connect.rs#L148`) and `AnyIllegalCause::KIND_COUNT` is 18 (`git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/enforcement/policy.rs#L21`). The monitoring grammar's fixed kind labels follow (`c13`, `a13`; `git:5486a6f43a3e5656b3238f3c0ed2d068d0653225:src/log.rs#L1850`, `:1937`). The eliminated `NotHttp` row is deliberately not re-added: every prior `NotHttp` rejection is now attributable to exactly one of the new discriminants, so the coarser catch-all carried no additional information.
 
 ## Hardening: CONNECT header-line count bound, passive resolver degraded signaling, widened refresh band
 
@@ -466,7 +466,7 @@ Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment 
 
 #### Vec 35 — CONNECT header-line count bound
 
-Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment bounds the number of header lines a CONNECT request head may carry at 16 header fields (`MAX_HEADER_LINES`, `src/inspection/connect.rs:13`). Every line the header loop yields is counted (`src/inspection/connect.rs:286-290`), incrementing before the empty-line continue as defense in depth — the head is truncated at the first CRLFCRLF delimiter, so each header field yields exactly one header-loop line and the empty line never appears in a bounded head. A request whose count exceeds 16 is rejected with the new exact discriminant `ConnectError::TooManyHeaderLines`, mapped to `ConnectHeadReason::TooManyHeaderLines` (`src/inspection/connect.rs:62`, `:131`, `:155`). `ConnectHeadReason::COUNT` is now 14 (`git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/connect.rs#L160`), `AnyIllegalCause::KIND_COUNT` is 19 (`git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/enforcement/policy.rs#L21`), and the monitoring grammar's fixed kind labels follow (`c14`, `a14`; `git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/log.rs#L1864`, `:1951`). The bound is a parse-classification bound, not a buffer change: the fixed request-head buffer and its size limits are unchanged, and a head of exactly 16 fields is accepted at the boundary.
+Spec §CONNECT request govern the CONNECT Accept/Reject surface. This increment bounds the number of header lines a CONNECT request head may carry at 16 header fields (`MAX_HEADER_LINES`, `src/inspection/connect.rs:14`). Every line the header loop yields is counted (`src/inspection/connect.rs:287-291`), incrementing before the empty-line continue as defense in depth — the head is truncated at the first CRLFCRLF delimiter, so each header field yields exactly one header-loop line and the empty line never appears in a bounded head. A request whose count exceeds 16 is rejected with the new exact discriminant `ConnectError::TooManyHeaderLines`, mapped to `ConnectHeadReason::TooManyHeaderLines` (`src/inspection/connect.rs:63`, `:132`, `:156`). `ConnectHeadReason::COUNT` is now 14 (`git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/connect.rs#L160`), `AnyIllegalCause::KIND_COUNT` is 19 (`git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/enforcement/policy.rs#L21`), and the monitoring grammar's fixed kind labels follow (`c14`, `a14`; `git:c9d0b543ec28a2500839cc6a2cfc599a16768368:src/log.rs#L1864`, `:1951`). The bound is a parse-classification bound, not a buffer change: the fixed request-head buffer and its size limits are unchanged, and a head of exactly 16 fields is accepted at the boundary.
 
 #### Vec 19 — Passive resolver degraded signaling
 
@@ -510,15 +510,15 @@ Spec §Configuration & DNS govern the configuration document and its mandatory k
 
 #### Config validation surface and error precedence
 
-`resolver` is now a mandatory configuration key: a document with every other key present but no `resolver` fails with `MissingField("resolver")`. Count outside 1..=5 maps to the new `ConfigError::ResolverCountOutOfRange { got }` (`src/config.rs:363`), and an invalid address to the new `ConfigError::InvalidResolver { index, value }` (`:366`, 1-based index in its diagnostic), both exiting 78 (EX_CONFIG) like every other configuration error (§Configuration & DNS). The resolver is built last in `from_table` (`build_resolver_set`, `src/config.rs:637`), after enforcement/allowlist/listen/allowance validation, so every pre-existing invalid-config error keeps its established precedence and no error fixture changes; only previously-valid documents must now carry `resolver`.
+`resolver` is now a mandatory configuration key: a document with every other key present but no `resolver` fails with `MissingField("resolver")`. Count outside 1..=5 maps to the new `ConfigError::ResolverCountOutOfRange { got }` (`src/config/mod.rs:365`), and an invalid address to the new `ConfigError::InvalidResolver { index, value }` (`:368`, 1-based index in its diagnostic), both exiting 78 (EX_CONFIG) like every other configuration error (§Configuration & DNS). The resolver is built last in `from_table` (`build_resolver_set`, `src/config/mod.rs:639`), after enforcement/allowlist/listen/allowance validation, so every pre-existing invalid-config error keeps its established precedence and no error fixture changes; only previously-valid documents must now carry `resolver`.
 
 #### Boot, image, and read-once surfaces
 
-`run_boot(config_path)` takes a single argument; `BootReport.nameserver` is removed and the primary resolver is read from the validated config (`report.config.resolver_set().primary()`, `src/boot.rs`; `src/main.rs` prints and consumes it from the config, no `RESOLVER_PATH`). The startup order clause §Configuration & DNS ("configuration and resolver reads") is satisfied by one config read carrying both allowlist and resolver set. The image clause §Typical deployment pattern ("its configuration file, and the platform resolver configuration") becomes: the production image holds the statically linked binary and its configuration file (validated allowlist + resolver set) and nothing else. The read-once clause §Architecture is met by reading `config.toml` once; no resolver-specific file read remains.
+`run_boot(config_path)` takes a single argument; `BootReport.nameserver` is removed and the primary resolver is read from the validated config (`report.config.resolver_set().primary()`, `src/boot/mod.rs`; `src/main.rs` prints and consumes it from the config, no `RESOLVER_PATH`). The startup order clause §Configuration & DNS ("configuration and resolver reads") is satisfied by one config read carrying both allowlist and resolver set. The image clause §Typical deployment pattern ("its configuration file, and the platform resolver configuration") becomes: the production image holds the statically linked binary and its configuration file (validated allowlist + resolver set) and nothing else. The read-once clause §Architecture is met by reading `config.toml` once; no resolver-specific file read remains.
 
 #### 4 KiB document preflight (measured, not assumed)
 
-The "A compact configuration with 32 entries of 100 ASCII bytes each" bound at §Configuration & DNS was re-measured with the new key using the parser-real assertions in `src/config.rs`. The tightest 32 × 100-byte compact form (`[any_illegal]` + `[actions]`, `full_group_document`) previously measured 4061 B; adding the mandatory one-entry `resolver = ["1.1.1.1"]` (23 B including newline) yields **4084 B**, which fits the 4096 B limit — asserted in `compact_32_hundred_byte_names_measured_total_is_4084` (`git:b5d53ef847e21ef004696744cf29e3b35a53c85b:src/config.rs#L1204-L1211`). Honest bounds with the 5-resolver maximum: a 2-entry resolver (4095 B) still fits; a 3-, 4-, or 5-entry resolver (4106/4117/4128 B) with 32 × 100-byte names **exceeds** the documented limit and is not configurable in that tightest form — the max-count 5-entry form needs shorter allowlist names. No cap expansion is made: the 4096 B document limit is unchanged, and the 5-resolver maximum trades full name-length headroom against the new surface — names short enough to leave sufficient headroom can still declare all five resolvers. The 4 KiB fit preflight therefore **passes** for the compact one-entry form this stage ships.
+The "A compact configuration with 32 entries of 100 ASCII bytes each" bound at §Configuration & DNS was re-measured with the new key using the parser-real assertions in `src/config/mod.rs`. The tightest 32 × 100-byte compact form (`[any_illegal]` + `[actions]`, `full_group_document`) previously measured 4061 B; adding the mandatory one-entry `resolver = ["1.1.1.1"]` (23 B including newline) yields **4084 B**, which fits the 4096 B limit — asserted in `compact_32_hundred_byte_names_measured_total_is_4084` (`git:b5d53ef847e21ef004696744cf29e3b35a53c85b:src/config.rs#L1204-L1211`). Honest bounds with the 5-resolver maximum: a 2-entry resolver (4095 B) still fits; a 3-, 4-, or 5-entry resolver (4106/4117/4128 B) with 32 × 100-byte names **exceeds** the documented limit and is not configurable in that tightest form — the max-count 5-entry form needs shorter allowlist names. No cap expansion is made: the 4096 B document limit is unchanged, and the 5-resolver maximum trades full name-length headroom against the new surface — names short enough to leave sufficient headroom can still declare all five resolvers. The 4 KiB fit preflight therefore **passes** for the compact one-entry form this stage ships.
 
 #### Multi-resolver failover and failback (Vec 18)
 
@@ -539,15 +539,15 @@ Spec §Configuration & DNS (peer assertion) and §Initial resource profile (DNS 
 
 Spec §Configuration & DNS govern the configuration document and resolver selection, and the `alumina-hrdn4` amendment owns the validated `resolver` array. This increment extends each resolver entry with an optional validated name identity without changing the array's shape, its 1..=5 count bound, or its address validation: an entry may be `IP#fqdn` instead of a bare IP, with the IP half validated exactly as before (numeric unicast IPv4/IPv6, no zone identifier, fixed port 53) and the FQDN half validated as a DNS name.
 
-- **FQDN validation (`Fqdn`, `src/dns/resolver.rs:31`).** Each label is 1–63 bytes of lowercase ASCII letters, digits, and hyphens, with no leading or trailing hyphen, and the total is at most `FQDN_MAX_LEN = 253` (`src/dns/resolver.rs:21`). A wildcard `*` anywhere maps to `WildcardFqdn`; non-ASCII/IDN characters map to `IdnFqdn`; uppercase or otherwise non-DNS characters, and leading/trailing/empty labels (a leading or trailing dot), map to `InvalidFqdn` — the three new `ResolverError` discriminants live at `src/dns/resolver.rs:240-242` (Display `:246`). Digit-leading labels are allowed (RFC 1123), matching the allowlist `config::Fqdn` label rule at `src/config.rs:61`. The validated name is stored inline as `[u8; FQDN_MAX_LEN]` with a `len: u8`, so `Nameserver` (`src/dns/resolver.rs:185`) and `ResolverSet` remain `Copy` and the fixed zero-alloc profile is preserved.
+- **FQDN validation (`Fqdn`, `src/dns/resolver.rs:31`).** Each label is 1–63 bytes of lowercase ASCII letters, digits, and hyphens, with no leading or trailing hyphen, and the total is at most `FQDN_MAX_LEN = 253` (`src/dns/resolver.rs:21`). A wildcard `*` anywhere maps to `WildcardFqdn`; non-ASCII/IDN characters map to `IdnFqdn`; uppercase or otherwise non-DNS characters, and leading/trailing/empty labels (a leading or trailing dot), map to `InvalidFqdn` — the three new `ResolverError` discriminants live at `src/dns/resolver.rs:240-242` (Display `:246`). Digit-leading labels are allowed (RFC 1123), matching the allowlist `config::Fqdn` label rule at `src/config/mod.rs:63`. The validated name is stored inline as `[u8; FQDN_MAX_LEN]` with a `len: u8`, so `Nameserver` (`src/dns/resolver.rs:185`) and `ResolverSet` remain `Copy` and the fixed zero-alloc profile is preserved.
 - **Entry parse (`select`, `src/dns/resolver.rs:305`).** `select()` splits a token once on `#`: the IP half is validated exactly as before, and the FQDN half, when present, is validated as above. A bare IP yields `fqdn: None` (`is_ip_only()`, `src/dns/resolver.rs:230`) and remains fully valid — IP-only is the tolerated degraded-trust form. A trailing `#pin-sha256=`-style suffix is rejected as `InvalidFqdn` through the non-DNS-characters rule.
-- **Carriage and accessors.** `Nameserver` and `ResolverSet` stay `Copy`; `build_resolver_set` (`src/config.rs:637`) is structurally unchanged — the `fqdn` field rides the existing validated surface. The additions are `fqdn()` (`src/dns/resolver.rs:224`), `is_ip_only()` (`:230`), and `ResolverSet::iter()` (`src/dns/resolver.rs:430`) for the boot scan. `src/dns/transport.rs` carries the copied set unchanged this package: the §Configuration & DNS resolver-peer assertion remains address-based (the DoT handshake on port 853 is implemented by the DoT transport section below), and both the single-resolver and failover/failback surfaces are otherwise untouched.
-- **Startup warning.** Every IP-only resolver entry emits one stdout startup warning — `BootReport::ip_only_resolvers()` (`src/boot.rs:46`) printed from `src/main.rs:127-131` — so a degraded-trust bare-IP deployment is operator-visible immediately.
+- **Carriage and accessors.** `Nameserver` and `ResolverSet` stay `Copy`; `build_resolver_set` (`src/config/mod.rs:639`) is structurally unchanged — the `fqdn` field rides the existing validated surface. The additions are `fqdn()` (`src/dns/resolver.rs:224`), `is_ip_only()` (`:230`), and `ResolverSet::iter()` (`src/dns/resolver.rs:430`) for the boot scan. `src/dns/transport.rs` carries the copied set unchanged this package: the §Configuration & DNS resolver-peer assertion remains address-based (the DoT handshake on port 853 is implemented by the DoT transport section below), and both the single-resolver and failover/failback surfaces are otherwise untouched.
+- **Startup warning.** Every IP-only resolver entry emits one stdout startup warning — `BootReport::ip_only_resolvers()` (`src/boot/mod.rs:48`) printed from `src/main.rs:126-130` — so a degraded-trust bare-IP deployment is operator-visible immediately.
 - **Config diagnostics.** `ConfigError::InvalidResolver`'s diagnostic text now names the `IP#fqdn` form; a malformed FQDN fails the same discriminant with the established exit 78 (EX_CONFIG) and precedence (`build_resolver_set` runs last in `from_table`, so earlier invalid-config errors keep their order).
 
 #### 4 KiB document preflight (re-measured, V37 form)
 
-The 4 KiB document bound at §Configuration & DNS was re-measured for the V37 golden path with parser-real assertions in `src/config.rs`. The golden-path example shape — a 3-entry allowlist and a 5-resolver `IP#fqdn` array — serializes to **437 B**, pinned by `resolver_ip_fqdn_example_fits_4kib` (`git:b5d53ef847e21ef004696744cf29e3b35a53c85b:src/config.rs#L1439`, asserts `len == 437` and `<= 4096` and that it parses). The honest-bounds language of the `alumina-hrdn4` clause still holds in the tightest 32 × 100-byte compact form (`full_group_document`): the bare-IP one-entry form remains 4084 B, and a single realistic `IP#fqdn` entry (18-character `cloudflare-dns.com`) measures **4103 B** — over the limit — pinned by `compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_4103` (`git:b5d53ef847e21ef004696744cf29e3b35a53c85b:src/config.rs#L1217`). A one-entry `IP#fqdn` with an FQDN of 11 characters or fewer still fits (e.g. `dns.google`, 10 characters, keeps 4095 B). So, as the hrdn4 clause documented, the max-count/max-name compact form trades name-length headroom against this surface and needs shorter allowlist names (or shorter FQDNs) to hold `IP#fqdn` entries; no cap expansion is made.
+The 4 KiB document bound at §Configuration & DNS was re-measured for the V37 golden path with parser-real assertions in `src/config/mod.rs`. The golden-path example shape — a 3-entry allowlist and a 5-resolver `IP#fqdn` array — serializes to **437 B**, pinned by `resolver_ip_fqdn_example_fits_4kib` (`git:b5d53ef847e21ef004696744cf29e3b35a53c85b:src/config.rs#L1439`, asserts `len == 437` and `<= 4096` and that it parses). The honest-bounds language of the `alumina-hrdn4` clause still holds in the tightest 32 × 100-byte compact form (`full_group_document`): the bare-IP one-entry form remains 4084 B, and a single realistic `IP#fqdn` entry (18-character `cloudflare-dns.com`) measures **4103 B** — over the limit — pinned by `compact_32_hundred_byte_names_with_ip_fqdn_resolver_measured_total_is_4103` (`git:b5d53ef847e21ef004696744cf29e3b35a53c85b:src/config.rs#L1217`). A one-entry `IP#fqdn` with an FQDN of 11 characters or fewer still fits (e.g. `dns.google`, 10 characters, keeps 4095 B). So, as the hrdn4 clause documented, the max-count/max-name compact form trades name-length headroom against this surface and needs shorter allowlist names (or shorter FQDNs) to hold `IP#fqdn` entries; no cap expansion is made.
 
 ## DoT transport (V1) and strict SPKI pinning (V5), Package 2 of the DoT chain
 
@@ -848,7 +848,7 @@ and whitespace, with 1 through 32 `[allowed_fqdn."..."]` tables and a required `
 Boot-time read only; zero runtime/heap impact; no runtime-surface expansion. The capacity
 clause (rp2e §Configuration surface (implemented; exact schema)) is amended to the new bound: the keyed full-schema 32-entry worst case
 is re-measured with the exact document serializer the parser reads (pinned by parser-real
-assertions in `src/config.rs`) and must fit under 16 KiB. Neither a further cap expansion,
+assertions in `src/config/mod.rs`) and must fit under 16 KiB. Neither a further cap expansion,
 an alias, a silent compact migration, nor a change to the legal literal set is implied.
 
 ### Startup-final record shape
@@ -907,7 +907,7 @@ accepted.
 This amendment documents the implemented per-control enforcement schema: the symmetry model
 (T2), the action vocabulary and scopes (T3), JA4 action-selecting (T4), and behavior symmetry
 through the unified `decide()` (T6). It is the governing description of the implemented
-schema in `src/config.rs` and `src/enforcement/{action,policy,state}.rs`; the Configuration
+schema in `src/config/mod.rs` and `src/enforcement/{action,policy,state}.rs`; the Configuration
 surface (implemented; exact schema) and Keyed configuration schema sections carry the exact
 grammar.
 
@@ -1004,7 +1004,7 @@ semantics.
 claim above is superseded: each class's threshold and window are operator-configurable via
 its optional gate section — `[bad_handshake]`, `[illegal_fqdn]`, `[ja4]` — (§Keyed
 configuration schema; an `[early_data]` gate section is rejected at load, exit 78), defaulting to `threshold = 1` / `window_secs = 900`
-(`parse_gate_section`, `src/config.rs:798`; `Enforcement::new`, `src/runtime/storage.rs:179`). At the
+(`parse_gate_section`, `src/config/mod.rs:800`; `Enforcement::new`, `src/runtime/storage.rs:179`). At the
 default the first deviation of a class arms that class's all-scope block, sticky until
 restart, so the "no tolerated rate" guarantee is preserved;
 raising a threshold is the operator's deliberate choice to tolerate a bounded burst. The
@@ -1300,9 +1300,9 @@ recorded even when every detail batch is dropped. The detail batches are best-ef
 blocks the summary: `report_drops` counts each dropped `monitor_domain` batch once per batch;
 `capture_drops` counts capture-detail loss with mixed units — once per detail at capture time
 (a later detection relation on an already-captured connection is suppressed,
-`src/runtime/reactor.rs:2372-2387`, or a detail is evicted when the 64-detail window is full,
+`src/runtime/reactor.rs:2373-2388`, or a detail is evicted when the 64-detail window is full,
 `src/enforcement/monitor.rs:330`) and once per batch when a `monitor_capture` batch is
-dropped at report time (`src/log/tests.rs:826-880`, up to 22 details lost in one counted batch) — the
+dropped at report time (`src/log/tests.rs:828-882`, up to 22 details lost in one counted batch) — the
 per-batch/per-detail unit mixing is intentional and documented; both are saturating counters
 with overflow flags in the summary's fixed core.
 
@@ -1405,16 +1405,16 @@ the originating setup.
 The CONNECT request head is rejected when it contains a bare carriage return (a `0x0d` not
 immediately followed by `0x0a`) or a bare line feed (`0x0a` not immediately preceded by
 `0x0d`), located incrementally while scanning for the `\r\n\r\n` head terminator
-(`src/inspection/connect.rs:274`/`:277`, `bare_line_feed` `src/inspection/connect.rs:331`, `bare_carriage_return`
-`src/inspection/connect.rs:339`). Tests: `rejects_bare_lf` (`src/inspection/connect/tests.rs:315`),
+(`src/inspection/connect.rs:275`/`:278`, `bare_line_feed` `src/inspection/connect.rs:332`, `bare_carriage_return`
+`src/inspection/connect.rs:340`). Tests: `rejects_bare_lf` (`src/inspection/connect/tests.rs:315`),
 `rejects_bare_carriage_return_in_header_value` (`src/inspection/connect/tests.rs:321`),
 `rejects_bare_carriage_return_before_delimiter` (`src/inspection/connect/tests.rs:330`).
 
 #### L8 — Non-`host_name` `server_name` rejection
 
 Within the `server_name` extension, any entry whose name type is not `host_name` (0) is
-rejected as `non-host_name name type` rather than ignored (`src/inspection/client_hello.rs:797-799` in
-`parse_server_names` `src/inspection/client_hello.rs:775`). Test: `non_host_name_sni_rejected`
+rejected as `non-host_name name type` rather than ignored (`src/inspection/client_hello.rs:805-807` in
+`parse_server_names` `src/inspection/client_hello.rs:783`). Test: `non_host_name_sni_rejected`
 (`src/inspection/client_hello/tests.rs:568`).
 
 #### SP-006 — >64 sigalgs rejected; `count:02` overflow saturates
@@ -1422,7 +1422,7 @@ rejected as `non-host_name name type` rather than ignored (`src/inspection/clien
 The `signature_algorithms` list is bounded at `MAX_SIGALGS = 64` (`src/inspection/client_hello.rs:44`);
 a list declaring more than 64 entries is rejected as `TooManySigAlgs` — an AnyIllegal profile
 violation, not a JA4 admit/reject — so the JA4 hash input is never silently truncated
-(`parse_sig_algs` `src/inspection/client_hello.rs:851`). The `count:02` token saturates at 99 with no
+(`parse_sig_algs` `src/inspection/client_hello.rs:859`). The `count:02` token saturates at 99 with no
 literal marker (`count_token` `src/inspection/client_hello/ja4.rs:101`). Tests:
 `sigalgs_over_max_sigalgs_rejected` (`src/inspection/client_hello/tests.rs:1073`),
 `sigalgs_at_max_sigalgs_accepted` (`src/inspection/client_hello/tests.rs:1081`),
@@ -1434,23 +1434,23 @@ literal marker (`count_token` `src/inspection/client_hello/ja4.rs:101`). Tests:
 
 #### One-label allowlist names are accepted; only `cname_bailiwick` requires ≥ 2 labels
 
-An allowlist entry key is parsed by `Fqdn::parse` (`src/config.rs:27-37`): it requires a
-`<fqdn>:<port>` shape (`rsplit_once(':')`, `src/config.rs:33-34`), rejects an IP-literal
-host shape (`is_ip_literal_shape`, `src/config.rs:36-37`), and validates the bare name via
-`validate_bare_name` (`src/config.rs:75-87`). `validate_bare_name` enforces the shared
-lowercase-ASCII label rules (`validate_label`, `src/config.rs:56-71`) and the 253-byte
+An allowlist entry key is parsed by `Fqdn::parse` (`src/config/mod.rs:29-39`): it requires a
+`<fqdn>:<port>` shape (`rsplit_once(':')`, `src/config/mod.rs:35-36`), rejects an IP-literal
+host shape (`is_ip_literal_shape`, `src/config/mod.rs:38-39`), and validates the bare name via
+`validate_bare_name` (`src/config/mod.rs:77-89`). `validate_bare_name` enforces the shared
+lowercase-ASCII label rules (`validate_label`, `src/config/mod.rs:58-73`) and the 253-byte
 `FQDN_MAX_LEN` bound, but imposes no minimum label count — the contract note at
-`src/config.rs:73-74` leaves shape-specific checks such as minimum label count to the
+`src/config/mod.rs:75-76` leaves shape-specific checks such as minimum label count to the
 caller, and `Fqdn::parse` never applies one. The only configuration surface that requires
 at least two labels is the declared `cname_bailiwick` zone suffix
-(`parse_cname_bailiwick_suffix`, `src/config.rs:92-101`, ≥ 2-label check at
-`src/config.rs:97-98`), a distinct F-07 safety rule; it never constrains the allowlist
-name itself. The allowlist key path is `parse_allowed_fqdn_table` (`src/config.rs:834`),
+(`parse_cname_bailiwick_suffix`, `src/config/mod.rs:94-103`, ≥ 2-label check at
+`src/config/mod.rs:99-100`), a distinct F-07 safety rule; it never constrains the allowlist
+name itself. The allowlist key path is `parse_allowed_fqdn_table` (`src/config/mod.rs:836`),
 which parses each key through `Fqdn::parse`.
 
 Tests: `Fqdn::parse("1.2.3.4:443").is_err()` and `Fqdn::parse("93.184.216.34:443").is_err()`
-(IP literals rejected) with `Fqdn::parse("4example.com:443").is_ok()` (`src/config.rs:140-143`);
-the accepted-entries list at `src/config.rs:165-175`; and `rejects_bare_fqdn_key`
+(IP literals rejected) with `Fqdn::parse("4example.com:443").is_ok()` (`src/config/mod.rs:142-145`);
+the accepted-entries list at `src/config/mod.rs:167-177`; and `rejects_bare_fqdn_key`
 (`src/config/enforcement_config_tests.rs:797`) confirming the only allowlist-key rejection is a missing `:port`,
 not a label count.
 
@@ -1493,7 +1493,7 @@ configured window (§Per-control enforcement schema T6 — SP-001 preservation).
 #### SP-003 — homogeneous-trust resolver arrays
 
 A resolver array must be trust-homogeneous; a mixed plain (bare-IP) and DoT (`IP#fqdn`) set
-is rejected at startup exit 78 (`src/config.rs:652`). Test: `resolver_mixed_plain_and_dot_trust_rejected`
+is rejected at startup exit 78 (`src/config/mod.rs:654`). Test: `resolver_mixed_plain_and_dot_trust_rejected`
 (`src/config/resolver_config_tests.rs:195`).
 
 #### SP-004 — sustained-negative incident class
@@ -1505,15 +1505,15 @@ summaries (`src/dns/schedule.rs:23`/`:27`/`:30`). Test: `sustained_negative_stre
 #### SP-005 — per-ordinal JA4 set up to K=16
 
 Each ordinal holds a set of up to `MAX_ADDRESSES` (16) distinct JA4 strings; overflow
-suppresses adds and increments a count; seeding events are recorded (`src/runtime/reactor.rs:568-578`,
-`src/runtime/reactor.rs:568-578`, `src/dns/cache.rs:7`). Test: `ja4_baseline_set_overflow_suppresses_and_dedups_unchanged`
+suppresses adds and increments a count; seeding events are recorded (`src/runtime/reactor.rs:569-579`,
+`src/runtime/reactor.rs:569-579`, `src/dns/cache.rs:7`). Test: `ja4_baseline_set_overflow_suppresses_and_dedups_unchanged`
 (`src/runtime/reactor/tests.rs:8767`).
 
 #### RT-001 — sigalg-list bound at 64
 
 The `signature_algorithms` list is bounded at `MAX_SIGALGS = 64` with no silent truncation
 of the JA4 hash input (`src/inspection/client_hello.rs:44`, `TooManySigAlgs` `src/inspection/client_hello.rs:243`,
-`src/inspection/client_hello.rs:851`). Tests: `sigalgs_over_max_sigalgs_rejected`
+`src/inspection/client_hello.rs:859`). Tests: `sigalgs_over_max_sigalgs_rejected`
 (`src/inspection/client_hello/tests.rs:1073`), `sigalgs_at_max_sigalgs_accepted` (`src/inspection/client_hello/tests.rs:1081`).
 
 #### SP-009 — probe-relocation counter disjoint from `dp=`
@@ -1526,8 +1526,8 @@ The probe-relocation counter (`probe_relocations` → `pr=`) is disjoint from th
 
 Latch/event records are reserved and drop newest-lowest first (`is_reserved`
 `src/log/mod.rs:294`, `enqueue_reserved` `src/log/queue.rs:119-147`). Tests: `logging_reserved_startup_final_displaces_newest_normal_when_full`
-(`src/log/tests.rs:1630`), `logging_reserved_records_survive_normal_overflow` (`src/log/tests.rs:1672`),
-`logging_all_reserved_full_drops_newest_reserved` (`src/log/tests.rs:1709`).
+(`src/log/tests.rs:1632`), `logging_reserved_records_survive_normal_overflow` (`src/log/tests.rs:1674`),
+`logging_all_reserved_full_drops_newest_reserved` (`src/log/tests.rs:1711`).
 
 #### RT-006 — independent stale-serving window
 
@@ -1549,7 +1549,7 @@ The `0xffce` codepoint is treated as ECH-present and rejected fail-closed, consi
 
 The `encrypted_server_name` codepoint is folded into the same `has_ech` profile
 fact as `encrypted_client_hello` (`src/inspection/client_hello.rs:102`, match arm
-`src/inspection/client_hello.rs:676`), so `validate` rejects it with `ChError::EchPresent`
+`src/inspection/client_hello.rs:684`), so `validate` rejects it with `ChError::EchPresent`
 (`src/inspection/client_hello/tests.rs:336-341`). Test: `rejects_esni_codepoint`
 (`src/inspection/client_hello/tests.rs:346`).
 
@@ -1560,7 +1560,7 @@ fact as `encrypted_client_hello` (`src/inspection/client_hello.rs:102`, match ar
 The flat union of declared `cname_bailiwick` suffixes is bounded by the Resource-Bounds
 Invariant (§II. Memory & Resource Invariants): exhaustion rejects work rather than expanding storage without bound. The
 config validator already rejects a suffix total above `ALLOWLIST_MAX`
-(`CnameBailiwickTooMany`, `src/config.rs:1078`; Display `src/config.rs:436`), so the
+(`CnameBailiwickTooMany`, `src/config/mod.rs:1080`; Display `src/config/mod.rs:438`), so the
 overflow is unreachable through validated configuration — this amendment makes the defence
 structural. `from_allowlist` (`src/dns/wire.rs:842`) now returns `Result<BailiwickZones, DnsError>`
 and replaces the debug-only assert on the suffix slot with the typed
@@ -1629,11 +1629,11 @@ aggregate counters and ALL aggregate overflow flags folded into `ofacts`
 downgrade-to-plain, probe-relocations, expired-pin-cert, ja4-change, ja4-seed) plus the
 per-ordinal `dx` hex loss bitset (`src/log/encoding.rs:666-675`). The adversarial-population
 worst-case test `logging_monitor_all_saturated_record_fits_the_2k_slot`
-(`src/log/tests.rs:1246`) saturates the whole Monitor (`saturate_all_for_test`) and asserts every
+(`src/log/tests.rs:1248`) saturates the whole Monitor (`saturate_all_for_test`) and asserts every
 emitted record fits the 2 KiB slot, carrying `ofacts=1` / `ocapture_drops=1` / `sn=32` /
 `js=4294967295` / `d31p` — the fixed core is never dropped. Family-split variants assert the
-same worst case with serving-stale latched (`src/log/tests.rs:1468`) and exactly one summary plus
-3 domain and 3 capture batches each under the 2048 B cap (`src/log/tests.rs:1480`).
+same worst case with serving-stale latched (`src/log/tests.rs:1470`) and exactly one summary plus
+3 domain and 3 capture batches each under the 2048 B cap (`src/log/tests.rs:1482`).
 
 Second, JA4 detail is sharded: per-ordinal `d<i>j` (change count), `d<i>v` (36-byte JA4
 value), and `d<i>p` (latest-overflow peer IP) ride the best-effort `monitor_domain` detail
@@ -1643,7 +1643,7 @@ ordinals span 3 batches, never the fixed core. The counters live in
 `[SaturatingCounter; ALLOWLIST_MAX]`, `ja4_change_loss` `[bool; ALLOWLIST_MAX]`, `ja4_value`
 `[[u8; 36]; ALLOWLIST_MAX]`, `ja4_seed`, `ja4_peer_ip` `NumericAddr`, `ja4_peer_ordinal`
 `Option<DomainOrdinal>`. The serving path keeps a fixed 512-entry zero-heap
-`Ja4BaselineTable` (`src/runtime/reactor.rs:584-598`, `ALLOWLIST_MAX` × `MAX_ADDRESSES` = 32 × 16)
+`Ja4BaselineTable` (`src/runtime/reactor.rs:585-599`, `ALLOWLIST_MAX` × `MAX_ADDRESSES` = 32 × 16)
 with `BaselineOutcome { FirstSeen, Unchanged, Overflow }`; overflow counts as a change signal.
 
 Third, an explicit loss flag exists on detail suppression:
@@ -1652,7 +1652,7 @@ Third, an explicit loss flag exists on detail suppression:
 capacity, but the overflowed value is not added to the set, so the operator sees detail was
 suppressed. The summary always encodes the `dx` hex bitset of loss flags when any is set
 (`src/log/encoding.rs:666-675`); the exact-grammar test
-`logging_monitor_summary_exact_grammar_and_zero_suppression` (`src/log/tests.rs:1114`) asserts the
+`logging_monitor_summary_exact_grammar_and_zero_suppression` (`src/log/tests.rs:1116`) asserts the
 summary carries the fixed core and the `dx` bitset while the single nonzero domain block
 rides its `monitor_domain` batch.
 

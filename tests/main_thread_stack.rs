@@ -5,10 +5,10 @@ use std::time::Duration;
 use mio::net::TcpListener as MioListener;
 
 use alumina::config::parse_config_document;
-use alumina::connect::MAX_HEADER_LINES;
+use alumina::inspection::MAX_HEADER_LINES;
 use alumina::inventory::TrafficStorage;
 use alumina::runtime::Runtime;
-use alumina::serve::ServeStorage;
+use alumina::runtime::ServeStorage;
 
 const LOOPS: usize = 64;
 const OVERLONG_LOOPS: usize = 4;

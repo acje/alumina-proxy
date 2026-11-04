@@ -549,7 +549,7 @@ def soa_record(owner, ttl, minimum):
     """A synthetic single-name authoritative-zone SOA covering `owner`. The
     zone apex of the queried name is the queried name itself, so the owner
     always covers it -- exactly what the runtime's NODATA classification
-    requires (src/dns.rs classify_soa/soa_covers)."""
+    requires (src/dns/wire.rs classify_soa/soa_covers)."""
     mname = qname_literal(b"ns1.example.org")
     rname = qname_literal(b"hostmaster.example.org")
     rdata_len = len(mname) + len(rname) + 20
@@ -685,7 +685,7 @@ class SilentUpstream(_BoundServer):
 
 
 # ---------------------------------------------------------------------------
-# Wire helpers (mirror src/client_hello.rs test builder, as in e2e_relay.py).
+# Wire helpers (mirror src/inspection/client_hello/tests.rs test builder, as in e2e_relay.py).
 # ---------------------------------------------------------------------------
 CONTENT_HANDSHAKE = 22
 HANDSHAKE_CLIENT_HELLO = 1
