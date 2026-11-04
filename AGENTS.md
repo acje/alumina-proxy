@@ -20,13 +20,15 @@ application and using egress to identify it and stop further exploitation.
 
 Every change must preserve:
 
-- **No silent acceptance.** Every deviation from the configured golden path is
-  detected and acted on (flare / block / tarpit); there is no tolerated rate of
-  bad behavior. In the idiomatic deployment the only client is the
-  trusted-at-rest app on a fixed golden path, so a tripwire firing is a
-  high-value signal — highly unexpected, almost certainly operator
-  misconfiguration or adversarial activity. Tripwires react
-  on the first sign of deviation.
+- **No silent acceptance.** Every deviation observable through the proxy's
+  CONNECT/initial-ClientHello and enumerated tripwire surfaces is detected and
+  acted on (`notify` / `block`; the reserved tarpit action is deferred, not
+  configurable); there is no tolerated rate of bad behavior, and behavior
+  hidden inside the tunnel or riding an admitted endpoint's own capabilities
+  never surfaces there — outside the detection reach. The idiomatic
+  deployment's only client is the trusted-at-rest app on a fixed golden path,
+  so a tripwire firing is a **high-value signal**, almost certainly operator
+  misconfiguration or adversarial activity.
 - **Operator chooses the action; the proxy owns the semantics.** The action for
   a context is operator configuration; security semantics are fixed constants
   (the allowlist is the operator's, enforcement is the proxy's). The all-scope
@@ -45,10 +47,9 @@ Every change must preserve:
 ## Documentation model
 
 - **`docs/architecture.html` is the single source of truth for architecture
-  documentation.** It is *derived from code* at a pinned revision and exists so
-  that a reviewer can do higher-level code review without re-reading every
-  module. Every factual claim cites a spec clause or a `file:line` at that
-  revision.
+  documentation.** It is *derived from code* and exists so that a reviewer can
+  do higher-level code review without re-reading every module. Every factual
+  claim cites a spec clause or a `file:line` of that code.
 - **It describes, it does not adjudicate.** No findings, severities, review
   verdicts, recommendations, open questions, decisions, task lists, or bead IDs
   appear in it. Issues, decisions, evidence, and verdicts live in `bd` only.
@@ -91,4 +92,7 @@ because one side "wins".
   connections/images (`boundary phase1` never executes E2E).
 - Behavioural changes run red→green and preserve the fixed profile: single
   boot owner and single serving owner, two reused 128 KiB per-tunnel buffers,
-  no post-boot heap alloc/dealloc, no runtime-surface expansion.
+  no post-boot *first-party* heap alloc/dealloc (dependency allocations are a
+  bounded seam and the per-connect DoT setup seam is an authorised first-party
+  allocation point — §Design direction; `docs/alumina-proxy.md` §Zero-
+  Allocation Invariant) — no runtime-surface expansion.

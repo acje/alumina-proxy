@@ -35,17 +35,21 @@ surface of configuration choices.
 The trust model is not distrust of the system. Your application and you (the
 operator) are trusted at rest; you hold full privilege over both application
 and proxy configuration. Alumina exists because compromise is inevitable: when
-an application is compromised, the proxy's job is to **identify** the
-compromise and **protect against further exploitation** purely through egress —
-the limit of its visibility and responsibility.
+an application is compromised, the proxy's job is to **identify** compromise
+that surfaces as an observable egress deviation and to **protect against
+further exploitation** — the limit of its visibility and responsibility;
+what never surfaces on the observed wire (hidden inside the encrypted tunnel
+or riding an admitted endpoint's capabilities) is outside its detection reach.
 
-The core promise: **no silent acceptance of adversarial behavior**. In the
-idiomatic deployment the only client is your trusted-at-rest application on a
-fixed golden path, so a healthy workload produces zero deviations. A tripwire
-firing is therefore a **high-value signal**: highly unexpected, and almost
-certainly operator misconfiguration or adversarial activity. Every deviation is
-detected and acted on; there is no tolerated rate of bad behavior. Tripwires
-react on the first sign of deviation and are highly accurate. The action taken
+The core promise: **no silent acceptance of adversarial behavior observable
+on the proxy's wire**. The idiomatic deployment's only client is your
+trusted-at-rest application on a fixed golden path, so a tripwire firing is a
+**high-value signal**, almost certainly operator misconfiguration or
+adversarial activity. Every deviation observable through the
+CONNECT/initial-ClientHello and enumerated tripwire surfaces is detected and
+acted on; there is no tolerated rate of bad behavior. Unobservable behavior —
+hidden inside the encrypted tunnel or riding an admitted endpoint's own
+capabilities — is outside its detection reach. The action taken
 (`notify` or `block`) is your configuration choice; Alumina does not always
 panic by blocking all egress. Tarpit is reserved/deferred — it is not accepted
 as an operational setting (`src/config/mod.rs:910,1067`; spec §Tripwire actions →
@@ -54,8 +58,9 @@ too: by default the first deviation arms all-scope block, and raising the bar
 is your deliberate choice to tolerate a bounded burst — never a hidden
 tolerated rate.
 
-> "There will be no silent acceptance of adversarial behavior without action
-> taken. The action may be `notify` or `block` (tarpitting is reserved/deferred,
+> "There will be no silent acceptance of adversarial behavior observable on
+> the proxy's wire without action taken. The action may be `notify` or
+> `block` (tarpitting is reserved/deferred,
 > not accepted as an operational setting). We will not always panic by blocking
 > all meaningful egress automation — that is an operator configuration choice.
 > Alumina promises to deliver highly accurate tripwires. The operator decides
@@ -63,8 +68,10 @@ tolerated rate.
 
 Narrowness is the mechanism, not a compromise: a single purpose, a fixed
 resource profile, and fixed security semantics make the proxy's invariants
-provable — no post-boot allocation, a single boot and serving owner, bounded
-buffers, no runtime-surface expansion. The fixed profile is the inviolable
+provable — no post-boot **first-party** allocation (DoT setup seam and
+dependency allocations are separate bounded exceptions), a single boot and
+serving owner, bounded buffers, no runtime-surface expansion. The fixed
+profile is the inviolable
 contract; it never yields to a feature.
 
 ## Documents
@@ -72,7 +79,7 @@ contract; it never yields to a feature.
 | Document | Role |
 | --- | --- |
 | [alumina-proxy.md](docs/alumina-proxy.md) | **Canonical spec** — sole governing requirements |
-| [docs/architecture.html](docs/architecture.html) | **As-built architecture reference** — derived from source at a pinned revision; describes the system, never adjudicates |
+| [docs/architecture.html](docs/architecture.html) | **As-built architecture reference** — derived from source; describes the system, never adjudicates |
 | [docs/benchmarks/e2micro-suite.md](docs/benchmarks/e2micro-suite.md) | e2-micro benchmark suite (1gbps + connection storms) vs Envoy/HAProxy — methodology + corrected M-04 results |
 | [docs/qa-package/README.md](docs/qa-package/README.md) | Local testQA run/validation instructions |
 | [Notify delivery: stdout collector reliability and drop-alerting runbook](#notify-delivery-stdout-collector-reliability-and-drop-alerting-runbook) | Deployment-owned collector runbook: liveness, drop-alerting, restart semantics, failure drill |
@@ -82,7 +89,14 @@ contract; it never yields to a feature.
 
 - `./config.toml` (≤ 16384 B, keyed `[allowed_fqdn."<fqdn>:<port>"]` tables per the `alumina-cfgk` amendment, mandatory keys, no defaults) carries the validated
   resolver set (1..=5 entries: bare `IP` on port 53, `IP#fqdn` on port 853, or
-  `IP#fqdn#pin-sha256=<b64>` strict-pin on port 853); no `resolv.conf` read, no
+  `IP#fqdn#pin-sha256=<b64>` strict-pin on port 853); resolver arrays are
+  trust-homogeneous — a mixed plain/DoT array is rejected at startup, and a DoT
+  handshake or identity failure never downgrades to plain DNS. DoT trust: an
+  unpinned `IP#fqdn` entry validates against an **empty root store** and fails
+  closed, so it cannot reach a publicly-trusted resolver until a trust-anchor
+  intake lands; a strict-pinned entry needs no CA chain (SAN + SPKI pin
+  equality; certificate validity is warning-only) and is usable immediately
+  (`docs/alumina-proxy.md:113,575,577,1043`); no `resolv.conf` read, no
   CLI args, no env overrides; one listening socket; **SIGTERM the only handled
   lifecycle signal** (spec §Architecture → Runtime surface).
 - Privilege preflight (non-root, empty caps, `no_new_privs`): unmet → EX_CONFIG
@@ -282,6 +296,17 @@ cannot observe its own unread pipe (writes succeed into a buffer nobody reads).
   ([docs/alumina-proxy.md](docs/alumina-proxy.md):340).
 - A failed sink latches permanently and the drain quiesces (`src/log/sink.rs:87-99,100-179`):
   no further records of any kind are emitted until the proxy restarts.
+  Backpressure is never a failure: a `WouldBlock`/`Interrupted` write retains
+  the cursor and retries on the bounded retry cadence, so a stalled/full pipe
+  is lossy only (whole-record drop, count on overflow) — never a hard failure
+  or a stall of serving (`src/log/sink.rs:136-144`). An **unrecoverable**
+  write error (e.g. stdout pipe closed) latches the sink failed, stranding
+  every remaining queued record once in the shared `dropped` tally
+  (`src/log/sink.rs:145-153`); outside shutdown the serving owner exits
+  `EX_IOERR` (74) at the next owner-turn boundary rather than continue without
+  an external log-loss signal (`src/runtime/owner.rs:305-306`; §F-09
+  `docs/alumina-proxy.md:1235`). During shutdown the drain carries no exit; the
+  shutdown verdict alone terminates the process.
 
 **Deployment-owned** — you must build and assure; no proxy test covers this:
 
@@ -377,10 +402,15 @@ never proof of a lossless exit window.
   **no** periodic summaries at all — so "no summary for N s" is not an alarm by
   itself. Alert instead on **silence where emission was expected**: a stream that
   had been delivering `kind=monitor` lines (or an open DNS incident per the
-  incident-summary window) going quiet for > N s ⇒ the sink latched failed
-  (`src/log/sink.rs:87-99,100-179`, nothing more is ever emitted until proxy restart) **or**
-  the collector died. Distinguish by checking collector liveness out-of-band;
-  a latched sink is cleared only by an operator-controlled proxy restart.
+  incident-summary window) going quiet for > N s is an **investigation signal,
+  not a proof of failure or exit**: causes are a latched hard sink failure
+  (outside shutdown the proxy exits `EX_IOERR` (74); nothing more is emitted;
+  `src/log/sink.rs:135-153`; `src/runtime/owner.rs:305-306`; §F-09), a dead
+  collector, or **live backpressure** — a live but stalled/slow collector
+  leaves the pipe full while events continue (`WouldBlock`/`Interrupted`
+  retains the cursor, never latches the sink; no exit, serving continues;
+  `src/log/sink.rs:136-144`). Correlate process status and collector read
+  progress out-of-band; a latched sink is cleared only by operator restart.
 - **A dropped record and a dropped counter can themselves be lost.** The summary
   line that would carry `report_drops`/`capture_drops` is itself a record the
   sink can strand; generic `dropped` refreshes only at startup/shutdown; and a
