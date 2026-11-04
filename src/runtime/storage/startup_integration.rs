@@ -134,9 +134,12 @@ fn full_serve_opens_listener_early_before_the_window_elapses() {
         .run_startup_within(responder.addr, NOW0, window)
         .expect("startup");
     let elapsed = start.elapsed();
-    assert_eq!(outcome.decision, StartupDecision::Serve(ServingMode::Full));
+    let decision = *outcome.decision();
+    assert_eq!(decision, StartupDecision::Serve(ServingMode::Full));
     assert_eq!(outcome.report.resolved_names, 2);
-    let listener = outcome.listener.expect("listener bound for full serve");
+    let listener = outcome
+        .into_listener()
+        .expect("listener bound for full serve");
     let addr = listener.local_addr().expect("listener address");
     assert_eq!(
         addr.ip(),
@@ -179,9 +182,10 @@ fn exit75_is_decided_only_at_the_actual_window_deadline() {
         .run_startup_within(responder.addr, NOW0, window)
         .expect("startup");
     let elapsed = start.elapsed();
-    assert_eq!(outcome.decision, StartupDecision::Exit75 { unresolved: 1 });
+    let decision = *outcome.decision();
+    assert_eq!(decision, StartupDecision::Exit75 { unresolved: 1 });
     assert!(
-        outcome.listener.is_none(),
+        outcome.listener().is_none(),
         "exit 75 must not bind a listener even with its configured address occupied"
     );
     assert!(
@@ -208,11 +212,11 @@ fn degraded_is_decided_only_at_the_actual_window_deadline() {
         .expect("startup");
     let elapsed = start.elapsed();
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Serve(ServingMode::Degraded)
     );
     assert!(
-        outcome.listener.is_some(),
+        outcome.listener().is_some(),
         "degraded serve must bind a listener"
     );
     assert!(
@@ -241,13 +245,13 @@ fn failed_lookup_retries_within_the_window_and_recovers_to_full() {
         .expect("startup");
     let elapsed = start.elapsed();
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the windowed retry must recover the failed lookup"
     );
     assert_eq!(outcome.report.resolved_names, 1);
     assert_eq!(outcome.report.failed, 2);
-    assert!(outcome.listener.is_some());
+    assert!(outcome.listener().is_some());
     assert!(
         elapsed < window,
         "recovered startup must return early, not wait for the deadline"
@@ -349,7 +353,8 @@ fn kernel_assigned_test_listener_avoids_the_released_port_rebind_race() {
     let outcome = storage
         .run_startup_within(responder.addr, NOW0, window)
         .expect("startup");
-    let listener = outcome.listener.expect("listener bound");
+    let decision = *outcome.decision();
+    let listener = outcome.into_listener().expect("listener bound");
     let addr = listener.local_addr().expect("listener address");
     assert_eq!(
         addr.ip(),
@@ -366,7 +371,7 @@ fn kernel_assigned_test_listener_avoids_the_released_port_rebind_race() {
         held_port,
         "listener must not reuse the still-held contender port"
     );
-    assert_eq!(outcome.decision, StartupDecision::Serve(ServingMode::Full));
+    assert_eq!(decision, StartupDecision::Serve(ServingMode::Full));
     let conn = TcpStream::connect(addr);
     assert!(
         conn.is_ok(),
@@ -708,11 +713,13 @@ fn configured_cross_suffix_cname_resolves_identically_on_shared_and_legacy_start
             .expect("shared startup window");
 
         assert_eq!(
-            shared_outcome.decision, legacy_outcome.decision,
+            *shared_outcome.decision(),
+            *legacy_outcome.decision(),
             "the shared MAIN path must take the identical readiness decision to the legacy storage window"
         );
         assert_eq!(
-            shared_outcome.decision, expected_decision,
+            *shared_outcome.decision(),
+            expected_decision,
             "a configured-suffix admission must decide exactly this readiness result"
         );
         assert_eq!(
@@ -724,7 +731,7 @@ fn configured_cross_suffix_cname_resolves_identically_on_shared_and_legacy_start
             "legacy is the independent baseline: same config, same answers, same resolved count"
         );
         assert_eq!(
-            shared_outcome.listener.is_some(),
+            shared_outcome.listener().is_some(),
             binds_listener,
             "a full-serving path binds the startup listener; an exit-75 path does not"
         );

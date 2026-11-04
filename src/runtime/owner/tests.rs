@@ -941,9 +941,10 @@ fn main_wiring_body() {
     let outcome = owner
         .run_startup_within(responder_addr, 1000, Duration::from_secs(2))
         .expect("startup window");
-    assert_eq!(outcome.decision, StartupDecision::Serve(ServingMode::Full));
+    let decision = *outcome.decision();
+    assert_eq!(decision, StartupDecision::Serve(ServingMode::Full));
     let listener = outcome
-        .listener
+        .into_listener()
         .expect("a serving decision binds the connect listener");
     let mut runtime = owner.attach(listener).expect("attach listener + dns");
 
@@ -1007,13 +1008,13 @@ fn startup_starvation_falsifier_body() {
         .run_startup_within(dead_addr, 1000, Duration::from_secs(2))
         .expect("startup window");
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Terminated,
         "a queued SIGTERM during a queued-runnable retry backoff must settle as the \
          terminated outcome instead of being starved by the queued runnable warning"
     );
     assert!(
-        outcome.listener.is_none(),
+        outcome.listener().is_none(),
         "the terminated startup must never bind a listener"
     );
 }
@@ -1236,7 +1237,7 @@ fn startup_reuse_window_body() {
     drop(responder);
 
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "both allowlist names must resolve on a single reusable startup connection"
     );
@@ -1371,13 +1372,13 @@ fn post_all_resolved_settlement_body() {
     drop(responder);
 
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Terminated,
         "a SIGTERM readable at the post-all-resolved pre-settlement checkpoint must settle \
          Terminated through the zero-wait recheck"
     );
     assert!(
-        outcome.listener.is_none(),
+        outcome.listener().is_none(),
         "the terminated startup must never bind a listener"
     );
 }
@@ -1471,12 +1472,12 @@ fn both_ready_settlement_body() {
     drop(responder);
 
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Terminated,
         "same-batch DNS-ready + pending signal must settle Terminated, never Serve"
     );
     assert!(
-        outcome.listener.is_none(),
+        outcome.listener().is_none(),
         "the terminated startup must never bind a listener"
     );
     assert_eq!(
@@ -2344,12 +2345,12 @@ fn idle_refresh_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the startup window must resolve the allowlist name"
     );
     let mut runtime = owner
-        .attach(outcome.listener.expect("serving listener"))
+        .attach(outcome.into_listener().expect("serving listener"))
         .expect("attach");
 
     let queries_at_attach = queries.load(std::sync::atomic::Ordering::SeqCst);
@@ -2447,12 +2448,12 @@ fn multicycle_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "startup must resolve the allowlist name"
     );
     let mut runtime = owner
-        .attach(outcome.listener.expect("serving listener"))
+        .attach(outcome.into_listener().expect("serving listener"))
         .expect("attach");
 
     let mut completed_cycles = 0usize;
@@ -2531,12 +2532,12 @@ fn refresh_retry_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the first responder session must resolve the allowlist name"
     );
     let mut runtime = owner
-        .attach(outcome.listener.expect("serving listener"))
+        .attach(outcome.into_listener().expect("serving listener"))
         .expect("attach");
 
     let secs = runtime.serving().storage().dns().now_u64();
@@ -2649,12 +2650,12 @@ fn sigterm_suppression_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the startup window must resolve the allowlist name"
     );
     let mut runtime = owner
-        .attach(outcome.listener.expect("serving listener"))
+        .attach(outcome.into_listener().expect("serving listener"))
         .expect("attach");
 
     let secs = runtime.serving().storage().dns().now_u64();
@@ -2742,12 +2743,12 @@ fn refresh_alloc_witness_body() {
         .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
-        outcome.decision,
+        *outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "startup resolves before the witness"
     );
     let mut runtime = owner
-        .attach(outcome.listener.expect("serving listener"))
+        .attach(outcome.into_listener().expect("serving listener"))
         .expect("attach");
     let secs = runtime.serving().storage().dns().now_u64();
     runtime

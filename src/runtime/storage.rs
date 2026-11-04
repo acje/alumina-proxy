@@ -1284,3 +1284,21 @@ mod tests;
 
 #[cfg(test)]
 mod startup_integration;
+
+impl StartupOutcome {
+    /// The terminal readiness decision for the startup window.
+    pub const fn decision(&self) -> &StartupDecision {
+        &self.decision
+    }
+
+    /// The bound CONNECT listener when a serving decision was taken; `None`
+    /// for exit 75 or a terminated window.
+    pub const fn listener(&self) -> Option<&TcpListener> {
+        self.listener.as_ref()
+    }
+
+    /// Moves the bound listener out, consuming the outcome.
+    pub fn into_listener(self) -> Option<TcpListener> {
+        self.listener
+    }
+}

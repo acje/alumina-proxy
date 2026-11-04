@@ -83,9 +83,9 @@ fn main() {
                 report.config.resolver_set().primary().port(),
             );
             match owner.run_startup(nameserver, PROCESS_EPOCH_SECS) {
-                Ok(outcome) => match outcome.decision {
+                Ok(outcome) => match *outcome.decision() {
                     StartupDecision::Serve(_mode) => {
-                        let Some(listener) = outcome.listener else {
+                        let Some(listener) = outcome.into_listener() else {
                             owner.emit_fatal_and_drain(format_args!(
                                 "alumina: serving decision without a bound listener",
                             ));
