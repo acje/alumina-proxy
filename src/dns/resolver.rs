@@ -1,6 +1,8 @@
 use std::fmt;
 use std::net::IpAddr;
 
+use crate::names::hostname::FixedHostname;
+
 pub const RESOLVER_PORT: u16 = 53;
 
 /// The `DoT` (DNS-over-TLS, RFC 7858) port an `IP#fqdn` (or `IP#fqdn#pin-sha256=`)
@@ -23,14 +25,15 @@ pub const FQDN_MAX_LEN: usize = crate::names::rules::FQDN_MAX_LEN;
 /// A validated resolver FQDN (the `fqdn` in an `IP#fqdn` entry): lowercase
 /// ASCII DNS-name syntax (labels 1..=63 `[a-z0-9-]`, no leading/trailing
 /// hyphen), total length at most [`FQDN_MAX_LEN`], no wildcard `*`, no
-/// IDN/non-ASCII bytes, no leading or trailing dot. Carried inline so
-/// [`Nameserver`] and [`ResolverSet`] stay `Copy` with no heap allocation
-/// (fixed profile): the validated bytes are the type, so every constructed
-/// value already passed the boundary rules in [`Fqdn::parse`].
+/// IDN/non-ASCII bytes, no leading or trailing dot. Carried inline as a
+/// [`FixedHostname`] payload so [`Nameserver`] and [`ResolverSet`] stay
+/// `Copy` with no heap allocation (fixed profile): construction reuses the
+/// shared payload type, and [`Fqdn::parse`] applies the strict resolver
+/// gates before the payload is built, so every constructed value already
+/// passed the boundary rules.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Fqdn {
-    bytes: [u8; FQDN_MAX_LEN],
-    len: u8,
+    payload: FixedHostname,
 }
 
 enum FqdnError {
@@ -40,10 +43,6 @@ enum FqdnError {
 }
 
 impl Fqdn {
-    #[expect(
-        clippy::expect_used,
-        reason = "an FQDN is rejected when it exceeds FQDN_MAX_LEN=253, so its length fits u8"
-    )]
     fn parse(value: &str) -> Result<Fqdn, FqdnError> {
         if value.bytes().any(|b| b == b'*') {
             return Err(FqdnError::Wildcard);
@@ -65,12 +64,8 @@ impl Fqdn {
         if crate::names::rules::is_ip_literal_shape(value.as_bytes()) {
             return Err(FqdnError::Invalid);
         }
-        let mut bytes = [0u8; FQDN_MAX_LEN];
-        bytes[..value.len()].copy_from_slice(value.as_bytes());
-        Ok(Fqdn {
-            bytes,
-            len: u8::try_from(value.len()).expect("FQDN_MAX_LEN fits u8"),
-        })
+        let payload = FixedHostname::normalize(value.as_bytes()).ok_or(FqdnError::Invalid)?;
+        Ok(Fqdn { payload })
     }
 
     /// The validated lowercase ASCII FQDN (no trailing dot).
@@ -79,13 +74,8 @@ impl Fqdn {
     ///
     /// Never: the inline bytes were validated as ASCII at construction.
     #[must_use]
-    #[expect(
-        clippy::expect_used,
-        reason = "Fqdn::parse validated the stored bytes as ASCII, so they are always valid UTF-8"
-    )]
     pub fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.bytes[..usize::from(self.len)])
-            .expect("Fqdn stores validated ASCII bytes")
+        self.payload.as_str()
     }
 }
 

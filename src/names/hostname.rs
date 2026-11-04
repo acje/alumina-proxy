@@ -7,14 +7,14 @@ pub const FQDN_MAX_LEN: usize = crate::names::rules::FQDN_MAX_LEN;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FixedHostname {
     bytes: [u8; FQDN_MAX_LEN],
-    len: usize,
+    len: u8,
 }
 
 impl FixedHostname {
     /// The normalized lowercase bytes, without a trailing dot.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        &self.bytes[..usize::from(self.len)]
     }
 
     /// The normalized name as a `&str`; always ASCII by construction.
@@ -56,17 +56,17 @@ impl FixedHostname {
         }
         let mut out = FixedHostname {
             bytes: [0u8; FQDN_MAX_LEN],
-            len,
+            len: u8::try_from(len).ok()?,
         };
         for (i, &b) in input[..len].iter().enumerate() {
             out.bytes[i] = b.to_ascii_lowercase();
         }
-        for label in out.bytes[..out.len].split(|&b| b == b'.') {
+        for label in out.bytes[..usize::from(out.len)].split(|&b| b == b'.') {
             if crate::names::rules::classify_label(label).is_err() {
                 return None;
             }
         }
-        if crate::names::rules::is_ip_literal_shape(&out.bytes[..out.len]) {
+        if crate::names::rules::is_ip_literal_shape(&out.bytes[..usize::from(out.len)]) {
             return None;
         }
         Some(out)

@@ -279,7 +279,7 @@ mod workspace_byte_constants {
         // THE SAME CHANGE — never by bumping this number alone.
         let per_slot = size_of::<ConnectParser>() + size_of::<ChInspector>();
         assert_eq!(
-            SLOT_WORKSPACE_BYTES, 156_856,
+            SLOT_WORKSPACE_BYTES, 156_840,
             "measured type-derived figure is {per_slot} bytes; reconcile the documented figure in the same change as any retained-array/layout edit"
         );
     }

@@ -346,7 +346,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>bytes</code>/<code>len</code> storage, copy semantics, and the
   <code>normalize</code>-only constructor that lowercases, strips one trailing
   dot, and applies the shared label rules
-  (<code>src/names/hostname.rs:42-71</code>, rules at
+  (<code>src/names/hostname.rs:42-73</code>, rules at
   <code>src/names/rules.rs:11-34</code>).
   The public path is <code>names::FixedHostname</code>, alongside
   <code>names::FQDN_MAX_LEN</code> (<code>src/names/mod.rs:4</code>);
@@ -370,7 +370,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   rejects uppercase labels and strips one trailing dot, <code>FixedHostname</code>
   folds case and strips one trailing dot while accepting an optional single dot
   only at the very end, and the resolver <code>Fqdn</code> orders
-  wildcard → IDN → syntax rejection and does not normalize — so the shared kernel is
+  wildcard → IDN → syntax rejection and reaches the shared
+  <code>FixedHostname</code> payload normalizer as a no-op, never letting it alter
+  acceptance — so the shared kernel is
   a rule-only predicate, never an acceptance authority.</p>
 
   <p>The TLS trust-verification stack is a deliberately minimal and bounded seam.
@@ -561,8 +563,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/names/rules.rs:1-34</code>; <code>src/dns/wire.rs:364-398</code>, <code>:1064-1221</code></td></tr>
       <tr><th scope="row"><code>hostname</code> (private child of <code>names</code>)</th>
         <td><code>FixedHostname</code> + <code>FQDN_MAX_LEN</code> alias: private
-        <code>bytes</code>/<code>len</code>, the <code>normalize</code>-only
-        constructor, copy storage unchanged. <code>names::FixedHostname</code>/
+        <code>bytes</code>/<code>len</code> (<code>u8</code>), the
+        <code>normalize</code>-only constructor, and the shared payload owner:
+        the resolver <code>Fqdn</code> reuses it as its sole inline payload.
+        <code>names::FixedHostname</code>/
         <code>names::FQDN_MAX_LEN</code> are the public named exports
         (<code>src/names/mod.rs:4</code>); <code>ClientHello</code> imports the
         canonical carrier directly.</td>
@@ -570,8 +574,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/inspection/client_hello.rs:3</code></td></tr>
       <tr><th scope="row"><code>dns/resolver</code></th>
         <td>DoT/plain classification: FQDN ⇒ port 853 + pin; bare IP ⇒ port 53; no silent plain fallback.</td>
-        <td><code>src/dns/resolver.rs:202-208</code> (<code>Nameserver::port()</code>),
-        <code>:305-340</code> (<code>select</code>)</td></tr>
+        <td><code>src/dns/resolver.rs:192-198</code> (<code>Nameserver::port()</code>),
+        <code>:295-330</code> (<code>select</code>)</td></tr>
       <tr><th scope="row"><code>dns/transport</code></th>
         <td>Nonblocking DNS state machine; exchange deadline 5 s; failback 900 s; CSPRNG tids; retained-resolver reuse; decision window 90 s; typed exchange class.</td>
         <td><code>src/dns/transport.rs:53-54</code>, <code>:591</code>, <code>:1039</code>, <code>:1354</code>, <code>:2832-2843</code>, <code>:3053-3083</code>, <code>:3426-3495</code></td></tr>
@@ -1031,7 +1035,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>A resolver entry is either a bare IP (port 53, plain DNS) or an
   IP-with-attached-FQDN (port <code>DOT_PORT</code> 853, DoT). The FQDN presence
   is both the DoT signal and the port signal, and there is no silent plain-DNS
-  fallback for a DoT entry (<code>Nameserver::port()</code> <code>src/dns/resolver.rs:202-208</code>). Trust
+  fallback for a DoT entry (<code>Nameserver::port()</code> <code>src/dns/resolver.rs:192-198</code>). Trust
   homogeneity across the resolver set is enforced at configuration time — a mix of
   trust classes is rejected rather than degraded
   (<code>ConfigError::MixedResolverTrust</code>, <code>src/config/mod.rs:654</code>).
@@ -1346,7 +1350,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>dp</code> monitor fact and never performed silently
   (<code>note_downgrade_if_dot_to_plain</code>,
   <code>src/dns/transport.rs:3085-3104</code>; <code>Nameserver::port()</code>
-  <code>src/dns/resolver.rs:202-208</code>).</p>
+  <code>src/dns/resolver.rs:192-198</code>).</p>
   <p>The retained transport also records a fixed configured-resolver origin on its
   incident notes, captured at the failure instant so provenance survives failover: every non-probe
   exchange failure captures the zero-based configured-resolver index active when
@@ -1762,8 +1766,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   type-derived figures that the binary prints at boot
   (<code>src/main.rs:33-39</code>), and that pinned ticket tests lock to exact
   values (<code>src/inventory.rs:273-285</code>). The number printed is
-  <code>214 665 002</code> bytes ≈ 204.7 MiB — the printed, constant-derived
-  named-buffer lower-bound plan (traffic 134217728 + serving workspace 80310272
+  <code>214 656 810</code> bytes ≈ 204.7 MiB — the printed, constant-derived
+  named-buffer lower-bound plan (traffic 134217728 + serving workspace 80302080
   + dns named buffers 137002), not a measured boot or RSS figure.</p>
 
   <table>
@@ -1784,9 +1788,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>134 217 728 (128 MiB)</td>
         <td><code>src/inventory.rs:9-12</code></td></tr>
       <tr><th scope="row">Serving workspace</th>
-        <td>512 × <code>SLOT_WORKSPACE_BYTES</code> (156 856 =
+        <td>512 × <code>SLOT_WORKSPACE_BYTES</code> (156 840 =
         <code>size_of::&lt;ConnectParser&gt;</code> + <code>size_of::&lt;ChInspector&gt;</code>)</td>
-        <td>80 310 272 (76.6 MiB)</td>
+        <td>80 302 080 (76.6 MiB)</td>
         <td><code>src/inventory.rs:20-36</code>, pin at <code>:273-285</code></td></tr>
       <tr><th scope="row">DNS named buffers</th>
         <td>512 (query) + 16 386 (response, <code>DNS_MSG_LIMIT + 2</code>) + 120 104
@@ -1799,7 +1803,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/inventory.rs:47-49</code>; <code>src/log/mod.rs:53-54</code></td></tr>
       <tr><th scope="row"><strong>Printed lower bound</strong></th>
         <td>traffic + serving + dns named buffers</td>
-        <td><strong>214 665 002 (≈ 204.7 MiB)</strong></td>
+        <td><strong>214 656 810 (≈ 204.7 MiB)</strong></td>
         <td><code>src/main.rs:33-39</code>; <code>src/inventory.rs:192-196</code></td></tr>
     </tbody>
   </table>
@@ -1807,11 +1811,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>The <em>printed</em> bound is a recorded measurement (the binary literally
   prints it); the derivation is a type-derived plan; it is explicitly
   <em>not</em> an RSS figure. Per slot: 262 144 bytes traffic (2 × 128 KiB) +
-  156 856 workspace ≈ 419 000 bytes ≈ 409 KiB per tunnel on the printed basis.
+  156 840 workspace ≈ 419 000 bytes ≈ 409 KiB per tunnel on the printed basis.
   An older spec row, “512 × 136 KiB ≈ 68 MiB”, describes the pre-retention
   profile and survives only as a historical row in the specification
   (<code>docs/alumina-proxy.md:436</code>); what the binary computes and prints
-  for the serving workspace is <code>80 310 272</code>.</p>
+  for the serving workspace is <code>80 302 080</code>.</p>
 
   <h3>7.1 What the bound includes and excludes</h3>
   <ul>
@@ -2016,7 +2020,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   difference is code, stack, and allocator/kernel socket-buffer residency
   outside the retained named-buffer set — a nominal observation on this
   candidate, never a guarantee, ordering, or capacity bound on another
-  workload or binary.</p>
+  workload or binary. This RSS snapshot is a measurement at an earlier
+  revision: its comparison base (<code>214 665 002</code>, the then-printed
+  plan) is retained as a historical figure and is <em>not</em> the current
+  plan — the current printed lower bound is <code>214 656 810</code>
+  (serving workspace <code>80 302 080</code> = 512 × <code>156 840</code>),
+  a distinct current-plan fact.</p>
   <p>The measured workload was the nominal idle golden path, observed per
   repetition rather than assumed: full startup with the two allowlisted names
   (<code>drain.example.org</code> -> 8.8.8.8,
@@ -2518,7 +2527,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/runtime/storage/tests.rs</code> + <code>startup_integration.rs</code>,
         <code>src/names/hostname/tests.rs</code>, <code>src/dns/transport/dot_tests.rs</code></td></tr>
       <tr><th scope="row">Resolver classifier</th>
-        <td><code>src/dns/resolver.rs:202-208</code>, <code>:305-340</code></td></tr>
+        <td><code>src/dns/resolver.rs:192-198</code>, <code>:295-330</code></td></tr>
       <tr><th scope="row">Startup DNS machine / deadlines / failover / failback /
       probes</th>
         <td><code>src/dns/transport.rs:53-54</code>, <code>:591</code>,
@@ -2538,7 +2547,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">DoT trust / pin-or-nothing</th>
         <td><code>src/dns/transport.rs:766-797</code>, <code>:1018</code>;
         <code>src/main.rs:120-136</code></td></tr>
-      <tr><th scope="row">Printed lower bound (214 665 002)</th>
+      <tr><th scope="row">Printed lower bound (214 656 810)</th>
         <td><code>src/main.rs:33-39</code>; <code>src/inventory.rs:192-196</code></td></tr>
       <tr><th scope="row">Spec intent citations</th>
         <td><code>docs/alumina-proxy.md</code> §Design philosophy, §Protocol
