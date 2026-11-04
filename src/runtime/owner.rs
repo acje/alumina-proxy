@@ -289,13 +289,7 @@ impl Runtime {
         if !self.serving.is_shutdown() {
             self.serving
                 .storage_mut()
-                .dns_mut()
-                .cancel_retained_startup_exchange();
-            self.step_sweep()?;
-            self.step_corroboration()?;
-            self.serving
-                .storage_mut()
-                .start_due_serving_refresh()
+                .prepare_serving_dns_turn()
                 .map_err(ServeError::from)?;
             let event_seen = self.serving.take_dns_event();
             let sendable = self.dns_sendable_without_wait();
@@ -316,38 +310,6 @@ impl Runtime {
             std::process::exit(EX_IOERR);
         }
         Ok(())
-    }
-
-    /// Advances the post-window probe sweep on the retained DNS transport,
-    /// folding any concluded probe verdicts into the single `resolver_probe`
-    /// record. Runs before refresh scheduling so the sweep owns the transport
-    /// between probes (docs/alumina-proxy.md:67).
-    ///
-    /// # Errors
-    ///
-    /// Returns a serve error when the underlying sweep step fails.
-    fn step_sweep(&mut self) -> Result<(), ServeError> {
-        self.serving
-            .storage_mut()
-            .step_sweep()
-            .map_err(ServeError::from)
-    }
-
-    /// Advances the bounded corroboration exchange on the retained DNS
-    /// transport: begins the single cross-check against a different configured
-    /// resolver when a sustained-negative incident opened for an admitted name
-    /// and the transport is idle. Runs after the post-window probe sweep and
-    /// before refresh scheduling so the corroboration owns the transport
-    /// between exchanges (alox18).
-    ///
-    /// # Errors
-    ///
-    /// Returns a serve error when the underlying corroboration step fails.
-    fn step_corroboration(&mut self) -> Result<(), ServeError> {
-        self.serving
-            .storage_mut()
-            .step_corroboration()
-            .map_err(ServeError::from)
     }
 
     /// Enter the serving loop for the process lifetime: the attached listener

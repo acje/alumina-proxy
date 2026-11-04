@@ -1347,3 +1347,44 @@ fn owner_path_refresh_wake_keeps_store_and_dns_epochs_distinct() {
         "the refused selection leaves the slot pending, not re-selectable"
     );
 }
+
+/// The consolidated storage-owned DNS turn must surface the exact typed error
+/// and mutation discipline of the owner-threaded sequence it replaces: on an
+/// idle storage whose due selection overflows the DNS clock, the single
+/// `prepare_serving_dns_turn` reaches the refresh step and propagates the
+/// typed `StartupDnsError::Schedule(ScheduleError::DeadlineOverflow)` without
+/// mutating any schedule slot, seating any active-family residue, or beginning
+/// transport I/O — the same contract the per-step owner path exercised.
+#[test]
+fn prepare_serving_dns_turn_surfaces_typed_overflow_without_mutation() {
+    let mut storage = booted(1, 0);
+    storage
+        .schedules_mut()
+        .overwrite_due_at(0, Family::A, u64::MAX)
+        .expect("due the A slot at the clock maximum");
+    storage.dns_mut().force_now_overflow_for_test();
+    let before = *storage.schedules();
+    assert_eq!(
+        storage.prepare_serving_dns_turn(),
+        Err(StartupDnsError::Schedule(ScheduleError::DeadlineOverflow)),
+        "the consolidated turn must surface the typed selection overflow untouched"
+    );
+    assert_eq!(
+        *storage.schedules(),
+        before,
+        "an overflowing selection must not mutate any schedule slot"
+    );
+    assert_eq!(
+        storage.schedules().due_time(0, Family::A).unwrap(),
+        Some(u64::MAX),
+        "the due time must remain exactly as scheduled"
+    );
+    assert!(
+        storage.active_exchange_family.is_none(),
+        "an overflow before selection leaves no active-family residue"
+    );
+    assert!(
+        !storage.dns().has_active_exchange(),
+        "an overflowing selection must never begin transport I/O"
+    );
+}

@@ -845,7 +845,7 @@ impl ServeStorage {
     /// fallible DNS start and the attempt report is recorded only on success,
     /// while the resolution and cache lookups that precede the marker leave it
     /// untouched.
-    pub(crate) fn start_due_serving_refresh(&mut self) -> Result<(), StartupDnsError> {
+    fn start_due_serving_refresh(&mut self) -> Result<(), StartupDnsError> {
         if self.dns.sweep_active() || self.dns.has_active_exchange() {
             return Ok(());
         }
@@ -876,7 +876,7 @@ impl ServeStorage {
     /// # Errors
     ///
     /// Returns the underlying fatal DNS exchange or transport error.
-    pub(crate) fn step_sweep(&mut self) -> Result<(), StartupDnsError> {
+    fn step_sweep(&mut self) -> Result<(), StartupDnsError> {
         self.dns.maybe_begin_sweep();
         if !self.dns.sweep_active() || self.dns.has_active_exchange() {
             return Ok(());
@@ -905,7 +905,7 @@ impl ServeStorage {
     /// # Errors
     ///
     /// Returns the underlying fatal DNS exchange or transport error.
-    pub(crate) fn step_corroboration(&mut self) -> Result<(), StartupDnsError> {
+    fn step_corroboration(&mut self) -> Result<(), StartupDnsError> {
         if self.dns.has_active_exchange() {
             return Ok(());
         }
@@ -1327,4 +1327,22 @@ pub enum StartupState {
         unresolved: u32,
     },
     Terminated,
+}
+
+impl ServeStorage {
+    /// Consolidates the DNS lifecycle selection for one serving turn into a
+    /// single storage-owned step: cancels a retained startup exchange, then
+    /// advances the post-window probe sweep, then the corroboration exchange,
+    /// then starts a due serving refresh — the exact boot sequence the owner
+    /// previously threaded across three calls. The transport remains the sole
+    /// failover/failback/probe algorithm owner; this method only selects which
+    /// lifecycle kinds start and their priority, and hides no wait, budget, or
+    /// numeric policy.
+    pub(crate) fn prepare_serving_dns_turn(&mut self) -> Result<(), StartupDnsError> {
+        self.dns.cancel_retained_startup_exchange();
+        self.step_sweep()?;
+        self.step_corroboration()?;
+        self.start_due_serving_refresh()?;
+        Ok(())
+    }
 }
