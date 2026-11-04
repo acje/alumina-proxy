@@ -7,6 +7,10 @@ use std::thread;
 
 use crate::dns::cache::Family;
 use crate::dns::transport::ExchangeClass;
+use crate::dns::transport::ExchangeStep;
+use crate::dns::transport::dot_tests::{
+    AdversarialReply, GOOD_CERT, GOOD_KEY, pinned_resolver, spawn_tls_responder,
+};
 
 fn config(port: u16) -> crate::config::Config {
     let doc = format!(
@@ -20,6 +24,16 @@ fn config_two_names(port: u16) -> crate::config::Config {
         "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n[allowed_fqdn.\"other.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
     );
     crate::config::parse_config_document(&doc).expect("valid test config")
+}
+
+/// A two-name allowlist configuration with an ephemeral listen port and a
+/// sole `DoT` resolver line, so a real startup window can dial the injected
+/// loopback TLS peer while the TLS identity comes from the resolver set.
+fn dot_config_window(port: u16, resolver_line: &str) -> crate::config::Config {
+    let doc = format!(
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"{resolver_line}\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+    );
+    crate::config::parse_config_document(&doc).expect("valid pinned-dot window config")
 }
 
 fn ephemeral_port() -> u16 {
@@ -1323,6 +1337,107 @@ fn startup_reuse_window_body() {
         outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "both allowlist names must resolve on a single reusable startup connection"
+    );
+}
+
+#[test]
+fn startup_window_zeroes_wait_for_deferred_handshake_and_resolves_promptly() {
+    let t = thread::Builder::new()
+        .name("startup-zero-wait-falsifier".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(startup_zero_wait_body)
+        .expect("spawn startup zero-wait falsifier thread");
+    t.join().expect("startup zero-wait falsifier thread");
+}
+
+/// The R1 repair proof: the actual startup window must zero its single poll
+/// while the active exchange is sendable-without-wait. A real `DoT` handshake
+/// is parked in `HandshakeContinue` for a few advances (test countdown knob,
+/// no mid-window mutation), so the `pre_poll` hook sees the pump re-advance the
+/// exchange immediately instead of riding out the window deadline; once the
+/// countdown releases, the held handshake resumes and the window still
+/// resolves every name promptly, never to the exchange/window deadline.
+fn startup_zero_wait_body() {
+    let config_port = ephemeral_port();
+    let storage = ServeStorage::boot(&dot_config_window(config_port, &pinned_resolver()))
+        .expect("boot storage");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
+    owner
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_hold_handshake_defer_remaining(6);
+
+    let observations = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let worst_gap = std::rc::Rc::new(std::cell::Cell::new(Duration::ZERO));
+    let last = std::rc::Rc::new(std::cell::Cell::new(None::<Instant>));
+    let observed_continue = std::rc::Rc::new(std::cell::Cell::new(false));
+    let obs_hook = std::rc::Rc::clone(&observations);
+    let gap_hook = std::rc::Rc::clone(&worst_gap);
+    let last_hook = std::rc::Rc::clone(&last);
+    let continue_hook = std::rc::Rc::clone(&observed_continue);
+    let hook = std::rc::Rc::new(move |serving: &crate::runtime::reactor::Serving| {
+        let dns = serving.storage().dns();
+        if !dns.has_active_exchange() || dns.needs_wait() {
+            return;
+        }
+        if dns.exchange_step() == Some(ExchangeStep::HandshakeContinue) {
+            continue_hook.set(true);
+        }
+        obs_hook.set(obs_hook.get() + 1);
+        let now = Instant::now();
+        if let Some(prev) = last_hook.get() {
+            let gap = now.saturating_duration_since(prev);
+            if gap > gap_hook.get() {
+                gap_hook.set(gap);
+            }
+        }
+        last_hook.set(Some(now));
+    });
+    owner.serving.arm_pre_poll_hook(hook);
+
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let port = responder.port();
+    let started = Instant::now();
+    let outcome = owner
+        .run_startup_within(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            1000,
+            Duration::from_secs(6),
+        )
+        .expect("startup window");
+    let elapsed = started.elapsed();
+    owner
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .close_connection()
+        .expect("window teardown close must succeed");
+    drop(responder);
+
+    assert!(
+        observed_continue.get(),
+        "the window must park the held handshake in HandshakeContinue"
+    );
+    assert!(
+        observations.get() >= 2,
+        "the pump must re-advance a sendable exchange more than once, saw {:?}",
+        observations.get()
+    );
+    assert!(
+        worst_gap.get() < Duration::from_millis(250),
+        "a sendable exchange must never get a real deadline-length wait; worst gap {:?}",
+        worst_gap.get()
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the window must resolve promptly, not ride out its deadline: took {elapsed:?}"
+    );
+    assert_eq!(
+        outcome.decision(),
+        StartupDecision::Serve(ServingMode::Full),
+        "both names must resolve once the deferred handshake resumes"
     );
 }
 

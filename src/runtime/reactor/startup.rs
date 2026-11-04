@@ -162,7 +162,12 @@ impl Serving {
                 .logs()
                 .next_drain(now_i)
                 .map(|retry| retry.saturating_duration_since(Instant::now()));
-            let wait = log_wait.map_or(dns_wait, |log_wait| dns_wait.min(log_wait));
+            let wait =
+                if self.storage.dns().has_active_exchange() && !self.storage.dns().needs_wait() {
+                    Duration::ZERO
+                } else {
+                    log_wait.map_or(dns_wait, |log_wait| dns_wait.min(log_wait))
+                };
             self.storage.logs_mut().drain_sink();
             #[cfg(test)]
             if let Some(hook) = self.pre_poll.as_ref() {

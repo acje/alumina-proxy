@@ -243,6 +243,11 @@ pub(crate) enum ExchangeStep {
     /// written until the handshake completes (TLS setup allocations are
     /// confined to this per-connect seam).
     TlsHandshake,
+    /// A `DoT` handshake that deferred on the local attempt budget with
+    /// outbound ciphertext still pending and no would-block ever fired: the
+    /// exchange is sendable without wait and the owner re-advances it on its
+    /// own, exactly like `SendReady`.
+    HandshakeContinue,
     /// The length-prefixed query is not yet fully written and the send can
     /// proceed without waiting; the next turn attempts another nonblocking
     /// write.
@@ -322,9 +327,13 @@ enum RecvStep {
 
 /// The progress of one nonblocking `DoT` TLS-handshake step.
 enum HandshakeStep {
-    /// The handshake is not complete; the exchange stays in scope and the
-    /// owner waits for socket readiness before another turn.
+    /// The handshake is not complete; the exchange waits on the armed socket
+    /// readiness edges before another turn.
     Waiting,
+    /// The local attempt budget was exhausted with outbound ciphertext still
+    /// pending and no would-block fired; the exchange is sendable without wait
+    /// and the owner re-advances it on the next turn.
+    Continue,
     /// The handshake finished (peer authenticated); advance moves to the
     /// sending stage next turn.
     Transition,
@@ -337,7 +346,13 @@ enum HandshakeStep {
 /// scoped borrow over the retained connection so the caller can close and
 /// count outside the borrow.
 enum HandshakeProbe {
+    /// No work remains that only an edge can unlock: a real `WouldBlock`, or
+    /// the handshake awaits the server's readable flight.
     Waiting,
+    /// The [`TLS_SEND_TRIES`] socket-attempt budget was exhausted while
+    /// outbound ciphertext is still pending; no would-block fired, so the
+    /// exchange stays sendable and resumes on a later owner advance.
+    Deferred,
     Transition,
     Failed(FailureReason),
 }
@@ -1038,6 +1053,13 @@ pub(crate) enum IncidentNote {
 
 /// The startup-window DNS driver and, after the window, the retained serving
 /// transport owner.
+#[cfg_attr(
+    test,
+    expect(
+        clippy::struct_excessive_bools,
+        reason = "cfg(test) progress-controller knobs (force_peer_mismatch, hold_send_partial, hold_handshake_defer) stay named booleans so each deterministic red/green staging contract is explicit; a bitfield would obscure per-knob control"
+    )
+)]
 pub struct StartupDns {
     poll: Poll,
     events: Events,
@@ -1178,6 +1200,10 @@ pub struct StartupDns {
     force_peer_mismatch: bool,
     #[cfg(test)]
     hold_send_partial: bool,
+    #[cfg(test)]
+    hold_handshake_defer: bool,
+    #[cfg(test)]
+    handshake_defer_remaining: u32,
 }
 
 /// The borrowed startup-window resolution context fed to
@@ -1259,6 +1285,10 @@ impl StartupDns {
             force_peer_mismatch: false,
             #[cfg(test)]
             hold_send_partial: false,
+            #[cfg(test)]
+            hold_handshake_defer: false,
+            #[cfg(test)]
+            handshake_defer_remaining: 0,
         })
     }
 
@@ -1459,7 +1489,7 @@ impl StartupDns {
     ///
     /// Returns a lifecycle `Transport` error when the private deregistration
     /// fails; the connection is dropped and the frame reset regardless.
-    fn close_connection(&mut self) -> Result<(), StartupDnsError> {
+    pub(crate) fn close_connection(&mut self) -> Result<(), StartupDnsError> {
         let mut deregister_error = None;
         if let Some(conn) = self.conn.take() {
             let mut stream = match conn {
@@ -1756,9 +1786,11 @@ impl StartupDns {
     /// its own.
     fn shared_desired_interest(&self) -> Option<Interest> {
         match self.active.as_ref().map(|ex| ex.step) {
-            Some(ExchangeStep::TlsHandshake | ExchangeStep::SendReady) => {
-                Some(Interest::READABLE | Interest::WRITABLE)
-            }
+            Some(
+                ExchangeStep::TlsHandshake
+                | ExchangeStep::HandshakeContinue
+                | ExchangeStep::SendReady,
+            ) => Some(Interest::READABLE | Interest::WRITABLE),
             Some(ExchangeStep::Receiving) => Some(Interest::READABLE),
             Some(ExchangeStep::Connecting | ExchangeStep::AwaitWritable) => {
                 Some(Interest::WRITABLE)
@@ -1780,6 +1812,16 @@ impl StartupDns {
         self.hold_send_partial = hold;
     }
 
+    /// Test-only controller that holds the TLS handshake in the sendable
+    /// `HandshakeContinue` stage for the next `remaining` handshake probes,
+    /// then releases it, so a real startup window can park the handshake for a
+    /// few advances and still resolve once the deferral clears (no mid-window
+    /// mutation is needed — the countdown releases itself).
+    #[cfg(test)]
+    pub(crate) const fn set_hold_handshake_defer_remaining(&mut self, remaining: u32) {
+        self.handshake_defer_remaining = remaining;
+    }
+
     #[cfg(test)]
     fn active_step(&self) -> Option<ExchangeStep> {
         self.active.as_ref().map(|ex| ex.step)
@@ -1788,10 +1830,11 @@ impl StartupDns {
     /// Whether the owner must wait for network readiness before advancing the
     /// exchange again. Connecting needs the connect-completion edge;
     /// `AwaitWritable` needs a writable edge after a real would-block send;
-    /// Receiving needs response data. `SendReady` never does — the next turn's
-    /// nonblocking write attempt proceeds on its own, so the owner yields
-    /// instead of blocking on a stale edge; a would-block observed there
-    /// transitions the exchange to `AwaitWritable` and arms this wait rather
+    /// Receiving needs response data. `SendReady` and the budget-deferred
+    /// `HandshakeContinue` never do — the next turn's nonblocking write attempt
+    /// or handshake advance proceeds on its own, so the owner yields instead of
+    /// blocking on a stale edge; a would-block observed there transitions the
+    /// exchange to `AwaitWritable`/`TlsHandshake` and arms this wait rather
     /// than spinning on an assumed write window.
     pub(crate) const fn needs_wait(&self) -> bool {
         let Some(ex) = self.active.as_ref() else {
@@ -1968,8 +2011,9 @@ impl StartupDns {
         }
     }
 
-    /// One nonblocking `DoT` TLS-handshake step: at most one read and one write
-    /// pass, then readiness is re-checked and the exchange deadline honoured.
+    /// One nonblocking `DoT` TLS-handshake step: drains outbound flights and
+    /// processes inbound records under the shared [`TLS_SEND_TRIES`] attempt
+    /// budget, then re-checks readiness and honours the exchange deadline.
     /// A failure (certificate/identity rejection, alert, EOF, socket error) is
     /// settled as a counted connect failure, not an abort; the cause captured
     /// by the probe is preserved into the failure record.
@@ -1978,54 +2022,65 @@ impl StartupDns {
         ex: &mut ActiveExchange,
         schedules: &mut Schedules,
     ) -> Result<HandshakeStep, StartupDnsError> {
-        match self.probe_tls_handshake() {
-            HandshakeProbe::Waiting => {}
+        let deferred = match self.probe_tls_handshake() {
+            HandshakeProbe::Waiting => false,
+            HandshakeProbe::Deferred => true,
             HandshakeProbe::Transition => return Ok(HandshakeStep::Transition),
             HandshakeProbe::Failed(cause) => {
                 self.close_connection()?;
                 let reason = self.note_failure(ex, schedules, cause)?;
                 return Ok(HandshakeStep::Failed(reason));
             }
-        }
+        };
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
             let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
             return Ok(HandshakeStep::Failed(reason));
         }
-        Ok(HandshakeStep::Waiting)
+        Ok(if deferred {
+            HandshakeStep::Continue
+        } else {
+            HandshakeStep::Waiting
+        })
     }
 
-    /// Probes one nonblocking handshake pass: pending outbound flights (the
-    /// initial `ClientHello` on the first turn, later client flights after
-    /// processing server records) are drained, then one `read_tls` attempt is
-    /// processed. A `WouldBlock` on either side leaves the exchange waiting on
-    /// the armed socket edges; the handshake completes once rustls reports it
+    /// Probes one bounded nonblocking handshake pass: pending outbound flights
+    /// (the initial `ClientHello` on the first turn, later client flights after
+    /// processing server records) and one inbound read share the fixed
+    /// [`TLS_SEND_TRIES`] socket-attempt budget for the advance. Exhausting the
+    /// budget with outbound ciphertext still pending defers
+    /// [`HandshakeProbe::Deferred`] so the owner re-drives the sendable
+    /// exchange instead of waiting for an edge that no would-block produced; a
+    /// real `WouldBlock` returns [`HandshakeProbe::Waiting`] and waits for the
+    /// armed socket edge. The handshake completes once rustls reports it
     /// `is_handshaking() == false`.
     fn probe_tls_handshake(&mut self) -> HandshakeProbe {
+        #[cfg(test)]
+        if self.hold_handshake_defer || self.handshake_defer_remaining > 0 {
+            if self.handshake_defer_remaining > 0 {
+                self.handshake_defer_remaining -= 1;
+            }
+            return HandshakeProbe::Deferred;
+        }
         let Some(DnsConn::Tls(conn)) = self.conn.as_mut() else {
             return HandshakeProbe::Failed(FailureReason::TlsProtocol);
         };
-        let mut write_blocked = false;
-        loop {
-            match conn.tls.write_tls(&mut conn.tcp) {
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    write_blocked = true;
-                    break;
-                }
+        let mut budget = TLS_SEND_TRIES;
+        if conn.tls.wants_write() {
+            match drain_tls_bytes(&mut conn.tcp, &mut conn.tls, &mut budget) {
+                Ok(TlsDrain::Pending) => return HandshakeProbe::Waiting,
+                Ok(TlsDrain::Deferred) => return HandshakeProbe::Deferred,
+                Ok(TlsDrain::Flushed) => {}
                 Err(_) => return HandshakeProbe::Failed(FailureReason::TlsProtocol),
-                Ok(_) => {}
-            }
-            if !conn.tls.wants_write() {
-                break;
             }
         }
-        if !write_blocked {
+        if budget > 0 {
+            budget -= 1;
             match conn.tls.read_tls(&mut conn.tcp) {
                 Ok(0) => {
                     return HandshakeProbe::Failed(FailureReason::TlsProtocol);
                 }
-                Ok(_n) => {
+                Ok(_) => {
                     if let Err(err) = conn.tls.process_new_packets() {
                         let reason = match &err {
                             rustls::Error::InvalidCertificate(
@@ -2043,15 +2098,14 @@ impl StartupDns {
                         };
                         return HandshakeProbe::Failed(reason);
                     }
-                    loop {
-                        match conn.tls.write_tls(&mut conn.tcp) {
-                            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(_) => return HandshakeProbe::Failed(FailureReason::TlsProtocol),
-                            Ok(_) => {}
-                        }
-                        if !conn.tls.wants_write() {
-                            break;
+                    if conn.tls.wants_write() {
+                        match drain_tls_bytes(&mut conn.tcp, &mut conn.tls, &mut budget) {
+                            Ok(TlsDrain::Pending) => return HandshakeProbe::Waiting,
+                            Ok(TlsDrain::Deferred) => return HandshakeProbe::Deferred,
+                            Ok(TlsDrain::Flushed) => {}
+                            Err(_) => {
+                                return HandshakeProbe::Failed(FailureReason::TlsProtocol);
+                            }
                         }
                     }
                 }
@@ -2415,7 +2469,7 @@ impl StartupDns {
                             || e.kind() == io::ErrorKind::Interrupted => {}
                     Err(_) => return RecvTry::Failure,
                 }
-                loop {
+                for _ in 0..TLS_SEND_TRIES {
                     match conn.tls.reader().read(&mut self.recv_buf[self.filled..]) {
                         Ok(0) => break,
                         Ok(n) => self.filled += n,
@@ -2770,14 +2824,17 @@ impl StartupDns {
                     return Ok(TurnResult::Failed(reason));
                 }
             },
-            ExchangeStep::TlsHandshake => match self.step_handshake(&mut ex, schedules)? {
-                HandshakeStep::Waiting => None,
-                HandshakeStep::Transition => Some(ExchangeStep::SendReady),
-                HandshakeStep::Failed(reason) => {
-                    self.active = None;
-                    return Ok(TurnResult::Failed(reason));
+            ExchangeStep::TlsHandshake | ExchangeStep::HandshakeContinue => {
+                match self.step_handshake(&mut ex, schedules)? {
+                    HandshakeStep::Waiting => Some(ExchangeStep::TlsHandshake),
+                    HandshakeStep::Continue => Some(ExchangeStep::HandshakeContinue),
+                    HandshakeStep::Transition => Some(ExchangeStep::SendReady),
+                    HandshakeStep::Failed(reason) => {
+                        self.active = None;
+                        return Ok(TurnResult::Failed(reason));
+                    }
                 }
-            },
+            }
             ExchangeStep::SendReady => match self.step_send(&mut ex, schedules)? {
                 SendStep::Waiting => None,
                 SendStep::Blocked => Some(ExchangeStep::AwaitWritable),
@@ -3486,15 +3543,17 @@ enum RecvTry {
     Failure,
 }
 
-/// Fixed bound on first-party socket (`write_tls`) attempts in one cooperative
-/// send step, in parity with the serving 16-op per-visit budget: every
-/// `Interrupted` retry, zero-progress flush, or successful socket write
-/// consumes one attempt. The rustls plaintext writer is an in-memory buffering
-/// step and is never charged against this budget. Exhausting it defers as
-/// [`TlsSendProbe::Yield`] without fabricating a `WouldBlock`, so a writable
-/// edge is not lost; the cooperative owner may re-drive the exchange within the
-/// same turn up to its advance bound, bounding socket attempts per owner turn
-/// at that bound times this constant.
+/// Fixed bound on first-party socket attempts in one cooperative advance, in
+/// parity with the serving 16-op per-visit budget: every `Interrupted` retry,
+/// zero-progress flush, or successful socket write consumes one attempt. The
+/// send step spends it on the flush drain; the handshake probe shares the same
+/// allowance across prewrite drain, one read and postwrite drain — never the
+/// additive `16 + read + 16` — and the in-memory rustls plaintext writer/reader
+/// are never charged. Exhausting it defers as [`TlsSendProbe::Yield`] /
+/// [`HandshakeProbe::Deferred`] without fabricating a `WouldBlock`, so a
+/// writable edge is not lost; the cooperative owner may re-drive the exchange
+/// within the same turn up to its advance bound, bounding socket attempts per
+/// owner turn at that bound times this constant.
 const TLS_SEND_TRIES: u32 = 16;
 
 /// The outcome of one nonblocking flush of rustls outbound ciphertext to the
@@ -3514,7 +3573,24 @@ enum TlsDrain {
 /// [`TLS_SEND_TRIES`] attempt bound. Generic over the socket `Write` end so a
 /// test can script `Interrupted` / zero-progress / `WouldBlock` outcomes.
 fn drain_tls_write<W: io::Write>(w: &mut W, tls: &mut ClientConnection) -> io::Result<TlsDrain> {
-    for _ in 0..TLS_SEND_TRIES {
+    let mut budget = TLS_SEND_TRIES;
+    drain_tls_bytes(w, tls, &mut budget)
+}
+
+/// The budget-shared flush behind [`drain_tls_write`]: drains outbound
+/// ciphertext to a socket `Write` end, consuming one attempt per `write_tls`
+/// call (including `Interrupted` retries and zero-progress flushes) from a
+/// caller-owned remaining counter. The handshake probe spends the same
+/// [`TLS_SEND_TRIES`] allowance on its prewrite drain, its single read and its
+/// postwrite drain, so a whole advance never sums to more than the fixed
+/// socket-attempt aggregate.
+fn drain_tls_bytes<W: io::Write>(
+    w: &mut W,
+    tls: &mut ClientConnection,
+    budget: &mut u32,
+) -> io::Result<TlsDrain> {
+    while *budget > 0 {
+        *budget -= 1;
         match tls.write_tls(w) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(TlsDrain::Pending),
@@ -3606,4 +3682,4 @@ fn wait_until_next_step(
 mod tests;
 
 #[cfg(test)]
-mod dot_tests;
+pub(crate) mod dot_tests;

@@ -21,7 +21,7 @@ const DOT_FQDN: &str = "dot.test";
 /// Self-signed ECDSA P-256 certificate, CN=`dot.test`, SAN `DNS:dot.test`.
 /// Its subject-public-key-info SHA-256 is [`PIN_B64`]; the matching pair
 /// (`GOOD_KEY`) signs it.
-const GOOD_CERT: &[u8] = &[
+pub(crate) const GOOD_CERT: &[u8] = &[
     0x30, 0x82, 0x01, 0x33, 0x30, 0x81, 0xda, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x09, 0x00, 0xd2,
     0xf8, 0xe4, 0xf2, 0x4c, 0x41, 0x09, 0xc5, 0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
     0x04, 0x03, 0x02, 0x30, 0x13, 0x31, 0x11, 0x30, 0x0f, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x08,
@@ -102,7 +102,7 @@ const NOT_YET_VALID_CERT: &[u8] = &[
 
 /// The PKCS#8 DER private key behind [`GOOD_CERT`] and [`SAN_MISMATCH_CERT`]
 /// (same key, same SPKI, same pin, different SAN).
-const GOOD_KEY: &[u8] = &[
+pub(crate) const GOOD_KEY: &[u8] = &[
     0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02,
     0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 0x6d, 0x30, 0x6b, 0x02,
     0x01, 0x01, 0x04, 0x20, 0xfd, 0xa6, 0x3f, 0x2a, 0xe9, 0xa3, 0x40, 0x66, 0x2c, 0x09, 0xe8, 0x04,
@@ -146,7 +146,7 @@ const PIN_B64: &str = "Neh7ibmf4XjPYrBqu/hlbW4Ibp23X3uuja0AU85JHgY";
 /// The pinned resolver line: `IP#fqdn#pin-sha256=<pin>` (port 853 by grammar).
 /// Built from [`PIN_B64`] so the embedded pin and the test constant cannot
 /// drift apart; `dot_config` needs a `&str`, so the helper owns one `String`.
-fn pinned_resolver() -> String {
+pub(crate) fn pinned_resolver() -> String {
     format!("127.0.0.1#{DOT_FQDN}#pin-sha256={PIN_B64}")
 }
 
@@ -167,7 +167,7 @@ fn ns(port: u16) -> SocketAddr {
 /// A two-name allowlist configuration whose sole resolver is the given `DoT`
 /// resolver line; the transport dials the injected loopback peer while the
 /// TLS identity (FQDN plus optional pin) comes from this resolver set.
-fn dot_config(resolver_line: &str) -> Config {
+pub(crate) fn dot_config(resolver_line: &str) -> Config {
     let doc = format!(
         "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"{resolver_line}\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
     );
@@ -371,7 +371,7 @@ fn write_tls_split(
 /// transport must fail closed on (wrong transaction id, an over-limit
 /// length prefix, or a malformed non-response).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum AdversarialReply {
+pub(crate) enum AdversarialReply {
     /// Mirror the query with a valid positive answer (TID, name, type).
     Positive,
     /// A structurally valid reply whose transaction id differs from the query.
@@ -494,14 +494,14 @@ fn serve_conn_blocking_post_handshake(
 /// the rustls server handshake and answering each accepted connection's DNS
 /// queries. The nonblocking accept loop with a stop flag lets the owning test
 /// shut the thread down deterministically.
-struct TlsResponder {
+pub(crate) struct TlsResponder {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl TlsResponder {
-    fn port(&self) -> u16 {
+    pub(crate) fn port(&self) -> u16 {
         self.addr.port()
     }
 }
@@ -519,7 +519,7 @@ impl Drop for TlsResponder {
 /// handshake (or performs post-handshake work) and serves the connection.
 type ConnHandler = fn(TcpStream, &Arc<ServerConfig>, AdversarialReply);
 
-fn spawn_tls_responder(
+pub(crate) fn spawn_tls_responder(
     cert: &'static [u8],
     key: &'static [u8],
     mode: AdversarialReply,
@@ -1667,4 +1667,162 @@ fn drain_partial_write_keeps_consuming_attempts() {
         "partial then full: {out:?}"
     );
     assert_eq!(sink.calls, 2, "each accept consumes exactly one attempt");
+}
+
+/// The handshake probe spends one shared [`TLS_SEND_TRIES`] allowance on
+/// prewrite drain, one read and postwrite drain — the aggregate never sums to
+/// an additive 16 + read + 16.
+#[test]
+fn handshake_subphases_share_the_fixed_aggregate_not_additive_budgets() {
+    let mut conn = buffered_tls_client();
+    let mut budget = TLS_SEND_TRIES;
+    let mut steps = vec![SinkStep::Interrupted; 8];
+    steps.push(SinkStep::WouldBlock);
+    let mut sink = ScriptedSink::new(steps);
+    let out = drain_tls_bytes(&mut sink, &mut conn, &mut budget).expect("shared budget");
+    assert!(
+        matches!(out, TlsDrain::Pending),
+        "prewrite would-block: {out:?}"
+    );
+    assert_eq!(
+        sink.calls, 9,
+        "8 interrupted retries plus one real would-block"
+    );
+    assert_eq!(
+        budget, 7,
+        "prewrite leaves 7 of the shared 16, never a fresh 16 per subphase"
+    );
+    let mut sink = ScriptedSink::new(vec![SinkStep::Interrupted; 7]);
+    let out = drain_tls_bytes(&mut sink, &mut conn, &mut budget).expect("shared budget");
+    assert!(
+        matches!(out, TlsDrain::Deferred),
+        "postwrite exhausts the rest: {out:?}"
+    );
+    assert_eq!(
+        sink.calls, 7,
+        "postwrite consumes the remaining shared attempts"
+    );
+    assert_eq!(
+        budget, 0,
+        "one 16-attempt aggregate across the whole advance, never 16 + 16"
+    );
+}
+
+/// A budget storm defers and a later fresh advance resumes the pending
+/// ciphertext; a real would-block stays distinct from the deferral.
+#[test]
+fn drain_budget_deferral_then_resume_keeps_would_block_distinct() {
+    let mut conn = buffered_tls_client();
+    let mut budget = TLS_SEND_TRIES;
+    let mut sink = ScriptedSink::new(storm());
+    let out = drain_tls_bytes(&mut sink, &mut conn, &mut budget).expect("deferral");
+    assert!(matches!(out, TlsDrain::Deferred), "deferred: {out:?}");
+    assert_eq!(sink.calls, TLS_SEND_TRIES as usize, "fixed allowance");
+
+    let mut budget = TLS_SEND_TRIES;
+    let mut sink = ScriptedSink::new(vec![SinkStep::Full]);
+    let out = drain_tls_bytes(&mut sink, &mut conn, &mut budget).expect("resume");
+    assert!(matches!(out, TlsDrain::Flushed), "resumed: {out:?}");
+    assert_eq!(sink.calls, 1);
+
+    let mut conn = buffered_tls_client();
+    let mut budget = TLS_SEND_TRIES;
+    let mut sink = ScriptedSink::new(vec![SinkStep::WouldBlock]);
+    let out = drain_tls_bytes(&mut sink, &mut conn, &mut budget).expect("would-block");
+    assert!(
+        matches!(out, TlsDrain::Pending),
+        "pending, not deferred: {out:?}"
+    );
+    assert_eq!(sink.calls, 1);
+}
+
+/// A handshake that exhausts its local attempt budget must park the exchange in
+/// the sendable `HandshakeContinue` stage (never a lost `AwaitEdge`), and once
+/// the deferral clears it must resume the real handshake to a published reply.
+/// The real-would-block => waiting/`needs_wait` distinction is proven
+/// deterministically at the send level by
+/// `drain_budget_deferral_then_resume_keeps_would_block_distinct` (a scripted
+/// `WouldBlock` settles `Pending`, never `Deferred`); this test drives the
+/// forced-deferral path only, with no reliance on OS would-block timing.
+#[test]
+fn handshake_budget_deferral_stays_sendable_and_resumes() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
+        fqdn: *fqdn,
+        pin: cfg.resolver_set().primary().pin().copied(),
+    });
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    transport.hold_handshake_defer = true;
+    transport
+        .start_exchange(
+            fqdn,
+            Family::A,
+            0,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
+        .unwrap();
+    let mut saw_continue = false;
+    for _ in 0..256 {
+        match transport
+            .advance_exchange(fqdn, &mut cache, &mut schedules)
+            .unwrap()
+        {
+            TurnResult::Pending => {
+                if transport.exchange_step() == Some(ExchangeStep::Connecting) {
+                    let _ = transport.wait_dns_readiness(deadline).unwrap();
+                }
+            }
+            other => panic!("deferred handshake must stay pending, got {other:?}"),
+        }
+        if transport.exchange_step() == Some(ExchangeStep::HandshakeContinue) {
+            saw_continue = true;
+            assert!(
+                !transport.needs_wait(),
+                "a budget-deferred handshake is sendable without wait"
+            );
+            break;
+        }
+    }
+    assert!(
+        saw_continue,
+        "the held budget deferral must park in HandshakeContinue"
+    );
+
+    transport.hold_handshake_defer = false;
+    let mut terminal = None;
+    for _ in 0..256 {
+        match transport
+            .advance_exchange(fqdn, &mut cache, &mut schedules)
+            .unwrap()
+        {
+            TurnResult::Pending => {
+                if transport
+                    .exchange_deadline()
+                    .is_some_and(|d| Instant::now() >= d)
+                {
+                    continue;
+                }
+                let _ = transport.wait_dns_readiness(deadline).unwrap();
+            }
+            other => {
+                terminal = Some(other);
+                break;
+            }
+        }
+    }
+    assert!(
+        matches!(terminal, Some(TurnResult::Published(_))),
+        "a deferred handshake must resume and publish, got {terminal:?}"
+    );
+    transport.close_connection().unwrap();
+    drop(responder);
 }
