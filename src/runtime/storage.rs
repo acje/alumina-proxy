@@ -103,17 +103,16 @@ pub enum StartupDecision {
     Terminated,
 }
 
-/// The outcome of the boot-owned startup window: the readiness decision, the
-/// single DNS-window exchange report, and the listener opened exactly when a
-/// serving decision is taken.
+/// The outcome of the boot-owned startup window: the listener-carrying
+/// startup state and the single DNS-window exchange report. The bound
+/// listener lives only inside the [`StartupState::Serve`] arm.
 pub struct StartupOutcome {
-    /// The terminal decision, or the early [`ServingMode::Full`] decision when
-    /// every name was usable and the listener opened immediately.
-    pub decision: StartupDecision,
-    /// The single 90-second DNS-window exchange report.
+    /// The startup state for the window. A serving arm carries the bound
+    /// CONNECT listener; exit-75 and terminated arms carry none.
+    pub state: StartupState,
+    /// The single DNS-window exchange report: the canonical counts
+    /// and the per-name outcome set of the startup window.
     pub report: StartupReport,
-    /// The bound CONNECT listener for a serving decision; `None` for exit 75.
-    pub listener: Option<TcpListener>,
 }
 
 /// A fatal startup failure: a DNS transport/storage error, a readiness
@@ -1149,16 +1148,16 @@ impl ServeStorage {
         } else {
             self.startup_decision(now0 + decision_seconds)?
         };
-        let listener = match decision {
-            StartupDecision::Serve(_) => Some(self.bind_listener()?),
-            StartupDecision::Exit75 { .. } | StartupDecision::Terminated => None,
+        let state = match decision {
+            StartupDecision::Serve(mode) => StartupState::Serve {
+                mode,
+                listener: self.bind_listener()?,
+            },
+            StartupDecision::Exit75 { unresolved } => StartupState::Exit75 { unresolved },
+            StartupDecision::Terminated => StartupState::Terminated,
         };
         self.emit_startup_records(now0 + decision_seconds, &report, decision);
-        Ok(StartupOutcome {
-            decision,
-            report,
-            listener,
-        })
+        Ok(StartupOutcome { state, report })
     }
 
     /// Emits the startup log records through the boot-owned log store and
@@ -1288,17 +1287,44 @@ mod startup_integration;
 impl StartupOutcome {
     /// The terminal readiness decision for the startup window.
     pub const fn decision(&self) -> StartupDecision {
-        self.decision
+        match &self.state {
+            StartupState::Serve { mode, .. } => StartupDecision::Serve(*mode),
+            StartupState::Exit75 { unresolved } => StartupDecision::Exit75 {
+                unresolved: *unresolved,
+            },
+            StartupState::Terminated => StartupDecision::Terminated,
+        }
     }
 
     /// The bound CONNECT listener when a serving decision was taken; `None`
     /// for exit 75 or a terminated window.
     pub const fn listener(&self) -> Option<&TcpListener> {
-        self.listener.as_ref()
+        match &self.state {
+            StartupState::Serve { listener, .. } => Some(listener),
+            StartupState::Exit75 { .. } | StartupState::Terminated => None,
+        }
     }
 
     /// Moves the bound listener out, consuming the outcome.
     pub fn into_listener(self) -> Option<TcpListener> {
-        self.listener
+        match self.state {
+            StartupState::Serve { listener, .. } => Some(listener),
+            StartupState::Exit75 { .. } | StartupState::Terminated => None,
+        }
     }
+}
+
+/// The startup state of the boot-owned window: `Serve` with the serving
+/// mode and its bound CONNECT listener, `Exit75` with the unresolved
+/// count, or `Terminated`.
+#[derive(Debug)]
+pub enum StartupState {
+    Serve {
+        mode: ServingMode,
+        listener: TcpListener,
+    },
+    Exit75 {
+        unresolved: u32,
+    },
+    Terminated,
 }

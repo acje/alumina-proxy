@@ -1052,7 +1052,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   fail-open validity parsing stay distinct facts. Without a pin, chain validation
   runs against an explicitly empty root store and therefore always fails — a
   deliberate “no trust anchors yet” position that surfaces as startup warnings
-  (<code>src/dns/transport.rs:740-746</code>, <code>src/main.rs:126-142</code>). The
+  (<code>src/dns/transport.rs:740-746</code>, <code>src/main.rs:120-136</code>). The
   result is deliberate: a pin is the only trust. “<code>IP#fqdn</code> without
   pin” is a deterministically unusable resolver rather than a degraded one.</p>
 
@@ -2059,7 +2059,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <p>Once the sink latches <code>failed</code>, <code>next_drain</code> returns
     <code>None</code> forever (<code>src/log/sink.rs:32-47</code>): a broken stdout
     permanently ends observability. There is no second sink: boot diagnostics use
-    stderr (<code>src/main.rs:64-79</code>, <code>:144-147</code>), but once the
+    stderr (<code>src/main.rs:64-79</code>, <code>:138-141</code>), but once the
     log store owns stdout there is no fallback channel
     (<code>src/log/sink.rs:16-31</code>). The latch is sticky state: no later
     drain consumes or clears it, so a non-owner drain — the startup-window
@@ -2133,19 +2133,19 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>src/runtime/reactor.rs:187</code>, applied through
   <code>src/runtime/owner.rs:368-371</code>) and a startup <code>Terminated</code>
   decision (SIGTERM within the startup window), which emits the shutdown record
-  and exits <code>0</code> (<code>src/main.rs:103-106</code>). Exit
+  and exits <code>0</code> (<code>src/main.rs:98-100</code>). Exit
   <code>70</code> (<code>EX_SOFTWARE</code>) is forced shutdown with undrained
   tunnels at the deadline (<code>ShutdownExit::Forced ⇒ 70</code>,
-  <code>src/runtime/reactor.rs:188</code>) and startup serving failures — no bound
-  listener, <code>attach</code> failure, or <code>serve</code> error — each
-  exiting <code>EX_SOFTWARE</code> (<code>src/main.rs:88-106</code>). Every
+  <code>src/runtime/reactor.rs:188</code>) and startup serving failures — <code>attach</code>
+  failure, or <code>serve</code> error — each
+  exiting <code>EX_SOFTWARE</code> (<code>src/main.rs:88-93</code>). Every
   <code>owner.run_startup</code> error maps to <code>EX_CONFIG = 78</code>:
   <code>StartupError::{Dns, Cache, Listener}</code> — DNS transport/storage,
   readiness evaluation, and listener bind — plus boot storage, preallocation,
   and stdout-sink setup failures
   (<code>src/boot/mod.rs:9</code>; <code>src/main.rs:61-79</code>,
-  <code>:109-112</code>; <code>src/runtime/storage.rs:119-130</code>); the startup DNS
-  verdict exits <code>EX_TEMPFAIL = 75</code> (<code>src/main.rs:102</code>).
+  <code>:102-105</code>; <code>src/runtime/storage.rs:119-130</code>); the startup DNS
+  verdict exits <code>EX_TEMPFAIL = 75</code> (<code>src/main.rs:96</code>).
   Exit <code>74</code> (<code>EX_IOERR</code>) is an unrecoverable stdout sink
   failure: the per-turn drain passes the queue, and once the sticky failed latch
   is set the owner exits in place at the turn unless shutdown has begun
@@ -2169,12 +2169,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>Drained shutdown after gate-opened tunnels complete
         (<code>ShutdownExit::Drained</code>) or startup
         <code>Terminated</code> (SIGTERM within the startup window)</td>
-        <td><code>src/runtime/reactor.rs:187</code>; <code>src/main.rs:88-110</code></td></tr>
+        <td><code>src/runtime/reactor.rs:187</code>; <code>src/main.rs:97-99</code></td></tr>
       <tr><th scope="row">70 (<code>EX_SOFTWARE</code>)</th>
         <td>Forced shutdown (undrained tunnels at the deadline) or a startup
-        serving failure: no bound listener, <code>attach</code> failure, or
+        serving failure: <code>attach</code> failure, or
         <code>serve</code> error</td>
-        <td><code>src/runtime/reactor.rs:188</code>; <code>src/main.rs:23</code>, <code>:88-106</code></td></tr>
+        <td><code>src/runtime/reactor.rs:188</code>; <code>src/main.rs:23</code>, <code>:88-93</code></td></tr>
       <tr><th scope="row">74 (<code>EX_IOERR</code>)</th>
         <td>Unrecoverable stdout sink failure: the sticky failed latch is read
         after each per-turn drain and the owner exits in place unless shutdown
@@ -2184,14 +2184,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/log/sink.rs:100-179</code>, <code>:87-99</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
-        <td><code>src/main.rs:22</code>, <code>:102</code>; <code>src/runtime/storage.rs:100</code></td></tr>
+        <td><code>src/main.rs:22</code>, <code>:96</code>; <code>src/runtime/storage.rs:100</code></td></tr>
       <tr><th scope="row">78 (<code>EX_CONFIG</code>)</th>
         <td>Every <code>owner.run_startup</code> error —
         <code>StartupError::{Dns, Cache, Listener}</code>: DNS
         transport/storage, readiness evaluation, listener bind — plus boot
         storage, preallocation, and stdout-sink setup failures</td>
         <td><code>src/boot/mod.rs:9</code>; <code>src/main.rs:61-79</code>,
-        <code>:109-112</code>; <code>src/runtime/storage.rs:119-130</code></td></tr>
+        <code>:102-105</code>; <code>src/runtime/storage.rs:119-130</code></td></tr>
       <tr><th scope="row">503 (HTTP)</th>
         <td>Admission: no free slot — typed capacity answer, fixed body</td>
         <td><code>src/runtime/reactor.rs:203</code>, <code>:1852-1864</code></td></tr>
@@ -2497,7 +2497,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>:360-373</code></td></tr>
       <tr><th scope="row">DoT trust / pin-or-nothing</th>
         <td><code>src/dns/transport.rs:717-748</code>, <code>:969</code>;
-        <code>src/main.rs:126-142</code></td></tr>
+        <code>src/main.rs:120-136</code></td></tr>
       <tr><th scope="row">Printed lower bound (214 665 002)</th>
         <td><code>src/main.rs:33-39</code>; <code>src/inventory.rs:192-196</code></td></tr>
       <tr><th scope="row">Spec intent citations</th>

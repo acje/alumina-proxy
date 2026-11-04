@@ -6,4 +6,6 @@ pub(crate) mod tunnel;
 
 pub use owner::{Preallocated, Runtime};
 pub use reactor::{ServeError, Serving, Shutdown};
-pub use storage::{ServeStorage, ServingMode, StartupDecision, StartupError, StartupOutcome};
+pub use storage::{
+    ServeStorage, ServingMode, StartupDecision, StartupError, StartupOutcome, StartupState,
+};

@@ -14,7 +14,7 @@
 //! with a diagnostic naming the field/source.
 
 use alumina::boot::{BootReport, EX_CONFIG, run_boot};
-use alumina::runtime::{Preallocated, ServeStorage, StartupDecision};
+use alumina::runtime::{Preallocated, ServeStorage, StartupState};
 
 /// Fixed documented input path, relative to the working directory. No CLI
 /// arguments or environment variables are read as policy (see README).
@@ -83,14 +83,8 @@ fn main() {
                 report.config.resolver_set().primary().port(),
             );
             match owner.run_startup(nameserver, PROCESS_EPOCH_SECS) {
-                Ok(outcome) => match outcome.decision() {
-                    StartupDecision::Serve(_mode) => {
-                        let Some(listener) = outcome.into_listener() else {
-                            owner.emit_fatal_and_drain(format_args!(
-                                "alumina: serving decision without a bound listener",
-                            ));
-                            std::process::exit(EX_SOFTWARE);
-                        };
+                Ok(outcome) => match outcome.state {
+                    StartupState::Serve { listener, .. } => {
                         let Ok(runtime) = owner.attach(listener) else {
                             std::process::exit(EX_SOFTWARE);
                         };
@@ -99,8 +93,8 @@ fn main() {
                             Ok(never) => match never {},
                         }
                     }
-                    StartupDecision::Exit75 { .. } => std::process::exit(EX_TEMPFAIL),
-                    StartupDecision::Terminated => {
+                    StartupState::Exit75 { .. } => std::process::exit(EX_TEMPFAIL),
+                    StartupState::Terminated => {
                         owner.emit_shutdown_and_drain();
                         std::process::exit(0);
                     }
