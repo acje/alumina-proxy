@@ -107,8 +107,8 @@ action is identical.
 ## 4. Enum segmentation
 
 Split by domain; every mapping enum is exhaustive with **no `_ =>` arm** (a wildcard would
-re-introduce the clamp at compile time). `#[non_exhaustive]` stays on the existing public
-`StartupDnsError` only.
+re-introduce the clamp at compile time). Public error enums follow the same closed policy:
+no public error enum — including `StartupDnsError` — carries `#[non_exhaustive]`.
 
 ```rust
 pub enum ExchangeFailure {                 // replaces FailureReason
