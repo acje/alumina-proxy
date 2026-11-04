@@ -1176,6 +1176,8 @@ pub struct StartupDns {
     force_write: Option<WriteForce>,
     #[cfg(test)]
     force_peer_mismatch: bool,
+    #[cfg(test)]
+    hold_send_partial: bool,
 }
 
 /// The borrowed startup-window resolution context fed to
@@ -1255,6 +1257,8 @@ impl StartupDns {
             force_write: None,
             #[cfg(test)]
             force_peer_mismatch: false,
+            #[cfg(test)]
+            hold_send_partial: false,
         })
     }
 
@@ -1768,6 +1772,14 @@ impl StartupDns {
         self.force_write = Some(force);
     }
 
+    /// Test-only controller that holds the plaintext send step at one byte per
+    /// advance, parking the exchange sendable in `SendReady` across turns (the
+    /// cooperative turn otherwise completes a short query within one turn).
+    #[cfg(test)]
+    pub(crate) const fn set_hold_send_partial(&mut self, hold: bool) {
+        self.hold_send_partial = hold;
+    }
+
     #[cfg(test)]
     fn active_step(&self) -> Option<ExchangeStep> {
         self.active.as_ref().map(|ex| ex.step)
@@ -2084,6 +2096,18 @@ impl StartupDns {
         ex: &mut ActiveExchange,
         schedules: &mut Schedules,
     ) -> Result<SendStep, StartupDnsError> {
+        #[cfg(test)]
+        if self.hold_send_partial {
+            if let Some(stream) = plain_stream(&mut self.conn) {
+                let end = (self.written + 1).min(ex.qlen);
+                if end > self.written
+                    && let Ok(w) = stream.write(&self.query_buf[self.written..end])
+                {
+                    self.written += w;
+                }
+            }
+            return Ok(SendStep::Waiting);
+        }
         let mut blocked = false;
         #[cfg(test)]
         let mut forced_partial = 0usize;
@@ -2200,7 +2224,7 @@ impl StartupDns {
                 }
                 Ok(SendStep::Blocked)
             }
-            TlsSendProbe::Progress => {
+            TlsSendProbe::Progress | TlsSendProbe::Yield => {
                 if Instant::now() >= ex.deadline {
                     self.close_connection()?;
                     let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
@@ -3431,6 +3455,7 @@ const fn plain_stream(conn: &mut Option<DnsConn>) -> Option<&mut TcpStream> {
 /// The progress of one nonblocking TLS application-data write probe, decided
 /// inside the scoped borrow over the retained connection so the caller can arm
 /// interests and settle failures outside the borrow.
+#[derive(Debug)]
 enum TlsSendProbe {
     /// Either zero plaintext was accepted this turn or a previous turn's
     /// outbound ciphertext remains pending; the writer/socket reported
@@ -3439,6 +3464,11 @@ enum TlsSendProbe {
     /// Some plaintext was accepted and flushed with no full drain; the next
     /// write pass can proceed without waiting.
     Progress,
+    /// The fixed socket-attempt budget was exhausted while ciphertext is still
+    /// buffered; the exchange stays sendable and resumes on a later advance
+    /// (the cooperative owner may re-drive it within the same turn), without
+    /// arming a writable edge because no would-block ever fired.
+    Yield,
     /// Every remaining plaintext byte is buffered and every outbound
     /// ciphertext byte is flushed; the exchange transitions to receiving.
     Complete,
@@ -3456,49 +3486,73 @@ enum RecvTry {
     Failure,
 }
 
-/// Pushes buffered outbound ciphertext to the socket, nonblocking. Returns
-/// `Ok(true)` when the rustls write buffer is empty, `Ok(false)` when a
-/// `WouldBlock` leaves outbound data pending for the next writable turn.
-fn drain_tls_write(tcp: &mut TcpStream, tls: &mut ClientConnection) -> io::Result<bool> {
-    loop {
-        match tls.write_tls(tcp) {
+/// Fixed bound on first-party socket (`write_tls`) attempts in one cooperative
+/// send step, in parity with the serving 16-op per-visit budget: every
+/// `Interrupted` retry, zero-progress flush, or successful socket write
+/// consumes one attempt. The rustls plaintext writer is an in-memory buffering
+/// step and is never charged against this budget. Exhausting it defers as
+/// [`TlsSendProbe::Yield`] without fabricating a `WouldBlock`, so a writable
+/// edge is not lost; the cooperative owner may re-drive the exchange within the
+/// same turn up to its advance bound, bounding socket attempts per owner turn
+/// at that bound times this constant.
+const TLS_SEND_TRIES: u32 = 16;
+
+/// The outcome of one nonblocking flush of rustls outbound ciphertext to the
+/// socket: [`Self::Flushed`] when the write buffer is empty, [`Self::Pending`]
+/// when a real `WouldBlock` leaves an edge pending, [`Self::Deferred`] when the
+/// local attempt budget is exhausted with ciphertext still buffered. A deferral
+/// never fires a would-block, so no writable edge is armed; the exchange stays
+/// sendable and resumes on a later advance.
+#[derive(Debug)]
+enum TlsDrain {
+    Flushed,
+    Pending,
+    Deferred,
+}
+
+/// Pushes buffered outbound ciphertext to the socket, nonblocking, under the
+/// [`TLS_SEND_TRIES`] attempt bound. Generic over the socket `Write` end so a
+/// test can script `Interrupted` / zero-progress / `WouldBlock` outcomes.
+fn drain_tls_write<W: io::Write>(w: &mut W, tls: &mut ClientConnection) -> io::Result<TlsDrain> {
+    for _ in 0..TLS_SEND_TRIES {
+        match tls.write_tls(w) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(TlsDrain::Pending),
             Err(e) => return Err(e),
             Ok(_) => {}
         }
         if !tls.wants_write() {
-            return Ok(true);
+            return Ok(TlsDrain::Flushed);
         }
     }
+    Ok(TlsDrain::Deferred)
 }
 
 /// Performs one nonblocking plaintext-write pass through the TLS writer and
 /// flushes the resulting outbound ciphertext to the socket, classifying the
-/// next cooperative turn's backpressure.
-fn tls_send_probe(
+/// next cooperative turn's backpressure. The plaintext write only runs while a
+/// remainder is pending, so a resumed probe (plaintext already buffered by a
+/// prior pass) never writes an empty slice and never mistakes that for a zero
+/// accepted with bytes remaining.
+fn tls_send_probe<W: io::Write>(
     plaintext: &[u8],
     written: &mut usize,
-    tcp: &mut TcpStream,
+    w: &mut W,
     tls: &mut ClientConnection,
 ) -> TlsSendProbe {
-    loop {
+    while *written < plaintext.len() {
         match tls.writer().write(&plaintext[*written..]) {
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Ok(0) => return TlsSendProbe::Fail,
             Ok(n) => *written += n,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(_) => return TlsSendProbe::Fail,
         }
-        if *written >= plaintext.len() {
-            break;
-        }
     }
-    match drain_tls_write(tcp, tls) {
-        Ok(drained) if *written >= plaintext.len() && drained => TlsSendProbe::Complete,
-        Ok(true) => TlsSendProbe::Progress,
-        Ok(false) => TlsSendProbe::Blocked,
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => TlsSendProbe::Blocked,
+    match drain_tls_write(w, tls) {
+        Ok(TlsDrain::Flushed) if *written >= plaintext.len() => TlsSendProbe::Complete,
+        Ok(TlsDrain::Flushed) => TlsSendProbe::Progress,
+        Ok(TlsDrain::Pending) => TlsSendProbe::Blocked,
+        Ok(TlsDrain::Deferred) => TlsSendProbe::Yield,
         Err(_) => TlsSendProbe::Fail,
     }
 }

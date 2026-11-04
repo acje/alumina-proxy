@@ -178,6 +178,8 @@ impl Preallocated {
             dns_token: self.dns_token,
             #[cfg(test)]
             dns_advances_last_turn: 0,
+            #[cfg(test)]
+            last_run_poll: None,
         })
     }
 
@@ -203,6 +205,9 @@ pub struct Runtime {
     /// an observable counter rather than inferring it from the step label.
     #[cfg(test)]
     pub(crate) dns_advances_last_turn: usize,
+    /// Test-only serving poll timeout `turn` last handed to the reactor.
+    #[cfg(test)]
+    pub(crate) last_run_poll: Option<Duration>,
 }
 
 impl Runtime {
@@ -271,7 +276,12 @@ impl Runtime {
     /// Returns a serve error when the poll, a registration, or a cooperative
     /// DNS turn fails.
     pub fn turn(&mut self, timeout: Option<Duration>) -> Result<(), ServeError> {
-        self.serving.run_once(timeout)?;
+        let run_timeout = self.effective_poll_timeout(timeout);
+        #[cfg(test)]
+        {
+            self.last_run_poll = run_timeout;
+        }
+        self.serving.run_once(run_timeout)?;
         #[cfg(test)]
         {
             self.dns_advances_last_turn = 0;
@@ -400,6 +410,19 @@ impl Runtime {
             .dns()
             .exchange_deadline()
             .is_some_and(|d| d <= Instant::now())
+    }
+
+    /// The poll timeout for one owner turn: while an active exchange is
+    /// sendable without waiting, a quiet traffic set must not stall it to its
+    /// deadline, so the wait is zeroed and the owner re-advances on its own;
+    /// otherwise the caller-provided timeout stands (internal deadlines are
+    /// folded by the reactor).
+    const fn effective_poll_timeout(&self, timeout: Option<Duration>) -> Option<Duration> {
+        if self.dns_sendable_without_wait() {
+            Some(Duration::ZERO)
+        } else {
+            timeout
+        }
     }
 
     fn cooperative_dns_turn(&mut self) -> Result<(), ServeError> {

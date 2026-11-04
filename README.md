@@ -304,7 +304,7 @@ cannot observe its own unread pipe (writes succeed into a buffer nobody reads).
   every remaining queued record once in the shared `dropped` tally
   (`src/log/sink.rs:145-153`); outside shutdown the serving owner exits
   `EX_IOERR` (74) at the next owner-turn boundary rather than continue without
-  an external log-loss signal (`src/runtime/owner.rs:305-306`; §F-09
+  an external log-loss signal (`src/runtime/owner.rs:315-316`; §F-09
   `docs/alumina-proxy.md:1235`). During shutdown the drain carries no exit; the
   shutdown verdict alone terminates the process.
 
@@ -405,7 +405,7 @@ never proof of a lossless exit window.
   incident-summary window) going quiet for > N s is an **investigation signal,
   not a proof of failure or exit**: causes are a latched hard sink failure
   (outside shutdown the proxy exits `EX_IOERR` (74); nothing more is emitted;
-  `src/log/sink.rs:135-153`; `src/runtime/owner.rs:305-306`; §F-09), a dead
+  `src/log/sink.rs:135-153`; `src/runtime/owner.rs:315-316`; §F-09), a dead
   collector, or **live backpressure** — a live but stalled/slow collector
   leaves the pipe full while events continue (`WouldBlock`/`Interrupted`
   retains the cursor, never latches the sink; no exit, serving continues;

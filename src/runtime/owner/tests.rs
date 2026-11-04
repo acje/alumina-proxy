@@ -112,6 +112,89 @@ fn falsifier_body() {
     );
 }
 
+/// A peer that never speaks: accepts, drains the query writes, sends nothing,
+/// and stays open until the proxy closes the connection (EOF).
+fn spawn_quiet_peer() -> (SocketAddr, thread::JoinHandle<()>) {
+    let listener = StdListener::bind("127.0.0.1:0").expect("bind quiet peer");
+    let addr = listener.local_addr().expect("peer addr");
+    let handle = thread::spawn(move || {
+        let (mut sock, _) = listener.accept().expect("accept transport");
+        let mut sink = [0u8; 256];
+        while let Ok(n) = sock.read(&mut sink) {
+            if n == 0 {
+                break;
+            }
+        }
+    });
+    (addr, handle)
+}
+
+#[test]
+fn sendable_exchange_advances_without_a_peer_event() {
+    let t = thread::Builder::new()
+        .name("runtime-sendable-quiet".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(sendable_quiet_body)
+        .expect("spawn sendable-quiet thread");
+    t.join().expect("sendable-quiet thread");
+}
+
+/// Parked sendable in `SendReady`, one quiet `turn(None)` against a silent peer
+/// must apply the zeroed poll and write the query remainder to `Receiving`.
+fn sendable_quiet_body() {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+    let (peer_addr, peer) = spawn_quiet_peer();
+
+    let exchange_deadline = Instant::now() + Duration::from_millis(1500);
+    let dns = runtime.serving.storage_mut().dns_mut();
+    dns.set_hold_send_partial(true);
+    dns.set_peer_for_test(peer_addr);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
+        .expect("start exchange");
+
+    let mut parked = false;
+    for _ in 0..64 {
+        runtime
+            .turn(Some(Duration::from_millis(2)))
+            .expect("owner turn");
+        if runtime.serving.storage().dns().exchange_step()
+            == Some(crate::dns::transport::ExchangeStep::SendReady)
+        {
+            parked = true;
+            break;
+        }
+    }
+    assert!(parked, "the exchange must reach a sendable SendReady park");
+
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_hold_send_partial(false);
+    runtime.turn(None).expect("quiet turn");
+    assert_eq!(
+        runtime.last_run_poll,
+        Some(Duration::ZERO),
+        "the owner must apply effective_poll_timeout in turn while the exchange is sendable"
+    );
+    assert!(
+        runtime.serving.storage().dns().exchange_step()
+            == Some(crate::dns::transport::ExchangeStep::Receiving),
+        "the quiet turn must write the query remainder and reach Receiving with no peer event"
+    );
+
+    drop(runtime);
+    peer.join().expect("quiet peer thread");
+}
+
 #[test]
 fn serving_loop_exchange_failure_emits_exchange_failed_record() {
     let t = thread::Builder::new()

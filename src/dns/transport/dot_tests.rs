@@ -1496,3 +1496,175 @@ fn dot_warm_serving_exchange_alloc_witness() {
     transport.cancel_for_shutdown();
     drop(responder);
 }
+
+/// A fresh `DoT` client connection whose buffered `ClientHello` gives the
+/// send helpers ciphertext to flush into a scripted sink, with no socket I/O.
+fn buffered_tls_client() -> ClientConnection {
+    let provider = rustls::crypto::ring::default_provider();
+    let config = ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .expect("loopback client protocol versions")
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth();
+    ClientConnection::new(
+        Arc::new(config),
+        ServerName::try_from(DOT_FQDN.to_string()).expect("dot.test server name"),
+    )
+    .expect("buffered client connection")
+}
+
+/// One scripted socket `write` result for the bounded-send seam.
+#[derive(Clone, Copy)]
+enum SinkStep {
+    Interrupted,
+    WouldBlock,
+    NoProgress,
+    Partial(usize),
+    Full,
+}
+
+/// Replays a fixed outcome script, panicking when over-called so a regression
+/// to unbounded TLS-send retrying aborts the test instead of hanging.
+struct ScriptedSink {
+    script: Vec<SinkStep>,
+    calls: usize,
+}
+
+impl ScriptedSink {
+    fn new(script: Vec<SinkStep>) -> Self {
+        Self { script, calls: 0 }
+    }
+}
+
+impl io::Write for ScriptedSink {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        assert!(
+            self.calls < self.script.len(),
+            "scripted sink over-called ({}/{})",
+            self.calls,
+            self.script.len()
+        );
+        let step = self.script[self.calls];
+        self.calls += 1;
+        match step {
+            SinkStep::Interrupted => Err(io::ErrorKind::Interrupted.into()),
+            SinkStep::WouldBlock => Err(io::ErrorKind::WouldBlock.into()),
+            SinkStep::NoProgress => Ok(0),
+            SinkStep::Partial(n) => Ok(n.min(buf.len())),
+            SinkStep::Full => Ok(buf.len()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn storm() -> Vec<SinkStep> {
+    vec![SinkStep::Interrupted; (TLS_SEND_TRIES as usize) * 2]
+}
+
+/// A storm of the given outcome stops at exactly [`TLS_SEND_TRIES`] attempts
+/// and defers, never looping.
+fn drain_defers(conn: &mut ClientConnection, script: Vec<SinkStep>) {
+    let mut sink = ScriptedSink::new(script);
+    let out = drain_tls_write(&mut sink, conn).expect("deferral, never an error");
+    assert!(matches!(out, TlsDrain::Deferred), "deferred: {out:?}");
+    assert_eq!(sink.calls, TLS_SEND_TRIES as usize, "fixed allowance");
+}
+
+#[test]
+fn drain_eintr_storm_and_no_progress_defer_after_fixed_attempts() {
+    drain_defers(&mut buffered_tls_client(), storm());
+    drain_defers(
+        &mut buffered_tls_client(),
+        vec![SinkStep::NoProgress; (TLS_SEND_TRIES as usize) * 2],
+    );
+}
+
+#[test]
+fn drain_defers_then_resumes_pending_ciphertext() {
+    let mut conn = buffered_tls_client();
+    drain_defers(&mut conn, storm());
+    let mut sink = ScriptedSink::new(vec![SinkStep::Full]);
+    let out = drain_tls_write(&mut sink, &mut conn).expect("flush");
+    assert!(matches!(out, TlsDrain::Flushed), "resumed: {out:?}");
+    assert_eq!(sink.calls, 1);
+}
+
+#[test]
+fn drain_would_block_stays_pending_not_yield() {
+    let mut conn = buffered_tls_client();
+    let mut sink = ScriptedSink::new(vec![SinkStep::WouldBlock]);
+    let out = drain_tls_write(&mut sink, &mut conn).expect("would-block is reported");
+    assert!(matches!(out, TlsDrain::Pending), "pending: {out:?}");
+    assert_eq!(sink.calls, 1);
+}
+
+#[test]
+fn probe_storm_yields_and_would_block_stays_blocked() {
+    let mut conn = buffered_tls_client();
+    let mut sink = ScriptedSink::new(storm());
+    let mut written = 0usize;
+    let probe = tls_send_probe(b"x", &mut written, &mut sink, &mut conn);
+    assert!(matches!(probe, TlsSendProbe::Yield), "yielded: {probe:?}");
+    assert_eq!(sink.calls, TLS_SEND_TRIES as usize);
+
+    let mut conn = buffered_tls_client();
+    let mut sink = ScriptedSink::new(vec![SinkStep::WouldBlock]);
+    let mut written = 0usize;
+    let probe = tls_send_probe(b"x", &mut written, &mut sink, &mut conn);
+    assert!(matches!(probe, TlsSendProbe::Blocked), "blocked: {probe:?}");
+    assert_eq!(sink.calls, 1);
+}
+
+#[test]
+fn probe_yield_then_resume_completes() {
+    let mut conn = buffered_tls_client();
+    let mut sink = ScriptedSink::new(storm());
+    let mut written = 0usize;
+    let probe = tls_send_probe(b"x", &mut written, &mut sink, &mut conn);
+    assert!(matches!(probe, TlsSendProbe::Yield), "yielded: {probe:?}");
+    assert_eq!(written, 1, "plaintext fully buffered before the yield");
+
+    let mut sink = ScriptedSink::new(vec![SinkStep::Full]);
+    let probe = tls_send_probe(b"x", &mut written, &mut sink, &mut conn);
+    assert!(
+        matches!(probe, TlsSendProbe::Complete),
+        "a yielded probe with plaintext already buffered must resume to \
+         Complete, never fail the empty remainder: {probe:?}"
+    );
+}
+
+#[test]
+fn probe_blocked_then_resume_completes() {
+    let mut conn = buffered_tls_client();
+    let mut sink = ScriptedSink::new(vec![SinkStep::WouldBlock]);
+    let mut written = 0usize;
+    let probe = tls_send_probe(b"x", &mut written, &mut sink, &mut conn);
+    assert!(matches!(probe, TlsSendProbe::Blocked), "blocked: {probe:?}");
+    assert_eq!(
+        written, 1,
+        "plaintext fully buffered before the would-block"
+    );
+
+    let mut sink = ScriptedSink::new(vec![SinkStep::Full]);
+    let probe = tls_send_probe(b"x", &mut written, &mut sink, &mut conn);
+    assert!(
+        matches!(probe, TlsSendProbe::Complete),
+        "a would-blocked probe with plaintext already buffered must resume to \
+         Complete, never fail the empty remainder: {probe:?}"
+    );
+}
+
+#[test]
+fn drain_partial_write_keeps_consuming_attempts() {
+    let mut conn = buffered_tls_client();
+    let mut sink = ScriptedSink::new(vec![SinkStep::Partial(1), SinkStep::Full]);
+    let out = drain_tls_write(&mut sink, &mut conn).expect("flush");
+    assert!(
+        matches!(out, TlsDrain::Flushed),
+        "partial then full: {out:?}"
+    );
+    assert_eq!(sink.calls, 2, "each accept consumes exactly one attempt");
+}
