@@ -191,7 +191,11 @@ findings, verdicts, or issue records here).
   sigterm_shutdown, enforcement, admission, coalescing, ja4_baseline), with
   helpers/fixtures kept in the parent and the external `tests/refusals.rs`
   child (5 refusal tests) unchanged. `dns/transport/tests.rs` has the
-  `shared_armed_cache` external topic child. `runtime/owner` follows the same
+  `shared_armed_cache` topic child (unchanged, 3 tests). `dns/transport/tests.rs`
+  now holds 13 inline topic modules (exchange, cooperative, startup, apply,
+  cancel, degraded, anomaly, failover, failback, probe_sweep, note_failure,
+  corroboration, turn_result) with all helpers kept in the parent;
+  `runtime/owner` follows the same
   inline-topic form in ten modules (cooperative_dns, probe_sweep, publishing,
   main_wiring, startup_warning, startup_window, sigterm_shutdown,
   startup_exchange, probe_records, due_refresh) with shared helpers kept in the
