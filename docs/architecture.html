@@ -1300,7 +1300,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>ObservedReply</code> is a two-pointer-sized view — bounded at 16 bytes
   by
   <code>parsed_reply_layout_is_bounded_by_the_outcome_plus_alignment</code>
-  (<code>src/dns/wire/tests.rs:860</code>) and measured at 16 bytes on the Linux 1.99
+  (<code>src/dns/wire/tests.rs:975</code>) and measured at 16 bytes on the Linux 1.99
   toolchain against 296-byte <code>ParsedReply</code> and 288-byte
   <code>Outcome</code>: no persistent field, heap allocation, or second
   owner- or workspace-sized copy.</p>

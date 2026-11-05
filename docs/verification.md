@@ -199,7 +199,12 @@ findings, verdicts, or issue records here).
   inline-topic form in ten modules (cooperative_dns, probe_sweep, publishing,
   main_wiring, startup_warning, startup_window, sigterm_shutdown,
   startup_exchange, probe_records, due_refresh) with shared helpers kept in the
-  parent; `dns/wire` and `log` are still whole-file suites with no topic children.
+  parent; `dns/wire/tests.rs` now holds 16 inline protocol topic modules (positive,
+  validation, bailiwick_cname, ttl_flags, workspace, negative_soa, authority_soa,
+  policy_rejects, malformed_rdata, cache_schedule, family, wire_names,
+  duplicate_cname, robustness, alloc_witness, embedded_dot) with all helper
+  fns kept in the parent; `log` is still a whole-file suite with no topic
+  children.
 
 ## Offline docs link checker
 
