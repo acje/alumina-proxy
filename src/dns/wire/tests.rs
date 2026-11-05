@@ -1187,6 +1187,150 @@ mod raw_ad_fact {
     }
 }
 
+mod supporting_ttl {
+    use super::*;
+
+    #[test]
+    fn positive_cap_is_min_across_cname_and_address_ttls() {
+        for (cname_ttl, addr_ttl, expected) in [(200u32, 120u32, 120u64), (30u32, 200u32, 30u64)] {
+            let mut ws = ResponseWorkspace::default();
+            let mut msg = header(0x4001, true, 0, 1, 2, 0, 0);
+            msg.extend_from_slice(&qname_bytes("sub.example.org"));
+            msg.extend_from_slice(&1u16.to_be_bytes());
+            msg.extend_from_slice(&1u16.to_be_bytes());
+            msg.extend_from_slice(&cname_record(
+                "sub.example.org",
+                "a.sub.example.org",
+                cname_ttl,
+            ));
+            msg.extend_from_slice(&a_record("a.sub.example.org", [203, 0, 113, 7], addr_ttl));
+            let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4001, &msg)
+                .expect("validated positive");
+            assert_eq!(
+                reply.supporting_ttl_cap(),
+                Some(expected),
+                "positive cap keeps the conservative TTL minimum, whichever link is smallest"
+            );
+        }
+    }
+
+    #[test]
+    fn positive_cap_preserves_zero_ttl() {
+        let mut ws = ResponseWorkspace::default();
+        let msg = direct_a("sub.example.org", 0x4002, [1, 2, 3, 4], 0);
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4002, &msg)
+            .expect("validated positive");
+        assert_eq!(
+            reply.supporting_ttl_cap(),
+            Some(0),
+            "a zero TTL is preserved, never clamped or renewed"
+        );
+    }
+
+    #[test]
+    fn nodata_cap_minutes_negative_cname_and_soa_ttl_minimum() {
+        let mut ws = ResponseWorkspace::default();
+        let mut msg = header(0x4003, true, 0, 1, 1, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&cname_record("sub.example.org", "a.sub.example.org", 40));
+        msg.extend_from_slice(&root_soa_record(300, 60));
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4003, &msg)
+            .expect("validated NODATA");
+        assert_eq!(
+            reply.supporting_ttl_cap(),
+            Some(40),
+            "negative cap keeps the CNAME TTL when it is the conservative minimum"
+        );
+    }
+
+    #[test]
+    fn nxdomain_cap_minutes_cname_soa_ttl_and_minimum() {
+        for (cname_ttl, soa_ttl, minimum, expected) in [
+            (None, 300, 60, 60),
+            (Some(25), 300, 60, 25),
+            (None, 30, 60, 30),
+        ] {
+            let mut ws = ResponseWorkspace::default();
+            let mut msg = header(0x4004, true, 3, 1, u16::from(cname_ttl.is_some()), 1, 0);
+            msg.extend_from_slice(&qname_bytes("sub.example.org"));
+            msg.extend_from_slice(&1u16.to_be_bytes());
+            msg.extend_from_slice(&1u16.to_be_bytes());
+            if let Some(ttl) = cname_ttl {
+                msg.extend_from_slice(&cname_record("sub.example.org", "a.sub.example.org", ttl));
+            }
+            msg.extend_from_slice(&root_soa_record(soa_ttl, minimum));
+            let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4004, &msg)
+                .expect("validated NXDOMAIN");
+            assert_eq!(
+                reply.supporting_ttl_cap(),
+                Some(expected),
+                "negative cap keeps whichever of the CNAME TTL, SOA TTL, and MINIMUM is smallest"
+            );
+        }
+    }
+
+    #[test]
+    fn no_soa_negative_resets_prior_positive_cap_on_reused_workspace() {
+        let mut ws = ResponseWorkspace::default();
+        let positive = direct_a("sub.example.org", 0x4006, [1, 2, 3, 4], 120);
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4006, &positive)
+            .expect("validated positive");
+        assert_eq!(reply.supporting_ttl_cap(), Some(120));
+        let mut msg = header(0x4007, true, 3, 1, 0, 0, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4007, &msg)
+            .expect("validated NXDOMAIN without SOA");
+        assert_eq!(
+            reply.supporting_ttl_cap(),
+            None,
+            "a reused workspace never leaks the prior positive cap into a no-SOA negative"
+        );
+    }
+
+    #[test]
+    fn positive_cap_preserves_max_u32_ttl_with_ad_and_extreme() {
+        let mut ws = ResponseWorkspace::default();
+        let mut msg = direct_a("sub.example.org", 0x4008, [203, 0, 113, 9], u32::MAX);
+        msg[3] |= 0x20;
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4008, &msg)
+            .expect("validated positive with the maximum wire TTL");
+        assert_eq!(
+            reply.supporting_ttl_cap(),
+            Some(u64::from(u32::MAX)),
+            "the maximum wire TTL is preserved exactly, never saturated nor confused with a sentinel"
+        );
+        assert!(
+            reply.extreme_ttl(),
+            "a u32::MAX TTL is extreme while still a distinct raw cap fact"
+        );
+        assert!(
+            reply.raw_ad_fact(),
+            "the raw AD bit coexists in the same owned reply with the extreme flag and the max cap"
+        );
+    }
+
+    #[test]
+    fn nxdomain_cap_preserves_some_zero_distinct_from_none() {
+        let mut ws = ResponseWorkspace::default();
+        let mut msg = header(0x4009, true, 3, 1, 0, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&root_soa_record(0, 60));
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4009, &msg)
+            .expect("validated NXDOMAIN with a zero-TTL SOA");
+        assert_eq!(
+            reply.supporting_ttl_cap(),
+            Some(0),
+            "a negative with a covering zero-TTL SOA keeps Some(0), distinct from the unknown None"
+        );
+    }
+}
+
 mod negative_soa {
     use super::*;
 

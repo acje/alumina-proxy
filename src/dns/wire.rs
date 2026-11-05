@@ -749,6 +749,7 @@ pub struct ResponseWorkspace {
     owner_len: usize,
     soa: Option<(DnsName, u32, u32)>,
     extreme_ttl: bool,
+    supporting_ttl_cap: Option<u32>,
 }
 
 impl Default for ResponseWorkspace {
@@ -762,6 +763,7 @@ impl Default for ResponseWorkspace {
             owner_len: 0,
             soa: None,
             extreme_ttl: false,
+            supporting_ttl_cap: None,
         }
     }
 }
@@ -772,6 +774,16 @@ impl ResponseWorkspace {
     /// anomaly surface without disturbing the validated outcome.
     pub(crate) const fn extreme_ttl(&self) -> bool {
         self.extreme_ttl
+    }
+
+    /// The conservative raw supporting-TTL cap bound from the same parse: the
+    /// minimum across every supporting CNAME and address TTL for a positive
+    /// reply, or the minimum across the supporting CNAME chain and the
+    /// covering SOA's TTL and MINIMUM for a negative reply with an SOA. With
+    /// no SOA the supporting lifetime is unknown (`None`). Observed only, on
+    /// the fixed workspace, with a zero TTL preserved (never clamped).
+    pub(crate) const fn supporting_ttl_cap(&self) -> Option<u32> {
+        self.supporting_ttl_cap
     }
 }
 
@@ -947,14 +959,65 @@ pub(crate) fn classify_published(outcome: &Outcome) -> PublishedKind {
     }
 }
 
-/// The validated outcome of one response parse bound to the extreme-TTL flag
-/// and the raw header AD bit captured from that same successful parse, owned by
-/// the receiver so a later reuse of the parse workspace cannot repurpose the
-/// observation.
+#[derive(Clone, Copy)]
+enum ReplyFacts {
+    WithSupportingTtl {
+        ad: bool,
+        extreme: bool,
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "temporary validated supporting-TTL staging until generation-bound cache publication"
+            )
+        )]
+        ttl: u32,
+    },
+    WithoutSupportingTtl {
+        ad: bool,
+        extreme: bool,
+    },
+}
+
+impl ReplyFacts {
+    const fn ad(self) -> bool {
+        match self {
+            ReplyFacts::WithSupportingTtl { ad, .. }
+            | ReplyFacts::WithoutSupportingTtl { ad, .. } => ad,
+        }
+    }
+
+    const fn extreme(self) -> bool {
+        match self {
+            ReplyFacts::WithSupportingTtl { extreme, .. }
+            | ReplyFacts::WithoutSupportingTtl { extreme, .. } => extreme,
+        }
+    }
+
+    #[cfg(test)]
+    const fn supporting_ttl_cap(self) -> Option<u64> {
+        match self {
+            ReplyFacts::WithSupportingTtl { ttl, .. } => Some(ttl as u64),
+            ReplyFacts::WithoutSupportingTtl { .. } => None,
+        }
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the conservative supporting cap is always a minimum over at least one reachable wire u32 operand (address TTL for positive; SOA TTL or MINIMUM for negative), so the sentinel-bearing u64 chain value cannot exceed u32::MAX here and the narrowing is lossless"
+)]
+const fn wire_ttl_floor(ttl: u64) -> u32 {
+    ttl as u32
+}
+
+/// The validated outcome of one response parse bound to the extreme-TTL flag,
+/// the raw header AD bit, and the conservative supporting-TTL cap captured from
+/// that same successful parse, owned by the receiver so a later reuse of the
+/// parse workspace cannot repurpose the observation.
 pub(crate) struct ParsedReply {
     outcome: Outcome,
-    extreme_ttl: bool,
-    ad: bool,
+    observation: ReplyFacts,
 }
 
 impl ParsedReply {
@@ -977,10 +1040,20 @@ impl ParsedReply {
         let outcome = parse_response(ws, zones, fqdn, family, tid, msg)?;
         let extreme_ttl = ws.extreme_ttl();
         let ad = msg.get(3).is_some_and(|b| b & AD_FLAG != 0);
+        let observation = ws.supporting_ttl_cap().map_or(
+            ReplyFacts::WithoutSupportingTtl {
+                ad,
+                extreme: extreme_ttl,
+            },
+            |ttl| ReplyFacts::WithSupportingTtl {
+                ad,
+                extreme: extreme_ttl,
+                ttl,
+            },
+        );
         Ok(ParsedReply {
             outcome,
-            extreme_ttl,
-            ad,
+            observation,
         })
     }
 
@@ -992,8 +1065,8 @@ impl ParsedReply {
         ObservedReply {
             outcome: &self.outcome,
             kind: classify_published(&self.outcome),
-            extreme: self.extreme_ttl,
-            ad: self.ad,
+            extreme: self.observation.extreme(),
+            ad: self.observation.ad(),
         }
     }
 
@@ -1003,7 +1076,7 @@ impl ParsedReply {
     /// oracle keeps the direct getter under `cfg(test)`.
     #[cfg(test)]
     pub(crate) const fn extreme_ttl(&self) -> bool {
-        self.extreme_ttl
+        self.observation.extreme()
     }
 
     /// The raw AD wire assertion from the same validated parse. It is a raw
@@ -1011,7 +1084,15 @@ impl ParsedReply {
     /// of the resolver or DNS data.
     #[cfg(test)]
     pub(crate) const fn raw_ad_fact(&self) -> bool {
-        self.ad
+        self.observation.ad()
+    }
+
+    /// The conservative raw supporting-TTL cap bound from the same validated
+    /// parse. The receive path does not consult it yet; the test payload
+    /// oracle keeps the direct getter under `cfg(test)`.
+    #[cfg(test)]
+    pub(crate) const fn supporting_ttl_cap(&self) -> Option<u64> {
+        self.observation.supporting_ttl_cap()
     }
 }
 
@@ -1094,6 +1175,7 @@ pub fn parse_response(
     ws.owner_len = 0;
     ws.soa = None;
     ws.extreme_ttl = false;
+    ws.supporting_ttl_cap = None;
     let mut reader = Reader::new(msg);
     let got_tid = reader.u16()?;
     if got_tid != tid {
@@ -1232,6 +1314,9 @@ pub fn parse_response(
     let root = DnsName::from_exact(fqdn.as_str().as_bytes());
     let (chain, chain_ttl) = root_chain(&root, zones, ws)?;
     let terminal = chain.terminal.as_slice();
+    let negative_cap = ws.soa.as_ref().map(|(_owner, ttl, minimum)| {
+        wire_ttl_floor(chain_ttl.min(u64::from(*ttl)).min(u64::from(*minimum)))
+    });
 
     let mut bindings = BindingList::default();
     let terminal_owner = ws.owners[..ws.owner_len]
@@ -1252,6 +1337,7 @@ pub fn parse_response(
                         earliest = earliest.min(u64::from(*addr_ttl));
                     }
                 }
+                ws.supporting_ttl_cap = Some(wire_ttl_floor(earliest));
                 return Ok(Outcome::Positive {
                     family,
                     bindings,
@@ -1260,6 +1346,7 @@ pub fn parse_response(
             }
             let soa = classify_soa(terminal, ws.soa.as_ref())?;
             soa.map_or(Err(DnsError::EmptyNoerrorWithoutSoa), |soa| {
+                ws.supporting_ttl_cap = negative_cap;
                 Ok(Outcome::NoData {
                     family,
                     soa: Some(soa),
@@ -1272,6 +1359,7 @@ pub fn parse_response(
             if terminal_data {
                 return Err(DnsError::TerminalWithoutData);
             }
+            ws.supporting_ttl_cap = negative_cap;
             Ok(Outcome::NxDomain { soa })
         }
         code => Err(DnsError::BadRcode { code }),
