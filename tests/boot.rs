@@ -1,40 +1,11 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process;
+#[path = "support/temp_dir.rs"]
+mod temp_dir;
+use temp_dir::TempDir;
 
 use alumina::boot::preflight::{self, KernelFacts, PreflightError};
 use alumina::config::{self, ConfigError};
 use alumina::dns;
 use alumina::inventory::{self, BootInventory, TrafficStorage};
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> Self {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("alumina-boot-{}-{}-{}", tag, process::id(), n));
-        fs::create_dir_all(&dir).expect("create temp dir");
-        TempDir(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-
-    fn write(&self, name: &str, body: &str) -> PathBuf {
-        let path = self.0.join(name);
-        fs::write(&path, body).expect("write temp fixture");
-        path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 
 const VALID_CONFIG: &str = r#"
 listen = "0.0.0.0:8080"
