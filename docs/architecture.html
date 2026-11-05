@@ -1888,7 +1888,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   turns). A separate pointer-transfer witness, not a numeric allocation
   witness, covers the second claim:
   <code>serving_consumes_boot_traffic_buffers_by_value_not_reallocation</code>
-  (<code>src/runtime/reactor/tests.rs:267</code>) asserts the boot traffic slabs transfer
+  (<code>src/runtime/reactor/tests.rs:1041-1050</code>) asserts the boot traffic slabs transfer
   into the slot workspaces by value: <code>slots[0].buf</code> and
   <code>slots[511].down</code> keep the <code>TrafficStorage</code>
   allocation pointers, so no second traffic allocation occurs when the serving
@@ -1969,14 +1969,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   sibling-release selection (<code>src/runtime/reactor/startup.rs:104-127</code>) remain
   a separate scheduling seam.</p>
   <p>The deterministic visit-budget fixture
-  (<code>run_budget_visit_fixture</code>, <code>src/runtime/reactor/tests.rs:3934-4068</code>)
+  (<code>run_budget_visit_fixture</code>, <code>src/runtime/reactor/tests.rs:265-403</code>)
   proves the shared per-visit ledger as built: a full 32&nbsp;KiB read window, observed via a
   non-consuming peek within the unchanged 2-second bound, yields one 32&nbsp;KiB read plus an
   equal flush and a saturated <code>VisitState</code> ledger of exactly 65,536 bytes
-  (<code>src/runtime/reactor/tests.rs:4071-4095</code>); a 32,664-byte prefix yields a 65,328-byte
+  (<code>src/runtime/reactor/tests.rs:5772-5797</code>); a 32,664-byte prefix yields a 65,328-byte
   ledger with 208 bytes remaining — not exhausted — and is rescheduled under the same
   independent 16-op/64&nbsp;KiB caps while the wire payload pattern is conserved byte-for-byte
-  (<code>src/runtime/reactor/tests.rs:4098-4122</code>; <code>read_room</code> at
+  (<code>src/runtime/reactor/tests.rs:5799-5824</code>; <code>read_room</code> at
   <code>src/runtime/reactor.rs:2052</code>).</p>
   <p>Registration tokens are disjoint by construction: the listener holds
   token 0, client sockets occupy <code>1..=512</code>, each upstream uses

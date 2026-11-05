@@ -168,7 +168,8 @@ findings, verdicts, or issue records here).
 - **Owner-local convention for `cfg(test)` suites.** Unit suites live
   colocated at `src/<owner>/tests.rs` (or a dot-named variant such as
   `dot_tests.rs`); genuine topic groups split into child
-  `src/<owner>/<mod>/tests/<topic>.rs` files declared by the parent. Storage
+  `src/<owner>/<mod>/tests/<topic>.rs` files declared by the parent — or inline
+  `mod <topic> { .. }` children colocated in the parent's own `tests.rs`. Storage
   startup integration stays a colocated private seam
   (`src/runtime/storage/startup_integration.rs`). `src/config/**` is the one
   module owner using the substantial `*_config_tests.rs` named roots
@@ -184,12 +185,14 @@ findings, verdicts, or issue records here).
   preservation for same-module externalizations). Shared test-only helpers
   live under `tests/support/` and are included via private `#[path]` modules —
   no Cargo target, no production export.
-- **Topic grouping is partial today.** Only two suites have topic child
-  modules: `runtime/reactor/tests.rs` declares a `refusals` topic child
-  (`tests/refusals.rs`) and `dns/transport/tests.rs` declares a
-  `shared_armed_cache` topic child (`tests/shared_armed_cache.rs`), the rest
-  of their bulk staying in the parent file. `runtime/owner`, `dns/wire`, and
-  `log` are still whole-file suites with no topic children.
+- **Reactor topic grouping via inline child modules.** `runtime/reactor/tests.rs`
+  wraps its tests in 14 inline topic modules (poll_timeout, run_once, serving,
+  connect_setup, deadlines, generation_tokens, dialing, relay, visit_budget,
+  sigterm_shutdown, enforcement, admission, coalescing, ja4_baseline), with
+  helpers/fixtures kept in the parent and the external `tests/refusals.rs`
+  child (5 refusal tests) unchanged. `dns/transport/tests.rs` has the
+  `shared_armed_cache` external topic child. `runtime/owner`, `dns/wire`,
+  and `log` are whole-file suites with no topic children.
 
 ## Offline docs link checker
 
