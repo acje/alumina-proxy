@@ -14,22 +14,22 @@ Host-run selectors and gates (all `sh scripts/verify.sh …` selectors and host
 Cargo commands):
 
 ```
-cargo +1.99.0 atest -p alumina --locked --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only suite (lib units + 6 gate-only binaries), witness-off — gated on Linux via `mid full` (reached via `sh scripts/verify.sh boundary phase1`); listed here as a manual reference
-cargo +1.99.0 atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only suite, alloc-witness — gated on Linux via `mid full`; listed here as a manual reference
+cargo +1.99.0 atest -p alumina --locked --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface (lib units + 6 gate-only binaries), witness-off — a manual reference; the same surface runs inside `mid union` (boundary dispatches union alone; `mid full` is a standalone selector subsumed by it)
+cargo +1.99.0 atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, alloc-witness — a manual reference (runs inside `mid union`)
 cargo +1.99.0 fmt --check
 cargo +1.99.0 aclippy -p alumina --locked --all-targets -- -D warnings
 sh scripts/verify.sh inner check                # INNER tier: cargo check only; host-runnable (compiles on macOS)
 sh scripts/verify.sh mid foundations            # MID tier (Linux-only, fail closed off-Linux): behavior-proof + fmt/whitespace (fast loop)
 sh scripts/verify.sh mid boot                   # MID tier (Linux-only): behavior-proof + fmt/whitespace (fast loop)
 sh scripts/verify.sh mid clippy                 # MID tier (Linux-only): clippy -D warnings (production + alloc-witness harness)
-sh scripts/verify.sh mid union                  # MID tier (Linux-only): release + static-ELF + closure metadata + clippy
-sh scripts/verify.sh mid full                   # MID tier (Linux-only): gate-only suite (lib units + 6 gate-only binaries) witness-off then witness-on
-sh scripts/verify.sh docs                       # native offline docs link gate
+sh scripts/verify.sh mid union                  # MID tier (Linux-only): release + static-ELF + closure metadata + clippy; runs the full test surface (lib + 8 integration targets) witness-off then witness-on
+sh scripts/verify.sh mid full                   # MID tier (Linux-only): standalone gate-only selector (lib units + 6 gate-only binaries) witness-off then witness-on; surface subsumed by mid union
+sh scripts/verify.sh docs                       # native offline docs gate: links + HTML + physical INTENDED + cfg-parentage + unsafe + spec digest
 sh scripts/verify.sh fixtures boot              # host Podman coordinator; Darwin allowed
 sh scripts/verify.sh e2e relay                  # host-runnable; auto-dispatches Linux build on Darwin
 sh scripts/verify.sh e2e shutdown               # host-runnable via rootful harness
 sh scripts/verify.sh boundary phase1-fast       # BOUNDARY fast tier: change-scope classification + cheap host gates (docs/unsafe/whitespace/audit) + identity; no Linux MID, no fixtures, no E2E
-sh scripts/verify.sh boundary phase1-slow       # BOUNDARY slow tier: reads scope marker; docs-only => explicit SKIPPED-BY-DESIGN, no MID; full => mid union + mid full + fixtures + artifact identity
+sh scripts/verify.sh boundary phase1-slow       # BOUNDARY slow tier: reads scope marker; docs-only => explicit SKIPPED-BY-DESIGN, no MID; full => mid union (alone; subsumes mid full) + fixtures + artifact identity
 sh scripts/verify.sh boundary phase1            # BOUNDARY tier (composed): fast tier, then slow tier unless docs-only; never E2E; exit 1 BLOCKED by design
 ```
 
@@ -37,16 +37,16 @@ sh scripts/verify.sh boundary phase1            # BOUNDARY tier (composed): fast
 dispatch writes the same aliases into its throwaway container config — the repo
 does not duplicate them). Most gate selectors run a filtered scope: their
 `verify.sh` `atest` invocations carry `--test foundations` or `--test boot`
-(optionally with `--features alloc-witness`). The `mid full` selector is the
-exception: it runs the gate-only test surface — lib unit tests + the 6
-integration binaries that run in no other selector (eligibility, mio_matrix,
-main_thread_stack, monitor_stdout, stdout_stall, stdout_closed) — witness-off
-then witness-on
+(optionally with `--features alloc-witness`). The `mid full` selector is a
+standalone gate-only selector: it runs lib unit tests plus the 6 gate-only
+integration binaries (eligibility, mio_matrix, main_thread_stack,
+monitor_stdout, stdout_stall, stdout_closed), witness-off then witness-on
 (alloc-witness, incl. the eligibility witness and the alloc-witness-only
-mio_matrix binary), on Linux via `sh scripts/verify.sh boundary phase1`.
-foundations and boot are deliberately not re-run there: `mid union` already
-runs them in the same BOUNDARY dispatch (and the `mid foundations` / `mid boot`
-inner loops run them during development).
+mio_matrix binary); atest-only (no clippy/fmt). `boundary phase1` does not
+dispatch it: `mid union` subsumes the whole gate-only surface — one dispatch
+runs lib plus all eight integration targets (foundations, boot, and those
+same 6) witness-off then witness-on (the `mid foundations` / `mid boot` inner
+loops additionally run the two during development).
 
 ### Three-tier guarantee contract
 
@@ -60,8 +60,9 @@ Verification is tiered; each tier backs a different claim:
   static-ELF/clippy/release/closure proofs moved to `mid union`); `mid
   clippy` runs clippy `-D warnings` for production and the alloc-witness
   test harness; `mid union` carries release + static-ELF + closure metadata
-  + clippy; `mid full` runs the gate-only suite (lib units + the 6
-  gate-only binaries) witness-off then witness-on. MID backs per-sub-mission
+  + clippy; `mid full` is the standalone gate-only selector (lib units +
+  the 6 gate-only binaries) witness-off then witness-on, its surface
+  subsumed by `mid union`. MID backs per-sub-mission
   done-claims.
 - **BOUNDARY** — split into a fast tier and a slow tier; both exit 1
   `BLOCKED` by design and neither ever executes E2E:
@@ -77,9 +78,12 @@ Verification is tiered; each tier backs a different claim:
     the production binary); production confinement is unchanged.
   - `sh scripts/verify.sh boundary phase1-slow`: reads the scope marker
     (missing => full, fail-safe). On docs-only it emits an explicit
-    `PHASE1-SLOW-SKIPPED-BY-DESIGN` and skips the Linux MID; on full it runs
-    one Linux dispatch `mid union && mid full` (`set -e` aborts on the first
-    red marker) plus `fixtures boot` and the artifact identity check.
+    `PHASE1-SLOW-SKIPPED-BY-DESIGN` and skips the Linux MID; on full it
+    dispatches the Linux MID union once — `mid union` covers the whole
+    gate-only test surface (lib + all eight integration targets, witness-off
+    then witness-on), so `mid full` is no longer a separate dispatch (`set -e`
+    aborts on the first red marker) — plus `fixtures boot` and the artifact
+    identity check.
   - `sh scripts/verify.sh boundary phase1` (composed): fast tier, then the
     slow tier unless the scope is docs-only. Preserves the single-invocation
     path used by `docs/qa-package/validate.sh`.
@@ -90,21 +94,102 @@ Verification is tiered; each tier backs a different claim:
   full ceremony, and a docs-only candidate skips the MID explicitly, never
   silently. BOUNDARY backs repo-wide candidate done-claims.
 
-### Full affected-corpus offline check
+### Offline docs gate — the `docs` selector (not just links)
 
-`verify.sh docs` runs the offline link gate on the **4-root canonical set**
-(`DOCSLINK_ROOTS` in `scripts/verify.sh`): `README.md`, `docs/alumina-proxy.md`,
-`docs/verification.md`, `docs/qa-package/README.md`. The full retained Markdown
-corpus — all **5** docs — is checked with the explicit nonempty
-argv command:
+`sh scripts/verify.sh docs` is the full offline docs gate, not a link-only
+check. It runs, in sequence: the link/fragment gate over the **5-root
+`DOCSLINK_ROOTS`** set (`docs/alumina-proxy.md`,
+`docs/trust-telemetry-design.md`, `docs/verification.md`,
+`docs/qa-package/README.md`, `README.md` — trust-telemetry native coverage is
+exercised here via its root entry); the HTML structure gate over the HTML doc
+roots; the physical **INTENDED** inventory (every `src`/`tests` `.rs` listed);
+**CFG-TEST-PARENTAGE** (admitted `src/*/tests.rs` and `src/*/dot_tests.rs`
+declared `#[cfg(test)]` by their parent); the **UNSAFE-SURFACE** confinement
+gate; and the **CANONICAL-DIGEST** pin (frozen spec sha equals the `AGENTS.md`
+pin). A docs change reruns this whole selector — the link gate alone is not
+the gate.
+
+The full retained Markdown corpus is checked with the explicit, nonempty argv
+command, run with `NODE_OPTIONS`/`NODE_PATH` cleared:
 
 ```
-node scripts/docs_check/check.mjs README.md AGENTS.md docs/alumina-proxy.md docs/verification.md docs/qa-package/README.md
+env -u NODE_OPTIONS -u NODE_PATH node scripts/docs_check/check.mjs AGENTS.md README.md docs/alumina-proxy.md docs/verification.md docs/qa-package/README.md
+```
+
+Manual checker regression fixtures, hand-run (identity-tracked, **not** wired
+into any dispatch arm):
+
+```
+node scripts/docs_check/test.mjs
+node scripts/html_check_test.mjs
 ```
 
 Selector host context / prerequisites (incl. `mid` Linux-only fail-closed and
 `fixtures`/`e2e` host-runnable details, `boundary phase1` never executing E2E):
 sole owner is [docs/qa-package/README.md](qa-package/README.md).
+
+## Test suite navigation & ownership
+
+Navigation/ownership instructions, not an architecture narrative (no
+findings, verdicts, or issue records here).
+
+- **One Linux `sh scripts/verify.sh mid union` is the whole verified surface:**
+  it runs the lib unit suite plus all **eight** integration test targets
+  (foundations, boot, eligibility, mio_matrix, main_thread_stack,
+  monitor_stdout, stdout_stall, stdout_closed) witness-off then witness-on
+  (`--features alloc-witness`); the same union also runs release/static-ELF/
+  closure-metadata, clippy, and fmt/whitespace. Off/on totals 998/1035
+  (lib 956/980, foundations 9/13, boot 28/28, eligibility 5/6, mio 0/8).
+  `boundary phase1` dispatches union once — never `mid full` separately;
+  `mid full` remains a standalone gate-only selector.
+- **The root `--test boot` suite is the broad boot component/API integration
+  target**: it exercises config load and strict-schema rejection (config
+  errors → exit 78), bare-IP resolver validation, synthetic preflight
+  privilege floors, and inventory/traffic-storage component APIs — not the
+  assembled boot runner. The assembled boot path and resolver trust/pin
+  preparation live in the boot unit suite `src/boot/tests.rs` (selected by
+  `--lib` inside `mid union`), where `run_boot_with_facts` assembles the
+  stages. Both suites share the `TempDir` fixture through the private shared
+  helper (`tests/support/temp_dir.rs`).
+- **Foundations** (`tests/foundations.rs`) is the API/support harness:
+  fault and fuzz-style inputs plus the allocation-witness proving surface,
+  not just the off/on witness count.
+- **Four gate-only targets are `harness=false` process-entry binaries**, not
+  libtest tests: `main_thread_stack`, `stdout_stall`, `monitor_stdout`,
+  `stdout_closed` (each `[[test]] harness = false` with its own `main()`);
+  the lib unit suite plus `foundations`, `boot`, `eligibility`, and
+  `mio_matrix` are the libtest-harness targets.
+- **Remaining roots are discovery-based and legitimate** (default
+  `tests/*.rs`); `tests/support/` is a private helper dir, never an
+  auto-discovered Cargo target. There is no catch-all, helper, or hook
+  framework.
+- **`fixtures boot` is a separate E2E-family selector.** `boundary phase1`
+  (native gate) never executes E2E and is not E2E qualification.
+- **Owner-local convention for `cfg(test)` suites.** Unit suites live
+  colocated at `src/<owner>/tests.rs` (or a dot-named variant such as
+  `dot_tests.rs`); genuine topic groups split into child
+  `src/<owner>/<mod>/tests/<topic>.rs` files declared by the parent. Storage
+  startup integration stays a colocated private seam
+  (`src/runtime/storage/startup_integration.rs`). `src/config/**` is the one
+  module owner using the substantial `*_config_tests.rs` named roots
+  (`cname_bailiwick_config_tests.rs`, `enforcement_config_tests.rs`,
+  `resolver_config_tests.rs`), all retained whole-file; the enforcement and
+  resolver paths are specifically frozen-spec-cited, and the third is a
+  legitimate private cfg(test) root.
+- **Small inline suites stay inline deliberately; group only genuine
+  cohesion.** Moving a suite between these forms MAY change qualified test
+  names — adding a topic child module introduces a prefix, while a same-name
+  `#[cfg(test)]` module externalization preserves the qualified prefix — so a
+  move records its name/identity mapping (renames where they occur, identity
+  preservation for same-module externalizations). Shared test-only helpers
+  live under `tests/support/` and are included via private `#[path]` modules —
+  no Cargo target, no production export.
+- **Topic grouping is partial today.** Only two suites have topic child
+  modules: `runtime/reactor/tests.rs` declares a `refusals` topic child
+  (`tests/refusals.rs`) and `dns/transport/tests.rs` declares a
+  `shared_armed_cache` topic child (`tests/shared_armed_cache.rs`), the rest
+  of their bulk staying in the parent file. `runtime/owner`, `dns/wire`, and
+  `log` are still whole-file suites with no topic children.
 
 ## Offline docs link checker
 

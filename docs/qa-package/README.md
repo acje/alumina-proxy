@@ -65,7 +65,7 @@ no daemon**. The wrapper
 change-scope classification + docs/unsafe/whitespace/audit — then the slow
 tier, which dispatches the mid union once and then fixtures), then probes the
 fixture-facts static/hash/freshness. The docs
-control runs once inside `boundary phase1` (the same `docslink_check` the
+control runs once inside `boundary phase1` (the same link/citation check the
 `docs` selector runs); the wrapper does not re-invoke it.
 Its convenience is **build ordering only** — it never provisions VMs,
 connections, or images (existing infrastructure remains prerequisite), and it
@@ -87,17 +87,18 @@ claim), and this repo never provisions VMs, connections or images.
   dispatch via the rootless podman connection, `--pull=never`, pinned
   builder image; requires `podman`, a reachable rootless podman connection and
   the pinned image present).
-- `mid full` — **Linux-only**; fail closed on any non-Linux host. Runs the
-  gate-only test surface (lib unit tests + the 6 integration binaries that run
-  in no other selector: eligibility, mio_matrix, main_thread_stack,
+- `mid full` — **Linux-only**; fail closed on any non-Linux host. Standalone
+  gate-only selector: runs the gate-only test surface (lib unit tests + the 6
+  gate-only integration binaries: eligibility, mio_matrix, main_thread_stack,
   monitor_stdout, stdout_stall, stdout_closed) witness-off then witness-on
   (`--features alloc-witness`, incl. the eligibility witness and the
-  alloc-witness-only mio_matrix binary); atest-only (no clippy/fmt).
-  foundations and boot are not re-run here — `mid union` already runs them in
-  the same BOUNDARY dispatch. On macOS it runs through `boundary phase1`
-  (Linux dispatch via the rootless podman connection, `--pull=never`,
-  pinned builder image; requires `podman`, a reachable rootless podman
-  connection and the pinned image present).
+  alloc-witness-only mio_matrix binary); atest-only (no clippy/fmt). Its
+  surface is subsumed by `mid union` (one Linux dispatch, lib + all eight
+  integration targets witness-off/on); `boundary phase1` dispatches union
+  alone, never `mid full`. On macOS `mid` selectors fail closed off-Linux — run
+  it only via a direct Linux `mid` dispatch (rootless podman connection,
+  `--pull=never`, pinned builder image; requires `podman`, a reachable
+  rootless podman connection and the pinned image present).
 - `fixtures boot` — **host Podman coordinator (Darwin allowed by source)**;
   requires existing rootless and rootful podman connections with the pinned
   builder image present on both (`--pull=never`),
@@ -127,9 +128,10 @@ claim), and this repo never provisions VMs, connections or images.
   compile-dominated dispatch. The slow tier (`boundary phase1-slow`) reads the
   scope marker (missing => full, fail-safe): on docs-only it emits an explicit
   `PHASE1-SLOW-SKIPPED-BY-DESIGN` and skips the MID; on full it dispatches the
-  Linux MID union once (foundations + boot command sets) and the Linux `mid
-  full` unfiltered full suite once (witness-off + witness-on), then fixtures,
-  identity AFTER/compare and artifact identity. The composed selector runs the
+  Linux MID union once (union covers the whole gate-only test surface — lib
+  plus all eight integration targets — witness-off then witness-on), then
+  fixtures, identity AFTER/compare and artifact identity. `mid full` is no
+  longer dispatched separately (`mid union` subsumes it). The composed selector runs the
   fast tier then the slow tier unless the scope is docs-only. Host
   tools required and fail closed when absent: `podman` + a reachable rootless
   podman connection;
@@ -138,7 +140,10 @@ claim), and this repo never provisions VMs, connections or images.
   `python3` (config-candidate observation); `cargo-audit` + `cargo-deny`.
   **Never invokes the e2e selectors**; exit-zero coordination is not release
   qualification.
-- `docs` (`verify.sh docs`) — offline link gate (canonical + moved/new roots): requires Node with
+- `docs` (`verify.sh docs`) — full offline docs gate, not just links:
+  link/fragment over the 5-root `DOCSLINK_ROOTS` (incl.
+  `docs/trust-telemetry-design.md`) + HTML structure + physical INTENDED +
+  cfg-parentage + unsafe surface + frozen-spec digest; requires Node with
   **`NODE_OPTIONS`/`NODE_PATH` unset** and `scripts/docs_check/check.mjs`
   present; runs no network.
 
