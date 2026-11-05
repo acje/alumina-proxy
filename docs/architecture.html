@@ -364,8 +364,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   IP-literal-shape predicate <code>is_ip_literal_shape</code> (<code>:30-34</code>).
   The DNS wire codec is a separate protocol scope, not unified with this policy:
   it applies its own independent 63-byte wire-label bound on query encoding
-  (<code>write_qname</code>, <code>src/dns/wire.rs:364-398</code>) and on response-name
-  reads inside <code>parse_response</code> (<code>src/dns/wire.rs:1064-1221</code>).
+  (<code>write_qname</code>, <code>src/dns/wire.rs:366-402</code>) and on response-name
+  reads inside <code>parse_response</code> (<code>src/dns/wire.rs:1083-1241</code>).
   The boundary adapters keep their intentional strictness — config <code>Fqdn</code>
   rejects uppercase labels and strips one trailing dot before its own
   payload reaches the shared <code>FixedHostname</code> normalizer as a no-op
@@ -539,7 +539,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         30–900 s; retry backoff [1,2,4,8,16,30]; generation-tagged cache with
         stale-publish rejection. Mutation of cache/schedule lives in the private
         <code>dns/publication</code> child, not <code>src/dns/wire.rs</code> itself.</td>
-        <td><code>src/dns/wire.rs:1064</code>, <code>:1227-1258</code>;
+        <td><code>src/dns/wire.rs:1083</code>, <code>:1246-1278</code>;
         <code>src/dns/publication.rs:17</code>; <code>src/dns/schedule.rs:16</code>, <code>:358-389</code>;
         <code>src/dns/cache.rs:50-62</code>, <code>:373-382</code></td></tr>
       <tr><th scope="row"><code>dns/outcome</code> (private child)</th>
@@ -555,14 +555,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/wire.rs</code> itself owns the observed-reply layer that feeds it —
         <code>ParsedReply</code>/<code>ObservedReply</code>,
         <code>classify_published</code>/<code>parse_reply</code>/<code>observe</code>/
-        <code>probe_facts</code>/<code>apply</code> — alongside the immutable
+        <code>probe_facts</code>/<code>apply</code>, which now carry the immutable
+        raw AD observation — alongside the immutable
         cache carriers (<code>Family</code>/<code>CacheError</code>/
         <code>MAX_ADDRESSES</code>) and schedule <code>Soa</code>.</td>
         <td><code>src/dns/publication.rs:17-104</code>;
-        <code>src/dns/wire.rs:9-14</code>, <code>:919-1049</code></td></tr>
+        <code>src/dns/wire.rs:9-14</code>, <code>:925-1067</code></td></tr>
       <tr><th scope="row"><code>name_rules</code> (private)</th>
         <td>Hostname-grammar byte rules common to the name carriers — the config and resolver <code>Fqdn</code> adapters each wrap the shared <code>FixedHostname</code> payload — : 253/63 bounds, four-variant label classifier, IP-literal-shape predicate; the DNS wire codec keeps its own label bound.</td>
-        <td><code>src/names/rules.rs:1-34</code>; <code>src/dns/wire.rs:364-398</code>, <code>:1064-1221</code></td></tr>
+        <td><code>src/names/rules.rs:1-34</code>; <code>src/dns/wire.rs:366-402</code>, <code>:1083-1241</code></td></tr>
       <tr><th scope="row"><code>hostname</code> (private child of <code>names</code>)</th>
         <td><code>FixedHostname</code> + <code>FQDN_MAX_LEN</code> alias: private
         <code>bytes</code>/<code>len</code> (<code>u8</code>), the
@@ -1176,11 +1177,12 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>map_schedule</code> error projection at <code>src/dns/publication.rs:99-104</code>),
   so a <code>DeadlineOverflow</code> leaves both resources untouched. Responses are
   matched on tid + question fields (qname + qtype + qclass)
-  (<code>src/dns/wire.rs:1079-1121</code>); QR/opcode/TC are validated from
+  (<code>src/dns/wire.rs:1098-1141</code>); QR/opcode/TC are validated from
   the response flags, and RCODE is classified or rejected — NOERROR/NXDOMAIN
-  are handled, every other RCODE is refused (<code>:1227-1258</code>) — so RCODE
+  are handled, every other RCODE is refused (<code>:1246-1278</code>) — so RCODE
   is validated, not a query-equality field; <code>DNAME</code> and trailing bytes
-  are rejected everywhere (<code>:1168</code>, <code>:1179</code>, <code>:1199</code>).</p>
+  are rejected everywhere (<code>:1187</code>, <code>:1198-1199</code>, <code>:1218-1219</code>,
+  trailing at <code>:1228-1229</code>).</p>
   <p>The startup integration fixtures drive the real startup path: each
   successful fixture builds its config through the
   <code>#[cfg(test)]</code>-only constructor that selects a loopback
@@ -1210,12 +1212,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <h3>5.4 Per-entry CNAME bailiwick</h3>
   <p>Each allowlist name derives its own bailiwick: itself plus only the CNAME
   suffixes it declared. Coverage is per-entry, so one entry’s declared suffixes
-  never widen a neighbour’s trust (<code>src/dns/wire.rs:827-893</code>), and
+  never widen a neighbour’s trust (<code>src/dns/wire.rs:830-896</code>, per-entry
+  coverage predicate at <code>:904-920</code>), and
   same-bare-name entries across ports must declare byte-identical suffix lists or
   boot fails with <code>DivergentCnameBailiwick</code>
   (<code>src/config/mod.rs:1036</code>). The flat union of declared suffixes is
   bounded by the fixed <code>ALLOWLIST_MAX</code> (32) slot bound, and overflow is
-  fail-stop (<code>src/dns/wire.rs:827-893</code>).</p>
+  fail-stop (<code>src/dns/wire.rs:830-896</code>).</p>
   <p><code>ServeStorage::boot</code> installs the exact validated per-entry
   bailiwick in its retained DNS owner before either startup path; the standalone
   legacy window also installs its own <code>Config</code> when entered. The boot
@@ -1264,35 +1267,44 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/dns/transport.rs:2842-2844</code>).</p>
   <p>The receive path turns one parsed reply into cache or probe state through
   an observer owned by <code>src/dns/wire.rs</code>: <code>ParsedReply</code> binds the
-  parsed <code>Outcome</code> to the extreme-TTL flag — a pure boolean copy of
-  the predicate, captured by that same successful parse
-  (<code>parse_reply</code>, <code>src/dns/wire.rs:965</code>; the struct at
-  <code>:951</code>), so no effect is counted at capture time.
+  parsed <code>Outcome</code> to the extreme-TTL flag and the raw header AD bit
+  — pure boolean copies of the TTL predicate and of the one asserted flag,
+  captured by that same successful parse (<code>parse_reply</code>,
+  <code>src/dns/wire.rs:969</code>; the struct at <code>:954</code>; the AD read at
+  <code>:979</code> from the <code>AD_FLAG</code> mask <code>:346</code>), so no effect is
+  counted at capture time. The query itself carries RD and AD with CD clear and
+  no EDNS/OPT record (<code>write_header</code>, <code>src/dns/wire.rs:348-360</code>), and
+  the AD bit is retained strictly as a raw observation of a fully validated
+  reply — never authentication of the resolver or DNS data — with no
+  admission, minimum, or log capability consuming it yet.
   <code>observe</code> then materialises a private borrowed view whose
   published-kind classification is computed once — at the receive call site, not
   as an API guarantee, since <code>observe</code> is a re-usable method
-  (<code>ObservedReply</code> <code>:1008</code>, <code>observe</code>
-  <code>:985</code>, <code>classify_published</code> <code>:936</code>,
-  <code>PublishedKind</code> <code>:923</code>). Only after a successful parse
+  (<code>ObservedReply</code> <code>:1024</code>, <code>observe</code>
+  <code>:991</code>, <code>classify_published</code> <code>:938</code>,
+  <code>PublishedKind</code> <code>:925</code>). The observed view exposes three
+  pure sensor facts from the same reply — the published kind, the extreme-TTL
+  flag, and the raw AD bit. Only after a successful parse
   and the existing deadline check does <code>step_recv</code> call
   <code>observe</code>: the receive path resets the frame cursors before the
-  match (<code>src/dns/transport.rs:2427-2428</code>), and a successful reply
+  match (<code>src/dns/transport.rs:2426-2427</code>), and a successful reply
   whose deadline has not expired is observed exactly once — after the deadline
   check and before both separate current-clock reads, the receipt read and the
   apply-time clock
   (<code>src/dns/transport.rs:2419-2484</code>: parse <code>:2419</code>, deadline
-  <code>:2431-2435</code>, <code>observe</code> <code>:2436</code>, receipt
-  <code>:2447</code>, apply-time clock <code>:2454</code>). A <code>Probe</code>
+  <code>:2430-2434</code>, <code>observe</code> <code>:2435</code>, receipt
+  <code>:2446</code>, apply-time clock <code>:2453</code>). A <code>Probe</code>
   exchange reads the pure sensor facts with no cache or schedule side effects
-  (<code>probe_facts</code>, <code>src/dns/wire.rs:1017</code>, called at
-  <code>src/dns/transport.rs:2438</code>), while a <code>Startup</code> or
+  (<code>probe_facts</code>, <code>src/dns/wire.rs:1036</code>, called at
+  <code>src/dns/transport.rs:2437</code>; the third pure sensor fact is the raw
+  AD bit, read with no side effects), while a <code>Startup</code> or
   <code>Serving</code> exchange applies the observed reply through
   <code>ObservedReply::apply</code>, whose body invokes the unchanged public
   <code>dns::apply_outcome</code> — which returns <code>OutcomeIncidents</code>
   only (<code>src/dns/publication.rs:17-25</code>) — and only when that call
   succeeds returns the cohesive <code>(PublishedKind, bool, OutcomeIncidents)</code>
   triple to the Root as <code>kind</code>/<code>extreme</code>/<code>incidents</code>
-  (<code>ObservedReply::apply</code>, <code>src/dns/wire.rs:1029-1047</code>; the
+  (<code>ObservedReply::apply</code>, <code>src/dns/wire.rs:1048-1067</code>; the
   re-export at <code>src/dns/mod.rs:3</code>). The Root reads the triple only on
   <code>Ok</code> at <code>src/dns/transport.rs:2448-2455</code> (a parse success
   alone does not reach the return), then folds the same effects into incident,
@@ -2471,7 +2483,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime/storage.rs:255</code>; <code>src/runtime/tunnel.rs:88-96</code>;
         <code>src/dns/transport.rs:1354</code></td></tr>
       <tr><th scope="row">Per-entry CNAME bailiwick</th>
-        <td><code>src/dns/wire.rs:827-893</code>; <code>src/config/mod.rs:1036</code></td></tr>
+        <td><code>src/dns/wire.rs:830-896</code>, <code>:904-920</code>; <code>src/config/mod.rs:1036</code></td></tr>
       <tr><th scope="row">Stage machine (10 variants vs 9-step path)</th>
         <td><code>src/runtime/reactor.rs:341-352</code></td></tr>
       <tr><th scope="row">CONNECT parse bounds &amp; bare-CR/LF</th>
@@ -2499,9 +2511,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/dns/incident_report.rs:14-15</code>, <code>:149-235</code>,
         <code>:299-304</code>; <code>src/runtime/storage.rs:458-510</code></td></tr>
       <tr><th scope="row">DNS parse / bailiwick / tid+question match / RCODE</th>
-        <td><code>src/dns/wire.rs:1064</code>, <code>:827-893</code>,
-        <code>:1079-1121</code>, <code>:1227-1258</code>;
-        <code>:1168</code>, <code>:1179</code>, <code>:1199</code></td></tr>
+        <td><code>src/dns/wire.rs:1083</code>, <code>:830-896</code>, <code>:904-920</code>,
+        <code>:1098-1141</code>, <code>:1246-1278</code>;
+        <code>:1187</code>, <code>:1198-1199</code>, <code>:1218-1219</code>, <code>:1228-1229</code></td></tr>
       <tr><th scope="row">Cache outcome application (private publication child)</th>
         <td><code>src/dns/publication.rs:17-104</code>;
         <code>src/dns/schedule.rs:358-389</code>, <code>:502-533</code>;

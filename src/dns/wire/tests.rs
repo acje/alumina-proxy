@@ -957,7 +957,7 @@ mod workspace {
         let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x1350, &high)
             .expect("high reply");
         let observed = reply.observe();
-        let (kind, extreme) = observed.probe_facts();
+        let (kind, extreme, _raw_ad_fact) = observed.probe_facts();
         assert_eq!(
             kind,
             classify_published(&reply.outcome),
@@ -992,6 +992,198 @@ mod workspace {
             "the borrowed observed view stays within the two-pointer budget: {} bytes",
             std::mem::size_of::<ObservedReply<'_>>()
         );
+    }
+}
+
+mod query_wire {
+    use super::*;
+
+    #[test]
+    fn query_sets_recursion_auth_flag_and_clear_checking_with_single_question() {
+        let mut buf = [0u8; 64];
+        let name = fqdn("sub.example.org");
+        let len = build_query(&name, Family::A, 0x2001, &mut buf).expect("query fits");
+        assert_eq!(len, HEADER_LEN + qname_bytes("sub.example.org").len() + 4);
+        assert_eq!(buf[2], 0x01, "RD=1 requested");
+        assert_eq!(buf[3], 0x20, "AD=1 requested with CD=0 and no error bits");
+        assert_eq!(u16::from_be_bytes([buf[4], buf[5]]), 1, "single question");
+        assert_eq!(
+            u16::from_be_bytes([buf[6], buf[7]]),
+            0,
+            "no answers requested"
+        );
+        assert_eq!(
+            u16::from_be_bytes([buf[8], buf[9]]),
+            0,
+            "no authority records"
+        );
+        assert_eq!(
+            u16::from_be_bytes([buf[10], buf[11]]),
+            0,
+            "no additional section carries no OPT record, so DO/EDNS is never requested"
+        );
+    }
+}
+
+mod raw_ad_fact {
+    use super::*;
+
+    fn ad_toggled(tid: u16, ad: bool) -> Vec<u8> {
+        let mut m = direct_a("sub.example.org", tid, [1, 2, 3, 4], 120);
+        if ad {
+            m[3] |= 0x20;
+        }
+        m
+    }
+
+    #[test]
+    fn validated_ad1_reply_retains_raw_ad_fact() {
+        let mut ws = ResponseWorkspace::default();
+        let reply = parse_reply_into(
+            &mut ws,
+            "sub.example.org",
+            Family::A,
+            0x3001,
+            &ad_toggled(0x3001, true),
+        )
+        .expect("validated AD1 reply");
+        assert!(
+            reply.raw_ad_fact(),
+            "a validated reply asserting AD=1 keeps the raw fact"
+        );
+        assert!(
+            reply.observe().probe_facts().2,
+            "the observed view carries the same raw fact"
+        );
+    }
+
+    #[test]
+    fn validated_ad0_reply_retains_raw_zero_ad_fact() {
+        let mut ws = ResponseWorkspace::default();
+        let reply = parse_reply_into(
+            &mut ws,
+            "sub.example.org",
+            Family::A,
+            0x3002,
+            &ad_toggled(0x3002, false),
+        )
+        .expect("validated AD0 reply");
+        assert!(
+            !reply.raw_ad_fact(),
+            "a validated reply without AD keeps the raw zero fact"
+        );
+        assert!(!reply.observe().probe_facts().2);
+    }
+
+    #[test]
+    fn ad_facts_stay_independent_across_workspace_reuse() {
+        let mut ws = ResponseWorkspace::default();
+        let ad1 = parse_reply_into(
+            &mut ws,
+            "sub.example.org",
+            Family::A,
+            0x3003,
+            &ad_toggled(0x3003, true),
+        )
+        .expect("AD1 reply");
+        let ad0 = parse_reply_into(
+            &mut ws,
+            "sub.example.org",
+            Family::A,
+            0x3004,
+            &ad_toggled(0x3004, false),
+        )
+        .expect("AD0 reply");
+        assert!(ad1.raw_ad_fact());
+        assert!(
+            !ad0.raw_ad_fact(),
+            "an owned reply keeps its own parse's AD fact after the workspace is reused"
+        );
+        let (kind1, extreme1, ad1_fact) = ad1.observe().probe_facts();
+        let (kind0, extreme0, ad0_fact) = ad0.observe().probe_facts();
+        assert_eq!(
+            kind1, kind0,
+            "the raw AD bit never changes the published-kind classification"
+        );
+        assert_eq!(extreme1, extreme0);
+        assert!(ad1_fact);
+        assert!(!ad0_fact);
+    }
+
+    #[test]
+    fn malformed_mismatched_and_incomplete_replies_never_yield_an_ad_fact() {
+        let mut ws = ResponseWorkspace::default();
+        let mut bad_tid = ad_toggled(0x3010, true);
+        bad_tid[0] = 0x55;
+        assert!(
+            matches!(
+                parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x3010, &bad_tid),
+                Err(DnsError::BadTid { .. })
+            ),
+            "a transaction-id mismatch never constructs a validated-reply wrapper"
+        );
+        let wrong_question = direct_a("other.example.org", 0x3011, [1, 2, 3, 4], 120);
+        assert!(
+            matches!(
+                parse_reply_into(
+                    &mut ws,
+                    "sub.example.org",
+                    Family::A,
+                    0x3011,
+                    &wrong_question
+                ),
+                Err(DnsError::QuestionMismatch)
+            ),
+            "a question mismatch never constructs a validated-reply wrapper"
+        );
+        let mut truncated = direct_a("sub.example.org", 0x3012, [1, 2, 3, 4], 120);
+        truncated[2] |= 0x02;
+        assert!(
+            matches!(
+                parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x3012, &truncated),
+                Err(DnsError::Truncated)
+            ),
+            "a truncated reply never constructs a validated-reply wrapper"
+        );
+        let mut trailing = ad_toggled(0x3013, true);
+        trailing.push(0);
+        assert!(
+            matches!(
+                parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x3013, &trailing),
+                Err(DnsError::TrailingBytes)
+            ),
+            "a malformed frame with trailing bytes never constructs a validated-reply wrapper"
+        );
+    }
+
+    #[test]
+    fn plain_ad1_is_a_raw_observation_that_never_changes_apply_authority() {
+        for ad in [true, false] {
+            let mut ws = ResponseWorkspace::default();
+            let reply = parse_reply_into(
+                &mut ws,
+                "sub.example.org",
+                Family::A,
+                0x3020,
+                &ad_toggled(0x3020, ad),
+            )
+            .expect("validated reply");
+            let observed = reply.observe();
+            let (kind, _extreme, fact) = observed.probe_facts();
+            assert_eq!(fact, ad);
+            assert_eq!(kind, PublishedKind::ResolvedPositive);
+            let mut cache = Cache::new(2).expect("cache");
+            let mut schedules = Schedules::new(2).expect("schedules");
+            let name = cache.name_index(0).expect("index");
+            let generation = cache.entry(name, Family::A).expect("entry").generation();
+            let (applied_kind, applied_extreme, _incidents) = observed
+                .apply(&mut cache, &mut schedules, 0, generation, 1000, 1000)
+                .expect("apply");
+            assert_eq!(applied_kind, PublishedKind::ResolvedPositive);
+            assert!(!applied_extreme);
+            let entry = cache.entry(name, Family::A).expect("entry");
+            assert_eq!(entry.deadlines(), (Some(1120), Some(1120 + 259_200)));
+        }
     }
 }
 

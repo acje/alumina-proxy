@@ -32,7 +32,7 @@ configuration, and time correct and prevents bypass.
 | --- | --- |
 | Proxy policy binding | Implemented — allowlisted CONNECT `name:port`, validated DNS-derived address eligibility, and SNI matching the approved name (`docs/alumina-proxy.md:59,88,255`) |
 | Resolver transport | Implemented — DNS over TCP only; strict-pinned DoT authenticates the resolver hop by SPKI/TLS-signature key possession (no CA chain needed), while an unpinned DoT entry validates against an empty root store and fails closed (`docs/alumina-proxy.md:107,113`) |
-| DNSSEC assurance | Planned, not implemented — queries are recursion-desired A/AAAA only and carry no DNSSEC-authentication dimension; cache admission runs on freshness and bounded stale-serving, never on authenticated proof (`docs/alumina-proxy.md:116,119-120`) |
+| DNSSEC assurance | Observation only, admission not implemented — existing A/AAAA queries now set the AD bit (RD set, CD clear, no DO/EDNS), and the raw response AD=0/1 flag is retained as an immutable per-reply observation only; cache admission still runs on freshness and bounded stale-serving, never on authenticated proof, and no authenticated-cache, admission, or log capability exists yet (`docs/alumina-proxy.md:116,119-120`) |
 | Endpoint & deployment | Client- and deployment-owned — the proxy relays opaque TLS and never authenticates the upstream server; client verification of the upstream server certificate and hostname (with the server verifying a client certificate only when mutual TLS is configured), correct clocks and anchors, and bypass-resistant deployment are operator responsibilities (`docs/alumina-proxy.md:55,90,287`) |
 
 None of the above is a claim that Alumina currently delivers the complete

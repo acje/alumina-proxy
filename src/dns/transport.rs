@@ -2434,7 +2434,7 @@ impl StartupDns {
                     }
                     let observed = reply.observe();
                     if ex.class == ExchangeClass::Probe {
-                        let (kind, extreme) = observed.probe_facts();
+                        let (kind, extreme, _raw_ad_fact) = observed.probe_facts();
                         if extreme {
                             self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
                         }

@@ -342,14 +342,17 @@ const fn family_qtype(family: Family) -> u16 {
 
 const HEADER_LEN: usize = 12;
 
+const RD_FLAG: u8 = 0x01;
+const AD_FLAG: u8 = 0x20;
+
 fn write_header(buf: &mut [u8], tid: u16) -> Result<(), DnsError> {
     if buf.len() < HEADER_LEN {
         return Err(DnsError::BufferExhausted);
     }
     buf[0] = (tid >> 8) as u8;
     buf[1] = (tid & 0xff) as u8;
-    buf[2] = 0x01;
-    buf[3] = 0x00;
+    buf[2] = RD_FLAG;
+    buf[3] = AD_FLAG;
     buf[4] = 0x00;
     buf[5] = 0x01;
     buf[6..12].fill(0);
@@ -944,19 +947,21 @@ pub(crate) fn classify_published(outcome: &Outcome) -> PublishedKind {
     }
 }
 
-/// The validated outcome of one response parse bound to the extreme-TTL
-/// flag captured from that same successful parse, owned by the receiver so a
-/// later reuse of the parse workspace cannot repurpose the observation.
+/// The validated outcome of one response parse bound to the extreme-TTL flag
+/// and the raw header AD bit captured from that same successful parse, owned by
+/// the receiver so a later reuse of the parse workspace cannot repurpose the
+/// observation.
 pub(crate) struct ParsedReply {
     outcome: Outcome,
     extreme_ttl: bool,
+    ad: bool,
 }
 
 impl ParsedReply {
     /// Parses a response through the unchanged public [`parse_response`],
-    /// binding the extreme-TTL observation from that same successful parse;
-    /// on error no [`ParsedReply`] exists and the workspace flag is left as
-    /// the parse left it.
+    /// binding the extreme-TTL observation and the raw AD flag from that same
+    /// successful parse; on error no [`ParsedReply`] exists and the workspace
+    /// flag is left as the parse left it.
     ///
     /// # Errors
     ///
@@ -971,21 +976,24 @@ impl ParsedReply {
     ) -> Result<ParsedReply, DnsError> {
         let outcome = parse_response(ws, zones, fqdn, family, tid, msg)?;
         let extreme_ttl = ws.extreme_ttl();
+        let ad = msg.get(3).is_some_and(|b| b & AD_FLAG != 0);
         Ok(ParsedReply {
             outcome,
             extreme_ttl,
+            ad,
         })
     }
 
     /// Observes this reply into a private borrowed view: the published-kind
-    /// classification is computed exactly once here and the extreme-TTL flag is
-    /// bound from the same reply, so the receive path reads one consistent fact
-    /// set for the whole exchange.
+    /// classification is computed exactly once here and the extreme-TTL flag and
+    /// raw AD observation are bound from the same reply, so the receive path
+    /// reads one consistent fact set for the whole exchange.
     pub(crate) fn observe(&self) -> ObservedReply<'_> {
         ObservedReply {
             outcome: &self.outcome,
             kind: classify_published(&self.outcome),
             extreme: self.extreme_ttl,
+            ad: self.ad,
         }
     }
 
@@ -997,24 +1005,36 @@ impl ParsedReply {
     pub(crate) const fn extreme_ttl(&self) -> bool {
         self.extreme_ttl
     }
+
+    /// The raw AD wire assertion from the same validated parse. It is a raw
+    /// observation of one bit in a fully validated reply, never authentication
+    /// of the resolver or DNS data.
+    #[cfg(test)]
+    pub(crate) const fn raw_ad_fact(&self) -> bool {
+        self.ad
+    }
 }
 
 /// A private borrowed view over a local [`ParsedReply`] created by
-/// [`ParsedReply::observe`]: the published-kind classification and the
-/// extreme-TTL flag are captured at observe time so the receive path reads one
-/// consistent observation. The borrow is bounded to the local reply value and
-/// is never stored on the receiver, the cache, or a schedule.
+/// [`ParsedReply::observe`]: the published-kind classification, the
+/// extreme-TTL flag, and the raw AD observation are captured at observe time
+/// so the receive path reads one consistent observation. The borrow is bounded
+/// to the local reply value and is never stored on the receiver, the cache, or
+/// a schedule.
 pub(crate) struct ObservedReply<'a> {
     outcome: &'a Outcome,
     kind: PublishedKind,
     extreme: bool,
+    ad: bool,
 }
 
 impl<'a> ObservedReply<'a> {
-    /// The pure probe-sensor facts of the observed reply — the published kind
-    /// and the extreme-TTL flag — with no cache or schedule side effects.
-    pub(crate) const fn probe_facts(&self) -> (PublishedKind, bool) {
-        (self.kind, self.extreme)
+    /// The pure probe-sensor facts of the observed reply — the published kind,
+    /// the extreme-TTL flag, and the raw header AD bit — with no cache or
+    /// schedule side effects. The AD element is a raw assertion of one bit in
+    /// the validated reply, never authentication of the resolver or DNS data.
+    pub(crate) const fn probe_facts(&self) -> (PublishedKind, bool, bool) {
+        (self.kind, self.extreme, self.ad)
     }
 
     /// Applies the observed reply through the unchanged public
