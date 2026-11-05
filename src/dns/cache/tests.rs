@@ -936,3 +936,227 @@ fn cache_zero_heap_on_error_paths() {
         "cache error paths must not allocate: {counts:?}"
     );
 }
+
+mod evidence_value {
+    use super::evidence::{Evidence, EvidenceError, ProofClass, ResolverSource};
+
+    fn v4e(ad: bool, origin: bool, qualified: bool, ttl: Option<u32>, start: u64) -> Evidence {
+        Evidence::new(
+            ad,
+            origin,
+            qualified,
+            ResolverSource::index(0).unwrap(),
+            ttl,
+            start,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn class_plain_ad_never_authenticates() {
+        assert_eq!(
+            v4e(true, false, false, Some(60), 10).class(),
+            ProofClass::Trusted
+        );
+        assert_eq!(
+            v4e(true, false, true, Some(60), 10).class(),
+            ProofClass::Trusted
+        );
+    }
+
+    #[test]
+    fn class_authenticated_combinations() {
+        assert_eq!(
+            v4e(true, true, false, Some(60), 10).class(),
+            ProofClass::Authenticated
+        );
+        assert_eq!(
+            v4e(false, true, true, Some(60), 10).class(),
+            ProofClass::Authenticated
+        );
+        assert_eq!(
+            v4e(true, true, true, Some(60), 10).class(),
+            ProofClass::Delegated
+        );
+        // Unqualified AD=0 is still an authenticated origin, never plain.
+        assert_eq!(
+            v4e(false, true, false, Some(60), 10).class(),
+            ProofClass::Authenticated
+        );
+    }
+
+    #[test]
+    fn authenticated_unqualified_ad0_is_at_least_authenticated() {
+        let e = v4e(false, true, false, Some(60), 1_000);
+        assert_eq!(e.class(), ProofClass::Authenticated);
+        assert_eq!(e.active_class(1_030), Some(ProofClass::Authenticated));
+    }
+
+    #[test]
+    fn deadline_anchors_at_query_start_and_caps() {
+        assert_eq!(
+            v4e(false, true, false, Some(60), 1_000).evidential_deadline(),
+            Some(1_060)
+        );
+        assert_eq!(
+            v4e(false, true, false, Some(200_000), 1_000).evidential_deadline(),
+            Some(1_000 + 86_400)
+        );
+        assert_eq!(
+            v4e(false, true, false, Some(0), 1_000).evidential_deadline(),
+            Some(1_000)
+        );
+        assert_eq!(
+            v4e(false, true, false, None, 1_000).evidential_deadline(),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_ttl_distinct_from_explicit_zero() {
+        let unknown = v4e(true, true, false, None, 1_000);
+        let zero = v4e(true, true, false, Some(0), 1_000);
+        assert_eq!(unknown.raw_supporting_ttl(), None);
+        assert_eq!(zero.raw_supporting_ttl(), Some(0));
+        assert_ne!(unknown, zero);
+        assert_eq!(unknown.active_class(2_000), None);
+        assert_eq!(zero.active_class(2_000), None);
+    }
+
+    #[test]
+    fn active_class_requires_unexpired_authenticated_lease() {
+        let auth = v4e(true, true, false, Some(60), 1_000);
+        assert_eq!(auth.active_class(1_030), Some(ProofClass::Authenticated));
+        assert_eq!(auth.active_class(1_060), None);
+        assert_eq!(auth.active_class(2_000), None);
+        let accredited = v4e(false, true, true, Some(60), 1_000);
+        assert_eq!(
+            accredited.active_class(1_030),
+            Some(ProofClass::Authenticated)
+        );
+        let delegated = v4e(true, true, true, Some(60), 1_000);
+        assert_eq!(delegated.active_class(1_030), Some(ProofClass::Delegated));
+    }
+
+    #[test]
+    fn active_class_never_before_query_start() {
+        // now below the query-start floor is never active even inside the
+        // upper deadline.
+        let delegated = v4e(true, true, true, Some(60), 1_000);
+        assert_eq!(delegated.evidential_deadline(), Some(1_060));
+        assert_eq!(delegated.active_class(999), None);
+        assert_eq!(delegated.active_class(1_000), Some(ProofClass::Delegated));
+    }
+
+    #[test]
+    fn active_class_absent_without_reusable_lease() {
+        assert_eq!(
+            v4e(true, true, false, None, 1_000).active_class(1_030),
+            None
+        );
+        // Explicit-zero TTL: deadline == query-start floor, so the lease has
+        // already arrived the instant it begins — never authenticates, even
+        // with the start in the past (now > deadline).
+        assert_eq!(
+            v4e(true, true, false, Some(0), 1_000).active_class(1_000),
+            None
+        );
+        assert_eq!(
+            v4e(true, true, false, Some(0), 1_000).active_class(2_000),
+            None
+        );
+        // Plain AD=1 never authenticates.
+        assert_eq!(
+            v4e(true, false, false, Some(60), 1_000).active_class(1_030),
+            None
+        );
+    }
+
+    #[test]
+    fn deadline_overflow_refuses() {
+        assert_eq!(
+            Evidence::new(
+                false,
+                true,
+                false,
+                ResolverSource::index(0).unwrap(),
+                Some(60),
+                u64::MAX,
+            )
+            .err(),
+            Some(EvidenceError::DeadlineOverflow)
+        );
+        assert_eq!(
+            Evidence::new(
+                false,
+                true,
+                false,
+                ResolverSource::index(0).unwrap(),
+                None,
+                u64::MAX,
+            )
+            .map(Evidence::evidential_deadline),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn source_index_bounded_and_unknown_explicit() {
+        assert!(ResolverSource::index(0).is_some());
+        assert!(ResolverSource::index(4).is_some());
+        assert_eq!(ResolverSource::index(5), None);
+        assert_eq!(ResolverSource::index(u8::MAX), None);
+        assert_eq!(ResolverSource::UNKNOWN.get(), None);
+        assert_eq!(ResolverSource::index(2).unwrap().get(), Some(2));
+    }
+
+    #[test]
+    fn raw_facts_retained_losslessly() {
+        let e = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(3).unwrap(),
+            Some(7),
+            5,
+        )
+        .unwrap();
+        assert!(e.raw_ad());
+        assert!(e.origin_authenticated());
+        assert!(e.qualified());
+        assert_eq!(e.source(), ResolverSource::index(3).unwrap());
+        assert_eq!(e.raw_supporting_ttl(), Some(7));
+        assert_eq!(e.class(), ProofClass::Delegated);
+        assert_eq!(e.active_class(11), Some(ProofClass::Delegated));
+        assert_eq!(e.active_class(12), None);
+    }
+
+    #[test]
+    fn authenticated_origin_requires_attributable_source() {
+        assert_eq!(
+            Evidence::new(true, true, false, ResolverSource::UNKNOWN, Some(60), 1_000).err(),
+            Some(EvidenceError::AuthenticatedWithoutSource)
+        );
+        assert_eq!(
+            Evidence::new(true, true, true, ResolverSource::UNKNOWN, Some(60), 1_000).err(),
+            Some(EvidenceError::AuthenticatedWithoutSource)
+        );
+        assert!(Evidence::new(true, true, false, ResolverSource::UNKNOWN, None, 1_000).is_err());
+        // An attributable source satisfies an authenticated origin; plain
+        // origins may remain unknown.
+        assert!(
+            Evidence::new(
+                true,
+                true,
+                false,
+                ResolverSource::index(0).unwrap(),
+                Some(60),
+                1_000
+            )
+            .is_ok()
+        );
+        assert!(
+            Evidence::new(true, false, false, ResolverSource::UNKNOWN, Some(60), 1_000).is_ok()
+        );
+    }
+}

@@ -477,3 +477,191 @@ impl Cache {
 
 #[cfg(test)]
 mod tests;
+
+pub mod evidence {
+    #![cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "temporary lossless origin/source/TTL evidence staging until generation-bound cache publication"
+        )
+    )]
+
+    use super::TTL_CAP;
+    use crate::dns::resolver::MAX_RESOLVERS;
+
+    /// Historical proof class derived from the raw reply facts, independent of
+    /// the clock and of address usability. A plain (unauthenticated-origin)
+    /// reply is never authenticated. Every authenticated-origin reply is at
+    /// least authenticated; only a qualified deployment with the AD bit set
+    /// is delegated.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ProofClass {
+        /// No authenticated assurance: `resolver_trusted` fallback.
+        Trusted,
+        /// Authenticated-origin `resolver_authenticated` assurance.
+        Authenticated,
+        /// Qualified, authenticated, AD-set `delegated_dnssec` evidence.
+        Delegated,
+    }
+
+    impl ProofClass {
+        const fn classify(origin_authenticated: bool, qualified: bool, ad: bool) -> ProofClass {
+            match (origin_authenticated, qualified, ad) {
+                (false, _, _) => ProofClass::Trusted,
+                (true, true, true) => ProofClass::Delegated,
+                (true, _, _) => ProofClass::Authenticated,
+            }
+        }
+    }
+
+    /// The upstream resolver identity that produced the reply: one of the
+    /// existing resolver-selection indices (`0..MAX_RESOLVERS`) or an explicit
+    /// unknown. Out-of-range indices are rejected, never silently truncated.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ResolverSource(Option<u8>);
+
+    impl ResolverSource {
+        /// An explicit unknown origin when no resolver identity is attributable.
+        pub const UNKNOWN: ResolverSource = ResolverSource(None);
+
+        /// Bounds a resolver index to the existing selection; `None` outside it.
+        pub const fn index(index: u8) -> Option<ResolverSource> {
+            if (index as usize) < MAX_RESOLVERS {
+                Some(ResolverSource(Some(index)))
+            } else {
+                None
+            }
+        }
+
+        /// The resolver index, or `None` when the origin is unknown.
+        pub const fn get(self) -> Option<u8> {
+            self.0
+        }
+    }
+
+    /// A checked construction refusal; the resulting value would be invalid.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum EvidenceError {
+        /// `query_start + capped_raw_supporting_ttl` overflowed `u64`.
+        DeadlineOverflow,
+        /// An authenticated-origin reply had no attributable resolver source.
+        AuthenticatedWithoutSource,
+    }
+
+    /// Lossless immutable reply evidence. Retains raw AD, the authenticated-origin
+    /// fact (the trusted owner's already-established strict-pin TLS identity/key
+    /// possession, never inferred from a configured pin or AD), the qualification
+    /// deployment condition, the source identity, and the raw supporting TTL
+    /// (`None` for unknown differs from `Some(0)` for explicit zero). The
+    /// historical `class()` is separate from clock-relative `active_class(now)`
+    /// bounded below by the query-start floor.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Evidence {
+        raw_ad: bool,
+        origin_authenticated: bool,
+        qualified: bool,
+        source: ResolverSource,
+        raw_supporting_ttl: Option<u32>,
+        evidential_start: u64,
+        evidential_deadline: Option<u64>,
+    }
+
+    impl Evidence {
+        /// Builds evidence from the raw reply facts. `origin_authenticated`
+        /// must already be the completed strict-pin TLS identity fact, and
+        /// `qualified` the external trusted deployment condition; neither is
+        /// derived here. The evidential floor anchors at `query_start`
+        /// (genuine owner input) and the deadline at that floor plus the raw
+        /// supporting TTL capped to `TTL_CAP`; a `None` or `Some(0)` TTL
+        /// yields no reusable lease.
+        ///
+        /// # Errors
+        ///
+        /// Returns `DeadlineOverflow` when `query_start + capped_ttl`
+        /// overflows `u64`; no evidence is produced. Returns
+        /// `AuthenticatedWithoutSource` when `origin_authenticated` is set
+        /// without an attributable resolver source; no evidence is produced.
+        pub const fn new(
+            raw_ad: bool,
+            origin_authenticated: bool,
+            qualified: bool,
+            source: ResolverSource,
+            raw_supporting_ttl: Option<u32>,
+            query_start: u64,
+        ) -> Result<Evidence, EvidenceError> {
+            if origin_authenticated && matches!(source, ResolverSource::UNKNOWN) {
+                return Err(EvidenceError::AuthenticatedWithoutSource);
+            }
+            let evidential_deadline = match raw_supporting_ttl {
+                None => None,
+                Some(ttl) => {
+                    let raw = ttl as u64;
+                    let capped = if raw < TTL_CAP { raw } else { TTL_CAP };
+                    match query_start.checked_add(capped) {
+                        Some(deadline) => Some(deadline),
+                        None => return Err(EvidenceError::DeadlineOverflow),
+                    }
+                }
+            };
+            Ok(Evidence {
+                raw_ad,
+                origin_authenticated,
+                qualified,
+                source,
+                raw_supporting_ttl,
+                evidential_start: query_start,
+                evidential_deadline,
+            })
+        }
+
+        /// The raw AD bit, retained independently of the derived class.
+        pub const fn raw_ad(self) -> bool {
+            self.raw_ad
+        }
+
+        /// The already-established authenticated-origin fact.
+        pub const fn origin_authenticated(self) -> bool {
+            self.origin_authenticated
+        }
+
+        /// The external qualified-deployment condition.
+        pub const fn qualified(self) -> bool {
+            self.qualified
+        }
+
+        /// The bounded resolver origin/source identity.
+        pub const fn source(self) -> ResolverSource {
+            self.source
+        }
+
+        /// The raw supporting TTL: `None` (unknown) distinct from `Some(0)`.
+        pub const fn raw_supporting_ttl(self) -> Option<u32> {
+            self.raw_supporting_ttl
+        }
+
+        /// The checked evidential deadline, `None` when no reusable lease exists.
+        pub const fn evidential_deadline(self) -> Option<u64> {
+            self.evidential_deadline
+        }
+
+        /// The historical proof class, always available from the raw facts.
+        pub const fn class(self) -> ProofClass {
+            ProofClass::classify(self.origin_authenticated, self.qualified, self.raw_ad)
+        }
+
+        /// Established authenticated assurance at `now`: only an
+        /// authenticated/delegated class inside its checked deadline and not
+        /// before its query-start floor. Not-yet-begun, expired, unknown,
+        /// zero-TTL, and trusted-class evidence never authenticates.
+        pub const fn active_class(self, now: u64) -> Option<ProofClass> {
+            match self.class() {
+                ProofClass::Trusted => None,
+                class => match self.evidential_deadline {
+                    Some(deadline) if now >= self.evidential_start && now < deadline => Some(class),
+                    Some(_) | None => None,
+                },
+            }
+        }
+    }
+}

@@ -538,7 +538,23 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>DNS parse + bailiwick; refresh on a nonzero positive TTL clamped to
         5–900 s, zero TTL at 1 s (no stale serving), validated negative SOA
         30–900 s; retry backoff [1,2,4,8,16,30]; generation-tagged cache with
-        stale-publish rejection. Mutation of cache/schedule lives in the private
+        stale-publish rejection. An appended crate-private evidence type
+        (<code>src/dns/cache.rs:481-667</code>) stages losslessly retained
+        raw AD, bounded resolver source, and raw supporting TTL
+        (<code>None</code> distinct from <code>Some(0)</code>) beside private
+        fields that, as constructor inputs, record the trusted owner's
+        already-established strict-pin TLS key/identity authenticated-origin
+        fact and the external qualified-deployment condition — recorded, not
+        verified, against crypto, config pin, or AD. Its historical proof
+        class maps a plain origin to <code>trusted</code>, every
+        authenticated origin to at least <code>authenticated</code>, and an
+        authenticated, qualified, AD-set reply to <code>delegated</code>;
+        reusable authentication needs the clock inside the
+        <code>evidential_start..deadline</code> window of a checked,
+        <code>TTL_CAP</code>-capped deadline
+        (<code>src/dns/cache.rs:657-665</code>). No production cache, proof
+        publication, policy, admission, or log consumer uses it yet. Mutation
+        of cache/schedule lives in the private
         <code>dns/publication</code> child, not <code>src/dns/wire.rs</code> itself.</td>
         <td><code>src/dns/wire.rs:1164</code>, <code>:1331-1367</code>;
         <code>src/dns/publication.rs:17</code>; <code>src/dns/schedule.rs:16</code>, <code>:358-389</code>;
