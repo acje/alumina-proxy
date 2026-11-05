@@ -1160,3 +1160,254 @@ mod evidence_value {
         );
     }
 }
+
+mod cache_evidence_integration {
+    use super::evidence::{Evidence, ProofClass, ResolverSource};
+    use super::*;
+
+    fn mk_ev(ad: bool, origin: bool, qualified: bool, ttl: Option<u32>, start: u64) -> Evidence {
+        Evidence::new(
+            ad,
+            origin,
+            qualified,
+            ResolverSource::index(0).unwrap(),
+            ttl,
+            start,
+        )
+        .unwrap()
+    }
+
+    fn publish_ev(
+        cache: &mut Cache,
+        name: NameIndex,
+        tag: Generation,
+        addrs: &[NumericAddr],
+        receipt: u64,
+        ttl: u64,
+        ev: Option<Evidence>,
+    ) -> Result<(), CacheError> {
+        let staged =
+            StagedPositive::stage_with_evidence(name, Family::A, tag, addrs, receipt, ttl, ev)
+                .unwrap();
+        cache.publish_positive(&staged)
+    }
+
+    #[test]
+    fn legacy_stage_defaults_none_and_replacement_clears_evidence() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        let delegated = mk_ev(true, true, true, Some(60), 1_000);
+        publish_ev(
+            &mut cache,
+            name,
+            Generation::INITIAL,
+            &[pub_addr()],
+            1_001,
+            60,
+            Some(delegated),
+        )
+        .unwrap();
+        let entry = read(&cache, name, Family::A);
+        assert_eq!(
+            entry.evidence(),
+            Some(delegated),
+            "evidence stored atomically"
+        );
+        assert_eq!(
+            entry.effective_projection(1_030),
+            Some(ProofClass::Delegated)
+        );
+        let tag = current_gen(&cache, name, Family::A);
+        publish_simple(&mut cache, name, Family::A, tag, &[pub_addr()], 1_100, 60);
+        let entry = read(&cache, name, Family::A);
+        assert_eq!(
+            entry.evidence(),
+            None,
+            "legacy replacement clears old evidence"
+        );
+        assert_eq!(entry.effective_projection(1_130), Some(ProofClass::Trusted));
+    }
+
+    #[test]
+    fn eligible_zero_evidence_projects_class_regardless_of_address_usability() {
+        let cases = [
+            (
+                "valid delegated",
+                true,
+                true,
+                true,
+                1_000,
+                Some(60),
+                1_030,
+                Some(ProofClass::Delegated),
+            ),
+            (
+                "plain trusted",
+                false,
+                false,
+                false,
+                1_000,
+                Some(60),
+                1_030,
+                Some(ProofClass::Trusted),
+            ),
+            ("expired", true, true, true, 1_000, Some(60), 1_060, None),
+        ];
+        for (label, origin, qualified, ad, start, ttl, now, expected) in cases {
+            let mut cache = Cache::new(1).unwrap();
+            let name = NameIndex(0);
+            let ev = mk_ev(ad, origin, qualified, ttl, start);
+            publish_ev(
+                &mut cache,
+                name,
+                Generation::INITIAL,
+                &[priv_addr()],
+                1_001,
+                60,
+                Some(ev),
+            )
+            .unwrap();
+            let entry = read(&cache, name, Family::A);
+            assert!(entry.is_empty(), "{label}: no eligible candidate survives");
+            assert_eq!(
+                entry.evidence(),
+                Some(ev),
+                "{label}: evidence stored regardless of usability"
+            );
+            assert_eq!(entry.effective_projection(now), expected, "{label}");
+        }
+        let cache = Cache::new(1).unwrap();
+        assert_eq!(
+            cache
+                .entry(NameIndex(0), Family::A)
+                .unwrap()
+                .effective_projection(1_030),
+            None,
+            "truly empty/unattempted projects nothing"
+        );
+    }
+
+    #[test]
+    fn expired_evidence_falls_back_to_ordinary_trusted_while_servable() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        let delegated = mk_ev(true, true, true, Some(60), 1_000);
+        publish_ev(
+            &mut cache,
+            name,
+            Generation::INITIAL,
+            &[pub_addr()],
+            1_001,
+            60,
+            Some(delegated),
+        )
+        .unwrap();
+        let entry = read(&cache, name, Family::A);
+        assert_eq!(
+            entry.effective_projection(1_030),
+            Some(ProofClass::Delegated)
+        );
+        assert_eq!(
+            entry.effective_projection(1_059),
+            Some(ProofClass::Delegated)
+        );
+        assert!(entry.servable(1_060), "binding outlives the evidence lease");
+        assert_eq!(
+            entry.effective_projection(1_060),
+            Some(ProofClass::Trusted),
+            "expired proof on a still-servable positive keeps the ordinary baseline"
+        );
+        let (_, retirement) = entry.deadlines();
+        let retirement = retirement.expect("positive entry carries a retirement deadline");
+        assert_eq!(
+            entry.effective_projection(retirement),
+            None,
+            "a retired positive projects nothing"
+        );
+    }
+
+    #[test]
+    fn evidence_must_match_answer_ttl_and_refusals_preserve_the_entry() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        publish_simple(
+            &mut cache,
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[pub_addr()],
+            1_000,
+            60,
+        );
+        let saved = read(&cache, name, Family::A);
+        let saved_gen = current_gen(&cache, name, Family::A);
+
+        let mismatched = mk_ev(true, true, true, Some(60), 1_000);
+        assert_eq!(
+            publish_ev(
+                &mut cache,
+                name,
+                saved_gen,
+                &[pub_addr()],
+                1_001,
+                300,
+                Some(mismatched),
+            ),
+            Err(CacheError::EvidenceInconsistent),
+            "evidence supporting TTL must exactly equal the answer TTL"
+        );
+        assert_eq!(read(&cache, name, Family::A), saved, "entry preserved");
+        assert_eq!(current_gen(&cache, name, Family::A), saved_gen);
+
+        let untimed = mk_ev(false, false, false, None, 1_000);
+        assert_eq!(
+            publish_ev(
+                &mut cache,
+                name,
+                saved_gen,
+                &[pub_addr()],
+                1_001,
+                60,
+                Some(untimed),
+            ),
+            Err(CacheError::EvidenceInconsistent),
+            "positive evidence always carries its supporting TTL"
+        );
+        assert_eq!(read(&cache, name, Family::A), saved, "entry preserved");
+        assert_eq!(current_gen(&cache, name, Family::A), saved_gen);
+
+        let one = mk_ev(true, true, true, Some(1), 1_000);
+        assert_eq!(
+            publish_ev(
+                &mut cache,
+                name,
+                saved_gen,
+                &[pub_addr()],
+                1_001,
+                0,
+                Some(one),
+            ),
+            Err(CacheError::EvidenceInconsistent),
+            "a zero-TTL answer cannot carry a one-second evidence"
+        );
+        assert_eq!(read(&cache, name, Family::A), saved, "entry preserved");
+        assert_eq!(current_gen(&cache, name, Family::A), saved_gen);
+
+        let late_floor = mk_ev(true, true, true, Some(60), 1_200);
+        assert_eq!(
+            publish_ev(
+                &mut cache,
+                name,
+                saved_gen,
+                &[pub_addr()],
+                1_000,
+                60,
+                Some(late_floor),
+            ),
+            Err(CacheError::EvidenceInconsistent),
+            "the query floor may not follow the receipt"
+        );
+        assert_eq!(read(&cache, name, Family::A), saved, "entry preserved");
+        assert_eq!(current_gen(&cache, name, Family::A), saved_gen);
+    }
+}

@@ -94,6 +94,9 @@ pub struct Entry {
     /// from the earliest supporting TTL: a zero-TTL entry is never served
     /// stale (F-10).
     stale_allowed: bool,
+    /// Optional immutable reply evidence, stored atomically with the
+    /// bindings; legacy publishes leave this `None`.
+    evidence: Option<evidence::Evidence>,
 }
 
 impl Entry {
@@ -104,6 +107,7 @@ impl Entry {
         bindings: [UNUSED_SLOT; MAX_ADDRESSES],
         binding_len: 0,
         stale_allowed: false,
+        evidence: None,
     };
 
     #[must_use]
@@ -167,6 +171,33 @@ impl Entry {
     pub const fn stale_allowed(&self) -> bool {
         self.stale_allowed
     }
+
+    /// The immutable reply evidence stored with this entry, `None` for legacy
+    /// or currently unevidenced positives.
+    #[must_use]
+    pub const fn evidence(&self) -> Option<evidence::Evidence> {
+        self.evidence
+    }
+
+    /// The effective proof class for serving at `now`: a stored evidence
+    /// projects its own class whenever it is valid at `now`, independent of
+    /// address usability (candidate eligibility or servability); a positive
+    /// without a currently valid evidence class projects at most ordinary
+    /// trusted while its binding stays servable and nothing otherwise, so an
+    /// expired proof on a still-servable positive keeps the ordinary baseline
+    /// instead of vanishing.
+    #[must_use]
+    pub const fn effective_projection(&self, now: u64) -> Option<evidence::ProofClass> {
+        let valid = match self.evidence {
+            Some(ev) => ev.valid_class(now),
+            None => None,
+        };
+        match valid {
+            Some(class) => Some(class),
+            None if self.servable(now) => Some(evidence::ProofClass::Trusted),
+            None => None,
+        }
+    }
 }
 
 const fn empty_with_generation(generation: Generation) -> Entry {
@@ -186,6 +217,7 @@ pub struct StagedPositive {
     binding_len: u8,
     receipt: u64,
     ttl: u64,
+    evidence: Option<evidence::Evidence>,
 }
 
 impl StagedPositive {
@@ -194,7 +226,28 @@ impl StagedPositive {
     /// The route is crate-private, reserved for the validated DNS outcome
     /// adapter of a later increment. Cross-family and capacity membership are
     /// runtime-validated here; configured-range membership is enforced at
-    /// publication time by the admitting cache.
+    /// publication time by the admitting cache. Defaults to carrying no
+    /// evidence; [`StagedPositive::stage_with_evidence`] binds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BindingCapacityExceeded` when `bindings` exceeds
+    /// `MAX_ADDRESSES` (never truncating), or `FamilyMismatch` when a binding
+    /// does not match `family`.
+    pub(crate) fn stage(
+        name: NameIndex,
+        family: Family,
+        generation: Generation,
+        bindings: &[NumericAddr],
+        receipt: u64,
+        ttl: u64,
+    ) -> Result<StagedPositive, CacheError> {
+        Self::stage_with_evidence(name, family, generation, bindings, receipt, ttl, None)
+    }
+
+    /// Stages a validated positive carrying immutable reply `evidence`, bound
+    /// atomically with the bindings at publication. There is no detached
+    /// setter: evidence is fixed at construction.
     ///
     /// # Errors
     ///
@@ -205,13 +258,14 @@ impl StagedPositive {
         clippy::expect_used,
         reason = "binding count is checked against MAX_ADDRESSES=16, which fits u8"
     )]
-    pub(crate) fn stage(
+    pub(crate) fn stage_with_evidence(
         name: NameIndex,
         family: Family,
         generation: Generation,
         bindings: &[NumericAddr],
         receipt: u64,
         ttl: u64,
+        evidence: Option<evidence::Evidence>,
     ) -> Result<StagedPositive, CacheError> {
         if bindings.len() > MAX_ADDRESSES {
             return Err(CacheError::BindingCapacityExceeded);
@@ -235,6 +289,7 @@ impl StagedPositive {
                 .expect("binding count bounded by MAX_ADDRESSES"),
             receipt,
             ttl,
+            evidence,
         })
     }
 }
@@ -248,6 +303,9 @@ pub enum CacheError {
     GenerationExhausted,
     StaleGeneration,
     DeadlineOverflow,
+    /// Staged evidence is internally inconsistent: its evidential floor
+    /// follows the receipt, or its lease outlives the supporting binding TTL.
+    EvidenceInconsistent,
 }
 
 impl fmt::Display for CacheError {
@@ -259,6 +317,7 @@ impl fmt::Display for CacheError {
             CacheError::GenerationExhausted => "entry generation",
             CacheError::StaleGeneration => "stale generation",
             CacheError::DeadlineOverflow => "cache deadline overflow",
+            CacheError::EvidenceInconsistent => "inconsistent staged evidence",
         };
         write!(f, "cache {detail}")
     }
@@ -354,11 +413,12 @@ impl Cache {
     ///
     /// # Errors
     ///
-    /// Returns `NameOutOfRange`, `StaleGeneration`, `GenerationExhausted`, or
-    /// `DeadlineOverflow` when respectively the name is not admitted by this
-    /// cache, the staged request tag no longer matches the current entry
-    /// generation, advancing past the maximum generation, or the
-    /// receipt-derived deadlines overflow. The entry is unchanged on every
+    /// Returns `NameOutOfRange`, `StaleGeneration`, `GenerationExhausted`,
+    /// `DeadlineOverflow`, or `EvidenceInconsistent` when respectively the
+    /// name is not admitted by this cache, the staged request tag no longer
+    /// matches the current entry generation, advancing past the maximum
+    /// generation, the receipt-derived deadlines overflow, or the staged
+    /// evidence is internally inconsistent. The entry is unchanged on every
     /// error path.
     ///
     /// # Panics
@@ -388,6 +448,22 @@ impl Cache {
         let retirement = freshness
             .checked_add(STALE_GRACE)
             .ok_or(CacheError::DeadlineOverflow)?;
+        if let Some(evidence) = staged.evidence {
+            if evidence.evidential_start() > staged.receipt {
+                return Err(CacheError::EvidenceInconsistent);
+            }
+            let supporting = evidence
+                .raw_supporting_ttl()
+                .ok_or(CacheError::EvidenceInconsistent)?;
+            if u64::from(supporting) != staged.ttl {
+                return Err(CacheError::EvidenceInconsistent);
+            }
+            if let Some(deadline) = evidence.evidential_deadline()
+                && deadline > freshness
+            {
+                return Err(CacheError::EvidenceInconsistent);
+            }
+        }
         let mut eligible = [UNUSED_SLOT; MAX_ADDRESSES];
         let mut eligible_len = 0usize;
         for &addr in &staged.bindings[..usize::from(staged.binding_len)] {
@@ -399,6 +475,7 @@ impl Cache {
         let new_entry = if eligible_len == 0 {
             Entry {
                 generation: next_generation,
+                evidence: staged.evidence,
                 ..Entry::EMPTY
             }
         } else {
@@ -410,6 +487,7 @@ impl Cache {
                 binding_len: u8::try_from(eligible_len)
                     .expect("eligible count bounded by MAX_ADDRESSES"),
                 stale_allowed: staged.ttl != 0,
+                evidence: staged.evidence,
             }
         };
         *entry = new_entry;
@@ -479,14 +557,6 @@ impl Cache {
 mod tests;
 
 pub mod evidence {
-    #![cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "temporary lossless origin/source/TTL evidence staging until generation-bound cache publication"
-        )
-    )]
-
     use super::TTL_CAP;
     use crate::dns::resolver::MAX_RESOLVERS;
 
@@ -645,22 +715,37 @@ pub mod evidence {
             self.evidential_deadline
         }
 
+        /// The query-start floor anchoring the evidential window.
+        pub const fn evidential_start(self) -> u64 {
+            self.evidential_start
+        }
+
         /// The historical proof class, always available from the raw facts.
         pub const fn class(self) -> ProofClass {
             ProofClass::classify(self.origin_authenticated, self.qualified, self.raw_ad)
         }
 
+        /// The proof class valid at `now` purely from the evidential window,
+        /// for any class including ordinary trusted; `None` before the
+        /// query-start floor, after the checked deadline, or when no reusable
+        /// lease exists.
+        pub const fn valid_class(self, now: u64) -> Option<ProofClass> {
+            match self.evidential_deadline {
+                Some(deadline) if now >= self.evidential_start && now < deadline => {
+                    Some(self.class())
+                }
+                Some(_) | None => None,
+            }
+        }
+
         /// Established authenticated assurance at `now`: only an
-        /// authenticated/delegated class inside its checked deadline and not
-        /// before its query-start floor. Not-yet-begun, expired, unknown,
-        /// zero-TTL, and trusted-class evidence never authenticates.
+        /// authenticated/delegated class inside its evidential window.
+        /// Trusted-class, not-yet-begun, expired, unknown, and zero-TTL
+        /// evidence never authenticates.
         pub const fn active_class(self, now: u64) -> Option<ProofClass> {
-            match self.class() {
-                ProofClass::Trusted => None,
-                class => match self.evidential_deadline {
-                    Some(deadline) if now >= self.evidential_start && now < deadline => Some(class),
-                    Some(_) | None => None,
-                },
+            match self.valid_class(now) {
+                Some(ProofClass::Trusted) => None,
+                other => other,
             }
         }
     }

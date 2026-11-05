@@ -309,7 +309,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   verb: production code may not unwrap; every <code>expect</code> must carry a
   proven-bound justification and an <code>#[expect]</code> with a <code>reason</code>
   (e.g. <code>src/runtime/reactor.rs:510</code>, <code>src/config/mod.rs:545</code>,
-  <code>src/dns/cache.rs:369-372</code>). The public surface has three consumers: the
+  <code>src/dns/cache.rs:257-260</code>). The public surface has three consumers: the
   serving binary (<code>src/main.rs</code>), the test corpus, and the dev-only
   <code>src/bin/parser_bench.rs</code> developer harness, a distinct binary
   importing <code>alumina::inspection::{ChInspector, Inspect,
@@ -539,7 +539,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         5–900 s, zero TTL at 1 s (no stale serving), validated negative SOA
         30–900 s; retry backoff [1,2,4,8,16,30]; generation-tagged cache with
         stale-publish rejection. An appended crate-private evidence type
-        (<code>src/dns/cache.rs:481-667</code>) stages losslessly retained
+        (<code>src/dns/cache.rs:559-752</code>) stages losslessly retained
         raw AD, bounded resolver source, and raw supporting TTL
         (<code>None</code> distinct from <code>Some(0)</code>) beside private
         fields that, as constructor inputs, record the trusted owner's
@@ -549,16 +549,59 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         class maps a plain origin to <code>trusted</code>, every
         authenticated origin to at least <code>authenticated</code>, and an
         authenticated, qualified, AD-set reply to <code>delegated</code>;
-        reusable authentication needs the clock inside the
-        <code>evidential_start..deadline</code> window of a checked,
-        <code>TTL_CAP</code>-capped deadline
-        (<code>src/dns/cache.rs:657-665</code>). No production cache, proof
-        publication, policy, admission, or log consumer uses it yet. Mutation
+        the binding freshness is <code>receipt + raw TTL</code> with the raw
+        TTL clamped to <code>[1, TTL_CAP]</code> (a zero-TTL answer's legacy
+        freshness clamps to 1 s, reusable inside that fresh window with no
+        authenticated lease and no stale serving), while reusable
+        authentication needs a separate checked deadline at the query start
+        plus <code>min(raw TTL, TTL_CAP)</code>.
+        <code>valid_class(now)</code> (<code>src/dns/cache.rs:732-739</code>)
+        yields any class inside the
+        <code>evidential_start..deadline</code> window for ordinary
+        projections, while
+        <code>active_class(now)</code> (<code>src/dns/cache.rs:745-750</code>)
+        additionally excludes ordinary <code>trusted</code> for
+        authenticated-assurance use. The cache stores it: every
+        <code>Entry</code> and <code>StagedPositive</code> carry the optional
+        immutable evidence, the legacy staging route
+        (<code>src/dns/cache.rs:237-246</code>) defaults to no evidence and
+        any replacement clears prior evidence, accepted evidence is assigned
+        atomically with the generation-advancing publish
+        (<code>src/dns/cache.rs:433-442</code>, <code>:475-493</code>) and
+        survives candidate-eligibility filtering to zero bindings, and
+        <code>Entry::effective_projection(now)</code>
+        (<code>src/dns/cache.rs:190</code>) is the single serving projection:
+        a stored evidence projects its own class whenever valid at
+        <code>now</code>, independent of address usability; a legacy entry
+        without evidence projects at most ordinary <code>trusted</code> while
+        servable; an empty/unattempted or otherwise not-servable legacy entry
+        projects nothing; and an expired proof on a still-servable positive
+        falls back to at most ordinary <code>trusted</code>, projecting
+        nothing once the positive is no longer servable. A staged evidence
+        whose
+        <code>evidential_start</code> floor follows the receipt, whose
+        supporting TTL is absent or does not exactly equal the answer TTL, or
+        whose deadline would outlive the supporting binding freshness
+        (<code>receipt</code> plus the answer TTL clamped to
+        <code>TTL_CAP</code>, <code>src/dns/cache.rs:451-466</code>), is
+        refused atomically
+        (<code>CacheError::EvidenceInconsistent</code>) with the prior entry
+        preserved. Production outcome application still stages positives
+        through the evidence-free <code>stage()</code> path
+        (<code>src/dns/publication.rs:35-43</code>): a genuine
+        reply-evidence identity bound from the parsed reply's
+        TLS/source/query context is not yet wired; no policy, admission, or
+        log consumer reads evidence yet.
+        Mutation
         of cache/schedule lives in the private
         <code>dns/publication</code> child, not <code>src/dns/wire.rs</code> itself.</td>
         <td><code>src/dns/wire.rs:1164</code>, <code>:1331-1367</code>;
-        <code>src/dns/publication.rs:17</code>; <code>src/dns/schedule.rs:16</code>, <code>:358-389</code>;
-        <code>src/dns/cache.rs:50-62</code>, <code>:373-382</code></td></tr>
+        <code>src/dns/publication.rs:17</code>, <code>:35-43</code>;
+        <code>src/dns/schedule.rs:16</code>, <code>:358-389</code>;
+        <code>src/dns/cache.rs:84-100</code>, <code>:210-295</code>, <code>:190</code>,
+        <code>:237-246</code>, <code>:433-495</code> (<code>:451-466</code>,
+        <code>:475-493</code>), <code>:504-519</code>, <code>:528-537</code>,
+        <code>:559-752</code> (<code>:732-739</code>, <code>:745-750</code>)</td></tr>
       <tr><th scope="row"><code>dns/outcome</code> (private child)</th>
         <td>Neutral value carriers — <code>FailureReason</code>,
         <code>NotAttemptedReason</code>, <code>NameOutcome</code>,
@@ -1579,7 +1622,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   Every publish is generation-guarded: a validated in-flight result carries the
   current <code>Generation</code>, and <code>publish_positive</code> refuses any
   mismatch (<code>StaleGeneration</code>), so a stale publish can never overwrite
-  a newer entry (<code>src/dns/cache.rs:50-62</code>, <code>:373-382</code>).</p>
+  a newer entry (<code>src/dns/cache.rs:433-442</code>).</p>
 
   <table>
     <caption>Table 4 — DNS cache lifetime and the generation guard.</caption>
@@ -1604,10 +1647,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         clamp; the <em>refresh</em> interval uses the schedule bounds instead:
         5–900 s nonzero positive, 1 s zero). A zero-TTL origin is fresh for 1 s
         and never served stale.</td>
-        <td><code>src/dns/cache.rs:18</code>, <code>:383</code>, <code>:412</code></td></tr>
+        <td><code>src/dns/cache.rs:18</code>, <code>:443</code>, <code>:489</code></td></tr>
       <tr><th scope="row">Freshness deadline</th>
         <td>receipt + clamped TTL</td>
-        <td><code>src/dns/cache.rs:383-384</code></td></tr>
+        <td><code>src/dns/cache.rs:443-447</code></td></tr>
       <tr><th scope="row">Stale grace</th>
         <td><code>STALE_GRACE = 259 200</code> s (72 h) before retirement</td>
         <td><code>src/dns/cache.rs:10</code></td></tr>
@@ -1620,7 +1663,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Eviction</th>
         <td>validated NXDOMAIN clears <em>both</em> families; validated NODATA
         clears only the queried family</td>
-        <td><code>src/dns/cache.rs:426-448</code> (nxdomain), <code>:450-459</code> (nodata)</td></tr>
+        <td><code>src/dns/cache.rs:504-519</code> (nxdomain), <code>:528-537</code> (nodata)</td></tr>
     </tbody>
   </table>
 </section>
@@ -2351,7 +2394,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>allowlist-verified hostname + port; cache-entry-scoped selection;
         generation-age retirement</td>
         <td><code>src/config/mod.rs</code>; <code>src/runtime/tunnel.rs:773-782</code>, <code>:863-885</code>;
-        <code>src/dns/cache.rs:373-382</code></td></tr>
+        <code>src/dns/cache.rs:398-409</code>, <code>:433-442</code></td></tr>
       <tr><th scope="row">Authorization-Before-Forwarding: no client tunnel bytes
       until ClientHello validates with exactly-one matching SNI; no upstream bytes
       before the gate opens</th>
@@ -2377,7 +2420,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime/owner.rs:56-59</code> (<code>:42-55</code>), <code>:163-184</code></td></tr>
       <tr><th scope="row">A stale DNS publish cannot overwrite a newer entry</th>
         <td><code>Generation</code> + <code>StaleGeneration</code> rejection</td>
-        <td><code>src/dns/cache.rs:50-62</code>, <code>:373-382</code></td></tr>
+        <td><code>src/dns/cache.rs:398-409</code>, <code>:433-442</code></td></tr>
       <tr><th scope="row">Panic hygiene: crate lints, <code>panic =
       "abort"</code>, annotated <code>#[expect]</code> bounds</th>
         <td>No <code>unwrap</code> and no <code>panic!</code> in <code>src/</code>
