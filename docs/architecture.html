@@ -169,8 +169,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     document is size-bounded (≤ 16&nbsp;KiB at <code>src/config/mod.rs:17</code>, <code>CONFIG_DOC_LIMIT</code>,
     schema-strict: an unknown key is an
     error), read once at boot through
-    <code>config::load_config_document</code> (load entry at <code>src/config/mod.rs:625</code>;
-    strict schema and unknown-key rejection in <code>from_table</code> at <code>:681-734</code>).</li>
+    <code>config::load_config_document</code> (load entry at <code>src/config/mod.rs:493</code>;
+    strict schema and unknown-key rejection in <code>from_table</code> at <code>:549-602</code>).</li>
     <li><strong>Privilege floor.</strong> Preflight refuses root, refuses any
     non-empty effective/permitted/ambient capability set, and requires
     <code>no_new_privs</code> before the process may proceed
@@ -308,7 +308,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/lib.rs:1-2</code>), which is the first and strongest architectural
   verb: production code may not unwrap; every <code>expect</code> must carry a
   proven-bound justification and an <code>#[expect]</code> with a <code>reason</code>
-  (e.g. <code>src/runtime/reactor.rs:510</code>, <code>src/config/mod.rs:677</code>,
+  (e.g. <code>src/runtime/reactor.rs:510</code>, <code>src/config/mod.rs:545</code>,
   <code>src/dns/cache.rs:369-372</code>). The public surface has three consumers: the
   serving binary (<code>src/main.rs</code>), the test corpus, and the dev-only
   <code>src/bin/parser_bench.rs</code> developer harness, a distinct binary
@@ -496,7 +496,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/boot/preflight.rs:96-116</code></td></tr>
       <tr><th scope="row"><code>config</code></th>
         <td>Strict schema parse; allowlist (≤ 32), ports, early_data/ja4 controls, gate sections, CNAME bailiwicks, resolver trust homogeneity.</td>
-        <td><code>src/config/mod.rs:19</code>, <code>:22-74</code>, <code>:677-734</code>, <code>:938-975</code>, <code>:756</code>, <code>:1168</code></td></tr>
+        <td><code>src/config/mod.rs:19</code>, <code>:22-74</code>, <code>:545-602</code>, <code>:806-843</code>, <code>:624</code>, <code>:1036</code></td></tr>
       <tr><th scope="row"><code>runtime/owner</code></th>
         <td>Single-reactor owner; serves as the attached owner after <code>attach</code>; owns overall DNS order and bounded per-turn advancement, delegating refresh admission/start to storage.</td>
         <td><code>src/runtime/owner.rs:163-184</code>, <code>:200-211</code>, <code>:223-229</code>, <code>:278-313</code>, <code>:292</code>, <code>:332-345</code>, <code>:390-401</code></td></tr>
@@ -1040,11 +1040,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   fallback for a DoT entry (<code>Nameserver::port()</code> <code>src/dns/resolver.rs:192-198</code>). Trust
   homogeneity across the resolver set is enforced at configuration time — a mix of
   trust classes is rejected rather than degraded
-  (<code>ConfigError::MixedResolverTrust</code>, <code>src/config/mod.rs:756</code>).
+  (<code>ConfigError::MixedResolverTrust</code>, <code>src/config/mod.rs:624</code>).
   A separate guard restricts the <code>early_data</code> control’s block scope to
   <code>connection</code> only — an upstream-sourced early-data signal therefore
   cannot select a per-domain or process-wide latch
-  (<code>src/config/mod.rs:1025-1032</code>; see
+  (<code>src/config/mod.rs:893-900</code>; see
   <a href="#enforcement">§6.2</a>).</p>
 
   <h3>5.2 DoT trust: pin-or-nothing</h3>
@@ -1187,7 +1187,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   kernel-assigned listener port (0) instead of a pre-probed port
   (<code>src/runtime/storage/startup_integration.rs:25-27</code>; the constructor
   <code>Config::with_kernel_assigned_test_listener</code> at
-  <code>src/config/mod.rs:1435-1441</code>). The port-0 value exists only in that
+  <code>src/config/mod.rs:1303-1309</code>). The port-0 value exists only in that
   cfg(test) constructor: the public document parser still rejects port 0
   (<code>src/config/mod.rs:131-133</code>), so operator <code>listen</code> remains
   numeric 1..=65535 and the production bind is unchanged
@@ -1213,7 +1213,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   never widen a neighbour’s trust (<code>src/dns/wire.rs:827-893</code>), and
   same-bare-name entries across ports must declare byte-identical suffix lists or
   boot fails with <code>DivergentCnameBailiwick</code>
-  (<code>src/config/mod.rs:1168</code>). The flat union of declared suffixes is
+  (<code>src/config/mod.rs:1036</code>). The flat union of declared suffixes is
   bounded by the fixed <code>ALLOWLIST_MAX</code> (32) slot bound, and overflow is
   fail-stop (<code>src/dns/wire.rs:827-893</code>).</p>
   <p><code>ServeStorage::boot</code> installs the exact validated per-entry
@@ -1637,10 +1637,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/enforcement/state.rs:71-77</code>), but the configuration surface
   accepts only the three sections <code>[bad_handshake]</code>,
   <code>[illegal_fqdn]</code>, and <code>[ja4]</code>
-  (<code>src/config/mod.rs:723-727</code>) and rejects an <code>[early_data]</code>
-  gate section at load (reject at <code>:721</code>); the GateSet’s
+  (<code>src/config/mod.rs:591-595</code>) and rejects an <code>[early_data]</code>
+  gate section at load (reject at <code>:589</code>); the GateSet’s
   <code>early_data</code> slot is always the default (<code>AllScopeGate::default()</code>,
-  <code>:726</code>). Each is an <code>AllScopeGate</code>
+  <code>:594</code>). Each is an <code>AllScopeGate</code>
   whose <code>threshold</code> and <code>window_secs</code> are nonzero
   (<code>NonZeroU32</code>/<code>NonZeroU64</code>): the nonzero types make only
   zero parameter values unrepresentable and say nothing about whether a gate can
@@ -1657,7 +1657,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <div class="callout" role="note">
     <p>The <code>[early_data]</code> gate section is rejected at config load with
     exit 78 (<code>ConfigError::EarlyDataGateRejected</code>,
-    <code>src/config/mod.rs:572</code>, raised at <code>:721</code>), so no boot
+    <code>src/config/mod.rs:440</code>, raised at <code>:589</code>), so no boot
     succeeds carrying it and the all-scope early-data bar cannot be configured at
     all. The rejection is structural, not an oversight: a per-class all-scope
     counter is noted only when the raw decided effect is
@@ -1665,8 +1665,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     (<code>src/enforcement/state.rs:262-278</code>), and the configuration parser
     rejects any <code>early_data</code> block whose scope is not
     <code>connection</code> (<code>ConfigError::EarlyDataBlockScopeInvalid</code>,
-    <code>src/config/mod.rs:1025-1032</code>; the parser doc comment at
-    <code>:1002-1008</code> records that restriction). An upstream-sourced
+    <code>src/config/mod.rs:893-900</code>; the parser doc comment at
+    <code>:870-876</code> records that restriction). An upstream-sourced
     early-data signal therefore cannot select a per-domain or process-wide
     latch (<code>docs/alumina-proxy.md:1018-1020</code>). The only reachable raw effects
     for <code>EarlyUpstreamData</code> are therefore <code>BaselineOnly</code>,
@@ -2395,7 +2395,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>dp</code> fact (<code>src/dns/transport.rs:3085-3104</code>).</li>
     <li><strong>Trust is homogeneous or boot fails.</strong> A mixed-trust
     resolver set is rejected at configuration time
-    (<code>src/config/mod.rs:756</code>).</li>
+    (<code>src/config/mod.rs:624</code>).</li>
   </ul>
 </section>
 
@@ -2420,7 +2420,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <tbody>
       <tr><th scope="row">Fixed input, no CLI/env policy</th>
         <td><code>src/main.rs:21</code> (<code>CONFIG_PATH</code>); schema-strict
-        load at <code>src/config/mod.rs:625-734</code> region</td></tr>
+        load at <code>src/config/mod.rs:493-602</code> region</td></tr>
       <tr><th scope="row">Privilege floor / exit codes</th>
         <td><code>src/boot/preflight.rs:96-116</code>; <code>src/main.rs:22-23</code>;
         <code>src/boot/mod.rs:9</code></td></tr>
@@ -2429,8 +2429,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/transport.rs:54</code>; spec <code>docs/alumina-proxy.md:110</code></td></tr>
       <tr><th scope="row">early_data block scope connection-only; the
       <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
-        <td><code>src/config/mod.rs:1025-1032</code>, <code>:721</code>,
-        <code>:1009-1030</code>;
+        <td><code>src/config/mod.rs:893-900</code>, <code>:589</code>,
+        <code>:877-898</code>;
         <code>src/enforcement/state.rs:262-278</code>,
         <code>src/enforcement/state/tests.rs:1123</code> (test); <code>docs/alumina-proxy.md:1018-1020</code>,
         <code>:822-828</code></td></tr>
@@ -2471,7 +2471,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime/storage.rs:255</code>; <code>src/runtime/tunnel.rs:88-96</code>;
         <code>src/dns/transport.rs:1354</code></td></tr>
       <tr><th scope="row">Per-entry CNAME bailiwick</th>
-        <td><code>src/dns/wire.rs:827-893</code>; <code>src/config/mod.rs:1168</code></td></tr>
+        <td><code>src/dns/wire.rs:827-893</code>; <code>src/config/mod.rs:1036</code></td></tr>
       <tr><th scope="row">Stage machine (10 variants vs 9-step path)</th>
         <td><code>src/runtime/reactor.rs:341-352</code></td></tr>
       <tr><th scope="row">CONNECT parse bounds &amp; bare-CR/LF</th>
