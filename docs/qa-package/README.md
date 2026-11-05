@@ -13,7 +13,7 @@ production-qualified or externally-deployed system (qualification gates in
 ## Package contents
 
 | File | Purpose |
-|---|---|
+| --- | --- |
 | `config.example.toml` | Example runtime configuration (fixed documented inputs, no secrets) |
 | `validate.sh` | Identity capture + local isolated smoke (positive/negative) + docs + deny/audit; hard-0 gate |
 
@@ -23,7 +23,7 @@ Three **distinct intended native Linux variants**; each has its own build
 command, scope and digest — not interchangeable, no artificial shared identity:
 
 | Variant | Path | Built/tested |
-|---|---|---|
+| --- | --- | --- |
 | Exercised smoke artifact (fixture-facts) | `target/fixture-facts/release/alumina` | built by the `fixtures boot` gate from exact source in-run; static-ELF + executed under privilege profile (typed-terminated positive + exit-78 negatives); sha + non-setid + `security.capability` absence proven in-run (`METADATA-OK`) |
 | Production release (MID) | `target/release/alumina` | built by `mid union` (via `boundary phase1` slow tier); static-ELF + whitespace + witness gates; **not executed** by this wrapper |
 | Production release (e2e musl) | `target/aarch64-unknown-linux-musl/release/alumina` | production release target for the native `e2e relay` / `e2e shutdown` host selectors; **not executed by this wrapper** |
@@ -141,7 +141,7 @@ claim), and this repo never provisions VMs, connections or images.
   **Never invokes the e2e selectors**; exit-zero coordination is not release
   qualification.
 - `docs` (`verify.sh docs`) — full offline docs gate, not just links:
-  link/fragment over the 5-root `DOCSLINK_ROOTS` (incl.
+  link/fragment over the 8-root `DOCSLINK_ROOTS` (incl.
   `docs/trust-telemetry-design.md`) + HTML structure + physical INTENDED +
   cfg-parentage + unsafe surface + frozen-spec digest; requires Node with
   **`NODE_OPTIONS`/`NODE_PATH` unset** and `scripts/docs_check/check.mjs`
@@ -274,7 +274,7 @@ sh docs/qa-package/validate.sh
    gate once (`docslink_check`), `cargo audit` + `cargo deny check` — never a
    docs-only skip).
 3. Probes the exercised fixture-facts artifact the gate just built: static ELF
-   + sha256 + freshness proven against the in-run variant marker the fixture
+   - sha256 + freshness proven against the in-run variant marker the fixture
    gate wrote.
 4. Emits `QA-PACKAGE-VALIDATE-OK`, exit 0, only when identity resolved, the
    fresh-variant proof holds and every sub-gate hard-0. Three-state outcome:

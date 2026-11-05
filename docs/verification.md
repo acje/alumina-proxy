@@ -60,7 +60,7 @@ Verification is tiered; each tier backs a different claim:
   static-ELF/clippy/release/closure proofs moved to `mid union`); `mid
   clippy` runs clippy `-D warnings` for production and the alloc-witness
   test harness; `mid union` carries release + static-ELF + closure metadata
-  + clippy; `mid full` is the standalone gate-only selector (lib units +
+  - clippy; `mid full` is the standalone gate-only selector (lib units +
   the 6 gate-only binaries) witness-off then witness-on, its surface
   subsumed by `mid union`. MID backs per-sub-mission
   done-claims.
@@ -97,9 +97,10 @@ Verification is tiered; each tier backs a different claim:
 ### Offline docs gate — the `docs` selector (not just links)
 
 `sh scripts/verify.sh docs` is the full offline docs gate, not a link-only
-check. It runs, in sequence: the link/fragment gate over the **5-root
+check. It runs, in sequence: the link/fragment gate over the **8-root
 `DOCSLINK_ROOTS`** set (`docs/alumina-proxy.md`,
-`docs/trust-telemetry-design.md`, `docs/verification.md`,
+`docs/trust-telemetry-design.md`, `docs/trust-chain-design.md`,
+`docs/deployment.md`, `docs/monitoring.md`, `docs/verification.md`,
 `docs/qa-package/README.md`, `README.md` — trust-telemetry native coverage is
 exercised here via its root entry); the HTML structure gate over the HTML doc
 roots; the physical **INTENDED** inventory (every `src`/`tests` `.rs` listed);
@@ -113,7 +114,7 @@ The full retained Markdown corpus is checked with the explicit, nonempty argv
 command, run with `NODE_OPTIONS`/`NODE_PATH` cleared:
 
 ```
-env -u NODE_OPTIONS -u NODE_PATH node scripts/docs_check/check.mjs AGENTS.md README.md docs/alumina-proxy.md docs/verification.md docs/qa-package/README.md
+env -u NODE_OPTIONS -u NODE_PATH node scripts/docs_check/check.mjs AGENTS.md README.md docs/alumina-proxy.md docs/trust-telemetry-design.md docs/trust-chain-design.md docs/deployment.md docs/monitoring.md docs/verification.md docs/qa-package/README.md
 ```
 
 Manual checker regression fixtures, hand-run (identity-tracked, **not** wired
