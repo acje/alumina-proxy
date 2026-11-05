@@ -1,13 +1,19 @@
 use super::*;
 
 use std::io::{self, Read, Seek, Write};
+
 use std::net::SocketAddr;
+
 use std::net::{TcpListener as StdListener, TcpStream};
+
 use std::thread;
 
 use crate::dns::cache::Family;
+
 use crate::dns::transport::ExchangeClass;
+
 use crate::dns::transport::ExchangeStep;
+
 use crate::dns::transport::dot_tests::{
     AdversarialReply, GOOD_CERT, GOOD_KEY, pinned_resolver, spawn_tls_responder,
 };
@@ -63,16 +69,6 @@ fn spawn_stall_responder() -> (SocketAddr, thread::JoinHandle<()>) {
 
 fn connect(port: u16) -> TcpStream {
     TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).expect("client connect")
-}
-
-#[test]
-fn single_poll_wait_advances_stalled_dns_and_accepts_traffic_together() {
-    let t = thread::Builder::new()
-        .name("runtime-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(falsifier_body)
-        .expect("spawn falsifier thread");
-    t.join().expect("falsifier thread");
 }
 
 fn falsifier_body() {
@@ -143,16 +139,6 @@ fn spawn_quiet_peer() -> (SocketAddr, thread::JoinHandle<()>) {
     (addr, handle)
 }
 
-#[test]
-fn sendable_exchange_advances_without_a_peer_event() {
-    let t = thread::Builder::new()
-        .name("runtime-sendable-quiet".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(sendable_quiet_body)
-        .expect("spawn sendable-quiet thread");
-    t.join().expect("sendable-quiet thread");
-}
-
 /// Parked sendable in `SendReady`, one quiet `turn(None)` against a silent peer
 /// must apply the zeroed poll and write the query remainder to `Receiving`.
 fn sendable_quiet_body() {
@@ -209,16 +195,6 @@ fn sendable_quiet_body() {
     peer.join().expect("quiet peer thread");
 }
 
-#[test]
-fn serving_loop_exchange_failure_emits_exchange_failed_record() {
-    let t = thread::Builder::new()
-        .name("runtime-exchange-failed".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(exchange_failed_body)
-        .expect("spawn exchange-failed thread");
-    t.join().expect("exchange-failed thread");
-}
-
 fn exchange_failed_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
@@ -268,17 +244,6 @@ fn exchange_failed_body() {
         text.contains("reason=\"timeout\""),
         "the record carries the structural failure reason: {text}"
     );
-}
-
-#[test]
-#[cfg(all(test, feature = "alloc-witness"))]
-fn hot_relay_turns_compose_with_bounded_stalled_dns() {
-    let t = std::thread::Builder::new()
-        .name("runtime-hot-dns-many-slots".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(hot_relay_many_slots_body)
-        .expect("spawn falsifier thread");
-    t.join().expect("falsifier thread");
 }
 
 #[cfg(all(test, feature = "alloc-witness"))]
@@ -498,16 +463,6 @@ fn hot_relay_many_slots_body() {
             "hot relay {i} bytes byte-exact"
         );
     }
-}
-
-#[test]
-fn due_refresh_is_deferred_while_probe_sweep_owns_the_transport() {
-    let t = std::thread::Builder::new()
-        .name("runtime-sweep-deferral".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(due_refresh_is_deferred_while_probe_sweep_owns_the_transport_body)
-        .expect("spawn sweep-deferral thread");
-    t.join().expect("sweep-deferral thread");
 }
 
 fn due_refresh_is_deferred_while_probe_sweep_owns_the_transport_body() {
@@ -857,16 +812,6 @@ fn owner_name_published(owner: &Preallocated, ordinal: usize, family: Family) ->
     matches!(cache.entry(name_index, family), Ok(entry) if !entry.bindings().is_empty())
 }
 
-#[test]
-fn idle_after_published_does_not_spin() {
-    let t = thread::Builder::new()
-        .name("runtime-idle-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(idle_falsifier_body)
-        .expect("spawn idle falsifier thread");
-    t.join().expect("idle falsifier thread");
-}
-
 fn idle_falsifier_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
@@ -925,16 +870,6 @@ fn idle_falsifier_body() {
         elapsed >= Duration::from_millis(80),
         "idle turns must wait out the serving timeout rather than spin: {elapsed:?}"
     );
-}
-
-#[test]
-fn peer_close_after_answer_then_reconnect_publishes() {
-    let t = thread::Builder::new()
-        .name("runtime-reconnect-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(reconnect_falsifier_body)
-        .expect("spawn reconnect falsifier thread");
-    t.join().expect("reconnect falsifier thread");
 }
 
 fn reconnect_falsifier_body() {
@@ -1010,16 +945,6 @@ fn reconnect_falsifier_body() {
 
 use crate::runtime::storage::{ServingMode, StartupDecision};
 
-#[test]
-fn preallocate_then_startup_then_attach_accepts_in_main_order() {
-    let t = thread::Builder::new()
-        .name("runtime-main-wiring".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(main_wiring_body)
-        .expect("spawn main-wiring falsifier");
-    t.join().expect("main-wiring falsifier thread");
-}
-
 /// Mirrors main.rs exactly: the retained serving workspaces are preallocated
 /// BEFORE any DNS exchange, the startup window then runs over that complete
 /// owner, and the serving decision's listener is attached for traffic.
@@ -1062,16 +987,6 @@ fn main_wiring_body() {
         accepted,
         "the wired owner must accept the client on the startup-bound listener"
     );
-}
-
-#[test]
-fn startup_queued_warning_still_observes_sigterm_and_never_binds() {
-    let t = thread::Builder::new()
-        .name("startup-starvation-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(startup_starvation_falsifier_body)
-        .expect("spawn startup-starvation falsifier thread");
-    t.join().expect("startup-starvation falsifier thread");
 }
 
 /// The shared-startup window must observe a queued SIGTERM even while the
@@ -1152,16 +1067,6 @@ fn drained_warning_lines(file: &mut std::fs::File) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn startup_warning_private_owner_reasons_observed_first_failure() {
-    let t = thread::Builder::new()
-        .name("startup-warning-private-owner".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(startup_warning_private_owner_body)
-        .expect("spawn private-owner warning falsifier");
-    t.join().expect("private-owner warning falsifier thread");
-}
-
 fn startup_warning_private_owner_body() {
     let port = ephemeral_port();
     let mut storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
@@ -1188,17 +1093,6 @@ fn startup_warning_private_owner_body() {
         "the private warning must carry the actually observed refused-connect cause: {}",
         warnings[0]
     );
-}
-
-#[test]
-fn startup_warning_cooperative_owner_reasons_observed_first_failure() {
-    let t = thread::Builder::new()
-        .name("startup-warning-cooperative-owner".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(startup_warning_cooperative_owner_body)
-        .expect("spawn cooperative-owner warning falsifier");
-    t.join()
-        .expect("cooperative-owner warning falsifier thread");
 }
 
 fn startup_warning_cooperative_owner_body() {
@@ -1238,16 +1132,6 @@ fn startup_warning_cooperative_owner_body() {
         !all.contains("kind=exchange_failed"),
         "the cooperative startup window must never emit a serving exchange_failed record, sink: {all}"
     );
-}
-
-#[test]
-fn runtime_skips_cooperative_dns_and_stays_draining_after_sigterm() {
-    let t = thread::Builder::new()
-        .name("runtime-shutdown-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(shutdown_falsifier_body)
-        .expect("spawn shutdown falsifier thread");
-    t.join().expect("shutdown falsifier thread");
 }
 
 fn shutdown_falsifier_body() {
@@ -1304,16 +1188,6 @@ fn shutdown_falsifier_body() {
     drop(responder);
 }
 
-#[test]
-fn startup_window_reuses_one_connection_across_names() {
-    let t = thread::Builder::new()
-        .name("reuse-window-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(startup_reuse_window_body)
-        .expect("spawn reuse-window falsifier thread");
-    t.join().expect("reuse-window falsifier thread");
-}
-
 /// The shared startup window must resolve every allowlist name over one
 /// reusable connection, exactly as the private driver does: the window
 /// owner closes the transport once at the end, never after each published
@@ -1338,16 +1212,6 @@ fn startup_reuse_window_body() {
         StartupDecision::Serve(ServingMode::Full),
         "both allowlist names must resolve on a single reusable startup connection"
     );
-}
-
-#[test]
-fn startup_window_zeroes_wait_for_deferred_handshake_and_resolves_promptly() {
-    let t = thread::Builder::new()
-        .name("startup-zero-wait-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(startup_zero_wait_body)
-        .expect("spawn startup zero-wait falsifier thread");
-    t.join().expect("startup zero-wait falsifier thread");
 }
 
 /// The R1 repair proof: the actual startup window must zero its single poll
@@ -1441,17 +1305,6 @@ fn startup_zero_wait_body() {
     );
 }
 
-#[test]
-fn runtime_self_pipe_sigterm_cancels_active_receiving() {
-    let t = thread::Builder::new()
-        .name("selfpipe-receiving-cancellation-witness".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(selfpipe_receiving_cancellation_body)
-        .expect("spawn self-pipe receiving-cancellation witness thread");
-    t.join()
-        .expect("self-pipe receiving-cancellation witness thread");
-}
-
 /// The retained DNS transport must reach an observable `Receiving` step
 /// against a peer that withholds its answer, and the first-observed
 /// SIGTERM — delivered through the real signal self-pipe and observed by a
@@ -1527,17 +1380,6 @@ fn selfpipe_receiving_cancellation_body() {
     drop(responder);
 }
 
-#[test]
-fn run_startup_post_all_resolved_sigterm_settles_terminated() {
-    let t = thread::Builder::new()
-        .name("post-settlement-sigterm-witness".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(post_all_resolved_settlement_body)
-        .expect("spawn post-all-resolved settlement witness thread");
-    t.join()
-        .expect("post-all-resolved settlement witness thread");
-}
-
 /// Every allowlist name resolves, so the window leaves the selection loop
 /// all-resolved; only then — at the pre-settlement checkpoint, before the
 /// zero-wait recheck decides Serve-vs-Terminated — a real SIGTERM self-pipe
@@ -1579,16 +1421,6 @@ fn post_all_resolved_settlement_body() {
         outcome.listener().is_none(),
         "the terminated startup must never bind a listener"
     );
-}
-
-#[test]
-fn run_startup_both_ready_sigterm_and_final_answer_settles_terminated() {
-    let t = thread::Builder::new()
-        .name("both-ready-same-batch-witness".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(both_ready_settlement_body)
-        .expect("spawn both-ready settlement witness thread");
-    t.join().expect("both-ready settlement witness thread");
 }
 
 /// Mirrors the e2e SIMULTANEOUS-COMPLETION case natively and proves the
@@ -1987,46 +1819,6 @@ fn serving_refresh_survives_next_turn_body() {
     drop(responder);
 }
 
-#[test]
-fn serving_refresh_survives_next_turn() {
-    let t = thread::Builder::new()
-        .name("serving-refresh-survives-witness".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(serving_refresh_survives_next_turn_body)
-        .expect("spawn serving-refresh-survives witness thread");
-    t.join().expect("serving-refresh-survives witness thread");
-}
-
-#[test]
-fn startup_expiry_gates_already_readable_response() {
-    let t = thread::Builder::new()
-        .name("startup-expiry-readable-witness".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(startup_expiry_gates_already_readable_response_body)
-        .expect("spawn startup-expiry readable witness thread");
-    t.join().expect("startup-expiry readable witness thread");
-}
-
-#[test]
-fn startup_expiry_gates_response_completing_during_final_turn() {
-    let t = thread::Builder::new()
-        .name("startup-expiry-final-turn-witness".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(startup_expiry_gates_response_completing_during_final_turn_body)
-        .expect("spawn startup-expiry final-turn witness thread");
-    t.join().expect("startup-expiry final-turn witness thread");
-}
-
-#[test]
-fn retained_startup_exchange_cannot_advance() {
-    let t = thread::Builder::new()
-        .name("retained-startup-exchange-witness".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(retained_startup_exchange_cannot_advance_body)
-        .expect("spawn retained-startup-exchange witness thread");
-    t.join().expect("retained-startup-exchange witness thread");
-}
-
 /// F1 regression (alox18): the corroboration exchange must conclude through the
 /// real serving path. The corroboration is a pure-sensor probe exchange started
 /// by the serving owner; if `cancel_retained_startup_exchange` cancelled it at
@@ -2086,16 +1878,6 @@ fn corroboration_concludes_through_serving_turns_body() {
         "the corroboration exchange must conclude through the serving turns and emit the conflict fact"
     );
     drop(responder);
-}
-
-#[test]
-fn corroboration_concludes_through_serving_turns() {
-    let t = thread::Builder::new()
-        .name("runtime-corroboration-concludes".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(corroboration_concludes_through_serving_turns_body)
-        .expect("spawn corroboration-concludes thread");
-    t.join().expect("corroboration-concludes thread");
 }
 
 fn probe_exchange_failed_reports_per_event_resolver_body() {
@@ -2195,16 +1977,6 @@ fn probe_exchange_failed_reports_per_event_resolver_body() {
         Some(0),
         "the failed probe must restore the pre-probe resolver 0"
     );
-}
-
-#[test]
-fn probe_exchange_failed_reports_per_event_resolver() {
-    let t = thread::Builder::new()
-        .name("runtime-probe-exchange-failed-resolver".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(probe_exchange_failed_reports_per_event_resolver_body)
-        .expect("spawn probe-exchange-failed-resolver thread");
-    t.join().expect("probe-exchange-failed-resolver thread");
 }
 
 #[expect(
@@ -2337,16 +2109,6 @@ fn failover_and_recovery_emit_truthful_origin_body() {
         "the closed window counted three failures: {}",
         summary[0]
     );
-}
-
-#[test]
-fn failover_and_recovery_emit_truthful_origin() {
-    let t = thread::Builder::new()
-        .name("runtime-failover-recovery-origin".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(failover_and_recovery_emit_truthful_origin_body)
-        .expect("spawn failover-recovery-origin thread");
-    t.join().expect("failover-recovery-origin thread");
 }
 
 enum SessionGate {
@@ -2523,16 +2285,6 @@ fn stop_and_join_responder(
     handle.join().expect("join responder thread");
 }
 
-#[test]
-fn idle_runtime_wakes_indefinite_poll_onto_due_refresh_and_renews() {
-    let t = thread::Builder::new()
-        .name("runtime-idle-refresh-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(idle_refresh_body)
-        .expect("spawn idle-refresh falsifier thread");
-    t.join().expect("idle-refresh falsifier thread");
-}
-
 fn idle_refresh_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
@@ -2626,16 +2378,6 @@ fn idle_refresh_body() {
     );
 }
 
-#[test]
-fn due_refresh_renews_across_cycles_under_indefinite_poll() {
-    let t = thread::Builder::new()
-        .name("runtime-multicycle-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(multicycle_body)
-        .expect("spawn multicycle falsifier thread");
-    t.join().expect("multicycle falsifier thread");
-}
-
 fn multicycle_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
@@ -2703,16 +2445,6 @@ fn multicycle_body() {
         completed_cycles, 2,
         "the production indefinite poll must drive two complete real-query refresh cycles"
     );
-}
-
-#[test]
-fn idle_runtime_retries_failed_refresh_on_backoff() {
-    let t = thread::Builder::new()
-        .name("runtime-refresh-retry-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(refresh_retry_body)
-        .expect("spawn refresh-retry falsifier thread");
-    t.join().expect("refresh-retry falsifier thread");
 }
 
 #[expect(
@@ -2828,16 +2560,6 @@ fn refresh_retry_body() {
     );
 }
 
-#[test]
-fn sigterm_stops_due_refresh_flow() {
-    let t = thread::Builder::new()
-        .name("runtime-sigterm-suppression-falsifier".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(sigterm_suppression_body)
-        .expect("spawn sigterm-suppression falsifier thread");
-    t.join().expect("sigterm-suppression falsifier thread");
-}
-
 fn sigterm_suppression_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
@@ -2919,18 +2641,6 @@ fn sigterm_suppression_body() {
 }
 
 #[cfg(feature = "alloc-witness")]
-#[test]
-fn due_refresh_owner_path_spends_zero_allocations() {
-    std::thread::Builder::new()
-        .name("refresh-alloc-witness".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(refresh_alloc_witness_body)
-        .expect("spawn refresh alloc witness")
-        .join()
-        .expect("refresh alloc witness thread");
-}
-
-#[cfg(feature = "alloc-witness")]
 fn refresh_alloc_witness_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
@@ -3004,16 +2714,6 @@ fn refresh_alloc_witness_body() {
     std::mem::forget(runtime);
 }
 
-#[test]
-fn shutdown_finishing_records_raw_statuses_shared_clock_and_monitor() {
-    let t = thread::Builder::new()
-        .name("shutdown-finishing-characterize".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(shutdown_finishing_body)
-        .expect("spawn shutdown-finishing characterize thread");
-    t.join().expect("shutdown-finishing characterize thread");
-}
-
 fn shutdown_finishing_body() {
     let port = ephemeral_port();
     let mut storage = ServeStorage::boot(&config(port)).expect("boot storage");
@@ -3084,4 +2784,330 @@ fn verify_shutdown_drain(text: &str, previous_len: usize, status: &str) {
         secs_of_line(monitor_line),
         "one emit samples one clock: shutdown_final and the forced monitor summary must share secs: {frame}"
     );
+}
+
+mod cooperative_dns {
+    use super::*;
+
+    #[test]
+    fn single_poll_wait_advances_stalled_dns_and_accepts_traffic_together() {
+        let t = thread::Builder::new()
+            .name("runtime-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(falsifier_body)
+            .expect("spawn falsifier thread");
+        t.join().expect("falsifier thread");
+    }
+    #[test]
+    fn sendable_exchange_advances_without_a_peer_event() {
+        let t = thread::Builder::new()
+            .name("runtime-sendable-quiet".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(sendable_quiet_body)
+            .expect("spawn sendable-quiet thread");
+        t.join().expect("sendable-quiet thread");
+    }
+    #[test]
+    fn serving_loop_exchange_failure_emits_exchange_failed_record() {
+        let t = thread::Builder::new()
+            .name("runtime-exchange-failed".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(exchange_failed_body)
+            .expect("spawn exchange-failed thread");
+        t.join().expect("exchange-failed thread");
+    }
+    #[test]
+    #[cfg(all(test, feature = "alloc-witness"))]
+    fn hot_relay_turns_compose_with_bounded_stalled_dns() {
+        let t = std::thread::Builder::new()
+            .name("runtime-hot-dns-many-slots".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(hot_relay_many_slots_body)
+            .expect("spawn falsifier thread");
+        t.join().expect("falsifier thread");
+    }
+}
+
+mod probe_sweep {
+    use super::*;
+
+    #[test]
+    fn due_refresh_is_deferred_while_probe_sweep_owns_the_transport() {
+        let t = std::thread::Builder::new()
+            .name("runtime-sweep-deferral".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(due_refresh_is_deferred_while_probe_sweep_owns_the_transport_body)
+            .expect("spawn sweep-deferral thread");
+        t.join().expect("sweep-deferral thread");
+    }
+}
+
+mod publishing {
+    use super::*;
+
+    #[test]
+    fn idle_after_published_does_not_spin() {
+        let t = thread::Builder::new()
+            .name("runtime-idle-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(idle_falsifier_body)
+            .expect("spawn idle falsifier thread");
+        t.join().expect("idle falsifier thread");
+    }
+    #[test]
+    fn peer_close_after_answer_then_reconnect_publishes() {
+        let t = thread::Builder::new()
+            .name("runtime-reconnect-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(reconnect_falsifier_body)
+            .expect("spawn reconnect falsifier thread");
+        t.join().expect("reconnect falsifier thread");
+    }
+}
+
+mod main_wiring {
+    use super::*;
+
+    #[test]
+    fn preallocate_then_startup_then_attach_accepts_in_main_order() {
+        let t = thread::Builder::new()
+            .name("runtime-main-wiring".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(main_wiring_body)
+            .expect("spawn main-wiring falsifier");
+        t.join().expect("main-wiring falsifier thread");
+    }
+}
+
+mod startup_warning {
+    use super::*;
+
+    #[test]
+    fn startup_queued_warning_still_observes_sigterm_and_never_binds() {
+        let t = thread::Builder::new()
+            .name("startup-starvation-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(startup_starvation_falsifier_body)
+            .expect("spawn startup-starvation falsifier thread");
+        t.join().expect("startup-starvation falsifier thread");
+    }
+    #[test]
+    fn startup_warning_private_owner_reasons_observed_first_failure() {
+        let t = thread::Builder::new()
+            .name("startup-warning-private-owner".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(startup_warning_private_owner_body)
+            .expect("spawn private-owner warning falsifier");
+        t.join().expect("private-owner warning falsifier thread");
+    }
+    #[test]
+    fn startup_warning_cooperative_owner_reasons_observed_first_failure() {
+        let t = thread::Builder::new()
+            .name("startup-warning-cooperative-owner".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(startup_warning_cooperative_owner_body)
+            .expect("spawn cooperative-owner warning falsifier");
+        t.join()
+            .expect("cooperative-owner warning falsifier thread");
+    }
+}
+
+mod startup_window {
+    use super::*;
+
+    #[test]
+    fn startup_window_reuses_one_connection_across_names() {
+        let t = thread::Builder::new()
+            .name("reuse-window-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(startup_reuse_window_body)
+            .expect("spawn reuse-window falsifier thread");
+        t.join().expect("reuse-window falsifier thread");
+    }
+    #[test]
+    fn startup_window_zeroes_wait_for_deferred_handshake_and_resolves_promptly() {
+        let t = thread::Builder::new()
+            .name("startup-zero-wait-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(startup_zero_wait_body)
+            .expect("spawn startup zero-wait falsifier thread");
+        t.join().expect("startup zero-wait falsifier thread");
+    }
+}
+
+mod sigterm_shutdown {
+    use super::*;
+
+    #[test]
+    fn runtime_skips_cooperative_dns_and_stays_draining_after_sigterm() {
+        let t = thread::Builder::new()
+            .name("runtime-shutdown-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(shutdown_falsifier_body)
+            .expect("spawn shutdown falsifier thread");
+        t.join().expect("shutdown falsifier thread");
+    }
+    #[test]
+    fn runtime_self_pipe_sigterm_cancels_active_receiving() {
+        let t = thread::Builder::new()
+            .name("selfpipe-receiving-cancellation-witness".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(selfpipe_receiving_cancellation_body)
+            .expect("spawn self-pipe receiving-cancellation witness thread");
+        t.join()
+            .expect("self-pipe receiving-cancellation witness thread");
+    }
+    #[test]
+    fn run_startup_post_all_resolved_sigterm_settles_terminated() {
+        let t = thread::Builder::new()
+            .name("post-settlement-sigterm-witness".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(post_all_resolved_settlement_body)
+            .expect("spawn post-all-resolved settlement witness thread");
+        t.join()
+            .expect("post-all-resolved settlement witness thread");
+    }
+    #[test]
+    fn run_startup_both_ready_sigterm_and_final_answer_settles_terminated() {
+        let t = thread::Builder::new()
+            .name("both-ready-same-batch-witness".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(both_ready_settlement_body)
+            .expect("spawn both-ready settlement witness thread");
+        t.join().expect("both-ready settlement witness thread");
+    }
+    #[test]
+    fn shutdown_finishing_records_raw_statuses_shared_clock_and_monitor() {
+        let t = thread::Builder::new()
+            .name("shutdown-finishing-characterize".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(shutdown_finishing_body)
+            .expect("spawn shutdown-finishing characterize thread");
+        t.join().expect("shutdown-finishing characterize thread");
+    }
+}
+
+mod startup_exchange {
+    use super::*;
+
+    #[test]
+    fn serving_refresh_survives_next_turn() {
+        let t = thread::Builder::new()
+            .name("serving-refresh-survives-witness".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(serving_refresh_survives_next_turn_body)
+            .expect("spawn serving-refresh-survives witness thread");
+        t.join().expect("serving-refresh-survives witness thread");
+    }
+    #[test]
+    fn startup_expiry_gates_already_readable_response() {
+        let t = thread::Builder::new()
+            .name("startup-expiry-readable-witness".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(startup_expiry_gates_already_readable_response_body)
+            .expect("spawn startup-expiry readable witness thread");
+        t.join().expect("startup-expiry readable witness thread");
+    }
+    #[test]
+    fn startup_expiry_gates_response_completing_during_final_turn() {
+        let t = thread::Builder::new()
+            .name("startup-expiry-final-turn-witness".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(startup_expiry_gates_response_completing_during_final_turn_body)
+            .expect("spawn startup-expiry final-turn witness thread");
+        t.join().expect("startup-expiry final-turn witness thread");
+    }
+    #[test]
+    fn retained_startup_exchange_cannot_advance() {
+        let t = thread::Builder::new()
+            .name("retained-startup-exchange-witness".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(retained_startup_exchange_cannot_advance_body)
+            .expect("spawn retained-startup-exchange witness thread");
+        t.join().expect("retained-startup-exchange witness thread");
+    }
+}
+
+mod probe_records {
+    use super::*;
+
+    #[test]
+    fn corroboration_concludes_through_serving_turns() {
+        let t = thread::Builder::new()
+            .name("runtime-corroboration-concludes".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(corroboration_concludes_through_serving_turns_body)
+            .expect("spawn corroboration-concludes thread");
+        t.join().expect("corroboration-concludes thread");
+    }
+    #[test]
+    fn probe_exchange_failed_reports_per_event_resolver() {
+        let t = thread::Builder::new()
+            .name("runtime-probe-exchange-failed-resolver".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(probe_exchange_failed_reports_per_event_resolver_body)
+            .expect("spawn probe-exchange-failed-resolver thread");
+        t.join().expect("probe-exchange-failed-resolver thread");
+    }
+    #[test]
+    fn failover_and_recovery_emit_truthful_origin() {
+        let t = thread::Builder::new()
+            .name("runtime-failover-recovery-origin".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(failover_and_recovery_emit_truthful_origin_body)
+            .expect("spawn failover-recovery-origin thread");
+        t.join().expect("failover-recovery-origin thread");
+    }
+}
+
+mod due_refresh {
+    use super::*;
+
+    #[test]
+    fn idle_runtime_wakes_indefinite_poll_onto_due_refresh_and_renews() {
+        let t = thread::Builder::new()
+            .name("runtime-idle-refresh-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(idle_refresh_body)
+            .expect("spawn idle-refresh falsifier thread");
+        t.join().expect("idle-refresh falsifier thread");
+    }
+    #[test]
+    fn due_refresh_renews_across_cycles_under_indefinite_poll() {
+        let t = thread::Builder::new()
+            .name("runtime-multicycle-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(multicycle_body)
+            .expect("spawn multicycle falsifier thread");
+        t.join().expect("multicycle falsifier thread");
+    }
+    #[test]
+    fn idle_runtime_retries_failed_refresh_on_backoff() {
+        let t = thread::Builder::new()
+            .name("runtime-refresh-retry-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(refresh_retry_body)
+            .expect("spawn refresh-retry falsifier thread");
+        t.join().expect("refresh-retry falsifier thread");
+    }
+    #[test]
+    fn sigterm_stops_due_refresh_flow() {
+        let t = thread::Builder::new()
+            .name("runtime-sigterm-suppression-falsifier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(sigterm_suppression_body)
+            .expect("spawn sigterm-suppression falsifier thread");
+        t.join().expect("sigterm-suppression falsifier thread");
+    }
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn due_refresh_owner_path_spends_zero_allocations() {
+        std::thread::Builder::new()
+            .name("refresh-alloc-witness".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(refresh_alloc_witness_body)
+            .expect("spawn refresh alloc witness")
+            .join()
+            .expect("refresh alloc witness thread");
+    }
 }

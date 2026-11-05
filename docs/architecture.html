@@ -1881,10 +1881,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   deallocations, reallocations, and unphased counts all zero — over the
   <code>Runtime::turn → Serving::run_once</code> poll/pump paths:
   <code>hot_relay_turns_compose_with_bounded_stalled_dns</code>
-  (<code>src/runtime/owner/tests.rs:275</code>, Serving phase, 17 hot relays + stalled
+  (<code>src/runtime/owner/tests.rs:2821</code>, Serving phase, 17 hot relays + stalled
   DNS + backlog + expiry across 900 owner turns) and
   <code>due_refresh_owner_path_spends_zero_allocations</code>
-  (<code>src/runtime/owner/tests.rs:2923</code>, BackgroundRefresh phase, 200 owner
+  (<code>src/runtime/owner/tests.rs:3104</code>, BackgroundRefresh phase, 200 owner
   turns). A separate pointer-transfer witness, not a numeric allocation
   witness, covers the second claim:
   <code>serving_consumes_boot_traffic_buffers_by_value_not_reallocation</code>
@@ -2466,7 +2466,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Terminal sink state / shutdown-finish emit protocol</th>
         <td><code>src/log/sink.rs:100-179</code>, <code>:87-99</code>,
         <code>:32-47</code>, <code>:61-73</code>; <code>src/runtime/owner.rs:30-40</code>,
-        <code>:143-151</code>, <code>:353-357</code>; <code>src/runtime/owner/tests.rs:3008</code></td></tr>
+        <code>:143-151</code>, <code>:353-357</code>; <code>src/runtime/owner/tests.rs:2980</code></td></tr>
       <tr><th scope="row">Single clock / mount_clock re-anchor</th>
         <td><code>src/runtime/storage.rs:255</code>; <code>src/runtime/tunnel.rs:88-96</code>;
         <code>src/dns/transport.rs:1354</code></td></tr>
