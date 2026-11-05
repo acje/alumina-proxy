@@ -203,8 +203,12 @@ findings, verdicts, or issue records here).
   validation, bailiwick_cname, ttl_flags, workspace, negative_soa, authority_soa,
   policy_rejects, malformed_rdata, cache_schedule, family, wire_names,
   duplicate_cname, robustness, alloc_witness, embedded_dot) with all helper
-  fns kept in the parent; `log` is still a whole-file suite with no topic
-  children.
+  fns kept in the parent. `log/tests.rs` now holds 14 inline topic modules
+  (record_encoding, startup_records, fatal_grammar, oversize_drops, queue_overflow,
+  sink_budget, monitor_queue, monitor_records, monitor_edges, reserved_records,
+  shutdown, writev_progress, sink_failure, typed_incidents) with all helper fns
+  kept in the parent. The previously whole-file runtime/owner, dns/wire, and
+  log suites now expose named inline topic modules.
 
 ## Offline docs link checker
 

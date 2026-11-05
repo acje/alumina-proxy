@@ -2085,7 +2085,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     are witnessed by
     <code>logging_writev_interrupted_keeps_cursor_and_stream_identical</code> and
     <code>logging_writev_zero_progress_keeps_cursor_and_stream_identical</code>
-    (<code>src/log/tests.rs:2183-2209</code>).</li>
+    (<code>src/log/tests.rs:2256-2267</code>).</li>
     <li><strong>Drops are always counted, never silent.</strong> Ring-full and
     encode-failure both <code>drop_one</code> (<code>src/log/queue.rs:176-185</code>),
     a hard sink error drops the whole queue <em>through the same counter</em>
@@ -2102,7 +2102,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     bounded-not-lossless fallback — <code>displace_reserved</code>
     (<code>src/log/queue.rs:159-175</code>); the witnessed legal-input cases run
     through a scripted <code>Partial(NonZeroUsize)</code> sink in
-    <code>src/log/tests.rs:2207-2296</code>.</li>
+    <code>src/log/tests.rs:180-282</code>.</li>
   </ol>
 
   <h3>8.2 The terminal sink state and its failure consequences</h3>
@@ -2516,7 +2516,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/log/encoding.rs:11-963</code>; private <code>queue</code>/<code>sink</code> children run on the crate-private <code>LogStore</code> declared at <code>src/log/mod.rs:530-544</code>, constructed at <code>:616-674</code></td></tr>
       <tr><th scope="row">Reserved-ring displacement (begun-front protection)</th>
         <td><code>src/log/queue.rs:159-175</code>, <code>:119-147</code>;
-        <code>src/log/tests.rs:2207-2296</code> (scripted <code>Partial(NonZeroUsize)</code>)</td></tr>
+        <code>src/log/tests.rs:180-282</code> (scripted <code>Partial(NonZeroUsize)</code>)</td></tr>
       <tr><th scope="row">Unit-test placement: owner-colocated <code>cfg(test)</code> files</th>
         <td>Inline unit modules moved to their owning module's <code>tests.rs</code> —
         <code>src/dns/wire/tests.rs</code>, <code>src/inspection/client_hello/tests.rs</code>,
