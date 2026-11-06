@@ -1003,11 +1003,12 @@ fn startup_starvation_falsifier_body() {
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
     let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
-    owner.serving.storage_mut().logs_mut().startup_warning(
+    owner.serving.storage_mut().logs_mut().startup_warning_ctx(
         1000,
         "sub.example.org",
         Family::A,
         "timeout",
+        None,
     );
     let dead = ephemeral_port();
     let dead_addr = SocketAddr::from(([127, 0, 0, 1], dead));

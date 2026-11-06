@@ -115,8 +115,8 @@ fn assert_scripted_stall_preserves_cursor_and_stream(first: ScriptedFirst, label
     let (mut reference, mut reference_file) = file_logstore();
     for i in 0..40 {
         let name = format!("host-{i}.sub.example.org");
-        subject.startup_warning(1, &name, Family::A, "timeout");
-        reference.startup_warning(1, &name, Family::A, "timeout");
+        subject.startup_warning_ctx(1, &name, Family::A, "timeout", None);
+        reference.startup_warning_ctx(1, &name, Family::A, "timeout", None);
     }
     let enqueued = subject.len();
     subject.drain_sink();
@@ -185,7 +185,7 @@ fn assert_reserved_eviction_preserves_partial_record(n: usize, cursor_past_succe
         "a legal max-length FQDN for the warning record"
     );
     let (mut a_store, mut a_file) = file_logstore();
-    a_store.startup_warning(1, &name, Family::A, "timeout");
+    a_store.startup_warning_ctx(1, &name, Family::A, "timeout", None);
     flush_all(&mut a_store);
     let a_record = read_all(&mut a_file);
     let a_len = a_record.len();
@@ -223,7 +223,7 @@ fn assert_reserved_eviction_preserves_partial_record(n: usize, cursor_past_succe
         std::num::NonZeroUsize::new(n).unwrap(),
     ))
     .expect("scripted sink store");
-    subject.startup_warning(1, &name, Family::A, "timeout");
+    subject.startup_warning_ctx(1, &name, Family::A, "timeout", None);
     let mut fill_monitor = Monitor::new();
     let mut secs = 10_000u64;
     while subject.len() < QUEUE_SLOTS {
@@ -379,7 +379,7 @@ mod record_encoding {
         name.push('\x01');
         name.push_str(".example.org");
         let (mut store, mut file) = file_logstore();
-        store.startup_warning(1, &name, Family::A, "timeout");
+        store.startup_warning_ctx(1, &name, Family::A, "timeout", None);
         flush_all(&mut store);
         let out = read_all(&mut file);
         let text = String::from_utf8(out).expect("escaped ascii");
@@ -500,11 +500,15 @@ mod startup_records {
             Field::new("name", Val::Str(name)),
             Field::new("family", Val::Family(Family::Aaaa)),
             Field::new("reason", Val::Str("window_closed")),
+            Field::new("context", Val::OptStr(Some("both"))),
         ];
-        worst.push((
-            "startup_warning",
-            encode_record(&mut slot, Level::Warn, Kind::StartupWarning, &warn).expect("fits"),
-        ));
+        let warn_bytes =
+            encode_record(&mut slot, Level::Warn, Kind::StartupWarning, &warn).expect("fits");
+        eprintln!(
+            "measured startup_warning worst bytes={warn_bytes} headroom={}",
+            SLOT_BYTES - warn_bytes
+        );
+        worst.push(("startup_warning", warn_bytes));
 
         worst.push((
             "startup_name",
@@ -924,7 +928,7 @@ mod oversize_drops {
     fn logging_oversize_record_is_dropped_whole_and_counted() {
         let long = "z".repeat(SLOT_BYTES * 2);
         let (mut store, _file) = file_logstore();
-        store.startup_warning(1, &long, Family::A, "timeout");
+        store.startup_warning_ctx(1, &long, Family::A, "timeout", None);
         assert_eq!(store.dropped(), 1, "oversize record dropped whole");
         assert_eq!(store.len(), 0, "nothing queued for the oversize record");
     }
@@ -1017,7 +1021,7 @@ mod queue_overflow {
     fn logging_queue_drops_when_full_and_counts() {
         let (mut store, _file) = file_logstore();
         for _ in 0..(QUEUE_SLOTS + 40) {
-            store.startup_warning(1, "sub.example.org", Family::A, "timeout");
+            store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
         }
         assert!(store.is_full(), "queue must be full after overfilling");
         assert_eq!(store.len(), QUEUE_SLOTS, "capacity never exceeds the bound");
@@ -1033,7 +1037,7 @@ mod queue_overflow {
     fn logging_drop_counter_saturation_sets_overflow_state() {
         let (mut store, _file) = file_logstore();
         store.saturate_dropped_for_test();
-        store.startup_warning(1, "sub.example.org", Family::A, "timeout");
+        store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
         assert_eq!(
             store.dropped(),
             u64::MAX,
@@ -1094,7 +1098,7 @@ mod queue_overflow {
     fn logging_queue_threshold_edges_real_secs_on_enqueue_and_drain() {
         let (mut store, mut file) = file_logstore();
         for _ in 0..249 {
-            store.startup_warning(100, "sub.example.org", Family::A, "timeout");
+            store.startup_warning_ctx(100, "sub.example.org", Family::A, "timeout", None);
         }
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
@@ -1129,7 +1133,7 @@ mod sink_budget {
         let (mut store, mut file) = file_logstore();
         let filler = "filler.example.org";
         for _ in 0..(SINK_MAX_BYTES / 512) {
-            store.startup_warning(1, filler, Family::A, "timeout");
+            store.startup_warning_ctx(1, filler, Family::A, "timeout", None);
         }
         store.drain_sink();
         assert!(
@@ -1160,7 +1164,7 @@ mod monitor_queue {
         use crate::enforcement::monitor::{CapturedDetail, SlotCapture};
         let (mut store, _file) = file_logstore();
         for _ in 0..QUEUE_SLOTS {
-            store.startup_warning(1, "sub.example.org", Family::A, "timeout");
+            store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
         }
         assert!(store.is_full(), "ring is full before the monitor summary");
         let mut m = Monitor::new();
@@ -1673,7 +1677,7 @@ mod monitor_records {
         let (mut store, mut file) = file_logstore();
         let mut guard = 0;
         while store.len() < QUEUE_SLOTS - 1 && guard < 8 * QUEUE_SLOTS {
-            store.startup_warning(100, "sub.example.org", Family::A, "timeout");
+            store.startup_warning_ctx(100, "sub.example.org", Family::A, "timeout", None);
             guard += 1;
         }
         assert_eq!(store.len(), QUEUE_SLOTS - 1, "fill leaves one free slot");
@@ -1857,7 +1861,13 @@ mod reserved_records {
     fn logging_reserved_startup_final_displaces_newest_normal_when_full() {
         let (mut store, mut file) = file_logstore();
         for i in 0..(QUEUE_SLOTS - 1) {
-            store.startup_warning(100, &format!("n{i}.example.org"), Family::A, "timeout");
+            store.startup_warning_ctx(
+                100,
+                &format!("n{i}.example.org"),
+                Family::A,
+                "timeout",
+                None,
+            );
         }
         assert_eq!(
             store.len(),
@@ -1911,7 +1921,7 @@ mod reserved_records {
         assert_eq!(store.len(), QUEUE_SLOTS, "reserved records fill the ring");
         let dropped_before = store.dropped();
         for _ in 0..16 {
-            store.startup_warning(200, "sub.example.org", Family::A, "timeout");
+            store.startup_warning_ctx(200, "sub.example.org", Family::A, "timeout", None);
         }
         assert_eq!(
             store.dropped(),
@@ -2019,7 +2029,7 @@ mod writev_progress {
         let big = "p".repeat(1000);
         let mut turns = 0;
         while turns < 8 * QUEUE_SLOTS && store.len() < QUEUE_SLOTS {
-            store.startup_warning(1, &big, Family::A, "timeout");
+            store.startup_warning_ctx(1, &big, Family::A, "timeout", None);
             store.drain_sink();
             turns += 1;
         }
@@ -2034,7 +2044,7 @@ mod writev_progress {
         );
         let dropped_before = store.dropped();
         for _ in 0..16 {
-            store.startup_warning(1, &big, Family::A, "timeout");
+            store.startup_warning_ctx(1, &big, Family::A, "timeout", None);
         }
         assert_eq!(
             store.dropped(),
@@ -2071,7 +2081,7 @@ mod writev_progress {
         let (mut store, _file) = file_logstore();
         let mut stdout_store = LogStore::new().expect("stdout sink store");
         let ((), counts) = run_phase(Phase::Logging, || {
-            store.startup_warning(1, "sub.example.org", Family::A, "timeout");
+            store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
             for un in unresolved {
                 store.startup_name(2, un);
             }
@@ -2088,16 +2098,16 @@ mod writev_progress {
             store.note_capacity(7, 410, 0);
             store.note_capacity(8, 410, 103);
             for _ in 0..20 {
-                store.startup_warning(9, &long, Family::A, "timeout");
+                store.startup_warning_ctx(9, &long, Family::A, "timeout", None);
             }
             for _ in 0..(QUEUE_SLOTS + 4) {
-                store.startup_warning(10, "sub.example.org", Family::A, "timeout");
+                store.startup_warning_ctx(10, "sub.example.org", Family::A, "timeout", None);
             }
             for _ in 0..(SINK_MAX_OPS + 4) {
                 store.drain_sink();
             }
             for _ in 0..(QUEUE_SLOTS + 4) {
-                stdout_store.startup_warning(11, "sub.example.org", Family::A, "timeout");
+                stdout_store.startup_warning_ctx(11, "sub.example.org", Family::A, "timeout", None);
             }
             for _ in 0..(SINK_MAX_OPS + 4) {
                 stdout_store.drain_sink();
@@ -2123,7 +2133,7 @@ mod writev_progress {
             let (reader, writer) = UnixStream::pair().expect("socketpair");
             drop(reader);
             let mut epipe = LogStore::with_fd(&writer).expect("pipe sink store");
-            epipe.startup_warning(1, "sub.example.org", Family::A, "timeout");
+            epipe.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
             epipe.drain_sink();
             assert!(epipe.sink_has_failed());
             assert_eq!(
@@ -2139,7 +2149,7 @@ mod writev_progress {
         let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
         let big = "p".repeat(1000);
         for _ in 0..QUEUE_SLOTS {
-            store.startup_warning(1, &big, Family::A, "timeout");
+            store.startup_warning_ctx(1, &big, Family::A, "timeout", None);
         }
         let mut turns = 0;
         while store.len() > 0 && turns < 8 * QUEUE_SLOTS {
@@ -2154,7 +2164,7 @@ mod writev_progress {
         );
 
         let (mut runnable, _file) = file_logstore();
-        runnable.startup_warning(1, "sub.example.org", Family::A, "timeout");
+        runnable.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
         assert_eq!(
             runnable.next_drain(now),
             Some(now),
@@ -2169,8 +2179,8 @@ mod writev_progress {
         let (mut reference, mut reference_file) = file_logstore();
         for i in 0..SINK_MAX_OPS {
             let name = format!("host-{i}.example.org");
-            subject.startup_warning(1, &name, Family::A, "timeout");
-            reference.startup_warning(1, &name, Family::A, "timeout");
+            subject.startup_warning_ctx(1, &name, Family::A, "timeout", None);
+            reference.startup_warning_ctx(1, &name, Family::A, "timeout", None);
         }
         subject.drain_sink();
         assert_eq!(
@@ -2202,12 +2212,12 @@ mod writev_progress {
         let mut subject = LogStore::with_fd(&writer).expect("pipe sink store");
         let big = "p".repeat(1000);
         for _ in 0..40 {
-            subject.startup_warning(1, &big, Family::A, "timeout");
+            subject.startup_warning_ctx(1, &big, Family::A, "timeout", None);
         }
         let expected = {
             let (mut reference, mut file) = file_logstore();
             for _ in 0..40 {
-                reference.startup_warning(1, &big, Family::A, "timeout");
+                reference.startup_warning_ctx(1, &big, Family::A, "timeout", None);
             }
             flush_all(&mut reference);
             read_all(&mut file)
@@ -2275,7 +2285,7 @@ mod sink_failure {
         let (reader, writer) = UnixStream::pair().expect("socketpair");
         drop(reader);
         let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
-        store.startup_warning(1, "sub.example.org", Family::A, "timeout");
+        store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
         store.drain_sink();
         assert!(
             store.sink_has_failed(),
@@ -2306,7 +2316,7 @@ mod sink_failure {
             let (reader, writer) = UnixStream::pair().expect("socketpair");
             drop(reader);
             let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
-            store.startup_warning(1, "sub.example.org", Family::A, "timeout");
+            store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
             store.drain_sink();
             assert!(
                 store.sink_has_failed(),
@@ -2325,7 +2335,7 @@ mod sink_failure {
             let mut store = LogStore::with_fd(&writer).expect("pipe sink store");
             let big = "p".repeat(1000);
             for _ in 0..QUEUE_SLOTS {
-                store.startup_warning(1, &big, Family::A, "timeout");
+                store.startup_warning_ctx(1, &big, Family::A, "timeout", None);
             }
             let mut turns = 0;
             while store.len() > 0 && turns < 8 * QUEUE_SLOTS {
@@ -2353,7 +2363,7 @@ mod sink_failure {
         let big = "p".repeat(1000);
         let mut guard = 0;
         while guard < 8 * QUEUE_SLOTS && store.len() < QUEUE_SLOTS {
-            store.startup_warning(1, &big, Family::A, "timeout");
+            store.startup_warning_ctx(1, &big, Family::A, "timeout", None);
             guard += 1;
         }
         assert_eq!(
@@ -2391,11 +2401,41 @@ mod typed_incidents {
     #[test]
     fn startup_warning_carries_typed_first_failure_reason() {
         let (mut store, _file) = file_logstore();
-        store.startup_warning(1, "sub.example.org", Family::A, "pin_mismatch");
+        store.startup_warning_ctx(1, "sub.example.org", Family::A, "pin_mismatch", None);
         let text = String::from_utf8_lossy(store.last_record_bytes().expect("one warning queued"));
         assert!(
             text.contains("reason=\"pin_mismatch\""),
             "the first-failure startup warning must expose the typed reason token: {text}"
+        );
+    }
+
+    #[test]
+    fn startup_warning_ctx_renders_per_family_negative_lease_set() {
+        let cases = [
+            ([true, true], "both"),
+            ([true, false], "a"),
+            ([false, true], "aaaa"),
+            ([false, false], "none"),
+        ];
+        for (flags, expect) in cases {
+            let (mut store, _file) = file_logstore();
+            store.startup_warning_ctx(1, "sub.example.org", Family::A, "pin_mismatch", Some(flags));
+            let text = String::from_utf8_lossy(store.last_record_bytes().expect("warning queued"));
+            assert!(
+                text.contains(&format!("context=\"{expect}\"")),
+                "current lease set {flags:?} renders {expect}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_warning_ctx_omits_context_when_lease_set_unknown() {
+        let (mut store, _file) = file_logstore();
+        store.startup_warning_ctx(1, "sub.example.org", Family::A, "pin_mismatch", None);
+        let text = String::from_utf8_lossy(store.last_record_bytes().expect("warning queued"));
+        assert!(
+            !text.contains("context="),
+            "UNKNOWN lookup must omit the context token: {text}"
         );
     }
 

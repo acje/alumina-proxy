@@ -679,15 +679,18 @@ impl LogStore {
         self.secs = secs;
     }
 
-    /// The startup first-failure warning: exactly one attempt across all
-    /// names and record types (docs/alumina-proxy.md:67), enqueued at the time of the
-    /// first counted exchange failure inside the startup window.
-    pub(crate) fn startup_warning(
+    /// The startup first-failure warning with the current per-family reusable
+    /// negative-lease set: `context` renders `none`/`a`/`aaaa`/`both` when
+    /// both owner projections resolve and is omitted (`None`, UNKNOWN) when a
+    /// projection lookup errors. Exactly one attempt across all names and
+    /// record types (docs/alumina-proxy.md:67).
+    pub(crate) fn startup_warning_ctx(
         &mut self,
         secs: u64,
         name: &str,
         family: Family,
         reason: &'static str,
+        context: Option<[bool; 2]>,
     ) {
         self.set_now(secs);
         let fields = [
@@ -695,8 +698,19 @@ impl LogStore {
             Field::new("name", Val::Str(name)),
             Field::new("family", Val::Family(family)),
             Field::new("reason", Val::Str(reason)),
+            Field::new("context", Val::OptStr(context.map(Self::startup_ctx_token))),
         ];
         self.enqueue(Level::Warn, Kind::StartupWarning, &fields);
+    }
+
+    /// Encodes the current per-family negative-lease set as the record token.
+    const fn startup_ctx_token(context: [bool; 2]) -> &'static str {
+        match context {
+            [true, true] => "both",
+            [true, false] => "a",
+            [false, true] => "aaaa",
+            [false, false] => "none",
+        }
     }
 
     /// One warn per counted exchange failure in the serving loop

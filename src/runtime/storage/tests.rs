@@ -1,4 +1,5 @@
 use super::*;
+use crate::dns::cache::evidence::{Evidence, ResolverSource};
 use crate::dns::cache::{Generation, StagedPositive};
 use crate::dns::schedule::ScheduleError;
 use crate::eligibility::NumericAddr;
@@ -437,7 +438,7 @@ fn monitor_report_emits_at_whole_second_cadence_clears_on_commit_and_admits_ring
     {
         let ring = storage.logs_mut();
         for _ in 0..(crate::log::QUEUE_SLOTS) {
-            ring.startup_warning(DNS_EPOCH, "sub.example.org", Family::A, "timeout");
+            ring.startup_warning_ctx(DNS_EPOCH, "sub.example.org", Family::A, "timeout", None);
         }
     }
     let next = one_second + Duration::from_secs(1);
@@ -904,7 +905,7 @@ fn enqueue_failure_drops_summary_resets_window_and_counts_drop() {
     {
         let ring = storage.logs_mut();
         for _ in 0..crate::log::QUEUE_SLOTS {
-            ring.startup_warning(1, "sub.example.org", Family::A, "timeout");
+            ring.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
         }
     }
     assert!(storage.logs().is_full(), "ring must be at capacity");
@@ -1043,7 +1044,23 @@ fn summary_reports_remaining_freshness_and_retirement_deadlines() {
 #[test]
 fn startup_warning_first_emits_typed_reason_on_probe_branch() {
     let mut storage = booted(1, 0);
-    storage.startup_warning_first(1, 0, Family::A, "pin_mismatch");
+    storage
+        .cache
+        .evict_nodata_evidenced(
+            idx(&storage.cache, 0),
+            Family::A,
+            Evidence::new(
+                false,
+                true,
+                false,
+                ResolverSource::index(1).unwrap(),
+                Some(600),
+                0,
+            )
+            .expect("admitted NoData evidence"),
+        )
+        .expect("preseed NoData-A lease");
+    storage.startup_warning_first(1, 0, Family::Aaaa, "pin_mismatch");
     assert_eq!(
         storage.logs().len(),
         1,
@@ -1056,8 +1073,10 @@ fn startup_warning_first_emits_typed_reason_on_probe_branch() {
             .expect("one warning queued"),
     );
     assert!(
-        text.contains("kind=startup_warning") && text.contains("reason=\"pin_mismatch\""),
-        "prod-branch first warning must carry the typed reason token: {text}"
+        text.contains("kind=startup_warning")
+            && text.contains("reason=\"pin_mismatch\"")
+            && text.contains("context=\"a\""),
+        "prod-branch first warning must carry the typed reason and the current lease context: {text}"
     );
 }
 

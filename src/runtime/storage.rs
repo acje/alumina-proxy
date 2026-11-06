@@ -781,8 +781,12 @@ impl ServeStorage {
         reason: &'static str,
     ) {
         if let Some(name) = self.config.allowlist().get(ordinal) {
+            let context = self
+                .cache
+                .name_index(ordinal)
+                .and_then(|index| self.cache.negative_lease_flags(index, secs));
             self.logs
-                .startup_warning(secs, name.as_str(), family, reason);
+                .startup_warning_ctx(secs, name.as_str(), family, reason, context);
         }
     }
 

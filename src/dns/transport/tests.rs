@@ -4761,3 +4761,72 @@ fn snapshot_retains_other_family_generation_after_start() {
         "snapshot is immutable: re-read active after mutation retains the other tag"
     );
 }
+
+#[test]
+fn resolve_window_first_failure_warns_with_live_context() {
+    use crate::dns::cache::evidence::{Evidence, ResolverSource};
+    let cfg = config();
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let floor = transport.now_u64();
+    let idx = cache.name_index(0).unwrap();
+    cache
+        .evict_nodata_evidenced(
+            idx,
+            Family::A,
+            Evidence::new(
+                false,
+                true,
+                false,
+                ResolverSource::index(1).unwrap(),
+                Some(600),
+                floor,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(
+        cache
+            .negative_projection(idx, Family::A, floor)
+            .unwrap()
+            .is_some()
+    );
+    let dead = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let path = std::env::temp_dir().join(format!("alumina-l39-{}.log", std::process::id()));
+    let sink = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let mut logs = crate::log::LogStore::with_fd(&sink).unwrap();
+    transport
+        .resolve_window(
+            WindowInputs {
+                config: &cfg,
+                cache: &mut cache,
+                schedules: &mut schedules,
+                nameserver: ns(dead),
+                now0: floor,
+                window: Duration::from_secs(2),
+            },
+            &mut logs,
+        )
+        .unwrap();
+    drop(logs);
+    let bytes = std::fs::read(&path).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(text.matches("kind=startup_warning").count(), 1, "{text}");
+    assert!(
+        text.contains("kind=startup_warning")
+            && text.contains("reason=\"connect\"")
+            && text.contains("family=A")
+            && text.contains("context=\"a\""),
+        "{text}"
+    );
+}

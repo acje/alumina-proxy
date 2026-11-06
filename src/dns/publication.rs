@@ -60,16 +60,6 @@ pub fn apply_outcome(
     )
 }
 
-/// The crate-private production apply route: stages validated positives with
-/// immutable reply `evidence` atomically at publication. Relying on the
-/// DNS-private trusted boundary, the caller is the same-reply `wire`
-/// [`ObservedReply`](crate::dns::wire::ObservedReply) producer only; this is
-/// not a type-enforced gateway, but no public caller can build a detached
-/// `Outcome`+`Evidence` under a public name.
-///
-/// # Errors
-///
-/// Returns the same errors as [`apply_outcome`].
 pub(super) fn apply_route(
     cache: &mut Cache,
     schedules: &mut Schedules,
@@ -134,7 +124,11 @@ pub(super) fn apply_route(
             let prepared = schedules
                 .prepare_nxdomain(index, *soa, receipt, now)
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
-            cache.evict_nxdomain(name).map_err(DnsError::Cache)?;
+            let minted = match negative_evidence(evidence, query_family, other_generation) {
+                Some(evidence) => cache.evict_nxdomain_evidenced(name, evidence),
+                None => cache.evict_nxdomain(name),
+            };
+            minted.map_err(DnsError::Cache)?;
             schedules.commit_nxdomain(index, prepared);
             let sustained = schedules.note_negative_streak(index, now);
             let per_type = [
@@ -157,15 +151,33 @@ pub(super) fn apply_route(
             let prepared = schedules
                 .prepare_nodata(index, *no_data_family, *soa, receipt, now)
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
-            cache
-                .evict_nodata(name, *no_data_family)
-                .map_err(DnsError::Cache)?;
+            let minted = match negative_evidence(evidence, query_family, other_generation) {
+                Some(evidence) => cache.evict_nodata_evidenced(name, *no_data_family, evidence),
+                None => cache.evict_nodata(name, *no_data_family),
+            };
+            minted.map_err(DnsError::Cache)?;
             schedules.commit_nodata(index, *no_data_family, prepared);
+            let mut per_type = [PerTypeTransition::None; 2];
+            per_type[family_slot(*no_data_family)] = schedules
+                .clear_exchange_incident(index, *no_data_family, now)
+                .map_err(|err| DnsError::Cache(map_schedule(err)))?;
             Ok(OutcomeIncidents {
                 sustained: IncidentTransition::None,
-                per_type: [PerTypeTransition::None; 2],
+                per_type,
             })
         }
+    }
+}
+
+const fn negative_evidence(
+    evidence: Option<evidence::Evidence>,
+    query_family: Option<Family>,
+    other_generation: Option<Generation>,
+) -> Option<evidence::Evidence> {
+    if query_family.is_some() && other_generation.is_some() {
+        evidence
+    } else {
+        None
     }
 }
 

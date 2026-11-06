@@ -132,6 +132,8 @@ pub struct Entry {
     /// Optional immutable reply evidence, stored atomically with the
     /// bindings; legacy publishes leave this `None`.
     evidence: Option<evidence::Evidence>,
+    /// Closed negative scope minted with this entry.
+    negative: Option<NegativeProof>,
 }
 
 impl Entry {
@@ -143,6 +145,7 @@ impl Entry {
         binding_len: 0,
         stale_allowed: false,
         evidence: None,
+        negative: None,
     };
 
     #[must_use]
@@ -238,6 +241,25 @@ impl Entry {
 const fn empty_with_generation(generation: Generation) -> Entry {
     Entry {
         generation,
+        ..Entry::EMPTY
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NegativeProof {
+    Nx {
+        sibling_tag: Generation,
+        evidence: evidence::Evidence,
+    },
+    NoData {
+        evidence: evidence::Evidence,
+    },
+}
+
+const fn negative_entry(generation: Generation, negative: NegativeProof) -> Entry {
+    Entry {
+        generation,
+        negative: Some(negative),
         ..Entry::EMPTY
     }
 }
@@ -548,6 +570,7 @@ impl Cache {
                     .expect("eligible count bounded by MAX_ADDRESSES"),
                 stale_allowed: staged.ttl != 0,
                 evidence: staged.evidence,
+                negative: None,
             }
         };
         *entry = new_entry;
@@ -594,6 +617,103 @@ impl Cache {
             .ok_or(CacheError::GenerationExhausted)?;
         *self.entry_mut(name, family) = empty_with_generation(next);
         Ok(())
+    }
+
+    pub(crate) fn evict_nodata_evidenced(
+        &mut self,
+        name: NameIndex,
+        family: Family,
+        evidence: evidence::Evidence,
+    ) -> Result<(), CacheError> {
+        self.admit(name)?;
+        let next = self
+            .entry_ref(name, family)
+            .generation
+            .checked_next()
+            .ok_or(CacheError::GenerationExhausted)?;
+        *self.entry_mut(name, family) = negative_entry(next, NegativeProof::NoData { evidence });
+        Ok(())
+    }
+
+    pub(crate) fn evict_nxdomain_evidenced(
+        &mut self,
+        name: NameIndex,
+        evidence: evidence::Evidence,
+    ) -> Result<(), CacheError> {
+        self.admit(name)?;
+        let a = self
+            .entry_ref(name, Family::A)
+            .generation
+            .checked_next()
+            .ok_or(CacheError::GenerationExhausted)?;
+        let aaaa = self
+            .entry_ref(name, Family::Aaaa)
+            .generation
+            .checked_next()
+            .ok_or(CacheError::GenerationExhausted)?;
+        *self.entry_mut(name, Family::A) = negative_entry(
+            a,
+            NegativeProof::Nx {
+                sibling_tag: aaaa,
+                evidence,
+            },
+        );
+        *self.entry_mut(name, Family::Aaaa) = negative_entry(
+            aaaa,
+            NegativeProof::Nx {
+                sibling_tag: a,
+                evidence,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn negative_lease_flags(&self, name: NameIndex, now: u64) -> Option<[bool; 2]> {
+        match (
+            self.negative_projection(name, Family::A, now),
+            self.negative_projection(name, Family::Aaaa, now),
+        ) {
+            (Ok(a), Ok(aaaa)) => Some([a.is_some(), aaaa.is_some()]),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn negative_projection(
+        &self,
+        name: NameIndex,
+        family: Family,
+        now: u64,
+    ) -> Result<Option<NegativeProof>, CacheError> {
+        let Some(proof) = self.entry(name, family)?.negative else {
+            return Ok(None);
+        };
+        match proof {
+            NegativeProof::NoData { evidence } => {
+                if evidence.valid_class(now).is_none() {
+                    return Ok(None);
+                }
+                Ok(Some(NegativeProof::NoData { evidence }))
+            }
+            NegativeProof::Nx {
+                sibling_tag,
+                evidence,
+            } => {
+                let sibling = match family {
+                    Family::A => self.entry(name, Family::Aaaa)?,
+                    Family::Aaaa => self.entry(name, Family::A)?,
+                };
+                if sibling.generation() != sibling_tag {
+                    return Ok(None);
+                }
+                if evidence.valid_class(now).is_none() {
+                    return Ok(None);
+                }
+                Ok(Some(NegativeProof::Nx {
+                    sibling_tag,
+                    evidence,
+                }))
+            }
+        }
     }
 
     /// Records an exchange failure for an admitted name and family without any

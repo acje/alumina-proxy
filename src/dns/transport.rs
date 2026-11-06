@@ -2846,7 +2846,13 @@ impl StartupDns {
                         }
                         Ok(ExchangeResult::Failed(reason)) => {
                             if ledger.mark_failed(ordinal, family, reason) {
-                                logs.startup_warning(now, name.as_str(), family, reason.as_str());
+                                logs.startup_warning_ctx(
+                                    now,
+                                    name.as_str(),
+                                    family,
+                                    reason.as_str(),
+                                    cache.negative_lease_flags(name_index, now),
+                                );
                             }
                         }
                         Ok(ExchangeResult::Superseded) => {}

@@ -939,6 +939,282 @@ fn cache_zero_heap_on_error_paths() {
 
 mod evidence_value {
     use super::evidence::{Evidence, EvidenceError, ProofClass, ResolverSource};
+    use super::*;
+
+    #[test]
+    fn negative_nodata_mint() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        cache
+            .evict_nodata_evidenced(name, Family::A, v4e(false, false, false, Some(60), 1000))
+            .unwrap();
+        let a = read(&cache, name, Family::A);
+        let NegativeProof::NoData { .. } = a.negative.unwrap() else {
+            panic!("expected NoData kind");
+        };
+        assert!(a.is_empty());
+        assert_eq!(a.evidence(), None);
+        assert_eq!(a.generation(), Generation::INITIAL.checked_next().unwrap());
+        assert_eq!(
+            read(&cache, name, Family::Aaaa).generation(),
+            Generation::INITIAL
+        );
+    }
+
+    #[test]
+    fn negative_nx_mint_binds_both_families_with_sibling_tags() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        cache.evict_nodata(name, Family::A).unwrap();
+        cache.evict_nodata(name, Family::A).unwrap();
+        cache.evict_nodata(name, Family::Aaaa).unwrap();
+        cache
+            .evict_nxdomain_evidenced(name, v4e(false, false, false, Some(60), 1000))
+            .unwrap();
+        let a = read(&cache, name, Family::A);
+        let aaaa = read(&cache, name, Family::Aaaa);
+        assert_ne!(a.generation(), aaaa.generation());
+        let NegativeProof::Nx {
+            sibling_tag: atag, ..
+        } = a.negative.unwrap()
+        else {
+            panic!("expected Nx on A");
+        };
+        let NegativeProof::Nx {
+            sibling_tag: aaaatag,
+            ..
+        } = aaaa.negative.unwrap()
+        else {
+            panic!("expected Nx on AAAA");
+        };
+        assert_eq!(atag, aaaa.generation());
+        assert_eq!(aaaatag, a.generation());
+        assert!(a.is_empty() && aaaa.is_empty());
+        assert_eq!(a.evidence(), None);
+        assert_eq!(aaaa.evidence(), None);
+    }
+
+    #[test]
+    fn legacy_and_positive_publish_clear_negative_records() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        cache
+            .evict_nxdomain_evidenced(name, v4e(false, false, false, Some(60), 1000))
+            .unwrap();
+        assert!(read(&cache, name, Family::A).negative.is_some());
+        assert!(read(&cache, name, Family::Aaaa).negative.is_some());
+        let current = current_gen(&cache, name, Family::A);
+        publish_simple(&mut cache, name, Family::A, current, &[pub_addr()], 100, 60);
+        let a = read(&cache, name, Family::A);
+        assert!(a.negative.is_none());
+        assert_eq!(a.bindings(), &[pub_addr()]);
+        assert_eq!(a.evidence(), None);
+        cache.evict_nxdomain(name).unwrap();
+        assert!(read(&cache, name, Family::Aaaa).negative.is_none());
+        cache
+            .evict_nodata_evidenced(name, Family::A, v4e(false, false, false, Some(60), 1000))
+            .unwrap();
+        assert!(read(&cache, name, Family::A).negative.is_some());
+        cache.evict_nodata(name, Family::A).unwrap();
+        assert!(read(&cache, name, Family::A).negative.is_none());
+    }
+
+    #[test]
+    fn negative_projection_nx_degrades_on_sibling_rewrite() {
+        let ev = v4e(false, false, false, Some(60), 1000);
+        let name = NameIndex(0);
+        let mut cache = Cache::new(1).unwrap();
+        cache.evict_nodata(name, Family::A).unwrap();
+        cache.evict_nodata(name, Family::A).unwrap();
+        cache.evict_nodata(name, Family::Aaaa).unwrap();
+        assert_ne!(
+            current_gen(&cache, name, Family::A),
+            current_gen(&cache, name, Family::Aaaa)
+        );
+        cache.evict_nxdomain_evidenced(name, ev).unwrap();
+        assert!(matches!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            Some(NegativeProof::Nx { .. })
+        ));
+        let own_a = cache.entry(name, Family::A).unwrap();
+        cache
+            .evict_nodata_evidenced(name, Family::Aaaa, ev)
+            .unwrap();
+        assert_eq!(own_a, cache.entry(name, Family::A).unwrap());
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            None
+        );
+        let mut cache = Cache::new(1).unwrap();
+        cache.evict_nodata(name, Family::A).unwrap();
+        cache.evict_nodata(name, Family::Aaaa).unwrap();
+        cache.evict_nodata(name, Family::Aaaa).unwrap();
+        assert_ne!(
+            current_gen(&cache, name, Family::A),
+            current_gen(&cache, name, Family::Aaaa)
+        );
+        cache.evict_nxdomain_evidenced(name, ev).unwrap();
+        assert!(matches!(
+            cache.negative_projection(name, Family::Aaaa, 1005).unwrap(),
+            Some(NegativeProof::Nx { .. })
+        ));
+        let own_aaaa = cache.entry(name, Family::Aaaa).unwrap();
+        cache.evict_nodata_evidenced(name, Family::A, ev).unwrap();
+        assert_eq!(own_aaaa, cache.entry(name, Family::Aaaa).unwrap());
+        assert_eq!(
+            cache.negative_projection(name, Family::Aaaa, 1005).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn negative_projection_nodata_survives_sibling_advance() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        let ev = v4e(false, false, false, Some(60), 1000);
+        cache.evict_nodata_evidenced(name, Family::A, ev).unwrap();
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            Some(NegativeProof::NoData { evidence: ev })
+        );
+        let own_a = cache.entry(name, Family::A).unwrap();
+        cache
+            .evict_nodata_evidenced(name, Family::Aaaa, ev)
+            .unwrap();
+        assert_eq!(own_a, cache.entry(name, Family::A).unwrap());
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            Some(NegativeProof::NoData { evidence: ev })
+        );
+        let tag = current_gen(&cache, name, Family::A);
+        publish_simple(&mut cache, name, Family::A, tag, &[pub_addr()], 100, 60);
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn negative_projection_absent_positive_untracked_and_lease_none() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        let ev = v4e(false, false, false, Some(60), 1000);
+        assert_eq!(
+            cache.negative_projection(name, Family::Aaaa, 1005).unwrap(),
+            None
+        );
+        cache.evict_nodata(name, Family::A).unwrap();
+        let tag = current_gen(&cache, name, Family::A);
+        publish_simple(&mut cache, name, Family::A, tag, &[pub_addr()], 100, 60);
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            None
+        );
+        let mut cache = Cache::new(1).unwrap();
+        cache.evict_nodata(name, Family::A).unwrap();
+        cache.evict_nodata(name, Family::Aaaa).unwrap();
+        cache.evict_nxdomain_evidenced(name, ev).unwrap();
+        cache
+            .evict_nodata_evidenced(name, Family::Aaaa, ev)
+            .unwrap();
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            None
+        );
+        let mut cache = Cache::new(1).unwrap();
+        cache.evict_nodata_evidenced(name, Family::A, ev).unwrap();
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 999).unwrap(),
+            None
+        );
+        assert!(
+            cache
+                .negative_projection(name, Family::A, 1000)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            cache
+                .negative_projection(name, Family::A, 1059)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1060).unwrap(),
+            None
+        );
+        let no_lease = v4e(false, false, false, None, 1000);
+        cache
+            .evict_nodata_evidenced(name, Family::A, no_lease)
+            .unwrap();
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            None
+        );
+        let zero_ttl = v4e(false, false, false, Some(0), 1000);
+        cache
+            .evict_nodata_evidenced(name, Family::A, zero_ttl)
+            .unwrap();
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            None
+        );
+        let late = v4e(false, false, false, Some(60), 1005);
+        cache.evict_nodata_evidenced(name, Family::A, late).unwrap();
+        let NegativeProof::NoData { evidence } = cache
+            .negative_projection(name, Family::A, 1030)
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected retained NoData");
+        };
+        assert_eq!(evidence, late);
+        assert_ne!(evidence, ev);
+    }
+
+    #[test]
+    fn negative_projection_nx_lease() {
+        let mut cache = Cache::new(1).unwrap();
+        let name = NameIndex(0);
+        let ev = v4e(false, false, false, Some(60), 1000);
+        cache.evict_nxdomain_evidenced(name, ev).unwrap();
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 999).unwrap(),
+            None
+        );
+        assert!(matches!(
+            cache.negative_projection(name, Family::A, 1000).unwrap(),
+            Some(NegativeProof::Nx { .. })
+        ));
+        assert!(matches!(
+            cache.negative_projection(name, Family::A, 1059).unwrap(),
+            Some(NegativeProof::Nx { .. })
+        ));
+        assert!(matches!(
+            cache.negative_projection(name, Family::Aaaa, 1059).unwrap(),
+            Some(NegativeProof::Nx { .. })
+        ));
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1060).unwrap(),
+            None
+        );
+        let no_lease = v4e(false, false, false, None, 1000);
+        cache.evict_nxdomain_evidenced(name, no_lease).unwrap();
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            None
+        );
+        let zero_ttl = v4e(false, false, false, Some(0), 1000);
+        cache.evict_nxdomain_evidenced(name, zero_ttl).unwrap();
+        assert_eq!(
+            cache.negative_projection(name, Family::A, 1005).unwrap(),
+            None
+        );
+        assert_eq!(
+            cache.negative_projection(name, Family::Aaaa, 1005).unwrap(),
+            None
+        );
+    }
 
     fn v4e(ad: bool, origin: bool, qualified: bool, ttl: Option<u32>, start: u64) -> Evidence {
         Evidence::new(

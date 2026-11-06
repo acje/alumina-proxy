@@ -816,11 +816,12 @@ mod poll_timeout {
                 None,
                 "no slots, no dns deadline, empty log queue: idle serving has no wait"
             );
-            serving.storage_mut().logs_mut().startup_warning(
+            serving.storage_mut().logs_mut().startup_warning_ctx(
                 1,
                 "sub.example.org",
                 crate::dns::cache::Family::A,
                 "timeout",
+                None,
             );
             assert_eq!(
                 serving.poll_timeout(),

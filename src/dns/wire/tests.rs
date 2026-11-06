@@ -2080,7 +2080,7 @@ mod cache_schedule {
     }
 
     #[test]
-    fn apply_nodata_leaves_exchange_incidents_untouched() {
+    fn apply_nodata_recovers_only_its_own_family_incident() {
         let mut cache = Cache::new(2).expect("cache");
         let mut schedules = Schedules::new(2).expect("schedules");
         let name = cache.name_index(0).expect("index");
@@ -2116,8 +2116,11 @@ mod cache_schedule {
         .expect("apply");
         assert_eq!(
             incidents.per_type,
-            [PerTypeTransition::None, PerTypeTransition::None],
-            "a NODATA touches no per-type exchange incident"
+            [
+                PerTypeTransition::Recovered { duration: 12 },
+                PerTypeTransition::None,
+            ],
+            "a NODATA recovers only the queried A incident, leaving AAAA open"
         );
         let nxdomain = apply_outcome(
             &mut cache,
@@ -2132,10 +2135,10 @@ mod cache_schedule {
         assert_eq!(
             nxdomain.per_type,
             [
-                PerTypeTransition::Recovered { duration: 20 },
+                PerTypeTransition::None,
                 PerTypeTransition::Recovered { duration: 20 },
             ],
-            "the incidents survived NODATA untouched and an NXDOMAIN later clears them"
+            "NODATA closed A first; the later NXDOMAIN clears the still-open AAAA"
         );
     }
 
@@ -3194,6 +3197,186 @@ mod production_apply_route {
             )
             .expect("preseed positive applies");
         (cache, schedules)
+    }
+
+    #[test]
+    fn parsed_negative_provenance() {
+        let mut ws = ResponseWorkspace::default();
+        for (label, rcode, tid) in [("NX", 3u8, 0x5301u16), ("NODATA", 0u8, 0x5302u16)] {
+            let mut msg = header(tid, true, rcode, 1, 0, 1, 0);
+            msg[3] |= 0x20;
+            msg.extend_from_slice(&qname_bytes("sub.example.org"));
+            msg.extend_from_slice(&1u16.to_be_bytes());
+            msg.extend_from_slice(&1u16.to_be_bytes());
+            msg.extend_from_slice(&root_soa_record(300, 60));
+            let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, tid, &msg)
+                .expect("validated negative reply");
+            assert_eq!(
+                reply.supporting_ttl_cap(),
+                Some(60),
+                "{label} SOA TTL/MINIMUM cap is 60"
+            );
+            let (mut cache, mut schedules) = owned_cache_fixture();
+            let name = cache.name_index(0).expect("index");
+            let tracked = cache
+                .generations_before_query(name, Family::A)
+                .expect("generation snapshot");
+            let (kind, _extreme, _incidents) = reply
+                .observe()
+                .apply(
+                    &mut cache,
+                    &mut schedules,
+                    crate::dns::publication::ApplyContext {
+                        index: 0,
+                        generation: tracked.queried,
+                        receipt: 6_001,
+                        now: 6_001,
+                        query_family: Some(Family::A),
+                        other_generation: Some(tracked.other),
+                    },
+                    ApplyOrigin {
+                        source: ResolverSource::index(1).expect("index"),
+                        query_floor: 6_000,
+                        origin_authenticated: true,
+                    },
+                )
+                .expect("accepted negative applies");
+            assert_eq!(kind, PublishedKind::Negative, "{label} publishes Negative");
+            let projected = cache
+                .negative_projection(name, Family::A, 6_001)
+                .expect("owner projection");
+            let evidence = match projected {
+                Some(crate::dns::cache::NegativeProof::Nx { evidence, .. }) => {
+                    assert_eq!(rcode, 3, "NXDOMAIN projects Nx");
+                    evidence
+                }
+                Some(crate::dns::cache::NegativeProof::NoData { evidence }) => {
+                    assert_eq!(rcode, 0, "NODATA projects NoData");
+                    evidence
+                }
+                None => panic!("{label} negative applied but owner projection is None"),
+            };
+            assert!(evidence.raw_ad(), "AD bit retained in negative evidence");
+            assert_eq!(
+                evidence.source(),
+                ResolverSource::index(1).expect("index"),
+                "selected source index 1 retained"
+            );
+            assert!(!evidence.qualified(), "{label} never production-qualified");
+            assert!(
+                evidence.origin_authenticated(),
+                "{label} authenticated-origin fact retained"
+            );
+            assert_eq!(
+                evidence.class(),
+                crate::dns::cache::evidence::ProofClass::Authenticated,
+                "{label} complete pin origin classifies Authenticated"
+            );
+            assert_eq!(
+                evidence.evidential_start(),
+                6_000,
+                "query floor anchors the evidential start"
+            );
+            assert_eq!(
+                evidence.evidential_deadline(),
+                Some(6_060),
+                "SOA MINIMUM 60 caps the lease at 6060"
+            );
+            assert!(
+                evidence.valid_class(6_050).is_some(),
+                "lease is valid inside the 6000..6060 window"
+            );
+            assert!(
+                evidence.valid_class(6_060).is_none(),
+                "lease expires exactly at 6060"
+            );
+            assert_eq!(
+                cache
+                    .entry(name, Family::A)
+                    .expect("entry")
+                    .bindings()
+                    .len(),
+                0,
+                "negative application clears A addresses"
+            );
+        }
+    }
+
+    #[test]
+    fn nodata_incident_recovery() {
+        let mut ws = ResponseWorkspace::default();
+        let mut msg = header(0x4700, true, 0, 1, 0, 1, 0);
+        msg[3] |= 0x20;
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&soa_record("example.org", 300, 60));
+        let (mut cache, mut schedules) = owned_cache_fixture();
+        let name = cache.name_index(0).expect("index");
+        let tracked = cache
+            .generations_before_query(name, Family::A)
+            .expect("query-start generation snapshot");
+        schedules
+            .note_exchange_failure(
+                0,
+                Family::A,
+                6_000,
+                crate::dns::transport::FailureReason::Connect,
+            )
+            .expect("open the A incident");
+        schedules
+            .note_exchange_failure(
+                0,
+                Family::Aaaa,
+                6_000,
+                crate::dns::transport::FailureReason::Connect,
+            )
+            .expect("open the AAAA incident");
+        let sibling_before = schedules.incident(0, Family::Aaaa);
+        assert!(
+            sibling_before.is_some(),
+            "precondition: the sibling AAAA incident is open before the NODATA"
+        );
+        let nodata = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4700, &msg)
+            .expect("validated NODATA");
+        let (_kind, _extreme, incidents) = nodata
+            .observe()
+            .apply(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation: tracked.queried,
+                    receipt: 6_001,
+                    now: 6_001,
+                    query_family: Some(Family::A),
+                    other_generation: Some(tracked.other),
+                },
+                ApplyOrigin {
+                    source: ResolverSource::index(1).expect("index"),
+                    query_floor: 6_000,
+                    origin_authenticated: true,
+                },
+            )
+            .expect("accepted NODATA publishes");
+        assert_eq!(
+            incidents.per_type,
+            [
+                PerTypeTransition::Recovered { duration: 1 },
+                PerTypeTransition::None,
+            ],
+            "a validated NODATA recovers only the queried A incident, leaving AAAA open"
+        );
+        assert_eq!(
+            schedules.incident(0, Family::A),
+            Some(crate::dns::schedule::TypeIncident::Closed),
+            "the queried family incident is closed"
+        );
+        assert_eq!(
+            schedules.incident(0, Family::Aaaa),
+            sibling_before,
+            "the sibling AAAA incident is exactly unchanged"
+        );
     }
 
     #[test]

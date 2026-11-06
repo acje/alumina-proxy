@@ -1148,20 +1148,6 @@ impl<'a> ObservedReply<'a> {
         )
     }
 
-    /// Applies the observed reply through the crate's evidence-binding
-    /// production route, returning the kind and the extreme flag captured
-    /// from the same reply alongside the incidents the apply produced. The
-    /// reply-derived `evidence` — raw AD, the actual transport source, the
-    /// query-start floor, and the support-TTL cap, read from this same
-    /// [`ParsedReply`] and the supplied `origin` transport facts — is built
-    /// internally for every validated positive and bound atomically at
-    /// publication. On error, no kind, flag or incidents are returned and no
-    /// entry is changed.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DnsError::Cache` when the evidence is refused (`DeadlineOverflow`
-    /// / `EvidenceInconsistent`) or the cache or schedule refuses the mutation.
     pub(super) fn apply(
         self,
         cache: &mut Cache,
@@ -1170,7 +1156,7 @@ impl<'a> ObservedReply<'a> {
         origin: ApplyOrigin,
     ) -> Result<(PublishedKind, bool, OutcomeIncidents), DnsError> {
         let evidence = match &self.reply.outcome {
-            Outcome::Positive { .. } => Some(
+            Outcome::Positive { .. } | Outcome::NxDomain { .. } | Outcome::NoData { .. } => Some(
                 Evidence::new(
                     self.ad_fact(),
                     origin.origin_authenticated,
@@ -1181,7 +1167,6 @@ impl<'a> ObservedReply<'a> {
                 )
                 .map_err(|err| DnsError::Cache(map_evidence_error(err)))?,
             ),
-            _ => None,
         };
         let incidents =
             publication::apply_route(cache, schedules, context, &self.reply.outcome, evidence)?;
