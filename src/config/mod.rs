@@ -6,6 +6,7 @@ use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 use std::ops::Range;
 
+use crate::dns::cache::evidence::AssuranceRequirement;
 use crate::dns::resolver::MAX_RESOLVERS;
 use crate::dns::resolver::{self, ResolverSet};
 use crate::enforcement::action::{
@@ -197,6 +198,7 @@ impl ListenAddr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     allowlist: Allowlist,
+    entry_requirements: [AssuranceRequirement; ALLOWLIST_MAX],
     listen: ListenAddr,
     startup_unresolved_allowance: u8,
     control: ControlTable,
@@ -205,10 +207,31 @@ pub struct Config {
     gates: GateSet,
 }
 
+#[cfg(test)]
+impl Config {
+    /// Tests only: a copy with the per-entry requirement at `index`
+    /// replaced, inhabiting the valid invariant. Does not construct the
+    /// selector variants on the production parse path.
+    pub(crate) fn with_entry_requirement(
+        mut self,
+        index: usize,
+        requirement: AssuranceRequirement,
+    ) -> Self {
+        self.entry_requirements[index] = requirement;
+        self
+    }
+}
+
 impl Config {
     #[must_use]
     pub const fn allowlist(&self) -> &Allowlist {
         &self.allowlist
+    }
+
+    /// Per-allowlist assurance requirement at `index`, parallel to
+    /// `allowlist()` order; only `0..allowlist().len()` is ever read.
+    pub(crate) const fn entry_requirement(&self, index: usize) -> AssuranceRequirement {
+        self.entry_requirements[index]
     }
 
     /// Per-allowlist declared `cname_bailiwick` suffixes, parallel to
@@ -344,6 +367,17 @@ pub enum ConfigError {
         value: String,
     },
     MixedResolverTrust,
+    InvalidRecursivePolicy {
+        value: String,
+    },
+    RecursiveDeclaresWeakResolver {
+        index: usize,
+        value: String,
+    },
+    InvalidDnsAssurance {
+        key: String,
+        reason: String,
+    },
 }
 
 impl ConfigError {
@@ -477,6 +511,16 @@ impl fmt::Display for ConfigError {
                 f,
                 "config resolver array mixes plain (bare-IP) and DoT (IP#fqdn) entries; a resolver set must be trust-homogeneous"
             ),
+            ConfigError::InvalidRecursivePolicy { value } => write!(
+                f,
+                "config recursive_dnssec_policy {value:?} invalid: only \"root_validating_no_stale\" is supported"
+            ),
+            ConfigError::RecursiveDeclaresWeakResolver { index, value } => write!(
+                f,
+                "config recursive_dnssec_policy requires a strict IP#fqdn#pin-sha256= entry for every resolver; resolver[{0}] {value:?} is weak",
+                index + 1
+            ),
+            ConfigError::InvalidDnsAssurance { key, reason } => write!(f, "config {key}: {reason}"),
         }
     }
 }
@@ -561,6 +605,7 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
                 | "illegal_fqdn"
                 | "early_data"
                 | "ja4"
+                | "recursive_dnssec_policy"
         ) {
             return Err(match value {
                 toml::Value::Table(_) => ConfigError::UnknownTable(key.clone()),
@@ -584,6 +629,18 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
     let control = ControlTable::new(any_controls, &parsed.early_data, &parsed.ja4)
         .expect("build_allowlist validated 1..=32 entries, so ControlTable::new cannot fail");
     let resolver = build_resolver_set(table)?;
+    let declared_root_validating =
+        resolver.recursion_policy() == resolver::RecursionPolicy::RootValidatingNoStale;
+    for (index, fqdn) in parsed.allowlist.iter().enumerate() {
+        if parsed.requirements[index] != AssuranceRequirement::ResolverTrusted
+            && !declared_root_validating
+        {
+            return Err(ConfigError::InvalidDnsAssurance {
+                key: format!("{}:{}", fqdn.as_str(), fqdn.port()),
+                reason: "requires recursive_dnssec_policy = \"root_validating_no_stale\" and every resolver strict".to_owned(),
+            });
+        }
+    }
     let gates = {
         if table.get("early_data").is_some() {
             return Err(ConfigError::EarlyDataGateRejected);
@@ -597,6 +654,7 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
     };
     Ok(Config {
         allowlist: parsed.allowlist,
+        entry_requirements: parsed.requirements,
         listen,
         startup_unresolved_allowance: allowance,
         control,
@@ -634,8 +692,23 @@ fn build_resolver_set(table: &toml::Table) -> Result<ResolverSet, ConfigError> {
         }
         nameservers.push(ns);
     }
-    resolver::ResolverSet::from_slice(&nameservers).ok_or(ConfigError::ResolverCountOutOfRange {
-        got: nameservers.len(),
+    let set = resolver::ResolverSet::from_slice(&nameservers).ok_or(
+        ConfigError::ResolverCountOutOfRange {
+            got: nameservers.len(),
+        },
+    )?;
+    if table.get("recursive_dnssec_policy").is_none() {
+        return Ok(set);
+    }
+    let policy = require_string(table, "recursive_dnssec_policy")?;
+    if policy != resolver::RECURSIVE_DNSSEC_POLICY_ROOT_VALIDATING_NO_STALE {
+        return Err(ConfigError::InvalidRecursivePolicy { value: policy });
+    }
+    set.declared_root_validating_no_stale().map_err(|index| {
+        ConfigError::RecursiveDeclaresWeakResolver {
+            index,
+            value: values[index].clone(),
+        }
     })
 }
 
@@ -826,6 +899,7 @@ fn parse_allowed_fqdn_table(
             "cname_bailiwick" => {
                 bailiwick = parse_cname_bailiwick(value, fqdn_key)?;
             }
+            "dns_assurance" => {}
             _ => {
                 return Err(ConfigError::UnknownKey(format!(
                     "allowed_fqdn.{fqdn_key}.{key}"
@@ -840,6 +914,40 @@ fn parse_allowed_fqdn_table(
     let early = parse_per_fqdn_control(early_data, fqdn_key, "early_data")?;
     let j4 = parse_per_fqdn_control(ja4, fqdn_key, "ja4")?;
     Ok((early, j4, bailiwick))
+}
+
+fn parse_dns_assurance(
+    value: &toml::Value,
+    fqdn_key: &str,
+) -> Result<AssuranceRequirement, ConfigError> {
+    let toml::Value::String(selector) = value else {
+        return Err(ConfigError::WrongType(format!(
+            "allowed_fqdn.{fqdn_key}.dns_assurance: expected string"
+        )));
+    };
+    match selector.as_str() {
+        "resolver_trusted" => Ok(AssuranceRequirement::ResolverTrusted),
+        "resolver_authenticated" => Ok(AssuranceRequirement::ResolverAuthenticated),
+        "delegated_dnssec" => Ok(AssuranceRequirement::DelegatedDnssec),
+        _ => Err(ConfigError::InvalidDnsAssurance {
+            key: format!("allowed_fqdn.{fqdn_key}.dns_assurance"),
+            reason: format!("unknown dns_assurance selector {selector:?}"),
+        }),
+    }
+}
+
+fn parse_entry_requirement(
+    value: &toml::Value,
+    fqdn_key: &str,
+) -> Result<AssuranceRequirement, ConfigError> {
+    let toml::Value::Table(table) = value else {
+        return Ok(AssuranceRequirement::ResolverTrusted);
+    };
+    table
+        .get("dns_assurance")
+        .map_or(Ok(AssuranceRequirement::ResolverTrusted), |selector| {
+            parse_dns_assurance(selector, fqdn_key)
+        })
 }
 
 fn parse_cname_bailiwick(value: &toml::Value, fqdn_key: &str) -> Result<Vec<String>, ConfigError> {
@@ -988,6 +1096,7 @@ struct ParsedAllowlist {
     early_data: Vec<PerFqdnControl>,
     ja4: Vec<PerFqdnControl>,
     bailiwicks: Vec<Vec<String>>,
+    requirements: [AssuranceRequirement; ALLOWLIST_MAX],
 }
 
 fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> {
@@ -1012,6 +1121,7 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
     let mut early_data = Vec::with_capacity(entries.len());
     let mut ja4 = Vec::with_capacity(entries.len());
     let mut bailiwicks = Vec::with_capacity(entries.len());
+    let mut requirements = [AssuranceRequirement::ResolverTrusted; ALLOWLIST_MAX];
     let mut total_suffixes = 0usize;
     for (key, value) in entries {
         let fqdn = Fqdn::parse(key).map_err(|reason| ConfigError::InvalidFqdn {
@@ -1027,6 +1137,7 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
             )));
         }
         let (early, j4, suffixes) = parse_allowed_fqdn_table(value, key)?;
+        requirements[allowlist.len()] = parse_entry_requirement(value, key)?;
         // Same bare name on different ports collapses to the first entry's
         // suffix list at runtime (covers_for first-match position), so every
         // same-bare-name entry must declare byte-identical lists — any
@@ -1061,6 +1172,7 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
         early_data,
         ja4,
         bailiwicks,
+        requirements,
     })
 }
 

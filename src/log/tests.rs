@@ -888,6 +888,16 @@ mod startup_records {
                 name: "skip.example.org",
                 outcome: NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed),
             },
+            StartupUnresolved {
+                ordinal: 3,
+                name: "expire.example.org",
+                outcome: NameOutcome::PositiveUnusable,
+            },
+            StartupUnresolved {
+                ordinal: 4,
+                name: "reject.example.org",
+                outcome: NameOutcome::Failed(FailureReason::InsufficientAssurance),
+            },
         ] {
             assert!(store.startup_name(9, un), "per-name record enqueued");
         }
@@ -899,6 +909,8 @@ mod startup_records {
             "level=info kind=startup_name secs=9 ordinal=0 name=\"neg.example.org\" outcome=negative\n\
              level=info kind=startup_name secs=9 ordinal=1 name=\"fail.example.org\" outcome=failed reason=\"timeout\"\n\
              level=info kind=startup_name secs=9 ordinal=2 name=\"skip.example.org\" outcome=not_attempted reason=\"window_closed\"\n\
+             level=info kind=startup_name secs=9 ordinal=3 name=\"expire.example.org\" outcome=positive_unusable\n\
+             level=info kind=startup_name secs=9 ordinal=4 name=\"reject.example.org\" outcome=failed reason=\"insufficient_assurance\"\n\
              level=info kind=startup_final secs=9 status=\"failure\" allowance=0 usable=0 unresolved=0 exchanges=0 failed=0 not_attempted=0 dropped=0 names_dropped=0\n",
             "each name carries its outcome and reason in its own record, then the summary"
         );

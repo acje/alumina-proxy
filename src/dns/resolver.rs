@@ -18,6 +18,9 @@ pub const PIN_SHA256_SUFFIX: &str = "#pin-sha256=";
 
 pub const MAX_RESOLVERS: usize = 5;
 
+/// The only accepted `recursive_dnssec_policy` value: root-validating, no-stale (trusted operator assertion).
+pub const RECURSIVE_DNSSEC_POLICY_ROOT_VALIDATING_NO_STALE: &str = "root_validating_no_stale";
+
 /// The maximum byte length of a validated resolver FQDN (RFC 1035 logical
 /// name, no trailing dot).
 pub const FQDN_MAX_LEN: usize = crate::names::rules::FQDN_MAX_LEN;
@@ -220,6 +223,12 @@ impl Nameserver {
     pub const fn is_ip_only(&self) -> bool {
         self.fqdn.is_none()
     }
+
+    /// Strict `IP#fqdn#pin-sha256=` identity; shared predicate for the root-validating and later gates.
+    #[must_use]
+    pub const fn is_strict(&self) -> bool {
+        self.fqdn.is_some() && self.pin.is_some()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -360,6 +369,20 @@ const fn is_unicast(addr: IpAddr) -> bool {
     }
 }
 
+/// Immutable declared recursion policy: `from_slice` builds `Undeclared`; explicit declaration selects `RootValidatingNoStale`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecursionPolicy {
+    Undeclared,
+    RootValidatingNoStale,
+}
+
+impl RecursionPolicy {
+    /// Explicitly production-qualifying (`declared`, not `Undeclared`).
+    pub const fn is_declared(self) -> bool {
+        !matches!(self, RecursionPolicy::Undeclared)
+    }
+}
+
 /// The validated resolver set from configuration: a fixed `MAX_RESOLVERS`
 /// array holding the declared resolvers. Construction goes through
 /// [`ResolverSet::from_slice`], which refuses empty and over-capacity inputs,
@@ -367,6 +390,7 @@ const fn is_unicast(addr: IpAddr) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResolverSet {
     entries: [Nameserver; MAX_RESOLVERS],
+    policy: RecursionPolicy,
     len: usize,
 }
 
@@ -383,6 +407,7 @@ impl ResolverSet {
         arr[..count].copy_from_slice(entries);
         Some(ResolverSet {
             entries: arr,
+            policy: RecursionPolicy::Undeclared,
             len: count,
         })
     }
@@ -419,6 +444,33 @@ impl ResolverSet {
     /// Iterates the declared resolvers in order (index 0 is the primary).
     pub fn iter(&self) -> std::slice::Iter<'_, Nameserver> {
         self.entries[..self.len].iter()
+    }
+
+    /// The immutable declared recursion policy (`Undeclared` unless explicitly declared).
+    pub const fn recursion_policy(&self) -> RecursionPolicy {
+        self.policy
+    }
+
+    /// The declared policy attributable to a live connection source index: the
+    /// set's declared policy when the index is a member, `Undeclared` for an
+    /// unknown or foreign source. Reads only the typed policy and membership —
+    /// never pins, AD, or liveness.
+    pub const fn policy_of(&self, source_index: Option<u8>) -> RecursionPolicy {
+        match source_index {
+            Some(i) if self.get(i as usize).is_some() => self.policy,
+            _ => RecursionPolicy::Undeclared,
+        }
+    }
+
+    /// Attaches the declared root-validating-no-stale policy, validating EVERY member (incl. backups) strict FQDN+pin.
+    pub(crate) fn declared_root_validating_no_stale(self) -> Result<ResolverSet, usize> {
+        self.iter().position(|member| !member.is_strict()).map_or(
+            Ok(ResolverSet {
+                policy: RecursionPolicy::RootValidatingNoStale,
+                ..self
+            }),
+            Err,
+        )
     }
 }
 

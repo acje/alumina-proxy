@@ -1,9 +1,18 @@
 use super::*;
+use crate::dns::resolver::RecursionPolicy;
 use std::fmt::Write as _;
 
 fn valid_doc(resolver: &str) -> String {
     format!(
         "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = {resolver}\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+    )
+}
+
+fn policy_doc(resolver: &str, policy: &str) -> String {
+    valid_doc(resolver).replacen(
+        "\nresolver",
+        &format!("\nrecursive_dnssec_policy = \"{policy}\"\nresolver"),
+        1,
     )
 }
 
@@ -297,4 +306,182 @@ fn resolver_key_respected_in_compact_fit_form() {
         "compact 32-name fit form with resolver must still be documented; measured {}",
         compact.len()
     );
+}
+
+#[test]
+fn recursive_policy_absence_undeclared_and_declared_when_all_strict() {
+    let cfg = parse_config_document(&valid_doc(
+        "[\"9.9.9.9#dns.quad9.net#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]",
+    ))
+    .expect("no declaration, strict pins: undeclared");
+    assert_eq!(
+        cfg.resolver_set().recursion_policy(),
+        RecursionPolicy::Undeclared
+    );
+    let declared = parse_config_document(&policy_doc(
+        "[\"9.9.9.9#dns.quad9.net#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"1.1.1.1#cloudflare-dns.com#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]",
+        "root_validating_no_stale",
+    ))
+    .expect("explicit all-strict declaration valid");
+    assert_eq!(
+        declared.resolver_set().recursion_policy(),
+        RecursionPolicy::RootValidatingNoStale
+    );
+}
+
+#[test]
+fn recursive_policy_weak_backup_rejected() {
+    let err = parse_config_document(&policy_doc(
+        "[\"9.9.9.9#dns.quad9.net#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"1.1.1.1#cloudflare-dns.com\"]",
+        "root_validating_no_stale",
+    ))
+    .expect_err("unpinned DoT backup is weak; declaration must fail closed");
+    assert!(
+        matches!(
+            &err,
+            ConfigError::RecursiveDeclaresWeakResolver { index: 1, .. }
+        ),
+        "weak backup must isolate index 1, got {err:?}"
+    );
+    assert_eq!(err.exit_status(), 78, "weak backup must exit 78");
+}
+
+#[test]
+fn recursive_policy_plain_mix_precedes_weakness() {
+    let err = parse_config_document(&policy_doc(
+        "[\"9.9.9.9#dns.quad9.net#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"1.1.1.1\"]",
+        "root_validating_no_stale",
+    ))
+    .expect_err("bare-IP backup is a plain/DoT mix; MixedResolverTrust fires first");
+    assert!(
+        matches!(&err, ConfigError::MixedResolverTrust),
+        "mixed trust must win over weakness, got {err:?}"
+    );
+    assert_eq!(err.exit_status(), 78, "MixedResolverTrust must exit 78");
+}
+
+#[test]
+fn recursive_policy_unknown_value_rejected() {
+    let err = parse_config_document(&policy_doc(
+        "[\"9.9.9.9#dns.quad9.net#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]",
+        "permissive_no_stale",
+    ))
+    .expect_err("unrecognised policy value must be rejected");
+    assert!(
+        matches!(&err, ConfigError::InvalidRecursivePolicy { .. }),
+        "unknown policy value must be InvalidRecursivePolicy, got {err:?}"
+    );
+    assert_eq!(err.exit_status(), 78, "InvalidRecursivePolicy must exit 78");
+}
+
+#[test]
+fn recursive_policy_wrong_type_rejected() {
+    let d = valid_doc(
+        "[\"9.9.9.9#dns.quad9.net#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]",
+    )
+    .replacen("\nresolver", "\nrecursive_dnssec_policy = 42\nresolver", 1);
+    let err = parse_config_document(&d).expect_err("non-string policy must be rejected");
+    assert!(
+        matches!(
+            &err,
+            ConfigError::WrongType(f) if f.starts_with("recursive_dnssec_policy")
+        ),
+        "non-string policy must be WrongType, got {err:?}"
+    );
+    assert_eq!(err.exit_status(), 78, "WrongType must exit 78");
+}
+
+#[test]
+fn dns_assurance_selectors_activate_with_declared_root_validating() {
+    let inject = |doc: &str, selector: &str| {
+        doc.replacen(
+            "ja4 = { action = \"notify\", scope = \"connection\" }\n",
+            &format!(
+                "ja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"{selector}\"\n"
+            ),
+            1,
+        )
+    };
+    for selector in ["resolver_authenticated", "delegated_dnssec"] {
+        let err = parse_config_document(&inject(&valid_doc("[\"1.1.1.1\"]"), selector))
+            .expect_err("strong selector without declared policy must be rejected");
+        assert!(
+            matches!(&err, ConfigError::InvalidDnsAssurance { .. }),
+            "selector {selector} without declared policy got {err:?}"
+        );
+        assert_eq!(err.exit_status(), 78, "strong gate must exit 78");
+    }
+    let declared = policy_doc(
+        "[\"1.1.1.1#cloudflare-dns.com#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]",
+        "root_validating_no_stale",
+    );
+    let cfg = parse_config_document(&inject(&declared, "resolver_authenticated"))
+        .expect("authenticated selector accepts the declared policy");
+    assert_eq!(
+        cfg.entry_requirement(0),
+        AssuranceRequirement::ResolverAuthenticated,
+        "config-owned ordinal carries the activated requirement"
+    );
+}
+
+fn dns_assurance_line(doc: &str, value: &str) -> String {
+    doc.replacen(
+        "ja4 = { action = \"notify\", scope = \"connection\" }\n",
+        &format!(
+            "ja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = {value}\n"
+        ),
+        1,
+    )
+}
+
+#[test]
+fn dns_assurance_activate_ordinal_parity_matrix() {
+    let strict =
+        "[\"1.1.1.1#cloudflare-dns.com#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]";
+    let mut doc = policy_doc(strict, "root_validating_no_stale");
+    doc.push_str(
+        "[allowed_fqdn.\"a.example:8443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"delegated_dnssec\"\n[allowed_fqdn.\"b.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
+    );
+    let cfg = parse_config_document(&dns_assurance_line(&doc, "\"resolver_authenticated\""))
+        .expect("three-entry strong allowlist");
+    for (index, want) in [
+        (0, AssuranceRequirement::ResolverAuthenticated),
+        (1, AssuranceRequirement::DelegatedDnssec),
+        (2, AssuranceRequirement::ResolverTrusted),
+    ] {
+        assert_eq!(cfg.entry_requirement(index), want);
+    }
+}
+
+#[test]
+fn dns_assurance_unknown_token_and_wrong_type_reject_78() {
+    let declared = policy_doc(
+        "[\"1.1.1.1#cloudflare-dns.com#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]",
+        "root_validating_no_stale",
+    );
+    let unknown = parse_config_document(&dns_assurance_line(&declared, "\"bogus\"")).unwrap_err();
+    assert!(matches!(&unknown, ConfigError::InvalidDnsAssurance { .. }));
+    assert_eq!(unknown.exit_status(), 78);
+    let wrong = parse_config_document(&dns_assurance_line(&declared, "42")).unwrap_err();
+    assert!(matches!(&wrong, ConfigError::WrongType(_)));
+    assert_eq!(wrong.exit_status(), 78);
+}
+
+#[test]
+fn dns_assurance_strong_selector_cannot_weaken_resolver_set() {
+    let strict = "9.9.9.9#dns.quad9.net#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+    for (selector, backup) in [
+        ("resolver_authenticated", "1.1.1.1#cloudflare-dns.com"),
+        ("delegated_dnssec", "1.1.1.1"),
+    ] {
+        let resolver = format!("[\"{strict}\", \"{backup}\"]");
+        let value = format!("\"{selector}\"");
+        let doc = policy_doc(&resolver, "root_validating_no_stale");
+        let err = parse_config_document(&dns_assurance_line(&doc, &value)).unwrap_err();
+        assert_eq!(
+            err.exit_status(),
+            78,
+            "strong selector {selector} + {backup}"
+        );
+    }
 }

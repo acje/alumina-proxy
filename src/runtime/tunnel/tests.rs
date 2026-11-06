@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::parse_config_document;
-use crate::dns::cache::{Generation, StagedPositive};
+use crate::dns::cache::{Generation, StagedPositive, evidence};
 use crate::inspection::connect::ConnectParser;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -149,6 +149,55 @@ fn forbidden_host_is_effect_nonreachable_even_with_usable_cache() {
     )
     .expect("decision");
     assert_eq!(phase, ConnectPhase::Forbidden);
+}
+
+#[test]
+fn dial_guard_admits_fresh_auth_evidence_then_denies_after_expiry() {
+    let mut cache =
+        Cache::with_requirement(2, evidence::AssuranceRequirement::ResolverAuthenticated)
+            .expect("cache");
+    let n = name(&cache, 0);
+    let ev = evidence::Evidence::new(
+        true,
+        true,
+        false,
+        evidence::ResolverSource::index(0).expect("resolver"),
+        Some(60),
+        DNS_EPOCH + 1000,
+    )
+    .expect("AD0 auth evidence");
+    let staged = StagedPositive::stage_with_evidence(
+        n,
+        Family::A,
+        Generation::INITIAL,
+        &[pub_v4()],
+        DNS_EPOCH + 1001,
+        60,
+        Some(ev),
+    )
+    .expect("staged");
+    cache.publish_positive(&staged).expect("published");
+    let cfg = config();
+    let anchor = anchor();
+    let view = view_of_clocked(&cfg, &cache, WorkerClock::new(anchor, DNS_EPOCH + 1000));
+    let req = auth_request("sub.example.org");
+    let resolved = view.resolve(&req);
+    assert_eq!(resolved.dial_admits(pub_v4(), later(anchor, 1)), Ok(true));
+    assert_eq!(resolved.dial_admits(pub_v4(), later(anchor, 60)), Ok(false));
+}
+
+#[test]
+fn dial_guard_reports_absent_cache_name_as_error() {
+    let cache = cache_with(1);
+    let cfg = config();
+    let anchor = anchor();
+    let view = view_of_clocked(&cfg, &cache, WorkerClock::new(anchor, DNS_EPOCH));
+    let req = auth_request("z.example.org");
+    let resolved = view.resolve(&req);
+    assert_eq!(
+        resolved.dial_admits(pub_v4(), later(anchor, 0)),
+        Err(crate::dns::cache::CacheError::NameOutOfRange)
+    );
 }
 
 #[test]
@@ -305,6 +354,50 @@ fn family_exhausted_at_current_address_count_uses_other_family() {
             connect_deadline: Deadline::connect_attempt(now, setup),
         }
     );
+}
+
+#[test]
+fn owned_requirement_peer_selection_uses_cache_owner_minimum() {
+    use crate::dns::cache::evidence::AssuranceRequirement as Req;
+    use crate::dns::cache::evidence::Evidence;
+    use crate::dns::cache::evidence::ResolverSource;
+    let mut cache = Cache::with_requirement(1, Req::ResolverAuthenticated).expect("cache");
+    let n = name(&cache, 0);
+    publish(&mut cache, n, Family::A, &[pub_v4()], 1_001, 60);
+    let ev = Evidence::new(
+        false,
+        true,
+        false,
+        ResolverSource::index(0).expect("source"),
+        Some(60),
+        1_000,
+    )
+    .expect("evidence");
+    let staged = StagedPositive::stage_with_evidence(
+        n,
+        Family::Aaaa,
+        Generation::INITIAL,
+        &[pub_v6()],
+        1_001,
+        60,
+        Some(ev),
+    )
+    .expect("staged");
+    cache.publish_positive(&staged).expect("published");
+
+    let first = select_peer(&cache, n, 1_001, AttemptCounts::new(), None).expect("selection");
+    assert_eq!(
+        first,
+        PeerDecision::Peer {
+            addr: pub_v6(),
+            family: Family::Aaaa
+        }
+    );
+    let expired = select_peer(&cache, n, 1_060, AttemptCounts::new(), None).expect("selection");
+    assert_eq!(expired, PeerDecision::NoFamily);
+    cache.evict_nodata(n, Family::Aaaa).expect("evict");
+    let no_grade = select_peer(&cache, n, 1_001, AttemptCounts::new(), None).expect("selection");
+    assert_eq!(no_grade, PeerDecision::NoFamily);
 }
 
 #[test]

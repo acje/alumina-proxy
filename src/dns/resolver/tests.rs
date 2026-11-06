@@ -448,3 +448,47 @@ fn resolver_set_carries_fqdn_through_slice_and_copy() {
         .collect();
     assert_eq!(iterated, ["dns.google", "<none>"]);
 }
+
+#[test]
+fn policy_of_membership_secondmember_declared_none_and_out_of_range_undeclared() {
+    let b64 = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+    let entries = [
+        select(&format!("1.1.1.1#a.example#pin-sha256={b64}")).expect("strict pin a"),
+        select(&format!("8.8.8.8#b.example#pin-sha256={b64}")).expect("strict pin b"),
+    ];
+    let declared = ResolverSet::from_slice(&entries)
+        .expect("2 fit")
+        .declared_root_validating_no_stale()
+        .expect("both members strict -> declared set");
+    assert_eq!(
+        declared.policy_of(Some(0)),
+        RecursionPolicy::RootValidatingNoStale,
+        "primary member of a declared set is declared"
+    );
+    assert_eq!(
+        declared.policy_of(Some(1)),
+        RecursionPolicy::RootValidatingNoStale,
+        "second member of a declared set is declared"
+    );
+    assert_eq!(
+        declared.policy_of(Some(2)),
+        RecursionPolicy::Undeclared,
+        "out-of-range index is a foreign source -> undeclared"
+    );
+    assert_eq!(
+        declared.policy_of(Some(4)),
+        RecursionPolicy::Undeclared,
+        "far out-of-range index is a foreign source -> undeclared"
+    );
+    assert_eq!(
+        declared.policy_of(None),
+        RecursionPolicy::Undeclared,
+        "absent source index -> undeclared"
+    );
+    let undeclared = ResolverSet::from_slice(&entries).expect("2 fit");
+    assert_eq!(
+        undeclared.policy_of(Some(0)),
+        RecursionPolicy::Undeclared,
+        "a member of an undeclared set is undeclared"
+    );
+}

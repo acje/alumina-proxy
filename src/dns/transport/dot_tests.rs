@@ -174,6 +174,16 @@ pub(crate) fn dot_config(resolver_line: &str) -> Config {
     parse_config_document(&doc).expect("valid pinned-dot config")
 }
 
+/// A declared (`root_validating_no_stale`) counterpart of [`dot_config`]: the
+/// same allowlist and pinned primary, but the saved set carries the declared
+/// recursion policy so a completed real pinned exchange must qualify.
+fn dot_config_declared(resolver_line: &str) -> Config {
+    let doc = format!(
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 1\nresolver = [\"{resolver_line}\"]\nrecursive_dnssec_policy = \"root_validating_no_stale\"\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+    );
+    parse_config_document(&doc).expect("valid declared pinned-dot config")
+}
+
 fn bindings_of(
     cache: &Cache,
     ordinal: usize,
@@ -1969,4 +1979,52 @@ fn wait_dns_readiness_bounds_interrupted_poll_storm_and_yields_promptly() {
         "the Connecting exchange must survive the storm so the owner can re-advance it"
     );
     drop(listener);
+}
+
+#[test]
+fn pinned_dot_declared_policy_qualifies_completed_origin() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config_declared(&pinned_resolver());
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let report = transport
+        .resolve(
+            &cfg,
+            &mut cache,
+            &mut schedules,
+            ns(responder.port()),
+            1_000_000,
+        )
+        .unwrap();
+    assert_eq!(report.exchanges, 4);
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        report.resolved_names, 2,
+        "a declared-policy pin-matching DoT resolver must resolve the whole allowlist"
+    );
+    let name = cache.name_index(0).unwrap();
+    let evidence = cache
+        .entry(name, Family::A)
+        .expect("entry")
+        .evidence()
+        .expect("real completed pinned TLS exchange binds evidence");
+    assert_eq!(
+        evidence.source(),
+        crate::dns::cache::evidence::ResolverSource::index(0).expect("primary index"),
+        "the actual configured primary resolver is the bound source"
+    );
+    assert!(
+        evidence.origin_authenticated(),
+        "completed strict-pin TLS authenticates the origin"
+    );
+    assert!(
+        !evidence.raw_ad(),
+        "loopback fixture reply carries AD=0, witnessed as the raw reply fact"
+    );
+    assert!(
+        evidence.qualified(),
+        "declared pinned config qualifies the real completed-provenance origin"
+    );
+    drop(responder);
 }

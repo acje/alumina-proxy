@@ -574,6 +574,7 @@ impl StartupUnresolved<'_> {
     const fn outcome_token(&self) -> &'static str {
         match self.outcome {
             NameOutcome::Resolved => "resolved",
+            NameOutcome::PositiveUnusable => "positive_unusable",
             NameOutcome::Negative => "negative",
             NameOutcome::NoEligible => "no_eligible",
             NameOutcome::Failed(_) => "failed",
@@ -585,7 +586,10 @@ impl StartupUnresolved<'_> {
         match self.outcome {
             NameOutcome::Failed(reason) => Some(reason.as_str()),
             NameOutcome::NotAttempted(reason) => Some(reason.as_str()),
-            NameOutcome::Resolved | NameOutcome::Negative | NameOutcome::NoEligible => None,
+            NameOutcome::Resolved
+            | NameOutcome::PositiveUnusable
+            | NameOutcome::Negative
+            | NameOutcome::NoEligible => None,
         }
     }
 }

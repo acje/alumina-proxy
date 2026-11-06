@@ -78,16 +78,10 @@ pub(super) fn apply_route(
     let name = cache
         .name_index(index)
         .ok_or(DnsError::Cache(CacheError::NameOutOfRange))?;
-    if let (Some(query_family), Some(other_generation)) = (query_family, other_generation) {
-        reject_obsolete_negative(
-            cache,
-            name,
-            query_family,
-            other_generation,
-            generation,
-            outcome,
-        )?;
-    }
+    reject_obsolete_generation(cache, name, context, outcome)?;
+    cache
+        .check_publication_requirement(name, evidence, now)
+        .map_err(DnsError::Cache)?;
     match outcome {
         Outcome::Positive {
             bindings,
@@ -188,23 +182,33 @@ const fn map_schedule(err: crate::dns::schedule::ScheduleError) -> CacheError {
     }
 }
 
-/// The whole-family negative publication guard. Before an obsolete NXDOMAIN
-/// or NODATA would overwrite newer cache, schedule, or incident state, the
-/// owned production context compares the current generations against the
-/// query-start snapshot and refuses with `StaleGeneration` on any mismatch,
-/// leaving every entry, proof, deadline, binding, and incident untouched.
-/// NXDOMAIN compares both families; NODATA compares the queried family only
-/// and requires the outcome's family to be the queried one.
-fn reject_obsolete_negative(
+fn reject_obsolete_generation(
     cache: &Cache,
     name: crate::dns::cache::NameIndex,
-    query_family: Family,
-    other_generation: Generation,
-    queried_generation: Generation,
+    context: ApplyContext,
     outcome: &Outcome,
 ) -> Result<(), DnsError> {
+    let ApplyContext {
+        generation: queried_generation,
+        query_family,
+        other_generation,
+        ..
+    } = context;
     match outcome {
+        Outcome::Positive { family, .. } => {
+            let queried_now = cache
+                .entry(name, *family)
+                .map_err(DnsError::Cache)?
+                .generation();
+            if queried_now != queried_generation {
+                return Err(DnsError::Cache(CacheError::StaleGeneration));
+            }
+        }
         Outcome::NxDomain { .. } => {
+            let (Some(query_family), Some(other_generation)) = (query_family, other_generation)
+            else {
+                return Ok(());
+            };
             let other_family = match query_family {
                 Family::A => Family::Aaaa,
                 Family::Aaaa => Family::A,
@@ -222,6 +226,9 @@ fn reject_obsolete_negative(
             }
         }
         Outcome::NoData { family, .. } => {
+            let (Some(query_family), Some(_)) = (query_family, other_generation) else {
+                return Ok(());
+            };
             if *family != query_family {
                 return Err(DnsError::Cache(CacheError::StaleGeneration));
             }
@@ -233,7 +240,6 @@ fn reject_obsolete_negative(
                 return Err(DnsError::Cache(CacheError::StaleGeneration));
             }
         }
-        Outcome::Positive { .. } => {}
     }
     Ok(())
 }

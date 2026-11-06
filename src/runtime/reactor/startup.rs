@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::dns::cache::{CacheError, Family};
+use crate::dns::cache::Family;
 use crate::dns::transport::{
     EXCHANGE_DEADLINE_SECS, ExchangeClass, StartupDnsError, TurnResult, WindowLedger,
 };
@@ -57,6 +57,10 @@ impl Serving {
                 terminated = true;
                 break;
             }
+            let now = self.storage.dns().now_u64();
+            ledger
+                .refresh_resolved(self.storage.cache(), now)
+                .map_err(StartupDnsError::Cache)?;
             if ledger.all_resolved() {
                 break;
             }
@@ -74,19 +78,7 @@ impl Serving {
                 match self.storage.advance_dns()? {
                     None | Some(TurnResult::Pending | TurnResult::Superseded) => {}
                     Some(TurnResult::Published(kind)) => {
-                        let name_index = self
-                            .storage
-                            .cache()
-                            .name_index(ordinal)
-                            .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
-                        let has = !self
-                            .storage
-                            .cache()
-                            .entry(name_index, ex_family)?
-                            .bindings()
-                            .is_empty();
                         ledger.mark_published(ordinal, kind);
-                        ledger.resolve(ordinal, has);
                     }
                     Some(TurnResult::Failed(reason)) => {
                         if ledger.mark_failed(ordinal, ex_family, reason) {
@@ -101,6 +93,9 @@ impl Serving {
                     }
                 }
             }
+            ledger
+                .refresh_resolved(self.storage.cache(), self.storage.dns().now_u64())
+                .map_err(StartupDnsError::Cache)?;
             if !self.storage.dns().has_active_exchange() {
                 let secs = self.storage.dns().now_u64();
                 let selected = self
@@ -203,6 +198,9 @@ impl Serving {
             })
         })?;
         let elapsed = self.storage.dns().window_start().elapsed().as_secs();
+        ledger
+            .refresh_resolved(self.storage.cache(), now0.saturating_add(elapsed))
+            .map_err(StartupDnsError::Cache)?;
         self.storage
             .settle_startup(now0, ledger.finish(), elapsed, terminated)
     }

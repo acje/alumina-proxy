@@ -1718,3 +1718,100 @@ that survives process and host restart, and the anchor for durability (a store o
 manager, or a server-side feature corundum does not currently admit). The bounded stdout log
 stays the local diagnostic fallback; durability is additive and never a replacement for the
 fixed log slot.
+## Hardening: per-entry DNS assurance and qualified admission
+
+Qualified admission is a fixed, config-owned per-entry capability. Each
+allowlist key — a same-hostname/different-port pair is two ordinals with
+independent requirements — carries the additional optional per-entry string
+key `dns_assurance`; per-entry omission is the one defaults exception and means
+legacy (`resolver_trusted`). Recognized values are:
+
+- `resolver_trusted` (explicit or omitted) — admitted under any valid current
+  proof class, including unauthenticated trust; legacy behaviour preserved.
+- `resolver_authenticated` — must carry current authenticated-origin proof (an
+  already-established strict-pin TLS identity fact), independent of
+  qualification and of the AD bit, so AD=0 is valid and AD=1 is not required.
+- `delegated_dnssec` — must carry the delegated class: authenticated origin
+  additionally qualified by the operator-asserted root-validating deployment
+  and the raw AD=1 bit; AD=1 is required.
+
+The two strong tokens are governed together: an entry requiring either is valid
+only when the document additionally declares the optional top-level
+`recursive_dnssec_policy` valued exactly `"root_validating_no_stale"` and every
+declared resolver, primary and backups alike, is strict-pinned (FQDN plus
+`#pin-sha256=`). The check consumes the validated ResolverSet's typed recursion
+policy — its root-validating declaration constructor refuses any non-strict
+member — never a raw TOML key presence; a strong token without that declaration
+and uniform strict pinning is invalid configuration (typed
+`InvalidDnsAssurance`, EX_CONFIG), never a silent downgrade to legacy.
+
+This amendment supersedes the prior categorical scope for exactly these
+settings and nothing else in configuration validation: `dns_assurance` is the
+recognized additional optional per-entry key (per-entry omission the defaults
+exception), the recursion-policy declaration the recognized additional optional
+document key, and the earlier statements that the retained AD observation adds
+no cache-admission or minimum capability and that qualification remains false
+are scoped to the unactivated raw-AD-only legacy observation path. The true
+claim that the AD bit alone never authenticates is retained in full, as are the
+existing warning-field omission rules.
+
+The root-validating trust model is an operator assertion, not an independently
+proven root DNSSEC validation: the proxy never requests DO and performs no
+local DNSSEC validation, so admission rests on the declared root-validating
+policy completing positive support (the complete rooted CNAME chain plus the
+terminal A/AAAA candidates) or validated-negative support on correct-time RRSIG
+admissibility with no expired-stale authentication. "Qualified" means the
+reply's resolving origin is a member of the declared root-validating set,
+asserted by the operator through the declaration. Strong current proof differs
+from endpoint TLS validation and address availability and is implied by neither.
+
+The running cache is owned by the validated configuration: per-ordinal
+requirements are bound at construction, never reconfigured at runtime, and the
+config-owned constructor is the sole production cache owner. Admission is not
+once-at-publication; it is re-evaluated on current clock-relative proof at
+startup readiness and at every actual upstream connection attempt. Startup
+usability requires at least one currently admissible binding under the
+ordinal's requirement. Each actual dial — the initial attempt, every retry
+within the per-tunnel attempt budget, and any attempt resumed after a delay —
+re-reads the current cache and proof with the owner clock immediately before
+connecting. A strong ordinal refuses expired, absent, or below-requirement
+proof even while its address is fresh or stale-servable. Family order, attempt
+budgets, and established-peer semantics are unchanged; later proof expiry tears
+nothing down.
+
+Current proof is the checked evidence projection when asked: valid strictly
+after the conservative query-start floor (inclusive) and strictly before the
+exclusive deadline of floor plus the raw supporting TTL capped at 86400
+seconds. Positive support is the complete rooted chain plus terminal address
+TTLs; validated-negative support is the chain plus the covering SOA TTL and
+SOA.MINIMUM; an NXDOMAIN without a covering SOA yields no reusable negative
+proof; an explicitly zero or unknown supporting TTL yields no reusable proof
+lease. These are authentication-evidence rules, not the receipt-based address
+rules: no address TTL-0-to-one-second promotion, no refresh-floor reset, and no
+stale-grace authorization for expired proof. Generation is checked before
+assurance: an obsolete query generation fails before any admission check, an
+obsolete application whose classified outcome is negative concludes as
+Superseded (harmless, no failure count), any other obsolete or invalid
+application — including an obsolete positive generation — is a fatal exchange
+error, and pure probes are consumed before the publication path and never apply
+their outcome.
+
+A below-requirement reply cannot commit candidate cache, proof, or
+success-schedule changes: the publication route refuses with the typed
+`insufficient_assurance` outcome before any mutation, so previously valid
+bindings and their existing deadlines are preserved unchanged and no renewed
+authorization occurs. That atomicity is distinct from exchange-failure
+accounting: the refusal is counted as the exact typed exchange failure
+`insufficient_assurance`, bounded retry and exchange-failure backoff proceed
+normally, and serving is never torn down.
+
+This capability introduces no minimum cross-entry ranking and no best-family
+selection; each ordinal is judged on its own requirement. It relaxes no
+resource, owner, allocation, time, work, or log limit: the fixed profile —
+single boot owner and single serving owner, two reused 128 KiB per-tunnel
+buffers, no post-boot first-party heap alloc/dealloc except the authorised DoT
+setup seam, no new anchors, no local DNSSEC validation, and no new runtime
+endpoints — is unchanged. Per-A/AAAA boot and change telemetry over these
+requirements is not implemented by this amendment and remains a separate future
+governed increment; the existing exact failure token is a failure token, not a
+telemetry stream.

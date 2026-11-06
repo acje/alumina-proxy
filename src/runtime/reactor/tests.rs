@@ -3102,6 +3102,94 @@ mod dialing {
     }
 
     #[test]
+    fn fresh_dial_admission_denies_loopback_before_any_upstream_socket() {
+        let listener = StdListener::bind("127.0.0.1:0").expect("origin bind");
+        let dial_port = listener.local_addr().expect("origin addr").port();
+        let port = ephemeral_port();
+        let cfg = config_pair(port, dial_port);
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            serving.storage_mut().publish_test_addr(
+                0,
+                crate::eligibility::NumericAddr::V4([8, 8, 8, 8].into()),
+                crate::dns::cache::Family::A,
+            );
+            let mut client = connect(port);
+            pump(serving, 10);
+            assert!(
+                serving.slots[0].handle.is_some(),
+                "the connected client must be accepted into slot 0 before the manual state is set"
+            );
+            let head = format!("CONNECT sub.example.org:{dial_port} HTTP/1.1\r\n\r\n");
+            serving.slots[0]
+                .parser
+                .feed(head.as_bytes())
+                .expect("valid head");
+            serving.slots[0].approved =
+                Some(FixedHostname::normalize(b"sub.example.org").expect("norm"));
+            serving.slots[0].approved_port = dial_port;
+            serving.slots[0].stage = Stage::Dialing;
+            let req = serving.slots[0]
+                .parser
+                .result()
+                .copied()
+                .expect("parsed request")
+                .expect("valid connect");
+            let resolved = serving.storage().resolve_request(&req);
+            let public = crate::eligibility::NumericAddr::V4([8, 8, 8, 8].into());
+            let loopback = crate::eligibility::NumericAddr::V4([127, 0, 0, 1].into());
+            let now = std::time::Instant::now();
+            assert_eq!(
+                resolved.dial_admits(public, now),
+                Ok(true),
+                "the eligible public binding must admit: the member context is present"
+            );
+            assert_eq!(
+                resolved.dial_admits(loopback, now),
+                Ok(false),
+                "the loopback target must be inadmissible"
+            );
+            serving.dial_checked(0, loopback).expect("checked dial");
+            assert!(
+                serving.slots[0].upstream.is_none(),
+                "the fresh guard must deny the loopback dial before any upstream socket"
+            );
+            pump(serving, 20);
+            client.set_nonblocking(true).expect("nonblocking reader");
+            let read_start = std::time::Instant::now();
+            let mut buf = [0u8; 64];
+            let mut body = Vec::new();
+            loop {
+                match client.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        body.extend_from_slice(&buf[..n]);
+                        if body.windows(b"\r\n\r\n".len()).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(
+                            read_start.elapsed() < std::time::Duration::from_secs(5),
+                            "the NoResolvedAddresses refusal head never became readable"
+                        );
+                        std::thread::yield_now();
+                    }
+                    Err(err) => panic!("read the NoResolvedAddresses refusal: {err}"),
+                }
+            }
+            assert!(
+                body.starts_with(b"HTTP/1.1 502"),
+                "the denial must be a 502 refusal, got {body:?}"
+            );
+            assert!(
+                body.windows(b"no resolved addresses".len())
+                    .any(|w| w == b"no resolved addresses"),
+                "the 502 must be NoResolvedAddresses — a DialFailed or silent drop must not pass, got {body:?}"
+            );
+        });
+    }
+
+    #[test]
     /// The FIRST failed dial must be recorded back into the slot ledger and the
     /// decision re-run against the advanced cursor, exactly once per failed
     /// establishment: with a single A binding the re-decision resolves 502

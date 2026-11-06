@@ -5,6 +5,7 @@ use crate::config::{ALLOWLIST_MAX, Allowlist, Fqdn};
 use crate::dns::cache::evidence::{Evidence, EvidenceError, ResolverSource};
 use crate::dns::cache::{Cache, CacheError, Family, MAX_ADDRESSES};
 use crate::dns::publication::{self, ApplyContext};
+use crate::dns::resolver::RecursionPolicy;
 use crate::dns::schedule::{OutcomeIncidents, Schedules, Soa};
 use crate::eligibility::NumericAddr;
 
@@ -1087,8 +1088,9 @@ impl ParsedReply {
 }
 
 /// The transport-side origin facts an apply needs but the reply itself cannot
-/// carry: the resolver actually selected at exchange start, the genuine
-/// query-start floor, and the completed strict-pin authentication fact. The
+/// carry: the connection-captured delivering source, the genuine query-start
+/// floor, the completed strict-pin authentication fact, and the declared
+/// recursion policy of the saved configured set that source belongs to. The
 /// reply-derived raw AD and supporting-TTL facts stay on the reply so every
 /// positive binds evidence from the same [`ParsedReply`] it is built from.
 #[derive(Clone, Copy)]
@@ -1096,6 +1098,7 @@ pub(crate) struct ApplyOrigin {
     pub(crate) source: ResolverSource,
     pub(crate) query_floor: u64,
     pub(crate) origin_authenticated: bool,
+    pub(crate) origin_policy: RecursionPolicy,
 }
 
 /// Maps an evidence construction refusal into the corresponding cache error so
@@ -1160,7 +1163,7 @@ impl<'a> ObservedReply<'a> {
                 Evidence::new(
                     self.ad_fact(),
                     origin.origin_authenticated,
-                    false,
+                    origin.origin_policy.is_declared(),
                     origin.source,
                     self.supporting_ttl_cap(),
                     origin.query_floor,

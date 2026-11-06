@@ -42,6 +42,81 @@ fn dot_config_window(port: u16, resolver_line: &str) -> crate::config::Config {
     crate::config::parse_config_document(&doc).expect("valid pinned-dot window config")
 }
 
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn startup_zero_window_reports_current_cache_admission_without_exchange() {
+    use crate::dns::cache::evidence::{AssuranceRequirement, Evidence, ResolverSource};
+    use crate::dns::cache::{Cache, Generation, StagedPositive};
+    use crate::eligibility::NumericAddr;
+
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
+
+    {
+        let cache = owner.serving.storage_mut().cache_mut();
+        *cache = Cache::with_requirement(2, AssuranceRequirement::ResolverAuthenticated)
+            .expect("strict owner-required cache");
+        let name = cache
+            .name_index(0)
+            .expect("ordinal-zero allowlist name index");
+        let evidence = Evidence::new(
+            false,
+            true,
+            false,
+            ResolverSource::index(0).expect("resolver zero"),
+            Some(600),
+            1_000_000,
+        )
+        .expect("consistent evidence");
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1_000_001,
+            600,
+            Some(evidence),
+        )
+        .expect("stage admissible positive");
+        cache
+            .publish_positive(&staged)
+            .expect("publish admissible positive");
+    }
+
+    let outcome = owner
+        .run_startup_within(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            1_000_000,
+            Duration::ZERO,
+        )
+        .expect("zero-length startup window settles without error");
+
+    let cache = owner.serving.storage_mut().cache_mut();
+    let name = cache
+        .name_index(0)
+        .expect("ordinal-zero allowlist name index");
+    assert_eq!(
+        cache.entry(name, Family::A).unwrap().state(1_000_600),
+        crate::dns::cache::EntryState::Fresh,
+        "binding is still fresh at the proof deadline"
+    );
+    assert!(
+        !cache.is_name_admissible(name, 1_000_600).unwrap(),
+        "an expired Auth proof must not admit the still-fresh binding"
+    );
+
+    assert_eq!(
+        outcome.report.resolved_names, 1,
+        "the live admissible name is reported resolved even with no exchange"
+    );
+    assert_eq!(
+        outcome.report.exchanges, 0,
+        "the zero-length window must not run any exchange"
+    );
+}
+
 fn ephemeral_port() -> u16 {
     let probe = StdListener::bind("127.0.0.1:0").expect("bind probe");
     let port = probe.local_addr().expect("probe addr").port();

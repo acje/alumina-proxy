@@ -108,7 +108,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   source. Every architectural claim cites
   <code>src/*.rs</code>, <code>tests/*.rs</code>, or the governing specification
   (<code>docs/alumina-proxy.md</code>, SHA-256
-  <code>81d25c6c5b2d221215459e7036f471806b650e54f8f84cc5f8dbdcfa031a8a08</code>).
+  <code>b1d95dbc7fead191d51b51bc40cfa6b3e7f2fc922beb9de4ea0564d842d8c4b2</code>).
   Values the code itself prints or asserts are recorded as measured. No review
   apparatus — findings, severities, proposals, or open questions — is carried here;
   the architecture is described as it is built.</p>
@@ -169,8 +169,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     document is size-bounded (≤ 16&nbsp;KiB at <code>src/config/mod.rs:17</code>, <code>CONFIG_DOC_LIMIT</code>,
     schema-strict: an unknown key is an
     error), read once at boot through
-    <code>config::load_config_document</code> (load entry at <code>src/config/mod.rs:493</code>;
-    strict schema and unknown-key rejection in <code>from_table</code> at <code>:549-602</code>).</li>
+    <code>config::load_config_document</code> (load entry at <code>src/config/mod.rs:537</code>;
+    strict schema and unknown-key rejection in <code>from_table</code> at <code>:593-614</code>).</li>
     <li><strong>Privilege floor.</strong> Preflight refuses root, refuses any
     non-empty effective/permitted/ambient capability set, and requires
     <code>no_new_privs</code> before the process may proceed
@@ -499,7 +499,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/boot/preflight.rs:96-116</code></td></tr>
       <tr><th scope="row"><code>config</code></th>
         <td>Strict schema parse; allowlist (≤ 32), ports, early_data/ja4 controls, gate sections, CNAME bailiwicks, resolver trust homogeneity.</td>
-        <td><code>src/config/mod.rs:19</code>, <code>:22-74</code>, <code>:545-602</code>, <code>:806-843</code>, <code>:624</code>, <code>:1036</code></td></tr>
+        <td><code>src/config/mod.rs:19</code>, <code>:22-74</code>, <code>:593-614</code>, <code>:645-654</code>, <code>:679-683</code>, <code>:1145-1155</code></td></tr>
       <tr><th scope="row"><code>runtime/owner</code></th>
         <td>Single-reactor owner; serves as the attached owner after <code>attach</code>; owns overall DNS order and bounded per-turn advancement, delegating refresh admission/start to storage.</td>
         <td><code>src/runtime/owner.rs:163-184</code>, <code>:200-211</code>, <code>:223-229</code>, <code>:278-313</code>, <code>:292</code>, <code>:332-345</code>, <code>:390-406</code></td></tr>
@@ -541,7 +541,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         5–900 s, zero TTL at 1 s (no stale serving), validated negative SOA
         30–900 s; retry backoff [1,2,4,8,16,30]; generation-tagged cache with
         stale-publish rejection. An appended crate-private evidence type
-        (<code>src/dns/cache.rs:810-864</code>) stages losslessly retained
+        (<code>src/dns/cache.rs:913-1030</code>) stages losslessly retained
         raw AD, bounded resolver source, and raw supporting TTL
         (<code>None</code> distinct from <code>Some(0)</code>) beside private
         fields that, as constructor inputs, record the trusted owner's
@@ -557,11 +557,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         authenticated lease and no stale serving), while reusable
         authentication needs a separate checked deadline at the query start
         plus <code>min(raw TTL, TTL_CAP)</code>.
-        <code>valid_class(now)</code> (<code>src/dns/cache.rs:912</code>)
+        <code>valid_class(now)</code> (<code>src/dns/cache.rs:1015</code>)
         yields any class inside the
         <code>evidential_start..deadline</code> window for ordinary
         projections, while
-        <code>active_class(now)</code> (<code>src/dns/cache.rs:925</code>)
+        <code>active_class(now)</code> (<code>src/dns/cache.rs:1028</code>)
         additionally excludes ordinary <code>trusted</code> for
         authenticated-assurance use. The cache stores it: every
         <code>Entry</code> and <code>StagedPositive</code> carry the optional
@@ -569,7 +569,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         (<code>src/dns/cache.rs:303</code>) defaults to no evidence and
         any replacement clears prior evidence, accepted evidence is assigned
         atomically with the generation-advancing publish
-        (<code>src/dns/cache.rs:493-563</code>, <code>:535-555</code>) and
+        (<code>src/dns/cache.rs:557-620</code>, <code>:516-527</code>) and
         survives candidate-eligibility filtering to zero bindings, and
         <code>Entry::effective_projection(now)</code>
         (<code>src/dns/cache.rs:225</code>) is the single serving projection:
@@ -585,7 +585,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         supporting TTL is absent or does not exactly equal the answer TTL, or
         whose deadline would outlive the supporting binding freshness
         (<code>receipt</code> plus the answer TTL clamped to
-        <code>TTL_CAP</code>, <code>src/dns/cache.rs:533-546</code>), is
+        <code>TTL_CAP</code>, <code>src/dns/cache.rs:567-590</code>), is
         refused atomically
         (<code>CacheError::EvidenceInconsistent</code>) with the prior entry
         preserved. Production positive application stages that reply-derived
@@ -596,12 +596,16 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>ObservedReply::apply</code> and stages it together with the
         positive — including an all-ineligible <code>NoEligible</code>
         positive whose zero-address entry still retains the evidence
-        (<code>stage_with_evidence</code>, <code>src/dns/cache.rs:319</code>);
+        (<code>stage_with_evidence</code>, <code>src/dns/cache.rs:319-351</code>;
+        zero-address retention at <code>src/dns/cache.rs:599-604</code>);
         the evidence-free <code>stage()</code> helper
         (<code>src/dns/cache.rs:295</code>) is legacy/test-only staging. The
         DNS-private trusted publisher is the same-reply producer, not a
-        type-enforced gateway. No policy or admission consumer reads
-        evidence yet; consumers are limited to the same-reply staged publish
+        type-enforced gateway. Per-ordinal policy and admission consumers read the
+        requirement and the evidence projection at publication check and
+        admission time (<code>check_publication_requirement</code>, <code>src/dns/cache.rs:516-527</code>;
+        <code>is_name_admissible</code>/<code>is_peer_admissible</code>, <code>:622-651</code>); the
+        remaining consumers are the same-reply staged publish
         (positive and fully tracked negative alike, with an untracked negative
         falling back to legacy evidence-free staging), the serving projection
         above, and the diagnostic <code>startup_warning</code> family-set
@@ -613,9 +617,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/publication.rs:38</code>, <code>:63</code>;
         <code>src/dns/schedule.rs:16</code>, <code>:358-389</code>;
         <code>src/dns/cache.rs:122-137</code>, <code>:247-345</code>, <code>:225</code>,
-        <code>:303</code>, <code>:493-563</code> (<code>:533-546</code>,
-        <code>:535-555</code>), <code>:580-602</code>, <code>:604-620</code>,
-        <code>:810-864</code> (<code>:912-929</code>)</td></tr>
+        <code>:303</code>, <code>:557-620</code>, <code>:567-590</code> (evidence staging/check),
+        <code>:516-527</code>, <code>:622-651</code> (publication req/admission),
+        <code>:668</code>, <code>:692</code> (nxdomain/nodata), <code>:913-1030</code> (evidence)</td></tr>
       <tr><th scope="row"><code>dns/outcome</code> (private child)</th>
         <td>Neutral value carriers — <code>FailureReason</code>,
         <code>NotAttemptedReason</code>, <code>NameOutcome</code>,
@@ -646,9 +650,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         complete tracking falls back to the evidence-free legacy surface;
         the public <code>dns::apply_outcome</code>
         (<code>:38</code>) stays that evidence-free surface, and this
-        DNS-private trusted publisher is not a type-enforced gateway. No
-        admission, assurance, receipt-renewal, or scheduling consumer
-        exists; the diagnostic <code>startup_warning</code> consumes only its
+        DNS-private trusted publisher is not a type-enforced gateway. An
+        admission/assurance consumer now exists at publication check time
+        (<code>check_publication_requirement</code>, <code>src/dns/cache.rs:516-527</code>;
+        name and peer admission, <code>:622-651</code>); receipt-renewal or
+        scheduling consumers do not; the diagnostic <code>startup_warning</code> consumes only its
         family-set context, never raw AD/source/qualification fields.
         The layer also
         includes <code>classify_published</code>/<code>parse_reply</code>, alongside the
@@ -1136,11 +1142,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   fallback for a DoT entry (<code>Nameserver::port()</code> <code>src/dns/resolver.rs:192-198</code>). Trust
   homogeneity across the resolver set is enforced at configuration time — a mix of
   trust classes is rejected rather than degraded
-  (<code>ConfigError::MixedResolverTrust</code>, <code>src/config/mod.rs:624</code>).
+  (<code>ConfigError::MixedResolverTrust</code>, <code>src/config/mod.rs:679-683</code>).
   A separate guard restricts the <code>early_data</code> control’s block scope to
   <code>connection</code> only — an upstream-sourced early-data signal therefore
   cannot select a per-domain or process-wide latch
-  (<code>src/config/mod.rs:893-900</code>; see
+  (<code>src/config/mod.rs:1001-1015</code>; see
   <a href="#enforcement">§6.2</a>).</p>
 
   <h3>5.2 DoT trust: pin-or-nothing</h3>
@@ -1314,7 +1320,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   coverage predicate at <code>:920-931</code>), and
   same-bare-name entries across ports must declare byte-identical suffix lists or
   boot fails with <code>DivergentCnameBailiwick</code>
-  (<code>src/config/mod.rs:1036</code>). The flat union of declared suffixes is
+  (<code>src/config/mod.rs:1145-1155</code>). The flat union of declared suffixes is
   bounded by the fixed <code>ALLOWLIST_MAX</code> (32) slot bound, and overflow is
   fail-stop (<code>src/dns/wire.rs:857-900</code>).</p>
   <p><code>ServeStorage::boot</code> installs the exact validated per-entry
@@ -1349,7 +1355,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>start_exchange</code> at <code>src/dns/transport.rs:2906-2962</code>). The retained-resolver
   refresh path requests a <code>Serving</code> exchange
   (<code>prepare_serving_dns_turn</code> at
-  <code>src/runtime/storage.rs:1344-1350</code>; <code>start_dns_exchange</code> in
+  <code>src/runtime/storage.rs:1339-1345</code>; <code>start_dns_exchange</code> in
   <code>src/runtime/storage.rs:806-830</code>), and a cooperative startup window requests
   <code>Startup</code> (<code>src/runtime/reactor/startup.rs:129</code>). Per-turn
   cleanup cancels exactly the <code>Startup</code>-class retained work while
@@ -1357,7 +1363,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>cancel_retained_startup_exchange</code>
   (<code>src/dns/transport.rs:1626-1634</code>, driven from the storage-owned
   <code>prepare_serving_dns_turn</code> at
-  <code>src/runtime/storage.rs:1345</code>) is scoped to the startup class by the typed
+  <code>src/runtime/storage.rs:1340</code>) is scoped to the startup class by the typed
   lifecycle, so no servicing or probe exchange is ever cancelled as leftover
   startup work. Overlap fails closed: a second <code>start_exchange</code> while
   one is active returns <code>ExchangeActive</code> and leaves the outstanding
@@ -1387,36 +1393,36 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   retained as an unknown outcome. The positive <code>Outcome.ttl</code> already
     carried the same raw chain/address minimum, so ordinary positive-TTL
   publication is unchanged, and the negative supporting-chain minimum is a
-  conservative observation consumed only by the private negative signatures
-  below — not the schedule's SOA-only TTL rule — with no authentication,
-  cache-admission, or minimum-capability consequence. The retained supporting
+  conservative raw-lifetime observation consumed only by the private negative signatures below — not the schedule's SOA-only TTL rule — a raw value that alone is not authentication yet still participates in the current assurance gate. The retained supporting
   lifetime is a raw counted term distinct from lease usability: a zero
   chain or SOA TTL is kept as <code>Some(0)</code>, a known explicit zero whose
   deadline equals the query start, whereas a validated NXDOMAIN without a
   covering SOA has no supporting lifetime and remains unknown
   <code>None</code> (<code>src/dns/wire.rs:1344-1349</code>, <code>:1377-1393</code>); neither
   yields a currently reusable lease (<code>Evidence::new</code>,
-  <code>src/dns/cache.rs:846-864</code>; <code>valid_class</code>, <code>:912-918</code>). A validated
+  <code>src/dns/cache.rs:938-954</code>; <code>valid_class</code>, <code>:1015-1019</code>). A validated
   negative that does not complete tracking is not projected and falls back to
   the legacy empty-Evidence apply (<code>src/dns/publication.rs:38,63</code>),
   while positive events remain unfiltered by the negative tracking. The query itself carries RD and AD,
   with CD clear and no EDNS/OPT record (<code>write_header</code>,
   <code>src/dns/wire.rs:348-360</code>), and the AD bit is retained strictly as a raw
   observation of a fully validated reply — never authentication of the resolver
-  or DNS data — and carries no AD-alone authentication, qualification, or
-  admission consequence; DNSSEC assurance, resolver qualification, and a
-  configured minimum or admission likewise do not depend on it. Raw AD stays
+  or DNS data — and alone never carries an admission, qualification, or
+  assurance consequence: admission and any configured minimum or DNSSEC
+  assurance enter only via the declared typed requirement
+  (<code>AssuranceRequirement</code>, <code>src/dns/cache.rs:850-864</code>) checked at
+  publication (<code>:516-527</code>), never from the raw AD bit. Raw AD stays
   reply-bound evidence, retained in <code>ParsedReply</code> and immutable
   <code>Evidence</code> (<code>src/dns/wire.rs:1030-1047</code>,
-  <code>:1158-1167</code>; <code>src/dns/cache.rs:810-817</code>,
-  <code>:857-865</code>); only the diagnostic <code>startup_warning</code>
+  <code>:1158-1167</code>; <code>src/dns/cache.rs:913</code>,
+  <code>:938-954</code>); only the diagnostic <code>startup_warning</code>
   family-set context is emitted by that warning, whose fields never include
   raw AD/source/qualification values. The
   existing first-global <code>startup_warning</code> is produced by both
   startup-time paths (<code>src/dns/transport.rs:2849-2854</code>;
   <code>src/runtime/storage.rs:776-789</code>) from the current cache
   <code>A</code>/<code>AAAA</code> flags (<code>negative_lease_flags</code>,
-  <code>src/dns/cache.rs:671</code>): it emits the single global attempt with
+  <code>src/dns/cache.rs:752-762</code>): it emits the single global attempt with
   a current cache-owner reusable negative-lease family-set context —
   <code>none</code>/<code>a</code>/<code>aaaa</code>/<code>both</code>, a four-token bijection
   over the two family flags — and omits the context when the lease set is
@@ -1436,18 +1442,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   Only after a successful parse
   and the existing deadline check does <code>step_recv</code> call
   <code>observe</code>: the receive path resets the frame cursors before the
-  match (<code>src/dns/transport.rs:2480-2481</code>), and a successful reply
+  match (<code>src/dns/transport.rs:2475-2477</code>), and a successful reply
   whose deadline has not expired is observed exactly once — after the deadline
   check and before the receipt read and the apply-time clock read
-  (<code>src/dns/transport.rs:2468-2520</code>: parse <code>:2472</code>, deadline
-  <code>:2484-2488</code>, <code>observe</code> <code>:2489</code>, receipt
-  <code>:2500</code>, delivering-origin read <code>:2501</code>, apply
-  <code>:2504-2520</code>). The
+  (<code>src/dns/transport.rs:2467-2537</code>: parse <code>:2467-2474</code>, deadline
+  <code>:2479-2482</code>, <code>observe</code> <code>:2484</code>, receipt
+  <code>:2495</code>, origin-policy read <code>:2496-2502</code>, apply
+  <code>:2505-2537</code>). The
   <code>query_floor</code> anchoring every evidence value is the exchange's own,
   captured on the shared owner clock before any failback, connect, entropy,
   TLS, or query work (<code>start_exchange</code>, <code>src/dns/transport.rs:2906-2962</code>),
   and the delivery facts come from <code>delivering_origin</code>
-  (<code>src/dns/transport.rs:2426-2432</code>): the delivering connection's own immutable
+  (<code>src/dns/transport.rs:2421-2425</code>): the delivering connection's own immutable
   <code>source</code> (carried from the plain connection through the TLS upgrade)
   and a strict-pin result that requires a completed rustls handshake, with
   identity/key possession and the <code>Finished</code> state verified — never a
@@ -1460,45 +1466,46 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   it pairs the same reply's raw AD and supporting-TTL cap with those delivery
   facts to build the immutable <code>Evidence</code> for a positive and a
   validated negative alike (<code>Outcome::Positive | Outcome::NxDomain |
-  Outcome::NoData</code>, <code>src/dns/wire.rs:1159-1160</code>) — <code>qualified</code>
-  stays false and no detached flag or AD- or pin-derived qualification enters
-  it, so a raw AD of 0 is never invented into an <code>Insecure</code>/<code>Bogus</code>
-  provenance (<code>ProofClass::classify</code>/<code>Evidence::class</code>, <code>src/dns/cache.rs:759</code>), and pin possession is
+  Outcome::NoData</code>, <code>src/dns/wire.rs:1159-1160</code>) — the recorded
+  qualified-deployment condition is the sole qualification input; no detached
+  flag or AD- or pin-derived qualification enters it, so a raw AD of 0 is
+  never invented into an <code>Insecure</code>/<code>Bogus</code> provenance
+  (<code>ProofClass::classify</code>, <code>src/dns/cache.rs:840</code>;
+  <code>Evidence::class</code>, <code>:1007</code>), and pin possession is
   not qualification. The evidence routes through the crate-private
   <code>apply_route</code> (<code>src/dns/publication.rs:63</code>), which stages it
-  atomically with the generation-advancing publish: positive evidence is
-  admitted unfiltered (<code>src/dns/publication.rs:97-105</code>), while a
+  atomically with the generation-advancing publish: positive evidence passes the same owned-requirement gate as any negative before the outcome match (<code>src/dns/publication.rs:81-85</code>), exempt only from the negative-only paired-tag rule, while a
   negative publishes a private <code>NegativeProof</code> only when query
   family and sibling generation are both present (<code>:172-181</code>); a
   validated negative that does not complete tracking keeps the legacy
   unevidenced eviction (<code>:127-130</code>, <code>:154-157</code>). The projection
   returns the <code>Nx</code> or <code>NoData</code> variant, not an rcode
-  (<code>src/dns/cache.rs:686-717</code>): <code>Nx</code> publishes each negative
+  (<code>src/dns/cache.rs:703-800</code>): <code>Nx</code> publishes each negative
   entry under its own advanced entry generation and records the sibling family's
   published generation as <code>sibling_tag</code>, which the projection re-checks:
   the <code>Nx</code> proof re-projects only while that recorded <code>sibling_tag</code>
   still equals the sibling entry's current generation, then passes an
   <code>Evidence.valid_class</code> gate (<code>evict_nxdomain_evidenced</code>,
-  <code>src/dns/cache.rs:638</code>; <code>negative_projection</code> <code>:686-717</code>;
-  <code>valid_class</code> <code>:912</code>) — while <code>NoData</code> binds only its own
+  <code>src/dns/cache.rs:719</code>; <code>negative_projection</code> <code>:762</code>;
+  <code>valid_class</code> <code>:1015</code>) — while <code>NoData</code> binds only its own
   <code>family</code> and lease (<code>evict_nodata_evidenced</code>,
-  <code>src/dns/cache.rs:622</code>). Every validated outcome applies into incident
+  <code>src/dns/cache.rs:703</code>). Every validated outcome applies into incident
   transitions, never an entry: the route returns the sustained-negative delta plus
   per-type exchange-incident deltas in <code>A</code>/<code>Aaaa</code> order
   (<code>OutcomeIncidents</code>/<code>PerTypeTransition</code>,
   <code>src/dns/publication.rs:38,63</code>), where a query-family recovery clears only
   the queried family's incident — <code>PerTypeTransition::Recovered</code> from
   <code>clear_exchange_incident</code> (<code>src/dns/schedule.rs:441,453</code>; NODATA
-  <code>src/dns/publication.rs:162</code>) — and NXDOMAIN clears both
-  (<code>src/dns/publication.rs:136,139</code>). The positive getters plus the public legacy
+  <code>src/dns/publication.rs:141-162</code>) — and NXDOMAIN clears both
+  (<code>src/dns/publication.rs:128-134</code>). The positive getters plus the public legacy
   surface stay unchanged: this DNS-private trusted publisher is the
   same-reply producer, not a type-enforced gateway. Only when that call
   succeeds does the cohesive <code>(PublishedKind, bool, OutcomeIncidents)</code>
   triple reach the Root as <code>kind</code>/<code>extreme</code>/<code>incidents</code>;
   the Root reads the triple only on
-  <code>Ok</code> at <code>src/dns/transport.rs:2504-2521</code> (a parse success
+  <code>Ok</code> at <code>src/dns/transport.rs:2505-2537</code> (a parse success
   alone does not reach the return), then folds the same effects into incident,
-  TTL, and corroboration accounting (<code>src/dns/transport.rs:2528-2556</code>). The
+  TTL, and corroboration accounting (<code>src/dns/transport.rs:2539-2567</code>). The
   borrowed <code>ObservedReply</code> view stays bounded at two pointers (16 bytes)
   per the
   <code>parsed_reply_layout_is_bounded_by_the_outcome_plus_alignment</code>
@@ -1666,7 +1673,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>The refresh side of that schedule is owned by the same reactor turn: the
   non-shutdown branch of <code>turn</code> delegates the consolidated DNS
   lifecycle selection to storage via <code>prepare_serving_dns_turn</code>
-  (<code>src/runtime/owner.rs:292</code>, <code>src/runtime/storage.rs:1344-1350</code>):
+  (<code>src/runtime/owner.rs:292</code>, <code>src/runtime/storage.rs:1339-1345</code>):
   it cancels a retained startup exchange, advances the post-window probe sweep,
   steps the corroboration, then starts a due serving refresh
   (<code>start_due_serving_refresh</code>, <code>src/runtime/storage.rs:855-874</code>).
@@ -1737,10 +1744,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   Every publish is generation-guarded: a validated in-flight result carries the
   current <code>Generation</code>, and <code>publish_positive</code> refuses any
   mismatch (<code>StaleGeneration</code>), so a stale publish can never overwrite
-  a newer entry (<code>src/dns/cache.rs:493-497</code>).</p>
+  a newer entry (<code>src/dns/cache.rs:557-620</code>).</p>
   <p>Negative publications carry the same guard through a paired query-start
   capture owned by the cache: <code>Cache::generations_before_query</code>
-  (<code>src/dns/cache.rs:465-487</code>) snapshots the queried family's entry
+  (<code>src/dns/cache.rs:501-514</code>) snapshots the queried family's entry
   generation and the other family's together from the live cache before any
   network work, shared by the startup and serving exchange paths
   (<code>src/dns/transport.rs:3088</code>, <code>src/runtime/storage.rs:822</code>). The crate-private
@@ -1780,10 +1787,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         clamp; the <em>refresh</em> interval uses the schedule bounds instead:
         5–900 s nonzero positive, 1 s zero). A zero-TTL origin is fresh for 1 s
         and never served stale.</td>
-        <td><code>src/dns/cache.rs:18</code>, <code>:503</code>, <code>:504</code></td></tr>
+        <td><code>src/dns/cache.rs:18</code>, <code>:567-574</code></td></tr>
       <tr><th scope="row">Freshness deadline</th>
         <td>receipt + clamped TTL</td>
-        <td><code>src/dns/cache.rs:503-509</code></td></tr>
+        <td><code>src/dns/cache.rs:567-574</code></td></tr>
       <tr><th scope="row">Stale grace</th>
         <td><code>STALE_GRACE = 259 200</code> s (72 h) before retirement</td>
         <td><code>src/dns/cache.rs:10</code></td></tr>
@@ -1796,7 +1803,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Eviction</th>
         <td>validated NXDOMAIN clears <em>both</em> families; validated NODATA
         clears only the queried family</td>
-        <td><code>src/dns/cache.rs:580-602</code> (nxdomain), <code>:604-620</code> (nodata)</td></tr>
+        <td><code>src/dns/cache.rs:668</code> (nxdomain), <code>:692</code> (nodata)</td></tr>
       <tr><th scope="row">Negative publication guard</th>
         <td>paired query-start generations snapshot
         (<code>generations_before_query</code>); a stale NXDOMAIN/NODATA
@@ -1804,10 +1811,19 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         prepare/evict/commit/incident/streak mutation — NXDOMAIN compares both
         families, NODATA the queried family only with the outcome family equal
         to the queried one</td>
-        <td><code>src/dns/cache.rs:465-487</code>;
+        <td><code>src/dns/cache.rs:501-514</code>;
         <code>src/dns/publication.rs:82</code>, <code>:198-239</code></td></tr>
     </tbody>
   </table>
+
+  <p>The qualified-admission configuration reaches the runtime through a
+  single first-party cache constructor: <code>ServeStorage::boot</code>
+  builds the DNS cache from the declared configuration via
+  <code>Cache::for_config</code> (<code>src/runtime/storage.rs:172-174</code>;
+  <code>src/dns/cache.rs:445-451</code>), the sole cache construction site, and
+  that same boot-built instance serves both the startup window and every actual
+  dial — the CONNECT attempt re-checks the owner-bound admission before dialing (<code>dial_checked</code>, <code>src/runtime/reactor.rs:2609-2626</code>; <code>dial_admits</code>, <code>src/runtime/tunnel.rs:832-847</code>; the cache predicate <code>src/dns/cache.rs:622-658</code>) — so no dial reads a stale admission source. The typed policies take two owned routes: <code>parse_entry_requirement</code> reads only the per-entry <code>dns_assurance</code> key, omission defaulting to <code>Trusted</code> (<code>src/config/mod.rs:939-951</code>), while <code>build_resolver_set</code> parses the top-level <code>recursive_dnssec_policy</code> into a distinct <code>RecursionPolicy</code> validated by <code>declared_root_validating_no_stale</code> (<code>src/dns/resolver.rs:465-473</code>), the both-strong gate applied by <code>from_table</code> (<code>src/config/mod.rs:631-641</code>), so an unsupported or unrepresentable combination is rejected at load, not at dial time. Evidence provenance is
+  captured once per reply before any policy is consulted: <code>ParsedReply</code> holds only the same-parse outcome, raw AD, extreme flag, and supporting-TTL cap (<code>src/dns/wire.rs:1009-1012</code>, <code>:1031-1048</code>); the delivering connection's immutable source, completed strict-pin handshake, and query-start floor arrive in <code>ApplyOrigin</code> (<code>src/dns/transport.rs:2421-2425</code>, <code>:2495-2502</code>) and join into <code>Evidence</code> only in <code>Evidence::new</code> via <code>ObservedReply::apply</code> (<code>src/dns/wire.rs:1161-1175</code>). Publication checks the owned requirement before the outcome match (<code>src/dns/publication.rs:81-85</code>): <code>InsufficientAssurance</code> is a counted, nonfatal exchange failure — the receive path closes the DNS connection, records <code>note_failure</code>, and returns <code>RecvStep::Failed</code>, distinct from other errors (<code>src/dns/transport.rs:2528-2535</code>, <code>:2537</code>), continuing via counted backoff with serving retained (<code>:3689-3690</code>; <code>src/dns/schedule.rs:402-418</code>); the token is <code>insufficient_assurance</code> (<code>src/dns/outcome.rs:24,38</code>); superseded negatives are a separate branch and pure probes return earlier (<code>src/dns/transport.rs:2524-2526</code>, <code>:2484-2494</code>), keeping every entry's stored class consistent with the last successful policy check.</p>
 </section>
 
 <section id="enforcement">
@@ -1880,10 +1896,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/enforcement/state.rs:71-77</code>), but the configuration surface
   accepts only the three sections <code>[bad_handshake]</code>,
   <code>[illegal_fqdn]</code>, and <code>[ja4]</code>
-  (<code>src/config/mod.rs:591-595</code>) and rejects an <code>[early_data]</code>
-  gate section at load (reject at <code>:589</code>); the GateSet’s
+  (<code>src/config/mod.rs:644-654</code>) and rejects an <code>[early_data]</code>
+  gate section at load (reject at <code>:645-647</code>); the GateSet’s
   <code>early_data</code> slot is always the default (<code>AllScopeGate::default()</code>,
-  <code>:594</code>). Each is an <code>AllScopeGate</code>
+  <code>:651</code>). Each is an <code>AllScopeGate</code>
   whose <code>threshold</code> and <code>window_secs</code> are nonzero
   (<code>NonZeroU32</code>/<code>NonZeroU64</code>): the nonzero types make only
   zero parameter values unrepresentable and say nothing about whether a gate can
@@ -1900,7 +1916,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <div class="callout" role="note">
     <p>The <code>[early_data]</code> gate section is rejected at config load with
     exit 78 (<code>ConfigError::EarlyDataGateRejected</code>,
-    <code>src/config/mod.rs:440</code>, raised at <code>:589</code>), so no boot
+    <code>src/config/mod.rs:342</code>, raised at <code>:645-647</code>), so no boot
     succeeds carrying it and the all-scope early-data bar cannot be configured at
     all. The rejection is structural, not an oversight: a per-class all-scope
     counter is noted only when the raw decided effect is
@@ -1908,8 +1924,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     (<code>src/enforcement/state.rs:262-278</code>), and the configuration parser
     rejects any <code>early_data</code> block whose scope is not
     <code>connection</code> (<code>ConfigError::EarlyDataBlockScopeInvalid</code>,
-    <code>src/config/mod.rs:893-900</code>; the parser doc comment at
-    <code>:870-876</code> records that restriction). An upstream-sourced
+    <code>src/config/mod.rs:1001-1015</code>; the parser doc comment at
+    <code>:978-984</code> records that restriction). An upstream-sourced
     early-data signal therefore cannot select a per-domain or process-wide
     latch (<code>docs/alumina-proxy.md:1018-1020</code>). The only reachable raw effects
     for <code>EarlyUpstreamData</code> are therefore <code>BaselineOnly</code>,
@@ -2536,7 +2552,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>allowlist-verified hostname + port; cache-entry-scoped selection;
         generation-age retirement</td>
         <td><code>src/config/mod.rs</code>; <code>src/runtime/tunnel.rs:773-782</code>, <code>:863-885</code>;
-        <code>src/dns/cache.rs:166-206</code>, <code>:493-497</code></td></tr>
+        <code>src/dns/cache.rs:557-620</code></td></tr>
       <tr><th scope="row">Authorization-Before-Forwarding: no client tunnel bytes
       until ClientHello validates with exactly-one matching SNI; no upstream bytes
       before the gate opens</th>
@@ -2562,7 +2578,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime/owner.rs:56-59</code> (<code>:42-55</code>), <code>:163-184</code></td></tr>
       <tr><th scope="row">A stale DNS publish cannot overwrite a newer entry</th>
         <td><code>Generation</code> + <code>StaleGeneration</code> rejection</td>
-        <td><code>src/dns/cache.rs:166-206</code>, <code>:493-497</code></td></tr>
+        <td><code>src/dns/cache.rs:557-620</code></td></tr>
       <tr><th scope="row">Panic hygiene: crate lints, <code>panic =
       "abort"</code>, annotated <code>#[expect]</code> bounds</th>
         <td>No <code>unwrap</code> and no <code>panic!</code> in <code>src/</code>
@@ -2638,7 +2654,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>dp</code> fact (<code>src/dns/transport.rs:3202-3216</code>).</li>
     <li><strong>Trust is homogeneous or boot fails.</strong> A mixed-trust
     resolver set is rejected at configuration time
-    (<code>src/config/mod.rs:624</code>).</li>
+    (<code>src/config/mod.rs:679-683</code>).</li>
   </ul>
 </section>
 
@@ -2663,7 +2679,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <tbody>
       <tr><th scope="row">Fixed input, no CLI/env policy</th>
         <td><code>src/main.rs:21</code> (<code>CONFIG_PATH</code>); schema-strict
-        load at <code>src/config/mod.rs:493-602</code> region</td></tr>
+        load at <code>src/config/mod.rs:593-614</code> region</td></tr>
       <tr><th scope="row">Privilege floor / exit codes</th>
         <td><code>src/boot/preflight.rs:96-116</code>; <code>src/main.rs:22-23</code>;
         <code>src/boot/mod.rs:9</code></td></tr>
@@ -2672,8 +2688,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/transport.rs:55</code>; spec <code>docs/alumina-proxy.md:110</code></td></tr>
       <tr><th scope="row">early_data block scope connection-only; the
       <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
-        <td><code>src/config/mod.rs:893-900</code>, <code>:589</code>,
-        <code>:877-898</code>;
+        <td><code>src/config/mod.rs:1001-1015</code>, <code>:645-647</code>,
+        <code>:648-654</code>;
         <code>src/enforcement/state.rs:262-278</code>,
         <code>src/enforcement/state/tests.rs:1123</code> (test); <code>docs/alumina-proxy.md:1018-1020</code>,
         <code>:822-828</code></td></tr>
@@ -2691,7 +2707,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/transport.rs:36</code>, <code>:806-812</code></td></tr>
       <tr><th scope="row">Exchange class typed at the start seam</th>
         <td><code>src/dns/transport.rs:2906-2962</code>,
-        <code>:1626-1634</code>; <code>src/runtime/storage.rs:1344-1350</code>;
+        <code>:1626-1634</code>; <code>src/runtime/storage.rs:1339-1345</code>;
         <code>src/runtime/storage.rs:806-830</code>; <code>src/runtime/reactor/startup.rs:129</code></td></tr>
       <tr><th scope="row">Slot reset reinitializes metadata (retained traffic
       slabs not zeroized)</th>
@@ -2714,7 +2730,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime/storage.rs:255</code>; <code>src/runtime/tunnel.rs:88-96</code>;
         <code>src/dns/transport.rs:1375-1377</code></td></tr>
       <tr><th scope="row">Per-entry CNAME bailiwick</th>
-        <td><code>src/dns/wire.rs:856-899</code>, <code>:919-930</code>; <code>src/config/mod.rs:1036</code></td></tr>
+        <td><code>src/dns/wire.rs:856-899</code>, <code>:919-930</code>; <code>src/config/mod.rs:1145-1155</code></td></tr>
       <tr><th scope="row">Stage machine (10 variants vs 9-step path)</th>
         <td><code>src/runtime/reactor.rs:341-352</code></td></tr>
       <tr><th scope="row">CONNECT parse bounds &amp; bare-CR/LF</th>
@@ -2811,7 +2827,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>src/*.rs</code>, <code>tests/*.rs</code>, or the specification, and no
     claim is stated at a strength the reading cannot support.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
-    <code>81d25c6c5b2d221215459e7036f471806b650e54f8f84cc5f8dbdcfa031a8a08</code>;
+    <code>b1d95dbc7fead191d51b51bc40cfa6b3e7f2fc922beb9de4ea0564d842d8c4b2</code>;
     referenced as the current canonical governing specification only.</li>
   </ul>
 </section>

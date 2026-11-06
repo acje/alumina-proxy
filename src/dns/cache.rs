@@ -364,6 +364,9 @@ pub enum CacheError {
     /// Staged evidence is internally inconsistent: its evidential floor
     /// follows the receipt, or its lease outlives the supporting binding TTL.
     EvidenceInconsistent,
+    /// The candidate's own evidence does not satisfy the name's owned
+    /// assurance requirement at publication time.
+    InsufficientAssurance,
 }
 
 impl fmt::Display for CacheError {
@@ -376,6 +379,7 @@ impl fmt::Display for CacheError {
             CacheError::StaleGeneration => "stale generation",
             CacheError::DeadlineOverflow => "cache deadline overflow",
             CacheError::EvidenceInconsistent => "inconsistent staged evidence",
+            CacheError::InsufficientAssurance => "insufficient assurance for the owned requirement",
         };
         write!(f, "cache {detail}")
     }
@@ -385,6 +389,7 @@ impl fmt::Display for CacheError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cache {
     name_count: u8,
+    requirements: [evidence::AssuranceRequirement; ALLOWLIST_MAX],
     entries: [[Entry; 2]; ALLOWLIST_MAX],
 }
 
@@ -395,33 +400,55 @@ impl Cache {
     ///
     /// Returns `NameOutOfRange` when `name_count` is zero or exceeds
     /// `ALLOWLIST_MAX`.
+    pub fn new(name_count: usize) -> Result<Cache, CacheError> {
+        Self::with_requirement(name_count, evidence::AssuranceRequirement::ResolverTrusted)
+    }
+
+    pub(crate) fn with_requirement(
+        name_count: usize,
+        required: evidence::AssuranceRequirement,
+    ) -> Result<Cache, CacheError> {
+        Self::with_entry_requirements(name_count, [required; ALLOWLIST_MAX])
+    }
+
     #[expect(
         clippy::large_stack_arrays,
         reason = "designed cache-storage fixed-profile buffer; no runtime heap"
     )]
-    pub fn new(name_count: usize) -> Result<Cache, CacheError> {
+    fn with_entry_requirements(
+        name_count: usize,
+        requirements: [evidence::AssuranceRequirement; ALLOWLIST_MAX],
+    ) -> Result<Cache, CacheError> {
         if name_count == 0 || name_count > ALLOWLIST_MAX {
             return Err(CacheError::NameOutOfRange);
         }
         let name_count = u8::try_from(name_count).map_err(|_| CacheError::NameOutOfRange)?;
         Ok(Cache {
             name_count,
+            requirements,
             entries: [[Entry::EMPTY; 2]; ALLOWLIST_MAX],
         })
     }
 
     /// Constructs a cache whose name count exactly matches the validated
     /// allowlist of `config`, so allowlist ordinals index the same names in
-    /// the cache (destination-binding, docs/alumina-proxy.md:145). The single
-    /// running-path constructor: a worker never pairs a config with an
-    /// independently sized cache (9pac M4).
+    /// the cache (destination-binding, docs/alumina-proxy.md:145). Each
+    /// admitted entry retains the config's per-allowlist assurance
+    /// requirement at the same ordinal, so requirement ownership stays in
+    /// config. The single running-path constructor: a worker never pairs a
+    /// config with an independently sized cache (9pac M4).
     ///
     /// # Errors
     ///
     /// Returns `NameOutOfRange` when the allowlist is empty or exceeds
     /// `ALLOWLIST_MAX` (configuration validation already rejects both).
     pub fn for_config(config: &Config) -> Result<Cache, CacheError> {
-        Cache::new(config.allowlist().len())
+        let allowlist_len = config.allowlist().len();
+        let mut requirements = [evidence::AssuranceRequirement::ResolverTrusted; ALLOWLIST_MAX];
+        for (slot, index) in requirements.iter_mut().zip(0..allowlist_len) {
+            *slot = config.entry_requirement(index);
+        }
+        Self::with_entry_requirements(allowlist_len, requirements)
     }
 
     /// The number of admitted names.
@@ -484,6 +511,21 @@ impl Cache {
             queried: self.entry(name, family)?.generation(),
             other: self.entry(name, other)?.generation(),
         })
+    }
+
+    pub(crate) fn check_publication_requirement(
+        &self,
+        name: NameIndex,
+        candidate: Option<evidence::Evidence>,
+        now: u64,
+    ) -> Result<(), CacheError> {
+        let required = self.requirements[name.get()];
+        let class = candidate.and_then(|candidate| candidate.valid_class(now));
+        match required {
+            evidence::AssuranceRequirement::ResolverTrusted => Ok(()),
+            _ if required.admits(class) => Ok(()),
+            _ => Err(CacheError::InsufficientAssurance),
+        }
     }
 
     fn entry_mut(&mut self, name: NameIndex, family: Family) -> &mut Entry {
@@ -575,6 +617,45 @@ impl Cache {
         };
         *entry = new_entry;
         Ok(())
+    }
+
+    fn peer_admissible(
+        &self,
+        name: NameIndex,
+        family: Family,
+        addr: NumericAddr,
+        now: u64,
+        required: evidence::AssuranceRequirement,
+    ) -> Result<bool, CacheError> {
+        let entry = self.entry(name, family)?;
+        let admitted = entry.servable(now)
+            && entry.bindings().contains(&addr)
+            && addr.is_eligible()
+            && required.admits(entry.effective_projection(now));
+        Ok(admitted)
+    }
+
+    pub(crate) fn is_peer_admissible(
+        &self,
+        name: NameIndex,
+        family: Family,
+        addr: NumericAddr,
+        now: u64,
+    ) -> Result<bool, CacheError> {
+        self.admit(name)?;
+        let required = self.requirements[name.get()];
+        self.peer_admissible(name, family, addr, now, required)
+    }
+
+    pub(crate) fn is_name_admissible(&self, name: NameIndex, now: u64) -> Result<bool, CacheError> {
+        for family in Family::ALL {
+            for &addr in self.entry(name, family)?.bindings() {
+                if self.is_peer_admissible(name, family, addr, now)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Evicts both families of a name following a validated NXDOMAIN.
@@ -761,6 +842,28 @@ pub mod evidence {
                 (false, _, _) => ProofClass::Trusted,
                 (true, true, true) => ProofClass::Delegated,
                 (true, _, _) => ProofClass::Authenticated,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum AssuranceRequirement {
+        ResolverTrusted,
+        ResolverAuthenticated,
+        DelegatedDnssec,
+    }
+
+    impl AssuranceRequirement {
+        pub(crate) const fn admits(self, class: Option<ProofClass>) -> bool {
+            match self {
+                Self::ResolverTrusted => class.is_some(),
+                Self::ResolverAuthenticated => {
+                    matches!(
+                        class,
+                        Some(ProofClass::Authenticated | ProofClass::Delegated)
+                    )
+                }
+                Self::DelegatedDnssec => matches!(class, Some(ProofClass::Delegated)),
             }
         }
     }

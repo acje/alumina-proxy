@@ -253,6 +253,21 @@ fn binding_published_strictly_before_deadline_counts_at_the_snapshot() {
 }
 
 #[test]
+fn owned_startup_readiness_limits_strong_owner_to_authenticated_bindings() {
+    let mut storage = booted(2, 0);
+    let req = crate::dns::cache::evidence::AssuranceRequirement::ResolverAuthenticated;
+    storage.cache = Cache::with_requirement(2, req).unwrap();
+    publish_a(&mut storage.cache, 0, FRESH, TTL);
+    publish_a(&mut storage.cache, 1, FRESH, TTL);
+    let decision = storage.startup_decision(FRESH + 5).unwrap();
+    assert_eq!(
+        decision,
+        StartupDecision::Exit75 { unresolved: 2 },
+        "an Auth-owned cache over ordinary positives must not serve Full"
+    );
+}
+
+#[test]
 fn serve_storage_boot_corresponds_allowlist_at_boundary() {
     let config = config_with_allowance(2, 1);
     let storage = ServeStorage::boot(&config).expect("boot serving storage");
@@ -1405,5 +1420,41 @@ fn prepare_serving_dns_turn_surfaces_typed_overflow_without_mutation() {
     assert!(
         !storage.dns().has_active_exchange(),
         "an overflowing selection must never begin transport I/O"
+    );
+}
+
+#[test]
+fn boot_real_parsed_strong_and_legacy_refuse_weak_on_strong() {
+    let cfg = crate::config::parse_config_document(
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#cloudflare-dns.com#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]\nrecursive_dnssec_policy = \"root_validating_no_stale\"\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_authenticated\"\n[allowed_fqdn.\"b.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
+    )
+    .expect("real parsed strong+legacy allowlist");
+    let storage = ServeStorage::boot(&cfg).expect("boot via actual production constructor");
+    let weak = Evidence::new(
+        false,
+        false,
+        false,
+        ResolverSource::index(0).unwrap(),
+        Some(60),
+        FRESH,
+    )
+    .expect("trusted-class weak evidence");
+    let (strong_idx, legacy_idx) = (
+        storage.cache.name_index(0).expect("strong ordinal"),
+        storage.cache.name_index(1).expect("legacy ordinal"),
+    );
+    assert_eq!(
+        storage
+            .cache
+            .check_publication_requirement(strong_idx, Some(weak), FRESH + 1),
+        Err(CacheError::InsufficientAssurance),
+        "strong ordinal must refuse weak publication through the real boot cache"
+    );
+    assert_eq!(
+        storage
+            .cache
+            .check_publication_requirement(legacy_idx, Some(weak), FRESH + 1),
+        Ok(()),
+        "absent-selector ordinal must still admit (positive control)"
     );
 }

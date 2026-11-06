@@ -19,6 +19,9 @@ pub enum FailureReason {
     /// A `DoT` TLS-layer failure outside certificate identity: rustls setup
     /// or build failure, protocol error, alert, `EOF`, or socket error.
     TlsProtocol,
+    /// The owned assurance requirement rejected the publication candidate's
+    /// evidence.
+    InsufficientAssurance,
 }
 
 impl FailureReason {
@@ -32,6 +35,7 @@ impl FailureReason {
             FailureReason::NameMismatch => "san_mismatch",
             FailureReason::NoTrustAnchor => "no_anchor",
             FailureReason::TlsProtocol => "tls_protocol",
+            FailureReason::InsufficientAssurance => "insufficient_assurance",
         }
     }
 }
@@ -60,6 +64,9 @@ impl NotAttemptedReason {
 pub enum NameOutcome {
     /// At least one family holds an eligible non-retired positive binding.
     Resolved,
+    /// The latest published outcome was a validated positive, but no binding
+    /// is currently admissible at the owner's clock.
+    PositiveUnusable,
     /// The latest published outcome for the name was a validated negative
     /// (NXDOMAIN, or an NODATA answer with no eligible bindings).
     Negative,

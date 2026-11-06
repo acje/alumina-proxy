@@ -1948,6 +1948,49 @@ mod apply {
             "the refused apply leaves the first exchange's published bindings intact"
         );
     }
+    #[test]
+    fn below_minimum_publication_is_counted_rejection_in_transport() {
+        use crate::dns::cache::evidence::AssuranceRequirement;
+        let cfg = config();
+        let fqdn = cfg.allowlist().get(0).unwrap();
+        let mut cache =
+            Cache::with_requirement(2, AssuranceRequirement::ResolverAuthenticated).unwrap();
+        let mut schedules = Schedules::new(2).unwrap();
+        let mut transport = seeded_bailiwick_transport();
+        let mut ex = fixture_exchange(0, Family::A, ExchangeClass::Serving);
+        ex.tid = 0x1230;
+        fill_frame(
+            &mut transport,
+            &positive_a_reply(fqdn, Family::A, ex.tid, 120, [1, 2, 3, 4]),
+        );
+        let result = transport.step_recv(&mut ex, fqdn, &mut cache, &mut schedules);
+        let Ok(RecvStep::Failed(reason)) = result else {
+            panic!("a below-minimum candidate must settle as a counted rejection");
+        };
+        assert_eq!(
+            reason,
+            FailureReason::InsufficientAssurance,
+            "the counted rejection carries the insufficient-assurance reason"
+        );
+        assert_eq!(
+            bindings_of(&cache, 0, Family::A),
+            Vec::new(),
+            "the rejected candidate leaves the cache untouched"
+        );
+        assert_eq!(
+            transport.take_incident_notes(),
+            [
+                Some(IncidentNote::Open {
+                    ordinal: 0,
+                    family: Family::A,
+                    reason: FailureReason::InsufficientAssurance,
+                    resolver: Some(0),
+                }),
+                None
+            ],
+            "the counted rejection opens a serving A incident typed by its reason"
+        );
+    }
 }
 
 mod cancel {
@@ -4828,5 +4871,262 @@ fn resolve_window_first_failure_warns_with_live_context() {
             && text.contains("family=A")
             && text.contains("context=\"a\""),
         "{text}"
+    );
+}
+
+#[test]
+fn startup_ledger_current_cache_refresh_overwrites_sticky_resolved() {
+    use crate::dns::cache::StagedPositive;
+    use crate::dns::cache::evidence::{AssuranceRequirement, Evidence, ResolverSource};
+    use crate::eligibility::NumericAddr;
+    let mut ledger = WindowLedger::new(1);
+    let mut cache =
+        Cache::with_requirement(1, AssuranceRequirement::ResolverAuthenticated).unwrap();
+    let name = cache.name_index(0).unwrap();
+    let evidence = Evidence::new(
+        false,
+        true,
+        false,
+        ResolverSource::index(0).unwrap(),
+        Some(60),
+        1000,
+    )
+    .unwrap();
+    let staged = StagedPositive::stage_with_evidence(
+        name,
+        Family::A,
+        Generation::INITIAL,
+        &[NumericAddr::V4([8, 8, 8, 8].into())],
+        1001,
+        60,
+        Some(evidence),
+    )
+    .unwrap();
+    cache.publish_positive(&staged).unwrap();
+    ledger.mark_published(0, PublishedKind::ResolvedPositive);
+    assert!(
+        !ledger.is_resolved(0),
+        "a published positive alone is not resolution authority; the refresh must establish it"
+    );
+    ledger.refresh_resolved(&cache, 1001).unwrap();
+    assert!(ledger.is_resolved(0), "Auth proof valid at its receipt");
+    assert!(
+        cache.entry(name, Family::A).unwrap().servable(1060),
+        "the ordinary binding is still fresh at 1060"
+    );
+    ledger.refresh_resolved(&cache, 1060).unwrap();
+    assert!(
+        !ledger.is_resolved(0),
+        "an expired Auth proof must not lease resolved status while the binding is fresh"
+    );
+    assert_eq!(ledger.exchanges, 1, "refresh must not re-count exchanges");
+    assert_eq!(ledger.failed, 0, "refresh must not count failures");
+    assert!(
+        ledger.first_failure.is_none(),
+        "refresh must not record failures"
+    );
+    let report = ledger.finish();
+    assert_eq!(
+        report.resolved_names, 0,
+        "the expired proof is not resolved"
+    );
+    assert_eq!(
+        report.outcomes[0],
+        NameOutcome::PositiveUnusable,
+        "an expired positive is reported positive-unusable, not resolved"
+    );
+    ledger.mark_failed(0, Family::A, FailureReason::Timeout);
+    assert_eq!(ledger.failed, 1, "the Timeout failure is counted");
+    assert_eq!(
+        ledger.first_failure,
+        Some((0, Family::A)),
+        "the Timeout failure records the first failure"
+    );
+    let report = ledger.finish();
+    assert_eq!(
+        report.outcomes[0],
+        NameOutcome::Failed(FailureReason::Timeout),
+        "a later Timeout overrides the historical positive"
+    );
+    ledger.refresh_resolved(&cache, 1001).unwrap();
+    assert!(ledger.is_resolved(0), "usable again at 1001");
+    ledger.mark_failed(0, Family::A, FailureReason::Timeout);
+    let report = ledger.finish();
+    assert_eq!(
+        report.outcomes[0],
+        NameOutcome::Resolved,
+        "a currently usable name stays resolved despite the failed exchange"
+    );
+}
+
+#[test]
+fn startup_refresh_error_atomic_preserves_prior_mask() {
+    use crate::dns::cache::CacheError;
+    use crate::dns::cache::StagedPositive;
+    use crate::dns::cache::evidence::{AssuranceRequirement, Evidence, ResolverSource};
+    use crate::eligibility::NumericAddr;
+    let mut ledger = WindowLedger::new(2);
+    ledger.resolved[0] = true;
+    ledger.resolved[1] = true;
+    assert!(
+        ledger.is_resolved(0) && ledger.is_resolved(1),
+        "the prior mask starts with both names resolved"
+    );
+    let mut cache =
+        Cache::with_requirement(1, AssuranceRequirement::ResolverAuthenticated).unwrap();
+    let name = cache.name_index(0).unwrap();
+    let evidence = Evidence::new(
+        false,
+        true,
+        false,
+        ResolverSource::index(0).unwrap(),
+        Some(60),
+        1000,
+    )
+    .unwrap();
+    let staged = StagedPositive::stage_with_evidence(
+        name,
+        Family::A,
+        Generation::INITIAL,
+        &[NumericAddr::V4([8, 8, 8, 8].into())],
+        1001,
+        60,
+        Some(evidence),
+    )
+    .unwrap();
+    cache.publish_positive(&staged).unwrap();
+    let err = ledger.refresh_resolved(&cache, 1060).unwrap_err();
+    assert_eq!(
+        err,
+        CacheError::NameOutOfRange,
+        "a ledger wider than the cache errors on the out-of-range ordinal"
+    );
+    assert!(
+        ledger.is_resolved(0) && ledger.is_resolved(1),
+        "a failed refresh publishes no partial snapshot; the prior mask is unchanged"
+    );
+    assert_eq!(ledger.exchanges, 0, "refresh errors touch no counters");
+    assert_eq!(ledger.failed, 0, "refresh errors touch no counters");
+    assert!(
+        ledger.first_failure.is_none(),
+        "refresh errors touch no counters"
+    );
+}
+
+fn zero_window_report(cache: &mut Cache, now0: u64) -> (StartupReport, u64) {
+    let cfg = config();
+    let mut schedules = Schedules::new(2).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let sink = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/null")
+        .unwrap();
+    let mut logs = crate::log::LogStore::with_fd(&sink).unwrap();
+    transport
+        .resolve_window(
+            WindowInputs {
+                config: &cfg,
+                cache,
+                schedules: &mut schedules,
+                nameserver: ns(1),
+                now0,
+                window: Duration::ZERO,
+            },
+            &mut logs,
+        )
+        .unwrap()
+}
+
+#[test]
+fn zero_window_reports_current_cache_admission_without_exchange() {
+    use crate::dns::cache::StagedPositive;
+    use crate::dns::cache::evidence::{AssuranceRequirement, Evidence, ResolverSource};
+    use crate::eligibility::NumericAddr;
+    let now0: u64 = 1_000_000;
+    let mut cache =
+        Cache::with_requirement(2, AssuranceRequirement::ResolverAuthenticated).unwrap();
+    let name = cache.name_index(0).unwrap();
+    let evidence = Evidence::new(
+        false,
+        true,
+        false,
+        ResolverSource::index(0).unwrap(),
+        Some(600),
+        now0,
+    )
+    .unwrap();
+    let staged = StagedPositive::stage_with_evidence(
+        name,
+        Family::A,
+        Generation::INITIAL,
+        &[NumericAddr::V4([8, 8, 8, 8].into())],
+        now0 + 1,
+        600,
+        Some(evidence),
+    )
+    .unwrap();
+    cache.publish_positive(&staged).unwrap();
+    let (report, elapsed) = zero_window_report(&mut cache, now0);
+    assert_eq!(
+        report.resolved_names, 1,
+        "owner-admissible name resolves from cache state even with a zero-length window"
+    );
+    assert_eq!(
+        report.outcomes[0],
+        NameOutcome::Resolved,
+        "the admissible name is reported resolved"
+    );
+    assert_eq!(
+        elapsed, 0,
+        "the zero-length window anchors readiness at its own start"
+    );
+    assert_eq!(
+        report.exchanges, 0,
+        "the admissible zero-length window runs no exchange"
+    );
+
+    let lapsed_floor = now0.saturating_sub(2_000);
+    let lapsed_ttl = 60u64;
+    let lapsed_receipt = now0.saturating_sub(30);
+    let mut lapsed =
+        Cache::with_requirement(2, AssuranceRequirement::ResolverAuthenticated).unwrap();
+    let lapsed_name = lapsed.name_index(0).unwrap();
+    let stale = Evidence::new(
+        false,
+        true,
+        false,
+        ResolverSource::index(0).unwrap(),
+        Some(u32::try_from(lapsed_ttl).unwrap()),
+        lapsed_floor,
+    )
+    .unwrap();
+    let staged = StagedPositive::stage_with_evidence(
+        lapsed_name,
+        Family::A,
+        Generation::INITIAL,
+        &[NumericAddr::V4([8, 8, 8, 8].into())],
+        lapsed_receipt,
+        lapsed_ttl,
+        Some(stale),
+    )
+    .unwrap();
+    lapsed.publish_positive(&staged).unwrap();
+    let (report, elapsed) = zero_window_report(&mut lapsed, now0);
+    let anchor = now0.saturating_add(elapsed);
+    assert!(
+        lapsed_receipt + lapsed_ttl > anchor,
+        "the binding is still fresh at the returned decision anchor"
+    );
+    assert!(
+        lapsed_floor + lapsed_ttl <= anchor,
+        "the proof has already expired at the returned decision anchor"
+    );
+    assert_eq!(
+        report.exchanges, 0,
+        "the expired-proof zero-length window runs no exchange"
+    );
+    assert_eq!(
+        report.resolved_names, 0,
+        "an expired proof with a still-fresh binding must not resolve"
     );
 }

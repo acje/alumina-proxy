@@ -40,7 +40,9 @@ use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme
 use crate::config::{ALLOWLIST_MAX, Config, Fqdn};
 use crate::dns::cache::evidence::ResolverSource;
 use crate::dns::cache::{Cache, CacheError, Family, Generation, Generations};
-use crate::dns::resolver::{Fqdn as ResolverFqdn, MAX_RESOLVERS, ResolverSet, SpiPin};
+use crate::dns::resolver::{
+    Fqdn as ResolverFqdn, MAX_RESOLVERS, RecursionPolicy, ResolverSet, SpiPin,
+};
 use crate::dns::schedule::{PerTypeTransition, ScheduleError, Schedules};
 use crate::dns::wire::{self, BailiwickZones, DNS_MSG_LIMIT, DnsError, ResponseWorkspace};
 use crate::enforcement::monitor::DnsAnomalyKind;
@@ -371,9 +373,8 @@ enum HandshakeProbe {
     Failed(FailureReason),
 }
 
-/// The per-name terminal outcome of a single exchanged result, as the resolve
-/// loops track it: `Resolved` is terminal (a usable name is never re-attempted),
-/// otherwise the latest concluded exchange's outcome or reason is kept (704q:
+/// The per-name outcome of a single exchanged result, as the resolve loops
+/// track it: the latest concluded exchange's outcome or reason is kept (704q:
 /// capture where still known, never infer at formatting).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Latest {
@@ -381,16 +382,13 @@ enum Latest {
     Failed(FailureReason),
     NoEligible,
     Negative,
-    Resolved,
+    Positive,
 }
 
 impl Latest {
-    fn merge(&mut self, result: ExchangeResult) {
-        if *self == Latest::Resolved {
-            return;
-        }
+    const fn merge(&mut self, result: ExchangeResult) {
         *self = match result {
-            ExchangeResult::Published(PublishedKind::ResolvedPositive) => Latest::Resolved,
+            ExchangeResult::Published(PublishedKind::ResolvedPositive) => Latest::Positive,
             ExchangeResult::Published(PublishedKind::Negative) => Latest::Negative,
             ExchangeResult::Published(PublishedKind::NoEligible) => Latest::NoEligible,
             ExchangeResult::Failed(reason) => Latest::Failed(reason),
@@ -400,7 +398,7 @@ impl Latest {
 
     const fn to_outcome(self) -> NameOutcome {
         match self {
-            Latest::Resolved => NameOutcome::Resolved,
+            Latest::Positive => NameOutcome::PositiveUnusable,
             Latest::Negative => NameOutcome::Negative,
             Latest::NoEligible => NameOutcome::NoEligible,
             Latest::Failed(reason) => NameOutcome::Failed(reason),
@@ -471,24 +469,21 @@ impl WindowLedger {
         self.attempted[ordinal * 2 + family_index(family)] = true;
     }
 
-    /// Merges a concluded exchange into the ledger and counts it: a
-    /// resolved-positive answer (with at least one eligible binding) marks the
-    /// name usable and terminal; a validated negative or no-eligible answer is
-    /// recorded as its own class and never re-attempted as resolved.
-    pub(crate) fn mark_published(&mut self, ordinal: usize, kind: PublishedKind) {
+    pub(crate) const fn mark_published(&mut self, ordinal: usize, kind: PublishedKind) {
         self.exchanges += 1;
-        match kind {
-            PublishedKind::ResolvedPositive => self.resolved[ordinal] = true,
-            PublishedKind::Negative | PublishedKind::NoEligible => {}
-        }
         self.latest[ordinal].merge(ExchangeResult::Published(kind));
     }
 
-    /// Overlays the "usable name" binding check: a name counts as resolved only
-    /// when a published positive answer actually left at least one eligible
-    /// binding.
-    pub(crate) const fn resolve(&mut self, ordinal: usize, has: bool) {
-        self.resolved[ordinal] |= has;
+    pub(crate) fn refresh_resolved(&mut self, cache: &Cache, now: u64) -> Result<(), CacheError> {
+        let mut mask = [false; ALLOWLIST_MAX];
+        for (ordinal, slot) in mask[..self.names].iter_mut().enumerate() {
+            let name = cache
+                .name_index(ordinal)
+                .ok_or(CacheError::NameOutOfRange)?;
+            *slot = cache.is_name_admissible(name, now)?;
+        }
+        self.resolved = mask;
+        Ok(())
     }
 
     /// Counts a concluded failed exchange, merges its reason as the name's
@@ -2499,6 +2494,12 @@ impl StartupDns {
                     }
                     let receipt = self.now_u64();
                     let (source, origin_authenticated) = self.delivering_origin();
+                    let origin_policy = self
+                        .resolvers
+                        .as_ref()
+                        .map_or(RecursionPolicy::Undeclared, |set| {
+                            set.policy_of(source.get())
+                        });
                     let obsolete_negative =
                         matches!(observed.probe_facts().0, PublishedKind::Negative);
                     let (kind, extreme, incidents) = match observed.apply(
@@ -2516,12 +2517,22 @@ impl StartupDns {
                             source,
                             query_floor: ex.query_floor,
                             origin_authenticated,
+                            origin_policy,
                         },
                     ) {
                         Ok(published) => published,
                         Err(DnsError::Cache(CacheError::StaleGeneration)) if obsolete_negative => {
                             schedules.release_selection(ex.ordinal, ex.family)?;
                             return Ok(RecvStep::Superseded);
+                        }
+                        Err(DnsError::Cache(CacheError::InsufficientAssurance)) => {
+                            self.close_connection()?;
+                            let reason = self.note_failure(
+                                ex,
+                                schedules,
+                                FailureReason::InsufficientAssurance,
+                            )?;
+                            return Ok(RecvStep::Failed(reason));
                         }
                         Err(err) => return Err(err.into()),
                     };
@@ -2709,9 +2720,6 @@ impl StartupDns {
                 if Instant::now() >= window_deadline {
                     continue;
                 }
-                let name_index = cache
-                    .name_index(ordinal)
-                    .ok_or(CacheError::NameOutOfRange)?;
                 let remaining = window_deadline.duration_since(Instant::now());
                 let exchange_deadline =
                     Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS).min(remaining);
@@ -2726,9 +2734,7 @@ impl StartupDns {
                     logs,
                 ) {
                     Ok(ExchangeResult::Published(kind)) => {
-                        let has = !cache.entry(name_index, family)?.bindings().is_empty();
                         ledger.mark_published(ordinal, kind);
-                        ledger.resolve(ordinal, has);
                     }
                     Ok(ExchangeResult::Failed(reason)) => {
                         ledger.mark_failed(ordinal, family, reason);
@@ -2738,6 +2744,10 @@ impl StartupDns {
                 }
             }
         }
+        let elapsed = self.start.elapsed().as_secs();
+        ledger
+            .refresh_resolved(cache, self.now0.saturating_add(elapsed))
+            .map_err(StartupDnsError::Cache)?;
         self.close_connection()?;
         Ok(ledger.finish())
     }
@@ -2805,13 +2815,16 @@ impl StartupDns {
         }
 
         loop {
+            let now = self.now_u64();
+            ledger
+                .refresh_resolved(cache, now)
+                .map_err(StartupDnsError::Cache)?;
             if ledger.all_resolved() {
                 break;
             }
             if Instant::now() >= window_deadline {
                 break;
             }
-            let now = self.now_u64();
             match schedules.select_due(now) {
                 Ok(Some(token)) => {
                     let ordinal = token.name();
@@ -2840,9 +2853,7 @@ impl StartupDns {
                         logs,
                     ) {
                         Ok(ExchangeResult::Published(kind)) => {
-                            let has = !cache.entry(name_index, family)?.bindings().is_empty();
                             ledger.mark_published(ordinal, kind);
-                            ledger.resolve(ordinal, has);
                         }
                         Ok(ExchangeResult::Failed(reason)) => {
                             if ledger.mark_failed(ordinal, family, reason) {
@@ -2880,8 +2891,12 @@ impl StartupDns {
                 Err(err) => return Err(StartupDnsError::from(err)),
             }
         }
+        let elapsed = self.start.elapsed().as_secs();
+        ledger
+            .refresh_resolved(cache, self.now0.saturating_add(elapsed))
+            .map_err(StartupDnsError::Cache)?;
         self.close_connection()?;
-        Ok((ledger.finish(), self.start.elapsed().as_secs()))
+        Ok((ledger.finish(), elapsed))
     }
 
     /// Starts a cooperative DNS exchange without waiting for network

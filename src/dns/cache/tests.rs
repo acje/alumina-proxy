@@ -37,6 +37,273 @@ fn read(cache: &Cache, name: NameIndex, family: Family) -> Entry {
     cache.entry(name, family).unwrap()
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ClassCase {
+    None,
+    Trusted,
+    Authenticated,
+    Delegated,
+}
+
+const ADMISSION_CASES: [(evidence::AssuranceRequirement, ClassCase, bool); 12] = [
+    (
+        evidence::AssuranceRequirement::ResolverTrusted,
+        ClassCase::None,
+        false,
+    ),
+    (
+        evidence::AssuranceRequirement::ResolverTrusted,
+        ClassCase::Trusted,
+        true,
+    ),
+    (
+        evidence::AssuranceRequirement::ResolverTrusted,
+        ClassCase::Authenticated,
+        true,
+    ),
+    (
+        evidence::AssuranceRequirement::ResolverTrusted,
+        ClassCase::Delegated,
+        true,
+    ),
+    (
+        evidence::AssuranceRequirement::ResolverAuthenticated,
+        ClassCase::None,
+        false,
+    ),
+    (
+        evidence::AssuranceRequirement::ResolverAuthenticated,
+        ClassCase::Trusted,
+        false,
+    ),
+    (
+        evidence::AssuranceRequirement::ResolverAuthenticated,
+        ClassCase::Authenticated,
+        true,
+    ),
+    (
+        evidence::AssuranceRequirement::ResolverAuthenticated,
+        ClassCase::Delegated,
+        true,
+    ),
+    (
+        evidence::AssuranceRequirement::DelegatedDnssec,
+        ClassCase::None,
+        false,
+    ),
+    (
+        evidence::AssuranceRequirement::DelegatedDnssec,
+        ClassCase::Trusted,
+        false,
+    ),
+    (
+        evidence::AssuranceRequirement::DelegatedDnssec,
+        ClassCase::Authenticated,
+        false,
+    ),
+    (
+        evidence::AssuranceRequirement::DelegatedDnssec,
+        ClassCase::Delegated,
+        true,
+    ),
+];
+
+#[test]
+fn assurance_requirement_admission_table() {
+    for &(requirement, class, expected) in &ADMISSION_CASES {
+        let case_class = match class {
+            ClassCase::None => None,
+            ClassCase::Trusted => Some(evidence::ProofClass::Trusted),
+            ClassCase::Authenticated => Some(evidence::ProofClass::Authenticated),
+            ClassCase::Delegated => Some(evidence::ProofClass::Delegated),
+        };
+        assert_eq!(
+            requirement.admits(case_class),
+            expected,
+            "requirement {requirement:?} vs class {class:?}"
+        );
+    }
+}
+
+#[test]
+fn peer_admissibility_owner_policy() {
+    let mut cache = Cache::new(1).unwrap();
+    let name = NameIndex(0);
+    let addr = pub_addr();
+    let other = v4([2, 2, 2, 2]);
+    let ev = evidence::Evidence::new(
+        true,
+        true,
+        false,
+        evidence::ResolverSource::index(0).unwrap(),
+        Some(60),
+        1_000,
+    )
+    .unwrap();
+    let staged = StagedPositive::stage_with_evidence(
+        name,
+        Family::A,
+        current_gen(&cache, name, Family::A),
+        &[addr],
+        1_001,
+        60,
+        Some(ev),
+    )
+    .unwrap();
+    cache.publish_positive(&staged).unwrap();
+
+    assert_eq!(
+        cache.peer_admissible(
+            name,
+            Family::A,
+            addr,
+            1_050,
+            evidence::AssuranceRequirement::ResolverAuthenticated
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        cache.peer_admissible(
+            name,
+            Family::A,
+            addr,
+            1_060,
+            evidence::AssuranceRequirement::ResolverTrusted
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        cache.peer_admissible(
+            name,
+            Family::A,
+            addr,
+            1_060,
+            evidence::AssuranceRequirement::ResolverAuthenticated
+        ),
+        Ok(false)
+    );
+    assert_eq!(
+        cache.peer_admissible(
+            name,
+            Family::A,
+            other,
+            1_050,
+            evidence::AssuranceRequirement::ResolverTrusted
+        ),
+        Ok(false)
+    );
+    assert_eq!(
+        cache.peer_admissible(
+            name,
+            Family::A,
+            other,
+            1_050,
+            evidence::AssuranceRequirement::ResolverAuthenticated
+        ),
+        Ok(false)
+    );
+    assert_eq!(
+        cache.peer_admissible(
+            NameIndex(1),
+            Family::A,
+            addr,
+            1_050,
+            evidence::AssuranceRequirement::ResolverTrusted
+        ),
+        Err(CacheError::NameOutOfRange)
+    );
+
+    let copied = cache.entry(name, Family::A).unwrap();
+    assert_eq!(
+        copied.effective_projection(1_050),
+        Some(evidence::ProofClass::Authenticated)
+    );
+    cache.evict_nxdomain(name).unwrap();
+    assert_eq!(
+        cache.peer_admissible(
+            name,
+            Family::A,
+            addr,
+            1_050,
+            evidence::AssuranceRequirement::ResolverAuthenticated
+        ),
+        Ok(false)
+    );
+}
+
+#[test]
+fn owned_assurance_requirement_wrapper_uses_cached_owner_min() {
+    use evidence::AssuranceRequirement as Req;
+    let name = NameIndex(0);
+    let addr = pub_addr();
+    let now = 1_050;
+    let mut auth = Cache::with_requirement(1, Req::ResolverAuthenticated).unwrap();
+    let mut legacy = Cache::new(1).unwrap();
+    let g = current_gen(&auth, name, Family::A);
+    publish_simple(&mut auth, name, Family::A, g, &[addr], 1_000, 60);
+    assert!(!auth.is_peer_admissible(name, Family::A, addr, now).unwrap());
+    let g = current_gen(&legacy, name, Family::A);
+    publish_simple(&mut legacy, name, Family::A, g, &[addr], 1_000, 60);
+    assert!(
+        legacy
+            .is_peer_admissible(name, Family::A, addr, now)
+            .unwrap()
+    );
+    auth.evict_nxdomain(name).unwrap();
+    let g = current_gen(&auth, name, Family::A);
+    publish_simple(&mut auth, name, Family::A, g, &[addr], 1_000, 60);
+    assert!(!auth.is_peer_admissible(name, Family::A, addr, now).unwrap());
+    assert_eq!(
+        legacy.is_peer_admissible(NameIndex(1), Family::A, addr, now),
+        Err(CacheError::NameOutOfRange)
+    );
+}
+
+#[test]
+fn member_isolation_with_valid_proof() {
+    use evidence::AssuranceRequirement as Req;
+    let mut auth = Cache::with_requirement(1, Req::ResolverAuthenticated).unwrap();
+    let g = current_gen(&auth, NameIndex(0), Family::A);
+    let ev = evidence::Evidence::new(
+        true,
+        true,
+        false,
+        evidence::ResolverSource::index(0).unwrap(),
+        Some(60),
+        1_000,
+    )
+    .unwrap();
+    let staged = StagedPositive::stage_with_evidence(
+        NameIndex(0),
+        Family::A,
+        g,
+        &[pub_addr()],
+        1_001,
+        60,
+        Some(ev),
+    )
+    .unwrap();
+    auth.publish_positive(&staged).unwrap();
+    assert!(
+        auth.is_peer_admissible(NameIndex(0), Family::A, pub_addr(), 1_001)
+            .unwrap()
+    );
+    assert!(
+        auth.is_peer_admissible(NameIndex(0), Family::A, pub_addr(), 1_030)
+            .unwrap()
+    );
+    assert!(
+        !auth
+            .is_peer_admissible(NameIndex(0), Family::A, v4([1, 0, 0, 1]), 1_001)
+            .unwrap()
+    );
+    assert!(
+        !auth
+            .is_peer_admissible(NameIndex(0), Family::A, v4([1, 0, 0, 1]), 1_030)
+            .unwrap()
+    );
+}
+
 #[test]
 #[expect(
     clippy::large_stack_arrays,
@@ -52,6 +319,7 @@ fn cache_new_rejects_out_of_range_name_count() {
         Cache::new(1),
         Ok(Cache {
             name_count: 1,
+            requirements: [evidence::AssuranceRequirement::ResolverTrusted; ALLOWLIST_MAX],
             entries: [[Entry::EMPTY; 2]; ALLOWLIST_MAX],
         })
     );
@@ -1686,4 +1954,69 @@ mod cache_evidence_integration {
         assert_eq!(read(&cache, name, Family::A), saved, "entry preserved");
         assert_eq!(current_gen(&cache, name, Family::A), saved_gen);
     }
+}
+
+#[test]
+fn for_config_copies_per_entry_requirements_from_config() {
+    let cfg = crate::config::parse_config_document(
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"b.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
+    )
+    .expect("two-entry allowlist config")
+    .with_entry_requirement(
+        1,
+        crate::dns::cache::evidence::AssuranceRequirement::ResolverAuthenticated,
+    );
+    let cache = Cache::for_config(&cfg).expect("two-entry allowlist cache");
+    assert_eq!(
+        cache.name_count(),
+        2,
+        "allowlist ordinals index the same names"
+    );
+    assert_eq!(
+        cache.requirements[0],
+        crate::dns::cache::evidence::AssuranceRequirement::ResolverTrusted,
+        "entry 0 keeps its absent-selector legacy requirement"
+    );
+    assert_eq!(
+        cache.requirements[1],
+        crate::dns::cache::evidence::AssuranceRequirement::ResolverAuthenticated,
+        "entry 1 keeps its distinct requirement carried from config"
+    );
+}
+
+#[test]
+fn for_config_real_parsed_requirements_govern_admission() {
+    let cfg = crate::config::parse_config_document(
+        "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#cloudflare-dns.com#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]\nrecursive_dnssec_policy = \"root_validating_no_stale\"\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_authenticated\"\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"delegated_dnssec\"\n",
+    )
+    .expect("real parsed two-entry strong allowlist");
+    let cache = Cache::for_config(&cfg).expect("for_config");
+    let (auth, delegated) = (NameIndex(0), NameIndex(1));
+    let ev = |facts: (bool, bool, bool)| {
+        evidence::Evidence::new(
+            facts.0,
+            facts.1,
+            facts.2,
+            evidence::ResolverSource::index(0).unwrap(),
+            Some(60),
+            1_000,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        cache.check_publication_requirement(auth, Some(ev((false, true, false))), 1_001),
+        Ok(())
+    );
+    assert_eq!(
+        cache.check_publication_requirement(auth, Some(ev((false, false, false))), 1_001),
+        Err(CacheError::InsufficientAssurance)
+    );
+    assert_eq!(
+        cache.check_publication_requirement(delegated, Some(ev((true, true, true))), 1_001),
+        Ok(())
+    );
+    assert_eq!(
+        cache.check_publication_requirement(delegated, Some(ev((false, true, false))), 1_001),
+        Err(CacheError::InsufficientAssurance)
+    );
 }

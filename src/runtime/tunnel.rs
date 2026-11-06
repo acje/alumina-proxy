@@ -33,7 +33,7 @@
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::dns::cache::{Cache, CacheError, Entry, EntryState, Family, NameIndex};
+use crate::dns::cache::{Cache, CacheError, EntryState, Family, NameIndex};
 use crate::eligibility::NumericAddr;
 use crate::inspection::connect::ConnectRequest;
 #[cfg(test)]
@@ -828,6 +828,23 @@ impl<'a> ResolvedRequest<'a> {
         let entry = view.cache.entry(name, family).ok()?;
         Some(entry.state(view.clock.cache_secs(now)))
     }
+
+    pub(crate) fn dial_admits(&self, addr: NumericAddr, now: Instant) -> Result<bool, CacheError> {
+        let view = &self.view;
+        let Some(ordinal) = self.ordinal() else {
+            return Ok(false);
+        };
+        let name = view
+            .cache
+            .name_index(ordinal)
+            .ok_or(CacheError::NameOutOfRange)?;
+        let family = match addr {
+            NumericAddr::V4(_) => Family::A,
+            NumericAddr::V6(_) => Family::Aaaa,
+        };
+        view.cache
+            .is_peer_admissible(name, family, addr, view.clock.cache_secs(now))
+    }
 }
 
 /// Decides the next CONNECT-phase action for a tunnel from the current cache.
@@ -908,11 +925,9 @@ pub(crate) fn select_peer(
     counts: AttemptCounts,
     previous: Option<Family>,
 ) -> Result<PeerDecision, CacheError> {
-    let a = cache.entry(name, Family::A)?;
-    let aaaa = cache.entry(name, Family::Aaaa)?;
     match (
-        usable_peer(&a, Family::A, counts.a(), now),
-        usable_peer(&aaaa, Family::Aaaa, counts.aaaa(), now),
+        peer_candidate(cache, name, Family::A, counts.a(), now)?,
+        peer_candidate(cache, name, Family::Aaaa, counts.aaaa(), now)?,
     ) {
         (None, None) => Ok(PeerDecision::NoFamily),
         (Some((addr, family)), None) | (None, Some((addr, family))) => {
@@ -928,30 +943,22 @@ pub(crate) fn select_peer(
     }
 }
 
-/// The usable candidate for `family` at its current attempt cursor: `Some`
-/// only when the family still holds a binding at index `attempted`, that entry
-/// is not empty or retired, and the specific candidate passes destination
-/// eligibility. An ineligible candidate makes THIS family unavailable at the
-/// cursor — it never erases a usable other family (9pac M3). In the running
-/// path bindings are already eligible because publishing filters them
-/// (cache.rs `publish_positive`), so this eligibility check is defense.
-fn usable_peer(
-    entry: &Entry,
+fn peer_candidate(
+    cache: &Cache,
+    name: NameIndex,
     family: Family,
     attempted: u8,
     now: u64,
-) -> Option<(NumericAddr, Family)> {
+) -> Result<Option<(NumericAddr, Family)>, CacheError> {
+    let entry = cache.entry(name, family)?;
     if usize::from(attempted) >= entry.bindings().len() {
-        return None;
-    }
-    if !entry.servable(now) {
-        return None;
+        return Ok(None);
     }
     let addr = entry.bindings()[usize::from(attempted)];
-    if !addr.is_eligible() {
-        return None;
+    if !cache.is_peer_admissible(name, family, addr, now)? {
+        return Ok(None);
     }
-    Some((addr, family))
+    Ok(Some((addr, family)))
 }
 
 #[cfg(test)]

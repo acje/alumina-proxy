@@ -169,7 +169,7 @@ impl ServeStorage {
     pub fn boot(config: &Config) -> Result<ServeStorage, StartupDnsError> {
         let name_count = config.allowlist().len();
         let logs = LogStore::new().map_err(StartupDnsError::from)?;
-        let cache = Cache::new(name_count).map_err(StartupDnsError::from)?;
+        let cache = Cache::for_config(config).map_err(StartupDnsError::from)?;
         let schedules = Schedules::new(name_count).map_err(StartupDnsError::from)?;
         let mut dns = StartupDns::new()?;
         dns.configure_bailiwick(config)?;
@@ -1272,17 +1272,8 @@ impl ServeStorage {
     }
 }
 
-/// A name is usable when either family holds an eligible non-retired positive
-/// binding (canonical docs/alumina-proxy.md:65); validated negatives and unattempted
-/// names are unresolved.
 fn usable_name(cache: &Cache, name: NameIndex, now: u64) -> Result<bool, CacheError> {
-    for family in Family::ALL {
-        let entry = cache.entry(name, family)?;
-        if entry.servable(now) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    cache.is_name_admissible(name, now)
 }
 
 #[cfg(test)]

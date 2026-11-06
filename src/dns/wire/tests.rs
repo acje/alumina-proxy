@@ -6,6 +6,8 @@ use crate::dns::apply_outcome;
 
 use crate::dns::cache::Cache;
 
+use crate::dns::resolver::RecursionPolicy;
+
 use crate::dns::schedule::{PerTypeTransition, Schedules};
 
 use std::fmt::Write as _;
@@ -1194,6 +1196,7 @@ mod raw_ad_fact {
                         source: ResolverSource::UNKNOWN,
                         query_floor: 1000,
                         origin_authenticated: false,
+                        origin_policy: RecursionPolicy::Undeclared,
                     },
                 )
                 .expect("apply");
@@ -3003,6 +3006,7 @@ mod embedded_dot {
 
 mod production_apply_route {
     use super::*;
+    use crate::dns::cache::evidence::ProofClass;
 
     /// Applies one real parsed A reply through [`ObservedReply::apply`] and
     /// returns the published kind and the reply-derived evidence the apply
@@ -3012,16 +3016,15 @@ mod production_apply_route {
         octets: [u8; 4],
         origin: ApplyOrigin,
         expected_kind: PublishedKind,
+        ad: bool,
     ) -> (PublishedKind, crate::dns::cache::evidence::Evidence, usize) {
         let mut ws = ResponseWorkspace::default();
-        let reply = parse_reply_into(
-            &mut ws,
-            "sub.example.org",
-            Family::A,
-            0x41a1,
-            &direct_a("sub.example.org", 0x41a1, octets, 120),
-        )
-        .expect("validated positive");
+        let mut message = direct_a("sub.example.org", 0x41a1, octets, 120);
+        if ad {
+            message[3] |= 0x20;
+        }
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x41a1, &message)
+            .expect("validated positive");
         let observed = reply.observe();
         assert_eq!(observed.probe_facts().0, expected_kind);
         let mut cache = Cache::new(2).expect("cache");
@@ -3093,6 +3096,7 @@ mod production_apply_route {
                     source: ResolverSource::index(1).expect("index"),
                     query_floor: 5_000,
                     origin_authenticated: true,
+                    origin_policy: RecursionPolicy::Undeclared,
                 },
             )
             .expect("preseed positive applies");
@@ -3129,6 +3133,7 @@ mod production_apply_route {
                 source: ResolverSource::UNKNOWN,
                 query_floor: 5_000,
                 origin_authenticated: false,
+                origin_policy: RecursionPolicy::Undeclared,
             },
         );
         assert!(
@@ -3193,6 +3198,7 @@ mod production_apply_route {
                     source: ResolverSource::index(1).expect("index"),
                     query_floor: 5_000,
                     origin_authenticated: true,
+                    origin_policy: RecursionPolicy::Undeclared,
                 },
             )
             .expect("preseed positive applies");
@@ -3238,6 +3244,7 @@ mod production_apply_route {
                         source: ResolverSource::index(1).expect("index"),
                         query_floor: 6_000,
                         origin_authenticated: true,
+                        origin_policy: RecursionPolicy::Undeclared,
                     },
                 )
                 .expect("accepted negative applies");
@@ -3356,6 +3363,7 @@ mod production_apply_route {
                     source: ResolverSource::index(1).expect("index"),
                     query_floor: 6_000,
                     origin_authenticated: true,
+                    origin_policy: RecursionPolicy::Undeclared,
                 },
             )
             .expect("accepted NODATA publishes");
@@ -3394,6 +3402,10 @@ mod production_apply_route {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "pre-existing ownership-matrix test at the house line ceiling; the typed origin_policy field is required on every ApplyOrigin literal"
+    )]
     fn nodata_generation_ownership_matrix() {
         let mut ws = ResponseWorkspace::default();
         let mut msg = header(0x4600, true, 0, 1, 0, 1, 0);
@@ -3457,6 +3469,7 @@ mod production_apply_route {
                     source: ResolverSource::UNKNOWN,
                     query_floor: 5_000,
                     origin_authenticated: false,
+                    origin_policy: RecursionPolicy::Undeclared,
                 },
             );
             if reject {
@@ -3505,8 +3518,10 @@ mod production_apply_route {
                 source: ResolverSource::index(1).expect("index"),
                 query_floor: 5_000,
                 origin_authenticated: true,
+                origin_policy: RecursionPolicy::Undeclared,
             },
             PublishedKind::ResolvedPositive,
+            false,
         );
         assert_eq!(bound, 1, "the eligible positive publishes one address");
         assert!(!evidence.raw_ad(), "raw AD witness from the same reply");
@@ -3540,8 +3555,10 @@ mod production_apply_route {
                 source: ResolverSource::index(1).expect("index"),
                 query_floor: 5_000,
                 origin_authenticated: true,
+                origin_policy: RecursionPolicy::Undeclared,
             },
             PublishedKind::NoEligible,
+            false,
         );
         assert_eq!(kind, PublishedKind::NoEligible);
         assert_eq!(
@@ -3554,5 +3571,294 @@ mod production_apply_route {
             "an all-ineligible positive still binds the same reply-derived evidence, never a silent None"
         );
         assert_eq!(evidence.evidential_start(), 5_000);
+    }
+
+    fn authenticated_preseed() -> (Cache, Schedules, PublishedKind) {
+        use crate::dns::cache::evidence::AssuranceRequirement;
+
+        let mut ws = ResponseWorkspace::default();
+        let (mut cache, mut schedules) = (
+            Cache::with_requirement(2, AssuranceRequirement::ResolverAuthenticated)
+                .expect("strong requirement cache"),
+            Schedules::new(2).expect("schedules"),
+        );
+        let name = cache.name_index(0).expect("index");
+        let generation = cache.entry(name, Family::A).expect("entry").generation();
+        let preseed = parse_reply_into(
+            &mut ws,
+            "sub.example.org",
+            Family::A,
+            0x4601,
+            &direct_a("sub.example.org", 0x4601, [1, 2, 3, 4], 1200),
+        )
+        .expect("validated authenticated preseed");
+        let (kind, _extreme, _incidents) = preseed
+            .observe()
+            .apply(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation,
+                    receipt: 5_000,
+                    now: 5_000,
+                    query_family: None,
+                    other_generation: None,
+                },
+                ApplyOrigin {
+                    source: ResolverSource::index(1).expect("index"),
+                    query_floor: 5_000,
+                    origin_authenticated: true,
+                    origin_policy: RecursionPolicy::Undeclared,
+                },
+            )
+            .expect("still-valid authenticated positive publishes");
+        (cache, schedules, kind)
+    }
+
+    #[test]
+    fn below_minimum_publication_preserves_owned_state_under_strong_requirement() {
+        use crate::dns::cache::CacheError;
+        use crate::dns::cache::evidence::ProofClass;
+        use crate::dns::wire::DnsError;
+
+        let mut ws = ResponseWorkspace::default();
+        let (cache, schedules, kind) = authenticated_preseed();
+        let name = cache.name_index(0).expect("index");
+        assert_eq!(
+            kind,
+            PublishedKind::ResolvedPositive,
+            "auth preseed publishes"
+        );
+        let proof = cache.entry(name, Family::A).expect("entry").evidence();
+        assert_eq!(
+            proof.map(|ev| ev.valid_class(6_000)),
+            Some(Some(ProofClass::Authenticated)),
+            "seed holds a still-valid authenticated proof"
+        );
+        assert_eq!(
+            cache
+                .entry(name, Family::A)
+                .expect("entry")
+                .bindings()
+                .len(),
+            1,
+            "seed leaves a fresh binding"
+        );
+        assert_eq!(
+            cache.entry(name, Family::A).expect("entry").state(6_000),
+            crate::dns::cache::EntryState::Fresh,
+            "seed entry is observed fresh at the rejection point"
+        );
+        let cache_baseline = cache;
+        let schedules_baseline = schedules;
+
+        let cases = [
+            ("positive", 0x4602u16),
+            ("nxdomain", 0x4603u16),
+            ("nodata", 0x4604u16),
+        ];
+        for (label, tid) in cases {
+            let (mut cache, mut schedules) = (cache_baseline, schedules_baseline);
+            let name = cache.name_index(0).expect("index");
+            let tracked = cache
+                .generations_before_query(name, Family::A)
+                .expect("generation snapshot");
+            let msg = match label {
+                "positive" => direct_a("sub.example.org", tid, [5, 6, 7, 8], 120),
+                "nxdomain" | "nodata" => {
+                    let mut m = header(
+                        tid,
+                        true,
+                        if label == "nxdomain" { 3u8 } else { 0u8 },
+                        1,
+                        0,
+                        1,
+                        0,
+                    );
+                    m[3] |= 0x20;
+                    m.extend_from_slice(&qname_bytes("sub.example.org"));
+                    m.extend_from_slice(&1u16.to_be_bytes());
+                    m.extend_from_slice(&1u16.to_be_bytes());
+                    m.extend_from_slice(&root_soa_record(300, 60));
+                    m
+                }
+                other => panic!("unknown fixture label: {other}"),
+            };
+            let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, tid, &msg)
+                .expect("validated below-minimum reply");
+            let result = reply.observe().apply(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation: tracked.queried,
+                    receipt: 6_000,
+                    now: 6_000,
+                    query_family: Some(Family::A),
+                    other_generation: Some(tracked.other),
+                },
+                ApplyOrigin {
+                    source: ResolverSource::index(1).expect("index"),
+                    query_floor: 6_000,
+                    origin_authenticated: false,
+                    origin_policy: RecursionPolicy::Undeclared,
+                },
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(DnsError::Cache(CacheError::InsufficientAssurance))
+                ),
+                "{label}: below-minimum candidate rejected with the typed insufficient-assurance error"
+            );
+            assert_eq!(cache, cache_baseline, "{label}: cache untouched");
+            assert_eq!(
+                schedules, schedules_baseline,
+                "{label}: schedules untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_generation_precedes_insufficient_assurance_for_strong_cache() {
+        use crate::dns::cache::CacheError;
+        use crate::dns::cache::evidence::AssuranceRequirement;
+        use crate::dns::schedule::Soa;
+        use crate::dns::wire::DnsError;
+        let (mut cache, schedules) = (
+            Cache::with_requirement(2, AssuranceRequirement::ResolverAuthenticated)
+                .expect("strong-requirement cache"),
+            Schedules::new(2).expect("schedules"),
+        );
+        let name = cache.name_index(0).expect("index");
+        let tracked = cache
+            .generations_before_query(name, Family::A)
+            .expect("query-start snapshot");
+        cache
+            .evict_nodata(name, Family::A)
+            .expect("advance the queried A generation past its snapshot");
+        assert_ne!(
+            cache.entry(name, Family::A).expect("entry").generation(),
+            tracked.queried,
+            "precondition: A advanced past the INITIAL snapshot"
+        );
+        let other_now = cache.entry(name, Family::Aaaa).expect("entry").generation();
+        assert_eq!(other_now, tracked.other, "other snapshot remains current");
+        let addr = crate::eligibility::NumericAddr::V4(std::net::Ipv4Addr::new(5, 6, 7, 8));
+        let baseline = cache;
+        let baseline_sched = schedules;
+        let soa = Soa::new(300, 60);
+        let no_data = Outcome::NoData {
+            family: Family::A,
+            soa: Some(soa),
+        };
+        let positive = Outcome::Positive {
+            family: Family::A,
+            bindings: BindingList::from_slice(&[addr]).expect("list"),
+            ttl: 120,
+        };
+        let cases = [
+            ("positive", positive),
+            ("nxdomain", Outcome::NxDomain { soa: Some(soa) }),
+            (
+                "nodata",
+                Outcome::NoData {
+                    family: Family::A,
+                    soa: Some(soa),
+                },
+            ),
+        ];
+        for (label, outcome) in cases {
+            let (mut cache, mut schedules) = (baseline, baseline_sched);
+            let refused = crate::dns::publication::apply_route(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation: tracked.queried,
+                    receipt: 6_000,
+                    now: 6_000,
+                    query_family: Some(Family::A),
+                    other_generation: Some(tracked.other),
+                },
+                &outcome,
+                None,
+            );
+            let Err(DnsError::Cache(error)) = refused else {
+                panic!("{label}: stale refusal precedes the assurance gate")
+            };
+            assert_eq!(error, CacheError::StaleGeneration, "{label}: exact stale");
+            assert_eq!(cache, baseline, "{label}: cache untouched");
+            assert_eq!(schedules, baseline_sched, "{label}: schedules untouched");
+        }
+        let (mut cache, mut schedules) = (baseline, baseline_sched);
+        let refused = crate::dns::publication::apply_route(
+            &mut cache,
+            &mut schedules,
+            crate::dns::publication::ApplyContext {
+                index: 0,
+                generation: other_now,
+                receipt: 6_000,
+                now: 6_000,
+                query_family: Some(Family::Aaaa),
+                other_generation: Some(other_now),
+            },
+            &no_data,
+            None,
+        );
+        let Err(DnsError::Cache(error)) = refused else {
+            panic!("NoData-A on a current AAAA snapshot is stale before policy")
+        };
+        assert_eq!(
+            error,
+            CacheError::StaleGeneration,
+            "family-mismatch stale precedes assurance"
+        );
+        assert_eq!(cache, baseline, "cache untouched");
+        assert_eq!(schedules, baseline_sched, "schedules untouched");
+    }
+
+    #[test]
+    fn declared_policy_provenance_prefers_delegated_else_authenticated() {
+        let origin = |policy| ApplyOrigin {
+            source: ResolverSource::index(1).expect("index"),
+            query_floor: 5_000,
+            origin_authenticated: true,
+            origin_policy: policy,
+        };
+        let (_, evidence, _) = apply_positive_reply(
+            [93, 184, 216, 34],
+            origin(RecursionPolicy::RootValidatingNoStale),
+            PublishedKind::ResolvedPositive,
+            true,
+        );
+        assert_eq!(
+            evidence.class(),
+            ProofClass::Delegated,
+            "declared policy + authenticated origin + AD1 is Delegated"
+        );
+        let (_, evidence, _) = apply_positive_reply(
+            [93, 184, 216, 34],
+            origin(RecursionPolicy::Undeclared),
+            PublishedKind::ResolvedPositive,
+            true,
+        );
+        assert_eq!(
+            evidence.class(),
+            ProofClass::Authenticated,
+            "undeclared policy never production-qualified"
+        );
+        let (_, evidence, _) = apply_positive_reply(
+            [93, 184, 216, 34],
+            origin(RecursionPolicy::RootValidatingNoStale),
+            PublishedKind::ResolvedPositive,
+            false,
+        );
+        assert_eq!(
+            evidence.class(),
+            ProofClass::Authenticated,
+            "declared policy without AD not promoted"
+        );
     }
 }

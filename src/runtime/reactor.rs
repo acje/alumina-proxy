@@ -2501,7 +2501,7 @@ impl Serving {
                 self.apply_slot_deadline(index, |ws| {
                     ws.connect_deadline = Some(connect_deadline);
                 });
-                self.dial(index, addr)
+                self.dial_checked(index, addr)
             }
         }
     }
@@ -2603,6 +2603,26 @@ impl Serving {
                 Ok(())
             }
             Err(_) => self.fail_current_attempt(index),
+        }
+    }
+
+    fn dial_checked(&mut self, index: usize, addr: NumericAddr) -> Result<(), ServeError> {
+        let Some(Ok(request)) = self.slots[index].parser.result().copied() else {
+            self.refuse(index, Refusal::DialFailed);
+            return Ok(());
+        };
+        let resolved = self.storage.resolve_request(&request);
+        let approved = *resolved.request().fixed_hostname();
+        match resolved.dial_admits(addr, Instant::now()) {
+            Ok(true) => self.dial(index, addr),
+            Ok(false) => {
+                self.refuse_with_hostname(index, Refusal::NoResolvedAddresses, approved);
+                Ok(())
+            }
+            Err(_) => {
+                self.refuse_with_hostname(index, Refusal::DialFailed, approved);
+                Ok(())
+            }
         }
     }
 
