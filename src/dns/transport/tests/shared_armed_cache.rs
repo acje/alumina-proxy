@@ -13,6 +13,7 @@ fn shared_exchange(step: ExchangeStep) -> ActiveExchange {
         tid: 0,
         class: ExchangeClass::Startup,
         generation: Generation::INITIAL,
+        other_generation: Generation::INITIAL,
         query_floor: 0,
     }
 }

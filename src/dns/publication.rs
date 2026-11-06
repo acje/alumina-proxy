@@ -14,6 +14,13 @@ pub(super) struct ApplyContext {
     pub(super) generation: Generation,
     pub(super) receipt: u64,
     pub(super) now: u64,
+    /// The queried family and the other family's query-start tag, owned by
+    /// the private production apply route for the whole-family negative
+    /// guard. The legacy public [`apply_outcome`] passes `None` here and is
+    /// explicitly untracked: a negative publication through it is not
+    /// claimed two-family guarded.
+    pub(super) query_family: Option<Family>,
+    pub(super) other_generation: Option<Generation>,
 }
 
 /// Applies a validated `outcome` to the cache and schedule for one allowlist
@@ -45,6 +52,8 @@ pub fn apply_outcome(
             generation,
             receipt,
             now,
+            query_family: None,
+            other_generation: None,
         },
         outcome,
         None,
@@ -73,10 +82,22 @@ pub(super) fn apply_route(
         generation,
         receipt,
         now,
+        query_family,
+        other_generation,
     } = context;
     let name = cache
         .name_index(index)
         .ok_or(DnsError::Cache(CacheError::NameOutOfRange))?;
+    if let (Some(query_family), Some(other_generation)) = (query_family, other_generation) {
+        reject_obsolete_negative(
+            cache,
+            name,
+            query_family,
+            other_generation,
+            generation,
+            outcome,
+        )?;
+    }
     match outcome {
         Outcome::Positive {
             bindings,
@@ -153,4 +174,54 @@ const fn map_schedule(err: crate::dns::schedule::ScheduleError) -> CacheError {
         crate::dns::schedule::ScheduleError::NameOutOfRange => CacheError::NameOutOfRange,
         crate::dns::schedule::ScheduleError::DeadlineOverflow => CacheError::DeadlineOverflow,
     }
+}
+
+/// The whole-family negative publication guard. Before an obsolete NXDOMAIN
+/// or NODATA would overwrite newer cache, schedule, or incident state, the
+/// owned production context compares the current generations against the
+/// query-start snapshot and refuses with `StaleGeneration` on any mismatch,
+/// leaving every entry, proof, deadline, binding, and incident untouched.
+/// NXDOMAIN compares both families; NODATA compares the queried family only
+/// and requires the outcome's family to be the queried one.
+fn reject_obsolete_negative(
+    cache: &Cache,
+    name: crate::dns::cache::NameIndex,
+    query_family: Family,
+    other_generation: Generation,
+    queried_generation: Generation,
+    outcome: &Outcome,
+) -> Result<(), DnsError> {
+    match outcome {
+        Outcome::NxDomain { .. } => {
+            let other_family = match query_family {
+                Family::A => Family::Aaaa,
+                Family::Aaaa => Family::A,
+            };
+            let queried_now = cache
+                .entry(name, query_family)
+                .map_err(DnsError::Cache)?
+                .generation();
+            let other_now = cache
+                .entry(name, other_family)
+                .map_err(DnsError::Cache)?
+                .generation();
+            if queried_now != queried_generation || other_now != other_generation {
+                return Err(DnsError::Cache(CacheError::StaleGeneration));
+            }
+        }
+        Outcome::NoData { family, .. } => {
+            if *family != query_family {
+                return Err(DnsError::Cache(CacheError::StaleGeneration));
+            }
+            let queried_now = cache
+                .entry(name, query_family)
+                .map_err(DnsError::Cache)?
+                .generation();
+            if queried_now != queried_generation {
+                return Err(DnsError::Cache(CacheError::StaleGeneration));
+            }
+        }
+        Outcome::Positive { .. } => {}
+    }
+    Ok(())
 }

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use std::thread;
 
-enum Step {
+pub(crate) enum Step {
     PositiveA {
         ttl: u32,
         octets: [u8; 4],
@@ -56,7 +56,7 @@ enum Step {
     Close,
 }
 
-struct Responder {
+pub(crate) struct Responder {
     addr: SocketAddr,
     handle: Option<thread::JoinHandle<()>>,
     connections: Arc<AtomicUsize>,
@@ -64,7 +64,7 @@ struct Responder {
 }
 
 impl Responder {
-    fn port(&self) -> u16 {
+    pub(crate) fn port(&self) -> u16 {
         self.addr.port()
     }
 
@@ -179,7 +179,7 @@ fn respond_for(query: &[u8], step: &Step) -> Option<Vec<u8>> {
     clippy::too_many_lines,
     reason = "test harness dispatches one arm per wire behaviour; the length-prefix probe arm keeps it over the heuristic line budget"
 )]
-fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
+pub(crate) fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind responder");
     let addr = listener.local_addr().expect("responder addr");
     let connections = Arc::new(AtomicUsize::new(0));
@@ -406,7 +406,9 @@ fn run_exchange_expecting(
     // responder scripts rely on one accepted connection per exchange.
     let deadline = Instant::now() + Duration::from_millis(200);
     let name_index = cache.name_index(0).unwrap();
-    let generation = cache.entry(name_index, Family::A).unwrap().generation();
+    let generation = cache
+        .generations_before_query(name_index, Family::A)
+        .unwrap();
     transport
         .start_exchange(
             fqdn,
@@ -460,6 +462,7 @@ fn fixture_exchange(ordinal: usize, family: Family, class: ExchangeClass) -> Act
         tid: 0,
         class,
         generation: Generation::INITIAL,
+        other_generation: Generation::INITIAL,
         query_floor: 0,
     }
 }
@@ -1203,6 +1206,9 @@ mod cooperative {
                 TurnResult::Failed(_) => {
                     failures += 1;
                     break;
+                }
+                TurnResult::Superseded => {
+                    panic!("a silent peer must conclude as a counted failure, not superseded")
                 }
                 other @ TurnResult::Published(_) => {
                     panic!("a silent peer must conclude as a counted failure, got {other:?}")
@@ -4027,6 +4033,87 @@ mod corroboration {
         drop(responder);
     }
     #[test]
+    fn obsolete_negative_exchange_refuses_and_keeps_schedule_invariants() {
+        let cfg = config();
+        let fqdn = cfg.allowlist().get(0).unwrap();
+        let responder = spawn_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
+        let mut cache = Cache::new(2).unwrap();
+        let mut schedules = Schedules::new(2).unwrap();
+        let name_index = cache.name_index(0).expect("index");
+        let now = 1_000_000u64;
+        schedules
+            .note_exchange_failure(0, Family::A, now, FailureReason::Timeout)
+            .expect("seed backoff, incident, and due");
+        let due_before = schedules.due_time(0, Family::A).expect("due_time");
+        let due_before = due_before.expect("seeded due");
+        let held = schedules.select_due(due_before).expect("select");
+        let held = held.expect("held selection");
+        assert_eq!(
+            (held.name(), held.family()),
+            (0, Family::A),
+            "the seeded selection is held before the exchange starts"
+        );
+        let mut expected = schedules;
+        expected
+            .release_selection(0, Family::A)
+            .expect("release the held selection on the expected copy only");
+        let pair = cache
+            .generations_before_query(name_index, Family::A)
+            .expect("query-start pair");
+        let queried_start = pair.queried;
+        let other_start = pair.other;
+        let mut transport = seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8"]));
+        transport.addr = ns(responder.port());
+        let deadline = Instant::now() + Duration::from_millis(200);
+        transport
+            .start_exchange(fqdn, Family::A, 0, deadline, pair, ExchangeClass::Startup)
+            .expect("start obsolete exchange");
+        cache
+            .evict_nodata(name_index, Family::Aaaa)
+            .expect("advance only the other family after start");
+        let other = cache.entry(name_index, Family::Aaaa).expect("entry");
+        assert_ne!(
+            other.generation(),
+            other_start,
+            "precondition: only the other family advanced after start"
+        );
+        let terminal =
+            run_exchange_to_terminal(&mut transport, fqdn, &mut cache, &mut schedules, deadline);
+        assert!(
+            matches!(terminal, TurnResult::Superseded),
+            "terminal must be Superseded, never a counted failure: {terminal:?}"
+        );
+        let queried = cache.entry(name_index, Family::A).expect("entry");
+        assert_eq!(
+            queried.generation(),
+            queried_start,
+            "no obsolete negative is applied to the queried entry"
+        );
+        assert_eq!(
+            schedules.due_time(0, Family::A).expect("due_time"),
+            Some(due_before),
+            "due and backoff are untouched by the obsolete exchange"
+        );
+        assert_eq!(
+            schedules, expected,
+            "whole-table schedule equality: due, backoff, guard, incident, streak and every other slot equal the released copy"
+        );
+        let at_due = schedules.select_due(due_before).expect("select at due");
+        assert!(
+            at_due.is_none(),
+            "at the preserved due the one-second guard keeps the held family unselectable"
+        );
+        let reselect_now = due_before + 1;
+        let reselected = schedules.select_due(reselect_now).expect("reselect");
+        let reselected = reselected.expect("released by production");
+        assert_eq!(
+            (reselected.name(), reselected.family()),
+            (0, Family::A),
+            "production released the held selection at the preserved due"
+        );
+        drop(responder);
+    }
+    #[test]
     fn step_corroboration_begins_single_exchange_against_the_next_resolver() {
         let set = resolver_set_of(&["1.1.1.1", "8.8.8.8"]);
         let mut transport = seeded_transport(set);
@@ -4601,4 +4688,76 @@ mod turn_result {
             }
         );
     }
+}
+
+/// Axis-A retention: `start_exchange` retains the query-start snapshot for
+/// both families immutably on the active exchange; the captured pair comes
+/// from the one Cache-owned capture helper shared with production startup
+/// and serving, and this witness checks both captured tags against the live
+/// cache, then moves the non-queried family after the exchange begins
+/// (docs/alumina-proxy.md:119).
+#[test]
+fn snapshot_retains_other_family_generation_after_start() {
+    let mut cache = Cache::new(2).unwrap();
+    let name_index = cache.name_index(0).unwrap();
+    cache.evict_nodata(name_index, Family::A).unwrap();
+    cache.evict_nodata(name_index, Family::Aaaa).unwrap();
+    cache.evict_nodata(name_index, Family::Aaaa).unwrap();
+    let pair = cache
+        .generations_before_query(name_index, Family::A)
+        .unwrap();
+    assert_ne!(
+        pair.queried, pair.other,
+        "seed unequal non-INITIAL families so a swapped capture cannot pass"
+    );
+    let queried_now = cache.entry(name_index, Family::A).unwrap().generation();
+    let other_now = cache.entry(name_index, Family::Aaaa).unwrap().generation();
+    assert_eq!(
+        pair.queried, queried_now,
+        "capture maps queried to the A entry"
+    );
+    assert_eq!(
+        pair.other, other_now,
+        "capture maps other to the AAAA entry"
+    );
+    let reverse = cache
+        .generations_before_query(name_index, Family::Aaaa)
+        .unwrap();
+    assert_ne!(
+        reverse.queried, reverse.other,
+        "reverse direction also witnesses unequal A/AAAA tags"
+    );
+    assert_eq!(
+        reverse.queried, other_now,
+        "reverse capture maps queried to the AAAA entry"
+    );
+    assert_eq!(
+        reverse.other, queried_now,
+        "reverse capture maps other to the A entry"
+    );
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let cfg = config();
+    let fqdn = cfg.allowlist().get(0).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(9);
+    transport.now0 = 1_000_000;
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline, pair, ExchangeClass::Startup)
+        .unwrap();
+    assert_eq!(
+        transport.active.as_ref().unwrap().other_generation,
+        pair.other,
+        "start must retain the query-start other-family generation"
+    );
+    cache.evict_nodata(name_index, Family::Aaaa).unwrap();
+    let moved = cache.entry(name_index, Family::Aaaa).unwrap().generation();
+    assert_ne!(
+        moved, pair.other,
+        "precondition: the NODATA eviction must advance the other family"
+    );
+    assert_eq!(
+        transport.active.as_ref().unwrap().other_generation,
+        pair.other,
+        "snapshot is immutable: re-read active after mutation retains the other tag"
+    );
 }

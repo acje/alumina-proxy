@@ -61,6 +61,41 @@ impl Generation {
     }
 }
 
+/// The query-start generation snapshot for one exchange: the queried family's
+/// cache entry generation plus the other family's, captured together from the
+/// same cache before any network work and retained immutably for the
+/// whole-family negative guard (docs/alumina-proxy.md:119, :121-124).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Generations {
+    /// The queried family's entry generation, authoritative for positives.
+    pub(crate) queried: Generation,
+    /// The non-queried family's entry generation from the same snapshot.
+    pub(crate) other: Generation,
+}
+
+/// Test-only single-generation convenience for direct-call test fixtures;
+/// `other` stays INITIAL because a test-authored exchange authors nothing
+/// (publication-free). The production entry takes a concrete pair, so this
+/// never makes a missing other-family tag silently INITIAL there.
+#[cfg(test)]
+impl Generations {
+    /// Single-generation snapshot for direct-call test fixtures.
+    pub(crate) const fn only(queried: Generation) -> Self {
+        Self {
+            queried,
+            other: Generation::INITIAL,
+        }
+    }
+}
+
+/// Test-only: lets direct-call test fixtures pass a bare [`Generation`].
+#[cfg(test)]
+impl From<Generation> for Generations {
+    fn from(queried: Generation) -> Self {
+        Self::only(queried)
+    }
+}
+
 /// Freshness view computed from deadlines, never stored on the entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryState {
@@ -403,6 +438,30 @@ impl Cache {
 
     fn entry_ref(&self, name: NameIndex, family: Family) -> &Entry {
         &self.entries[name.get()][family.index()]
+    }
+
+    /// The query-start snapshot for `family` at `name`: the queried family's
+    /// entry generation plus the other family's, captured together from this
+    /// cache before any network work and owned here so startup, serving, and
+    /// test witnesses share one capture path (docs/alumina-proxy.md:119).
+    ///
+    /// # Errors
+    ///
+    /// Returns `CacheError::NameOutOfRange` when `name` is outside the
+    /// admitted range.
+    pub(crate) fn generations_before_query(
+        &self,
+        name: NameIndex,
+        family: Family,
+    ) -> Result<Generations, CacheError> {
+        let other = match family {
+            Family::A => Family::Aaaa,
+            Family::Aaaa => Family::A,
+        };
+        Ok(Generations {
+            queried: self.entry(name, family)?.generation(),
+            other: self.entry(name, other)?.generation(),
+        })
     }
 
     fn entry_mut(&mut self, name: NameIndex, family: Family) -> &mut Entry {

@@ -72,7 +72,7 @@ impl Serving {
             }
             if let Some((ordinal, ex_family)) = self.storage.dns().active_identity() {
                 match self.storage.advance_dns()? {
-                    None | Some(TurnResult::Pending) => {}
+                    None | Some(TurnResult::Pending | TurnResult::Superseded) => {}
                     Some(TurnResult::Published(kind)) => {
                         let name_index = self
                             .storage

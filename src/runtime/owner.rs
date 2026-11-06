@@ -395,7 +395,11 @@ impl Runtime {
             }
             match self.serving.storage_mut().advance_dns_serving()? {
                 Some(TurnResult::Pending) => {}
-                None | Some(TurnResult::Published(_) | TurnResult::Failed(_)) => break,
+                None
+                | Some(TurnResult::Published(_) | TurnResult::Failed(_) | TurnResult::Superseded) =>
+                {
+                    break;
+                }
             }
         }
         Ok(())

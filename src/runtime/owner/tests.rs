@@ -3026,6 +3026,129 @@ mod startup_exchange {
             .expect("spawn retained-startup-exchange witness thread");
         t.join().expect("retained-startup-exchange witness thread");
     }
+
+    #[cfg(feature = "alloc-witness")]
+    fn pump_drain(sink: &mut TcpStream, out: &mut Vec<u8>) {
+        let mut tmp = [0u8; 256];
+        loop {
+            match sink.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&tmp[..n]),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    fn obsolete_negative_through_established_relay_survives_owner_turn_body() {
+        const RELAY_SLOT: usize = 30;
+        let port = ephemeral_port();
+        let storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
+        let listener =
+            TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+        let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+        let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+        let responder = crate::dns::transport::tests::spawn_responder(vec![vec![
+            crate::dns::transport::tests::Step::NxdomainWithSoa { ttl: 300, min: 60 },
+        ]]);
+        let responder_addr = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+        let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+        let sink_addr = sink.local_addr().expect("sink addr");
+        let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+        let mut sink_stream = sink.accept().expect("accept sink side").0;
+        sink_stream.set_nonblocking(true).expect("sink nonblocking");
+        let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
+        let peer_addr = peer_l.local_addr().expect("peer addr");
+        let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
+        let mut peer_stream = peer_l.accept().expect("accept peer side").0;
+        runtime
+            .serving_mut()
+            .test_setup_relay(RELAY_SLOT, up, client)
+            .expect("install established relay");
+        let probe: &[u8] = b"pre-dns-established-peer";
+        peer_stream.write_all(probe).expect("write client probe");
+        let mut got: Vec<u8> = Vec::new();
+        for _ in 0..400 {
+            runtime
+                .turn(Some(Duration::from_millis(2)))
+                .expect("owner turn pumping the relay");
+            pump_drain(&mut sink_stream, &mut got);
+            if got.windows(probe.len()).any(|w| w == probe) {
+                break;
+            }
+        }
+        assert!(
+            got.windows(probe.len()).any(|w| w == probe),
+            "established peers already relay before DNS starts"
+        );
+        runtime
+            .serving
+            .storage_mut()
+            .dns_mut()
+            .set_peer_for_test(responder_addr);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        runtime
+            .serving
+            .storage_mut()
+            .start_dns_exchange(0, Family::A, deadline, ExchangeClass::Serving)
+            .expect("start serving exchange");
+        let name_index = runtime
+            .serving
+            .storage()
+            .cache()
+            .name_index(0)
+            .expect("ordinal zero name index");
+        runtime
+            .serving
+            .storage_mut()
+            .cache_mut()
+            .evict_nodata(name_index, Family::Aaaa)
+            .expect("advance only the other family after start");
+        for _ in 0..400 {
+            runtime
+                .turn(Some(Duration::from_millis(2)))
+                .expect("superseded negative must not abort serving owner");
+            if !runtime.serving().storage().dns().has_active_exchange() {
+                break;
+            }
+        }
+        assert!(
+            !runtime.serving().storage().dns().has_active_exchange(),
+            "the obsolete negative concludes through owner turns"
+        );
+        let after: &[u8] = b"post-completion-fresh-bytes";
+        peer_stream
+            .write_all(after)
+            .expect("write fresh client bytes");
+        let mut got2: Vec<u8> = Vec::new();
+        for _ in 0..200 {
+            pump_drain(&mut sink_stream, &mut got2);
+            if got2.windows(after.len()).any(|w| w == after) {
+                break;
+            }
+            runtime
+                .turn(Some(Duration::from_millis(2)))
+                .expect("owner turn relaying post-completion bytes");
+        }
+        assert!(
+            got2.windows(after.len()).any(|w| w == after),
+            "occupied tunnel relays fresh bytes on the same established peers"
+        );
+        drop(responder);
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn obsolete_negative_through_established_relay_survives_owner_turn() {
+        let t = thread::Builder::new()
+            .name("obsolete-negative-established-relay-witness".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(obsolete_negative_through_established_relay_survives_owner_turn_body)
+            .expect("spawn obsolete-negative established-relay witness");
+        t.join()
+            .expect("obsolete-negative established-relay witness thread");
+    }
 }
 
 mod probe_records {

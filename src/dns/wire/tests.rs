@@ -1187,6 +1187,8 @@ mod raw_ad_fact {
                         generation,
                         receipt: 1000,
                         now: 1000,
+                        query_family: None,
+                        other_generation: None,
                     },
                     ApplyOrigin {
                         source: ResolverSource::UNKNOWN,
@@ -3032,6 +3034,8 @@ mod production_apply_route {
                     generation,
                     receipt: 5_010,
                     now: 5_010,
+                    query_family: None,
+                    other_generation: None,
                 },
                 origin,
             )
@@ -3046,6 +3050,268 @@ mod production_apply_route {
             .expect("reply-derived evidence bound at publication");
         let bound = entry.bindings().len();
         (kind, evidence, bound)
+    }
+
+    /// A real parsed obsolete NXDOMAIN through the production apply seam is
+    /// refused before any cache, schedule, or incident mutation when the
+    /// current generations no longer own the query-start snapshot. The
+    /// queried family still matches; only the other family advanced, so a
+    /// guard that checks both families must refuse (a queried-only guard
+    /// could not).
+    #[test]
+    fn obsolete_nxdomain_rejected_before_publication_mutation() {
+        let mut ws = ResponseWorkspace::default();
+        let preseed = parse_reply_into(
+            &mut ws,
+            "sub.example.org",
+            Family::A,
+            0x4501,
+            &direct_a("sub.example.org", 0x4501, [1, 2, 3, 4], 120),
+        )
+        .expect("validated positive preseed");
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let name = cache.name_index(0).expect("index");
+        let preseed_generation = cache.entry(name, Family::A).expect("entry").generation();
+        preseed
+            .observe()
+            .apply(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation: preseed_generation,
+                    receipt: 5_000,
+                    now: 5_000,
+                    query_family: None,
+                    other_generation: None,
+                },
+                ApplyOrigin {
+                    source: ResolverSource::index(1).expect("index"),
+                    query_floor: 5_000,
+                    origin_authenticated: true,
+                },
+            )
+            .expect("preseed positive applies");
+        let queried_start = cache.entry(name, Family::A).expect("entry").generation();
+        let other_start = cache.entry(name, Family::Aaaa).expect("entry").generation();
+        cache
+            .evict_nodata(name, Family::Aaaa)
+            .expect("advance the other family only");
+        let other_advanced = cache.entry(name, Family::Aaaa).expect("entry").generation();
+        assert_ne!(
+            other_advanced, other_start,
+            "precondition: only the other family advanced after the snapshot"
+        );
+
+        let mut msg = header(0x4502, true, 3, 1, 0, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&soa_record("example.org", 300, 60));
+        let nxdomain = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4502, &msg)
+            .expect("validated obsolete NXDOMAIN");
+        let refused = nxdomain.observe().apply(
+            &mut cache,
+            &mut schedules,
+            crate::dns::publication::ApplyContext {
+                index: 0,
+                generation: queried_start,
+                query_family: Some(Family::A),
+                other_generation: Some(other_start),
+                receipt: 6_000,
+                now: 6_000,
+            },
+            ApplyOrigin {
+                source: ResolverSource::UNKNOWN,
+                query_floor: 5_000,
+                origin_authenticated: false,
+            },
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(crate::dns::wire::DnsError::Cache(
+                    crate::dns::cache::CacheError::StaleGeneration
+                ))
+            ),
+            "an NXDOMAIN obsolete for the other family must be refused, got {refused:?}"
+        );
+        let entry = cache.entry(name, Family::A).expect("entry");
+        assert_eq!(
+            entry.generation(),
+            queried_start,
+            "refusal must not advance the queried entry"
+        );
+        assert!(
+            entry.evidence().is_some(),
+            "preexisting proof must survive the refusal"
+        );
+        assert_eq!(
+            entry.bindings().len(),
+            1,
+            "preexisting positive bindings must survive the refusal"
+        );
+        assert_eq!(
+            cache.entry(name, Family::Aaaa).expect("entry").generation(),
+            other_advanced,
+            "only the deliberate pre-advance mutates the other family"
+        );
+    }
+
+    fn owned_cache_fixture() -> (Cache, Schedules) {
+        let mut ws = ResponseWorkspace::default();
+        let preseed = parse_reply_into(
+            &mut ws,
+            "sub.example.org",
+            Family::A,
+            0x4501,
+            &direct_a("sub.example.org", 0x4501, [1, 2, 3, 4], 120),
+        )
+        .expect("validated positive preseed");
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let name = cache.name_index(0).expect("index");
+        let preseed_generation = cache.entry(name, Family::A).expect("entry").generation();
+        preseed
+            .observe()
+            .apply(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation: preseed_generation,
+                    receipt: 5_000,
+                    now: 5_000,
+                    query_family: None,
+                    other_generation: None,
+                },
+                ApplyOrigin {
+                    source: ResolverSource::index(1).expect("index"),
+                    query_floor: 5_000,
+                    origin_authenticated: true,
+                },
+            )
+            .expect("preseed positive applies");
+        (cache, schedules)
+    }
+
+    #[test]
+    fn guard_fixture() {
+        let (cache, _schedules) = owned_cache_fixture();
+        let name = cache.name_index(0).expect("index");
+        let entry = cache.entry(name, Family::A).expect("entry");
+        assert!(entry.evidence().is_some(), "live positive proof bound");
+        assert_eq!(entry.bindings().len(), 1, "one address bound");
+        let queried = entry.generation();
+        let other = cache.entry(name, Family::Aaaa).expect("entry").generation();
+        let aaaa = cache.entry(name, Family::Aaaa).expect("entry");
+        assert_eq!(entry.generation(), queried, "A generation stable");
+        assert_eq!(aaaa.generation(), other, "Aaaa generation stable");
+    }
+
+    #[test]
+    fn nodata_generation_ownership_matrix() {
+        let mut ws = ResponseWorkspace::default();
+        let mut msg = header(0x4600, true, 0, 1, 0, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&soa_record("example.org", 300, 60));
+        let (fixture_cache, _fixture_schedules) = owned_cache_fixture();
+        let fixture_name = fixture_cache.name_index(0).expect("index");
+        let initial = fixture_cache
+            .entry(fixture_name, Family::Aaaa)
+            .expect("entry")
+            .generation();
+        assert_ne!(
+            fixture_cache
+                .entry(fixture_name, Family::A)
+                .expect("entry")
+                .generation(),
+            initial,
+            "fixture advanced A past the initial generation"
+        );
+        for (advance, query_family, snapshot_after, reject) in [
+            (Some(Family::A), Family::A, false, true),
+            (Some(Family::Aaaa), Family::Aaaa, true, true),
+            (Some(Family::Aaaa), Family::A, false, false),
+        ] {
+            let (mut cache, mut schedules) = owned_cache_fixture();
+            let name = cache.name_index(0).expect("index");
+            let mut pair = cache
+                .generations_before_query(name, query_family)
+                .expect("query-start snapshot");
+            if let Some(family) = advance {
+                cache
+                    .evict_nodata(name, family)
+                    .expect("deliberate family advance");
+            }
+            if snapshot_after {
+                pair = cache
+                    .generations_before_query(name, query_family)
+                    .expect("post-advance snapshot");
+                assert_eq!(pair.queried, pair.other, "A1 == AAAA1 at the mismatch row");
+            }
+            let cache_baseline = cache;
+            let schedules_baseline = schedules;
+            let a_after = cache.entry(name, Family::A).expect("entry").generation();
+            let aaaa_after = cache.entry(name, Family::Aaaa).expect("entry").generation();
+            let nodata = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4600, &msg)
+                .expect("validated NODATA");
+            let result = nodata.observe().apply(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation: pair.queried,
+                    query_family: Some(query_family),
+                    other_generation: Some(pair.other),
+                    receipt: 6_000,
+                    now: 6_000,
+                },
+                ApplyOrigin {
+                    source: ResolverSource::UNKNOWN,
+                    query_floor: 5_000,
+                    origin_authenticated: false,
+                },
+            );
+            if reject {
+                assert!(
+                    matches!(
+                        result,
+                        Err(crate::dns::wire::DnsError::Cache(
+                            crate::dns::cache::CacheError::StaleGeneration
+                        ))
+                    ),
+                    "obsolete NODATA refused before mutation"
+                );
+                assert_eq!(
+                    schedules, schedules_baseline,
+                    "rejected without schedule mutation"
+                );
+                assert_eq!(cache, cache_baseline, "rejected without cache mutation");
+            } else {
+                let (kind, _extreme, _incidents) = result.expect("accepted NODATA publishes");
+                assert_eq!(kind, PublishedKind::Negative, "queried Negative published");
+                let accepted_entry = cache.entry(name, Family::A).expect("entry");
+                assert_ne!(
+                    accepted_entry.generation(),
+                    a_after,
+                    "Negative publish advanced A"
+                );
+                assert_eq!(accepted_entry.bindings().len(), 0, "A bindings cleared");
+                assert!(
+                    accepted_entry.evidence().is_none(),
+                    "A positive evidence cleared"
+                );
+                assert_eq!(
+                    cache.entry(name, Family::Aaaa).expect("entry").generation(),
+                    aaaa_after,
+                    "other family retained; no all-family NX evict"
+                );
+            }
+        }
     }
 
     #[test]

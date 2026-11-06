@@ -263,6 +263,13 @@ impl ServeStorage {
         &self.cache
     }
 
+    /// Test-only mutable cache handle, so a real-runtime regression can
+    /// advance the other family's generation after an actual start.
+    #[cfg(all(test, feature = "alloc-witness"))]
+    pub(crate) const fn cache_mut(&mut self) -> &mut Cache {
+        &mut self.cache
+    }
+
     /// The retained parsed configuration, read-only.
     pub(crate) const fn config(&self) -> &Config {
         &self.config
@@ -808,14 +815,10 @@ impl ServeStorage {
             .cache
             .name_index(ordinal)
             .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
-        let generation = self
-            .cache
-            .entry(name_index, family)
-            .map_err(StartupDnsError::Cache)?
-            .generation();
+        let pair = self.cache.generations_before_query(name_index, family)?;
         self.active_exchange_family = Some(family);
         self.dns
-            .start_exchange(fqdn, family, ordinal, deadline, generation, class)?;
+            .start_exchange(fqdn, family, ordinal, deadline, pair, class)?;
         let secs = self.cache_secs(Instant::now());
         self.incident_report
             .note_exchange_attempt(ordinal, family, secs);

@@ -39,7 +39,7 @@ use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme
 
 use crate::config::{ALLOWLIST_MAX, Config, Fqdn};
 use crate::dns::cache::evidence::ResolverSource;
-use crate::dns::cache::{Cache, CacheError, Family, Generation};
+use crate::dns::cache::{Cache, CacheError, Family, Generation, Generations};
 use crate::dns::resolver::{Fqdn as ResolverFqdn, MAX_RESOLVERS, ResolverSet, SpiPin};
 use crate::dns::schedule::{PerTypeTransition, ScheduleError, Schedules};
 use crate::dns::wire::{self, BailiwickZones, DNS_MSG_LIMIT, DnsError, ResponseWorkspace};
@@ -182,6 +182,7 @@ pub(crate) use crate::dns::wire::PublishedKind;
 enum ExchangeResult {
     Published(PublishedKind),
     Failed(FailureReason),
+    Superseded,
 }
 
 /// The class of one outstanding exchange, chosen by the caller at start so a
@@ -229,6 +230,10 @@ struct ActiveExchange {
     /// cannot overwrite newer cache state (docs/alumina-proxy.md:74,
     /// cache.rs:357-359).
     generation: Generation,
+    /// The non-queried family's cache generation captured from the same
+    /// query-start snapshot and retained immutably; the whole-family negative
+    /// guard compares it alongside `generation` (docs/alumina-proxy.md:119).
+    other_generation: Generation,
     /// The query-start clock floor captured before any failback, connect,
     /// entropy, TLS, or query work: the immutable time anchor every reply
     /// evidence value from this exchange starts from.
@@ -280,6 +285,9 @@ pub(crate) enum TurnResult {
     /// the schedule backoff has been advanced exactly once. The failure reason
     /// is carried structurally.
     Failed(FailureReason),
+    /// An obsolete exchange concluded harmlessly: superseded by newer cache
+    /// state, it advances no ledger, backoff, or success signal.
+    Superseded,
 }
 
 /// The progress of one nonblocking connect step.
@@ -328,6 +336,7 @@ enum RecvStep {
     Waiting,
     Failed(FailureReason),
     Published(PublishedKind),
+    Superseded,
 }
 
 /// The progress of one nonblocking `DoT` TLS-handshake step.
@@ -385,6 +394,7 @@ impl Latest {
             ExchangeResult::Published(PublishedKind::Negative) => Latest::Negative,
             ExchangeResult::Published(PublishedKind::NoEligible) => Latest::NoEligible,
             ExchangeResult::Failed(reason) => Latest::Failed(reason),
+            ExchangeResult::Superseded => return,
         };
     }
 
@@ -2489,12 +2499,16 @@ impl StartupDns {
                     }
                     let receipt = self.now_u64();
                     let (source, origin_authenticated) = self.delivering_origin();
-                    let (kind, extreme, incidents) = observed.apply(
+                    let obsolete_negative =
+                        matches!(observed.probe_facts().0, PublishedKind::Negative);
+                    let (kind, extreme, incidents) = match observed.apply(
                         cache,
                         schedules,
                         crate::dns::publication::ApplyContext {
                             index: ex.ordinal,
                             generation: ex.generation,
+                            query_family: Some(ex.family),
+                            other_generation: Some(ex.other_generation),
                             receipt,
                             now: self.now_u64(),
                         },
@@ -2503,7 +2517,14 @@ impl StartupDns {
                             query_floor: ex.query_floor,
                             origin_authenticated,
                         },
-                    )?;
+                    ) {
+                        Ok(published) => published,
+                        Err(DnsError::Cache(CacheError::StaleGeneration)) if obsolete_negative => {
+                            schedules.release_selection(ex.ordinal, ex.family)?;
+                            return Ok(RecvStep::Superseded);
+                        }
+                        Err(err) => return Err(err.into()),
+                    };
                     match incidents.sustained {
                         crate::dns::schedule::IncidentTransition::Opened => {
                             self.incident_opens += 1;
@@ -2712,6 +2733,7 @@ impl StartupDns {
                     Ok(ExchangeResult::Failed(reason)) => {
                         ledger.mark_failed(ordinal, family, reason);
                     }
+                    Ok(ExchangeResult::Superseded) => {}
                     Err(err) => return Err(err),
                 }
             }
@@ -2827,6 +2849,7 @@ impl StartupDns {
                                 logs.startup_warning(now, name.as_str(), family, reason.as_str());
                             }
                         }
+                        Ok(ExchangeResult::Superseded) => {}
                         Err(err) => return Err(err),
                     }
                 }
@@ -2880,18 +2903,19 @@ impl StartupDns {
         clippy::expect_used,
         reason = "DNS query length is capped by the fixed 2-byte prefix fit of DNS_MSG_LIMIT"
     )]
-    pub(crate) fn start_exchange(
+    fn start_exchange_impl(
         &mut self,
         fqdn: &Fqdn,
         family: Family,
         ordinal: usize,
         deadline: Instant,
-        generation: Generation,
+        generation: Generations,
         class: ExchangeClass,
     ) -> Result<(), StartupDnsError> {
         if self.active.is_some() {
             return Err(StartupDnsError::ExchangeActive);
         }
+        let Generations { queried, other } = generation;
         let query_floor = self.now_u64();
         self.maybe_begin_failback()?;
         let connect_err = if self.conn.is_none() {
@@ -2914,10 +2938,37 @@ impl StartupDns {
             connect_err,
             tid,
             class,
-            generation,
+            generation: queried,
+            other_generation: other,
             query_floor,
         });
         Ok(())
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn start_exchange(
+        &mut self,
+        fqdn: &Fqdn,
+        family: Family,
+        ordinal: usize,
+        deadline: Instant,
+        generation: Generations,
+        class: ExchangeClass,
+    ) -> Result<(), StartupDnsError> {
+        self.start_exchange_impl(fqdn, family, ordinal, deadline, generation, class)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_exchange(
+        &mut self,
+        fqdn: &Fqdn,
+        family: Family,
+        ordinal: usize,
+        deadline: Instant,
+        generation: impl Into<Generations>,
+        class: ExchangeClass,
+    ) -> Result<(), StartupDnsError> {
+        self.start_exchange_impl(fqdn, family, ordinal, deadline, generation.into(), class)
     }
 
     /// Advances the in-progress cooperative exchange by one turn. A turn never
@@ -2990,6 +3041,10 @@ impl StartupDns {
                     self.on_exchange_succeeded()?;
                     return Ok(TurnResult::Published(kind));
                 }
+                RecvStep::Superseded => {
+                    self.active = None;
+                    return Ok(TurnResult::Superseded);
+                }
             },
         };
         if let Some(step) = next_step {
@@ -3024,13 +3079,13 @@ impl StartupDns {
         let name_index = cache
             .name_index(ordinal)
             .ok_or(CacheError::NameOutOfRange)?;
-        let generation = cache.entry(name_index, family)?.generation();
+        let pair = cache.generations_before_query(name_index, family)?;
         self.start_exchange(
             fqdn,
             family,
             ordinal,
             deadline,
-            generation,
+            pair,
             ExchangeClass::Startup,
         )?;
         loop {
@@ -3048,6 +3103,9 @@ impl StartupDns {
                 }
                 TurnResult::Failed(reason) => {
                     return Ok(ExchangeResult::Failed(reason));
+                }
+                TurnResult::Superseded => {
+                    return Ok(ExchangeResult::Superseded);
                 }
             }
         }
@@ -3242,7 +3300,10 @@ impl StartupDns {
             Family::A,
             0,
             deadline,
-            Generation::INITIAL,
+            Generations {
+                queried: Generation::INITIAL,
+                other: Generation::INITIAL,
+            },
             ExchangeClass::Probe,
         )?;
         Ok(())
@@ -3281,7 +3342,10 @@ impl StartupDns {
             Family::A,
             0,
             deadline,
-            Generation::INITIAL,
+            Generations {
+                queried: Generation::INITIAL,
+                other: Generation::INITIAL,
+            },
             ExchangeClass::Probe,
         )?;
         if let Some(sweep) = &mut self.probe_sweep {
@@ -3355,7 +3419,10 @@ impl StartupDns {
             pending.family,
             pending.ordinal,
             deadline,
-            Generation::INITIAL,
+            Generations {
+                queried: Generation::INITIAL,
+                other: Generation::INITIAL,
+            },
             ExchangeClass::Probe,
         )?;
         Ok(false)
@@ -3819,7 +3886,7 @@ fn wait_until_next_step(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 pub(crate) mod dot_tests;
