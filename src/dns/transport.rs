@@ -38,6 +38,7 @@ use rustls::server::ParsedCertificate;
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
 use crate::config::{ALLOWLIST_MAX, Config, Fqdn};
+use crate::dns::cache::evidence::ResolverSource;
 use crate::dns::cache::{Cache, CacheError, Family, Generation};
 use crate::dns::resolver::{Fqdn as ResolverFqdn, MAX_RESOLVERS, ResolverSet, SpiPin};
 use crate::dns::schedule::{PerTypeTransition, ScheduleError, Schedules};
@@ -228,6 +229,10 @@ struct ActiveExchange {
     /// cannot overwrite newer cache state (docs/alumina-proxy.md:74,
     /// cache.rs:357-359).
     generation: Generation,
+    /// The query-start clock floor captured before any failback, connect,
+    /// entropy, TLS, or query work: the immutable time anchor every reply
+    /// evidence value from this exchange starts from.
+    query_floor: u64,
 }
 
 /// The stage of one outstanding exchange, advanced by at most one stage each
@@ -731,14 +736,29 @@ struct TlsTarget {
 /// client connection over its own TCP socket for a `DoT` resolver. The boxed
 /// connection keeps the fixed [`StartupDns`] struct small while TLS setup
 /// allocations stay confined to the per-connect [`Self::upgrade_to_tls`] seam.
+/// Every connection carries the immutable resolver source it was dialed for,
+/// captured at connection creation so reply origin never consults a
+/// global/latched selection after the fact.
 enum DnsConn {
-    Plain(TcpStream),
+    Plain {
+        stream: TcpStream,
+        source: ResolverSource,
+    },
     Tls(TlsConn),
 }
 
 struct TlsConn {
     tcp: TcpStream,
     tls: Box<ClientConnection>,
+    /// The strict-pin choice the rustls verifier was actually built with for
+    /// this exact connection — captured from the same [`TlsTarget`] used to
+    /// build its TLS config, never re-read from a possibly-changed current
+    /// `tls_target`. The verifier itself owns the real pin and name and checks
+    /// the handshake finished; this boolean only recalls the choice.
+    pinned: bool,
+    /// The immutable resolver source carried from the plain connection the
+    /// TLS layer upgraded.
+    source: ResolverSource,
     /// The shared pin-branch expired/not-yet-valid warning counter, drained
     /// into the owning transport's `ep` fold once at handshake transition.
     expired_pin_certs: Arc<AtomicU32>,
@@ -1535,7 +1555,7 @@ impl StartupDns {
         let mut deregister_error = None;
         if let Some(conn) = self.conn.take() {
             let mut stream = match conn {
-                DnsConn::Plain(stream) => stream,
+                DnsConn::Plain { stream, .. } => stream,
                 DnsConn::Tls(conn) => conn.tcp,
             };
             if let Err(e) = self
@@ -1646,7 +1666,11 @@ impl StartupDns {
         self.watch = watch;
         self.registration
             .begin_connect(self.poll.registry(), &mut stream, watch)?;
-        self.conn = Some(DnsConn::Plain(stream));
+        let source = self
+            .current_resolver_index()
+            .and_then(ResolverSource::index)
+            .unwrap_or(ResolverSource::UNKNOWN);
+        self.conn = Some(DnsConn::Plain { stream, source });
         Ok(None)
     }
 
@@ -2054,18 +2078,21 @@ impl StartupDns {
         schedules: &mut Schedules,
         target: TlsTarget,
     ) -> Result<Option<FailureReason>, StartupDnsError> {
-        let tcp = match self.conn.take() {
-            Some(DnsConn::Plain(stream)) => stream,
+        let (tcp, source) = match self.conn.take() {
+            Some(DnsConn::Plain { stream, source }) => (stream, source),
             other => {
                 self.conn = other;
                 return Ok(None);
             }
         };
         let expired_pin_certs = Arc::new(AtomicU32::new(0));
+        let pinned = target.pin.is_some();
         if let Ok(conn) = build_tls_connection(target, Arc::clone(&expired_pin_certs)) {
             self.conn = Some(DnsConn::Tls(TlsConn {
                 tcp,
                 tls: Box::new(conn),
+                pinned,
+                source,
                 expired_pin_certs,
             }));
             match self.probe_tls_handshake() {
@@ -2377,6 +2404,23 @@ impl StartupDns {
         Ok(SendStep::Failed(reason))
     }
 
+    /// The trusted owner's completed strict-pin TLS identity/key possession on
+    /// the live delivering connection: a `DoT` connection whose rustls
+    /// handshake has finished and whose verifier was built with a strict pin.
+    /// A configured pin present but a handshake still in flight is not proof;
+    /// a global pin configuration alone never authenticates — identity must be
+    /// *proven by the completed handshake on the live connection*. The source
+    /// and the connection-owned `pinned` choice are read from the connection's
+    /// own immutable pairing captured at creation/upgrade, never from the
+    /// transport's current `tls_target` or any latching selection.
+    fn delivering_origin(&self) -> (ResolverSource, bool) {
+        match &self.conn {
+            Some(DnsConn::Plain { source, .. }) => (*source, false),
+            Some(DnsConn::Tls(conn)) => (conn.source, !conn.tls.is_handshaking() && conn.pinned),
+            None => (ResolverSource::UNKNOWN, false),
+        }
+    }
+
     /// One nonblocking response-read step: at most one read, then a complete
     /// validated message is published; an API/EOF/deadline failure settles the
     /// counted failure and closes the connection exactly once.
@@ -2444,13 +2488,21 @@ impl StartupDns {
                         return Ok(RecvStep::Published(kind));
                     }
                     let receipt = self.now_u64();
+                    let (source, origin_authenticated) = self.delivering_origin();
                     let (kind, extreme, incidents) = observed.apply(
                         cache,
                         schedules,
-                        ex.ordinal,
-                        ex.generation,
-                        receipt,
-                        self.now_u64(),
+                        crate::dns::publication::ApplyContext {
+                            index: ex.ordinal,
+                            generation: ex.generation,
+                            receipt,
+                            now: self.now_u64(),
+                        },
+                        wire::ApplyOrigin {
+                            source,
+                            query_floor: ex.query_floor,
+                            origin_authenticated,
+                        },
                     )?;
                     match incidents.sustained {
                         crate::dns::schedule::IncidentTransition::Opened => {
@@ -2506,7 +2558,7 @@ impl StartupDns {
     fn try_recv(&mut self) -> RecvTry {
         match &mut self.conn {
             None => RecvTry::Failure,
-            Some(DnsConn::Plain(stream)) => {
+            Some(DnsConn::Plain { stream, .. }) => {
                 let filled_before = self.filled;
                 match stream.read(&mut self.recv_buf[self.filled..]) {
                     Ok(0) => RecvTry::Failure,
@@ -2840,6 +2892,7 @@ impl StartupDns {
         if self.active.is_some() {
             return Err(StartupDnsError::ExchangeActive);
         }
+        let query_floor = self.now_u64();
         self.maybe_begin_failback()?;
         let connect_err = if self.conn.is_none() {
             self.begin_connect(self.addr)?
@@ -2862,6 +2915,7 @@ impl StartupDns {
             tid,
             class,
             generation,
+            query_floor,
         });
         Ok(())
     }
@@ -3568,7 +3622,7 @@ impl StartupDns {
 /// struct borrow.
 const fn raw_stream(conn: &mut Option<DnsConn>) -> Option<&mut TcpStream> {
     match conn {
-        Some(DnsConn::Plain(stream)) => Some(stream),
+        Some(DnsConn::Plain { stream, .. }) => Some(stream),
         Some(DnsConn::Tls(conn)) => Some(&mut conn.tcp),
         None => None,
     }
@@ -3578,7 +3632,7 @@ const fn raw_stream(conn: &mut Option<DnsConn>) -> Option<&mut TcpStream> {
 #[cfg(test)]
 const fn raw_stream_ref(conn: &Option<DnsConn>) -> Option<&TcpStream> {
     match conn {
-        Some(DnsConn::Plain(stream)) => Some(stream),
+        Some(DnsConn::Plain { stream, .. }) => Some(stream),
         Some(DnsConn::Tls(conn)) => Some(&conn.tcp),
         None => None,
     }
@@ -3590,7 +3644,7 @@ const fn raw_stream_ref(conn: &Option<DnsConn>) -> Option<&TcpStream> {
 /// writes through the TLS writer instead.
 const fn plain_stream(conn: &mut Option<DnsConn>) -> Option<&mut TcpStream> {
     match conn {
-        Some(DnsConn::Plain(stream)) => Some(stream),
+        Some(DnsConn::Plain { stream, .. }) => Some(stream),
         _ => None,
     }
 }

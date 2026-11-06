@@ -2,8 +2,9 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::config::{ALLOWLIST_MAX, Allowlist, Fqdn};
-use crate::dns::apply_outcome;
-use crate::dns::cache::{Cache, CacheError, Family, Generation, MAX_ADDRESSES};
+use crate::dns::cache::evidence::{Evidence, EvidenceError, ResolverSource};
+use crate::dns::cache::{Cache, CacheError, Family, MAX_ADDRESSES};
+use crate::dns::publication::{self, ApplyContext};
 use crate::dns::schedule::{OutcomeIncidents, Schedules, Soa};
 use crate::eligibility::NumericAddr;
 
@@ -961,22 +962,8 @@ pub(crate) fn classify_published(outcome: &Outcome) -> PublishedKind {
 
 #[derive(Clone, Copy)]
 enum ReplyFacts {
-    WithSupportingTtl {
-        ad: bool,
-        extreme: bool,
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "temporary validated supporting-TTL staging until generation-bound cache publication"
-            )
-        )]
-        ttl: u32,
-    },
-    WithoutSupportingTtl {
-        ad: bool,
-        extreme: bool,
-    },
+    WithSupportingTtl { ad: bool, extreme: bool, ttl: u32 },
+    WithoutSupportingTtl { ad: bool, extreme: bool },
 }
 
 impl ReplyFacts {
@@ -994,10 +981,13 @@ impl ReplyFacts {
         }
     }
 
-    #[cfg(test)]
-    const fn supporting_ttl_cap(self) -> Option<u64> {
+    /// The conservative raw supporting-TTL cap bound from the same validated
+    /// parse: `Some` for a positive with a reachable answer-section TTL, `None`
+    /// when no supporting record survived. Consumed by the closed production
+    /// publish route from the same reply.
+    const fn supporting_ttl_cap(self) -> Option<u32> {
         match self {
-            ReplyFacts::WithSupportingTtl { ttl, .. } => Some(ttl as u64),
+            ReplyFacts::WithSupportingTtl { ttl, .. } => Some(ttl),
             ReplyFacts::WithoutSupportingTtl { .. } => None,
         }
     }
@@ -1057,16 +1047,15 @@ impl ParsedReply {
         })
     }
 
-    /// Observes this reply into a private borrowed view: the published-kind
-    /// classification is computed exactly once here and the extreme-TTL flag and
-    /// raw AD observation are bound from the same reply, so the receive path
-    /// reads one consistent fact set for the whole exchange.
+    /// Observes this reply into a private borrowed view over the whole
+    /// [`ParsedReply`]: the published-kind classification is computed once here
+    /// and every fact the receive path reads (raw AD, extreme-TTL flag,
+    /// supporting-TTL cap, application outcome) resolves through the one
+    /// borrowed reply, so the whole exchange reads one consistent fact set.
     pub(crate) fn observe(&self) -> ObservedReply<'_> {
         ObservedReply {
-            outcome: &self.outcome,
+            reply: self,
             kind: classify_published(&self.outcome),
-            extreme: self.observation.extreme(),
-            ad: self.observation.ad(),
         }
     }
 
@@ -1088,63 +1077,119 @@ impl ParsedReply {
     }
 
     /// The conservative raw supporting-TTL cap bound from the same validated
-    /// parse. The receive path does not consult it yet; the test payload
-    /// oracle keeps the direct getter under `cfg(test)`.
+    /// parse: `Some` for a positive with a reachable answer-section TTL, `None`
+    /// otherwise. The receive path reads it through the observed view; the test
+    /// payload oracle keeps the direct getter under `cfg(test)`.
     #[cfg(test)]
-    pub(crate) const fn supporting_ttl_cap(&self) -> Option<u64> {
+    pub(crate) const fn supporting_ttl_cap(&self) -> Option<u32> {
         self.observation.supporting_ttl_cap()
     }
 }
 
-/// A private borrowed view over a local [`ParsedReply`] created by
-/// [`ParsedReply::observe`]: the published-kind classification, the
-/// extreme-TTL flag, and the raw AD observation are captured at observe time
-/// so the receive path reads one consistent observation. The borrow is bounded
-/// to the local reply value and is never stored on the receiver, the cache, or
-/// a schedule.
+/// The transport-side origin facts an apply needs but the reply itself cannot
+/// carry: the resolver actually selected at exchange start, the genuine
+/// query-start floor, and the completed strict-pin authentication fact. The
+/// reply-derived raw AD and supporting-TTL facts stay on the reply so every
+/// positive binds evidence from the same [`ParsedReply`] it is built from.
+#[derive(Clone, Copy)]
+pub(crate) struct ApplyOrigin {
+    pub(crate) source: ResolverSource,
+    pub(crate) query_floor: u64,
+    pub(crate) origin_authenticated: bool,
+}
+
+/// Maps an evidence construction refusal into the corresponding cache error so
+/// the production apply surfaces it explicitly instead of silently dropping
+/// the evidence (a dead-floor overflow is `DeadlineOverflow`; an authenticated
+/// origin without an attributable source is `EvidenceInconsistent`).
+const fn map_evidence_error(err: EvidenceError) -> CacheError {
+    match err {
+        EvidenceError::DeadlineOverflow => CacheError::DeadlineOverflow,
+        EvidenceError::AuthenticatedWithoutSource => CacheError::EvidenceInconsistent,
+    }
+}
+
+/// A private borrowed view over a whole local [`ParsedReply`] created by
+/// [`ParsedReply::observe`]: the published-kind classification is captured at
+/// observe time, and every other fact the receive path reads (raw AD, the
+/// extreme-TTL flag, the supporting-TTL cap, the application outcome) resolves
+/// through the one borrowed reply, so the receive path reads one consistent
+/// fact set for the whole exchange. The borrow is bounded to the local reply
+/// value and is never stored on the receiver, the cache, or a schedule.
 pub(crate) struct ObservedReply<'a> {
-    outcome: &'a Outcome,
+    reply: &'a ParsedReply,
     kind: PublishedKind,
-    extreme: bool,
-    ad: bool,
 }
 
 impl<'a> ObservedReply<'a> {
+    /// The raw AD wire assertion from the same validated reply the receive
+    /// path is publishing. A raw observation of one bit in a fully validated
+    /// reply, never authentication of the resolver or DNS data.
+    pub(crate) const fn ad_fact(&self) -> bool {
+        ReplyFacts::ad(self.reply.observation)
+    }
+
+    /// The conservative raw supporting-TTL cap bound from the same validated
+    /// reply: `Some` for a positive with a reachable answer-section TTL, `None`
+    /// when no supporting record survived.
+    pub(crate) const fn supporting_ttl_cap(&self) -> Option<u32> {
+        ReplyFacts::supporting_ttl_cap(self.reply.observation)
+    }
+
     /// The pure probe-sensor facts of the observed reply — the published kind,
     /// the extreme-TTL flag, and the raw header AD bit — with no cache or
     /// schedule side effects. The AD element is a raw assertion of one bit in
     /// the validated reply, never authentication of the resolver or DNS data.
     pub(crate) const fn probe_facts(&self) -> (PublishedKind, bool, bool) {
-        (self.kind, self.extreme, self.ad)
+        (
+            self.kind,
+            ReplyFacts::extreme(self.reply.observation),
+            ReplyFacts::ad(self.reply.observation),
+        )
     }
 
-    /// Applies the observed reply through the unchanged public
-    /// [`apply_outcome`], returning the kind and the extreme flag captured at
-    /// observe time alongside the incidents the apply produced. On error, no
-    /// kind, flag or incidents are returned.
+    /// Applies the observed reply through the crate's evidence-binding
+    /// production route, returning the kind and the extreme flag captured
+    /// from the same reply alongside the incidents the apply produced. The
+    /// reply-derived `evidence` — raw AD, the actual transport source, the
+    /// query-start floor, and the support-TTL cap, read from this same
+    /// [`ParsedReply`] and the supplied `origin` transport facts — is built
+    /// internally for every validated positive and bound atomically at
+    /// publication. On error, no kind, flag or incidents are returned and no
+    /// entry is changed.
     ///
     /// # Errors
     ///
-    /// Returns exactly the errors [`apply_outcome`] returns.
-    pub(crate) fn apply(
+    /// Returns `DnsError::Cache` when the evidence is refused (`DeadlineOverflow`
+    /// / `EvidenceInconsistent`) or the cache or schedule refuses the mutation.
+    pub(super) fn apply(
         self,
         cache: &mut Cache,
         schedules: &mut Schedules,
-        ordinal: usize,
-        generation: Generation,
-        receipt: u64,
-        now: u64,
+        context: ApplyContext,
+        origin: ApplyOrigin,
     ) -> Result<(PublishedKind, bool, OutcomeIncidents), DnsError> {
-        let incidents = apply_outcome(
-            cache,
-            schedules,
-            ordinal,
-            generation,
-            receipt,
-            now,
-            self.outcome,
-        )?;
-        Ok((self.kind, self.extreme, incidents))
+        let evidence = match &self.reply.outcome {
+            Outcome::Positive { .. } => Some(
+                Evidence::new(
+                    self.ad_fact(),
+                    origin.origin_authenticated,
+                    false,
+                    origin.source,
+                    self.supporting_ttl_cap(),
+                    origin.query_floor,
+                )
+                .map_err(|err| DnsError::Cache(map_evidence_error(err)))?,
+            ),
+            _ => None,
+        };
+        let incidents =
+            publication::apply_route(cache, schedules, context, &self.reply.outcome, evidence)?;
+        Ok((
+            self.kind,
+            ReplyFacts::extreme(self.reply.observation),
+            incidents,
+        ))
     }
 }
 

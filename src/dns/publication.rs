@@ -1,14 +1,28 @@
+use crate::dns::cache::evidence;
 use crate::dns::cache::{Cache, CacheError, Family, Generation, StagedPositive};
 use crate::dns::schedule::{
     IncidentTransition, OutcomeIncidents, PerTypeTransition, Schedules, family_slot,
 };
 use crate::dns::wire::{DnsError, Outcome};
 
+/// The positional apply context grouped to keep the shared route below the
+/// argument-count gate: the allowlist `index`, the in-flight `generation`,
+/// and the monotonic `receipt`/`now` values.
+#[derive(Clone, Copy)]
+pub(super) struct ApplyContext {
+    pub(super) index: usize,
+    pub(super) generation: Generation,
+    pub(super) receipt: u64,
+    pub(super) now: u64,
+}
+
 /// Applies a validated `outcome` to the cache and schedule for one allowlist
 /// `index`, using the in-flight `generation` and the monotonic `receipt` and
 /// `now` values. Only validated outcomes mutate state. Returns the incident
 /// deltas the outcome produced for the name: the sustained-negative delta plus
-/// the per-type exchange-failure deltas in A/Aaaa slot order.
+/// the per-type exchange-failure deltas in A/Aaaa slot order. The public route
+/// stays evidence-free, so no detached flag or arbitrary evidence can enter
+/// the cache through it.
 ///
 /// # Errors
 ///
@@ -23,6 +37,43 @@ pub fn apply_outcome(
     now: u64,
     outcome: &Outcome,
 ) -> Result<OutcomeIncidents, DnsError> {
+    apply_route(
+        cache,
+        schedules,
+        ApplyContext {
+            index,
+            generation,
+            receipt,
+            now,
+        },
+        outcome,
+        None,
+    )
+}
+
+/// The crate-private production apply route: stages validated positives with
+/// immutable reply `evidence` atomically at publication. Relying on the
+/// DNS-private trusted boundary, the caller is the same-reply `wire`
+/// [`ObservedReply`](crate::dns::wire::ObservedReply) producer only; this is
+/// not a type-enforced gateway, but no public caller can build a detached
+/// `Outcome`+`Evidence` under a public name.
+///
+/// # Errors
+///
+/// Returns the same errors as [`apply_outcome`].
+pub(super) fn apply_route(
+    cache: &mut Cache,
+    schedules: &mut Schedules,
+    context: ApplyContext,
+    outcome: &Outcome,
+    evidence: Option<evidence::Evidence>,
+) -> Result<OutcomeIncidents, DnsError> {
+    let ApplyContext {
+        index,
+        generation,
+        receipt,
+        now,
+    } = context;
     let name = cache
         .name_index(index)
         .ok_or(DnsError::Cache(CacheError::NameOutOfRange))?;
@@ -32,13 +83,14 @@ pub fn apply_outcome(
             ttl,
             family: positive_family,
         } => {
-            let staged = StagedPositive::stage(
+            let staged = StagedPositive::stage_with_evidence(
                 name,
                 *positive_family,
                 generation,
                 bindings.as_slice(),
                 receipt,
                 *ttl,
+                evidence,
             )
             .map_err(DnsError::Cache)?;
             let cacheable = bindings.as_slice().iter().any(|b| b.is_eligible());

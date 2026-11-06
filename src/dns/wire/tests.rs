@@ -2,6 +2,8 @@ use super::*;
 
 use crate::config::{Config, parse_config_document};
 
+use crate::dns::apply_outcome;
+
 use crate::dns::cache::Cache;
 
 use crate::dns::schedule::{PerTypeTransition, Schedules};
@@ -1177,12 +1179,38 @@ mod raw_ad_fact {
             let name = cache.name_index(0).expect("index");
             let generation = cache.entry(name, Family::A).expect("entry").generation();
             let (applied_kind, applied_extreme, _incidents) = observed
-                .apply(&mut cache, &mut schedules, 0, generation, 1000, 1000)
+                .apply(
+                    &mut cache,
+                    &mut schedules,
+                    crate::dns::publication::ApplyContext {
+                        index: 0,
+                        generation,
+                        receipt: 1000,
+                        now: 1000,
+                    },
+                    ApplyOrigin {
+                        source: ResolverSource::UNKNOWN,
+                        query_floor: 1000,
+                        origin_authenticated: false,
+                    },
+                )
                 .expect("apply");
             assert_eq!(applied_kind, PublishedKind::ResolvedPositive);
             assert!(!applied_extreme);
             let entry = cache.entry(name, Family::A).expect("entry");
             assert_eq!(entry.deadlines(), (Some(1120), Some(1120 + 259_200)));
+            let evidence = entry
+                .evidence()
+                .expect("plain positive binds raw reply evidence");
+            assert!(
+                !evidence.origin_authenticated(),
+                "a plain (non-TLS) positive stays Trusted, never silently authenticated"
+            );
+            assert_eq!(
+                evidence.raw_ad(),
+                ad,
+                "the raw AD fact from the same reply is retained independently of authority"
+            );
         }
     }
 }
@@ -1192,7 +1220,7 @@ mod supporting_ttl {
 
     #[test]
     fn positive_cap_is_min_across_cname_and_address_ttls() {
-        for (cname_ttl, addr_ttl, expected) in [(200u32, 120u32, 120u64), (30u32, 200u32, 30u64)] {
+        for (cname_ttl, addr_ttl, expected) in [(200u32, 120u32, 120u32), (30u32, 200u32, 30u32)] {
             let mut ws = ResponseWorkspace::default();
             let mut msg = header(0x4001, true, 0, 1, 2, 0, 0);
             msg.extend_from_slice(&qname_bytes("sub.example.org"));
@@ -1300,7 +1328,7 @@ mod supporting_ttl {
             .expect("validated positive with the maximum wire TTL");
         assert_eq!(
             reply.supporting_ttl_cap(),
-            Some(u64::from(u32::MAX)),
+            Some(u32::MAX),
             "the maximum wire TTL is preserved exactly, never saturated nor confused with a sentinel"
         );
         assert!(
@@ -2965,5 +2993,117 @@ mod embedded_dot {
                 soa: Some(Soa::new(300, 60)),
             }
         );
+    }
+}
+
+mod production_apply_route {
+    use super::*;
+
+    /// Applies one real parsed A reply through [`ObservedReply::apply`] and
+    /// returns the published kind and the reply-derived evidence the apply
+    /// bound atomically at publication, so each witness drives the actual
+    /// reply path instead of a hand-built `Outcome` DTO.
+    fn apply_positive_reply(
+        octets: [u8; 4],
+        origin: ApplyOrigin,
+        expected_kind: PublishedKind,
+    ) -> (PublishedKind, crate::dns::cache::evidence::Evidence, usize) {
+        let mut ws = ResponseWorkspace::default();
+        let reply = parse_reply_into(
+            &mut ws,
+            "sub.example.org",
+            Family::A,
+            0x41a1,
+            &direct_a("sub.example.org", 0x41a1, octets, 120),
+        )
+        .expect("validated positive");
+        let observed = reply.observe();
+        assert_eq!(observed.probe_facts().0, expected_kind);
+        let mut cache = Cache::new(2).expect("cache");
+        let mut schedules = Schedules::new(2).expect("schedules");
+        let name = cache.name_index(0).expect("index");
+        let generation = cache.entry(name, Family::A).expect("entry").generation();
+        let (kind, _extreme, _incidents) = observed
+            .apply(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation,
+                    receipt: 5_010,
+                    now: 5_010,
+                },
+                origin,
+            )
+            .expect("apply");
+        assert_eq!(
+            kind, expected_kind,
+            "applied kind matches the observed reply"
+        );
+        let entry = cache.entry(name, Family::A).expect("entry");
+        let evidence = entry
+            .evidence()
+            .expect("reply-derived evidence bound at publication");
+        let bound = entry.bindings().len();
+        (kind, evidence, bound)
+    }
+
+    #[test]
+    fn eligible_positive_binds_reply_derived_evidence_witnesses() {
+        let (_kind, evidence, bound) = apply_positive_reply(
+            [93, 184, 216, 34],
+            ApplyOrigin {
+                source: ResolverSource::index(1).expect("index"),
+                query_floor: 5_000,
+                origin_authenticated: true,
+            },
+            PublishedKind::ResolvedPositive,
+        );
+        assert_eq!(bound, 1, "the eligible positive publishes one address");
+        assert!(!evidence.raw_ad(), "raw AD witness from the same reply");
+        assert_eq!(
+            evidence.source(),
+            ResolverSource::index(1).expect("index"),
+            "actual-selected-source witness"
+        );
+        assert_eq!(
+            evidence.evidential_start(),
+            5_000,
+            "query-start floor witness"
+        );
+        assert_eq!(
+            evidence.raw_supporting_ttl(),
+            Some(120),
+            "support-TTL cap witness"
+        );
+        assert_eq!(
+            evidence.class(),
+            crate::dns::cache::evidence::ProofClass::Authenticated,
+            "completed strict-pin origin with an attributable source is Authenticated"
+        );
+    }
+
+    #[test]
+    fn ineligible_positive_still_binds_reply_derived_evidence() {
+        let (kind, evidence, bound) = apply_positive_reply(
+            [10, 0, 0, 1],
+            ApplyOrigin {
+                source: ResolverSource::index(1).expect("index"),
+                query_floor: 5_000,
+                origin_authenticated: true,
+            },
+            PublishedKind::NoEligible,
+        );
+        assert_eq!(kind, PublishedKind::NoEligible);
+        assert_eq!(
+            bound, 0,
+            "an all-ineligible positive publishes zero addresses"
+        );
+        assert_eq!(
+            evidence.raw_supporting_ttl(),
+            Some(120),
+            "an all-ineligible positive still binds the same reply-derived evidence, never a silent None"
+        );
+        assert_eq!(evidence.evidential_start(), 5_000);
     }
 }

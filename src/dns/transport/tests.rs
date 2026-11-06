@@ -460,6 +460,7 @@ fn fixture_exchange(ordinal: usize, family: Family, class: ExchangeClass) -> Act
         tid: 0,
         class,
         generation: Generation::INITIAL,
+        query_floor: 0,
     }
 }
 
@@ -3452,7 +3453,10 @@ mod probe_sweep {
         transport.repoint_to_active();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe peer");
         let client = mio::net::TcpStream::connect(listener.local_addr().unwrap()).expect("connect");
-        transport.conn = Some(DnsConn::Plain(client));
+        transport.conn = Some(DnsConn::Plain {
+            stream: client,
+            source: ResolverSource::UNKNOWN,
+        });
         transport
             .on_exchange_succeeded()
             .expect("success settles without a transport error");

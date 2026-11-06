@@ -637,6 +637,30 @@ fn pinned_dot_resolver_resolves_both_names_over_loopback_tls() {
         report.resolved_names, 2,
         "a pin-matching DoT resolver must resolve the whole allowlist"
     );
+    let name = cache.name_index(0).unwrap();
+    let evidence = cache
+        .entry(name, Family::A)
+        .expect("entry")
+        .evidence()
+        .expect("real completed pinned TLS exchange binds reply-derived evidence to the cache");
+    assert_eq!(
+        evidence.source(),
+        crate::dns::cache::evidence::ResolverSource::index(0).expect("primary index"),
+        "the actual configured primary resolver used for this connection is the bound source"
+    );
+    assert!(
+        evidence.origin_authenticated(),
+        "a completed strict-pin TLS handshake authenticates the bound positive"
+    );
+    assert!(
+        !evidence.raw_ad(),
+        "the loopback fixture reply carries AD=0, witnessed as the raw reply fact"
+    );
+    assert_eq!(
+        evidence.evidential_deadline(),
+        Some(evidence.evidential_start() + 120),
+        "the supporting TTL (120) from the real parsed reply anchors to the query-start floor"
+    );
     assert_eq!(
         bindings_of(&cache, 0, Family::A),
         vec![crate::eligibility::NumericAddr::V4(
@@ -681,6 +705,14 @@ fn pinned_dot_wrong_pin_fails_handshake_and_publishes_nothing() {
         NameOutcome::Failed(reason) => assert_eq!(reason.as_str(), "pin_mismatch"),
         _ => panic!("wrong-pin exchange must conclude as a failed name outcome"),
     }
+    assert!(
+        cache
+            .entry(cache.name_index(0).unwrap(), Family::A)
+            .unwrap()
+            .evidence()
+            .is_none(),
+        "a wrong-pin handshake failure publishes no authenticated evidence"
+    );
     drop(responder);
 }
 
@@ -844,6 +876,8 @@ fn dot_exchange_traverses_handshake_before_send_and_receive() {
     let mut transport = StartupDns::new().unwrap();
     transport.addr = ns(responder.port());
     transport.now0 = 1_000_000;
+    transport.resolvers = Some(*cfg.resolver_set());
+    transport.active_resolver = ActiveResolver::primary_of(cfg.resolver_set());
     transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
         fqdn: *fqdn,
         pin: cfg.resolver_set().primary().pin().copied(),
@@ -976,6 +1010,8 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
     let mut transport = StartupDns::new().unwrap();
     transport.addr = ns(responder.port());
     transport.now0 = 1_000_000;
+    transport.resolvers = Some(*cfg.resolver_set());
+    transport.active_resolver = ActiveResolver::primary_of(cfg.resolver_set());
     transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
         fqdn: *fqdn,
         pin: cfg.resolver_set().primary().pin().copied(),
@@ -1017,7 +1053,7 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
     );
     let first_addr = match transport.conn.as_ref().expect("retained DoT transport") {
         DnsConn::Tls(conn) => &*conn.tls as *const _,
-        DnsConn::Plain(_) => panic!("a pinned DoT exchange must retain a TLS transport"),
+        DnsConn::Plain { .. } => panic!("a pinned DoT exchange must retain a TLS transport"),
     };
 
     // Second serving refresh: the retained transport is reused without a
@@ -1048,7 +1084,7 @@ fn serving_refresh_retains_dot_transport_without_rebuild() {
     );
     let second_addr = match transport.conn.as_ref().expect("retained DoT transport") {
         DnsConn::Tls(conn) => &*conn.tls as *const _,
-        DnsConn::Plain(_) => panic!("a pinned DoT exchange must retain a TLS transport"),
+        DnsConn::Plain { .. } => panic!("a pinned DoT exchange must retain a TLS transport"),
     };
     assert!(
         std::ptr::addr_eq(first_addr, second_addr),
@@ -1332,6 +1368,8 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
     let mut transport = StartupDns::new().unwrap();
     transport.addr = ns(responder.port());
     transport.now0 = 1_000_000;
+    transport.resolvers = Some(*cfg.resolver_set());
+    transport.active_resolver = ActiveResolver::primary_of(cfg.resolver_set());
     transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
         fqdn: *fqdn,
         pin: cfg.resolver_set().primary().pin().copied(),
@@ -1394,6 +1432,15 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
         matches!(second, TurnResult::Failed(FailureReason::Receive)),
         "a retained transport whose peer closed after one reply must fail the next exchange closed, got {second:?}"
     );
+    let evidence = cache
+        .entry(cache.name_index(0).unwrap(), Family::A)
+        .unwrap()
+        .evidence()
+        .expect("the first published proof survives the later disconnect");
+    assert!(
+        evidence.origin_authenticated(),
+        "the pre-disconnect authenticated proof is preserved, never cleared by the failed exchange"
+    );
     transport.cancel_for_shutdown();
     drop(responder);
 }
@@ -1405,6 +1452,32 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
 const WARM_DOT_ALLOC_BOUND: u64 = 8;
 
 #[cfg(feature = "alloc-witness")]
+fn assert_evidence_identity(evidence: crate::dns::cache::evidence::Evidence, ordinal: usize) {
+    assert_eq!(
+        evidence.source(),
+        crate::dns::cache::evidence::ResolverSource::index(0).expect("primary source"),
+        "exchange {ordinal} binds the actual configured primary resolver source"
+    );
+    assert!(
+        evidence.origin_authenticated(),
+        "exchange {ordinal} is authenticated by completed strict-pin TLS"
+    );
+    assert!(
+        !evidence.raw_ad(),
+        "exchange {ordinal} carries AD=0 witnessed raw, never fabricated"
+    );
+    assert!(
+        !evidence.qualified(),
+        "exchange {ordinal} AD=0 evidence is never qualified"
+    );
+    assert_eq!(
+        evidence.evidential_deadline(),
+        Some(evidence.evidential_start() + 120),
+        "exchange {ordinal} supporting TTL (120) anchors to the query-start floor"
+    );
+}
+
+#[cfg(feature = "alloc-witness")]
 #[test]
 fn dot_warm_serving_exchange_alloc_witness() {
     let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
@@ -1414,6 +1487,8 @@ fn dot_warm_serving_exchange_alloc_witness() {
     let mut transport = StartupDns::new().unwrap();
     transport.addr = ns(responder.port());
     transport.now0 = 1_000_000;
+    transport.resolvers = Some(*cfg.resolver_set());
+    transport.active_resolver = ActiveResolver::primary_of(cfg.resolver_set());
     transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
         fqdn: *fqdn,
         pin: cfg.resolver_set().primary().pin().copied(),
@@ -1449,6 +1524,14 @@ fn dot_warm_serving_exchange_alloc_witness() {
     assert!(
         matches!(cold, TurnResult::Published(_)),
         "the cold DoT exchange must publish, got {cold:?}"
+    );
+    assert_evidence_identity(
+        cache
+            .entry(cache.name_index(0).unwrap(), Family::A)
+            .expect("cold entry")
+            .evidence()
+            .expect("the cold DoT exchange binds source evidence to index 0"),
+        0,
     );
     assert!(
         transport.conn.is_some(),
@@ -1492,6 +1575,14 @@ fn dot_warm_serving_exchange_alloc_witness() {
     assert!(
         counts.allocs <= WARM_DOT_ALLOC_BOUND && counts.deallocs <= WARM_DOT_ALLOC_BOUND,
         "the warm DoT exchange must stay within the calibrated rustls seam bound: {counts:?}"
+    );
+    assert_evidence_identity(
+        cache
+            .entry(cache.name_index(1).unwrap(), Family::A)
+            .expect("warm entry")
+            .evidence()
+            .expect("the warm DoT exchange binds source evidence to index 1"),
+        1,
     );
     transport.cancel_for_shutdown();
     drop(responder);
@@ -1753,6 +1844,8 @@ fn handshake_budget_deferral_stays_sendable_and_resumes() {
     let mut transport = StartupDns::new().unwrap();
     transport.addr = ns(responder.port());
     transport.now0 = 1_000_000;
+    transport.resolvers = Some(*cfg.resolver_set());
+    transport.active_resolver = ActiveResolver::primary_of(cfg.resolver_set());
     transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
         fqdn: *fqdn,
         pin: cfg.resolver_set().primary().pin().copied(),

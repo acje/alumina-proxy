@@ -13,6 +13,7 @@ fn shared_exchange(step: ExchangeStep) -> ActiveExchange {
         tid: 0,
         class: ExchangeClass::Startup,
         generation: Generation::INITIAL,
+        query_floor: 0,
     }
 }
 
@@ -27,7 +28,10 @@ fn shared_socket(token: Token) -> (StartupDns, Poll, SocketAddr, SocketAddr) {
     let mut transport = StartupDns::new().unwrap();
     transport.now0 = 1_000_000;
     transport.registration = Registration::shared(token);
-    transport.conn = Some(DnsConn::Plain(flow));
+    transport.conn = Some(DnsConn::Plain {
+        stream: flow,
+        source: ResolverSource::UNKNOWN,
+    });
     transport.active = Some(shared_exchange(ExchangeStep::Connecting));
     let poll = Poll::new().expect("external shared poll");
     let bound = raw_stream_ref(&transport.conn)
