@@ -1040,6 +1040,12 @@ fn main_wiring_body() {
         .expect("startup window");
     let decision = outcome.decision();
     assert_eq!(decision, StartupDecision::Serve(ServingMode::Full));
+    assert_eq!(
+        outcome.report.family_results[0][0],
+        Some(Ok(crate::dns::transport::PublishedKind::ResolvedPositive))
+    );
+    assert!(!outcome.report.attempted[0][1]);
+    assert_eq!(outcome.report.family_results[0][1], None);
     let listener = outcome
         .into_listener()
         .expect("a serving decision binds the connect listener");
@@ -1186,6 +1192,14 @@ fn startup_warning_cooperative_owner_body() {
         outcome.report.failed >= 2,
         "the cooperative owner must observe several counted failures, observed {}",
         outcome.report.failed
+    );
+    assert!(
+        outcome
+            .report
+            .family_results
+            .iter()
+            .any(|pair| matches!(pair[1], Some(Err(_)))),
+        "the cooperative owner retains a concluded AAAA failure"
     );
     let warnings = drained_warning_lines(&mut file);
     assert_eq!(

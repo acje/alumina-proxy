@@ -416,6 +416,8 @@ pub struct StartupReport {
     pub outcomes: [NameOutcome; ALLOWLIST_MAX],
     /// One A/AAAA attempt pair per configured name in allowlist ordinal order.
     pub attempted: [[bool; 2]; ALLOWLIST_MAX],
+    /// Latest concluded A/AAAA result per name; `None` also covers unfinished attempts.
+    pub(crate) family_results: [[Option<Result<PublishedKind, FailureReason>>; 2]; ALLOWLIST_MAX],
     /// The first counted exchange failure: name ordinal plus address family.
     pub first_failure: Option<(u16, Family)>,
 }
@@ -429,6 +431,7 @@ pub struct StartupReport {
 pub(crate) struct WindowLedger {
     resolved: [bool; ALLOWLIST_MAX],
     attempted: [[bool; 2]; ALLOWLIST_MAX],
+    family_results: [[Option<Result<PublishedKind, FailureReason>>; 2]; ALLOWLIST_MAX],
     latest: [Latest; ALLOWLIST_MAX],
     names: usize,
     exchanges: u32,
@@ -441,6 +444,7 @@ impl WindowLedger {
         WindowLedger {
             resolved: [false; ALLOWLIST_MAX],
             attempted: [[false; 2]; ALLOWLIST_MAX],
+            family_results: [[None; 2]; ALLOWLIST_MAX],
             latest: [Latest::Unattempted; ALLOWLIST_MAX],
             names,
             exchanges: 0,
@@ -469,9 +473,15 @@ impl WindowLedger {
         self.attempted[ordinal][family_index(family)] = true;
     }
 
-    pub(crate) const fn mark_published(&mut self, ordinal: usize, kind: PublishedKind) {
+    pub(crate) const fn mark_published(
+        &mut self,
+        ordinal: usize,
+        family: Family,
+        kind: PublishedKind,
+    ) {
         self.exchanges += 1;
         self.latest[ordinal].merge(ExchangeResult::Published(kind));
+        self.family_results[ordinal][family_index(family)] = Some(Ok(kind));
     }
 
     pub(crate) fn refresh_resolved(&mut self, cache: &Cache, now: u64) -> Result<(), CacheError> {
@@ -504,6 +514,7 @@ impl WindowLedger {
     ) -> bool {
         self.failed += 1;
         self.latest[ordinal].merge(ExchangeResult::Failed(reason));
+        self.family_results[ordinal][family_index(family)] = Some(Err(reason));
         if self.first_failure.is_none() {
             self.first_failure = Some((
                 u16::try_from(ordinal).expect("name ordinal bounded by ALLOWLIST_MAX"),
@@ -543,6 +554,7 @@ impl WindowLedger {
             resolved_names,
             outcomes: [NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed); ALLOWLIST_MAX],
             attempted: self.attempted,
+            family_results: self.family_results,
             first_failure: self.first_failure,
         };
         for ordinal in 0..self.names {
@@ -2734,7 +2746,7 @@ impl StartupDns {
                     logs,
                 ) {
                     Ok(ExchangeResult::Published(kind)) => {
-                        ledger.mark_published(ordinal, kind);
+                        ledger.mark_published(ordinal, family, kind);
                     }
                     Ok(ExchangeResult::Failed(reason)) => {
                         ledger.mark_failed(ordinal, family, reason);
@@ -2853,7 +2865,7 @@ impl StartupDns {
                         logs,
                     ) {
                         Ok(ExchangeResult::Published(kind)) => {
-                            ledger.mark_published(ordinal, kind);
+                            ledger.mark_published(ordinal, family, kind);
                         }
                         Ok(ExchangeResult::Failed(reason)) => {
                             if ledger.mark_failed(ordinal, family, reason) {
@@ -3914,20 +3926,17 @@ pub(crate) mod dot_tests;
 
 #[cfg(test)]
 mod startup_attempt_retention_tests {
-    use super::{FailureReason, Family, NameOutcome, NotAttemptedReason, WindowLedger};
+    use super::{
+        ExchangeResult, FailureReason, Family, NameOutcome, NotAttemptedReason, PublishedKind,
+        WindowLedger,
+    };
     use crate::config::ALLOWLIST_MAX;
 
     #[test]
     fn finish_preserves_all_unattempted_families() {
         let report = WindowLedger::new(3).finish();
-        println!(
-            "StartupReport size={} align={}; WindowLedger size={} align={}",
-            std::mem::size_of::<super::StartupReport>(),
-            std::mem::align_of::<super::StartupReport>(),
-            std::mem::size_of::<WindowLedger>(),
-            std::mem::align_of::<WindowLedger>()
-        );
         assert_eq!(report.attempted, [[false; 2]; ALLOWLIST_MAX]);
+        assert_eq!(report.family_results, [[None; 2]; ALLOWLIST_MAX]);
         assert_eq!(report.not_attempted, 6);
         assert_eq!(report.resolved_names, 0);
         assert_eq!(report.exchanges, 0);
@@ -3964,6 +3973,69 @@ mod startup_attempt_retention_tests {
             &report.outcomes[1..3],
             &[NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed); 2]
         );
+    }
+
+    #[test]
+    fn finish_distinguishes_asymmetric_family_conclusions() {
+        let mut a_failed = WindowLedger::new(2);
+        let mut aaaa_failed = WindowLedger::new(2);
+        for ledger in [&mut a_failed, &mut aaaa_failed] {
+            ledger.track_attempt(0, Family::A);
+            ledger.track_attempt(0, Family::Aaaa);
+            ledger.track_attempt(1, Family::A);
+            ledger.mark_failed(0, Family::A, FailureReason::Timeout);
+        }
+        a_failed.mark_failed(0, Family::A, FailureReason::Send);
+        aaaa_failed.mark_failed(0, Family::Aaaa, FailureReason::Send);
+        a_failed.mark_published(0, Family::Aaaa, PublishedKind::ResolvedPositive);
+        aaaa_failed.mark_published(0, Family::Aaaa, PublishedKind::ResolvedPositive);
+        let a_report = a_failed.finish();
+        let aaaa_report = aaaa_failed.finish();
+        assert_eq!(a_report.exchanges, aaaa_report.exchanges);
+        assert_eq!(a_report.failed, aaaa_report.failed);
+        assert_eq!(a_report.first_failure, aaaa_report.first_failure);
+        assert_eq!(a_report.outcomes, aaaa_report.outcomes);
+        assert_eq!(a_report.attempted, aaaa_report.attempted);
+        assert_eq!(
+            a_report.family_results[0],
+            [
+                Some(Err(FailureReason::Send)),
+                Some(Ok(PublishedKind::ResolvedPositive))
+            ]
+        );
+        assert_eq!(
+            aaaa_report.family_results[0],
+            [
+                Some(Err(FailureReason::Timeout)),
+                Some(Ok(PublishedKind::ResolvedPositive))
+            ]
+        );
+        assert_eq!(a_report.attempted[1], [true, false]);
+        assert_eq!(a_report.family_results[1], [None, None]);
+        assert_ne!(
+            a_report, aaaa_report,
+            "distinct family histories survive finish"
+        );
+    }
+
+    #[test]
+    fn finish_retains_latest_family_outcomes_when_superseded() {
+        let mut ledger = WindowLedger::new(1);
+        ledger.track_attempt(0, Family::A);
+        ledger.track_attempt(0, Family::Aaaa);
+        ledger.mark_published(0, Family::A, PublishedKind::Negative);
+        ledger.mark_failed(0, Family::A, FailureReason::Timeout);
+        ledger.mark_published(0, Family::Aaaa, PublishedKind::NoEligible);
+        let before = ledger.finish();
+        assert_eq!(
+            before.family_results[0],
+            [
+                Some(Err(FailureReason::Timeout)),
+                Some(Ok(PublishedKind::NoEligible))
+            ]
+        );
+        ledger.latest[0].merge(ExchangeResult::Superseded);
+        assert_eq!(ledger.finish(), before);
     }
 
     #[cfg(feature = "alloc-witness")]

@@ -137,6 +137,14 @@ fn full_serve_opens_listener_early_before_the_window_elapses() {
     let decision = outcome.decision();
     assert_eq!(decision, StartupDecision::Serve(ServingMode::Full));
     assert_eq!(outcome.report.resolved_names, 2);
+    for ordinal in 0..2 {
+        assert_eq!(
+            outcome.report.family_results[ordinal][0],
+            Some(Ok(crate::dns::transport::PublishedKind::ResolvedPositive))
+        );
+        assert!(!outcome.report.attempted[ordinal][1]);
+        assert_eq!(outcome.report.family_results[ordinal][1], None);
+    }
     let listener = outcome
         .into_listener()
         .expect("listener bound for full serve");
@@ -251,6 +259,11 @@ fn failed_lookup_retries_within_the_window_and_recovers_to_full() {
     );
     assert_eq!(outcome.report.resolved_names, 1);
     assert_eq!(outcome.report.failed, 2);
+    assert_eq!(
+        outcome.report.family_results[0][0],
+        Some(Ok(crate::dns::transport::PublishedKind::ResolvedPositive))
+    );
+    assert!(matches!(outcome.report.family_results[0][1], Some(Err(_))));
     assert!(outcome.listener().is_some());
     assert!(
         elapsed < window,
@@ -460,6 +473,7 @@ fn widest_allowlist_config() -> Config {
 fn all_unresolved_report() -> StartupReport {
     use crate::config::ALLOWLIST_MAX;
     use crate::dns::transport::NameOutcome;
+    use crate::dns::transport::PublishedKind;
     StartupReport {
         exchanges: 64,
         failed: 64,
@@ -468,6 +482,7 @@ fn all_unresolved_report() -> StartupReport {
         resolved_names: 0,
         outcomes: [NameOutcome::Negative; ALLOWLIST_MAX],
         attempted: [[true; 2]; ALLOWLIST_MAX],
+        family_results: [[Some(Ok(PublishedKind::Negative)); 2]; ALLOWLIST_MAX],
         first_failure: None,
     }
 }

@@ -505,6 +505,7 @@ fn startup_split_emission_over_full_allowlist_spends_zero_allocations() {
         resolved_names: 0,
         outcomes: [NameOutcome::Failed(FailureReason::Timeout); ALLOWLIST_MAX],
         attempted: [[true; 2]; ALLOWLIST_MAX],
+        family_results: [[Some(Err(FailureReason::Timeout)); 2]; ALLOWLIST_MAX],
         first_failure: None,
     };
     let ((), counts) = run_phase(Phase::Logging, || {

@@ -1546,6 +1546,11 @@ mod startup {
             NameOutcome::Negative,
             "name1 AAAA NODATA is the latest concluded outcome, overriding the earlier timeout"
         );
+        assert!(matches!(report.family_results[1][0], Some(Err(_))));
+        assert_eq!(
+            report.family_results[1][1],
+            Some(Ok(PublishedKind::Negative))
+        );
     }
     #[test]
     fn startup_outcome_failed_carries_latest_failure_reason() {
@@ -4903,7 +4908,7 @@ fn startup_ledger_current_cache_refresh_overwrites_sticky_resolved() {
     )
     .unwrap();
     cache.publish_positive(&staged).unwrap();
-    ledger.mark_published(0, PublishedKind::ResolvedPositive);
+    ledger.mark_published(0, Family::A, PublishedKind::ResolvedPositive);
     assert!(
         !ledger.is_resolved(0),
         "a published positive alone is not resolution authority; the refresh must establish it"
@@ -4956,6 +4961,10 @@ fn startup_ledger_current_cache_refresh_overwrites_sticky_resolved() {
         report.outcomes[0],
         NameOutcome::Resolved,
         "a currently usable name stays resolved despite the failed exchange"
+    );
+    assert_eq!(
+        report.family_results[0][0],
+        Some(Err(FailureReason::Timeout))
     );
 }
 

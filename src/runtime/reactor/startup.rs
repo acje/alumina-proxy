@@ -78,7 +78,7 @@ impl Serving {
                 match self.storage.advance_dns()? {
                     None | Some(TurnResult::Pending | TurnResult::Superseded) => {}
                     Some(TurnResult::Published(kind)) => {
-                        ledger.mark_published(ordinal, kind);
+                        ledger.mark_published(ordinal, ex_family, kind);
                     }
                     Some(TurnResult::Failed(reason)) => {
                         if ledger.mark_failed(ordinal, ex_family, reason) {

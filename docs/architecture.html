@@ -274,9 +274,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   only <code>std::thread</code> invocation in production code is the
   <code>thread::sleep</code>
   that parks the single thread inside the startup DNS driver
-  (<code>src/dns/transport.rs:2878</code>, <code>:2765</code>; <code>resolve_window</code>
+  (<code>src/dns/transport.rs:2890</code>, <code>:2777</code>; <code>resolve_window</code>
   runs synchronously on the reactor thread before the listener opens, at
-  <code>src/dns/transport.rs:2765</code>, and the serving-time DNS work is cooperative
+  <code>src/dns/transport.rs:2777</code>, and the serving-time DNS work is cooperative
   per-turn advance, not a second thread). No thread is ever spawned in production —
   the only <code>std::thread::spawn</code>/<code>Builder</code> sites in
   production-adjacent code are <code>#[cfg(test)]</code> doubles
@@ -1272,10 +1272,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>Both startup drivers share <code>WindowLedger</code>, which records an
   attempt for each configured-name and address-family pair and copies its
   fixed 32-by-2 Boolean array into <code>StartupReport</code> in allowlist
-  ordinal order, with A before AAAA. The report retains the existing aggregate
-  counts and per-name outcomes; these attempt facts do not themselves emit a
-  record (<code>src/dns/transport.rs:408-443</code>, <code>:468-469</code>,
-  <code>:525-555</code>, <code>:3864-3870</code>).</p>
+  ordinal order, with A before AAAA. It also retains each family's latest
+  concluded published kind or failure independently of current cache usability.
+  When no conclusion is retained, the attempt bit distinguishes an attempted
+  family from an unattempted one; a prior conclusion can remain after a further
+  attempt starts. Superseded exchanges do not replace a conclusion. The existing
+  aggregate counts and per-name outcomes remain separate, and these facts do
+  not themselves emit a record (<code>src/dns/transport.rs:408-447</code>,
+  <code>:472-484</code>, <code>:509-517</code>, <code>:536-567</code>,
+  <code>:2747-2755</code>, <code>:2866-2881</code>,
+  <code>src/runtime/reactor/startup.rs:77-94</code>,
+  <code>src/dns/transport.rs:3876-3882</code>).</p>
   <p>Only fully validated outcomes reach the cache: the outcome-application
   body <code>dns::publication::apply_outcome</code>
   (<code>src/dns/publication.rs:38</code>, named-re-exported as
@@ -1308,15 +1315,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   readiness, and normal post-readiness bind — the kernel owns the actual
   listener the bind returns, and the full-serve and kernel-assigned-listener
   controls assert and connect to that returned address
-  (<code>src/runtime/storage/startup_integration.rs:139-156</code>,
-  <code>:352-374</code>).
+  (<code>src/runtime/storage/startup_integration.rs:139-164</code>,
+  <code>:365-387</code>).
   The exit-75 fixture holds an occupied configured address and asserts no
-  listener is bound (<code>src/runtime/storage/startup_integration.rs:183-186</code>); a
+  listener is bound (<code>src/runtime/storage/startup_integration.rs:191-194</code>); a
   normal-config control asserts an occupied configured address yields the
   <code>Listener</code> <code>AddrInUse</code> bind error
-  (<code>src/runtime/storage/startup_integration.rs:389-395</code>) and that the public
+  (<code>src/runtime/storage/startup_integration.rs:402-408</code>) and that the public
   parser rejects a zero listen port with
-  <code>ConfigError::InvalidListen</code> (<code>src/runtime/storage/startup_integration.rs:396-406</code>).
+  <code>ConfigError::InvalidListen</code> (<code>src/runtime/storage/startup_integration.rs:409-419</code>).
   These fixtures add no public API, no listener-ownership change, and no buffer
   or profile expansion.</p>
 
@@ -1343,7 +1350,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>BailiwickZones::from_allowlist</code>
   (<code>src/dns/transport.rs:1457-1458</code>); the legacy window performs the same
   reinstall from its own <code>Config</code> at its admission sites
-  (<code>resolve_body</code>/<code>resolve_window</code>, <code>src/dns/transport.rs:2675</code>, <code>:2765</code>). The public
+  (<code>resolve_body</code>/<code>resolve_window</code>, <code>src/dns/transport.rs:2687</code>, <code>:2777</code>). The public
   <code>StartupDns::new</code> default remains a legitimate standalone API; the
   boot route simply installs the validated <code>Config</code> before the first
   resolve. One paired fixture exercises both owners against identical allowlists
@@ -1352,7 +1359,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   name), while without it the same cross-suffix CNAME is rejected on both and
   the window declares <code>Exit75</code> with zero resolved names
   (<code>configured_cross_suffix_cname_resolves_identically_on_shared_and_legacy_startup</code>,
-  <code>src/runtime/storage/startup_integration.rs:683</code>).</p>
+  <code>src/runtime/storage/startup_integration.rs:698</code>).</p>
 
   <h3>5.5 The typed exchange lifecycle</h3>
   <p><code>ExchangeClass</code> — <code>Startup</code>, <code>Serving</code>, or
@@ -1627,9 +1634,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   best-effort sink may drop before its drain, so delivery is not guaranteed. It is
   latched behind the first counted failure, where <code>StartupDns::resolve_window</code>
   emits it on the first <code>ExchangeResult::Failed</code>
-  (<code>src/dns/transport.rs:2847-2850</code>, where
+  (<code>src/dns/transport.rs:2859-2862</code>, where
   <code>WindowLedger::mark_failed</code> returns the one-per-ledger first-failure
-  capture at <code>:494-521</code>), and the cooperative
+  capture at <code>:504-532</code>), and the cooperative
   <code>Serving::run_startup_window</code> reaches the same record through
   <code>ServeStorage::startup_warning_first</code>
   (<code>src/runtime/reactor/startup.rs:92-99</code>, <code>src/runtime/storage.rs:777-788</code>).
@@ -1701,8 +1708,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   selection and clears the family's pending flag
   (<code>release_selection</code>, <code>src/dns/schedule.rs:318</code>), then clears the active
   exchange and yields <code>TurnResult::Superseded</code>
-  (<code>src/dns/transport.rs:2523-2524</code>, <code>:3050-3053</code>). The exchange-completion
-  loops fold the terminal result as a no-op (<code>src/dns/transport.rs:2736</code>, <code>:2858</code>);
+  (<code>src/dns/transport.rs:2535-2536</code>, <code>:3062-3065</code>). The exchange-completion
+  loops fold the terminal result as a no-op (<code>src/dns/transport.rs:2748</code>, <code>:2870</code>);
   the startup window's <code>Serving</code> turn ignores it and continues
   (<code>src/runtime/reactor/startup.rs:75</code>), and the serving owner's advance breaks
   without error (<code>src/runtime/owner.rs:398</code>) — a terminal outcome for this reply,
@@ -2147,10 +2154,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   deallocations, reallocations, and unphased counts all zero — over the
   <code>Runtime::turn → Serving::run_once</code> poll/pump paths:
   <code>hot_relay_turns_compose_with_bounded_stalled_dns</code>
-  (<code>src/runtime/owner/tests.rs:2821</code>, Serving phase, 17 hot relays + stalled
+  (<code>src/runtime/owner/tests.rs:2835</code>, Serving phase, 17 hot relays + stalled
   DNS + backlog + expiry across 900 owner turns) and
   <code>due_refresh_owner_path_spends_zero_allocations</code>
-  (<code>src/runtime/owner/tests.rs:3227</code>, BackgroundRefresh phase, 200 owner
+  (<code>src/runtime/owner/tests.rs:3241</code>, BackgroundRefresh phase, 200 owner
   turns). A separate pointer-transfer witness, not a numeric allocation
   witness, covers the second claim:
   <code>serving_consumes_boot_traffic_buffers_by_value_not_reallocation</code>
@@ -2191,7 +2198,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   exchange, distinct from the retained named storage the inventory reports — never
   a universal or total-event maximum. The boot-window zero-allocation witness is
   explicit that it applies to the bare-IP/plain-DNS path only
-  (<code>src/dns/transport/tests.rs:1594</code>, <code>:1620</code>, <code>:1627</code>).</p>
+  (<code>src/dns/transport/tests.rs:1599</code>, <code>:1625</code>, <code>:1632</code>).</p>
 
   <h3>7.3 The serving concurrency and scheduling envelope</h3>
   <p>The reactor is a single poll owner (<code>poll: Poll</code> on the
@@ -2703,7 +2710,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">DoT seam allocation profile (warm fixture bound 8)</th>
         <td><code>src/dns/transport.rs:1068-1087</code>, <code>:2085-2121</code>;
         <code>src/dns/transport/dot_tests.rs:1452</code>, <code>:1572-1576</code>;
-        <code>src/dns/transport/tests.rs:1594</code>, <code>:1620</code>, <code>:1627</code></td></tr>
+        <code>src/dns/transport/tests.rs:1599</code>, <code>:1625</code>, <code>:1632</code></td></tr>
       <tr><th scope="row">Memory floor (printed named-buffer plan)</th>
         <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code>,
         <code>:273-285</code>; <code>src/main.rs:33-39</code></td></tr>
@@ -2732,7 +2739,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Terminal sink state / shutdown-finish emit protocol</th>
         <td><code>src/log/sink.rs:100-179</code>, <code>:87-99</code>,
         <code>:32-47</code>, <code>:61-73</code>; <code>src/runtime/owner.rs:30-40</code>,
-        <code>:143-151</code>, <code>:353-357</code>; <code>src/runtime/owner/tests.rs:2980</code></td></tr>
+        <code>:143-151</code>, <code>:353-357</code>; <code>src/runtime/owner/tests.rs:2994</code></td></tr>
       <tr><th scope="row">Single clock / mount_clock re-anchor</th>
         <td><code>src/runtime/storage.rs:255</code>; <code>src/runtime/tunnel.rs:88-96</code>;
         <code>src/dns/transport.rs:1375-1377</code></td></tr>
