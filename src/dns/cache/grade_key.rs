@@ -7,11 +7,103 @@ use super::evidence::{AssuranceRequirement, Evidence, ProofClass, ResolverSource
 use super::{Cache, CacheError, Family, NameIndex, NegativeProof};
 
 /// The exact closed grade key of one cache entry at a point in time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct EntryGradeKey {
     required: AssuranceRequirement,
     a: Option<ProofClass>,
     aaaa: Option<ProofClass>,
+    a_retained: Option<RetainedGrade>,
+    aaaa_retained: Option<RetainedGrade>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RetainedGrade {
+    class: ProofClass,
+    valid: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EntryGradeMarker {
+    required: AssuranceRequirement,
+    a: FamilyMarker,
+    aaaa: FamilyMarker,
+}
+
+impl EntryGradeMarker {
+    pub(crate) fn new(initial: EntryGradeKey) -> Self {
+        Self {
+            required: initial.required,
+            a: FamilyMarker::new(initial.a, initial.a_retained),
+            aaaa: FamilyMarker::new(initial.aaaa, initial.aaaa_retained),
+        }
+    }
+
+    pub(crate) fn observe(&mut self, next: EntryGradeKey) -> bool {
+        let requirement_changed = self.required != next.required;
+        let a_changed = self.a.observe(next.a, next.a_retained);
+        let aaaa_changed = self.aaaa.observe(next.aaaa, next.aaaa_retained);
+        self.required = next.required;
+        requirement_changed || a_changed || aaaa_changed
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FamilyMarker {
+    last_current: Option<ProofClass>,
+    known_class: Option<ProofClass>,
+    known_valid: Option<bool>,
+}
+
+impl FamilyMarker {
+    fn new(current: Option<ProofClass>, retained: Option<RetainedGrade>) -> Self {
+        Self {
+            last_current: current,
+            known_class: observed_class(current, retained),
+            known_valid: retained.map(|proof| proof.valid),
+        }
+    }
+
+    fn observe(&mut self, current: Option<ProofClass>, retained: Option<RetainedGrade>) -> bool {
+        let class = observed_class(current, retained);
+        let valid = retained.map(|proof| proof.valid);
+        let strong_loss = matches!(
+            self.last_current,
+            Some(ProofClass::Authenticated | ProofClass::Delegated)
+        ) && current.is_none()
+            && retained.is_none()
+            && self.known_valid == Some(true);
+        let class_changed = match (self.known_class, class) {
+            (Some(before), Some(after)) => before != after,
+            (None, Some(_)) => valid == Some(true) && self.known_valid != Some(true),
+            (Some(_), None) | (None, None) => false,
+        };
+        let validity_changed = matches!(
+            (self.known_valid, valid),
+            (Some(true), Some(false)) | (Some(false), Some(true))
+        );
+        self.last_current = current;
+        if strong_loss {
+            self.known_class = None;
+            self.known_valid = None;
+        } else {
+            self.known_class = match (valid, class) {
+                (Some(false), None) => None,
+                (_, _) => class.or(self.known_class),
+            };
+            self.known_valid = valid.or(self.known_valid);
+        }
+        class_changed || validity_changed || strong_loss
+    }
+}
+
+fn observed_class(
+    current: Option<ProofClass>,
+    retained: Option<RetainedGrade>,
+) -> Option<ProofClass> {
+    match retained {
+        Some(RetainedGrade { class, valid: true }) => Some(class),
+        Some(RetainedGrade { valid: false, .. }) | None => current,
+    }
 }
 
 impl Cache {
@@ -20,9 +112,9 @@ impl Cache {
     /// Each family is `None` when the cache commits no currently achieved
     /// assurance (empty, unresolved, unevidenced-negative, or not servable);
     /// otherwise it is the committed served class of the established positive
-    /// or the valid negative proof's class. Answer kind (positive, NODATA,
-    /// NXDOMAIN) is never part of the key, and a Trusted-class evidence window
-    /// closing without changing the served class is also not.
+    /// or the valid negative proof's class. Retained proof presence and time
+    /// validity are separate from current grade; answer kind, source, address,
+    /// generation, and deadline are not part of the key.
     ///
     /// # Errors
     ///
@@ -33,6 +125,18 @@ impl Cache {
             required: self.requirements[name.get()],
             a: self.achieved_assurance(name, Family::A, now)?,
             aaaa: self.achieved_assurance(name, Family::Aaaa, now)?,
+            a_retained: self
+                .family_retained(name, Family::A, now)?
+                .map(|p| RetainedGrade {
+                    class: p.class(),
+                    valid: p.time_valid(),
+                }),
+            aaaa_retained: self
+                .family_retained(name, Family::Aaaa, now)?
+                .map(|p| RetainedGrade {
+                    class: p.class(),
+                    valid: p.time_valid(),
+                }),
         })
     }
 

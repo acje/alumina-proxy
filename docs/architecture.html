@@ -1306,6 +1306,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   The snapshot size is checked against an existing record slot and a widest-name
   capture-and-enqueue witness checks allocation in the logging phase
   (<code>src/runtime/storage.rs:1462-1471</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
+  <p>The cache also exposes a dormant per-entry grade key containing the required
+  minimum, each family's current grade and its retained proof's optional class
+  and time validity as separate facts. Its fixed-size marker retains last known
+  class and validity across absent intervals and compares both families on each
+  observation. Establishing a valid proof with no prior class knowledge is
+  material even without an eligible address; the current grade remains absent.
+  The comparison uses a retained class only while time-valid;
+  an invalid historical class is not a current grade. Source, address,
+  generation and proof deadline are not key fields. This read model does not
+  itself schedule or emit change or expiry records
+  (<code>src/dns/cache/grade_key.rs:9-107</code>, <code>:122-141</code>;
+  spec <code>docs/alumina-proxy.md:1831-1832</code>).</p>
   <p>Only fully validated outcomes reach the cache: the outcome-application
   body <code>dns::publication::apply_outcome</code>
   (<code>src/dns/publication.rs:38</code>, named-re-exported as
