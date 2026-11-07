@@ -54,9 +54,67 @@ fn emit_terminal_shutdown_finish(
 /// }
 /// ```
 pub struct Preallocated {
-    serving: Serving,
+    serving: Box<Serving>,
     dns_token: Token,
 }
+
+/// A failed attachment retaining the non-reusable boot owner until process exit.
+pub struct AttachFailure {
+    error: ServeError,
+    owner: Preallocated,
+}
+
+impl std::fmt::Debug for AttachFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachFailure")
+            .field("error", &self.error)
+            .field("dns_token", &self.owner.dns_token)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for AttachFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for AttachFailure {}
+
+/// Failure before or during attachment of the serving owner.
+#[derive(Debug)]
+pub enum RuntimeBuildError {
+    Preallocate(ServeError),
+    Attach(AttachFailure),
+}
+
+const _: () = {
+    assert!(
+        std::mem::size_of::<Preallocated>() <= std::mem::size_of::<(Box<Serving>, Token)>(),
+        "preallocated owner must remain one serving box and token"
+    );
+    assert!(
+        std::mem::size_of::<AttachFailure>()
+            <= std::mem::size_of::<(Box<Serving>, Token, ServeError)>(),
+        "attachment failure must remain bounded by the owner pointer and error"
+    );
+    assert!(
+        std::mem::size_of::<RuntimeBuildError>()
+            <= std::mem::size_of::<(Box<Serving>, Token, ServeError, bool)>(),
+        "build error must remain bounded by the owner pointer, error and tag"
+    );
+};
+
+impl std::fmt::Display for RuntimeBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Preallocate(error) => error.fmt(f),
+            Self::Attach(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeBuildError {}
 
 impl Preallocated {
     /// Test-only writable handle to the SIGTERM self-pipe retained by the
@@ -82,7 +140,7 @@ impl Preallocated {
         traffic: crate::inventory::TrafficStorage,
     ) -> Result<Preallocated, ServeError> {
         let dns_token = Serving::dns_token();
-        let serving = Serving::preallocate(storage, traffic)?;
+        let serving = Box::new(Serving::preallocate(storage, traffic)?);
         Ok(Preallocated { serving, dns_token })
     }
 
@@ -158,20 +216,26 @@ impl Preallocated {
     ///
     /// # Errors
     ///
-    /// Returns a serve error when the listener registration or the shared DNS
-    /// registration fails.
-    pub fn attach(mut self, listener: TcpListener) -> Result<Runtime, ServeError> {
+    /// Returns an error retaining the owner when listener or shared DNS
+    /// registration fails. The caller must exit without dropping that error.
+    pub fn attach(mut self, listener: TcpListener) -> Result<Runtime, RuntimeBuildError> {
         if let Err(err) = self.serving.attach_listener(listener) {
             self.serving
                 .storage_mut()
                 .emit_fatal_and_drain(format_args!("attach listener failed: {err}"));
-            return Err(err);
+            return Err(RuntimeBuildError::Attach(AttachFailure {
+                error: err,
+                owner: self,
+            }));
         }
         if let Err(err) = self.serving.attach_dns_shared() {
             self.serving
                 .storage_mut()
                 .emit_fatal_and_drain(format_args!("attach dns failed: {err}"));
-            return Err(err);
+            return Err(RuntimeBuildError::Attach(AttachFailure {
+                error: err,
+                owner: self,
+            }));
         }
         Ok(Runtime {
             serving: self.serving,
@@ -198,7 +262,7 @@ impl Preallocated {
 /// it always owns an attached listener and all `sized` serving workspaces:
 /// the serve loop and per-turn dispatch are reachable only here.
 pub struct Runtime {
-    serving: Serving,
+    serving: Box<Serving>,
     dns_token: Token,
     /// Test-only count of cooperative DNS advances actually made on the most
     /// recent owner turn, so fixtures assert the eight-step turn bound against
@@ -218,14 +282,16 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// Returns a serve error when the serving poll, the listener registration,
-    /// or the shared DNS registration fails.
+    /// Returns a preallocation error or an attachment error retaining the owner.
+    /// After an attachment error the caller must exit without dropping it.
     pub fn new(
         storage: ServeStorage,
         listener: TcpListener,
         traffic: crate::inventory::TrafficStorage,
-    ) -> Result<Runtime, ServeError> {
-        Preallocated::preallocate(storage, traffic)?.attach(listener)
+    ) -> Result<Runtime, RuntimeBuildError> {
+        Preallocated::preallocate(storage, traffic)
+            .map_err(RuntimeBuildError::Preallocate)?
+            .attach(listener)
     }
 
     /// The serving engine, for host observation.
@@ -239,7 +305,7 @@ impl Runtime {
     /// shutdown through [`Self::turn`] (the production path) rather than a
     /// detached helper.
     #[cfg(all(test, feature = "alloc-witness"))]
-    pub(crate) const fn serving_mut(&mut self) -> &mut Serving {
+    pub(crate) fn serving_mut(&mut self) -> &mut Serving {
         &mut self.serving
     }
 
@@ -359,7 +425,7 @@ impl Runtime {
     /// DNS work is due without a freshness event when the outstanding exchange
     /// can proceed on its own (the next write attempts without waiting) and
     /// must not be starved by a quiet traffic set.
-    const fn dns_sendable_without_wait(&self) -> bool {
+    fn dns_sendable_without_wait(&self) -> bool {
         self.serving.storage().dns().has_active_exchange()
             && !self.serving.storage().dns().needs_wait()
     }
@@ -379,7 +445,7 @@ impl Runtime {
     /// deadline, so the wait is zeroed and the owner re-advances on its own;
     /// otherwise the caller-provided timeout stands (internal deadlines are
     /// folded by the reactor).
-    const fn effective_poll_timeout(&self, timeout: Option<Duration>) -> Option<Duration> {
+    fn effective_poll_timeout(&self, timeout: Option<Duration>) -> Option<Duration> {
         if self.dns_sendable_without_wait() {
             Some(Duration::ZERO)
         } else {

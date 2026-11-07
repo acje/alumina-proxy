@@ -4,7 +4,7 @@ pub(crate) mod reactor;
 pub(crate) mod storage;
 pub(crate) mod tunnel;
 
-pub use owner::{Preallocated, Runtime};
+pub use owner::{AttachFailure, Preallocated, Runtime, RuntimeBuildError};
 pub use reactor::{ServeError, Serving, Shutdown};
 pub use storage::{
     ServeStorage, ServingMode, StartupDecision, StartupError, StartupOutcome, StartupState,

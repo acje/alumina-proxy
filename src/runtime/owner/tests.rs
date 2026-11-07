@@ -3804,6 +3804,134 @@ mod probe_records {
     }
 }
 
+#[cfg(all(feature = "alloc-witness", any(target_os = "linux", debug_assertions)))]
+#[test]
+fn post_startup_listener_registration_failure_retains_boot_owner() {
+    thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use std::os::unix::net::UnixStream;
+
+            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let mut storage = ServeStorage::boot(&config).unwrap();
+            storage.publish_test_a(0);
+            let (_reader, writer) = UnixStream::pair().unwrap();
+            writer.set_nonblocking(true).unwrap();
+            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
+            let outcome = owner.run_startup_within(SocketAddr::from(([127, 0, 0, 1], 9)), 1000, Duration::ZERO).unwrap();
+            assert_eq!(outcome.decision(), StartupDecision::Serve(ServingMode::Full));
+            let mut listener = outcome.into_listener().unwrap();
+            owner.serving().registry().register(&mut listener, mio::Token(9000), mio::Interest::READABLE).unwrap();
+            let owner_pointer = std::ptr::from_ref(owner.serving());
+            let (control, baseline) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                owner.serving().registry().register(&mut listener, mio::Token(9000), mio::Interest::READABLE).map_err(ServeError::from)
+            });
+            assert!(format!("{:?}", control.unwrap_err()).contains("AlreadyExists"));
+            let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || owner.attach(listener));
+            let error = match result { Err(RuntimeBuildError::Attach(error)) => error, Err(error) => panic!("unexpected error: {error:?}"), Ok(_) => panic!("duplicate registration unexpectedly succeeded") };
+            assert!(format!("{error:?}").contains("AlreadyExists"), "actual registration error: {error:?}");
+            assert_eq!(std::ptr::from_ref(error.owner.serving()), owner_pointer);
+            assert!(error.owner.serving.test_slot_closed(0));
+            assert!(error.owner.serving.test_slot_closed(crate::inventory::TUNNEL_SLOTS - 1));
+            assert!(error.owner.serving.storage().cache().name_index(0).is_some());
+            println!("duplicate_registration_control={baseline:?} post_startup_attach_error_counts={counts:?}");
+            assert_eq!(counts, baseline, "attachment error must add no first-party heap activity beyond the same actual Mio error path");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn attachment_result_ownership_layout_is_measured() {
+    use std::mem::{align_of, size_of};
+    type Old = Result<Runtime, ServeError>;
+    type New = Result<Runtime, RuntimeBuildError>;
+    println!(
+        "layout old_result={} old_align={} new_result={} new_align={} preallocated={} preallocated_align={} runtime={} runtime_align={} attach_failure={} attach_failure_align={} error={} error_align={} serving_payload={} serving_payload_align={} box_pointer={}",
+        size_of::<Old>(),
+        align_of::<Old>(),
+        size_of::<New>(),
+        align_of::<New>(),
+        size_of::<Preallocated>(),
+        align_of::<Preallocated>(),
+        size_of::<Runtime>(),
+        align_of::<Runtime>(),
+        size_of::<AttachFailure>(),
+        align_of::<AttachFailure>(),
+        size_of::<RuntimeBuildError>(),
+        align_of::<RuntimeBuildError>(),
+        size_of::<Serving>(),
+        align_of::<Serving>(),
+        size_of::<Box<Serving>>()
+    );
+    assert!(size_of::<Preallocated>() <= size_of::<(Box<Serving>, mio::Token)>());
+    assert!(size_of::<AttachFailure>() <= size_of::<(Box<Serving>, mio::Token, ServeError)>());
+}
+
+#[test]
+fn public_owner_accessors_remain_const_callable() {
+    const fn preallocated(owner: &Preallocated) -> &Serving {
+        owner.serving()
+    }
+    const fn runtime(owner: &Runtime) -> &Serving {
+        owner.serving()
+    }
+    const fn shutdown(owner: &Runtime) -> Shutdown {
+        owner.shutdown()
+    }
+    let _ = preallocated as fn(&Preallocated) -> &Serving;
+    let _ = runtime as fn(&Runtime) -> &Serving;
+    let _ = shutdown as fn(&Runtime) -> Shutdown;
+}
+
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn post_startup_attachment_success_transfers_the_same_boot_owner() {
+    thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use std::os::unix::net::UnixStream;
+
+            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let mut storage = ServeStorage::boot(&config).unwrap();
+            storage.publish_test_a(0);
+            let (_reader, writer) = UnixStream::pair().unwrap();
+            writer.set_nonblocking(true).unwrap();
+            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
+            let outcome = owner
+                .run_startup_within(SocketAddr::from(([127, 0, 0, 1], 9)), 1000, Duration::ZERO)
+                .unwrap();
+            assert_eq!(
+                outcome.decision(),
+                StartupDecision::Serve(ServingMode::Full)
+            );
+            let owner_pointer = std::ptr::from_ref(owner.serving());
+            let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                owner.attach(outcome.into_listener().unwrap())
+            });
+            let runtime = result.unwrap();
+            assert_eq!(std::ptr::from_ref(runtime.serving()), owner_pointer);
+            assert!(runtime.serving.test_slot_closed(0));
+            assert!(
+                runtime
+                    .serving
+                    .test_slot_closed(crate::inventory::TUNNEL_SLOTS - 1)
+            );
+            assert!(
+                counts.all_zero(),
+                "attachment success must move the same boot owner without heap activity: {counts:?}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 mod due_refresh {
     use super::*;
 

@@ -37,6 +37,8 @@ fn main() {
         "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"notify\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
     );
     let config = parse_config_document(&doc).expect("valid config");
+    #[cfg(feature = "alloc-witness")]
+    actual_attach_registration_failure_on_main(&config);
     let storage = ServeStorage::boot(&config).expect("boot storage");
     let traffic = TrafficStorage::allocate().expect("allocate traffic storage");
     let mut runtime =
@@ -124,4 +126,42 @@ fn main() {
     println!(
         "MAIN-THREAD-STACK-OK loops={LOOPS} accept+reset cycles on true main thread; over-long-head refusals={OVERLONG_LOOPS}"
     );
+}
+
+#[cfg(feature = "alloc-witness")]
+fn actual_attach_registration_failure_on_main(config: &alumina::config::Config) {
+    use alumina::alloc::{Phase, run_phase};
+    use alumina::runtime::{Preallocated, RuntimeBuildError, ServeError};
+
+    let storage = ServeStorage::boot(config).expect("boot failure-probe storage");
+    let traffic = TrafficStorage::allocate().expect("boot failure-probe traffic");
+    let owner =
+        Preallocated::preallocate(storage, traffic).expect("preallocate failure-probe owner");
+    let mut listener =
+        MioListener::bind("127.0.0.1:0".parse().unwrap()).expect("bind probe listener");
+    owner
+        .serving()
+        .registry()
+        .register(&mut listener, mio::Token(9000), mio::Interest::READABLE)
+        .expect("register once");
+    let (control, baseline) = run_phase(Phase::Serving, || {
+        owner
+            .serving()
+            .registry()
+            .register(&mut listener, mio::Token(9000), mio::Interest::READABLE)
+            .map_err(ServeError::from)
+    });
+    assert!(format!("{:?}", control.unwrap_err()).contains("AlreadyExists"));
+    let (result, counts) = run_phase(Phase::Serving, || owner.attach(listener));
+    let error = match &result {
+        Err(RuntimeBuildError::Attach(error)) => error,
+        Err(error) => panic!("unexpected failure: {error:?}"),
+        Ok(_) => panic!("duplicate registration unexpectedly succeeded"),
+    };
+    assert!(format!("{error:?}").contains("AlreadyExists"));
+    assert_eq!(
+        counts, baseline,
+        "attachment added heap activity beyond the same Mio failure"
+    );
+    println!("MAIN-ATTACH-RETAINED-OK control={baseline:?} attach={counts:?}");
 }
