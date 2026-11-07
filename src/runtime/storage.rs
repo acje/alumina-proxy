@@ -24,7 +24,7 @@ use crate::enforcement::action::DomainOrdinal;
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::enforcement::state::Enforcement;
 use crate::inspection::connect::ConnectRequest;
-use crate::log::{Level, LogStore, ResolverProbeSegment};
+use crate::log::{Level, LogStore, ResolverProbeSegment, StartupStatus};
 #[cfg(test)]
 use crate::names::hostname::FixedHostname;
 use crate::runtime::tunnel::{
@@ -40,17 +40,11 @@ use crate::runtime::tunnel::{
 /// always representable on every supported platform.
 const SCHEDULE_FAR_FUTURE_SECS: u64 = 365 * 24 * 60 * 60 * 10;
 
-/// Bound on the startup drain turns: the readiness decision enqueues one
-/// `startup_name` record per unresolved name — at most `ALLOWLIST_MAX` (32) —
-/// plus the one `startup_final` summary, so at most 33 records, and one
-/// [`LogStore::drain_sink`] turn carries at most `SINK_MAX_OPS` (16) gathered
-/// fragments or `SINK_MAX_BYTES` (64 KiB), whichever binds first. The worst
-/// case is therefore
-/// `max(ceil(33 / 16), ceil(33 x 8 KiB / 64 KiB)) = max(3, 5) = 5` turns; this
-/// cap keeps one further turn of slack for a partial write that ends a turn
-/// mid-record. A sink that makes no progress at all stops the loop earlier
-/// (`WouldBlock`/failed) instead of spending the cap, and the real emission
-/// (32 names of at most 380 B plus the summary, ~13 KiB) needs three.
+/// Bound on startup drain turns, unchanged by the assurance burst. A decision
+/// attempts at most 32 assurance records, 32 unresolved-name records and one
+/// summary. Each [`LogStore::drain_sink`] turn retains its existing operation
+/// and byte budgets. A blocked or failed sink stops the loop early; a serving
+/// decision retains residue, while an exit decision counts it as stranded.
 const STARTUP_DRAIN_TURNS: usize = 6;
 
 /// The retained serving storage initialized once before the postboot phase.
@@ -87,6 +81,14 @@ pub(crate) struct AssuranceSnapshot {
     fqdn: Fqdn,
     families: [FamilySnapshot; 2],
     secs: u64,
+    boot: Option<AssuranceBoot>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AssuranceBoot {
+    pub(crate) status: StartupStatus,
+    pub(crate) attempted: [bool; 2],
+    pub(crate) results: [Option<Result<PublishedKind, FailureReason>>; 2],
 }
 
 impl AssuranceSnapshot {
@@ -96,6 +98,10 @@ impl AssuranceSnapshot {
 
     pub(crate) const fn secs(&self) -> u64 {
         self.secs
+    }
+
+    pub(crate) const fn boot(&self) -> Option<AssuranceBoot> {
+        self.boot
     }
 
     pub(crate) const fn family(&self, family: Family) -> &FamilySnapshot {
@@ -125,6 +131,17 @@ pub enum StartupDecision {
     Serve(ServingMode),
     Exit75 { unresolved: u32 },
     Terminated,
+}
+
+impl StartupDecision {
+    const fn status(self) -> StartupStatus {
+        match self {
+            Self::Serve(ServingMode::Full) => StartupStatus::Full,
+            Self::Serve(ServingMode::Degraded) => StartupStatus::Degraded,
+            Self::Exit75 { .. } => StartupStatus::Failed,
+            Self::Terminated => StartupStatus::Terminated,
+        }
+    }
 }
 
 /// The outcome of the boot-owned startup window: the listener-carrying
@@ -229,16 +246,25 @@ impl ServeStorage {
         ordinal: usize,
         now: Instant,
     ) -> Result<AssuranceSnapshot, CacheError> {
+        let secs = self.work_view().cache_secs(now);
+        self.capture_assurance_secs(ordinal, secs)
+    }
+
+    fn capture_assurance_secs(
+        &self,
+        ordinal: usize,
+        secs: u64,
+    ) -> Result<AssuranceSnapshot, CacheError> {
         let view = self.work_view();
         let fqdn = view.fqdn_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
         let name = view.name_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
-        let secs = view.cache_secs(now);
         let a = view.cache().family_snapshot(name, Family::A, secs)?;
         let aaaa = view.cache().family_snapshot(name, Family::Aaaa, secs)?;
         Ok(AssuranceSnapshot {
             fqdn: fqdn.clone(),
             families: [a, aaaa],
             secs,
+            boot: None,
         })
     }
 
@@ -1201,10 +1227,11 @@ impl ServeStorage {
         terminated: bool,
     ) -> Result<StartupOutcome, StartupError> {
         self.mount_clock(self.dns.window_start(), now0);
+        let secs = now0.saturating_add(decision_seconds);
         let decision = if terminated {
             StartupDecision::Terminated
         } else {
-            self.startup_decision(now0 + decision_seconds)?
+            self.startup_decision(secs)?
         };
         let state = match decision {
             StartupDecision::Serve(mode) => StartupState::Serve {
@@ -1214,7 +1241,33 @@ impl ServeStorage {
             StartupDecision::Exit75 { unresolved } => StartupState::Exit75 { unresolved },
             StartupDecision::Terminated => StartupState::Terminated,
         };
-        self.emit_startup_records(now0 + decision_seconds, &report, decision);
+        let status = decision.status();
+        match status {
+            StartupStatus::Terminated => {}
+            StartupStatus::Full | StartupStatus::Degraded | StartupStatus::Failed => {
+                for (ordinal, fqdn) in self.config.allowlist().iter().enumerate() {
+                    let boot = AssuranceBoot {
+                        status,
+                        attempted: report.attempted[ordinal],
+                        results: report.family_results[ordinal],
+                    };
+                    match self.capture_assurance_secs(ordinal, secs) {
+                        Ok(mut snapshot) => {
+                            snapshot.boot = Some(boot);
+                            self.logs.enqueue_assurance(
+                                &snapshot,
+                                0,
+                                crate::log::AssurancePhase::Boot,
+                            );
+                        }
+                        Err(_) => {
+                            self.logs.enqueue_assurance_unknown(fqdn, secs, boot);
+                        }
+                    }
+                }
+            }
+        }
+        self.emit_startup_records(secs, &report, decision);
         Ok(StartupOutcome { state, report })
     }
 
@@ -1242,15 +1295,10 @@ impl ServeStorage {
     ) {
         use crate::config::ALLOWLIST_MAX;
         use crate::dns::transport::NameOutcome;
-        use crate::log::{FinalCounts, StartupStatus, StartupUnresolved};
+        use crate::log::{FinalCounts, StartupUnresolved};
         let allowlist = self.config.allowlist();
         let names = allowlist.len() as u64;
-        let status = match decision {
-            StartupDecision::Serve(ServingMode::Full) => StartupStatus::Full,
-            StartupDecision::Serve(ServingMode::Degraded) => StartupStatus::Degraded,
-            StartupDecision::Exit75 { .. } => StartupStatus::Failed,
-            StartupDecision::Terminated => StartupStatus::Terminated,
-        };
+        let status = decision.status();
         let mut embedded = [StartupUnresolved {
             ordinal: 0,
             name: "",
@@ -1513,6 +1561,423 @@ mod assurance_bridge_tests {
         );
     }
 
+    #[test]
+    fn widest_boot_frame_including_retained_proofs_fits_slot() {
+        use crate::dns::cache::Family;
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Generation, StagedPositive};
+        use crate::dns::transport::FailureReason;
+        use crate::eligibility::NumericAddr;
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let name = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        let doc = format!(
+            "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nrecursive_dnssec_policy = \"root_validating_no_stale\"\nresolver = [\"1.1.1.1#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"8.8.8.8#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"9.9.9.9#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"8.8.4.4#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"1.0.0.1#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"{name}:65535\"]\ndns_assurance = \"resolver_authenticated\"\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+        );
+        let config = crate::config::parse_config_document(&doc).unwrap();
+        let mut storage = ServeStorage::boot(&config).unwrap();
+        assert_eq!(name.len(), crate::names::hostname::FQDN_MAX_LEN);
+        let start = u64::MAX - 300_000;
+        let evidence = Evidence::new(
+            false,
+            true,
+            false,
+            ResolverSource::index(4).unwrap(),
+            Some(300),
+            start,
+        )
+        .unwrap();
+        let index = storage.cache.name_index(0).unwrap();
+        for family in Family::ALL {
+            let addresses: Vec<_> = (1..=16)
+                .map(|i| match family {
+                    Family::A => NumericAddr::V4(Ipv4Addr::new(8, 8, 8, i)),
+                    Family::Aaaa => NumericAddr::V6(Ipv6Addr::new(
+                        0x2606,
+                        0x4700,
+                        0x4700,
+                        0,
+                        0,
+                        0,
+                        0,
+                        u16::from(i),
+                    )),
+                })
+                .collect();
+            let staged = StagedPositive::stage_with_evidence(
+                index,
+                family,
+                Generation::INITIAL,
+                &addresses,
+                start,
+                300,
+                Some(evidence),
+            )
+            .unwrap();
+            storage.cache.publish_positive(&staged).unwrap();
+        }
+        let mut snapshot = storage.capture_assurance_secs(0, start + 5).unwrap();
+        snapshot.boot = Some(super::AssuranceBoot {
+            status: crate::log::StartupStatus::Degraded,
+            attempted: [true; 2],
+            results: [Some(Err(FailureReason::InsufficientAssurance)); 2],
+        });
+        storage.logs.saturate_dropped_for_test();
+        assert!(storage.emit_assurance(&snapshot, u64::MAX, AssurancePhase::Boot));
+        assert_eq!(storage.logs.dropped(), u64::MAX);
+        let frame = storage.logs().last_record_bytes().unwrap();
+        let text = std::str::from_utf8(frame).unwrap();
+        assert!(
+            text.contains("a_retained_class=\"authenticated\"")
+                && text.contains("aaaa_retained_class=\"authenticated\"")
+        );
+        assert!(
+            text.contains("a_reason=\"insufficient_assurance\"")
+                && text.contains("aaaa_reason=\"insufficient_assurance\"")
+        );
+        for family in ["a", "aaaa"] {
+            assert!(text.contains(&format!("{family}_required=\"resolver_authenticated\"")));
+            assert!(text.contains(&format!("{family}_current=\"authenticated\"")));
+            assert!(text.contains(&format!("{family}_usable=16")));
+            assert!(text.contains(&format!("{family}_retained_source=4")));
+        }
+        assert!(
+            text.contains("seq=18446744073709551615")
+                && text.contains(&format!("secs={}", start + 5))
+        );
+        assert!(text.contains(&name) && text.contains("port=65535") && text.ends_with('\n'));
+        assert!(frame.len() <= crate::log::SLOT_BYTES);
+        println!("widest_boot_frame_bytes={}", frame.len());
+    }
+
+    #[test]
+    fn boot_frame_uses_readiness_second_for_retained_expiry() {
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::StartupReport;
+        use crate::eligibility::NumericAddr;
+        use std::io::Read as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut storage = storage();
+        storage.config = storage.config.clone().with_kernel_assigned_test_listener();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let index = storage.cache.name_index(0).unwrap();
+        let evidence = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(3),
+            1000,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            index,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1000,
+            3,
+            Some(evidence),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        let outcome = storage
+            .settle_startup(1000, StartupReport::default(), 5, false)
+            .unwrap();
+        assert_eq!(
+            outcome.decision(),
+            super::StartupDecision::Serve(super::ServingMode::Full)
+        );
+        let mut bytes = [0u8; 8192];
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let frame = text
+            .lines()
+            .find(|line| line.contains("kind=dns_assurance"))
+            .unwrap();
+        assert!(
+            frame.contains("secs=1005") && frame.contains("a_retained_time_valid=0"),
+            "decision clock, not a resampled clock: {frame}"
+        );
+        assert!(
+            frame.contains("a_current=\"trusted\"")
+                && frame.contains("a_retained_class=\"delegated\""),
+            "current and retained facts remain distinct: {frame}"
+        );
+    }
+
+    #[test]
+    fn boot_failure_conclusion_does_not_replace_valid_retained_proof() {
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::{FailureReason, StartupReport};
+        use crate::eligibility::NumericAddr;
+        use std::io::Read as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut storage = storage();
+        storage.config = storage.config.clone().with_kernel_assigned_test_listener();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let index = storage.cache.name_index(0).unwrap();
+        let proof = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(30),
+            1000,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            index,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1000,
+            30,
+            Some(proof),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        let mut report = StartupReport::default();
+        report.attempted[0] = [true, false];
+        report.family_results[0][0] = Some(Err(FailureReason::InsufficientAssurance));
+        let outcome = storage.settle_startup(1000, report, 5, false).unwrap();
+        assert_eq!(
+            outcome.decision(),
+            super::StartupDecision::Serve(super::ServingMode::Full)
+        );
+        let mut bytes = [0u8; 8192];
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let frame = text
+            .lines()
+            .find(|line| line.contains("kind=dns_assurance"))
+            .unwrap();
+        assert!(
+            frame.contains("a_last=\"failed\" a_reason=\"insufficient_assurance\""),
+            "{frame}"
+        );
+        assert!(
+            frame.contains("a_current=\"delegated\"") && frame.contains("a_retained_time_valid=1"),
+            "{frame}"
+        );
+        assert!(
+            frame.contains("aaaa_attempted=0 aaaa_last=\"none\""),
+            "{frame}"
+        );
+    }
+
+    #[test]
+    fn unknown_boot_snapshot_is_explicit_and_does_not_invent_family_facts() {
+        use crate::dns::transport::FailureReason;
+        let mut storage = storage();
+        let fqdn = storage.config.allowlist().get(0).unwrap().clone();
+        let boot = super::AssuranceBoot {
+            status: crate::log::StartupStatus::Failed,
+            attempted: [true, false],
+            results: [Some(Err(FailureReason::Timeout)), None],
+        };
+        assert!(
+            storage
+                .logs
+                .enqueue_assurance_unknown(&fqdn, u64::MAX, boot)
+        );
+        let text = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(
+            text.contains("cache_snapshot=unknown") && text.contains("secs=18446744073709551615"),
+            "{text}"
+        );
+        assert!(
+            text.contains("a_attempted=1 a_last=\"failed\" a_reason=\"timeout\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("aaaa_attempted=0 aaaa_last=\"none\"") && !text.contains("a_current="),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn startup_decision_and_boot_frame_saturate_at_clock_limit() {
+        use crate::dns::cache::Family;
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Generation, StagedPositive};
+        use crate::dns::transport::StartupReport;
+        use crate::eligibility::NumericAddr;
+        use std::io::Read as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut storage = storage();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let index = storage.cache.name_index(0).unwrap();
+        let staged = StagedPositive::stage(
+            index,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1000,
+            30,
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        assert!(
+            storage.cache.is_name_admissible(index, 0).unwrap(),
+            "wrapping the clock would spuriously revive the old binding"
+        );
+        let proof = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(9),
+            u64::MAX - 10,
+        )
+        .unwrap();
+        storage
+            .cache
+            .evict_nodata_evidenced(index, Family::Aaaa, proof)
+            .unwrap();
+        let outcome = storage
+            .settle_startup(u64::MAX, StartupReport::default(), 1, false)
+            .unwrap();
+        assert_eq!(
+            outcome.decision(),
+            super::StartupDecision::Exit75 { unresolved: 1 }
+        );
+        let mut bytes = [0u8; 8192];
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let frame = text
+            .lines()
+            .find(|line| line.contains("kind=dns_assurance"))
+            .unwrap();
+        assert!(
+            frame.contains("secs=18446744073709551615"),
+            "no clock wrap: {frame}"
+        );
+        assert!(
+            frame.contains("a_current=\"none\"") && frame.contains("aaaa_retained_time_valid=0"),
+            "expired binding and proof must not revive: {frame}"
+        );
+    }
+
+    #[test]
+    fn full_log_ring_does_not_change_boot_decision() {
+        use crate::dns::cache::Family;
+        use crate::dns::transport::StartupReport;
+        use std::io::{self, Write as _};
+        use std::os::unix::net::UnixStream;
+
+        let mut storage = storage();
+        let (_reader, mut writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let mut blocked = false;
+        for _ in 0..4096 {
+            match writer.write(&[0u8; 4096]) {
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    blocked = true;
+                    break;
+                }
+                Err(err) => panic!("fill socket: {err}"),
+            }
+        }
+        assert!(blocked, "socket must be full before settlement");
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        while !storage.logs.is_full() {
+            storage
+                .logs
+                .startup_warning_ctx(0, "alpha.example.org", Family::A, "timeout", None);
+        }
+        let before = storage.logs.dropped();
+        let outcome = storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert_eq!(
+            outcome.decision(),
+            super::StartupDecision::Exit75 { unresolved: 1 }
+        );
+        assert_eq!(
+            storage.logs.dropped() - before,
+            crate::log::QUEUE_SLOTS as u64 + 3,
+            "all previously queued records and the boot, unresolved-name and reserved summary attempts are counted"
+        );
+        assert!(
+            !storage.logs.sink_has_failed(),
+            "backpressure is not a hard sink failure"
+        );
+        assert_eq!(storage.logs.len(), 0, "exit strands the held queue");
+    }
+
+    #[test]
+    fn hard_sink_failure_keeps_decision_and_latches_error() {
+        use crate::dns::transport::StartupReport;
+        use std::os::unix::net::UnixStream;
+        let mut storage = storage();
+        let (reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        drop(reader);
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let outcome = storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert_eq!(
+            outcome.decision(),
+            super::StartupDecision::Exit75 { unresolved: 1 }
+        );
+        assert!(
+            storage.logs.sink_has_failed(),
+            "hard failure must remain latched for the owner"
+        );
+        assert_eq!(
+            storage.logs.dropped(),
+            3,
+            "boot, startup name and final records are counted"
+        );
+        assert_eq!(storage.logs.len(), 0);
+    }
+
+    #[test]
+    fn terminated_startup_emits_no_assurance_boot_records() {
+        use crate::dns::transport::StartupReport;
+        use std::io::Read as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut storage = storage();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let outcome = storage
+            .settle_startup(1000, StartupReport::default(), 0, true)
+            .unwrap();
+        assert_eq!(outcome.decision(), super::StartupDecision::Terminated);
+        assert!(outcome.listener().is_none());
+        let mut bytes = [0u8; 8192];
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        assert!(
+            text.contains("kind=startup_final") && text.contains("status=\"terminated\""),
+            "{text}"
+        );
+        assert!(!text.contains("kind=dns_assurance"), "{text}");
+        assert_eq!(storage.logs.dropped(), 0);
+    }
+
     #[cfg(feature = "alloc-witness")]
     #[test]
     fn owner_assurance_bridge_spends_zero_allocations() {
@@ -1525,5 +1990,61 @@ mod assurance_bridge_tests {
         });
         assert_eq!(result, Ok(true));
         assert!(counts.all_zero(), "owner bridge allocations: {counts:?}");
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn initial_assurance_real_settlement_32_entries_spends_zero_allocations() {
+        use crate::alloc::{Phase, run_phase};
+        use crate::dns::transport::{FailureReason, StartupReport};
+        use std::fmt::Write as _;
+        use std::io::Read as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut doc = String::from(
+            "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
+        );
+        for i in 0..32 {
+            write!(doc, "[allowed_fqdn.\"n{i}.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n").unwrap();
+        }
+        let config = crate::config::parse_config_document(&doc).unwrap();
+        let mut storage = ServeStorage::boot(&config).unwrap();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        reader.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let report = StartupReport {
+            attempted: [[true; 2]; 32],
+            family_results: [[Some(Err(FailureReason::InsufficientAssurance)); 2]; 32],
+            ..StartupReport::default()
+        };
+        let (result, counts) = run_phase(Phase::Logging, || {
+            storage.settle_startup(9, report, 0, false)
+        });
+        assert!(result.is_ok());
+        assert!(counts.all_zero(), "boot settlement: {counts:?}");
+        let mut bytes = [0u8; 65536];
+        let len = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..len]).unwrap();
+        let frames = text
+            .lines()
+            .filter(|line| line.contains("kind=dns_assurance"))
+            .count();
+        assert!(frames > 0 && frames <= 32);
+        assert_eq!(
+            text.lines().count() as u64 + storage.logs.dropped(),
+            65,
+            "32 boot attempts, 32 startup names and one summary must be emitted or counted as stranded"
+        );
+        println!(
+            "boot_snapshot_bytes={} boot_context_bytes={} max_real_frame_bytes={}",
+            std::mem::size_of::<AssuranceSnapshot>(),
+            std::mem::size_of::<super::AssuranceBoot>(),
+            text.lines()
+                .filter(|line| line.contains("kind=dns_assurance"))
+                .map(|line| line.len() + 1)
+                .max()
+                .unwrap()
+        );
     }
 }

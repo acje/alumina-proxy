@@ -5,13 +5,12 @@ use super::{
 };
 use std::fmt;
 
-#[cfg(test)]
 use crate::config::Fqdn;
 use crate::dns::cache::evidence::{AssuranceRequirement, ProofClass};
 use crate::dns::cache::grade_key::{FamilySnapshot, Outcome, RetainedKind};
 #[cfg(test)]
 use crate::dns::cache::{Cache, CacheError, NameIndex};
-use crate::runtime::storage::AssuranceSnapshot;
+use crate::runtime::storage::{AssuranceBoot, AssuranceSnapshot};
 
 /// A single encoded field. `OptVar` variants emit nothing when the value is
 /// absent, so a caller never supplies an empty quoted value.
@@ -341,12 +340,71 @@ pub(super) fn encode_dns_assurance(
     {
         return None;
     }
+    if let Some(boot) = snapshot.boot() {
+        if !append_assurance_boot(&mut w, boot) {
+            return None;
+        }
+    }
     for family in Family::ALL {
         if !append_family_grade(&mut w, family, snapshot.family(family)) {
             return None;
         }
     }
     if !w.push(b"\n") {
+        return None;
+    }
+    Some(w.len)
+}
+
+fn append_assurance_boot(w: &mut Entry<'_>, boot: AssuranceBoot) -> bool {
+    use crate::dns::transport::PublishedKind;
+    let result = |value| match value {
+        None => "none",
+        Some(Ok(PublishedKind::ResolvedPositive)) => "positive",
+        Some(Ok(PublishedKind::NoEligible)) => "no_eligible",
+        Some(Ok(PublishedKind::Negative)) => "negative",
+        Some(Err(_)) => "failed",
+    };
+    let reason =
+        |value: Option<Result<PublishedKind, crate::dns::transport::FailureReason>>| match value {
+            Some(Err(reason)) => Some(reason.as_str()),
+            None | Some(Ok(_)) => None,
+        };
+    write_fields(
+        w,
+        &[
+            Field::new("boot_status", Val::Str(boot.status.as_str())),
+            Field::new("a_attempted", Val::U64(u64::from(boot.attempted[0]))),
+            Field::new("a_last", Val::Str(result(boot.results[0]))),
+            Field::new("a_reason", Val::OptStr(reason(boot.results[0]))),
+            Field::new("aaaa_attempted", Val::U64(u64::from(boot.attempted[1]))),
+            Field::new("aaaa_last", Val::Str(result(boot.results[1]))),
+            Field::new("aaaa_reason", Val::OptStr(reason(boot.results[1]))),
+        ],
+    )
+}
+
+pub(super) fn encode_dns_assurance_unknown(
+    slot_buf: &mut [u8; SLOT_BYTES],
+    fqdn: &Fqdn,
+    secs: u64,
+    boot: AssuranceBoot,
+) -> Option<usize> {
+    let mut w = Entry {
+        buf: slot_buf,
+        len: 0,
+    };
+    if !write_header(&mut w, Level::Info, Kind::DnsAssurance)
+        || !w.push(b" name=\"")
+        || !push_escaped(&mut w, fqdn.as_str())
+        || !w.push(b"\" port=")
+        || fmt::Write::write_fmt(&mut w, format_args!("{}", fqdn.port())).is_err()
+        || !w.push(b" secs=")
+        || fmt::Write::write_fmt(&mut w, format_args!("{secs}")).is_err()
+        || !w.push(b" seq=0 phase=boot")
+        || !append_assurance_boot(&mut w, boot)
+        || !w.push(b" cache_snapshot=unknown\n")
+    {
         return None;
     }
     Some(w.len)

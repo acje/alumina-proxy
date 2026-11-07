@@ -1811,7 +1811,22 @@ resource, owner, allocation, time, work, or log limit: the fixed profile —
 single boot owner and single serving owner, two reused 128 KiB per-tunnel
 buffers, no post-boot first-party heap alloc/dealloc except the authorised DoT
 setup seam, no new anchors, no local DNSSEC validation, and no new runtime
-endpoints — is unchanged. Per-A/AAAA boot and change telemetry over these
-requirements is not implemented by this amendment and remains a separate future
-governed increment; the existing exact failure token is a failure token, not a
-telemetry stream.
+endpoints — is unchanged. At the shared full, degraded, or failed startup
+decision, the owner attempts one nonblocking `dns_assurance` record per
+configured FQDN and port using the same decision second, before the existing
+startup records. Each boot record has `phase=boot`, entry-local `seq=0` and
+`boot_status` of `full`, `degraded`, or `failure`. Its A and AAAA fields
+separately retain the attempt bit and latest concluded result (`none`,
+`positive`, `no_eligible`, `negative`, or `failed`, with the existing failure
+reason when failed), alongside the cache-owned current grade, requirement,
+outcome, usable count, and retained proof class, source, validity and
+applicability. An absent conclusion is distinct from an unattempted family;
+a failed refresh does not relabel an older retained proof. If cache capture
+fails, the entry record instead states `cache_snapshot=unknown` and retains
+the boot status and attempt/conclusion facts. A terminated startup or a
+listener bind failure does not attempt these records. Queue saturation or
+encoding failure counts a whole record drop; an attempt is not a delivery
+promise and does not change listener or admission decisions, the drain budget,
+or the sink failure rule. This boot
+observation makes no endpoint certificate or SNI claim. Change and expiry
+telemetry remain a separate future governed increment.

@@ -2972,6 +2972,257 @@ mod main_wiring {
 mod startup_warning {
     use super::*;
 
+    #[cfg(feature = "alloc-witness")]
+    fn actual_boot_status(cooperative: bool, mode: ServingMode) {
+        use crate::dns::cache::{Generation, StagedPositive};
+        use crate::eligibility::NumericAddr;
+        use std::os::unix::net::UnixStream;
+
+        let allowance = u8::from(mode == ServingMode::Degraded);
+        let doc = format!(
+            "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+        );
+        let config = crate::config::parse_config_document(&doc)
+            .unwrap()
+            .with_kernel_assigned_test_listener();
+        let mut storage = ServeStorage::boot(&config).unwrap();
+        let count = if mode == ServingMode::Full { 2 } else { 1 };
+        for ordinal in 0..count {
+            let name = storage.cache().name_index(ordinal).unwrap();
+            let staged = StagedPositive::stage(
+                name,
+                Family::A,
+                Generation::INITIAL,
+                &[NumericAddr::V4([8, 8, 8, 8].into())],
+                1000,
+                60,
+            )
+            .unwrap();
+            storage.cache_mut().publish_positive(&staged).unwrap();
+        }
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 9));
+        let outcome = if cooperative {
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
+            owner.run_startup_within(addr, 1000, Duration::ZERO)
+        } else {
+            storage.run_startup_within(addr, 1000, Duration::ZERO)
+        }
+        .unwrap();
+        assert_eq!(outcome.decision(), StartupDecision::Serve(mode));
+        let mut bytes = [0u8; 16384];
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let frames: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("kind=dns_assurance"))
+            .collect();
+        assert_eq!(frames.len(), 2, "{text}");
+        let status = if mode == ServingMode::Full {
+            "full"
+        } else {
+            "degraded"
+        };
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.contains(&format!("boot_status=\"{status}\""))),
+            "{text}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("a_outcome=\"positive\"")),
+            "{text}"
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.contains("a_attempted=0 a_last=\"none\"")
+                    && frame.contains("aaaa_attempted=0 aaaa_last=\"none\"")),
+            "{text}"
+        );
+        if mode == ServingMode::Degraded {
+            assert!(
+                frames
+                    .iter()
+                    .any(|frame| frame.contains("a_outcome=\"unknown\"")),
+                "{text}"
+            );
+        }
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn both_real_owners_report_full_and_degraded_boot() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                for cooperative in [false, true] {
+                    for mode in [ServingMode::Full, ServingMode::Degraded] {
+                        actual_boot_status(cooperative, mode);
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn actual_failure_boot(cooperative: bool) {
+        use std::os::unix::net::UnixStream;
+        let config = config_two_names(ephemeral_port());
+        let mut storage = ServeStorage::boot(&config).unwrap();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], ephemeral_port()));
+        let outcome = if cooperative {
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
+            owner.run_startup_within(addr, 1000, Duration::from_millis(300))
+        } else {
+            storage.run_startup_within(addr, 1000, Duration::from_millis(300))
+        }
+        .unwrap();
+        assert!(matches!(
+            outcome.decision(),
+            StartupDecision::Exit75 { unresolved: 2 }
+        ));
+        assert!(outcome.report.failed > 0);
+        let mut bytes = [0u8; 16384];
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let frames: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("kind=dns_assurance"))
+            .collect();
+        assert_eq!(frames.len(), 2, "{text}");
+        for (ordinal, name) in config.allowlist().iter().enumerate() {
+            let frame = frames
+                .iter()
+                .find(|frame| frame.contains(name.as_str()))
+                .unwrap();
+            assert!(frame.contains("boot_status=\"failure\""));
+            for (index, family) in ["a", "aaaa"].iter().enumerate() {
+                assert!(
+                    frame.contains(&format!(
+                        "{family}_attempted={}",
+                        u8::from(outcome.report.attempted[ordinal][index])
+                    )),
+                    "{frame}"
+                );
+                if let Some(Err(reason)) = outcome.report.family_results[ordinal][index] {
+                    assert!(
+                        frame.contains(&format!(
+                            "{family}_last=\"failed\" {family}_reason=\"{}\"",
+                            reason.as_str()
+                        )),
+                        "{frame}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn both_real_owners_report_concluded_failure() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                actual_failure_boot(false);
+                actual_failure_boot(true);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn initial_assurance_from_real_owner(cooperative: bool) {
+        use std::os::unix::net::UnixStream;
+
+        let config = config_two_names(ephemeral_port());
+        let mut storage = ServeStorage::boot(&config).expect("boot storage");
+        let (mut reader, writer) = UnixStream::pair().expect("log socket pair");
+        reader.set_nonblocking(true).expect("nonblocking reader");
+        *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).expect("log sink");
+        let dead_addr = SocketAddr::from(([127, 0, 0, 1], ephemeral_port()));
+        let outcome = if cooperative {
+            let traffic = crate::inventory::TrafficStorage::allocate().expect("traffic");
+            let mut owner = Preallocated::preallocate(storage, traffic).expect("owner");
+            owner.run_startup_within(dead_addr, 1000, Duration::ZERO)
+        } else {
+            storage.run_startup_within(dead_addr, 1000, Duration::ZERO)
+        }
+        .expect("startup decision");
+        assert!(matches!(
+            outcome.decision(),
+            StartupDecision::Exit75 { unresolved: 2 }
+        ));
+        let mut buf = [0u8; 16384];
+        let len = reader.read(&mut buf).expect("startup records");
+        let text = std::str::from_utf8(&buf[..len]).expect("log text");
+        let frames: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("kind=dns_assurance"))
+            .collect();
+        assert_eq!(frames.len(), 2, "one boot frame per entry: {text}");
+        for name in ["sub.example.org", "other.example.org"] {
+            assert!(
+                frames.iter().any(|frame| frame.contains(name)),
+                "missing {name}: {text}"
+            );
+        }
+        for frame in frames {
+            assert!(
+                frame.contains("secs=1000 seq=0 phase=boot"),
+                "decision clock: {frame}"
+            );
+            assert!(
+                frame.contains("boot_status=\"failure\""),
+                "startup decision: {frame}"
+            );
+            assert!(
+                frame.contains("a_attempted=0 a_last=\"none\""),
+                "A unattempted: {frame}"
+            );
+            assert!(
+                frame.contains("aaaa_attempted=0 aaaa_last=\"none\""),
+                "AAAA unattempted: {frame}"
+            );
+            assert!(
+                frame.contains("a_outcome=\"unknown\"")
+                    && frame.contains("aaaa_outcome=\"unknown\""),
+                "unresolved cache: {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocking_owner_emits_initial_assurance_for_every_entry() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| initial_assurance_from_real_owner(false))
+            .expect("spawn")
+            .join()
+            .expect("blocking owner");
+    }
+
+    #[test]
+    fn cooperative_owner_emits_initial_assurance_for_every_entry() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| initial_assurance_from_real_owner(true))
+            .expect("spawn")
+            .join()
+            .expect("cooperative owner");
+    }
+
     #[test]
     fn startup_queued_warning_still_observes_sigterm_and_never_binds() {
         let t = thread::Builder::new()

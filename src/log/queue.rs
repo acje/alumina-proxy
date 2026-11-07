@@ -1,9 +1,10 @@
-use super::encoding::{AssurancePhase, encode_dns_assurance};
+use super::encoding::{AssurancePhase, encode_dns_assurance, encode_dns_assurance_unknown};
 use super::{
     Dimension, Edge, Field, HIGH_PCT_NUMBER, Kind, LOW_PCT_NUMBER, Level, LogStore, QUEUE_MASK,
     QUEUE_SLOTS, SLOT_BYTES, Val, Watermark, encode_record,
 };
-use crate::runtime::storage::AssuranceSnapshot;
+use crate::config::Fqdn;
+use crate::runtime::storage::{AssuranceBoot, AssuranceSnapshot};
 
 impl LogStore {
     /// Whole-record drops so far; saturates at `u64::MAX`.
@@ -151,6 +152,16 @@ impl LogStore {
     ) -> bool {
         self.set_now(self.secs.max(snapshot.secs()));
         self.enqueue_normal(|slot| encode_dns_assurance(slot, snapshot, seq, phase))
+    }
+
+    pub(crate) fn enqueue_assurance_unknown(
+        &mut self,
+        fqdn: &Fqdn,
+        secs: u64,
+        boot: AssuranceBoot,
+    ) -> bool {
+        self.set_now(self.secs.max(secs));
+        self.enqueue_normal(|slot| encode_dns_assurance_unknown(slot, fqdn, secs, boot))
     }
     /// Enqueues a reserved priority-class record (docs/alumina-proxy.md:1299-1301).
     /// On a full ring the record is encoded into a stack scratch slot first and

@@ -108,7 +108,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   source. Every architectural claim cites
   <code>src/*.rs</code>, <code>tests/*.rs</code>, or the governing specification
   (<code>docs/alumina-proxy.md</code>, SHA-256
-  <code>b1d95dbc7fead191d51b51bc40cfa6b3e7f2fc922beb9de4ea0564d842d8c4b2</code>).
+  <code>7c80db8a62d13ddea49ab7b77713bfe04a0908b9d65bb55b4eea5dd4d6e4a21b</code>).
   Values the code itself prints or asserts are recorded as measured. No review
   apparatus — findings, severities, proposals, or open questions — is carried here;
   the architecture is described as it is built.</p>
@@ -1258,10 +1258,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     opens <code>Full</code> (zero unresolved) or <code>Degraded</code> (within
     the allowance). The decision is typed as
     <code>StartupDecision::{Serve(ServingMode), Exit75{unresolved}, Terminated}</code>
-    (<code>src/runtime/storage.rs:100</code>): a first-observed SIGTERM short-circuits the
+    (<code>src/runtime/storage.rs:130-134</code>): a first-observed SIGTERM short-circuits the
     window as <code>Terminated</code>, which never binds or attaches a listener.
     A single 90-second exchange report is carried by <code>StartupOutcome</code>
-    (<code>src/runtime/storage.rs:109-117</code>).</p>
+    (<code>src/runtime/storage.rs:150-159</code>).</p>
   <p>The startup window is driven cooperatively by the single serving poll:
   <code>Serving::run_startup_window</code> attaches the retained DNS transport
   to the serving poll <em>before</em> selection starts and advances the exchange
@@ -1277,8 +1277,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   When no conclusion is retained, the attempt bit distinguishes an attempted
   family from an unattempted one; a prior conclusion can remain after a further
   attempt starts. Superseded exchanges do not replace a conclusion. The existing
-  aggregate counts and per-name outcomes remain separate, and these facts do
-  not themselves emit a record (<code>src/dns/transport.rs:408-447</code>,
+  aggregate counts and per-name outcomes remain separate (<code>src/dns/transport.rs:408-447</code>,
   <code>:472-484</code>, <code>:509-517</code>, <code>:536-567</code>,
   <code>:2747-2755</code>, <code>:2866-2881</code>,
   <code>src/runtime/reactor/startup.rs:77-94</code>,
@@ -1288,13 +1287,25 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   family snapshots and captured second into one fixed value. The later queue
   encoder reads that value rather than the cache or clock; an invalid ordinal
   returns a cache error before enqueue, and a delayed record does not rewind
-  the queue's current second. The helper is not a boot/change producer
-  (<code>src/runtime/storage.rs:86-106</code>, <code>:227-251</code>;
-  <code>src/log/queue.rs:145-154</code>, <code>src/log/encoding.rs:318-350</code>;
+  the queue's current second. Both startup drivers invoke the shared settlement;
+  at a full, degraded, or failed decision, after any required listener bind
+  succeeds, it captures each entry at the same decision second and makes one
+  boot-frame enqueue attempt. A listener bind failure attempts no boot frames.
+  The decision second
+  saturates at the clock limit, matching the ledger refresh clock rather than
+  wrapping to an earlier instant. A frame includes
+  the startup status, each family's attempted bit and last conclusion separately
+  from the cached family facts; a capture error is reported as an unknown cache
+  snapshot without altering the decision. Termination does not emit boot frames.
+  Change and expiry production are not wired
+  (<code>src/runtime/storage.rs:80-113</code>, <code>:244-275</code>, <code>:1222-1271</code>;
+  <code>src/dns/transport.rs:2907-2908</code>, <code>src/runtime/reactor/startup.rs:200-205</code>;
+  <code>src/log/queue.rs:147-166</code>, <code>src/log/encoding.rs:318-410</code>;
+  spec <code>docs/alumina-proxy.md:1814-1832</code>;
   <code>src/config/mod.rs:22-25</code>, <code>src/names/hostname.rs:7-11</code>).
   The snapshot size is checked against an existing record slot and a widest-name
   capture-and-enqueue witness checks allocation in the logging phase
-  (<code>src/runtime/storage.rs:1414-1426</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
+  (<code>src/runtime/storage.rs:1462-1471</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
   <p>Only fully validated outcomes reach the cache: the outcome-application
   body <code>dns::publication::apply_outcome</code>
   (<code>src/dns/publication.rs:38</code>, named-re-exported as
@@ -1319,23 +1330,23 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   kernel-assigned listener port (0) instead of a pre-probed port
   (<code>src/runtime/storage/startup_integration.rs:25-27</code>; the constructor
   <code>Config::with_kernel_assigned_test_listener</code> at
-  <code>src/config/mod.rs:1303-1309</code>). The port-0 value exists only in that
+  <code>src/config/mod.rs:1415-1418</code>). The port-0 value exists only in that
   cfg(test) constructor: the public document parser still rejects port 0
-  (<code>src/config/mod.rs:131-133</code>), so operator <code>listen</code> remains
+  (<code>src/config/mod.rs:1179-1186</code>), so operator <code>listen</code> remains
   numeric 1..=65535 and the production bind is unchanged
-  (<code>src/runtime/storage.rs:1263</code>). Startup still exercises the real window,
+  (<code>src/runtime/storage.rs:1365-1372</code>). Startup still exercises the real window,
   readiness, and normal post-readiness bind — the kernel owns the actual
   listener the bind returns, and the full-serve and kernel-assigned-listener
   controls assert and connect to that returned address
-  (<code>src/runtime/storage/startup_integration.rs:139-164</code>,
-  <code>:365-387</code>).
+  (<code>src/runtime/storage/startup_integration.rs:167-186</code>,
+  <code>:406-440</code>).
   The exit-75 fixture holds an occupied configured address and asserts no
-  listener is bound (<code>src/runtime/storage/startup_integration.rs:191-194</code>); a
+  listener is bound (<code>src/runtime/storage/startup_integration.rs:208-216</code>); a
   normal-config control asserts an occupied configured address yields the
   <code>Listener</code> <code>AddrInUse</code> bind error
-  (<code>src/runtime/storage/startup_integration.rs:402-408</code>) and that the public
+  (<code>src/runtime/storage/startup_integration.rs:445-460</code>) and that the public
   parser rejects a zero listen port with
-  <code>ConfigError::InvalidListen</code> (<code>src/runtime/storage/startup_integration.rs:409-419</code>).
+  <code>ConfigError::InvalidListen</code> (<code>src/runtime/storage/startup_integration.rs:462-471</code>).
   These fixtures add no public API, no listener-ownership change, and no buffer
   or profile expansion.</p>
 
@@ -2853,7 +2864,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>src/*.rs</code>, <code>tests/*.rs</code>, or the specification, and no
     claim is stated at a strength the reading cannot support.</li>
     <li><strong>Spec integrity:</strong> <code>docs/alumina-proxy.md</code> SHA-256
-    <code>b1d95dbc7fead191d51b51bc40cfa6b3e7f2fc922beb9de4ea0564d842d8c4b2</code>;
+    <code>7c80db8a62d13ddea49ab7b77713bfe04a0908b9d65bb55b4eea5dd4d6e4a21b</code>;
     referenced as the current canonical governing specification only.</li>
   </ul>
 </section>

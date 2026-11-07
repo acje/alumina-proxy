@@ -129,6 +129,9 @@ fn full_serve_opens_listener_early_before_the_window_elapses() {
     let config = ephemeral_config("\"alpha.example.org:443\", \"beta.example.org:443\"", 0);
     let responder = DnsResponder::spawn(|q| build_positive(&q));
     let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let (mut log_reader, log_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+    log_reader.set_nonblocking(true).unwrap();
+    storage.logs = LogStore::with_fd(&log_writer).unwrap();
     let start = Instant::now();
     let outcome = storage
         .run_startup_within(responder.addr, NOW0, window)
@@ -144,6 +147,22 @@ fn full_serve_opens_listener_early_before_the_window_elapses() {
         );
         assert!(!outcome.report.attempted[ordinal][1]);
         assert_eq!(outcome.report.family_results[ordinal][1], None);
+    }
+    let mut log_bytes = [0u8; 16384];
+    let n = log_reader.read(&mut log_bytes).unwrap();
+    let text = std::str::from_utf8(&log_bytes[..n]).unwrap();
+    let frames: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("kind=dns_assurance"))
+        .collect();
+    assert_eq!(frames.len(), 2, "full startup: {text}");
+    for frame in frames {
+        assert!(
+            frame.contains("boot_status=\"full\"")
+                && frame.contains("a_attempted=1 a_last=\"positive\"")
+                && frame.contains("aaaa_attempted=0 aaaa_last=\"none\""),
+            "mixed family startup: {frame}"
+        );
     }
     let listener = outcome
         .into_listener()
@@ -214,6 +233,9 @@ fn degraded_is_decided_only_at_the_actual_window_deadline() {
         }
     });
     let mut storage = ServeStorage::boot(&config).expect("boot serving storage");
+    let (mut log_reader, log_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+    log_reader.set_nonblocking(true).unwrap();
+    storage.logs = LogStore::with_fd(&log_writer).unwrap();
     let start = Instant::now();
     let outcome = storage
         .run_startup_within(responder.addr, NOW0, window)
@@ -226,6 +248,32 @@ fn degraded_is_decided_only_at_the_actual_window_deadline() {
     assert!(
         outcome.listener().is_some(),
         "degraded serve must bind a listener"
+    );
+    let mut log_bytes = [0u8; 16384];
+    let n = log_reader.read(&mut log_bytes).unwrap();
+    let text = std::str::from_utf8(&log_bytes[..n]).unwrap();
+    let frames: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("kind=dns_assurance"))
+        .collect();
+    assert_eq!(frames.len(), 2, "degraded startup: {text}");
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.contains("boot_status=\"degraded\"")),
+        "{text}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("a_last=\"positive\"")),
+        "{text}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.contains("a_last=\"failed\"")),
+        "{text}"
     );
     assert!(
         elapsed >= window,
@@ -422,6 +470,50 @@ fn normally_configured_occupied_listen_addr_is_a_bind_error_after_ready() {
         Err(ConfigError::InvalidListen { value }) => assert_eq!(value, "127.0.0.1:0"),
         other => panic!("public parse of a zero listen port must yield InvalidListen: {other:?}"),
     }
+}
+
+#[test]
+fn occupied_listener_preserves_real_fatal_with_sixteen_resolved_names() {
+    use std::os::unix::net::UnixStream;
+
+    let guard = TcpListener::bind("127.0.0.1:0").expect("occupied address");
+    let mut names = String::new();
+    for ordinal in 0..16 {
+        if ordinal != 0 {
+            names.push_str(", ");
+        }
+        write!(names, "\"n{ordinal}.example.org:443\"").unwrap();
+    }
+    let config = config_with(&names, 0, guard.local_addr().unwrap().port());
+    assert_eq!(config.allowlist().len(), 16);
+    let responder = DnsResponder::spawn(|query| build_positive(&query));
+    let mut storage = ServeStorage::boot(&config).expect("boot storage");
+    let (mut reader, writer) = UnixStream::pair().expect("log socket");
+    reader.set_nonblocking(true).unwrap();
+    writer.set_nonblocking(true).unwrap();
+    storage.logs = LogStore::with_fd(&writer).expect("real sink");
+    let err = match storage.run_startup_within(responder.addr, NOW0, Duration::from_secs(3)) {
+        Err(
+            err @ StartupError::Listener {
+                kind: io::ErrorKind::AddrInUse,
+                ..
+            },
+        ) => err,
+        Err(other) => panic!("expected occupied listener, got {other:?}"),
+        Ok(_) => panic!("occupied listener must fail"),
+    };
+    storage.emit_fatal_and_drain(format_args!("alumina: startup: {err}"));
+    let mut bytes = [0u8; 16384];
+    let count = reader.read(&mut bytes).expect("fatal sink output");
+    let text = std::str::from_utf8(&bytes[..count]).expect("log utf8");
+    assert!(
+        text.contains("kind=fatal") && text.contains("startup listener"),
+        "real fatal must reach sink: {text}"
+    );
+    assert!(
+        !text.contains("kind=dns_assurance"),
+        "bind failure attempts no boot records: {text}"
+    );
 }
 
 /// The widest legal allowlist: `ALLOWLIST_MAX` keyed FQDNs, each exactly
