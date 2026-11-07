@@ -5,7 +5,7 @@ capability**. A workload may connect only to explicitly approved domains and
 ports. The proxy has one responsibility: enforce that boundary, with the minimum
 protocol scope and runtime capability needed to do so.
 
-The application and operator are trusted at rest; the design accounts for
+The application is trusted at rest; the design accounts for
 application compromise. Alumina limits the resulting egress opportunities and
 surfaces deviations from the workload's known-good behavior. It is not a
 general-purpose gateway, an ingress defense, or an encrypted-payload inspector.
@@ -13,19 +13,19 @@ general-purpose gateway, an ingress defense, or an encrypted-payload inspector.
 ## Design principles
 
 - **Narrow authority.** Admit allowlisted HTTP CONNECT destinations, validate
-	the initial TLS 1.3 ClientHello and matching SNI, then relay without decryption.
-	Additional protocols and runtime controls are outside the fixed scope.
+ the initial TLS 1.3 ClientHello and matching SNI, then relay without decryption.
+ Additional protocols and runtime controls are outside the fixed scope.
 - **Bounded execution.** Fixed capacities, a single boot owner and a single
-	serving owner, and two reused 128 KiB directional buffers per tunnel constrain
-	resource use and make invariants explicit and verifiable.
+ serving owner, and two reused 128 KiB directional buffers per tunnel constrain
+ resource use and make invariants explicit and verifiable.
 - **Allocation discipline.** Serving and DNS-refresh paths reuse storage
-	allocated at initialization, with no first-party heap allocation or deallocation
-	except the authorized per-connect DoT setup. Bounded dependency allocations
-	are outside that invariant's scope; see the
-	[allocation contract](docs/alumina-proxy.md#zero-allocation-invariant-scope).
+ allocated at initialization, with no first-party heap allocation or deallocation
+ except the authorized per-connect DoT setup. Bounded dependency allocations
+ are outside that invariant's scope; see the
+ [allocation contract](docs/alumina-proxy.md#zero-allocation-invariant-scope).
 - **No silent acceptance.** Every deviation on the defined CONNECT,
-	initial-ClientHello, and tripwire surfaces triggers action. The operator chooses
-	`notify` or `block`; Alumina owns the enforcement semantics.
+ initial-ClientHello, and tripwire surfaces triggers action. The operator chooses
+ `notify` or `block`; Alumina owns the enforcement semantics.
 
 Robustness comes from these constraints, not an expanding feature set. The
 lightweight, statically linked single binary is an implementation of that design.
@@ -33,19 +33,19 @@ lightweight, statically linked single binary is an implementation of that design
 ## Security boundaries
 
 - **TLS 1.3-only, client-first.** Clients establish a plaintext HTTP/1.1 CONNECT
-	tunnel, then send a TLS 1.3-only ClientHello. ECH and server-first protocols
-	are rejected. See [workload compatibility](docs/qa-package/README.md#protocol-compatibility-workloads-dialed-through-alumina).
+ tunnel, then send a TLS 1.3-only ClientHello. ECH and server-first protocols
+ are rejected. See [workload compatibility](docs/qa-package/README.md#protocol-compatibility-workloads-dialed-through-alumina).
 - **No payload inspection.** The client must verify the upstream certificate
-	and hostname. Abuse inside an admitted endpoint's encrypted traffic is outside
-	the proxy's visibility.
+ and hostname. Abuse inside an admitted endpoint's encrypted traffic is outside
+ the proxy's visibility.
 - **No DNSSEC today.** DNS uses TCP, optionally strict-pinned DNS over TLS.
-	Unpinned DoT currently fails closed; plain DNS does not authenticate DNS data.
+ Unpinned DoT currently fails closed; plain DNS does not authenticate DNS data.
 - **Deployment enforces confinement.** Separate workload and proxy network/runtime
-	identities are required to prevent direct-egress bypass and workload-controlled
-	resets of block state. A same-pod sidecar is cooperative only.
+ identities are required to prevent direct-egress bypass and workload-controlled
+ resets of block state. A same-pod sidecar is cooperative only.
 - **Notifications are best-effort.** The deployment owns stdout collection,
-	collector liveness, and loss alerting. Proxy restarts clear in-memory block
-	state and JA4 baselines.
+ collector liveness, and loss alerting. Proxy restarts clear in-memory block
+ state and JA4 baselines.
 
 ## Planned assurance controls
 
@@ -56,14 +56,14 @@ resolver would supply the DNSSEC verdicts over authenticated, strict-pinned
 DNS-over-TLS; see the [trust-chain design](docs/trust-chain-design.md).
 
 - **TODO.** Admission would require a configured minimum DNS assurance level and
-	a currently valid achieved proof per new CONNECT `name:port` — bounded
-	lifetimes, no stale or expired proofs, no unchecked TTL-zero extension, and
-	no fallback to a weaker unauthenticated path.
+ a currently valid achieved proof per new CONNECT `name:port` — bounded
+ lifetimes, no stale or expired proofs, no unchecked TTL-zero extension, and
+ no fallback to a weaker unauthenticated path.
 - **TODO.** Report achieved assurance for every allowlisted `fqdn:port` at the
-	startup resolution/readiness decision — successful, degraded, or failed —
-	including unresolved and unattempted results, then on meaningful
-	validation-level changes. Judge A/AAAA independently; never label the whole
-	entry secure from its best family.
+ startup resolution/readiness decision — successful, degraded, or failed —
+ including unresolved and unattempted results, then on meaningful
+ validation-level changes. Judge A/AAAA independently; never label the whole
+ entry secure from its best family.
 
 Endpoint verification stays client-owned: the client — not the proxy — checks
 the upstream server certificate and hostname; client certificates apply only
