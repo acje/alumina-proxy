@@ -122,6 +122,7 @@ impl LogStore {
     /// queue pressure once per turn. `Ok` values keep `enqueue_normal`'s
     /// semantics: `Some(len)` commits the record; `None` or a full ring drops
     /// a whole record and counts it.
+    #[cfg(test)]
     pub(super) fn enqueue_fallible<E>(
         &mut self,
         encode: impl FnOnce(&mut [u8; SLOT_BYTES]) -> Result<Option<usize>, E>,

@@ -699,7 +699,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         hard-error latch — and
         <code>LogStoreError</code> is the only externally-visible error.</td>
         <td><code>src/log/mod.rs:53-67</code>, <code>src/log/sink.rs:32-47</code>, <code>:100-179</code>,
-        <code>src/log/queue.rs:159-175</code>, <code>:176-181</code>, <code>:186-200</code>;
+        <code>src/log/queue.rs:100-116</code>, <code>:172-199</code>, <code>:212-237</code>;
         <code>src/log/encoding.rs:11-963</code></td></tr>
       <tr><th scope="row"><code>dns/incident_report</code> (crate-private child)</th>
         <td>Per-name windowed incident reporting (3600 s window), sticky snapshots, eligible-binding transition tracking.</td>
@@ -1306,7 +1306,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   snapshot without altering the decision. Termination does not emit boot frames.
   (<code>src/runtime/storage.rs:82-115</code>, <code>:386-423</code>, <code>:1486-1545</code>;
   <code>src/dns/transport.rs:2937-2939</code>, <code>src/runtime/reactor/startup.rs:200-205</code>;
-  <code>src/log/queue.rs:147-166</code>, <code>src/log/encoding.rs:318-410</code>;
+  <code>src/log/queue.rs:148-166</code>, <code>src/log/encoding.rs:318-410</code>;
   spec <code>docs/alumina-proxy.md:1814-1831</code>;
   <code>src/config/mod.rs:22-25</code>, <code>src/names/hostname.rs:7-11</code>).
   The snapshot size is checked against an existing record slot and a widest-name
@@ -2483,20 +2483,20 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>logging_writev_zero_progress_keeps_cursor_and_stream_identical</code>
     (<code>src/log/tests.rs:2267-2277</code>).</li>
     <li><strong>Drops are always counted, never silent.</strong> Ring-full and
-    encode-failure both <code>drop_one</code> (<code>src/log/queue.rs:176-185</code>),
+    encode-failure both <code>drop_one</code> (<code>src/log/queue.rs:100-116</code>, <code>:229-237</code>),
     a hard sink error drops the whole queue <em>through the same counter</em>
     (<code>src/log/sink.rs:100-179</code>), and exit paths strand-count the residue
     (<code>strand_queued</code>, <code>src/log/sink.rs:61-73</code>).</li>
     <li><strong>Priority classes exist.</strong> A reserved record can displace
     the newest normal record on a full ring rather than being dropped
-    (<code>enqueue_reserved</code>, <code>src/log/queue.rs:119-147</code>) — the
+    (<code>enqueue_reserved</code>, <code>src/log/queue.rs:172-199</code>) — the
     mechanism that keeps shutdown/fatal evidence from being evicted by a monitor
     burst. The displacement victim is never a begun span: a front record with an
     in-progress sink cursor (<code>cursor.off &gt; 0</code>) finishes unchanged
     before it can be evicted, an unstarted (off 0) front stays eligible, and when
     every held record is reserved the newest reserved record is the
     bounded-not-lossless fallback — <code>displace_reserved</code>
-    (<code>src/log/queue.rs:159-175</code>); the witnessed legal-input cases run
+    (<code>src/log/queue.rs:212-228</code>); the witnessed legal-input cases run
     through a scripted <code>Partial(NonZeroUsize)</code> sink in
     <code>src/log/tests.rs:180-282</code>.</li>
   </ol>
@@ -2889,7 +2889,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/enforcement/monitor.rs:12-26</code>, <code>:178-290</code></td></tr>
       <tr><th scope="row">Log ring / drain / priority</th>
         <td><code>src/log/mod.rs:53-72</code>, <code>:536-548</code>, <code>:643-648</code>, <code>:674-701</code>,
-        <code>src/log/sink.rs:32-47</code>, <code>:100-179</code>, <code>src/log/queue.rs:159-175</code>, <code>:176-181</code>, <code>:186-200</code>;
+        <code>src/log/sink.rs:32-47</code>, <code>:100-179</code>, <code>src/log/queue.rs:100-116</code>, <code>:172-199</code>, <code>:212-237</code>;
         <code>src/log/encoding.rs:11-963</code></td></tr>
       <tr><th scope="row">Incident report</th>
         <td><code>src/dns/incident_report.rs:14-15</code>, <code>:149-235</code>,
@@ -2911,7 +2911,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Log record serializers child</th>
         <td><code>src/log/encoding.rs:11-963</code>; private <code>queue</code>/<code>sink</code> children run on the crate-private <code>LogStore</code> declared at <code>src/log/mod.rs:536-548</code>, constructed at <code>:643-648</code>, <code>:674-701</code></td></tr>
       <tr><th scope="row">Reserved-ring displacement (begun-front protection)</th>
-        <td><code>src/log/queue.rs:159-175</code>, <code>:119-147</code>;
+        <td><code>src/log/queue.rs:212-228</code>, <code>:172-199</code>;
         <code>src/log/tests.rs:180-282</code> (scripted <code>Partial(NonZeroUsize)</code>)</td></tr>
       <tr><th scope="row">Unit-test placement: owner-colocated <code>cfg(test)</code> files</th>
         <td>Inline unit modules moved to their owning module's <code>tests.rs</code> —
