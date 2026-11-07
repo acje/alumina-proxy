@@ -2972,6 +2972,71 @@ mod main_wiring {
 mod startup_warning {
     use super::*;
 
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn consuming_serve_fault_return_preserves_boot_owned_allocations() {
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                use crate::runtime::storage::AssuranceObservation;
+                use std::os::unix::net::UnixStream;
+
+                let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+                let mut storage = ServeStorage::boot(&config).unwrap();
+                storage.publish_test_a(0);
+                let (_reader, writer) = UnixStream::pair().unwrap();
+                writer.set_nonblocking(true).unwrap();
+                *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+                let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+                let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
+                let outcome = owner
+                    .run_startup_within(SocketAddr::from(([127, 0, 0, 1], 9)), 1000, Duration::ZERO)
+                    .unwrap();
+                assert_eq!(
+                    outcome.decision(),
+                    StartupDecision::Serve(ServingMode::Full)
+                );
+                let mut runtime = owner.attach(outcome.into_listener().unwrap()).unwrap();
+                let future =
+                    runtime.serving.storage().dns().window_start() + Duration::from_secs(5);
+                assert_eq!(
+                    runtime.serving.storage_mut().emit_assurance(0, future),
+                    Ok(AssuranceObservation::Unchanged)
+                );
+                let actual = Instant::now();
+                assert!(future.saturating_duration_since(actual) >= Duration::from_secs(2));
+                assert!(runtime.serving.storage().assurance_wake(actual).is_err());
+                let (result, counts) =
+                    crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                        let result = runtime.serve();
+                        assert!(
+                            result.is_err(),
+                            "the actual serving path must return the selected fault"
+                        );
+                        assert!(runtime.serving.test_slot_closed(0));
+                        assert!(
+                            runtime
+                                .serving
+                                .test_slot_closed(crate::inventory::TUNNEL_SLOTS - 1)
+                        );
+                        assert!(runtime.serving.storage().cache().name_index(0).is_some());
+                        result
+                    });
+                assert!(
+                    result.is_err(),
+                    "the actual consuming serve path must return the selected fault"
+                );
+                println!("consuming_serve_fault_counts={counts:?}");
+                assert!(
+                    counts.all_zero(),
+                    "consuming serve error must not deallocate boot-owned state: {counts:?}"
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn actual_serving_publication_emits_assurance_change_for_seeded_entry() {
         thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(|| {

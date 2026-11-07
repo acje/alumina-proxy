@@ -85,7 +85,7 @@ fn main() {
             match owner.run_startup(nameserver, PROCESS_EPOCH_SECS) {
                 Ok(outcome) => match outcome.state {
                     StartupState::Serve { listener, .. } => {
-                        let Ok(runtime) = owner.attach(listener) else {
+                        let Ok(mut runtime) = owner.attach(listener) else {
                             std::process::exit(EX_SOFTWARE);
                         };
                         match runtime.serve() {

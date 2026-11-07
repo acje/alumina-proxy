@@ -328,8 +328,8 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// Returns a serve error when a poll or cooperative DNS turn fails.
-    pub fn serve(mut self) -> Result<std::convert::Infallible, ServeError> {
+    /// Returns a poll or DNS turn error; the caller must exit without dropping the retained owner.
+    pub fn serve(&mut self) -> Result<std::convert::Infallible, ServeError> {
         loop {
             if let Err(err) = self.turn(None) {
                 self.serving

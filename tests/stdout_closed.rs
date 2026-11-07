@@ -315,7 +315,7 @@ fn child_owner_main() {
         .prepare_stdout_log_sink()
         .expect("prepare nonblocking stdout sink");
     let traffic = TrafficStorage::allocate().expect("allocate traffic storage");
-    let runtime = Runtime::new(storage, listener, traffic).expect("attach runtime");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("attach runtime");
     report_unexpected_serve("owner", runtime.serve());
 }
 
@@ -323,7 +323,7 @@ fn child_owner_main() {
 /// drain latches the sink, and the first serving owner turn must exit 74.
 fn child_startup_main() {
     match run_start_up() {
-        Ok(runtime) => report_unexpected_serve("startup", runtime.serve()),
+        Ok(mut runtime) => report_unexpected_serve("startup", runtime.serve()),
         Err(what) => {
             eprintln!("STDOUT-CLOSED-STARTUP-FAILED: {what}");
         }
@@ -333,7 +333,7 @@ fn child_startup_main() {
 /// Runs the same startup-window latch, then begins shutdown before any serving
 /// owner turn: the shutdown verdict must win and the child exits 0.
 fn child_shutdown_main() {
-    let runtime = match run_start_up() {
+    let mut runtime = match run_start_up() {
         Ok(runtime) => runtime,
         Err(what) => {
             eprintln!("STDOUT-CLOSED-STARTUP-FAILED: {what}");

@@ -718,9 +718,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   before any listener exists, and hands the owner to <code>attach</code> once
   the listener and the shared DNS transport are in place, ending in
   <code>Runtime::serve</code>. At every link exactly one owner holds the state;
-  ownership transfers by value and is never split
-  (<code>src/main.rs:61-106</code>, <code>src/runtime/storage.rs:349-374</code>,
-  <code>src/runtime/reactor.rs:1068</code>).</p>
+  ownership transfers by value and is never split. The serve loop borrows the
+  attached runtime: on an error it emits the fatal diagnostic and returns while
+  the caller still owns the boot storage, then main immediately exits 70 without
+  dropping that owner (<code>src/main.rs:61-106</code>, <code>src/runtime/storage.rs:349-374</code>,
+  <code>src/runtime/reactor.rs:1068</code>, <code>src/runtime/owner.rs:332-343</code>).</p>
 
   <p>The serving state is physically organized under the
   <code>runtime</code> directory root (<code>src/runtime/mod.rs</code>, whose
