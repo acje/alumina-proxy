@@ -3649,6 +3649,129 @@ mod startup_exchange {
     }
 }
 
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn populated_seeded_owner_corroboration_probe_preserves_authorization_and_reporting() {
+    thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::dns::cache::evidence::{Evidence, ResolverSource};
+            use crate::dns::cache::{Generation, StagedPositive};
+            use crate::dns::incident_report::IncidentReport;
+            use crate::dns::transport::FailureReason;
+            use crate::dns::transport::tests::{Step, spawn_bounded_responder};
+            use crate::eligibility::NumericAddr;
+            use crate::runtime::storage::AssuranceObservation;
+            use std::os::unix::net::UnixStream;
+
+            let responder = spawn_bounded_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
+            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let fqdn = config.allowlist().get(0).unwrap().clone();
+            let mut storage = ServeStorage::boot(&config).unwrap();
+            let name = storage.cache().name_index(0).unwrap();
+            let proof = Evidence::new(false, false, false, ResolverSource::index(0).unwrap(), Some(600), 1000).unwrap();
+            storage.cache().check_publication_requirement(name, Some(proof), 1000).unwrap();
+            for (family, address) in [
+                (Family::A, NumericAddr::V4([8, 8, 8, 8].into())),
+                (Family::Aaaa, NumericAddr::V6([0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11].into())),
+            ] {
+                let staged = StagedPositive::stage_with_evidence(name, family, Generation::INITIAL, &[address], 1000, 600, Some(proof)).unwrap();
+                storage.cache_mut().publish_positive(&staged).unwrap();
+                assert!(storage.cache().is_peer_admissible(name, family, address, 1000).unwrap());
+                assert!(storage.cache().family_retained(name, family, 1000).unwrap().unwrap().time_valid());
+            }
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader.set_nonblocking(true).unwrap();
+            writer.set_nonblocking(true).unwrap();
+            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
+            let startup = owner.run_startup_within(SocketAddr::from(([127, 0, 0, 1], 9)), 1000, Duration::ZERO).unwrap();
+            assert_eq!(startup.decision(), StartupDecision::Serve(ServingMode::Full));
+            let mut buf = [0u8; 16384];
+            let n = reader.read(&mut buf).unwrap();
+            let boot = std::str::from_utf8(&buf[..n]).unwrap();
+            assert_eq!(boot.lines().filter(|line| line.contains("kind=dns_assurance ") && line.contains("seq=0 phase=boot")).count(), 1, "{boot}");
+            assert!(!boot.contains("phase=change") && !boot.contains("kind=dns_assurance_fault"), "{boot}");
+            let mut runtime = owner.attach(startup.into_listener().unwrap()).unwrap();
+            let observed = Instant::now();
+            let secs = runtime.serving.storage().cache_secs(observed);
+            assert!(secs < 1600);
+            runtime.serving.storage_mut().schedules_mut().note_exchange_failure(0, Family::A, secs, FailureReason::Timeout).unwrap();
+            runtime.serving.storage_mut().schedules_mut().overwrite_due_at(0, Family::A, secs + 300).unwrap();
+            runtime.serving.storage_mut().report_incident_if_due(observed);
+            let populate = |report: &mut IncidentReport| {
+                report.note_incident_open(0, secs, [Some((secs, FailureReason::Timeout.as_str(), None)), None]);
+                report.note_exchange_attempt(0, Family::A, secs);
+                report.note_exchange_attempt(0, Family::Aaaa, secs);
+                report.note_exchange_failure(0, Family::A, secs, FailureReason::Timeout.as_str(), None);
+                report.note_positive(0, Family::A, secs);
+                report.note_positive(0, Family::Aaaa, secs);
+                report.note_tunnel_bytes(0, 0, 7, 42, secs);
+                report.note_stale_admission(0, secs);
+            };
+            populate(runtime.serving.storage_mut().incident_report_mut());
+            let mut mirror = IncidentReport::new();
+            populate(&mut mirror);
+            let cache_before = *runtime.serving.storage().cache();
+            let schedules_before = *runtime.serving.storage().schedules();
+            assert!(matches!(schedules_before.incident(0, Family::A), Some(crate::dns::schedule::TypeIncident::Open { .. })));
+            let dropped_before = runtime.serving.storage().log_dropped();
+            assert_eq!(dropped_before, 0);
+            let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+            runtime.serving.storage_mut().dns_mut().set_peer_for_test(peer);
+            runtime.serving.storage_mut().dns_mut().seed_corroboration_for_test(&fqdn).unwrap();
+            assert!(runtime.serving.storage().dns().has_active_exchange());
+            assert!(!runtime.serving.storage().dns().active_is_serving());
+            let (done, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                for _ in 0..200 {
+                    runtime.turn(Some(Duration::from_millis(5))).unwrap();
+                    if !runtime.serving.storage().dns().has_active_exchange() { return true; }
+                }
+                false
+            });
+            assert!(done, "the seeded corroboration probe must conclude through real owner turns");
+            assert!(counts.all_zero(), "owner probe turns allocated: {counts:?}");
+            assert_eq!(*runtime.serving.storage().cache(), cache_before);
+            assert_eq!(*runtime.serving.storage().schedules(), schedules_before);
+            assert_eq!(runtime.serving.storage().log_dropped(), dropped_before);
+            assert_eq!(runtime.serving.storage().dns().current_resolver_index(), Some(0));
+            assert_eq!(runtime.serving.storage().enforcement().monitor().facts_dns_anomaly(crate::enforcement::monitor::DnsAnomalyKind::CorroborationConflict), 0);
+            let close = runtime.serving.storage().cache_secs(Instant::now());
+            let expected = mirror.close_window(0, close).unwrap();
+            assert_eq!(expected.per_type[0].attempts.value, 1);
+            assert_eq!(expected.per_type[1].attempts.value, 1);
+            assert_eq!(expected.per_type[0].failures.value, 1);
+            assert_eq!(expected.activity.tunnels.value, 1);
+            assert_eq!(expected.activity.bytes.value, 42);
+            assert_eq!(expected.activity.stale.value, 1);
+            assert_eq!(runtime.serving.storage_mut().incident_report_mut().close_window(0, close), Some(expected));
+            let now = Instant::now();
+            assert_eq!(runtime.serving.storage_mut().emit_assurance(0, now), Ok(AssuranceObservation::Unchanged));
+            let secs_after = runtime.serving.storage().cache_secs(now);
+            for family in Family::ALL {
+                assert!(runtime.serving.storage().cache().family_retained(name, family, secs_after).unwrap().unwrap().time_valid());
+            }
+            let mut captured = Vec::new();
+            for _ in 0..16 {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => captured.extend_from_slice(&buf[..n]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("log read: {error}"),
+                }
+            }
+            assert!(matches!(reader.read(&mut buf), Err(error) if error.kind() == io::ErrorKind::WouldBlock), "all probe log bytes must be inspected");
+            let logs = std::str::from_utf8(&captured).unwrap();
+            assert!(!logs.contains("kind=dns_assurance ") && !logs.contains("kind=dns_assurance_fault"), "{logs}");
+            assert!(!logs.contains("kind=exchange_failed"), "the corroboration probe must succeed: {logs}");
+            responder.finish().unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 mod probe_records {
     use super::*;
 
