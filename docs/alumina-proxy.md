@@ -1827,6 +1827,43 @@ the boot status and attempt/conclusion facts. A terminated startup or a
 listener bind failure does not attempt these records. Queue saturation or
 encoding failure counts a whole record drop; an attempt is not a delivery
 promise and does not change listener or admission decisions, the drain budget,
-or the sink failure rule. This boot
-observation makes no endpoint certificate or SNI claim. Change and expiry
-telemetry remain a separate future governed increment.
+or the sink failure rule. This boot observation makes no endpoint certificate
+or SNI claim.
+
+For a serving-class authoritative reply that passes the name, generation and
+minimum-assurance checks, the owner observes the current cache before the
+candidate publication. A successful atomic positive, NXDOMAIN or NODATA cache
+mutation is observed once immediately afterward, before schedule and incident
+bookkeeping; one NXDOMAIN after-observation contains both families. Both
+observations use the same actual monotonic publication instant, sampled at the
+existing apply-time clock position after receipt and resolver-origin policy are
+known, and its corresponding mounted owner-clock second. The before observation
+may record an expired retained proof even if later preparation refuses the
+candidate. Startup exchanges and pure probes, including corroboration, do not
+run this observer. A rejected generation or minimum produces no observation.
+
+A material observation attempts one `dns_assurance` record with `phase=change`
+and the owned entry's next sequence. Current grade and retained proof class and
+time validity remain separate: in particular, a retained Trusted proof becoming
+time-invalid is material even if the current grade remains Trusted. Same-level
+TTL countdown, address, generation, equivalent-resolver and transport-liveness
+changes do not alone produce a record. The marker advances on observation and
+the sequence advances before the enqueue attempt, including a full-queue drop;
+there is no retry or delivery guarantee. Sequence values saturate at
+`u64::MAX`, after which distinct attempts can share that value. A later
+publication or transport error does not undo an enqueue attempt; the existing
+bounded queue, displacement, stranded-record and sink rules still apply.
+
+An observation that cannot obtain or validate its owner-bound cache or clock
+facts does not become an unchanged result or change the publication decision.
+It attempts an error-level `dns_assurance_fault` record with `secs`, entry
+`ordinal`, `phase` (`before` or `after`) and a closed `reason` token:
+`name_out_of_range`, `binding_capacity`, `family_mismatch`,
+`generation_exhausted`, `stale_generation`, `deadline_overflow`,
+`evidence_inconsistent`, `insufficient_assurance`, `unseeded`,
+`before_startup`, `clock_regressed` or `clock_mismatch`. This auxiliary fault
+attempt has no assurance sequence and follows the existing whole-record drop
+accounting. On the current route a successful schedule preparation validates
+the fixed index and the later incident clear has no reachable schedule error.
+No quiet proof-expiry wake is introduced: without a later qualifying
+publication, an expiry has no new timer-driven observation in this increment.

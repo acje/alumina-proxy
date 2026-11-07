@@ -2438,13 +2438,7 @@ impl StartupDns {
         }
     }
 
-    /// One nonblocking response-read step: at most one read, then a complete
-    /// validated message is published; an API/EOF/deadline failure settles the
-    /// counted failure and closes the connection exactly once.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "faithful response-read step threading the counted reason through every failure arm plus the probe/name publish gate"
-    )]
+    #[cfg(test)]
     fn step_recv(
         &mut self,
         ex: &mut ActiveExchange,
@@ -2452,6 +2446,33 @@ impl StartupDns {
         cache: &mut Cache,
         schedules: &mut Schedules,
     ) -> Result<RecvStep, StartupDnsError> {
+        self.step_recv_observed(ex, fqdn, cache, schedules, &mut |_, _, _, _, _| {})
+    }
+
+    /// One nonblocking response-read step: at most one read, then a complete
+    /// validated message is published; an API/EOF/deadline failure settles the
+    /// counted failure and closes the connection exactly once.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "faithful response-read step threading the counted reason through every failure arm plus the probe/name publish gate"
+    )]
+    fn step_recv_observed<F>(
+        &mut self,
+        ex: &mut ActiveExchange,
+        fqdn: &Fqdn,
+        cache: &mut Cache,
+        schedules: &mut Schedules,
+        observer: &mut F,
+    ) -> Result<RecvStep, StartupDnsError>
+    where
+        F: FnMut(
+            crate::dns::publication::ObservationPhase,
+            &Cache,
+            crate::dns::cache::NameIndex,
+            u64,
+            Instant,
+        ),
+    {
         let want = self.msglen.map_or(2, |len| len + 2);
         if self.filled < want {
             match self.try_recv() {
@@ -2514,24 +2535,34 @@ impl StartupDns {
                         });
                     let obsolete_negative =
                         matches!(observed.probe_facts().0, PublishedKind::Negative);
-                    let (kind, extreme, incidents) = match observed.apply(
-                        cache,
-                        schedules,
-                        crate::dns::publication::ApplyContext {
-                            index: ex.ordinal,
-                            generation: ex.generation,
-                            query_family: Some(ex.family),
-                            other_generation: Some(ex.other_generation),
-                            receipt,
-                            now: self.now_u64(),
-                        },
-                        wire::ApplyOrigin {
-                            source,
-                            query_floor: ex.query_floor,
-                            origin_authenticated,
-                            origin_policy,
-                        },
-                    ) {
+                    let publication_at = Instant::now();
+                    let context = crate::dns::publication::ApplyContext {
+                        index: ex.ordinal,
+                        generation: ex.generation,
+                        query_family: Some(ex.family),
+                        other_generation: Some(ex.other_generation),
+                        receipt,
+                        now: self.now0.saturating_add(
+                            publication_at
+                                .saturating_duration_since(self.start)
+                                .as_secs(),
+                        ),
+                    };
+                    let origin = wire::ApplyOrigin {
+                        source,
+                        query_floor: ex.query_floor,
+                        origin_authenticated,
+                        origin_policy,
+                    };
+                    let publication = if ex.class == ExchangeClass::Serving {
+                        let mut forward = |phase, cache: &Cache, name, secs| {
+                            observer(phase, cache, name, secs, publication_at)
+                        };
+                        observed.apply_observed(cache, schedules, context, origin, &mut forward)
+                    } else {
+                        observed.apply(cache, schedules, context, origin)
+                    };
+                    let (kind, extreme, incidents) = match publication {
                         Ok(published) => published,
                         Err(DnsError::Cache(CacheError::StaleGeneration)) if obsolete_negative => {
                             schedules.release_selection(ex.ordinal, ex.family)?;
@@ -3022,6 +3053,25 @@ impl StartupDns {
         cache: &mut Cache,
         schedules: &mut Schedules,
     ) -> Result<TurnResult, StartupDnsError> {
+        self.advance_exchange_observed(fqdn, cache, schedules, &mut |_, _, _, _, _| {})
+    }
+
+    pub(crate) fn advance_exchange_observed<F>(
+        &mut self,
+        fqdn: &Fqdn,
+        cache: &mut Cache,
+        schedules: &mut Schedules,
+        observer: &mut F,
+    ) -> Result<TurnResult, StartupDnsError>
+    where
+        F: FnMut(
+            crate::dns::publication::ObservationPhase,
+            &Cache,
+            crate::dns::cache::NameIndex,
+            u64,
+            Instant,
+        ),
+    {
         let Some(mut ex) = self.active.take() else {
             return Err(StartupDnsError::ExchangeInactive);
         };
@@ -3063,22 +3113,24 @@ impl StartupDns {
                     return Ok(TurnResult::Failed(reason));
                 }
             },
-            ExchangeStep::Receiving => match self.step_recv(&mut ex, fqdn, cache, schedules)? {
-                RecvStep::Waiting => None,
-                RecvStep::Failed(reason) => {
-                    self.active = None;
-                    return Ok(TurnResult::Failed(reason));
+            ExchangeStep::Receiving => {
+                match self.step_recv_observed(&mut ex, fqdn, cache, schedules, observer)? {
+                    RecvStep::Waiting => None,
+                    RecvStep::Failed(reason) => {
+                        self.active = None;
+                        return Ok(TurnResult::Failed(reason));
+                    }
+                    RecvStep::Published(kind) => {
+                        self.active = None;
+                        self.on_exchange_succeeded()?;
+                        return Ok(TurnResult::Published(kind));
+                    }
+                    RecvStep::Superseded => {
+                        self.active = None;
+                        return Ok(TurnResult::Superseded);
+                    }
                 }
-                RecvStep::Published(kind) => {
-                    self.active = None;
-                    self.on_exchange_succeeded()?;
-                    return Ok(TurnResult::Published(kind));
-                }
-                RecvStep::Superseded => {
-                    self.active = None;
-                    return Ok(TurnResult::Superseded);
-                }
-            },
+            }
         };
         if let Some(step) = next_step {
             ex.step = step;

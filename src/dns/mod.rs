@@ -1,5 +1,6 @@
 mod publication;
 
+pub(crate) use publication::ObservationPhase;
 pub use publication::apply_outcome;
 pub use resolver::{MAX_RESOLVERS, RESOLVER_PORT};
 pub use wire::{

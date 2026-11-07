@@ -10,16 +10,20 @@ use crate::enforcement::monitor::DnsAnomalyKind;
 
 use std::io::{Read, Write};
 
-use std::net::{IpAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use std::thread;
 
 pub(crate) enum Step {
     PositiveA {
+        ttl: u32,
+        octets: [u8; 4],
+    },
+    PositiveAAd {
         ttl: u32,
         octets: [u8; 4],
     },
@@ -61,6 +65,49 @@ pub(crate) struct Responder {
     handle: Option<thread::JoinHandle<()>>,
     connections: Arc<AtomicUsize>,
     closed_after_prefix: Arc<AtomicUsize>,
+}
+
+pub(crate) struct BoundedResponder {
+    responder: Option<Responder>,
+    cancel: Arc<ResponderCancellation>,
+}
+
+struct ResponderCancellation {
+    requested: AtomicBool,
+    active: Mutex<Option<TcpStream>>,
+}
+
+impl BoundedResponder {
+    pub(crate) fn port(&self) -> u16 {
+        self.responder.as_ref().unwrap().port()
+    }
+
+    pub(crate) fn finish(mut self) -> thread::Result<()> {
+        self.cancel_and_join()
+    }
+
+    fn cancel_and_join(&mut self) -> thread::Result<()> {
+        let Some(mut responder) = self.responder.take() else {
+            return Ok(());
+        };
+        self.cancel.requested.store(true, Ordering::Release);
+        let active = self.cancel.active.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(stream) = active.as_ref() {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        drop(active);
+        let Some(handle) = responder.handle.take() else {
+            return Ok(());
+        };
+        handle.thread().unpark();
+        handle.join()
+    }
+}
+
+impl Drop for BoundedResponder {
+    fn drop(&mut self) {
+        let _ = self.cancel_and_join();
+    }
 }
 
 impl Responder {
@@ -128,7 +175,9 @@ fn respond_for(query: &[u8], step: &Step) -> Option<Vec<u8>> {
     msg.extend_from_slice(&tid.to_be_bytes());
     let (rcode, an, ns, answers, authority): (u16, u16, u16, Vec<Vec<u8>>, Vec<Vec<u8>>) =
         match step {
-            Step::PositiveA { ttl, octets } | Step::PositiveAMismatchedTid { ttl, octets } => {
+            Step::PositiveA { ttl, octets }
+            | Step::PositiveAAd { ttl, octets }
+            | Step::PositiveAMismatchedTid { ttl, octets } => {
                 (0, 1, 0, vec![record(qname, 1, *ttl, octets)], vec![])
             }
             Step::PositiveAaaa { ttl, octets } => {
@@ -159,7 +208,13 @@ fn respond_for(query: &[u8], step: &Step) -> Option<Vec<u8>> {
                 return None;
             }
         };
-    let flags = 0x8000 | rcode;
+    let flags = 0x8000
+        | rcode
+        | if matches!(step, Step::PositiveAAd { .. }) {
+            0x20
+        } else {
+            0
+        };
     msg.extend_from_slice(&flags.to_be_bytes());
     msg.extend_from_slice(&1u16.to_be_bytes());
     msg.extend_from_slice(&an.to_be_bytes());
@@ -175,12 +230,51 @@ fn respond_for(query: &[u8], step: &Step) -> Option<Vec<u8>> {
     Some(msg)
 }
 
+fn wait_script_duration(duration: Duration, cancel: Option<&ResponderCancellation>) {
+    let Some(cancel) = cancel else {
+        thread::sleep(duration);
+        return;
+    };
+    let deadline = Instant::now() + duration;
+    while !cancel.requested.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::park_timeout(remaining);
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "test harness dispatches one arm per wire behaviour; the length-prefix probe arm keeps it over the heuristic line budget"
 )]
 pub(crate) fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
+    spawn_responder_impl(conn_scripts, None)
+}
+
+pub(crate) fn spawn_bounded_responder(conn_scripts: Vec<Vec<Step>>) -> BoundedResponder {
+    let cancel = Arc::new(ResponderCancellation {
+        requested: AtomicBool::new(false),
+        active: Mutex::new(None),
+    });
+    let responder = spawn_responder_impl(conn_scripts, Some(Arc::clone(&cancel)));
+    BoundedResponder {
+        responder: Some(responder),
+        cancel,
+    }
+}
+
+fn spawn_responder_impl(
+    conn_scripts: Vec<Vec<Step>>,
+    cancel: Option<Arc<ResponderCancellation>>,
+) -> Responder {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind responder");
+    if cancel.is_some() {
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking responder");
+    }
     let addr = listener.local_addr().expect("responder addr");
     let connections = Arc::new(AtomicUsize::new(0));
     let connections_thread = Arc::clone(&connections);
@@ -189,13 +283,49 @@ pub(crate) fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
     let handle = thread::spawn(move || {
         let scripts = conn_scripts.into_iter();
         for conn_steps in scripts {
-            let Ok((mut sock, _)) = listener.accept() else {
+            if cancel
+                .as_ref()
+                .is_some_and(|state| state.requested.load(Ordering::Acquire))
+            {
+                break;
+            }
+            let accepted = loop {
+                match listener.accept() {
+                    Ok(pair) => break Some(pair),
+                    Err(err) if cancel.is_some() && err.kind() == io::ErrorKind::WouldBlock => {
+                        if cancel.as_ref().unwrap().requested.load(Ordering::Acquire) {
+                            break None;
+                        }
+                        thread::park_timeout(Duration::from_millis(50));
+                    }
+                    Err(err) if cancel.is_some() => panic!("responder accept failed: {err}"),
+                    Err(_) => break None,
+                }
+            };
+            let Some((mut sock, _)) = accepted else {
                 break;
             };
+            if let Some(state) = &cancel {
+                let mut active = state.active.lock().unwrap();
+                if state.requested.load(Ordering::Acquire) {
+                    break;
+                }
+                sock.set_nonblocking(false).unwrap();
+                sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                sock.set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                *active = Some(sock.try_clone().unwrap());
+            }
             connections_thread.fetch_add(1, Ordering::Relaxed);
             for step in conn_steps {
+                if cancel
+                    .as_ref()
+                    .is_some_and(|state| state.requested.load(Ordering::Acquire))
+                {
+                    break;
+                }
                 match step {
-                    Step::Stall(d) => thread::sleep(d),
+                    Step::Stall(d) => wait_script_duration(d, cancel.as_deref()),
                     Step::Close => break,
                     Step::Malformed(bytes) => {
                         let mut lenb = [0u8; 2];
@@ -267,7 +397,7 @@ pub(crate) fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
                             }
                             at += take;
                             if at < out.len() {
-                                thread::sleep(gap);
+                                wait_script_duration(gap, cancel.as_deref());
                             }
                         }
                     }
@@ -297,6 +427,9 @@ pub(crate) fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
                         }
                     }
                 }
+            }
+            if let Some(state) = &cancel {
+                *state.active.lock().unwrap() = None;
             }
         }
     });
@@ -5138,4 +5271,166 @@ fn zero_window_reports_current_cache_admission_without_exchange() {
         report.resolved_names, 0,
         "an expired proof with a still-fresh binding must not resolve"
     );
+}
+
+#[test]
+fn actual_transport_publication_callbacks_share_one_instant_and_owner_second() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::dns::publication::ObservationPhase;
+            use crate::runtime::tunnel::WorkerClock;
+
+            let responder = spawn_bounded_responder(vec![vec![Step::PositiveAAd {
+                ttl: 60,
+                octets: [9, 9, 9, 9],
+            }]]);
+            let config = config();
+            let mut cache = Cache::for_config(&config).unwrap();
+            let mut schedules = Schedules::new(config.allowlist().len()).unwrap();
+            let mut transport = StartupDns::new().unwrap();
+            let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+            transport
+                .begin_window(peer, *config.resolver_set(), 1000, Duration::ZERO)
+                .unwrap();
+            let clock = WorkerClock::new(transport.window_start(), 1000);
+            let name = cache.name_index(0).unwrap();
+            let pair = cache.generations_before_query(name, Family::A).unwrap();
+            let fqdn = config.allowlist().get(0).unwrap();
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(5);
+            transport
+                .start_exchange(fqdn, Family::A, 0, deadline, pair, ExchangeClass::Serving)
+                .unwrap();
+            let mut observations = [None, None];
+            let mut count = 0;
+            let mut observer = |phase, _cache: &Cache, _name, secs, instant| {
+                observations[count] = Some((phase, secs, instant));
+                count += 1;
+            };
+            loop {
+                match transport
+                    .advance_exchange_observed(fqdn, &mut cache, &mut schedules, &mut observer)
+                    .unwrap()
+                {
+                    TurnResult::Pending => {
+                        transport.wait_dns_readiness(deadline).unwrap();
+                    }
+                    TurnResult::Published(_) => break,
+                    other => panic!("publication failed: {other:?}"),
+                }
+            }
+            let returned = Instant::now();
+            assert_eq!(count, 2);
+            let (before_phase, before_secs, before) = observations[0].unwrap();
+            let (after_phase, after_secs, after) = observations[1].unwrap();
+            assert_eq!(before_phase, ObservationPhase::BeforeCommit);
+            assert_eq!(after_phase, ObservationPhase::AfterCommit);
+            assert_eq!(before, after);
+            assert!(started <= before && after <= returned);
+            assert_eq!(before_secs, after_secs);
+            assert_eq!(before_secs, clock.cache_secs(before));
+            responder.finish().unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn responder_preconnect_panic_is_bounded_and_preserved() {
+    let responder = spawn_bounded_responder(vec![vec![Step::PositiveA {
+        ttl: 60,
+        octets: [9, 9, 9, 9],
+    }]]);
+    let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+    let (done, cancelled) = std::sync::mpsc::channel();
+    let fallback = thread::spawn(move || {
+        if cancelled.recv_timeout(Duration::from_secs(2)).is_err() {
+            let _ = TcpStream::connect_timeout(&peer, Duration::from_millis(200));
+        }
+    });
+    let started = Instant::now();
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _responder = responder;
+        panic!("original preconnect failure");
+    }));
+    let elapsed = started.elapsed();
+    let _ = done.send(());
+    fallback.join().unwrap();
+    let panic = failure.expect_err("preconnect failure must not become success");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"original preconnect failure")
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "teardown took {elapsed:?}"
+    );
+}
+
+#[test]
+fn bounded_responder_joins_an_incomplete_query() {
+    let responder = spawn_bounded_responder(vec![vec![Step::PositiveA {
+        ttl: 60,
+        octets: [9, 9, 9, 9],
+    }]]);
+    let accepted = Arc::clone(&responder.responder.as_ref().unwrap().connections);
+    let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+    let mut client = TcpStream::connect(peer).unwrap();
+    client.write_all(&[0, 10]).unwrap();
+    for _ in 0..40 {
+        if accepted.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(accepted.load(Ordering::Acquire), 1);
+    thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    responder.finish().unwrap();
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+}
+
+#[test]
+fn bounded_responder_interrupts_a_delayed_reply() {
+    let responder =
+        spawn_bounded_responder(vec![vec![Step::Stall(Duration::from_secs(2)), Step::Close]]);
+    let accepted = Arc::clone(&responder.responder.as_ref().unwrap().connections);
+    let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+    let _client = TcpStream::connect(peer).unwrap();
+    for _ in 0..40 {
+        if accepted.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(accepted.load(Ordering::Acquire), 1);
+    thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    responder.finish().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn bounded_responder_finish_exposes_worker_panic() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let responder = Responder {
+        addr: listener.local_addr().unwrap(),
+        handle: Some(thread::spawn(|| panic!("responder failure"))),
+        connections: Arc::new(AtomicUsize::new(0)),
+        closed_after_prefix: Arc::new(AtomicUsize::new(0)),
+    };
+    let bounded = BoundedResponder {
+        responder: Some(responder),
+        cancel: Arc::new(ResponderCancellation {
+            requested: AtomicBool::new(false),
+            active: Mutex::new(None),
+        }),
+    };
+    let panic = bounded
+        .finish()
+        .expect_err("worker failure must be observable");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"responder failure"));
 }

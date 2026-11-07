@@ -24,7 +24,7 @@ pub(super) struct ApplyContext {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ObservationPhase {
+pub(crate) enum ObservationPhase {
     BeforeCommit,
     AfterCommit,
 }

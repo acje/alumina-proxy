@@ -2972,6 +2972,52 @@ mod main_wiring {
 mod startup_warning {
     use super::*;
 
+    #[test]
+    fn actual_serving_publication_emits_assurance_change_for_seeded_entry() {
+        thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(|| {
+            use std::os::unix::net::UnixStream;
+            let doc = concat!("listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n", "[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n");
+            let config = crate::config::parse_config_document(doc).unwrap().with_kernel_assigned_test_listener();
+            let mut storage = ServeStorage::boot(&config).unwrap();
+            storage.publish_test_a(0);
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader.set_nonblocking(true).unwrap();
+            writer.set_nonblocking(true).unwrap();
+            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
+            let startup = owner.run_startup_within(SocketAddr::from(([127, 0, 0, 1], 9)), 1000, Duration::ZERO).unwrap();
+            assert_eq!(startup.decision(), StartupDecision::Serve(ServingMode::Degraded));
+            let mut buf = [0u8; 16384];
+            let n = reader.read(&mut buf).unwrap();
+            let boot = std::str::from_utf8(&buf[..n]).unwrap();
+            assert!(boot.contains("kind=dns_assurance") && boot.contains("phase=boot"), "{boot}");
+            assert!(!boot.contains("phase=change"), "no intermediate boot events: {boot}");
+            let listener = startup.into_listener().unwrap();
+            let mut runtime = owner.attach(listener).unwrap();
+            let (peer, _responder) = spawn_responder_keep_alive();
+            runtime.serving.storage_mut().dns_mut().set_peer_for_test(peer);
+            runtime.serving.storage_mut().start_dns_exchange(1, Family::A,
+                Instant::now() + Duration::from_secs(5), ExchangeClass::Serving).unwrap();
+            let mut published = false;
+            for _ in 0..200 {
+                runtime.turn(Some(Duration::from_millis(5))).unwrap();
+                if !runtime.serving.storage().dns().has_active_exchange() && name_published(&runtime, 1, Family::A) {
+                    published = true;
+                    break;
+                }
+            }
+            assert!(published, "the real serving reply must publish");
+            let n = match reader.read(&mut buf) {
+                Ok(n) => n,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => 0,
+                Err(err) => panic!("read log sink: {err}"),
+            };
+            let text = std::str::from_utf8(&buf[..n]).unwrap();
+            assert!(text.lines().any(|line| line.contains("kind=dns_assurance") && line.contains("seq=1 phase=change")), "real parsed serving publication must emit its change: {text}");
+        }).unwrap().join().unwrap();
+    }
+
     #[cfg(feature = "alloc-witness")]
     fn actual_boot_status(cooperative: bool, mode: ServingMode) {
         use crate::dns::cache::{Generation, StagedPositive};

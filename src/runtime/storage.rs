@@ -112,6 +112,109 @@ pub(crate) enum AssuranceObservationError {
     Unseeded,
     BeforeStartup,
     ClockRegressed,
+    ClockMismatch,
+}
+
+impl AssuranceObservationError {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cache(CacheError::NameOutOfRange) => "name_out_of_range",
+            Self::Cache(CacheError::BindingCapacityExceeded) => "binding_capacity",
+            Self::Cache(CacheError::FamilyMismatch) => "family_mismatch",
+            Self::Cache(CacheError::GenerationExhausted) => "generation_exhausted",
+            Self::Cache(CacheError::StaleGeneration) => "stale_generation",
+            Self::Cache(CacheError::DeadlineOverflow) => "deadline_overflow",
+            Self::Cache(CacheError::EvidenceInconsistent) => "evidence_inconsistent",
+            Self::Cache(CacheError::InsufficientAssurance) => "insufficient_assurance",
+            Self::Unseeded => "unseeded",
+            Self::BeforeStartup => "before_startup",
+            Self::ClockRegressed => "clock_regressed",
+            Self::ClockMismatch => "clock_mismatch",
+        }
+    }
+}
+
+struct AssuranceView<'a> {
+    config: &'a Config,
+    origin: Instant,
+    now0: u64,
+    states: &'a mut [Option<AssuranceState>; ALLOWLIST_MAX],
+    clock: &'a mut Option<AssuranceClock>,
+    logs: &'a mut LogStore,
+}
+
+impl AssuranceView<'_> {
+    fn observe(
+        &mut self,
+        cache: &Cache,
+        ordinal: usize,
+        name: NameIndex,
+        secs: u64,
+        now: Instant,
+    ) -> Result<AssuranceObservation, AssuranceObservationError> {
+        if self.config.allowlist().get(ordinal).is_none() || cache.name_index(ordinal) != Some(name)
+        {
+            return Err(AssuranceObservationError::Cache(CacheError::NameOutOfRange));
+        }
+        let state = self
+            .states
+            .get_mut(ordinal)
+            .and_then(Option::as_mut)
+            .ok_or(AssuranceObservationError::Unseeded)?;
+        let clock = self
+            .clock
+            .as_mut()
+            .ok_or(AssuranceObservationError::Unseeded)?;
+        let Some(elapsed) = now.checked_duration_since(self.origin) else {
+            return Err(AssuranceObservationError::BeforeStartup);
+        };
+        if now < clock.boot || elapsed.as_secs() < clock.boot_elapsed_secs {
+            return Err(AssuranceObservationError::BeforeStartup);
+        }
+        if now < clock.last {
+            return Err(AssuranceObservationError::ClockRegressed);
+        }
+        if self.now0.saturating_add(elapsed.as_secs()) != secs {
+            return Err(AssuranceObservationError::ClockMismatch);
+        }
+        let snapshot = capture_assurance_from(self.config, cache, ordinal, secs)
+            .map_err(AssuranceObservationError::Cache)?;
+        clock.last = now;
+        if !state.marker.observe(snapshot.key) {
+            return Ok(AssuranceObservation::Unchanged);
+        }
+        state.sequence = state.sequence.saturating_add(1);
+        let sequence = state.sequence;
+        let enqueued =
+            self.logs
+                .enqueue_assurance(&snapshot, sequence, crate::log::AssurancePhase::Change);
+        Ok(AssuranceObservation::Attempted { sequence, enqueued })
+    }
+}
+
+fn capture_assurance_from(
+    config: &Config,
+    cache: &Cache,
+    ordinal: usize,
+    secs: u64,
+) -> Result<AssuranceSnapshot, CacheError> {
+    let fqdn = config
+        .allowlist()
+        .get(ordinal)
+        .ok_or(CacheError::NameOutOfRange)?;
+    let name = cache
+        .name_index(ordinal)
+        .ok_or(CacheError::NameOutOfRange)?;
+    Ok(AssuranceSnapshot {
+        fqdn: fqdn.clone(),
+        families: [
+            cache.family_snapshot(name, Family::A, secs)?,
+            cache.family_snapshot(name, Family::Aaaa, secs)?,
+        ],
+        secs,
+        boot: None,
+        key: cache.grade_key(name, secs)?,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -273,12 +376,13 @@ impl ServeStorage {
         WorkerView::new(&self.config, &self.cache, self.worker.clock())
     }
 
+    #[cfg(test)]
     pub(crate) fn capture_assurance(
         &self,
         ordinal: usize,
         now: Instant,
     ) -> Result<AssuranceSnapshot, CacheError> {
-        let secs = self.work_view().cache_secs(now);
+        let secs = self.cache_secs(now);
         self.capture_assurance_secs(ordinal, secs)
     }
 
@@ -287,75 +391,29 @@ impl ServeStorage {
         ordinal: usize,
         secs: u64,
     ) -> Result<AssuranceSnapshot, CacheError> {
-        let view = self.work_view();
-        let fqdn = view.fqdn_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
-        let name = view.name_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
-        let key = view.cache().grade_key(name, secs)?;
-        let a = view.cache().family_snapshot(name, Family::A, secs)?;
-        let aaaa = view.cache().family_snapshot(name, Family::Aaaa, secs)?;
-        Ok(AssuranceSnapshot {
-            fqdn: fqdn.clone(),
-            families: [a, aaaa],
-            secs,
-            boot: None,
-            key,
-        })
+        capture_assurance_from(&self.config, &self.cache, ordinal, secs)
     }
 
+    #[cfg(test)]
     pub(crate) fn emit_assurance(
         &mut self,
         ordinal: usize,
         now: Instant,
     ) -> Result<AssuranceObservation, AssuranceObservationError> {
-        if self.config.allowlist().get(ordinal).is_none()
-            || self.cache.name_index(ordinal).is_none()
-        {
-            return Err(AssuranceObservationError::Cache(CacheError::NameOutOfRange));
-        }
-        if self
-            .assurance
-            .get(ordinal)
-            .and_then(Option::as_ref)
-            .is_none()
-        {
-            return Err(AssuranceObservationError::Unseeded);
-        }
-        let clock = self
-            .assurance_clock
-            .as_ref()
-            .ok_or(AssuranceObservationError::Unseeded)?;
-        let Some(elapsed) = now.checked_duration_since(self.origin) else {
-            return Err(AssuranceObservationError::BeforeStartup);
-        };
-        if now < clock.boot || elapsed.as_secs() < clock.boot_elapsed_secs {
-            return Err(AssuranceObservationError::BeforeStartup);
-        }
-        if now < clock.last {
-            return Err(AssuranceObservationError::ClockRegressed);
-        }
         let secs = self.cache_secs(now);
-        let snapshot = self
-            .capture_assurance_secs(ordinal, secs)
-            .map_err(AssuranceObservationError::Cache)?;
-        let state = self
-            .assurance
-            .get_mut(ordinal)
-            .and_then(Option::as_mut)
-            .ok_or(AssuranceObservationError::Unseeded)?;
-        let clock = self
-            .assurance_clock
-            .as_mut()
-            .ok_or(AssuranceObservationError::Unseeded)?;
-        clock.last = now;
-        if !state.marker.observe(snapshot.key) {
-            return Ok(AssuranceObservation::Unchanged);
-        }
-        state.sequence = state.sequence.saturating_add(1);
-        let sequence = state.sequence;
-        let enqueued =
-            self.logs
-                .enqueue_assurance(&snapshot, sequence, crate::log::AssurancePhase::Change);
-        Ok(AssuranceObservation::Attempted { sequence, enqueued })
+        let name = self
+            .cache
+            .name_index(ordinal)
+            .ok_or(AssuranceObservationError::Cache(CacheError::NameOutOfRange))?;
+        let mut view = AssuranceView {
+            config: &self.config,
+            origin: self.origin,
+            now0: self.now0,
+            states: &mut self.assurance,
+            clock: &mut self.assurance_clock,
+            logs: &mut self.logs,
+        };
+        view.observe(&self.cache, ordinal, name, secs, now)
     }
 
     /// The whole-second DNS/cache serving clock, mounted on the same origin
@@ -736,9 +794,30 @@ impl ServeStorage {
             .allowlist()
             .get(ordinal)
             .ok_or(StartupDnsError::Cache(CacheError::NameOutOfRange))?;
-        let result = self
-            .dns
-            .advance_exchange(fqdn, &mut self.cache, &mut self.schedules)?;
+        let mut view = AssuranceView {
+            config: &self.config,
+            origin: self.origin,
+            now0: self.now0,
+            states: &mut self.assurance,
+            clock: &mut self.assurance_clock,
+            logs: &mut self.logs,
+        };
+        let mut observer = |phase, cache: &Cache, name, secs, now| {
+            if let Err(err) = view.observe(cache, ordinal, name, secs, now) {
+                let phase = match phase {
+                    crate::dns::ObservationPhase::BeforeCommit => "before",
+                    crate::dns::ObservationPhase::AfterCommit => "after",
+                };
+                view.logs
+                    .dns_assurance_fault(secs, ordinal, phase, err.as_str());
+            }
+        };
+        let result = self.dns.advance_exchange_observed(
+            fqdn,
+            &mut self.cache,
+            &mut self.schedules,
+            &mut observer,
+        )?;
         self.drain_common_six();
         self.drain_incident_notes();
         let secs = self.cache_secs(Instant::now());
@@ -1541,6 +1620,400 @@ mod assurance_bridge_tests {
     use crate::log::AssurancePhase;
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn invalid_preconnect_seed_remains_error_and_joins_responder() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let started = Instant::now();
+                assert_eq!(
+                    invalid_preconnect_seed(),
+                    Err(CacheError::EvidenceInconsistent)
+                );
+                assert!(started.elapsed() < Duration::from_secs(3));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn invalid_preconnect_seed() -> Result<(), CacheError> {
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::tests::{Step, spawn_bounded_responder};
+        use crate::eligibility::NumericAddr;
+
+        let _responder = spawn_bounded_responder(vec![vec![Step::PositiveA {
+            ttl: 60,
+            octets: [9, 9, 9, 9],
+        }]]);
+        let mut storage = storage();
+        let name = storage.cache.name_index(0).unwrap();
+        let proof =
+            Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1000,
+            60,
+            Some(proof),
+        )?;
+        storage.cache.publish_positive(&staged)
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn actual_owner_expiry_then_recovery_uses_one_clock_and_no_allocation() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(actual_owner_expiry_then_recovery_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    fn actual_owner_expiry_then_recovery_body() {
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::tests::{Step, spawn_bounded_responder};
+        use crate::dns::transport::{ExchangeClass, StartupReport, TurnResult};
+        use crate::eligibility::NumericAddr;
+        use std::io::Read;
+        use std::net::SocketAddr;
+        use std::os::unix::net::UnixStream;
+
+        let responder = spawn_bounded_responder(vec![vec![
+            Step::Stall(Duration::from_millis(1300)),
+            Step::PositiveAAd {
+                ttl: 60,
+                octets: [9, 9, 9, 9],
+            },
+        ]]);
+        let mut storage = storage();
+        storage.config = storage.config.clone().with_kernel_assigned_test_listener();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+        storage
+            .dns
+            .begin_window(peer, *storage.config.resolver_set(), 1000, Duration::ZERO)
+            .unwrap();
+        let name = storage.cache.name_index(0).unwrap();
+        let old =
+            Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1000,
+            1,
+            Some(old),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        let startup = storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert_eq!(
+            startup.decision(),
+            super::StartupDecision::Serve(super::ServingMode::Full)
+        );
+        assert_eq!(storage.dns.now_u64(), 1000);
+        assert!(
+            storage
+                .cache
+                .family_snapshot(name, Family::A, 1000)
+                .unwrap()
+                .retained()
+                .unwrap()
+                .time_valid()
+        );
+        storage.logs.drain_sink();
+        let mut bytes = [0u8; 16384];
+        let n = reader.read(&mut bytes).unwrap();
+        assert!(
+            std::str::from_utf8(&bytes[..n])
+                .unwrap()
+                .contains("phase=boot")
+        );
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(5);
+        storage
+            .start_dns_exchange(0, Family::A, deadline, ExchangeClass::Serving)
+            .unwrap();
+        let (terminal, counts) =
+            crate::alloc::run_phase(crate::alloc::Phase::BackgroundRefresh, || {
+                loop {
+                    match storage.advance_dns_serving().unwrap() {
+                        Some(TurnResult::Pending) => {
+                            storage.dns.wait_dns_readiness(deadline).unwrap();
+                        }
+                        Some(result) => break result,
+                        None => panic!("serving exchange vanished"),
+                    }
+                }
+            });
+        assert!(matches!(terminal, TurnResult::Published(_)), "{terminal:?}");
+        assert!(counts.all_zero(), "{counts:?}");
+        let returned = Instant::now();
+        let observed = storage.assurance_clock.unwrap().last;
+        assert!(started <= observed && observed <= returned);
+        let secs = storage.cache_secs(observed);
+        assert_eq!(
+            secs,
+            crate::runtime::tunnel::WorkerClock::new(storage.origin, storage.now0)
+                .cache_secs(observed)
+        );
+        assert!(secs >= 1001 && secs < 1060, "{secs}");
+        storage.logs.drain_sink();
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let frames: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("kind=dns_assurance "))
+            .collect();
+        assert_eq!(frames.len(), 2, "{text}");
+        for (frame, (seq, valid)) in frames.iter().zip([(1, 0), (2, 1)]) {
+            assert!(
+                frame.contains(&format!("secs={secs} seq={seq} phase=change")),
+                "{frame}"
+            );
+            assert!(frame.contains("a_current=\"trusted\""), "{frame}");
+            assert!(frame.contains("a_required=\"resolver_trusted\""), "{frame}");
+            assert!(frame.contains("a_outcome=\"positive\""), "{frame}");
+            assert!(frame.contains("a_retained_kind=\"positive\""), "{frame}");
+            assert!(frame.contains("a_retained_class=\"trusted\""), "{frame}");
+            assert!(
+                frame.contains(&format!("a_retained_time_valid={valid}")),
+                "{frame}"
+            );
+        }
+        assert_eq!(storage.assurance[0].unwrap().sequence, 2);
+        responder.finish().unwrap();
+    }
+
+    #[test]
+    fn actual_owner_negative_publications_are_atomic() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                actual_owner_negative_case(true);
+                actual_owner_negative_case(false);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn actual_owner_negative_case(nx: bool) {
+        use crate::dns::cache::Family;
+        use crate::dns::transport::tests::{Step, spawn_bounded_responder};
+        use crate::dns::transport::{ExchangeClass, StartupReport, TurnResult};
+        use std::io::Read;
+        use std::net::SocketAddr;
+        use std::os::unix::net::UnixStream;
+
+        let step = if nx {
+            Step::NxdomainWithSoa { ttl: 60, min: 60 }
+        } else {
+            Step::NodataWithSoa { ttl: 60, min: 60 }
+        };
+        let responder = spawn_bounded_responder(vec![vec![step]]);
+        let mut storage = storage();
+        storage.config = storage.config.clone().with_kernel_assigned_test_listener();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+        storage
+            .dns
+            .begin_window(peer, *storage.config.resolver_set(), 1000, Duration::ZERO)
+            .unwrap();
+        storage.publish_test_a(0);
+        let startup = storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert_eq!(
+            startup.decision(),
+            super::StartupDecision::Serve(super::ServingMode::Full)
+        );
+        storage.logs.drain_sink();
+        let mut bytes = [0u8; 16384];
+        reader.read(&mut bytes).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        storage
+            .start_dns_exchange(0, Family::Aaaa, deadline, ExchangeClass::Serving)
+            .unwrap();
+        loop {
+            match storage.advance_dns_serving().unwrap() {
+                Some(TurnResult::Pending) => {
+                    storage.dns.wait_dns_readiness(deadline).unwrap();
+                }
+                Some(TurnResult::Published(_)) => break,
+                other => panic!("negative publication failed: {other:?}"),
+            }
+        }
+        storage.logs.drain_sink();
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let frames: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("kind=dns_assurance "))
+            .collect();
+        assert_eq!(frames.len(), 1, "{text}");
+        let frame = frames[0];
+        assert!(frame.contains("seq=1 phase=change"), "{frame}");
+        if nx {
+            assert!(
+                frame.contains("a_outcome=\"nx\"") && frame.contains("aaaa_outcome=\"nx\""),
+                "{frame}"
+            );
+            assert!(
+                frame.contains("a_retained_kind=\"nx\"")
+                    && frame.contains("aaaa_retained_kind=\"nx\""),
+                "{frame}"
+            );
+        } else {
+            assert!(
+                frame.contains("a_outcome=\"positive\"")
+                    && frame.contains("aaaa_outcome=\"nodata\""),
+                "{frame}"
+            );
+            assert!(
+                frame.contains("a_retained=\"none\"")
+                    && frame.contains("aaaa_retained_kind=\"nodata\""),
+                "{frame}"
+            );
+        }
+        responder.finish().unwrap();
+    }
+
+    #[test]
+    fn actual_owner_same_grade_address_refresh_and_nx_are_silent() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(actual_owner_silent_refresh_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn actual_owner_silent_refresh_body() {
+        use crate::dns::cache::Family;
+        use crate::dns::transport::tests::{Step, spawn_bounded_responder};
+        use crate::dns::transport::{ExchangeClass, StartupReport, TurnResult};
+        use crate::eligibility::NumericAddr;
+        use std::io::Read;
+        use std::net::SocketAddr;
+        use std::os::unix::net::UnixStream;
+
+        let responder = spawn_bounded_responder(vec![vec![
+            Step::PositiveA {
+                ttl: 60,
+                octets: [8, 8, 8, 8],
+            },
+            Step::PositiveAaaa {
+                ttl: 60,
+                octets: [
+                    0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+                ],
+            },
+            Step::PositiveA {
+                ttl: 60,
+                octets: [9, 9, 9, 9],
+            },
+            Step::NxdomainWithSoa { ttl: 60, min: 60 },
+        ]]);
+        let mut storage = storage();
+        storage.config = storage.config.clone().with_kernel_assigned_test_listener();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+        storage
+            .dns
+            .begin_window(peer, *storage.config.resolver_set(), 1000, Duration::ZERO)
+            .unwrap();
+        storage.publish_test_a(0);
+        let startup = storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert_eq!(
+            startup.decision(),
+            super::StartupDecision::Serve(super::ServingMode::Full)
+        );
+        storage.logs.drain_sink();
+        let mut bytes = [0u8; 16384];
+        reader.read(&mut bytes).unwrap();
+        let name = storage.cache.name_index(0).unwrap();
+        let mut first_generation = None;
+        for (index, family) in [Family::A, Family::Aaaa, Family::A, Family::A]
+            .into_iter()
+            .enumerate()
+        {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            storage
+                .start_dns_exchange(0, family, deadline, ExchangeClass::Serving)
+                .unwrap();
+            loop {
+                match storage.advance_dns_serving().unwrap() {
+                    Some(TurnResult::Pending) => {
+                        storage.dns.wait_dns_readiness(deadline).unwrap();
+                    }
+                    Some(TurnResult::Published(_)) => break,
+                    other => panic!("publication failed: {other:?}"),
+                }
+            }
+            match index {
+                0 => {
+                    first_generation =
+                        Some(storage.cache.entry(name, Family::A).unwrap().generation())
+                }
+                2 => {
+                    let entry = storage.cache.entry(name, Family::A).unwrap();
+                    assert_ne!(Some(entry.generation()), first_generation);
+                    assert_eq!(entry.bindings(), &[NumericAddr::V4([9, 9, 9, 9].into())]);
+                    assert_eq!(storage.assurance[0].unwrap().sequence, 1);
+                }
+                3 => assert_eq!(storage.assurance[0].unwrap().sequence, 1),
+                _ => {}
+            }
+        }
+        storage.logs.drain_sink();
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let frames: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("kind=dns_assurance "))
+            .collect();
+        assert_eq!(frames.len(), 1, "{text}");
+        assert!(frames[0].contains("seq=1 phase=change"), "{text}");
+        let now = storage.cache_secs(Instant::now());
+        assert!(
+            storage
+                .cache
+                .negative_projection(name, Family::A, now)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            storage
+                .cache
+                .negative_projection(name, Family::Aaaa, now)
+                .unwrap()
+                .is_some()
+        );
+        responder.finish().unwrap();
+    }
+
     fn storage() -> ServeStorage {
         let doc = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
         let config = crate::config::parse_config_document(doc).expect("valid owner config");
@@ -2242,17 +2715,18 @@ mod assurance_bridge_tests {
             .evict_nodata_evidenced(name, Family::Aaaa, evidence)
             .unwrap();
         let observed_at = origin + Duration::from_secs(5);
-        let view = storage.work_view();
-        let secs = view.cache_secs(observed_at);
+        let clock = crate::runtime::tunnel::WorkerClock::new(origin, 1000);
+        let secs = clock.cache_secs(observed_at);
         assert_eq!(secs, 1005);
         assert_eq!(
-            view.cache()
+            storage
+                .cache()
                 .family_snapshot(name, Family::A, secs)
                 .unwrap()
                 .current(),
             Some(ProofClass::Delegated)
         );
-        assert!(view.cache_secs(Instant::now()) >= 1030);
+        assert!(clock.cache_secs(Instant::now()) >= 1030);
         let snapshot = storage.capture_assurance(0, observed_at).unwrap();
         storage.cache.evict_nodata(name, Family::A).unwrap();
         storage.cache.evict_nodata(name, Family::Aaaa).unwrap();

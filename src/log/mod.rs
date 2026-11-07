@@ -262,6 +262,7 @@ enum Kind {
     IncidentEligibleLoss,
     IncidentEligibleRecovered,
     DnsAssurance,
+    DnsAssuranceFault,
 }
 
 impl Kind {
@@ -287,6 +288,7 @@ impl Kind {
             Kind::IncidentEligibleLoss => "incident_eligible_loss",
             Kind::IncidentEligibleRecovered => "incident_eligible_recovered",
             Kind::DnsAssurance => "dns_assurance",
+            Kind::DnsAssuranceFault => "dns_assurance_fault",
         }
     }
 
@@ -609,6 +611,25 @@ pub(crate) struct ResolverProbeSegment<'a> {
 }
 
 impl LogStore {
+    pub(crate) fn dns_assurance_fault(
+        &mut self,
+        secs: u64,
+        ordinal: usize,
+        phase: &'static str,
+        reason: &'static str,
+    ) {
+        self.set_now(self.secs.max(secs));
+        let fields = [
+            Field::new("secs", Val::U64(secs)),
+            Field::new(
+                "ordinal",
+                Val::U64(u64::try_from(ordinal).unwrap_or(u64::MAX)),
+            ),
+            Field::new("phase", Val::Str(phase)),
+            Field::new("reason", Val::Str(reason)),
+        ];
+        self.enqueue(Level::Error, Kind::DnsAssuranceFault, &fields);
+    }
     /// Builds the full queue over an owned clone of the production stdout
     /// descriptor (fd 1). The clone shares the underlying file description, so
     /// a later [`LogStore::prepare_stdout`] making it nonblocking also flips
