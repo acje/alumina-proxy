@@ -107,6 +107,21 @@ fn observed_class(
 }
 
 impl Cache {
+    pub(crate) fn retained_evidential_deadline(
+        &self,
+        name: NameIndex,
+        family: Family,
+    ) -> Result<Option<u64>, CacheError> {
+        let entry = self.entry(name, family)?;
+        let evidence = match entry.negative {
+            Some(NegativeProof::NoData { evidence } | NegativeProof::Nx { evidence, .. }) => {
+                Some(evidence)
+            }
+            None => entry.evidence(),
+        };
+        Ok(evidence.and_then(Evidence::evidential_deadline))
+    }
+
     /// The entry's exact assurance-grade key at `now`.
     ///
     /// Each family is `None` when the cache commits no currently achieved

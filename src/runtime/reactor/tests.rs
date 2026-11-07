@@ -8938,5 +8938,806 @@ mod ja4_baseline {
     }
 }
 
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn idle_run_once_observes_trusted_proof_expiry_without_dns_publication() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            for (gap_after_preview, full_queue, dual_family, signal_first) in [(false, false, false, false), (true, false, false, false), (true, true, false, false), (false, false, true, false), (true, false, false, true)] {
+            use crate::dns::cache::evidence::{Evidence, ResolverSource};
+            use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::transport::StartupReport;
+            use crate::eligibility::NumericAddr;
+            use std::io::Write as _;
+            use std::os::unix::net::UnixStream;
+
+            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let mut storage = ServeStorage::boot(&config).unwrap();
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader.set_nonblocking(true).unwrap();
+            writer.set_nonblocking(true).unwrap();
+            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+            storage.dns_mut().begin_window(
+                SocketAddr::from(([127, 0, 0, 1], 9)),
+                *config.resolver_set(),
+                1000,
+                Duration::ZERO,
+            ).unwrap();
+            let name = storage.cache().name_index(0).unwrap();
+            let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
+            let staged = StagedPositive::stage_with_evidence(
+                name, Family::A, Generation::INITIAL,
+                &[NumericAddr::V4([8, 8, 8, 8].into())], 1000, 1, Some(proof),
+            ).unwrap();
+            storage.cache_mut().publish_positive(&staged).unwrap();
+            if dual_family {
+                let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(2), 1000).unwrap();
+                let staged = StagedPositive::stage_with_evidence(
+                    name, Family::Aaaa, Generation::INITIAL,
+                    &[NumericAddr::V6([0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11].into())], 1000, 2, Some(proof),
+                ).unwrap();
+                storage.cache_mut().publish_positive(&staged).unwrap();
+            }
+            let outcome = storage.settle_startup(1000, StartupReport::default(), 0, false).unwrap();
+            let listener = outcome.into_listener().expect("seeded startup is serving");
+            storage.logs_mut().drain_sink();
+            let mut boot = [0u8; 8192];
+            assert!(reader.read(&mut boot).unwrap() > 0);
+            assert_eq!(storage.logs().len(), 0);
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut serving = Serving::new(storage, listener, traffic).unwrap();
+            assert_eq!(serving.storage().dns().now_u64(), 1000);
+            if full_queue {
+                for _ in 0..crate::log::QUEUE_SLOTS {
+                    serving.storage_mut().logs_mut().startup_warning_ctx(1000, "sub.example.org", Family::A, "timeout", None);
+                }
+                assert!(serving.storage().logs().is_full());
+            }
+            let dropped_before = serving.storage().logs().dropped();
+            if gap_after_preview {
+                let before = Instant::now();
+                let expiry = serving.storage().assurance_wake(before).unwrap().expect("valid proof has an expiry wake");
+                assert!(expiry > before);
+                std::thread::sleep(expiry.saturating_duration_since(before) + Duration::from_millis(25));
+                let after = Instant::now();
+                assert!(after >= expiry);
+                assert_eq!(serving.storage().assurance_wake(after).unwrap(), Some(after),
+                    "an overdue, unobserved expiry remains immediate after crossing the clock gap");
+            }
+            let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
+            if signal_first {
+                wake.write_all(&[1]).unwrap();
+            }
+            let (done, cancelled) = std::sync::mpsc::channel::<()>();
+            let guard = std::thread::spawn(move || {
+                if cancelled.recv_timeout(Duration::from_secs(3)).is_err() {
+                    wake.write_all(&[1]).unwrap();
+                }
+            });
+            let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                serving.run_once(None)
+            });
+            let _ = done.send(());
+            guard.join().unwrap();
+            result.unwrap();
+            assert!(counts.all_zero(), "the actual idle expiry turn must not allocate: {counts:?}");
+            if full_queue {
+                assert_eq!(serving.storage().logs().dropped(), dropped_before + 1);
+                serving.run_once(Some(Duration::ZERO)).unwrap();
+                assert_eq!(serving.storage().logs().dropped(), dropped_before + 1, "dropped expiry must not retry");
+            } else {
+                let frame = serving.storage().logs().last_record_bytes()
+                    .map(|bytes| std::str::from_utf8(bytes).unwrap()).unwrap_or("");
+                assert!(frame.contains("phase=change") && frame.contains("a_current=\"trusted\"")
+                    && frame.contains("a_retained_time_valid=0"), "idle expiry must emit an owned change: {frame}");
+                if dual_family {
+                    assert!(frame.contains("aaaa_retained_time_valid=1"), "{frame}");
+                }
+            }
+            if signal_first {
+                assert!(serving.is_shutdown(), "SIGTERM must take effect on the expiry turn");
+                assert!(serving.listener.is_none(), "SIGTERM must stop admission on the expiry turn");
+            } else {
+                assert!(!serving.is_shutdown(), "expiry must wake before the safety signal");
+            }
+            if dual_family {
+                serving.storage_mut().logs_mut().drain_sink();
+                assert!(reader.read(&mut boot).unwrap() > 0);
+                let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                    serving.run_once(Some(Duration::from_secs(3)))
+                });
+                result.unwrap();
+                assert!(counts.all_zero(), "dual-family expiry turn allocated: {counts:?}");
+                let frame = std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
+                assert!(frame.contains("seq=2 phase=change") && frame.contains("aaaa_retained_time_valid=0"), "{frame}");
+            }
+            assert!(serving.storage().assurance_wake(Instant::now()).unwrap().is_none(),
+                "an already observed expiry must not keep scheduling zero-time waits");
+            if !full_queue {
+                serving.storage_mut().logs_mut().drain_sink();
+                assert!(reader.read(&mut boot).unwrap() > 0);
+                if !signal_first {
+                    assert!(serving.poll_timeout().is_none(), "no slot, DNS, log or refresh deadline remains");
+                }
+            }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[cfg(test)]
 mod refusals;
+
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn idle_negative_expiry_does_not_revive_positive_bindings() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::dns::cache::evidence::{Evidence, ResolverSource};
+            use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::transport::StartupReport;
+            use crate::eligibility::NumericAddr;
+            use crate::runtime::storage::{ServingMode, StartupDecision};
+            use std::io::Write as _;
+            use std::os::unix::net::UnixStream;
+
+            for nx in [false, true] {
+                let doc = "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
+                let config = crate::config::parse_config_document(doc).unwrap().with_kernel_assigned_test_listener();
+                assert_eq!(config.allowlist().get(0).unwrap().as_str(), "alpha.example.org");
+                let mut storage = ServeStorage::boot(&config).unwrap();
+                let (mut reader, writer) = UnixStream::pair().unwrap();
+                reader.set_nonblocking(true).unwrap();
+                writer.set_nonblocking(true).unwrap();
+                *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+                storage.dns_mut().begin_window(SocketAddr::from(([127, 0, 0, 1], 9)), *config.resolver_set(), 1000, Duration::ZERO).unwrap();
+                let target = storage.cache().name_index(0).unwrap();
+                let other = storage.cache().name_index(1).unwrap();
+                let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
+                let other_positive = StagedPositive::stage(other, Family::A, Generation::INITIAL,
+                    &[NumericAddr::V4([8, 8, 8, 8].into())], 1000, 60).unwrap();
+                storage.cache_mut().publish_positive(&other_positive).unwrap();
+                if nx {
+                    storage.cache_mut().evict_nxdomain_evidenced(target, proof).unwrap();
+                } else {
+                    storage.cache_mut().evict_nodata_evidenced(target, Family::A, proof).unwrap();
+                }
+                assert!(storage.cache().negative_projection(target, Family::A, 1000).unwrap().is_some());
+                let outcome = storage.settle_startup(1000, StartupReport::default(), 0, false).unwrap();
+                assert_eq!(outcome.decision(), StartupDecision::Serve(ServingMode::Degraded));
+                let listener = outcome.into_listener().unwrap();
+                storage.logs_mut().drain_sink();
+                let mut bytes = [0u8; 16384];
+                assert!(reader.read(&mut bytes).unwrap() > 0);
+                assert_eq!(storage.logs().len(), 0);
+                let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+                let mut serving = Serving::new(storage, listener, traffic).unwrap();
+                assert_eq!(serving.storage().dns().now_u64(), 1000);
+                let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
+                let (done, cancelled) = std::sync::mpsc::channel::<()>();
+                let guard = std::thread::spawn(move || {
+                    if cancelled.recv_timeout(Duration::from_secs(3)).is_err() {
+                        wake.write_all(&[1]).unwrap();
+                    }
+                });
+                let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || serving.run_once(None));
+                let _ = done.send(());
+                guard.join().unwrap();
+                result.unwrap();
+                assert!(counts.all_zero(), "idle negative expiry turn allocated: {counts:?}");
+                assert!(!serving.is_shutdown(), "expiry must precede watchdog signal");
+                let frame = std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
+                assert!(frame.contains("name=\"alpha.example.org\"") && frame.contains("seq=1 phase=change"), "{frame}");
+                assert!(frame.contains("a_retained_time_valid=0") && frame.contains("a_outcome=\"unknown\""), "{frame}");
+                if nx {
+                    assert!(frame.contains("a_retained_kind=\"nx\"") && frame.contains("aaaa_retained_kind=\"nx\"") && frame.contains("aaaa_retained_time_valid=0"), "{frame}");
+                } else {
+                    assert!(frame.contains("a_retained_kind=\"nodata\"") && frame.contains("aaaa_retained=\"none\""), "{frame}");
+                }
+                let now = serving.storage().cache_secs(Instant::now());
+                for family in Family::ALL {
+                    assert!(serving.storage().cache().entry(target, family).unwrap().bindings().is_empty());
+                    assert!(serving.storage().cache().negative_projection(target, family, now).unwrap().is_none());
+                }
+                assert!(serving.storage().assurance_wake(Instant::now()).unwrap().is_none());
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn idle_strong_proof_expiry_denies_new_peer_admission() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::dns::cache::evidence::{Evidence, ResolverSource};
+            use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::transport::StartupReport;
+            use crate::eligibility::NumericAddr;
+            use crate::runtime::storage::{ServingMode, StartupDecision};
+            use std::io::Write as _;
+            use std::os::unix::net::UnixStream;
+
+            let doc = "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#cloudflare-dns.com#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]\nrecursive_dnssec_policy = \"root_validating_no_stale\"\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_authenticated\"\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"delegated_dnssec\"\n";
+            let config = crate::config::parse_config_document(doc).unwrap().with_kernel_assigned_test_listener();
+            let mut storage = ServeStorage::boot(&config).unwrap();
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader.set_nonblocking(true).unwrap();
+            writer.set_nonblocking(true).unwrap();
+            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+            storage.dns_mut().begin_window(SocketAddr::from(([127, 0, 0, 1], 9)), *config.resolver_set(), 1000, Duration::ZERO).unwrap();
+            let addr = NumericAddr::V4([8, 8, 8, 8].into());
+            for (ordinal, delegated) in [(0, false), (1, true)] {
+                let name = storage.cache().name_index(ordinal).unwrap();
+                let proof = Evidence::new(delegated, true, delegated, ResolverSource::index(0).unwrap(), Some(1), 1000).unwrap();
+                storage.cache().check_publication_requirement(name, Some(proof), 1000).unwrap();
+                let staged = StagedPositive::stage_with_evidence(name, Family::A, Generation::INITIAL, &[addr], 1000, 1, Some(proof)).unwrap();
+                storage.cache_mut().publish_positive(&staged).unwrap();
+                assert!(storage.cache().is_name_admissible(name, 1000).unwrap());
+                assert!(storage.cache().is_peer_admissible(name, Family::A, addr, 1000).unwrap());
+            }
+            let outcome = storage.settle_startup(1000, StartupReport::default(), 0, false).unwrap();
+            assert_eq!(outcome.decision(), StartupDecision::Serve(ServingMode::Full));
+            let listener = outcome.into_listener().unwrap();
+            storage.logs_mut().drain_sink();
+            let mut bytes = [0u8; 16384];
+            assert!(reader.read(&mut bytes).unwrap() > 0);
+            assert_eq!(storage.logs().len(), 0);
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut serving = Serving::new(storage, listener, traffic).unwrap();
+            assert_eq!(serving.storage().dns().now_u64(), 1000);
+            let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
+            let (done, cancelled) = std::sync::mpsc::channel::<()>();
+            let guard = std::thread::spawn(move || {
+                if cancelled.recv_timeout(Duration::from_secs(3)).is_err() {
+                    wake.write_all(&[1]).unwrap();
+                }
+            });
+            let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || serving.run_once(None));
+            let _ = done.send(());
+            guard.join().unwrap();
+            result.unwrap();
+            assert!(counts.all_zero(), "strong expiry turn allocated: {counts:?}");
+            assert!(!serving.is_shutdown(), "expiry must precede watchdog signal");
+            let now = serving.storage().cache_secs(Instant::now());
+            assert!(now >= 1001);
+            for ordinal in 0..2 {
+                let name = serving.storage().cache().name_index(ordinal).unwrap();
+                assert!(serving.storage().cache().entry(name, Family::A).unwrap().bindings().contains(&addr));
+                assert!(!serving.storage().cache().is_name_admissible(name, now).unwrap());
+                assert!(!serving.storage().cache().is_peer_admissible(name, Family::A, addr, now).unwrap());
+            }
+            serving.storage_mut().logs_mut().drain_sink();
+            let n = reader.read(&mut bytes).unwrap();
+            let text = std::str::from_utf8(&bytes[..n]).unwrap();
+            let frames: Vec<_> = text.lines().filter(|line| line.contains("kind=dns_assurance ")).collect();
+            assert_eq!(frames.len(), 2, "{text}");
+            assert!(frames.iter().any(|frame| frame.contains("port=443 ") && frame.contains("a_retained_class=\"authenticated\"") && frame.contains("a_retained_time_valid=0")), "{text}");
+            assert!(frames.iter().any(|frame| frame.contains("port=8443 ") && frame.contains("a_retained_class=\"delegated\"") && frame.contains("a_retained_time_valid=0")), "{text}");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::dns::cache::evidence::{Evidence, ResolverSource};
+            use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::transport::tests::{Step, spawn_bounded_responder};
+            use crate::dns::transport::{ExchangeClass, StartupReport, TurnResult};
+            use crate::eligibility::NumericAddr;
+            use std::io::Write as _;
+            use std::os::unix::net::UnixStream;
+
+            let responder = spawn_bounded_responder(vec![vec![
+                Step::Stall(Duration::from_secs(3)),
+                Step::PositiveA {
+                    ttl: 60,
+                    octets: [9, 9, 9, 9],
+                },
+            ]]);
+            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let mut storage = ServeStorage::boot(&config).unwrap();
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader.set_nonblocking(true).unwrap();
+            writer.set_nonblocking(true).unwrap();
+            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+            let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+            storage
+                .dns_mut()
+                .begin_window(peer, *config.resolver_set(), 1000, Duration::ZERO)
+                .unwrap();
+            let name = storage.cache().name_index(0).unwrap();
+            let proof =
+                Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
+            let staged = StagedPositive::stage_with_evidence(
+                name,
+                Family::A,
+                Generation::INITIAL,
+                &[NumericAddr::V4([8, 8, 8, 8].into())],
+                1000,
+                1,
+                Some(proof),
+            )
+            .unwrap();
+            storage.cache_mut().publish_positive(&staged).unwrap();
+            let outcome = storage
+                .settle_startup(1000, StartupReport::default(), 0, false)
+                .unwrap();
+            let listener = outcome.into_listener().unwrap();
+            storage.logs_mut().drain_sink();
+            let mut bytes = [0u8; 8192];
+            assert!(reader.read(&mut bytes).unwrap() > 0);
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut serving = Serving::new(storage, listener, traffic).unwrap();
+            serving.attach_dns_shared().unwrap();
+            let exchange_deadline = Instant::now() + Duration::from_secs(5);
+            serving
+                .storage_mut()
+                .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
+                .unwrap();
+            serving.sync_dns_shared().unwrap();
+            for _ in 0..32 {
+                if serving.storage().dns().test_active_receiving() {
+                    break;
+                }
+                assert!(matches!(
+                    serving.storage_mut().advance_dns_serving().unwrap(),
+                    Some(TurnResult::Pending)
+                ));
+                serving.sync_dns_shared().unwrap();
+                if serving.storage().dns().needs_wait()
+                    && !serving.storage().dns().test_active_receiving()
+                {
+                    serving.run_once(Some(Duration::from_millis(100))).unwrap();
+                }
+            }
+            assert!(serving.storage().dns().test_active_receiving());
+            let expiry = serving
+                .storage()
+                .assurance_wake(Instant::now())
+                .unwrap()
+                .unwrap();
+            assert!(expiry < exchange_deadline);
+            let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
+            let (done, cancelled) = std::sync::mpsc::channel::<()>();
+            let guard = std::thread::spawn(move || {
+                if cancelled.recv_timeout(Duration::from_secs(2)).is_err() {
+                    wake.write_all(&[1]).unwrap();
+                }
+            });
+            let (result, counts) =
+                crate::alloc::run_phase(crate::alloc::Phase::Serving, || serving.run_once(None));
+            let _ = done.send(());
+            guard.join().unwrap();
+            result.unwrap();
+            assert!(
+                counts.all_zero(),
+                "waiting-DNS expiry turn allocated: {counts:?}"
+            );
+            assert!(!serving.is_shutdown());
+            assert!(
+                serving.storage().dns().test_active_receiving(),
+                "DNS exchange must still be waiting"
+            );
+            let frame =
+                std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
+            assert!(
+                frame.contains("phase=change") && frame.contains("a_retained_time_valid=0"),
+                "{frame}"
+            );
+            responder.finish().unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::dns::cache::evidence::{Evidence, ResolverSource};
+            use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::transport::StartupReport;
+            use crate::eligibility::NumericAddr;
+            use std::io::Write as _;
+            use std::os::unix::net::UnixStream;
+
+            for full_queue in [false, true] {
+                let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+                let mut storage = ServeStorage::boot(&config).unwrap();
+                let (mut reader, writer) = UnixStream::pair().unwrap();
+                reader.set_nonblocking(true).unwrap();
+                writer.set_nonblocking(true).unwrap();
+                *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+                storage
+                    .dns_mut()
+                    .begin_window(
+                        SocketAddr::from(([127, 0, 0, 1], 9)),
+                        *config.resolver_set(),
+                        1000,
+                        Duration::ZERO,
+                    )
+                    .unwrap();
+                let name = storage.cache().name_index(0).unwrap();
+                let proof =
+                    Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000)
+                        .unwrap();
+                let staged = StagedPositive::stage_with_evidence(
+                    name,
+                    Family::A,
+                    Generation::INITIAL,
+                    &[NumericAddr::V4([8, 8, 8, 8].into())],
+                    1000,
+                    1,
+                    Some(proof),
+                )
+                .unwrap();
+                storage.cache_mut().publish_positive(&staged).unwrap();
+                let listener = storage
+                    .settle_startup(1000, StartupReport::default(), 0, false)
+                    .unwrap()
+                    .into_listener()
+                    .unwrap();
+                storage.logs_mut().drain_sink();
+                let mut boot = [0u8; 8192];
+                assert!(reader.read(&mut boot).unwrap() > 0);
+                let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+                let mut serving = Serving::new(storage, listener, traffic).unwrap();
+                let sink = StdListener::bind("127.0.0.1:0").unwrap();
+                let up = mio::net::TcpStream::connect(sink.local_addr().unwrap()).unwrap();
+                let (mut sink_stream, _) = sink.accept().unwrap();
+                sink_stream
+                    .set_read_timeout(Some(Duration::from_millis(40)))
+                    .unwrap();
+                let peer_listener = StdListener::bind("127.0.0.1:0").unwrap();
+                let client =
+                    mio::net::TcpStream::connect(peer_listener.local_addr().unwrap()).unwrap();
+                let (mut peer, _) = peer_listener.accept().unwrap();
+                {
+                    let slot = &mut serving.slots[0];
+                    slot.upstream = Some(up);
+                    slot.client = Some(client);
+                    slot.head_len = 4;
+                    slot.buf_base = 0;
+                    slot.buf_len = 0;
+                    slot.idle_deadline = Some(Instant::now() + Duration::from_secs(30));
+                }
+                open_relay(&mut serving, 0);
+                serving.sync_live_deadline(0);
+                serving.register_upstream(0).unwrap();
+                serving.register_client(0).unwrap();
+                serving.run_once(Some(Duration::ZERO)).unwrap();
+                assert!(matches!(serving.slots[0].stage, Stage::Relay));
+                assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
+                if full_queue {
+                    for _ in 0..crate::log::QUEUE_SLOTS {
+                        serving.storage_mut().logs_mut().startup_warning_ctx(
+                            1000,
+                            "sub.example.org",
+                            Family::A,
+                            "timeout",
+                            None,
+                        );
+                    }
+                    assert!(serving.storage().logs().is_full());
+                    let now = Instant::now();
+                    let expiry = serving.storage().assurance_wake(now).unwrap().unwrap();
+                    std::thread::sleep(
+                        expiry.saturating_duration_since(now) + Duration::from_millis(25),
+                    );
+                }
+                let dropped = serving.storage().logs().dropped();
+                let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
+                let (done, cancelled) = std::sync::mpsc::channel::<()>();
+                let guard = std::thread::spawn(move || {
+                    if cancelled.recv_timeout(Duration::from_secs(3)).is_err() {
+                        wake.write_all(&[1]).unwrap();
+                    }
+                });
+                let (result, counts) =
+                    crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                        serving.run_once(None)
+                    });
+                let _ = done.send(());
+                guard.join().unwrap();
+                result.unwrap();
+                assert!(counts.all_zero(), "relay expiry turn allocated: {counts:?}");
+                assert!(!serving.is_shutdown());
+                assert!(matches!(serving.slots[0].stage, Stage::Relay));
+                assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
+                if full_queue {
+                    assert_eq!(serving.storage().logs().dropped(), dropped + 1);
+                } else {
+                    let frame =
+                        std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap())
+                            .unwrap();
+                    assert!(
+                        frame.contains("phase=change") && frame.contains("a_retained_time_valid=0"),
+                        "{frame}"
+                    );
+                }
+                peer.write_all(b"ping").unwrap();
+                let mut got = [0u8; 4];
+                let mut received = 0;
+                for _ in 0..100 {
+                    let (result, counts) =
+                        crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                            serving.run_once(Some(Duration::from_millis(20)))
+                        });
+                    result.unwrap();
+                    assert!(counts.all_zero(), "relay forwarding allocated: {counts:?}");
+                    match sink_stream.read(&mut got[received..]) {
+                        Ok(n) => received += n,
+                        Err(err)
+                            if matches!(
+                                err.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                            ) => {}
+                        Err(err) => panic!("sink read: {err}"),
+                    }
+                    if received == got.len() {
+                        break;
+                    }
+                }
+                assert_eq!(&got, b"ping");
+                assert!(matches!(serving.slots[0].stage, Stage::Relay));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn actual_client_setup_deadline_precedes_idle_proof_expiry() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::dns::cache::evidence::{Evidence, ResolverSource};
+            use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::transport::StartupReport;
+            use crate::eligibility::NumericAddr;
+            use std::os::unix::net::UnixStream;
+
+            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let mut storage = ServeStorage::boot(&config).unwrap();
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader.set_nonblocking(true).unwrap();
+            writer.set_nonblocking(true).unwrap();
+            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+            storage
+                .dns_mut()
+                .begin_window(
+                    SocketAddr::from(([127, 0, 0, 1], 9)),
+                    *config.resolver_set(),
+                    1000,
+                    Duration::ZERO,
+                )
+                .unwrap();
+            let name = storage.cache().name_index(0).unwrap();
+            let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(12), 1000)
+                .unwrap();
+            let staged = StagedPositive::stage_with_evidence(
+                name,
+                Family::A,
+                Generation::INITIAL,
+                &[NumericAddr::V4([8, 8, 8, 8].into())],
+                1000,
+                12,
+                Some(proof),
+            )
+            .unwrap();
+            storage.cache_mut().publish_positive(&staged).unwrap();
+            let listener = storage
+                .settle_startup(1000, StartupReport::default(), 0, false)
+                .unwrap()
+                .into_listener()
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            storage.logs_mut().drain_sink();
+            let mut log_bytes = [0u8; 8192];
+            assert!(reader.read(&mut log_bytes).unwrap() > 0);
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut serving = Serving::new(storage, listener, traffic).unwrap();
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            serving.run_once(Some(Duration::from_secs(2))).unwrap();
+            assert_eq!(serving.storage().occupied(), 1);
+            assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+            serving.run_once(Some(Duration::ZERO)).unwrap();
+            let client_deadline = serving.slots[0].setup_deadline.unwrap();
+            let proof_deadline = serving
+                .storage()
+                .assurance_wake(Instant::now())
+                .unwrap()
+                .unwrap();
+            assert!(client_deadline < proof_deadline);
+            let hard_limit = Instant::now() + Duration::from_secs(11);
+            for _ in 0..16 {
+                if serving.storage().occupied() == 0 {
+                    break;
+                }
+                let remaining = hard_limit.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let (result, counts) =
+                    crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                        serving.run_once(Some(remaining))
+                    });
+                result.unwrap();
+                assert!(
+                    counts.all_zero(),
+                    "client deadline turn allocated: {counts:?}"
+                );
+            }
+            let observed = Instant::now();
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "actual setup deadline must release client"
+            );
+            assert!(observed >= client_deadline && observed < proof_deadline);
+            let now = serving.storage().cache_secs(observed);
+            assert!(
+                serving
+                    .storage()
+                    .cache()
+                    .family_retained(name, Family::A, now)
+                    .unwrap()
+                    .unwrap()
+                    .time_valid()
+            );
+            assert!(
+                serving
+                    .storage()
+                    .assurance_wake(observed)
+                    .unwrap()
+                    .is_some_and(|wake| wake > observed)
+            );
+            let mut response = [0u8; 512];
+            let n = client.read(&mut response).unwrap();
+            assert!(response[..n].starts_with(b"HTTP/1.1 504"));
+            serving.storage_mut().logs_mut().drain_sink();
+            match reader.read(&mut log_bytes) {
+                Ok(n) => assert!(
+                    !std::str::from_utf8(&log_bytes[..n])
+                        .unwrap()
+                        .contains("phase=change")
+                ),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("log read: {error}"),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn synthetic_expiry_clock_fault_is_reported_without_losing_poll_buffer() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::dns::cache::evidence::{Evidence, ResolverSource};
+            use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::transport::StartupReport;
+            use crate::eligibility::NumericAddr;
+            use crate::runtime::storage::AssuranceObservation;
+            use std::os::unix::net::UnixStream;
+
+            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let mut storage = ServeStorage::boot(&config).unwrap();
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader.set_nonblocking(true).unwrap();
+            writer.set_nonblocking(true).unwrap();
+            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+            storage
+                .dns_mut()
+                .begin_window(
+                    SocketAddr::from(([127, 0, 0, 1], 9)),
+                    *config.resolver_set(),
+                    1000,
+                    Duration::ZERO,
+                )
+                .unwrap();
+            let name = storage.cache().name_index(0).unwrap();
+            let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(60), 1000)
+                .unwrap();
+            let staged = StagedPositive::stage_with_evidence(
+                name,
+                Family::A,
+                Generation::INITIAL,
+                &[NumericAddr::V4([8, 8, 8, 8].into())],
+                1000,
+                60,
+                Some(proof),
+            )
+            .unwrap();
+            storage.cache_mut().publish_positive(&staged).unwrap();
+            let listener = storage
+                .settle_startup(1000, StartupReport::default(), 0, false)
+                .unwrap()
+                .into_listener()
+                .unwrap();
+            storage.logs_mut().drain_sink();
+            let mut boot = [0u8; 8192];
+            assert!(reader.read(&mut boot).unwrap() > 0);
+            let future = storage.dns().window_start() + Duration::from_secs(5);
+            assert!(future > Instant::now());
+            assert_eq!(
+                storage.emit_assurance(0, future),
+                Ok(AssuranceObservation::Unchanged)
+            );
+            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
+            let mut serving = Serving::new(storage, listener, traffic).unwrap();
+            let sink = StdListener::bind("127.0.0.1:0").unwrap();
+            let upstream = mio::net::TcpStream::connect(sink.local_addr().unwrap()).unwrap();
+            let (_sink_peer, _) = sink.accept().unwrap();
+            let client_listener = StdListener::bind("127.0.0.1:0").unwrap();
+            let client =
+                mio::net::TcpStream::connect(client_listener.local_addr().unwrap()).unwrap();
+            let (_client_peer, _) = client_listener.accept().unwrap();
+            serving.slots[0].upstream = Some(upstream);
+            serving.slots[0].client = Some(client);
+            open_relay(&mut serving, 0);
+            let length = serving.storage().logs().len();
+            serving
+                .storage_mut()
+                .observe_assurance_expiry(Instant::now());
+            assert_eq!(serving.storage().logs().len(), length + 1);
+            let frame =
+                std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
+            assert!(
+                frame.contains("kind=dns_assurance_fault")
+                    && frame.contains("ordinal=0")
+                    && frame.contains("phase=\"expiry\"")
+                    && frame.contains("reason=\"clock_regressed\""),
+                "{frame}"
+            );
+            assert!(!serving.is_shutdown() && serving.listener.is_some());
+            assert!(matches!(serving.slots[0].stage, Stage::Relay));
+            assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
+            let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+                serving.run_once(Some(Duration::ZERO))
+            });
+            assert_eq!(result.unwrap_err().kind, io::ErrorKind::Other);
+            assert_eq!(serving.storage().logs().len(), length + 2);
+            let frame =
+                std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
+            assert!(
+                frame.contains("kind=dns_assurance_fault")
+                    && frame.contains("ordinal=0")
+                    && frame.contains("phase=\"expiry\"")
+                    && frame.contains("reason=\"clock_regressed\""),
+                "{frame}"
+            );
+            assert!(
+                counts.all_zero(),
+                "fault path must retain the poll batch: {counts:?}"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

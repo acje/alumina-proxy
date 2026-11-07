@@ -1857,7 +1857,7 @@ bounded queue, displacement, stranded-record and sink rules still apply.
 An observation that cannot obtain or validate its owner-bound cache or clock
 facts does not become an unchanged result or change the publication decision.
 It attempts an error-level `dns_assurance_fault` record with `secs`, entry
-`ordinal`, `phase` (`before` or `after`) and a closed `reason` token:
+`ordinal`, `phase` (`before`, `after` or `expiry`) and a closed `reason` token:
 `name_out_of_range`, `binding_capacity`, `family_mismatch`,
 `generation_exhausted`, `stale_generation`, `deadline_overflow`,
 `evidence_inconsistent`, `insufficient_assurance`, `unseeded`,
@@ -1865,5 +1865,42 @@ It attempts an error-level `dns_assurance_fault` record with `secs`, entry
 attempt has no assurance sequence and follows the existing whole-record drop
 accounting. On the current route a successful schedule preparation validates
 the fixed index and the later incident clear has no reachable schedule error.
-No quiet proof-expiry wake is introduced: without a later qualifying
-publication, an expiry has no new timer-driven observation in this increment.
+
+After startup has seeded an entry's observation state, the serving owner also
+observes it on each completed poll turn without requiring another DNS reply.
+Before each poll attempt, it examines retained positive and negative evidence
+deadlines for each seeded entry and family. It previews the existing marker's
+material-change decision on a copy at the later of the current owner-clock
+second and the candidate deadline; preview changes neither the real marker nor
+the retained proof. A material future deadline is mapped from the mounted
+owner origin and epoch with checked arithmetic. An overdue, not-yet-observed
+material expiry selects an immediate wake, including when time crossed its
+deadline between turns; an already-observed expiry alone does not repeatedly
+select a zero wait. Known-unseeded entries are skipped by the regular fold.
+
+The expiry wake joins the existing slot, DNS, log, refresh and shutdown waits
+in the single poll. After the poll, SIGTERM is handled first and a fresh actual
+owner `Instant` drives one regular observation fold. A retained Trusted proof
+becoming time-invalid is observed even if current grade stays Trusted. Normal
+expiry, a whole-record drop or an ordinary observation fault does not itself
+close an established tunnel, change admission, or terminate serving; later new
+peer decisions continue to check current proof against the configured minimum.
+The marker and saturating sequence advance before one bounded enqueue attempt,
+including a drop, with no retry. A regular-observation fault instead attempts
+the existing auxiliary `dns_assurance_fault` with `phase=expiry` and does not
+replace a DNS publication or admission result.
+
+If the expiry wake plan cannot be computed because of an internal owner-clock,
+cache or checked deadline-conversion fault, the owner attempts a typed
+`dns_assurance_fault` with `phase=expiry` and follows the existing serving-error
+path to `EX_SOFTWARE` (70), rather than treating the failure as no deadline.
+This fail-closed operational path is distinct from ordinary expiry and dropped
+records. The existing hard stdout-sink failure rule remains `EX_IOERR` (74).
+
+Each planning attempt scans at most 32 entries and 64 family deadline
+candidates, with the existing bounded 16-attempt interrupted-poll allowance;
+one completed turn's regular observation fold scans at most 32 entries and
+captures at most 64 family snapshots. Candidate previews use the same marker
+decision, including its bounded cache projections. Existing log limits remain
+256 slots of 2 KiB and at most 16 fragments or 64 KiB per drain; no new queue,
+timer framework, endpoint, or post-boot first-party allocation seam is added.

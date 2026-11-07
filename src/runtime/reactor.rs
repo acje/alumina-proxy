@@ -1322,7 +1322,23 @@ impl Serving {
         let mut attempts = 0usize;
         loop {
             attempts += 1;
-            let effective = match (self.poll_timeout(), timeout) {
+            let regular = self.poll_timeout();
+            let assurance_now = Instant::now();
+            let assurance = match self.storage.assurance_wake(assurance_now) {
+                Ok(wake) => wake.map(|wake| wake.saturating_duration_since(Instant::now())),
+                Err(fault) => {
+                    self.storage
+                        .report_assurance_wake_fault(assurance_now, fault);
+                    self.events = batch;
+                    return Err(io::Error::from(io::ErrorKind::Other).into());
+                }
+            };
+            let internal = match (regular, assurance) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, b) => b,
+            };
+            let effective = match (internal, timeout) {
                 (Some(d), Some(t)) => Some(d.min(t)),
                 (Some(d), None) => Some(d),
                 (None, t) => t,
@@ -1362,6 +1378,7 @@ impl Serving {
         {
             self.on_sigterm()?;
         }
+        self.storage.observe_assurance_expiry(Instant::now());
         if self.next_expiry.is_some_and(|deadline| now >= deadline) {
             self.expire_sweep(now);
         }

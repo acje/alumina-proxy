@@ -115,6 +115,12 @@ pub(crate) enum AssuranceObservationError {
     ClockMismatch,
 }
 
+#[derive(Debug)]
+pub(crate) struct AssuranceWakeFault {
+    ordinal: usize,
+    error: AssuranceObservationError,
+}
+
 impl AssuranceObservationError {
     const fn as_str(self) -> &'static str {
         match self {
@@ -423,6 +429,104 @@ impl ServeStorage {
     pub(crate) fn cache_secs(&self, now: Instant) -> u64 {
         self.now0
             .saturating_add(now.saturating_duration_since(self.origin).as_secs())
+    }
+
+    pub(crate) fn assurance_wake(
+        &self,
+        now: Instant,
+    ) -> Result<Option<Instant>, AssuranceWakeFault> {
+        let Some(first) = self.assurance.iter().position(Option::is_some) else {
+            return Ok(None);
+        };
+        let fault = |error| AssuranceWakeFault {
+            ordinal: first,
+            error,
+        };
+        let clock = self
+            .assurance_clock
+            .ok_or_else(|| fault(AssuranceObservationError::Unseeded))?;
+        let elapsed = now
+            .checked_duration_since(self.origin)
+            .ok_or_else(|| fault(AssuranceObservationError::BeforeStartup))?;
+        if now < clock.boot || elapsed.as_secs() < clock.boot_elapsed_secs {
+            return Err(fault(AssuranceObservationError::BeforeStartup));
+        }
+        if now < clock.last {
+            return Err(fault(AssuranceObservationError::ClockRegressed));
+        }
+        let secs = self.now0.saturating_add(elapsed.as_secs());
+        let mut earliest: Option<Instant> = None;
+        for ordinal in 0..self.config.allowlist().len() {
+            let Some(state) = self.assurance[ordinal] else {
+                continue;
+            };
+            let fault = |error| AssuranceWakeFault {
+                ordinal,
+                error: AssuranceObservationError::Cache(error),
+            };
+            let name = self
+                .cache
+                .name_index(ordinal)
+                .ok_or_else(|| fault(CacheError::NameOutOfRange))?;
+            for family in Family::ALL {
+                let Some(deadline) = self
+                    .cache
+                    .retained_evidential_deadline(name, family)
+                    .map_err(fault)?
+                else {
+                    continue;
+                };
+                let observed_secs = secs.max(deadline);
+                let mut preview = state.marker;
+                if !preview.observe(self.cache.grade_key(name, observed_secs).map_err(fault)?) {
+                    continue;
+                }
+                let wake = if deadline <= secs {
+                    now
+                } else {
+                    let offset = deadline
+                        .checked_sub(self.now0)
+                        .ok_or_else(|| fault(CacheError::DeadlineOverflow))?;
+                    self.origin
+                        .checked_add(Duration::from_secs(offset))
+                        .ok_or_else(|| fault(CacheError::DeadlineOverflow))?
+                };
+                earliest = Some(earliest.map_or(wake, |current| current.min(wake)));
+            }
+        }
+        Ok(earliest)
+    }
+
+    pub(crate) fn report_assurance_wake_fault(&mut self, now: Instant, fault: AssuranceWakeFault) {
+        let secs = self.cache_secs(now);
+        self.logs
+            .dns_assurance_fault(secs, fault.ordinal, "expiry", fault.error.as_str());
+    }
+
+    pub(crate) fn observe_assurance_expiry(&mut self, now: Instant) {
+        let secs = self.cache_secs(now);
+        let mut view = AssuranceView {
+            config: &self.config,
+            origin: self.origin,
+            now0: self.now0,
+            states: &mut self.assurance,
+            clock: &mut self.assurance_clock,
+            logs: &mut self.logs,
+        };
+        for ordinal in 0..self.config.allowlist().len() {
+            if view.states[ordinal].is_none() {
+                continue;
+            }
+            let result = self
+                .cache
+                .name_index(ordinal)
+                .ok_or(AssuranceObservationError::Cache(CacheError::NameOutOfRange))
+                .and_then(|name| view.observe(&self.cache, ordinal, name, secs, now));
+            if let Err(error) = result {
+                view.logs
+                    .dns_assurance_fault(secs, ordinal, "expiry", error.as_str());
+            }
+        }
     }
 
     /// The absolute wall instant at which a due whole-second schedule value
@@ -2074,6 +2178,11 @@ mod assurance_bridge_tests {
         let before_seq = storage.assurance[0].as_ref().unwrap().sequence;
         let before_frame = storage.logs.last_record_bytes().unwrap().to_vec();
         let before_cache = storage.cache;
+        let wake_fault = storage
+            .assurance_wake(tick + Duration::from_millis(100))
+            .unwrap_err();
+        assert_eq!(wake_fault.ordinal, 0);
+        assert_eq!(wake_fault.error, AssuranceObservationError::ClockRegressed);
         let rewind = storage.emit_assurance(0, tick + Duration::from_millis(100));
         assert_eq!(
             rewind,
@@ -3252,6 +3361,120 @@ mod assurance_bridge_tests {
                 .map(|line| line.len() + 1)
                 .max()
                 .unwrap()
+        );
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn expiry_fold_32_entries_64_families_is_bounded_and_allocation_free() {
+        use crate::alloc::{Phase, run_phase};
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::StartupReport;
+        use crate::eligibility::NumericAddr;
+        use std::fmt::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut doc = String::from(
+            "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
+        );
+        for i in 0..32 {
+            write!(doc, "[allowed_fqdn.\"n{i}.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n").unwrap();
+        }
+        let config = crate::config::parse_config_document(&doc)
+            .unwrap()
+            .with_kernel_assigned_test_listener();
+        let mut storage = ServeStorage::boot(&config).unwrap();
+        let (_reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        storage
+            .dns
+            .begin_window(
+                std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
+                *config.resolver_set(),
+                1000,
+                Duration::ZERO,
+            )
+            .unwrap();
+        let proof =
+            Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
+        for ordinal in 0..32 {
+            let name = storage.cache.name_index(ordinal).unwrap();
+            for (family, address) in [
+                (Family::A, NumericAddr::V4([8, 8, 8, 8].into())),
+                (
+                    Family::Aaaa,
+                    NumericAddr::V6(
+                        [
+                            0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+                        ]
+                        .into(),
+                    ),
+                ),
+            ] {
+                let staged = StagedPositive::stage_with_evidence(
+                    name,
+                    family,
+                    Generation::INITIAL,
+                    &[address],
+                    1000,
+                    1,
+                    Some(proof),
+                )
+                .unwrap();
+                storage.cache.publish_positive(&staged).unwrap();
+                assert!(
+                    storage
+                        .cache
+                        .family_retained(name, family, 1000)
+                        .unwrap()
+                        .unwrap()
+                        .time_valid()
+                );
+            }
+        }
+        let outcome = storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert_eq!(
+            outcome.decision(),
+            super::StartupDecision::Serve(super::ServingMode::Full)
+        );
+        assert_eq!(storage.assurance.iter().flatten().count(), 32);
+        let before = Instant::now();
+        let deadline = storage.assurance_wake(before).unwrap().unwrap();
+        assert!(deadline > before);
+        std::thread::sleep(deadline.saturating_duration_since(before) + Duration::from_millis(25));
+        let actual = Instant::now();
+        let started = Instant::now();
+        let (wake, plan_counts) = run_phase(Phase::Serving, || storage.assurance_wake(actual));
+        let planning = started.elapsed();
+        assert_eq!(wake.unwrap(), Some(actual));
+        assert!(
+            plan_counts.all_zero(),
+            "64-family wake plan allocated: {plan_counts:?}"
+        );
+        let started = Instant::now();
+        let ((), observe_counts) =
+            run_phase(Phase::Serving, || storage.observe_assurance_expiry(actual));
+        let observation = started.elapsed();
+        assert!(
+            observe_counts.all_zero(),
+            "32-entry expiry observation allocated: {observe_counts:?}"
+        );
+        assert!(
+            storage
+                .assurance
+                .iter()
+                .flatten()
+                .all(|state| state.sequence == 1)
+        );
+        assert!(storage.assurance_wake(Instant::now()).unwrap().is_none());
+        println!(
+            "expiry_seeded_entries=32 expiry_seeded_families=64 wake_plan_us={} observe_us={}",
+            planning.as_micros(),
+            observation.as_micros()
         );
     }
 }
