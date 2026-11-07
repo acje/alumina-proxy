@@ -5,6 +5,11 @@ use super::{
 };
 use std::fmt;
 
+use crate::config::Fqdn;
+use crate::dns::cache::evidence::{AssuranceRequirement, ProofClass};
+use crate::dns::cache::grade_key::{FamilySnapshot, Outcome, RetainedKind};
+use crate::dns::cache::{Cache, CacheError, NameIndex};
+
 /// A single encoded field. `OptVar` variants emit nothing when the value is
 /// absent, so a caller never supplies an empty quoted value.
 #[derive(Clone, Copy)]
@@ -147,6 +152,205 @@ pub(crate) fn fuzz_encode_text(text: &str) -> Option<usize> {
     )
 }
 
+const fn class_token(class: Option<ProofClass>) -> &'static str {
+    match class {
+        None => "none",
+        Some(ProofClass::Trusted) => "trusted",
+        Some(ProofClass::Authenticated) => "authenticated",
+        Some(ProofClass::Delegated) => "delegated",
+    }
+}
+const fn requirement_token(required: AssuranceRequirement) -> &'static str {
+    match required {
+        AssuranceRequirement::ResolverTrusted => "resolver_trusted",
+        AssuranceRequirement::ResolverAuthenticated => "resolver_authenticated",
+        AssuranceRequirement::DelegatedDnssec => "delegated_dnssec",
+    }
+}
+const fn outcome_token(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Positive => "positive",
+        Outcome::NoData => "nodata",
+        Outcome::Nx => "nx",
+        Outcome::Unknown => "unknown",
+    }
+}
+const fn kind_token(kind: RetainedKind) -> &'static str {
+    match kind {
+        RetainedKind::Positive => "positive",
+        RetainedKind::NoData => "nodata",
+        RetainedKind::Nx => "nx",
+    }
+}
+
+/// Appends one family's fixed grade block to `w`, keys prefixed by its exact
+/// `Family` label. Canonical owner of the frame's per-family grade facts.
+fn append_family_grade(w: &mut Entry<'_>, family: Family, snap: &FamilySnapshot) -> bool {
+    let retained = snap.retained();
+    let fields: [Field<'_>; 10] = match family {
+        Family::A => [
+            Field::new("a_current", Val::Str(class_token(snap.current()))),
+            Field::new("a_required", Val::Str(requirement_token(snap.required()))),
+            Field::new("a_outcome", Val::Str(outcome_token(snap.outcome()))),
+            Field::new("a_usable", Val::U64(u64::from(snap.usable()))),
+            Field::new(
+                "a_retained",
+                Val::Str(if retained.is_some() { "yes" } else { "none" }),
+            ),
+            Field::new(
+                "a_retained_kind",
+                Val::OptStr(retained.map(|r| kind_token(r.kind()))),
+            ),
+            Field::new(
+                "a_retained_class",
+                Val::OptStr(retained.map(|r| class_token(Some(r.class())))),
+            ),
+            Field::new(
+                "a_retained_source",
+                resolver_val(retained.is_some(), retained.and_then(|r| r.source().get())),
+            ),
+            Field::new(
+                "a_retained_time_valid",
+                Val::OptU64(retained.map(|r| u64::from(r.time_valid()))),
+            ),
+            Field::new(
+                "a_retained_applicable",
+                Val::OptU64(retained.map(|r| u64::from(r.applicable()))),
+            ),
+        ],
+        Family::Aaaa => [
+            Field::new("aaaa_current", Val::Str(class_token(snap.current()))),
+            Field::new(
+                "aaaa_required",
+                Val::Str(requirement_token(snap.required())),
+            ),
+            Field::new("aaaa_outcome", Val::Str(outcome_token(snap.outcome()))),
+            Field::new("aaaa_usable", Val::U64(u64::from(snap.usable()))),
+            Field::new(
+                "aaaa_retained",
+                Val::Str(if retained.is_some() { "yes" } else { "none" }),
+            ),
+            Field::new(
+                "aaaa_retained_kind",
+                Val::OptStr(retained.map(|r| kind_token(r.kind()))),
+            ),
+            Field::new(
+                "aaaa_retained_class",
+                Val::OptStr(retained.map(|r| class_token(Some(r.class())))),
+            ),
+            Field::new(
+                "aaaa_retained_source",
+                resolver_val(retained.is_some(), retained.and_then(|r| r.source().get())),
+            ),
+            Field::new(
+                "aaaa_retained_time_valid",
+                Val::OptU64(retained.map(|r| u64::from(r.time_valid()))),
+            ),
+            Field::new(
+                "aaaa_retained_applicable",
+                Val::OptU64(retained.map(|r| u64::from(r.applicable()))),
+            ),
+        ],
+    };
+    write_fields(w, &fields)
+}
+
+/// One bounded `entry_frame` record for cache `name` at `now`. The name bytes
+/// and `port` come from the caller's validated `Fqdn`; `fqdn` must be the
+/// allowlist entry of `name`'s ordinal. The cache owns the per-family
+/// snapshots, labelled by their exact `Family`. All-or-nothing: overflow
+/// returns `Ok(None)` with the slot uncommitted; an out-of-range name stays
+/// a typed `Err`.
+pub(super) fn encode_entry_frame(
+    slot_buf: &mut [u8; SLOT_BYTES],
+    cache: &Cache,
+    name: NameIndex,
+    fqdn: &Fqdn,
+    now: u64,
+) -> Result<Option<usize>, CacheError> {
+    let mut w = Entry {
+        buf: slot_buf,
+        len: 0,
+    };
+    if !w.push(b"level=info kind=entry_frame name=\"")
+        || !push_escaped(&mut w, fqdn.as_str())
+        || !w.push(b"\" port=")
+        || fmt::Write::write_fmt(&mut w, format_args!("{}", fqdn.port())).is_err()
+    {
+        return Ok(None);
+    }
+    for family in Family::ALL {
+        let snap = cache.family_snapshot(name, family, now)?;
+        if !append_family_grade(&mut w, family, &snap) {
+            return Ok(None);
+        }
+    }
+    if !w.push(b"\n") {
+        return Ok(None);
+    }
+    Ok(Some(w.len))
+}
+
+/// The closed owned-phase label of an owner-telemetry record: boot or
+/// change. No new taxonomy beyond the existing closed operating phases.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssurancePhase {
+    Boot,
+    Change,
+}
+
+impl AssurancePhase {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Boot => "boot",
+            Self::Change => "change",
+        }
+    }
+}
+
+/// One full owner-telemetry record for a validated owner: canonical
+/// `write_header` with the real `Kind::DnsAssurance` label, then the typed
+/// Fqdn/port, `secs`, the caller's fixed `seq`, the closed `phase`, and both
+/// family grade blocks, newline-terminated within the fixed slot. The frame
+/// is delivered through the LogStore producer bridge.
+pub(super) fn encode_dns_assurance(
+    slot_buf: &mut [u8; SLOT_BYTES],
+    cache: &Cache,
+    name: NameIndex,
+    fqdn: &Fqdn,
+    secs: u64,
+    seq: u64,
+    phase: AssurancePhase,
+) -> Result<Option<usize>, CacheError> {
+    let mut w = Entry {
+        buf: slot_buf,
+        len: 0,
+    };
+    if !write_header(&mut w, Level::Info, Kind::DnsAssurance)
+        || !w.push(b" name=\"")
+        || !push_escaped(&mut w, fqdn.as_str())
+        || !w.push(b"\" port=")
+        || fmt::Write::write_fmt(&mut w, format_args!("{}", fqdn.port())).is_err()
+        || !w.push(b" secs=")
+        || fmt::Write::write_fmt(&mut w, format_args!("{secs}")).is_err()
+        || !w.push(b" seq=")
+        || fmt::Write::write_fmt(&mut w, format_args!("{seq}")).is_err()
+        || !w.push(b" phase=")
+        || !w.push(phase.as_str().as_bytes())
+    {
+        return Ok(None);
+    }
+    for family in Family::ALL {
+        let snap = cache.family_snapshot(name, family, secs)?;
+        if !append_family_grade(&mut w, family, &snap) {
+            return Ok(None);
+        }
+    }
+    if !w.push(b"\n") {
+        return Ok(None);
+    }
+    Ok(Some(w.len))
+}
 fn write_header(w: &mut Entry<'_>, level: Level, kind: Kind) -> bool {
     w.push(b"level=")
         && w.push(level.as_str().as_bytes())

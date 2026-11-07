@@ -1,5 +1,7 @@
+use super::encoding::encode_entry_frame;
 use super::*;
 
+use crate::dns::cache::{Cache, Family};
 use std::fmt::Write as _;
 
 use crate::config::CONFIG_DOC_LIMIT;
@@ -65,6 +67,12 @@ fn widest_name(index: usize) -> String {
         "c".repeat(63),
         "d".repeat(61)
     )
+}
+
+/// Validated owner identity for frame-caller tests: host and port parse
+/// through the real Fqdn boundary, so no test fabricates unvalidated names.
+fn typed_fqdn(host: &str, port: u16) -> crate::config::Fqdn {
+    crate::config::Fqdn::parse(&format!("{host}:{port}")).expect("valid typed fqdn")
 }
 
 /// Builds and parses the widest legal configuration: `ALLOWLIST_MAX` keyed
@@ -1056,6 +1064,183 @@ mod queue_overflow {
             "drop count saturates, never wraps"
         );
         assert!(store.dropped_overflow(), "overflow flag latches");
+    }
+
+    #[test]
+    fn logging_enqueue_fallible_err_commits_nothing_and_counts_nothing() {
+        let (mut store, _file) = file_logstore();
+        assert!(
+            store.enqueue_normal(|slot| {
+                let seed: &[u8] = b"level=info kind=fallible_seed ok\n";
+                slot[..seed.len()].copy_from_slice(seed);
+                Some(seed.len())
+            }),
+            "seed record queued"
+        );
+        let committed = store.len();
+        let dropped = store.dropped();
+        let r = store.enqueue_fallible(|slot| {
+            slot[..5].copy_from_slice(b"dirty");
+            Err("boom")
+        });
+        assert_eq!(
+            r,
+            Err("boom"),
+            "encoder error is surfaced, not folded into a drop"
+        );
+        assert_eq!(store.len(), committed, "a failed encode commits no record");
+        assert_eq!(store.dropped(), dropped, "a failed encode counts no drop");
+        assert_eq!(
+            store.last_record_bytes(),
+            Some(b"level=info kind=fallible_seed ok\n".as_slice()),
+            "the seed record stays the last committed record after the failed attempt"
+        );
+        assert!(!store.dropped_overflow());
+    }
+
+    #[test]
+    fn logging_enqueue_fallible_success_commits_and_full_queue_drops_whole() {
+        let (mut store, _file) = file_logstore();
+        let record: &[u8] = b"level=info kind=fallible_record ok\n";
+        assert!(record.len() < SLOT_BYTES, "payload fits the record slot");
+        assert_eq!(
+            store.enqueue_fallible(move |slot| {
+                slot[..record.len()].copy_from_slice(record);
+                Ok::<Option<usize>, &'static str>(Some(record.len()))
+            }),
+            Ok(true),
+            "a successful typed enqueue commits"
+        );
+        assert_eq!(store.len(), 1, "one record committed");
+        assert_eq!(store.dropped(), 0, "no drop on success");
+        assert_eq!(
+            store.last_record_bytes(),
+            Some(record),
+            "committed bytes are exact"
+        );
+        for _ in 1..QUEUE_SLOTS {
+            assert!(
+                store.enqueue_normal(|slot| {
+                    let p: &[u8] = b"level=info kind=fallible_record ok\n";
+                    slot[..p.len()].copy_from_slice(p);
+                    Some(p.len())
+                }),
+                "ring fills to capacity"
+            );
+        }
+        assert!(store.is_full(), "ring holds QUEUE_SLOTS records");
+        let before = store.dropped();
+        let r = store.enqueue_fallible(|_slot| Err("must not run on a full ring"));
+        assert_eq!(
+            r,
+            Ok(false),
+            "a full ring drops whole without running the encoder"
+        );
+        assert_eq!(
+            store.dropped(),
+            before + 1,
+            "one attempt drop counted on the full ring"
+        );
+        assert_eq!(store.len(), QUEUE_SLOTS, "capacity never exceeds the bound");
+        assert!(!store.dropped_overflow());
+    }
+
+    #[test]
+    fn logging_enqueue_assurance_real_frame_metadata_and_typed_bound() {
+        use crate::runtime::tunnel::{WorkerClock, WorkerView};
+        use std::time::Instant;
+        const DNS_EPOCH: u64 = 1_700_000_000;
+        let (config, _doc) = widest_legal_config();
+        let cache = crate::dns::cache::Cache::for_config(&config).expect("same-allowlist cache");
+        let (mut store, _file) = file_logstore();
+        let fqdn = config.allowlist().get(0).expect("widest owner");
+        let epoch = Instant::now();
+        let view = WorkerView::new(&config, &cache, WorkerClock::new(epoch, DNS_EPOCH));
+        let result = store.enqueue_assurance(
+            &view,
+            0,
+            u64::MAX,
+            crate::log::encoding::AssurancePhase::Boot,
+            epoch,
+        );
+        assert!(
+            matches!(result, Ok(true)),
+            "real owner frame enqueued: {result:?}"
+        );
+        let text = std::str::from_utf8(store.last_record_bytes().expect("committed frame"))
+            .expect("ASCII frame");
+        assert!(
+            text.starts_with("level=info kind=dns_assurance name=\"") && text.ends_with('\n'),
+            "canonical header via write_header and newline terminator: {text}"
+        );
+        assert!(
+            text.contains(&format!(" secs={} seq={} phase=boot", DNS_EPOCH, u64::MAX)),
+            "real secs from the bound view's mounted clock, sequence/phase in the one record: {text}"
+        );
+        assert!(
+            text.contains(fqdn.as_str()) && text.contains("port=443"),
+            "typed Fqdn name+port payload intact"
+        );
+        assert!(text.contains("a_retained=") && text.contains("aaaa_retained="));
+        assert!(
+            text.len() < SLOT_BYTES,
+            "widest owner frame incl header/metadata fits the 2 KiB slot: {}",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn logging_enqueue_assurance_typed_lookup_error_and_full_drop_counted() {
+        use crate::runtime::tunnel::{WorkerClock, WorkerView};
+        use std::time::Instant;
+        const DNS_EPOCH: u64 = 1_700_000_000;
+        let (config, _doc) = widest_legal_config();
+        let cache = crate::dns::cache::Cache::for_config(&config).expect("same-allowlist cache");
+        let (mut store, _file) = file_logstore();
+        let epoch = Instant::now();
+        let view = WorkerView::new(&config, &cache, WorkerClock::new(epoch, DNS_EPOCH));
+        let before_len = store.len();
+        let before_dropped = store.dropped();
+        let err = store.enqueue_assurance(
+            &view,
+            config.allowlist().len(),
+            1,
+            crate::log::encoding::AssurancePhase::Change,
+            epoch,
+        );
+        assert!(
+            matches!(err, Err(crate::dns::cache::CacheError::NameOutOfRange)),
+            "out-of-allowlist ordinal is a typed Err, never a counted drop: {err:?}"
+        );
+        assert_eq!(
+            store.len(),
+            before_len,
+            "no record from the failed owner lookup"
+        );
+        assert_eq!(
+            store.dropped(),
+            before_dropped,
+            "lookup error counts no drop"
+        );
+        for _ in 0..QUEUE_SLOTS {
+            assert!(store.enqueue_normal(|slot| {
+                let p: &[u8] = b"level=info kind=fill ok\n";
+                slot[..p.len()].copy_from_slice(p);
+                Some(p.len())
+            }));
+        }
+        assert!(store.is_full(), "ring at capacity");
+        let before = store.dropped();
+        let full = store.enqueue_assurance(
+            &view,
+            0,
+            2,
+            crate::log::encoding::AssurancePhase::Change,
+            epoch,
+        );
+        assert_eq!(full, Ok(false), "a full ring drops whole: Ok(false)");
+        assert_eq!(store.dropped(), before + 1, "one attempt drop counted");
+        assert_eq!(store.len(), QUEUE_SLOTS, "capacity bound holds");
     }
 
     #[test]
@@ -2131,6 +2316,148 @@ mod writev_progress {
         );
     }
 
+    /// A resolver-proven negative (delegated class, resolver 0) recorded at
+    /// receipt 1000 with a 600s TTL; read at 1700 so it is past its current
+    /// expiry window while the retained proof is still the stored artifact.
+    fn negative_evidence() -> crate::dns::cache::evidence::Evidence {
+        crate::dns::cache::evidence::Evidence::new(
+            true,
+            true,
+            true,
+            crate::dns::cache::evidence::ResolverSource::index(0).unwrap(),
+            Some(600),
+            1000,
+        )
+        .unwrap()
+    }
+
+    /// Real-cache retained pin: a proven negative for both families survives
+    /// current expiry with the exact family-prefixed kind/class/source and the
+    /// time-valid/applicable flags read 0 while the proof is retained.
+    #[test]
+    fn entry_frame_retained_evidence_survives_current_expiry_with_family_prefix() {
+        let mut cache = crate::dns::cache::Cache::new(1).unwrap();
+        let name = cache.name_index(0).unwrap();
+        for fam in [
+            crate::dns::cache::Family::A,
+            crate::dns::cache::Family::Aaaa,
+        ] {
+            cache
+                .evict_nodata_evidenced(name, fam, negative_evidence())
+                .unwrap();
+        }
+        let mut slot = [0u8; SLOT_BYTES];
+        let n = crate::log::encoding::encode_entry_frame(
+            &mut slot,
+            &cache,
+            name,
+            &typed_fqdn("example.org", 443),
+            1700,
+        )
+        .unwrap()
+        .unwrap();
+        let frame = std::str::from_utf8(&slot[..n]).unwrap();
+        assert!(frame.starts_with("level=info kind=entry_frame name=\"example.org\" port=443"));
+        assert!(frame.ends_with('\n'));
+        for fam in ["a", "aaaa"] {
+            let prefix = format!(
+                "{fam}_retained=\"yes\" {fam}_retained_kind=\"nodata\" \
+                 {fam}_retained_class=\"delegated\" {fam}_retained_source="
+            );
+            assert!(frame.contains(&prefix), "missing {prefix:?} in {frame:?}");
+            assert!(
+                frame.contains(&format!("{fam}_retained_time_valid=0")),
+                "retained time-valid must read 0 after current expiry: {frame:?}"
+            );
+            assert!(
+                frame.contains(&format!("{fam}_retained_applicable=0")),
+                "retained applicable must read 0 after current expiry: {frame:?}"
+            );
+        }
+    }
+
+    /// Full-frame bound: a FQDN_MAX_LEN name plus max port plus both families
+    /// with every retained-detail field present fits the fixed record slot; the
+    /// measured byte count (newline included) is a current-frame fact, not a
+    /// new resource ceiling.
+    #[test]
+    fn entry_frame_widest_name_max_port_and_both_families_fit_the_bounded_slot() {
+        let mut cache = crate::dns::cache::Cache::new(1).unwrap();
+        let name = cache.name_index(0).unwrap();
+        for fam in [
+            crate::dns::cache::Family::A,
+            crate::dns::cache::Family::Aaaa,
+        ] {
+            cache
+                .evict_nodata_evidenced(name, fam, negative_evidence())
+                .unwrap();
+        }
+        let widest = widest_name(0);
+        let mut slot = [0u8; SLOT_BYTES];
+        let n = crate::log::encoding::encode_entry_frame(
+            &mut slot,
+            &cache,
+            name,
+            &typed_fqdn(&widest, 65_535),
+            1700,
+        )
+        .unwrap()
+        .unwrap();
+        let frame = std::str::from_utf8(&slot[..n]).unwrap();
+        assert!(
+            frame.contains(&widest),
+            "253-byte validated FQDN is embedded verbatim"
+        );
+        assert!(frame.contains("port=65535"));
+        assert!(frame.contains("a_retained=") && frame.contains("aaaa_retained="));
+        assert!(frame.ends_with('\n'), "frame ends with a newline");
+        assert!(
+            n <= 900,
+            "full typed frame measured at {n} bytes (> conservative 900 bound)"
+        );
+    }
+
+    /// Untrusted input boundary: an over-`FQDN_MAX_LEN` hostname is rejected
+    /// by the validated `Fqdn` constructor, so no frame record can ever carry
+    /// it — the same "no record emitted" guarantee the old overflow test made
+    /// before identity became typed. (The generic `Entry` overflow fallback is
+    /// exercised by the existing oversize-drop record tests.)
+    #[test]
+    fn entry_frame_rejects_oversized_hostname_at_input_boundary() {
+        let absurd = format!("{}.example.org", "p".repeat(SLOT_BYTES));
+        let rejected = crate::config::Fqdn::parse(&format!("{absurd}:443"));
+        assert!(
+            rejected.is_err(),
+            "an over-253-byte hostname is rejected at the Fqdn boundary and no frame is emitted: {rejected:?}"
+        );
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn entry_frame_format_spends_zero_allocations_in_phase() {
+        use crate::alloc::{Phase, run_phase};
+        let mut cache = crate::dns::cache::Cache::new(1).unwrap();
+        let name = cache.name_index(0).unwrap();
+        cache
+            .evict_nodata_evidenced(name, crate::dns::cache::Family::A, negative_evidence())
+            .unwrap();
+        let typed = typed_fqdn("example.org", 443);
+        let mut slot = [0u8; SLOT_BYTES];
+        let (_, control) = run_phase(Phase::Logging, || 0usize);
+        assert!(control.all_zero(), "baseline should be quiet: {control:?}");
+        let ((), counts) = run_phase(Phase::Logging, || {
+            let r = crate::log::encoding::encode_entry_frame(&mut slot, &cache, name, &typed, 1700);
+            assert!(
+                r.is_ok(),
+                "frame must format inside the guarded phase: {r:?}"
+            );
+        });
+        assert!(
+            counts.all_zero(),
+            "entry-frame formatting must not allocate post-boot: {counts:?}"
+        );
+    }
+
     #[test]
     fn logging_next_drain_contract_runnable_blocked_and_quiescent() {
         let now = Instant::now();
@@ -2468,4 +2795,52 @@ mod typed_incidents {
             "recovery record pin"
         );
     }
+}
+
+#[test]
+fn family_grade_empty_snapshot_is_explicit_none_within_a_slot() {
+    let cache = Cache::new(1).unwrap();
+    let name = cache.name_index(0).unwrap();
+    let mut slot = [0u8; SLOT_BYTES];
+    let len = encode_entry_frame(
+        &mut slot,
+        &cache,
+        name,
+        &typed_fqdn("example.org", 443),
+        1000,
+    )
+    .unwrap()
+    .expect("minimal empty-owner frame fits the 2 KiB slot");
+    let frame = std::str::from_utf8(&slot[..len]).unwrap();
+    assert!(frame.starts_with("level=info kind=entry_frame name=\"example.org\" port=443"));
+    assert!(
+        frame.contains(
+            "a_current=\"none\" a_required=\"resolver_trusted\" a_outcome=\"unknown\" a_usable=0 a_retained=\"none\""
+        ),
+        "empty A block explicit and contiguous on the canonical frame: {frame}"
+    );
+    assert!(frame.ends_with('\n'), "canonical frame ends with a newline");
+    assert!(len < SLOT_BYTES, "empty owner frame stays within its slot");
+}
+
+#[test]
+fn entry_frame_minimal_empty_owner_is_explicit_none_for_both_families() {
+    let cache = Cache::new(1).unwrap();
+    let name = cache.name_index(0).unwrap();
+    let mut slot = [0u8; SLOT_BYTES];
+    let len = encode_entry_frame(
+        &mut slot,
+        &cache,
+        name,
+        &typed_fqdn("example.org", 443),
+        1000,
+    )
+    .unwrap()
+    .expect("minimal empty-owner frame fits the 2 KiB slot");
+    assert_eq!(
+        &slot[..len],
+        b"level=info kind=entry_frame name=\"example.org\" port=443 a_current=\"none\" a_required=\"resolver_trusted\" a_outcome=\"unknown\" a_usable=0 a_retained=\"none\" aaaa_current=\"none\" aaaa_required=\"resolver_trusted\" aaaa_outcome=\"unknown\" aaaa_usable=0 aaaa_retained=\"none\"\n"
+            .as_slice(),
+        "minimal empty owner: both families explicit none, never invented"
+    );
 }

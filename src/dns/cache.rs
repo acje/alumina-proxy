@@ -817,6 +817,8 @@ impl Cache {
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod grade_key;
+
 pub mod evidence {
     use super::TTL_CAP;
     use crate::dns::resolver::MAX_RESOLVERS;

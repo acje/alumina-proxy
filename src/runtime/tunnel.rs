@@ -780,6 +780,31 @@ impl<'a> WorkerView<'a> {
             ordinal,
         }
     }
+
+    /// The allowlist `Fqdn` at `ordinal` on this view's own config, or `None`
+    /// when out of range. Identity resolution pairs with [`Self::name_at`]:
+    /// both come from this one owner, so the LogStore assurance bridge can
+    /// never label an ordinal with a foreign config or cache (38dl2 M1).
+    pub(crate) fn fqdn_at(&self, ordinal: usize) -> Option<&'a crate::config::Fqdn> {
+        self.config.allowlist().get(ordinal)
+    }
+
+    /// The cache `NameIndex` at `ordinal` on this view's own cache, or `None`
+    /// when out of range. Pairs with [`Self::fqdn_at`] from the same owner.
+    pub(crate) fn name_at(&self, ordinal: usize) -> Option<crate::dns::cache::NameIndex> {
+        self.cache.name_index(ordinal)
+    }
+
+    /// The owning cache, for record encoders projecting per-family snapshots
+    /// at this view's clock.
+    pub(crate) const fn cache(&self) -> &'a crate::dns::cache::Cache {
+        self.cache
+    }
+
+    /// The whole-second DNS/cache value for `now` on this view's mounted clock.
+    pub(crate) fn cache_secs(&self, now: Instant) -> u64 {
+        self.clock.cache_secs(now)
+    }
 }
 
 /// The single exact-pair resolution of an already-validated CONNECT carried

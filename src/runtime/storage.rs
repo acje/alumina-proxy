@@ -200,6 +200,25 @@ impl ServeStorage {
         WorkerView::new(&self.config, &self.cache, self.worker.clock())
     }
 
+    /// Ships one owner-telemetry `dns_assurance` frame bound to this
+    /// storage's own config/cache/clock authority (38dl2 M1/L1): assembles
+    /// the view directly from its own fields — never a foreign config, cache,
+    /// or second — captures one monotonic `Instant`, and borrows `logs`
+    /// disjointly from the read view. `seq` is the caller-owned fixed owner
+    /// state; a `CacheError` stays a typed `Err`; a full ring or encode
+    /// overflow drops one `Ok(false)`; queue pressure is the caller's
+    /// per-turn accounting. Unwired until the boot/change producer hooks.
+    pub(crate) fn emit_assurance(
+        &mut self,
+        ordinal: usize,
+        seq: u64,
+        phase: crate::log::AssurancePhase,
+    ) -> Result<bool, crate::dns::cache::CacheError> {
+        let view = WorkerView::new(&self.config, &self.cache, self.worker.clock());
+        let now = Instant::now();
+        self.logs.enqueue_assurance(&view, ordinal, seq, phase, now)
+    }
+
     /// The whole-second DNS/cache serving clock, mounted on the same origin
     /// and epoch the startup window wrote receipts on: `now0` plus whole
     /// seconds since the window origin. The single origin+offset continuity
@@ -1342,5 +1361,49 @@ impl ServeStorage {
         self.step_corroboration()?;
         self.start_due_serving_refresh()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod assurance_bridge_tests {
+    use super::{CacheError, ServeStorage};
+    use crate::log::AssurancePhase;
+    use std::time::Instant;
+
+    fn storage() -> ServeStorage {
+        let doc = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
+        let config = crate::config::parse_config_document(doc).expect("valid owner config");
+        let mut storage = ServeStorage::boot(&config).expect("boot owner storage");
+        storage.mount_clock(Instant::now(), 1_700_000_000);
+        storage
+    }
+
+    #[test]
+    fn owner_assurance_bridge_preserves_owner_identity_and_errors() {
+        let mut storage = storage();
+        assert_eq!(storage.emit_assurance(0, 7, AssurancePhase::Boot), Ok(true));
+        let record = std::str::from_utf8(storage.logs().last_record_bytes().unwrap()).unwrap();
+        assert!(record.contains("alpha.example.org"));
+        assert!(record.contains("seq=7 phase=boot"));
+        let len = storage.logs().len();
+        let dropped = storage.logs().dropped();
+        assert_eq!(
+            storage.emit_assurance(1, 8, AssurancePhase::Change),
+            Err(CacheError::NameOutOfRange)
+        );
+        assert_eq!(storage.logs().len(), len);
+        assert_eq!(storage.logs().dropped(), dropped);
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn owner_assurance_bridge_spends_zero_allocations() {
+        use crate::alloc::{Phase, run_phase};
+        let mut storage = storage();
+        let (result, counts) = run_phase(Phase::Logging, || {
+            storage.emit_assurance(0, 7, AssurancePhase::Boot)
+        });
+        assert_eq!(result, Ok(true));
+        assert!(counts.all_zero(), "owner bridge allocations: {counts:?}");
     }
 }

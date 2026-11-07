@@ -261,6 +261,7 @@ enum Kind {
     IncidentSummary,
     IncidentEligibleLoss,
     IncidentEligibleRecovered,
+    DnsAssurance,
 }
 
 impl Kind {
@@ -285,6 +286,7 @@ impl Kind {
             Kind::IncidentSummary => "incident_summary",
             Kind::IncidentEligibleLoss => "incident_eligible_loss",
             Kind::IncidentEligibleRecovered => "incident_eligible_recovered",
+            Kind::DnsAssurance => "dns_assurance",
         }
     }
 
@@ -343,7 +345,7 @@ mod encoding;
 mod queue;
 mod sink;
 
-pub(crate) use self::encoding::fuzz_encode_text;
+pub(crate) use self::encoding::{AssurancePhase, fuzz_encode_text};
 use self::encoding::{
     Field, Val, count_capture_batches, count_domain_batches, encode_fatal,
     encode_monitor_capture_batch, encode_monitor_domain_batch, encode_monitor_summary,

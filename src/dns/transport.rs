@@ -373,9 +373,7 @@ enum HandshakeProbe {
     Failed(FailureReason),
 }
 
-/// The per-name outcome of a single exchanged result, as the resolve loops
-/// track it: the latest concluded exchange's outcome or reason is kept (704q:
-/// capture where still known, never infer at formatting).
+/// The latest concluded exchange outcome per name, captured rather than inferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Latest {
     Unattempted,
@@ -416,6 +414,8 @@ pub struct StartupReport {
     pub resolved_names: u32,
     /// One entry per configured name in allowlist ordinal order.
     pub outcomes: [NameOutcome; ALLOWLIST_MAX],
+    /// One A/AAAA attempt pair per configured name in allowlist ordinal order.
+    pub attempted: [[bool; 2]; ALLOWLIST_MAX],
     /// The first counted exchange failure: name ordinal plus address family.
     pub first_failure: Option<(u16, Family)>,
 }
@@ -428,7 +428,7 @@ pub struct StartupReport {
 #[derive(Debug)]
 pub(crate) struct WindowLedger {
     resolved: [bool; ALLOWLIST_MAX],
-    attempted: [bool; ALLOWLIST_MAX * 2],
+    attempted: [[bool; 2]; ALLOWLIST_MAX],
     latest: [Latest; ALLOWLIST_MAX],
     names: usize,
     exchanges: u32,
@@ -440,7 +440,7 @@ impl WindowLedger {
     pub(crate) const fn new(names: usize) -> WindowLedger {
         WindowLedger {
             resolved: [false; ALLOWLIST_MAX],
-            attempted: [false; ALLOWLIST_MAX * 2],
+            attempted: [[false; 2]; ALLOWLIST_MAX],
             latest: [Latest::Unattempted; ALLOWLIST_MAX],
             names,
             exchanges: 0,
@@ -466,7 +466,7 @@ impl WindowLedger {
     }
 
     pub(crate) const fn track_attempt(&mut self, ordinal: usize, family: Family) {
-        self.attempted[ordinal * 2 + family_index(family)] = true;
+        self.attempted[ordinal][family_index(family)] = true;
     }
 
     pub(crate) const fn mark_published(&mut self, ordinal: usize, kind: PublishedKind) {
@@ -515,19 +515,18 @@ impl WindowLedger {
         }
     }
 
-    /// Finishes the window ledger into the typed startup report, applying the
-    /// canonical count and outcome rules: attempted per name-family pair,
-    /// not-attempted as the remainder, resolved names where a usable binding
-    /// was published, and each unresolved name reported from its latest
-    /// classified outcome rather than inferred.
+    /// Finishes the ledger into a typed report: attempts per name-family,
+    /// the unattempted remainder and current usable names, with unresolved names
+    /// reported from their latest classified outcome rather than inference.
     #[expect(
         clippy::expect_used,
         reason = "ledger counts (attempted, resolved, names*2) are bounded by 2*ALLOWLIST_MAX=64, fitting u32"
     )]
     pub(crate) fn finish(&self) -> StartupReport {
         let attempted_count = u32::try_from(
-            self.attempted[..self.names * 2]
+            self.attempted[..self.names]
                 .iter()
+                .flatten()
                 .filter(|&&t| t)
                 .count(),
         )
@@ -543,6 +542,7 @@ impl WindowLedger {
                 - attempted_count,
             resolved_names,
             outcomes: [NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed); ALLOWLIST_MAX],
+            attempted: self.attempted,
             first_failure: self.first_failure,
         };
         for ordinal in 0..self.names {
@@ -3911,3 +3911,72 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 pub(crate) mod dot_tests;
+
+#[cfg(test)]
+mod startup_attempt_retention_tests {
+    use super::{FailureReason, Family, NameOutcome, NotAttemptedReason, WindowLedger};
+    use crate::config::ALLOWLIST_MAX;
+
+    #[test]
+    fn finish_preserves_all_unattempted_families() {
+        let report = WindowLedger::new(3).finish();
+        println!(
+            "StartupReport size={} align={}; WindowLedger size={} align={}",
+            std::mem::size_of::<super::StartupReport>(),
+            std::mem::align_of::<super::StartupReport>(),
+            std::mem::size_of::<WindowLedger>(),
+            std::mem::align_of::<WindowLedger>()
+        );
+        assert_eq!(report.attempted, [[false; 2]; ALLOWLIST_MAX]);
+        assert_eq!(report.not_attempted, 6);
+        assert_eq!(report.resolved_names, 0);
+        assert_eq!(report.exchanges, 0);
+        assert_eq!(report.failed, 0);
+        assert_eq!(
+            &report.outcomes[..3],
+            &[NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed); 3]
+        );
+    }
+
+    #[test]
+    fn finish_preserves_asymmetric_family_attempts() {
+        let mut ledger = WindowLedger::new(ALLOWLIST_MAX);
+        ledger.track_attempt(0, Family::A);
+        ledger.track_attempt(1, Family::Aaaa);
+        ledger.track_attempt(ALLOWLIST_MAX - 1, Family::A);
+        ledger.track_attempt(ALLOWLIST_MAX - 1, Family::Aaaa);
+        ledger.mark_failed(0, Family::A, FailureReason::Timeout);
+        let report = ledger.finish();
+        assert_eq!(report.attempted[0], [true, false]);
+        assert_eq!(report.attempted[1], [false, true]);
+        assert_eq!(report.attempted[2], [false, false]);
+        assert_eq!(report.attempted[ALLOWLIST_MAX - 1], [true, true]);
+        assert_eq!(report.not_attempted, 60);
+        assert_eq!(report.resolved_names, 0);
+        assert_eq!(report.exchanges, 0);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.first_failure, Some((0, Family::A)));
+        assert_eq!(
+            report.outcomes[0],
+            NameOutcome::Failed(FailureReason::Timeout)
+        );
+        assert_eq!(
+            &report.outcomes[1..3],
+            &[NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed); 2]
+        );
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn finishing_attempt_ledger_spends_zero_allocations() {
+        use crate::alloc::{Phase, run_phase};
+        let mut ledger = WindowLedger::new(ALLOWLIST_MAX);
+        ledger.track_attempt(0, Family::Aaaa);
+        let (report, counts) = run_phase(Phase::StartupDns, || ledger.finish());
+        assert_eq!(report.attempted[0], [false, true]);
+        assert!(
+            counts.all_zero(),
+            "finishing ledger allocations: {counts:?}"
+        );
+    }
+}

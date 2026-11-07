@@ -1269,6 +1269,13 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/runtime/reactor/startup.rs:28-131</code>, <code>:129</code>), so a first
   observed SIGTERM during the window is seen within one bounded poll instead of
   being invisible for the window’s full duration.</p>
+  <p>Both startup drivers share <code>WindowLedger</code>, which records an
+  attempt for each configured-name and address-family pair and copies its
+  fixed 32-by-2 Boolean array into <code>StartupReport</code> in allowlist
+  ordinal order, with A before AAAA. The report retains the existing aggregate
+  counts and per-name outcomes; these attempt facts do not themselves emit a
+  record (<code>src/dns/transport.rs:408-443</code>, <code>:468-469</code>,
+  <code>:525-555</code>, <code>:3864-3870</code>).</p>
   <p>Only fully validated outcomes reach the cache: the outcome-application
   body <code>dns::publication::apply_outcome</code>
   (<code>src/dns/publication.rs:38</code>, named-re-exported as
@@ -1345,7 +1352,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   name), while without it the same cross-suffix CNAME is rejected on both and
   the window declares <code>Exit75</code> with zero resolved names
   (<code>configured_cross_suffix_cname_resolves_identically_on_shared_and_legacy_startup</code>,
-  <code>src/runtime/storage/startup_integration.rs:677</code>).</p>
+  <code>src/runtime/storage/startup_integration.rs:683</code>).</p>
 
   <h3>5.5 The typed exchange lifecycle</h3>
   <p><code>ExchangeClass</code> — <code>Startup</code>, <code>Serving</code>, or

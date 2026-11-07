@@ -1,7 +1,11 @@
+use super::encoding::{AssurancePhase, encode_dns_assurance};
 use super::{
     Dimension, Edge, Field, HIGH_PCT_NUMBER, Kind, LOW_PCT_NUMBER, Level, LogStore, QUEUE_MASK,
     QUEUE_SLOTS, SLOT_BYTES, Val, Watermark, encode_record,
 };
+use crate::dns::cache::CacheError;
+use crate::runtime::tunnel::WorkerView;
+use std::time::Instant;
 
 impl LogStore {
     /// Whole-record drops so far; saturates at `u64::MAX`.
@@ -110,6 +114,63 @@ impl LogStore {
             self.drop_one();
             false
         }
+    }
+    /// Typed-enqueue sibling of `enqueue_normal` for owner telemetry: the
+    /// caller's encoder surfaces a `CacheError` as `Err`, preserved distinctly
+    /// rather than folded into a counted drop. On `Err` the slot is left
+    /// uncommitted (its partial bytes remain garbage-on-failure) and neither
+    /// the drop counter nor any queue-usage state moves; the caller accounts
+    /// queue pressure once per turn. `Ok` values keep `enqueue_normal`'s
+    /// semantics: `Some(len)` commits the record; `None` or a full ring drops
+    /// a whole record and counts it.
+    pub(super) fn enqueue_fallible<E>(
+        &mut self,
+        encode: impl FnOnce(&mut [u8; SLOT_BYTES]) -> Result<Option<usize>, E>,
+    ) -> Result<bool, E> {
+        if self.count >= QUEUE_SLOTS {
+            self.drop_one();
+            return Ok(false);
+        }
+        let index = self.write_index();
+        match encode(&mut self.slots[index].buf) {
+            Ok(Some(len)) => {
+                self.commit_record(index, len);
+                Ok(true)
+            }
+            Ok(None) => {
+                self.drop_one();
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+    /// Producer bridge for one owner-telemetry record, bound to a
+    /// storage-issued [`WorkerView`] so the `Fqdn`, cache `NameIndex`, and
+    /// whole-second serving clock all come from one owner (38dl2 M1): the
+    /// ordinal is resolved on the view's own config and cache before any
+    /// queue interaction, then `secs` is derived from the view's mounted
+    /// clock at `now` and stamped via `set_now` before the attempt (38dl2
+    /// L1), so per-turn queue accounting never stamps a stale second. The
+    /// fallible queue ships the frame: a `CacheError` stays a typed `Err`
+    /// (no commit, no drop, no usage move), a full ring or encode overflow
+    /// drops one and returns `Ok(false)`. `seq` is the caller's fixed owner
+    /// state; queued is not delivered; the caller accounts queue pressure
+    /// once per turn.
+    pub(crate) fn enqueue_assurance(
+        &mut self,
+        view: &WorkerView<'_>,
+        ordinal: usize,
+        seq: u64,
+        phase: AssurancePhase,
+        now: Instant,
+    ) -> Result<bool, CacheError> {
+        let fqdn = view.fqdn_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
+        let name = view.name_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
+        let secs = view.cache_secs(now);
+        self.set_now(secs);
+        self.enqueue_fallible(|slot| {
+            encode_dns_assurance(slot, view.cache(), name, fqdn, secs, seq, phase)
+        })
     }
     /// Enqueues a reserved priority-class record (docs/alumina-proxy.md:1299-1301).
     /// On a full ring the record is encoded into a stack scratch slot first and
