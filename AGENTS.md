@@ -80,8 +80,12 @@ because one side "wins".
 ## Rules
 
 - `docs/alumina-proxy.md` is the sole, byte-canonical governing
-  specification (sha256 `b1d95dbc7fead191d51b51bc40cfa6b3e7f2fc922beb9de4ea0564d842d8c4b2`). Never edit it; documents only
-  restate or cite it.
+  specification (sha256 `b1d95dbc7fead191d51b51bc40cfa6b3e7f2fc922beb9de4ea0564d842d8c4b2`) and is byte-frozen by default.
+  Only an explicitly user-authorized, scoped governance amendment may change
+  it. That increment must update the spec, this digest pin, code, tests and
+  architecture together, pass required independent source and governance
+  reviews before adoption, and preserve all security and resource limits.
+  Other documents only restate or cite the specification.
 - Native verification entry point, QA run and prerequisite ownership are
   `docs/qa-package/README.md`; the verify command set is in
   `docs/verification.md`.
