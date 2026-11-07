@@ -3008,6 +3008,505 @@ mod production_apply_route {
     use super::*;
     use crate::dns::cache::evidence::ProofClass;
 
+    fn observed_negative_matrix(nxdomain: bool) {
+        use crate::dns::cache::grade_key::{FamilySnapshot, Outcome as FamilyOutcome};
+        use crate::dns::cache::{Generation, NameIndex, StagedPositive};
+        use crate::dns::publication::ObservationPhase;
+        use crate::dns::transport::FailureReason;
+
+        let mut ws = ResponseWorkspace::default();
+        let mut msg = header(0x4300, true, if nxdomain { 3 } else { 0 }, 1, 0, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&soa_record("example.org", 300, 60));
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4300, &msg).unwrap();
+        let mut cache = Cache::new(1).unwrap();
+        let mut schedules = Schedules::new(1).unwrap();
+        let name = cache.name_index(0).unwrap();
+        for (family, addr) in [
+            (Family::A, NumericAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
+            (
+                Family::Aaaa,
+                NumericAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)),
+            ),
+        ] {
+            let staged =
+                StagedPositive::stage(name, family, Generation::INITIAL, &[addr], 4900, 600)
+                    .unwrap();
+            cache.publish_positive(&staged).unwrap();
+            schedules
+                .note_exchange_failure(0, family, 4980, FailureReason::Connect)
+                .unwrap();
+        }
+        let generation = cache.entry(name, Family::A).unwrap().generation();
+        let other_generation = cache.entry(name, Family::Aaaa).unwrap().generation();
+        let mut events: [Option<(
+            ObservationPhase,
+            u64,
+            FamilySnapshot,
+            FamilySnapshot,
+            Generation,
+            Generation,
+        )>; 2] = [None; 2];
+        let mut count = 0;
+        let result = {
+            let mut observer = |phase, cache: &Cache, name: NameIndex, now| {
+                events[count] = Some((
+                    phase,
+                    now,
+                    cache.family_snapshot(name, Family::A, now).unwrap(),
+                    cache.family_snapshot(name, Family::Aaaa, now).unwrap(),
+                    cache.entry(name, Family::A).unwrap().generation(),
+                    cache.entry(name, Family::Aaaa).unwrap().generation(),
+                ));
+                count += 1;
+            };
+            reply
+                .observe()
+                .apply_observed(
+                    &mut cache,
+                    &mut schedules,
+                    crate::dns::publication::ApplyContext {
+                        index: 0,
+                        generation,
+                        receipt: 5000,
+                        now: 5001,
+                        query_family: Some(Family::A),
+                        other_generation: Some(other_generation),
+                    },
+                    ApplyOrigin {
+                        source: ResolverSource::index(0).unwrap(),
+                        query_floor: 5000,
+                        origin_authenticated: false,
+                        origin_policy: RecursionPolicy::Undeclared,
+                    },
+                    &mut observer,
+                )
+                .unwrap()
+        };
+        assert_eq!(count, 2);
+        let (pre, pre_time, pre_a, pre_aaaa, pre_a_generation, pre_aaaa_generation) =
+            events[0].unwrap();
+        let (post, post_time, post_a, post_aaaa, post_a_generation, post_aaaa_generation) =
+            events[1].unwrap();
+        assert_eq!(
+            (pre, post, pre_time, post_time),
+            (
+                ObservationPhase::BeforeCommit,
+                ObservationPhase::AfterCommit,
+                5001,
+                5001
+            )
+        );
+        assert_eq!(
+            (pre_a.outcome(), pre_aaaa.outcome()),
+            (FamilyOutcome::Positive, FamilyOutcome::Positive)
+        );
+        assert_ne!(post_a_generation, pre_a_generation);
+        assert_eq!(
+            post_a.outcome(),
+            if nxdomain {
+                FamilyOutcome::Nx
+            } else {
+                FamilyOutcome::NoData
+            }
+        );
+        if nxdomain {
+            assert_ne!(post_aaaa_generation, pre_aaaa_generation);
+            assert_eq!(post_aaaa.outcome(), FamilyOutcome::Nx);
+            assert_eq!(
+                result.2.per_type,
+                [PerTypeTransition::Recovered { duration: 21 }; 2]
+            );
+        } else {
+            assert_eq!(post_aaaa_generation, pre_aaaa_generation);
+            assert_eq!(post_aaaa, pre_aaaa);
+            assert_eq!(
+                result.2.per_type,
+                [
+                    PerTypeTransition::Recovered { duration: 21 },
+                    PerTypeTransition::None
+                ]
+            );
+        }
+        assert_eq!(
+            cache.family_snapshot(name, Family::A, 5001).unwrap(),
+            post_a
+        );
+        assert_eq!(
+            cache.family_snapshot(name, Family::Aaaa, 5001).unwrap(),
+            post_aaaa
+        );
+    }
+
+    #[test]
+    fn actual_observer_sees_atomic_nxdomain_and_incident_recovery() {
+        observed_negative_matrix(true);
+    }
+
+    #[test]
+    fn actual_observer_sees_only_nodata_family_and_incident_recovery() {
+        observed_negative_matrix(false);
+    }
+
+    #[test]
+    fn actual_observer_rejections_never_report_post_or_replace_old_proof() {
+        use crate::dns::cache::evidence::{AssuranceRequirement, Evidence};
+        use crate::dns::cache::{Generation, StagedPositive};
+        use crate::dns::publication::ObservationPhase;
+        let mut ws = ResponseWorkspace::default();
+        let msg = direct_a("sub.example.org", 0x4401, [9, 9, 9, 9], 120);
+        let mut cache = Cache::with_requirement(1, AssuranceRequirement::DelegatedDnssec).unwrap();
+        let mut schedules = Schedules::new(1).unwrap();
+        let name = cache.name_index(0).unwrap();
+        let proof = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(120),
+            1000,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4(Ipv4Addr::new(8, 8, 8, 8))],
+            1000,
+            120,
+            Some(proof),
+        )
+        .unwrap();
+        cache.publish_positive(&staged).unwrap();
+        let before_cache = cache;
+        let before_schedules = schedules;
+        let origin = ApplyOrigin {
+            source: ResolverSource::index(0).unwrap(),
+            query_floor: 1000,
+            origin_authenticated: false,
+            origin_policy: RecursionPolicy::Undeclared,
+        };
+        let generation = cache.entry(name, Family::A).unwrap().generation();
+        let mut phases: [Option<ObservationPhase>; 2] = [None; 2];
+        let mut count = 0;
+        for requested_generation in [Generation::INITIAL, generation] {
+            let reply =
+                parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4401, &msg).unwrap();
+            let result = {
+                let mut observer = |phase, _: &Cache, _, _| {
+                    phases[count] = Some(phase);
+                    count += 1;
+                };
+                reply.observe().apply_observed(
+                    &mut cache,
+                    &mut schedules,
+                    crate::dns::publication::ApplyContext {
+                        index: 0,
+                        generation: requested_generation,
+                        receipt: 1000,
+                        now: 1010,
+                        query_family: Some(Family::A),
+                        other_generation: Some(Generation::INITIAL),
+                    },
+                    origin,
+                    &mut observer,
+                )
+            };
+            assert!(matches!(
+                result,
+                Err(DnsError::Cache(
+                    CacheError::StaleGeneration | CacheError::InsufficientAssurance
+                ))
+            ));
+            assert_eq!(
+                count, 0,
+                "obsolete and below-minimum refusals precede observation"
+            );
+            assert_eq!(cache, before_cache, "prior valid proof remains unchanged");
+            assert_eq!(schedules, before_schedules);
+        }
+    }
+
+    #[test]
+    fn actual_observer_zero_ttl_and_precommit_overflow_are_truthful() {
+        use crate::dns::cache::Generation;
+        use crate::dns::publication::ObservationPhase;
+        let mut ws = ResponseWorkspace::default();
+        let mut cache = Cache::new(1).unwrap();
+        let mut schedules = Schedules::new(1).unwrap();
+        let name = cache.name_index(0).unwrap();
+        let origin = ApplyOrigin {
+            source: ResolverSource::UNKNOWN,
+            query_floor: 1000,
+            origin_authenticated: false,
+            origin_policy: RecursionPolicy::Undeclared,
+        };
+        let msg = direct_a("sub.example.org", 0x4402, [9, 9, 9, 9], 0);
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4402, &msg).unwrap();
+        let mut phases: [Option<ObservationPhase>; 2] = [None; 2];
+        let mut retained_valid = None;
+        let mut count = 0;
+        {
+            let mut observer = |phase, cache: &Cache, name, now| {
+                phases[count] = Some(phase);
+                if phase == ObservationPhase::AfterCommit {
+                    retained_valid = cache
+                        .family_snapshot(name, Family::A, now)
+                        .unwrap()
+                        .retained()
+                        .map(|proof| proof.time_valid());
+                }
+                count += 1;
+            };
+            reply
+                .observe()
+                .apply_observed(
+                    &mut cache,
+                    &mut schedules,
+                    crate::dns::publication::ApplyContext {
+                        index: 0,
+                        generation: Generation::INITIAL,
+                        receipt: 1000,
+                        now: 1000,
+                        query_family: Some(Family::A),
+                        other_generation: Some(Generation::INITIAL),
+                    },
+                    origin,
+                    &mut observer,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            phases,
+            [
+                Some(ObservationPhase::BeforeCommit),
+                Some(ObservationPhase::AfterCommit)
+            ]
+        );
+        assert_eq!(
+            retained_valid,
+            Some(false),
+            "zero TTL is retained but never time-valid"
+        );
+        let generation = cache.entry(name, Family::A).unwrap().generation();
+        let before_cache = cache;
+        let before_schedules = schedules;
+        let msg = direct_a("sub.example.org", 0x4403, [10, 0, 0, 1], 120);
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4403, &msg).unwrap();
+        let mut count = 0;
+        let mut after = false;
+        let result = {
+            let mut observer = |phase, _: &Cache, _, _| {
+                count += 1;
+                after |= phase == ObservationPhase::AfterCommit;
+            };
+            reply.observe().apply_observed(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation,
+                    receipt: 1000,
+                    now: u64::MAX,
+                    query_family: Some(Family::A),
+                    other_generation: Some(Generation::INITIAL),
+                },
+                origin,
+                &mut observer,
+            )
+        };
+        assert!(matches!(
+            result,
+            Err(DnsError::Cache(CacheError::DeadlineOverflow))
+        ));
+        assert_eq!(
+            count, 1,
+            "validated candidate permits PRE before schedule refusal"
+        );
+        assert!(
+            !after,
+            "failed preparation cannot have a post-commit observation"
+        );
+        assert_eq!(cache, before_cache);
+        assert_eq!(schedules, before_schedules);
+    }
+
+    #[test]
+    fn observer_fault_is_auxiliary_and_does_not_change_publication_result() {
+        use crate::dns::cache::Generation;
+        let mut ws = ResponseWorkspace::default();
+        let msg = direct_a("sub.example.org", 0x4404, [9, 9, 9, 9], 120);
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4404, &msg).unwrap();
+        let mut cache = Cache::new(1).unwrap();
+        let mut schedules = Schedules::new(1).unwrap();
+        let mut fault = None;
+        let result = {
+            let mut observer = |_, cache: &Cache, _, _| {
+                fault = Some(cache.name_index(99).ok_or(CacheError::NameOutOfRange));
+            };
+            reply.observe().apply_observed(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation: Generation::INITIAL,
+                    receipt: 1000,
+                    now: 1001,
+                    query_family: Some(Family::A),
+                    other_generation: Some(Generation::INITIAL),
+                },
+                ApplyOrigin {
+                    source: ResolverSource::UNKNOWN,
+                    query_floor: 1000,
+                    origin_authenticated: false,
+                    origin_policy: RecursionPolicy::Undeclared,
+                },
+                &mut observer,
+            )
+        };
+        assert!(
+            result.is_ok(),
+            "observer-side typed fault cannot replace publication outcome"
+        );
+        assert_eq!(fault, Some(Err(CacheError::NameOutOfRange)));
+        assert!(
+            !cache
+                .entry(cache.name_index(0).unwrap(), Family::A)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn observed_publication_and_bounded_snapshots_spend_zero_allocations() {
+        use crate::alloc::{Phase, run_phase};
+        use crate::dns::cache::grade_key::FamilySnapshot;
+        use crate::dns::cache::{Generation, NameIndex};
+        use crate::dns::publication::ObservationPhase;
+        let mut ws = ResponseWorkspace::default();
+        let msg = direct_a("sub.example.org", 0x4405, [9, 9, 9, 9], 120);
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4405, &msg).unwrap();
+        let mut cache = Cache::new(1).unwrap();
+        let mut schedules = Schedules::new(1).unwrap();
+        let mut events: [Option<(ObservationPhase, u64, FamilySnapshot, FamilySnapshot)>; 2] =
+            [None; 2];
+        let mut count = 0;
+        let (result, counts) = run_phase(Phase::BackgroundRefresh, || {
+            let mut observer = |phase, cache: &Cache, name: NameIndex, now| {
+                events[count] = Some((
+                    phase,
+                    now,
+                    cache.family_snapshot(name, Family::A, now).unwrap(),
+                    cache.family_snapshot(name, Family::Aaaa, now).unwrap(),
+                ));
+                count += 1;
+            };
+            reply.observe().apply_observed(
+                &mut cache,
+                &mut schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation: Generation::INITIAL,
+                    receipt: 1000,
+                    now: 1001,
+                    query_family: Some(Family::A),
+                    other_generation: Some(Generation::INITIAL),
+                },
+                ApplyOrigin {
+                    source: ResolverSource::UNKNOWN,
+                    query_floor: 1000,
+                    origin_authenticated: false,
+                    origin_policy: RecursionPolicy::Undeclared,
+                },
+                &mut observer,
+            )
+        });
+        assert!(result.is_ok());
+        assert_eq!(count, 2);
+        assert!(
+            counts.all_zero(),
+            "observed publication and two fixed snapshots: {counts:?}"
+        );
+        println!(
+            "two_snapshot_event_bytes={}",
+            std::mem::size_of_val(&events)
+        );
+    }
+
+    #[test]
+    fn actual_observer_emits_pre_and_atomic_post_for_positive() {
+        use crate::dns::cache::grade_key::FamilySnapshot;
+        use crate::dns::cache::{Generation, NameIndex};
+        use crate::dns::publication::ObservationPhase;
+        let mut ws = ResponseWorkspace::default();
+        let reply = parse_reply_into(
+            &mut ws,
+            "sub.example.org",
+            Family::A,
+            0x41a1,
+            &direct_a("sub.example.org", 0x41a1, [9, 9, 9, 9], 120),
+        )
+        .unwrap();
+        let mut cache = Cache::new(1).unwrap();
+        let mut schedules = Schedules::new(1).unwrap();
+        let name = cache.name_index(0).unwrap();
+        let generation = cache.entry(name, Family::A).unwrap().generation();
+        let mut events: [Option<(ObservationPhase, u64, FamilySnapshot, FamilySnapshot)>; 2] =
+            [None; 2];
+        let mut count = 0;
+        {
+            let mut observer = |phase, cache: &Cache, name: NameIndex, now| {
+                events[count] = Some((
+                    phase,
+                    now,
+                    cache.family_snapshot(name, Family::A, now).unwrap(),
+                    cache.family_snapshot(name, Family::Aaaa, now).unwrap(),
+                ));
+                count += 1;
+            };
+            reply
+                .observe()
+                .apply_observed(
+                    &mut cache,
+                    &mut schedules,
+                    crate::dns::publication::ApplyContext {
+                        index: 0,
+                        generation,
+                        receipt: 1000,
+                        now: 1001,
+                        query_family: Some(Family::A),
+                        other_generation: Some(Generation::INITIAL),
+                    },
+                    ApplyOrigin {
+                        source: ResolverSource::index(0).unwrap(),
+                        query_floor: 1000,
+                        origin_authenticated: false,
+                        origin_policy: RecursionPolicy::Undeclared,
+                    },
+                    &mut observer,
+                )
+                .unwrap();
+        }
+        assert_eq!(count, 2, "one before and one after callback are required");
+        let (before_phase, before_secs, before_a, before_aaaa) = events[0].unwrap();
+        let (after_phase, after_secs, after_a, after_aaaa) = events[1].unwrap();
+        assert_eq!(
+            (before_phase, after_phase),
+            (
+                ObservationPhase::BeforeCommit,
+                ObservationPhase::AfterCommit
+            )
+        );
+        assert_eq!((before_secs, after_secs), (1001, 1001));
+        assert_eq!(before_a.current(), None);
+        assert_eq!(after_a.current(), Some(ProofClass::Trusted));
+        assert_eq!(after_a.usable(), 1);
+        assert_eq!(before_aaaa, after_aaaa);
+    }
+
     /// Applies one real parsed A reply through [`ObservedReply::apply`] and
     /// returns the published kind and the reply-derived evidence the apply
     /// bound atomically at publication, so each witness drives the actual

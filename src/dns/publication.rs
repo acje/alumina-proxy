@@ -1,5 +1,5 @@
 use crate::dns::cache::evidence;
-use crate::dns::cache::{Cache, CacheError, Family, Generation, StagedPositive};
+use crate::dns::cache::{Cache, CacheError, Family, Generation, NameIndex, StagedPositive};
 use crate::dns::schedule::{
     IncidentTransition, OutcomeIncidents, PerTypeTransition, Schedules, family_slot,
 };
@@ -23,6 +23,12 @@ pub(super) struct ApplyContext {
     pub(super) other_generation: Option<Generation>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ObservationPhase {
+    BeforeCommit,
+    AfterCommit,
+}
+
 /// Applies a validated `outcome` to the cache and schedule for one allowlist
 /// `index`, using the in-flight `generation` and the monotonic `receipt` and
 /// `now` values. Only validated outcomes mutate state. Returns the incident
@@ -33,8 +39,9 @@ pub(super) struct ApplyContext {
 ///
 /// # Errors
 ///
-/// Returns `DnsError::Cache` when the cache or schedule refuses the mutation
-/// without changing any entry.
+/// Returns `DnsError::Cache` on a pre-publication cache or schedule refusal.
+/// A successful schedule preparation admits the index; subsequent incident
+/// clearing cannot fail on the current route.
 pub fn apply_outcome(
     cache: &mut Cache,
     schedules: &mut Schedules,
@@ -67,6 +74,27 @@ pub(super) fn apply_route(
     outcome: &Outcome,
     evidence: Option<evidence::Evidence>,
 ) -> Result<OutcomeIncidents, DnsError> {
+    apply_route_observed(
+        cache,
+        schedules,
+        context,
+        outcome,
+        evidence,
+        &mut |_, _, _, _| {},
+    )
+}
+
+pub(super) fn apply_route_observed<F>(
+    cache: &mut Cache,
+    schedules: &mut Schedules,
+    context: ApplyContext,
+    outcome: &Outcome,
+    evidence: Option<evidence::Evidence>,
+    observer: &mut F,
+) -> Result<OutcomeIncidents, DnsError>
+where
+    F: FnMut(ObservationPhase, &Cache, NameIndex, u64),
+{
     let ApplyContext {
         index,
         generation,
@@ -82,6 +110,7 @@ pub(super) fn apply_route(
     cache
         .check_publication_requirement(name, evidence, now)
         .map_err(DnsError::Cache)?;
+    observer(ObservationPhase::BeforeCommit, cache, name, now);
     match outcome {
         Outcome::Positive {
             bindings,
@@ -103,6 +132,7 @@ pub(super) fn apply_route(
                 .prepare_positive(index, *positive_family, receipt, *ttl, cacheable, now)
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
             cache.publish_positive(&staged).map_err(DnsError::Cache)?;
+            observer(ObservationPhase::AfterCommit, cache, name, now);
             schedules.commit_positive(index, *positive_family, prepared);
             let sustained = schedules.reset_negative_streak(index);
             let mut per_type = [PerTypeTransition::None; 2];
@@ -123,6 +153,7 @@ pub(super) fn apply_route(
                 None => cache.evict_nxdomain(name),
             };
             minted.map_err(DnsError::Cache)?;
+            observer(ObservationPhase::AfterCommit, cache, name, now);
             schedules.commit_nxdomain(index, prepared);
             let sustained = schedules.note_negative_streak(index, now);
             let per_type = [
@@ -150,6 +181,7 @@ pub(super) fn apply_route(
                 None => cache.evict_nodata(name, *no_data_family),
             };
             minted.map_err(DnsError::Cache)?;
+            observer(ObservationPhase::AfterCommit, cache, name, now);
             schedules.commit_nodata(index, *no_data_family, prepared);
             let mut per_type = [PerTypeTransition::None; 2];
             per_type[family_slot(*no_data_family)] = schedules

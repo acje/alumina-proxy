@@ -1158,6 +1158,20 @@ impl<'a> ObservedReply<'a> {
         context: ApplyContext,
         origin: ApplyOrigin,
     ) -> Result<(PublishedKind, bool, OutcomeIncidents), DnsError> {
+        self.apply_observed(cache, schedules, context, origin, &mut |_, _, _, _| {})
+    }
+
+    pub(super) fn apply_observed<F>(
+        self,
+        cache: &mut Cache,
+        schedules: &mut Schedules,
+        context: ApplyContext,
+        origin: ApplyOrigin,
+        observer: &mut F,
+    ) -> Result<(PublishedKind, bool, OutcomeIncidents), DnsError>
+    where
+        F: FnMut(publication::ObservationPhase, &Cache, crate::dns::cache::NameIndex, u64),
+    {
         let evidence = match &self.reply.outcome {
             Outcome::Positive { .. } | Outcome::NxDomain { .. } | Outcome::NoData { .. } => Some(
                 Evidence::new(
@@ -1171,8 +1185,14 @@ impl<'a> ObservedReply<'a> {
                 .map_err(|err| DnsError::Cache(map_evidence_error(err)))?,
             ),
         };
-        let incidents =
-            publication::apply_route(cache, schedules, context, &self.reply.outcome, evidence)?;
+        let incidents = publication::apply_route_observed(
+            cache,
+            schedules,
+            context,
+            &self.reply.outcome,
+            evidence,
+            observer,
+        )?;
         Ok((
             self.kind,
             ReplyFacts::extreme(self.reply.observation),

@@ -319,8 +319,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   and notes the dependency seams that cross the layer boundaries: the DNS outcome
   adapter mutates reactor-core <code>Cache</code>/<code>Schedules</code> state
   through the public body <code>dns::publication::apply_outcome</code>
-  (<code>src/dns/publication.rs:38</code>), which delegates to the crate-private
-  <code>apply_route</code> (<code>:73</code>) that optionally stages reply-derived
+  (<code>src/dns/publication.rs:45</code>), which delegates through the crate-private
+  <code>apply_route</code> to <code>apply_route_observed</code> (<code>:70-97</code>) that optionally stages reply-derived
   evidence; named-re-exported as
   <code>dns::apply_outcome</code> (<code>src/dns/mod.rs:3</code>); the serving-surface
   inspector depends on the <code>names</code>-owned hostname type
@@ -368,7 +368,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   it applies its own independent 63-byte wire-label bound on query encoding
   (<code>write_qname</code>, <code>src/dns/wire.rs:367-403</code>) and on response-name
   reads inside <code>parse_response</code> (<code>read_name</code>/<code>read_rr</code>,
-  <code>src/dns/wire.rs:492-561</code>, called from the parser <code>:1194-1397</code>).
+  <code>src/dns/wire.rs:492-561</code>, called from the parser <code>:1217-1420</code>).
   The boundary adapters keep their intentional strictness — config <code>Fqdn</code>
   rejects uppercase labels and strips one trailing dot before its own
   payload reaches the shared <code>FixedHostname</code> normalizer as a no-op
@@ -591,7 +591,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         preserved. Production positive application stages that reply-derived
         evidence atomically with the generation-advancing publish: the
         crate-private route
-        (<code>src/dns/publication.rs:63</code>)
+        (<code>src/dns/publication.rs:87-97</code>, <code>:120-135</code>)
         receives the immutable <code>Evidence</code> from
         <code>ObservedReply::apply</code> and stages it together with the
         positive — including an all-ineligible <code>NoEligible</code>
@@ -613,8 +613,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         Mutation
         of cache/schedule lives in the private
         <code>dns/publication</code> child, not <code>src/dns/wire.rs</code> itself.</td>
-        <td><code>src/dns/wire.rs:1194</code>, <code>:1194-1397</code>;
-        <code>src/dns/publication.rs:38</code>, <code>:63</code>;
+        <td><code>src/dns/wire.rs:1217</code>, <code>:1217-1420</code>;
+        <code>src/dns/publication.rs:45</code>, <code>:70-97</code>;
         <code>src/dns/schedule.rs:16</code>, <code>:358-389</code>;
         <code>src/dns/cache.rs:122-137</code>, <code>:247-345</code>, <code>:225</code>,
         <code>:303</code>, <code>:557-620</code>, <code>:567-590</code> (evidence staging/check),
@@ -642,14 +642,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         over the whole <code>ParsedReply</code> — exposing three pure probe facts via
         <code>probe_facts</code> and, for a startup/serving outcome — positive, or a
         validated NXDOMAIN or NODATA — applying the reply through the
-        crate-private <code>apply_route</code>
-        (<code>src/dns/publication.rs:63</code>) with the same-reply <code>Evidence</code>
+        crate-private <code>apply_route_observed</code>
+        (<code>src/dns/publication.rs:87-97</code>, <code>:109-112</code>,
+        <code>:120-135</code>, <code>:147-156</code>, <code>:172-184</code>) with the same-reply <code>Evidence</code>
         (raw AD, supporting-TTL cap, actual source and query-start floor,
         completed-strict-pin authentication) bound atomically at the
         generation-advancing publish, while a validated negative without
         complete tracking falls back to the evidence-free legacy surface;
         the public <code>dns::apply_outcome</code>
-        (<code>:38</code>) stays that evidence-free surface, and this
+        (<code>:45</code>) stays that evidence-free surface, and this
         DNS-private trusted publisher is not a type-enforced gateway. An
         admission/assurance consumer now exists at publication check time
         (<code>check_publication_requirement</code>, <code>src/dns/cache.rs:516-527</code>;
@@ -660,11 +661,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         includes <code>classify_published</code>/<code>parse_reply</code>, alongside the
         immutable cache carriers (<code>Family</code>/<code>CacheError</code>/
         <code>MAX_ADDRESSES</code>) and schedule <code>Soa</code>.</td>
-        <td><code>src/dns/publication.rs:38</code>, <code>:63</code>;
-        <code>src/dns/wire.rs:9-14</code>, <code>:938-1178</code></td></tr>
+        <td><code>src/dns/publication.rs:45</code>, <code>:70-97</code>;
+        <code>src/dns/wire.rs:9-14</code>, <code>:938-1195</code></td></tr>
       <tr><th scope="row"><code>name_rules</code> (private)</th>
         <td>Hostname-grammar byte rules common to the name carriers — the config and resolver <code>Fqdn</code> adapters each wrap the shared <code>FixedHostname</code> payload — : 253/63 bounds, four-variant label classifier, IP-literal-shape predicate; the DNS wire codec keeps its own label bound.</td>
-        <td><code>src/names/rules.rs:1-34</code>; <code>src/dns/wire.rs:367-403</code>, <code>:1194-1397</code></td></tr>
+        <td><code>src/names/rules.rs:1-34</code>; <code>src/dns/wire.rs:367-403</code>, <code>:1217-1420</code></td></tr>
       <tr><th scope="row"><code>hostname</code> (private child of <code>names</code>)</th>
         <td><code>FixedHostname</code> + <code>FQDN_MAX_LEN</code> alias: private
         <code>bytes</code>/<code>len</code> (<code>u8</code>), the
@@ -1333,24 +1334,34 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   itself schedule or emit change or expiry records
   (<code>src/dns/cache/grade_key.rs:9-107</code>, <code>:122-141</code>;
   spec <code>docs/alumina-proxy.md:1831-1832</code>).</p>
+  <p>The internal publication route also accepts a read-only cache observer.
+  After generation and minimum checks it supplies a before-commit observation;
+  after each successful positive, NXDOMAIN or NODATA cache mutation it supplies
+  one after-commit observation before schedule and incident bookkeeping.
+  NXDOMAIN's after observation sees both families after the single cache call.
+  Both observations carry the publication context's same <code>now</code>.
+  The existing unobserved entry points supply a no-op; this seam is not wired
+  to the serving log (<code>src/dns/publication.rs:27-30</code>, <code>:70-113</code>,
+  <code>:130-141</code>, <code>:147-165</code>, <code>:172-189</code>;
+  <code>src/dns/wire.rs:1154-1195</code>).</p>
   <p>Only fully validated outcomes reach the cache: the outcome-application
   body <code>dns::publication::apply_outcome</code>
-  (<code>src/dns/publication.rs:38</code>, named-re-exported as
+  (<code>src/dns/publication.rs:45</code>, named-re-exported as
   <code>dns::apply_outcome</code> at <code>src/dns/mod.rs:3</code>), delegating to
-  the crate-private <code>apply_route</code> (<code>src/dns/publication.rs:63</code>, the production evidence
-  route), prepares the
+  the crate-private <code>apply_route</code> wrapper and
+  <code>apply_route_observed</code> (<code>src/dns/publication.rs:70-97</code>), prepares the
   schedule delta <em>before</em> mutating the cache (prepare/commit deltas at
   <code>src/dns/schedule.rs:358-389</code> positive, <code>:502-533</code> negative;
-  <code>map_schedule</code> error projection at <code>src/dns/publication.rs:184</code>),
+  <code>map_schedule</code> error projection at <code>src/dns/publication.rs:210</code>),
   so a <code>DeadlineOverflow</code> leaves both resources untouched. Responses are
-  matched on tid (<code>src/dns/wire.rs:1210-1216</code>) plus question fields
-  (qname + qtype + qclass, <code>:1247-1254</code>); QR/opcode/TC guards are
-  applied from the response flags (<code>:1217-1230</code>), and RCODE is
+  matched on tid (<code>src/dns/wire.rs:1233-1239</code>) plus question fields
+  (qname + qtype + qclass, <code>:1268-1277</code>); QR/opcode/TC guards are
+  applied from the response flags (<code>:1240-1252</code>), and RCODE is
   classified or rejected — NOERROR/NXDOMAIN are handled, every other RCODE is
-  refused (<code>:1361-1396</code>) — so RCODE is validated, not a query-equality
-  field; <code>DNAME</code> is rejected in every section (answer <code>:1299</code>,
-  authority <code>:1310-1312</code>, additional <code>:1330-1332</code>) and trailing
-  bytes are rejected (<code>:1340-1342</code>).</p>
+  refused (<code>:1384-1419</code>) — so RCODE is validated, not a query-equality
+  field; <code>DNAME</code> is rejected in every section (answer <code>:1322</code>,
+  authority <code>:1333-1334</code>, additional <code>:1353-1354</code>) and trailing
+  bytes are rejected (<code>:1363-1364</code>).</p>
   <p>The startup integration fixtures drive the real startup path: each
   successful fixture builds its config through the
   <code>#[cfg(test)]</code>-only constructor that selects a loopback
@@ -1462,11 +1473,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   chain or SOA TTL is kept as <code>Some(0)</code>, a known explicit zero whose
   deadline equals the query start, whereas a validated NXDOMAIN without a
   covering SOA has no supporting lifetime and remains unknown
-  <code>None</code> (<code>src/dns/wire.rs:1344-1349</code>, <code>:1377-1393</code>); neither
+  <code>None</code> (<code>src/dns/wire.rs:1367-1372</code>, <code>:1400-1417</code>); neither
   yields a currently reusable lease (<code>Evidence::new</code>,
   <code>src/dns/cache.rs:938-954</code>; <code>valid_class</code>, <code>:1015-1019</code>). A validated
   negative that does not complete tracking is not projected and falls back to
-  the legacy empty-Evidence apply (<code>src/dns/publication.rs:38,63</code>),
+  the legacy empty-Evidence apply (<code>src/dns/publication.rs:45,87</code>),
   while positive events remain unfiltered by the negative tracking. The query itself carries RD and AD,
   with CD clear and no EDNS/OPT record (<code>write_header</code>,
   <code>src/dns/wire.rs:348-360</code>), and the AD bit is retained strictly as a raw
@@ -1478,7 +1489,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   publication (<code>:516-527</code>), never from the raw AD bit. Raw AD stays
   reply-bound evidence, retained in <code>ParsedReply</code> and immutable
   <code>Evidence</code> (<code>src/dns/wire.rs:1030-1047</code>,
-  <code>:1158-1167</code>; <code>src/dns/cache.rs:913</code>,
+  <code>:1175-1183</code>; <code>src/dns/cache.rs:913</code>,
   <code>:938-954</code>); only the diagnostic <code>startup_warning</code>
   family-set context is emitted by that warning, whose fields never include
   raw AD/source/qualification values. The
@@ -1530,19 +1541,19 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   it pairs the same reply's raw AD and supporting-TTL cap with those delivery
   facts to build the immutable <code>Evidence</code> for a positive and a
   validated negative alike (<code>Outcome::Positive | Outcome::NxDomain |
-  Outcome::NoData</code>, <code>src/dns/wire.rs:1159-1160</code>) — the recorded
+  Outcome::NoData</code>, <code>src/dns/wire.rs:1175-1177</code>) — the recorded
   qualified-deployment condition is the sole qualification input; no detached
   flag or AD- or pin-derived qualification enters it, so a raw AD of 0 is
   never invented into an <code>Insecure</code>/<code>Bogus</code> provenance
   (<code>ProofClass::classify</code>, <code>src/dns/cache.rs:840</code>;
   <code>Evidence::class</code>, <code>:1007</code>), and pin possession is
   not qualification. The evidence routes through the crate-private
-  <code>apply_route</code> (<code>src/dns/publication.rs:63</code>), which stages it
-  atomically with the generation-advancing publish: positive evidence passes the same owned-requirement gate as any negative before the outcome match (<code>src/dns/publication.rs:81-85</code>), exempt only from the negative-only paired-tag rule, while a
+  <code>apply_route_observed</code> (<code>src/dns/publication.rs:87-97</code>, <code>:120-135</code>), which stages it
+  atomically with the generation-advancing publish: positive evidence passes the same owned-requirement gate as any negative before the outcome match (<code>src/dns/publication.rs:109-112</code>), exempt only from the negative-only paired-tag rule, while a
   negative publishes a private <code>NegativeProof</code> only when query
-  family and sibling generation are both present (<code>:172-181</code>); a
+  family and sibling generation are both present (<code>:198-207</code>); a
   validated negative that does not complete tracking keeps the legacy
-  unevidenced eviction (<code>:127-130</code>, <code>:154-157</code>). The projection
+  unevidenced eviction (<code>:151-155</code>, <code>:179-183</code>). The projection
   returns the <code>Nx</code> or <code>NoData</code> variant, not an rcode
   (<code>src/dns/cache.rs:703-800</code>): <code>Nx</code> publishes each negative
   entry under its own advanced entry generation and records the sibling family's
@@ -1557,11 +1568,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   transitions, never an entry: the route returns the sustained-negative delta plus
   per-type exchange-incident deltas in <code>A</code>/<code>Aaaa</code> order
   (<code>OutcomeIncidents</code>/<code>PerTypeTransition</code>,
-  <code>src/dns/publication.rs:38,63</code>), where a query-family recovery clears only
+  <code>src/dns/publication.rs:45,87</code>), where a query-family recovery clears only
   the queried family's incident — <code>PerTypeTransition::Recovered</code> from
   <code>clear_exchange_incident</code> (<code>src/dns/schedule.rs:441,453</code>; NODATA
-  <code>src/dns/publication.rs:141-162</code>) — and NXDOMAIN clears both
-  (<code>src/dns/publication.rs:128-134</code>). The positive getters plus the public legacy
+  <code>src/dns/publication.rs:172-194</code>) — and NXDOMAIN clears both
+  (<code>src/dns/publication.rs:159-165</code>). The positive getters plus the public legacy
   surface stay unchanged: this DNS-private trusted publisher is the
   same-reply producer, not a type-enforced gateway. Only when that call
   succeeds does the cohesive <code>(PublishedKind, bool, OutcomeIncidents)</code>
@@ -1816,8 +1827,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   network work, shared by the startup and serving exchange paths
   (<code>src/dns/transport.rs:3088</code>, <code>src/runtime/storage.rs:822</code>). The crate-private
   production route re-checks that pair before mutating:
-  <code>reject_obsolete_negative</code> (<code>src/dns/publication.rs:198-239</code>,
-  invoked at <code>:82</code>) refuses with <code>StaleGeneration</code> when an
+  <code>reject_obsolete_generation</code> (<code>src/dns/publication.rs:217-277</code>,
+  invoked at <code>:109</code>) refuses with <code>StaleGeneration</code> when an
   obsolete NXDOMAIN would overwrite newer state — comparing <em>both</em>
   families' current generations — or an obsolete NODATA would, comparing the
   queried family only and requiring the outcome's family to be the queried one.
@@ -1876,7 +1887,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         families, NODATA the queried family only with the outcome family equal
         to the queried one</td>
         <td><code>src/dns/cache.rs:501-514</code>;
-        <code>src/dns/publication.rs:82</code>, <code>:198-239</code></td></tr>
+        <code>src/dns/publication.rs:109</code>, <code>:217-277</code></td></tr>
     </tbody>
   </table>
 
@@ -1887,7 +1898,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>src/dns/cache.rs:445-451</code>), the sole cache construction site, and
   that same boot-built instance serves both the startup window and every actual
   dial — the CONNECT attempt re-checks the owner-bound admission before dialing (<code>dial_checked</code>, <code>src/runtime/reactor.rs:2609-2626</code>; <code>dial_admits</code>, <code>src/runtime/tunnel.rs:832-847</code>; the cache predicate <code>src/dns/cache.rs:622-658</code>) — so no dial reads a stale admission source. The typed policies take two owned routes: <code>parse_entry_requirement</code> reads only the per-entry <code>dns_assurance</code> key, omission defaulting to <code>Trusted</code> (<code>src/config/mod.rs:939-951</code>), while <code>build_resolver_set</code> parses the top-level <code>recursive_dnssec_policy</code> into a distinct <code>RecursionPolicy</code> validated by <code>declared_root_validating_no_stale</code> (<code>src/dns/resolver.rs:465-473</code>), the both-strong gate applied by <code>from_table</code> (<code>src/config/mod.rs:631-641</code>), so an unsupported or unrepresentable combination is rejected at load, not at dial time. Evidence provenance is
-  captured once per reply before any policy is consulted: <code>ParsedReply</code> holds only the same-parse outcome, raw AD, extreme flag, and supporting-TTL cap (<code>src/dns/wire.rs:1009-1012</code>, <code>:1031-1048</code>); the delivering connection's immutable source, completed strict-pin handshake, and query-start floor arrive in <code>ApplyOrigin</code> (<code>src/dns/transport.rs:2421-2425</code>, <code>:2495-2502</code>) and join into <code>Evidence</code> only in <code>Evidence::new</code> via <code>ObservedReply::apply</code> (<code>src/dns/wire.rs:1161-1175</code>). Publication checks the owned requirement before the outcome match (<code>src/dns/publication.rs:81-85</code>): <code>InsufficientAssurance</code> is a counted, nonfatal exchange failure — the receive path closes the DNS connection, records <code>note_failure</code>, and returns <code>RecvStep::Failed</code>, distinct from other errors (<code>src/dns/transport.rs:2528-2535</code>, <code>:2537</code>), continuing via counted backoff with serving retained (<code>:3689-3690</code>; <code>src/dns/schedule.rs:402-418</code>); the token is <code>insufficient_assurance</code> (<code>src/dns/outcome.rs:24,38</code>); superseded negatives are a separate branch and pure probes return earlier (<code>src/dns/transport.rs:2524-2526</code>, <code>:2484-2494</code>), keeping every entry's stored class consistent with the last successful policy check.</p>
+  captured once per reply before any policy is consulted: <code>ParsedReply</code> holds only the same-parse outcome, raw AD, extreme flag, and supporting-TTL cap (<code>src/dns/wire.rs:1009-1012</code>, <code>:1031-1048</code>); the delivering connection's immutable source, completed strict-pin handshake, and query-start floor arrive in <code>ApplyOrigin</code> (<code>src/dns/transport.rs:2421-2425</code>, <code>:2495-2502</code>) and join into <code>Evidence</code> only in <code>Evidence::new</code> via <code>ObservedReply::apply</code> (<code>src/dns/wire.rs:1175-1187</code>). Publication checks the owned requirement before the outcome match (<code>src/dns/publication.rs:109-112</code>): <code>InsufficientAssurance</code> is a counted, nonfatal exchange failure — the receive path closes the DNS connection, records <code>note_failure</code>, and returns <code>RecvStep::Failed</code>, distinct from other errors (<code>src/dns/transport.rs:2528-2535</code>, <code>:2537</code>), continuing via counted backoff with serving retained (<code>:3689-3690</code>; <code>src/dns/schedule.rs:402-418</code>); the token is <code>insufficient_assurance</code> (<code>src/dns/outcome.rs:24,38</code>); superseded negatives are a separate branch and pure probes return earlier (<code>src/dns/transport.rs:2524-2526</code>, <code>:2484-2494</code>), keeping every entry's stored class consistent with the last successful policy check.</p>
 </section>
 
 <section id="enforcement">
@@ -2822,11 +2833,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/dns/incident_report.rs:14-15</code>, <code>:149-235</code>,
         <code>:299-304</code>; <code>src/runtime/storage.rs:465-517</code></td></tr>
       <tr><th scope="row">DNS parse / bailiwick / tid+question match / RCODE</th>
-        <td><code>src/dns/wire.rs:1194</code>, <code>:857-900</code>, <code>:920-931</code>,
-        <code>:1210-1216</code>, <code>:1247-1254</code>, <code>:1361-1396</code>;
-        <code>:1299</code>, <code>:1310-1312</code>, <code>:1330-1332</code>, <code>:1340-1342</code></td></tr>
+        <td><code>src/dns/wire.rs:1217</code>, <code>:857-900</code>, <code>:920-931</code>,
+        <code>:1233-1239</code>, <code>:1268-1277</code>, <code>:1384-1419</code>;
+        <code>:1322</code>, <code>:1333-1334</code>, <code>:1353-1354</code>, <code>:1363-1364</code></td></tr>
       <tr><th scope="row">Cache outcome application (private publication child)</th>
-        <td><code>src/dns/publication.rs:38</code>, <code>:63</code>;
+        <td><code>src/dns/publication.rs:45</code>, <code>:70-97</code>;
         <code>src/dns/schedule.rs:358-389</code>, <code>:502-533</code>;
         <code>src/dns/mod.rs:3</code> (named re-export of the body)</td></tr>
       <tr><th scope="row">Neutral DNS outcome / verdict carriers</th>
