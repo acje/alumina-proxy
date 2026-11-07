@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use mio::net::TcpListener;
 
-use crate::config::{Config, Fqdn};
-use crate::dns::cache::grade_key::FamilySnapshot;
+use crate::config::{ALLOWLIST_MAX, Config, Fqdn};
+use crate::dns::cache::grade_key::{EntryGradeKey, EntryGradeMarker, FamilySnapshot};
 use crate::dns::cache::{Cache, CacheError, Family, NameIndex};
 use crate::dns::incident_report::{
     ClosedWindow, EligibleTransition, IncidentReport, IncidentSnapshot, SummaryCache,
@@ -75,6 +75,7 @@ pub struct ServeStorage {
     /// failure or positive publish is attributed to the exact family attempted.
     /// `None` while no serving exchange is in progress.
     active_exchange_family: Option<Family>,
+    assurance: [Option<AssuranceState>; ALLOWLIST_MAX],
 }
 
 pub(crate) struct AssuranceSnapshot {
@@ -82,6 +83,25 @@ pub(crate) struct AssuranceSnapshot {
     families: [FamilySnapshot; 2],
     secs: u64,
     boot: Option<AssuranceBoot>,
+    key: EntryGradeKey,
+}
+
+#[derive(Clone, Copy)]
+struct AssuranceState {
+    marker: EntryGradeMarker,
+    sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AssuranceObservation {
+    Unchanged,
+    Attempted { sequence: u64, enqueued: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AssuranceObservationError {
+    Cache(CacheError),
+    Unseeded,
 }
 
 #[derive(Clone, Copy)]
@@ -229,6 +249,7 @@ impl ServeStorage {
             logs,
             incident_report: IncidentReport::new(),
             active_exchange_family: None,
+            assurance: [None; ALLOWLIST_MAX],
         })
     }
 
@@ -258,6 +279,7 @@ impl ServeStorage {
         let view = self.work_view();
         let fqdn = view.fqdn_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
         let name = view.name_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
+        let key = view.cache().grade_key(name, secs)?;
         let a = view.cache().family_snapshot(name, Family::A, secs)?;
         let aaaa = view.cache().family_snapshot(name, Family::Aaaa, secs)?;
         Ok(AssuranceSnapshot {
@@ -265,16 +287,32 @@ impl ServeStorage {
             families: [a, aaaa],
             secs,
             boot: None,
+            key,
         })
     }
 
     pub(crate) fn emit_assurance(
         &mut self,
-        snapshot: &AssuranceSnapshot,
-        seq: u64,
-        phase: crate::log::AssurancePhase,
-    ) -> bool {
-        self.logs.enqueue_assurance(snapshot, seq, phase)
+        ordinal: usize,
+        secs: u64,
+    ) -> Result<AssuranceObservation, AssuranceObservationError> {
+        let snapshot = self
+            .capture_assurance_secs(ordinal, secs)
+            .map_err(AssuranceObservationError::Cache)?;
+        let state = self
+            .assurance
+            .get_mut(ordinal)
+            .and_then(Option::as_mut)
+            .ok_or(AssuranceObservationError::Unseeded)?;
+        if !state.marker.observe(snapshot.key) {
+            return Ok(AssuranceObservation::Unchanged);
+        }
+        state.sequence = state.sequence.saturating_add(1);
+        let sequence = state.sequence;
+        let enqueued =
+            self.logs
+                .enqueue_assurance(&snapshot, sequence, crate::log::AssurancePhase::Change);
+        Ok(AssuranceObservation::Attempted { sequence, enqueued })
     }
 
     /// The whole-second DNS/cache serving clock, mounted on the same origin
@@ -1253,6 +1291,10 @@ impl ServeStorage {
                     };
                     match self.capture_assurance_secs(ordinal, secs) {
                         Ok(mut snapshot) => {
+                            self.assurance[ordinal] = Some(AssuranceState {
+                                marker: EntryGradeMarker::new(snapshot.key),
+                                sequence: 0,
+                            });
                             snapshot.boot = Some(boot);
                             self.logs.enqueue_assurance(
                                 &snapshot,
@@ -1459,6 +1501,438 @@ mod assurance_bridge_tests {
     }
 
     #[test]
+    fn boot_seeded_observation_is_silent_before_trusted_proof_expiry() {
+        use super::{AssuranceObservation, AssuranceObservationError};
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::StartupReport;
+        use crate::eligibility::NumericAddr;
+        use std::io::Read as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut storage = storage();
+        storage.config = storage.config.clone().with_kernel_assigned_test_listener();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let name = storage.cache.name_index(0).unwrap();
+        let proof =
+            Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(10), 1000).unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1000,
+            10,
+            Some(proof),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        let outcome = storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert_eq!(
+            outcome.decision(),
+            super::StartupDecision::Serve(super::ServingMode::Full)
+        );
+        assert_eq!(
+            storage.emit_assurance(0, 1000),
+            Ok(AssuranceObservation::Unchanged)
+        );
+        assert_eq!(
+            storage.emit_assurance(0, 1009),
+            Ok(AssuranceObservation::Unchanged)
+        );
+        assert_eq!(
+            storage.emit_assurance(0, 1010),
+            Ok(AssuranceObservation::Attempted {
+                sequence: 1,
+                enqueued: true
+            })
+        );
+        let frame = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(
+            frame.contains("secs=1010 seq=1 phase=change")
+                && frame.contains("a_current=\"trusted\"")
+                && frame.contains("a_retained_time_valid=0"),
+            "{frame}"
+        );
+        assert_eq!(
+            storage.emit_assurance(0, 1011),
+            Ok(AssuranceObservation::Unchanged)
+        );
+        while !storage.logs.is_full() {
+            storage
+                .logs
+                .startup_warning_ctx(1011, "alpha.example.org", Family::A, "timeout", None);
+        }
+        let before_dropped = storage.logs.dropped();
+        let generation = storage.cache.entry(name, Family::A).unwrap().generation();
+        let strong = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(300),
+            1020,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            generation,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1020,
+            300,
+            Some(strong),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        assert_eq!(
+            storage.emit_assurance(0, 1021),
+            Ok(AssuranceObservation::Attempted {
+                sequence: 2,
+                enqueued: false
+            })
+        );
+        assert_eq!(storage.logs.dropped(), before_dropped + 1);
+        assert_eq!(
+            storage.emit_assurance(0, 1022),
+            Ok(AssuranceObservation::Unchanged)
+        );
+        assert_eq!(
+            storage.logs.dropped(),
+            before_dropped + 1,
+            "no retry after a dropped observation"
+        );
+        let mut bytes = [0u8; 8192];
+        assert!(reader.read(&mut bytes).unwrap() > 0);
+        storage.logs.drain_sink();
+        assert!(!storage.logs.is_full());
+        let generation = storage.cache.entry(name, Family::A).unwrap().generation();
+        let plain = Evidence::new(
+            false,
+            false,
+            false,
+            ResolverSource::UNKNOWN,
+            Some(300),
+            1030,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            generation,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1030,
+            300,
+            Some(plain),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        assert_eq!(
+            storage.emit_assurance(0, 1031),
+            Ok(AssuranceObservation::Attempted {
+                sequence: 3,
+                enqueued: true
+            })
+        );
+        let frame = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(
+            frame.contains("secs=1031 seq=3 phase=change"),
+            "sequence gap represents dropped attempt: {frame}"
+        );
+        let count = storage.logs.len();
+        assert_eq!(
+            storage.emit_assurance(1, 1031),
+            Err(AssuranceObservationError::Cache(CacheError::NameOutOfRange))
+        );
+        assert_eq!(
+            storage.logs.len(),
+            count,
+            "invalid lookup must not queue or mutate"
+        );
+    }
+
+    #[test]
+    fn unseeded_and_invalid_observations_are_distinct_errors() {
+        use super::AssuranceObservationError;
+        let mut storage = storage();
+        let before = storage.logs.len();
+        assert_eq!(
+            storage.emit_assurance(0, 1000),
+            Err(AssuranceObservationError::Unseeded)
+        );
+        assert_eq!(
+            storage.emit_assurance(1, 1000),
+            Err(AssuranceObservationError::Cache(CacheError::NameOutOfRange))
+        );
+        assert_eq!(storage.logs.len(), before);
+        assert!(storage.assurance[0].is_none());
+    }
+
+    #[test]
+    fn invalid_cache_snapshot_never_seeds_a_fabricated_marker() {
+        use super::AssuranceObservationError;
+        use crate::dns::cache::Cache;
+        use crate::dns::transport::StartupReport;
+        use std::io::Read as _;
+        use std::os::unix::net::UnixStream;
+        let doc = "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
+        let config = crate::config::parse_config_document(doc).unwrap();
+        let mut storage = ServeStorage::boot(&config).unwrap();
+        storage.cache = Cache::new(1).unwrap();
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert!(storage.assurance[0].is_some());
+        assert!(
+            storage.assurance[1].is_none(),
+            "failed capture is not an empty observation"
+        );
+        let mut bytes = [0u8; 8192];
+        let n = reader.read(&mut bytes).unwrap();
+        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        assert!(
+            text.lines()
+                .any(|line| line.contains("beta.example.org")
+                    && line.contains("cache_snapshot=unknown")),
+            "{text}"
+        );
+        let before = storage.assurance[0].as_ref().unwrap().sequence;
+        assert_eq!(
+            storage.emit_assurance(1, 1000),
+            Err(AssuranceObservationError::Cache(CacheError::NameOutOfRange))
+        );
+        assert_eq!(storage.assurance[0].as_ref().unwrap().sequence, before);
+        assert!(storage.assurance[1].is_none());
+    }
+
+    #[test]
+    fn failed_listener_does_not_seed_assurance_state() {
+        use super::{AssuranceObservationError, StartupError};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::StartupReport;
+        use crate::eligibility::NumericAddr;
+        let guard = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = guard.local_addr().unwrap().port();
+        let doc = format!(
+            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+        );
+        let config = crate::config::parse_config_document(&doc).unwrap();
+        let mut storage = ServeStorage::boot(&config).unwrap();
+        let name = storage.cache.name_index(0).unwrap();
+        let staged = StagedPositive::stage(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1000,
+            60,
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        assert!(matches!(
+            storage.settle_startup(1000, StartupReport::default(), 0, false),
+            Err(StartupError::Listener { .. })
+        ));
+        assert!(storage.assurance[0].is_none());
+        assert_eq!(
+            storage.emit_assurance(0, 1000),
+            Err(AssuranceObservationError::Unseeded)
+        );
+        assert_eq!(storage.logs.len(), 0);
+    }
+
+    #[test]
+    fn boot_full_queue_still_seeds_unresolved_entry_without_retry() {
+        use super::AssuranceObservation;
+        use crate::dns::cache::Family;
+        use crate::dns::transport::StartupReport;
+        use std::os::unix::net::UnixStream;
+        let mut storage = storage();
+        let (_reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        while !storage.logs.is_full() {
+            storage
+                .logs
+                .startup_warning_ctx(1000, "alpha.example.org", Family::A, "timeout", None);
+        }
+        let before = storage.logs.dropped();
+        let outcome = storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert_eq!(
+            outcome.decision(),
+            super::StartupDecision::Exit75 { unresolved: 1 }
+        );
+        assert!(
+            storage.logs.dropped() > before,
+            "the initial frame was attempted against a full queue"
+        );
+        assert_eq!(storage.assurance[0].as_ref().unwrap().sequence, 0);
+        let after = storage.logs.dropped();
+        assert_eq!(
+            storage.emit_assurance(0, 1000),
+            Ok(AssuranceObservation::Unchanged)
+        );
+        assert_eq!(
+            storage.logs.dropped(),
+            after,
+            "the dropped initial attempt is not retried"
+        );
+    }
+
+    #[test]
+    fn sequence_saturates_without_wrap_for_distinct_observations() {
+        use super::AssuranceObservation;
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::StartupReport;
+        use crate::eligibility::NumericAddr;
+        use std::os::unix::net::UnixStream;
+        let mut storage = storage();
+        let (_reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        storage.assurance[0].as_mut().unwrap().sequence = u64::MAX - 1;
+        let name = storage.cache.name_index(0).unwrap();
+        let strong = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(300),
+            1010,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1010,
+            300,
+            Some(strong),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        assert_eq!(
+            storage.emit_assurance(0, 1011),
+            Ok(AssuranceObservation::Attempted {
+                sequence: u64::MAX,
+                enqueued: true
+            })
+        );
+        let generation = storage.cache.entry(name, Family::A).unwrap().generation();
+        let plain = Evidence::new(
+            false,
+            false,
+            false,
+            ResolverSource::UNKNOWN,
+            Some(300),
+            1020,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            generation,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1020,
+            300,
+            Some(plain),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        assert_eq!(
+            storage.emit_assurance(0, 1021),
+            Ok(AssuranceObservation::Attempted {
+                sequence: u64::MAX,
+                enqueued: true
+            })
+        );
+        let frame = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(
+            frame.contains("seq=18446744073709551615") && !frame.contains("seq=0 "),
+            "{frame}"
+        );
+        assert_eq!(
+            storage.emit_assurance(0, 1022),
+            Ok(AssuranceObservation::Unchanged)
+        );
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn seeded_real_owner_observation_spends_zero_allocations() {
+        use super::{AssuranceObservation, AssuranceState};
+        use crate::alloc::{Phase, run_phase};
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::StartupReport;
+        use crate::eligibility::NumericAddr;
+        use std::os::unix::net::UnixStream;
+        let mut storage = storage();
+        let (_reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        let name = storage.cache.name_index(0).unwrap();
+        let proof = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(300),
+            1010,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1010,
+            300,
+            Some(proof),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        let (result, counts) = run_phase(Phase::Logging, || storage.emit_assurance(0, 1011));
+        assert_eq!(
+            result,
+            Ok(AssuranceObservation::Attempted {
+                sequence: 1,
+                enqueued: true
+            })
+        );
+        assert!(
+            counts.all_zero(),
+            "owner capture, marker and enqueue: {counts:?}"
+        );
+        println!(
+            "owner_bytes={} state_slot_bytes={} fixed_32_state_bytes={} snapshot_bytes={}",
+            std::mem::size_of::<ServeStorage>(),
+            std::mem::size_of::<Option<AssuranceState>>(),
+            std::mem::size_of::<[Option<AssuranceState>; 32]>(),
+            std::mem::size_of::<AssuranceSnapshot>()
+        );
+    }
+
+    #[test]
     fn assurance_snapshot_fits_existing_record_slot() {
         let bytes = std::mem::size_of::<AssuranceSnapshot>();
         println!(
@@ -1475,7 +1949,11 @@ mod assurance_bridge_tests {
     fn owner_assurance_bridge_preserves_owner_identity_and_errors() {
         let mut storage = storage();
         let snapshot = storage.capture_assurance(0, Instant::now()).unwrap();
-        assert!(storage.emit_assurance(&snapshot, 7, AssurancePhase::Boot));
+        assert!(
+            storage
+                .logs
+                .enqueue_assurance(&snapshot, 7, AssurancePhase::Boot)
+        );
         let record = std::str::from_utf8(storage.logs().last_record_bytes().unwrap()).unwrap();
         assert!(record.contains("alpha.example.org"));
         assert!(record.contains("seq=7 phase=boot"));
@@ -1541,7 +2019,11 @@ mod assurance_bridge_tests {
         let snapshot = storage.capture_assurance(0, observed_at).unwrap();
         storage.cache.evict_nodata(name, Family::A).unwrap();
         storage.cache.evict_nodata(name, Family::Aaaa).unwrap();
-        assert!(storage.emit_assurance(&snapshot, 7, AssurancePhase::Boot));
+        assert!(
+            storage
+                .logs
+                .enqueue_assurance(&snapshot, 7, AssurancePhase::Boot)
+        );
         let record = std::str::from_utf8(storage.logs().last_record_bytes().unwrap()).unwrap();
         assert!(
             record.contains(" secs=1005 "),
@@ -1628,7 +2110,11 @@ mod assurance_bridge_tests {
             results: [Some(Err(FailureReason::InsufficientAssurance)); 2],
         });
         storage.logs.saturate_dropped_for_test();
-        assert!(storage.emit_assurance(&snapshot, u64::MAX, AssurancePhase::Boot));
+        assert!(
+            storage
+                .logs
+                .enqueue_assurance(&snapshot, u64::MAX, AssurancePhase::Boot)
+        );
         assert_eq!(storage.logs.dropped(), u64::MAX);
         let frame = storage.logs().last_record_bytes().unwrap();
         let text = std::str::from_utf8(frame).unwrap();
@@ -1953,6 +2439,7 @@ mod assurance_bridge_tests {
 
     #[test]
     fn terminated_startup_emits_no_assurance_boot_records() {
+        use super::AssuranceObservationError;
         use crate::dns::transport::StartupReport;
         use std::io::Read as _;
         use std::os::unix::net::UnixStream;
@@ -1976,6 +2463,11 @@ mod assurance_bridge_tests {
         );
         assert!(!text.contains("kind=dns_assurance"), "{text}");
         assert_eq!(storage.logs.dropped(), 0);
+        assert!(storage.assurance[0].is_none());
+        assert_eq!(
+            storage.emit_assurance(0, 1000),
+            Err(AssuranceObservationError::Unseeded)
+        );
     }
 
     #[cfg(feature = "alloc-witness")]
@@ -1986,7 +2478,11 @@ mod assurance_bridge_tests {
         let now = Instant::now();
         let (result, counts) = run_phase(Phase::Logging, || {
             let snapshot = storage.capture_assurance(0, now)?;
-            Ok::<bool, CacheError>(storage.emit_assurance(&snapshot, 7, AssurancePhase::Boot))
+            Ok::<bool, CacheError>(storage.logs.enqueue_assurance(
+                &snapshot,
+                7,
+                AssurancePhase::Boot,
+            ))
         });
         assert_eq!(result, Ok(true));
         assert!(counts.all_zero(), "owner bridge allocations: {counts:?}");

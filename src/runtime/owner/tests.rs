@@ -2976,6 +2976,7 @@ mod startup_warning {
     fn actual_boot_status(cooperative: bool, mode: ServingMode) {
         use crate::dns::cache::{Generation, StagedPositive};
         use crate::eligibility::NumericAddr;
+        use crate::runtime::storage::AssuranceObservation;
         use std::os::unix::net::UnixStream;
 
         let allowance = u8::from(mode == ServingMode::Degraded);
@@ -3008,11 +3009,28 @@ mod startup_warning {
         let outcome = if cooperative {
             let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
             let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
-            owner.run_startup_within(addr, 1000, Duration::ZERO)
+            let outcome = owner
+                .run_startup_within(addr, 1000, Duration::ZERO)
+                .unwrap();
+            for ordinal in 0..2 {
+                assert_eq!(
+                    owner.serving.storage_mut().emit_assurance(ordinal, 1000),
+                    Ok(AssuranceObservation::Unchanged)
+                );
+            }
+            outcome
         } else {
-            storage.run_startup_within(addr, 1000, Duration::ZERO)
-        }
-        .unwrap();
+            let outcome = storage
+                .run_startup_within(addr, 1000, Duration::ZERO)
+                .unwrap();
+            for ordinal in 0..2 {
+                assert_eq!(
+                    storage.emit_assurance(ordinal, 1000),
+                    Ok(AssuranceObservation::Unchanged)
+                );
+            }
+            outcome
+        };
         assert_eq!(outcome.decision(), StartupDecision::Serve(mode));
         let mut bytes = [0u8; 16384];
         let n = reader.read(&mut bytes).unwrap();
@@ -3144,6 +3162,7 @@ mod startup_warning {
     }
 
     fn initial_assurance_from_real_owner(cooperative: bool) {
+        use crate::runtime::storage::AssuranceObservation;
         use std::os::unix::net::UnixStream;
 
         let config = config_two_names(ephemeral_port());
@@ -3155,11 +3174,28 @@ mod startup_warning {
         let outcome = if cooperative {
             let traffic = crate::inventory::TrafficStorage::allocate().expect("traffic");
             let mut owner = Preallocated::preallocate(storage, traffic).expect("owner");
-            owner.run_startup_within(dead_addr, 1000, Duration::ZERO)
+            let outcome = owner
+                .run_startup_within(dead_addr, 1000, Duration::ZERO)
+                .expect("startup decision");
+            for ordinal in 0..2 {
+                assert_eq!(
+                    owner.serving.storage_mut().emit_assurance(ordinal, 1000),
+                    Ok(AssuranceObservation::Unchanged)
+                );
+            }
+            outcome
         } else {
-            storage.run_startup_within(dead_addr, 1000, Duration::ZERO)
-        }
-        .expect("startup decision");
+            let outcome = storage
+                .run_startup_within(dead_addr, 1000, Duration::ZERO)
+                .expect("startup decision");
+            for ordinal in 0..2 {
+                assert_eq!(
+                    storage.emit_assurance(ordinal, 1000),
+                    Ok(AssuranceObservation::Unchanged)
+                );
+            }
+            outcome
+        };
         assert!(matches!(
             outcome.decision(),
             StartupDecision::Exit75 { unresolved: 2 }
