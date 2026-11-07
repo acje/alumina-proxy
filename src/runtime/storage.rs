@@ -76,6 +76,7 @@ pub struct ServeStorage {
     /// `None` while no serving exchange is in progress.
     active_exchange_family: Option<Family>,
     assurance: [Option<AssuranceState>; ALLOWLIST_MAX],
+    assurance_clock: Option<AssuranceClock>,
 }
 
 pub(crate) struct AssuranceSnapshot {
@@ -92,6 +93,13 @@ struct AssuranceState {
     sequence: u64,
 }
 
+#[derive(Clone, Copy)]
+struct AssuranceClock {
+    boot: Instant,
+    last: Instant,
+    boot_elapsed_secs: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AssuranceObservation {
     Unchanged,
@@ -102,6 +110,8 @@ pub(crate) enum AssuranceObservation {
 pub(crate) enum AssuranceObservationError {
     Cache(CacheError),
     Unseeded,
+    BeforeStartup,
+    ClockRegressed,
 }
 
 #[derive(Clone, Copy)]
@@ -250,6 +260,7 @@ impl ServeStorage {
             incident_report: IncidentReport::new(),
             active_exchange_family: None,
             assurance: [None; ALLOWLIST_MAX],
+            assurance_clock: None,
         })
     }
 
@@ -294,8 +305,35 @@ impl ServeStorage {
     pub(crate) fn emit_assurance(
         &mut self,
         ordinal: usize,
-        secs: u64,
+        now: Instant,
     ) -> Result<AssuranceObservation, AssuranceObservationError> {
+        if self.config.allowlist().get(ordinal).is_none()
+            || self.cache.name_index(ordinal).is_none()
+        {
+            return Err(AssuranceObservationError::Cache(CacheError::NameOutOfRange));
+        }
+        if self
+            .assurance
+            .get(ordinal)
+            .and_then(Option::as_ref)
+            .is_none()
+        {
+            return Err(AssuranceObservationError::Unseeded);
+        }
+        let clock = self
+            .assurance_clock
+            .as_ref()
+            .ok_or(AssuranceObservationError::Unseeded)?;
+        let Some(elapsed) = now.checked_duration_since(self.origin) else {
+            return Err(AssuranceObservationError::BeforeStartup);
+        };
+        if now < clock.boot || elapsed.as_secs() < clock.boot_elapsed_secs {
+            return Err(AssuranceObservationError::BeforeStartup);
+        }
+        if now < clock.last {
+            return Err(AssuranceObservationError::ClockRegressed);
+        }
+        let secs = self.cache_secs(now);
         let snapshot = self
             .capture_assurance_secs(ordinal, secs)
             .map_err(AssuranceObservationError::Cache)?;
@@ -304,6 +342,11 @@ impl ServeStorage {
             .get_mut(ordinal)
             .and_then(Option::as_mut)
             .ok_or(AssuranceObservationError::Unseeded)?;
+        let clock = self
+            .assurance_clock
+            .as_mut()
+            .ok_or(AssuranceObservationError::Unseeded)?;
+        clock.last = now;
         if !state.marker.observe(snapshot.key) {
             return Ok(AssuranceObservation::Unchanged);
         }
@@ -1283,6 +1326,12 @@ impl ServeStorage {
         match status {
             StartupStatus::Terminated => {}
             StartupStatus::Full | StartupStatus::Degraded | StartupStatus::Failed => {
+                let boot = Instant::now();
+                self.assurance_clock = Some(AssuranceClock {
+                    boot,
+                    last: boot,
+                    boot_elapsed_secs: decision_seconds,
+                });
                 for (ordinal, fqdn) in self.config.allowlist().iter().enumerate() {
                     let boot = AssuranceBoot {
                         status,
@@ -1490,7 +1539,7 @@ impl ServeStorage {
 mod assurance_bridge_tests {
     use super::{AssuranceSnapshot, CacheError, ServeStorage};
     use crate::log::AssurancePhase;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn storage() -> ServeStorage {
         let doc = "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
@@ -1498,6 +1547,181 @@ mod assurance_bridge_tests {
         let mut storage = ServeStorage::boot(&config).expect("boot owner storage");
         storage.mount_clock(Instant::now(), 1_700_000_000);
         storage
+    }
+
+    fn at(storage: &ServeStorage, secs: u64) -> Instant {
+        let base = storage
+            .assurance_clock
+            .map_or(storage.origin, |clock| clock.boot);
+        base + Duration::from_secs(secs.saturating_sub(storage.cache_secs(base)))
+    }
+
+    #[test]
+    fn earlier_observation_cannot_rewind_expired_proof_or_spend_sequence() {
+        use super::{AssuranceObservation, AssuranceObservationError};
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::StartupReport;
+        use crate::eligibility::NumericAddr;
+        use std::os::unix::net::UnixStream;
+
+        let mut storage = storage();
+        storage.config = storage.config.clone().with_kernel_assigned_test_listener();
+        let (_reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        let name = storage.cache.name_index(0).unwrap();
+        let proof =
+            Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(10), 1000).unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1000,
+            10,
+            Some(proof),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        let tick = storage.origin + Duration::from_secs(10);
+        let expiry = tick + Duration::from_millis(900);
+        assert_eq!(
+            storage.emit_assurance(0, expiry),
+            Ok(AssuranceObservation::Attempted {
+                sequence: 1,
+                enqueued: true
+            })
+        );
+        let before_len = storage.logs.len();
+        let before_drop = storage.logs.dropped();
+        let before_seq = storage.assurance[0].as_ref().unwrap().sequence;
+        let before_frame = storage.logs.last_record_bytes().unwrap().to_vec();
+        let before_cache = storage.cache;
+        let rewind = storage.emit_assurance(0, tick + Duration::from_millis(100));
+        assert_eq!(
+            rewind,
+            Err(AssuranceObservationError::ClockRegressed),
+            "an earlier same-second observation must not resurrect expired proof or consume sequence"
+        );
+        assert_eq!(
+            storage.emit_assurance(0, tick - Duration::from_secs(1)),
+            Err(AssuranceObservationError::ClockRegressed),
+            "the earlier valid-proof second cannot resurrect the expired proof"
+        );
+        let before_boot = storage
+            .assurance_clock
+            .unwrap()
+            .boot
+            .checked_sub(Duration::from_nanos(1))
+            .unwrap();
+        assert_eq!(
+            storage.emit_assurance(0, before_boot),
+            Err(AssuranceObservationError::BeforeStartup)
+        );
+        let before_origin = storage.origin.checked_sub(Duration::from_nanos(1)).unwrap();
+        assert_eq!(
+            storage.emit_assurance(0, before_origin),
+            Err(AssuranceObservationError::BeforeStartup)
+        );
+        assert_eq!(storage.assurance[0].as_ref().unwrap().sequence, before_seq);
+        assert_eq!(storage.logs.len(), before_len);
+        assert_eq!(storage.logs.dropped(), before_drop);
+        assert_eq!(storage.logs.last_record_bytes().unwrap(), before_frame);
+        assert_eq!(storage.cache, before_cache);
+        assert_eq!(storage.assurance_clock.unwrap().last, expiry);
+        assert_eq!(
+            storage.emit_assurance(0, expiry),
+            Ok(AssuranceObservation::Unchanged),
+            "rejection leaves the expired marker unchanged"
+        );
+    }
+
+    #[test]
+    fn observation_before_decision_second_is_rejected_even_at_saturated_epoch() {
+        use super::AssuranceObservationError;
+        use crate::dns::transport::StartupReport;
+        use std::os::unix::net::UnixStream;
+        let mut storage = storage();
+        let (_reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        storage
+            .settle_startup(u64::MAX, StartupReport::default(), 1000, false)
+            .unwrap();
+        let earlier = storage.origin + Duration::from_secs(999);
+        assert!(earlier > storage.assurance_clock.unwrap().boot);
+        let before_seq = storage.assurance[0].as_ref().unwrap().sequence;
+        let before_len = storage.logs.len();
+        let before_drop = storage.logs.dropped();
+        assert_eq!(
+            storage.emit_assurance(0, earlier),
+            Err(AssuranceObservationError::BeforeStartup),
+            "saturated epoch must not hide an instant before the decision second"
+        );
+        assert_eq!(storage.assurance[0].as_ref().unwrap().sequence, before_seq);
+        assert_eq!(storage.logs.len(), before_len);
+        assert_eq!(storage.logs.dropped(), before_drop);
+    }
+
+    #[test]
+    fn pre_and_post_publication_share_the_exact_owner_instant() {
+        use super::AssuranceObservation;
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::dns::transport::StartupReport;
+        use crate::eligibility::NumericAddr;
+        use std::os::unix::net::UnixStream;
+        let mut storage = storage();
+        let (_reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        let observed = at(&storage, 1020);
+        assert_eq!(
+            storage.emit_assurance(0, observed),
+            Ok(AssuranceObservation::Unchanged)
+        );
+        let name = storage.cache.name_index(0).unwrap();
+        let proof = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(300),
+            1020,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1020,
+            300,
+            Some(proof),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        assert_eq!(
+            storage.emit_assurance(0, observed),
+            Ok(AssuranceObservation::Attempted {
+                sequence: 1,
+                enqueued: true
+            })
+        );
+        let frame = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(frame.contains("secs=1020 seq=1 phase=change"), "{frame}");
+        assert_eq!(
+            storage.emit_assurance(0, observed),
+            Ok(AssuranceObservation::Unchanged)
+        );
+        assert_eq!(storage.assurance_clock.unwrap().last, observed);
     }
 
     #[test]
@@ -1538,15 +1762,15 @@ mod assurance_bridge_tests {
             super::StartupDecision::Serve(super::ServingMode::Full)
         );
         assert_eq!(
-            storage.emit_assurance(0, 1000),
+            storage.emit_assurance(0, at(&storage, 1000)),
             Ok(AssuranceObservation::Unchanged)
         );
         assert_eq!(
-            storage.emit_assurance(0, 1009),
+            storage.emit_assurance(0, at(&storage, 1009)),
             Ok(AssuranceObservation::Unchanged)
         );
         assert_eq!(
-            storage.emit_assurance(0, 1010),
+            storage.emit_assurance(0, at(&storage, 1010)),
             Ok(AssuranceObservation::Attempted {
                 sequence: 1,
                 enqueued: true
@@ -1560,7 +1784,7 @@ mod assurance_bridge_tests {
             "{frame}"
         );
         assert_eq!(
-            storage.emit_assurance(0, 1011),
+            storage.emit_assurance(0, at(&storage, 1011)),
             Ok(AssuranceObservation::Unchanged)
         );
         while !storage.logs.is_full() {
@@ -1589,9 +1813,14 @@ mod assurance_bridge_tests {
             Some(strong),
         )
         .unwrap();
+        let event_at = at(&storage, 1021);
+        assert_eq!(
+            storage.emit_assurance(0, event_at),
+            Ok(AssuranceObservation::Unchanged)
+        );
         storage.cache.publish_positive(&staged).unwrap();
         assert_eq!(
-            storage.emit_assurance(0, 1021),
+            storage.emit_assurance(0, event_at),
             Ok(AssuranceObservation::Attempted {
                 sequence: 2,
                 enqueued: false
@@ -1599,7 +1828,7 @@ mod assurance_bridge_tests {
         );
         assert_eq!(storage.logs.dropped(), before_dropped + 1);
         assert_eq!(
-            storage.emit_assurance(0, 1022),
+            storage.emit_assurance(0, at(&storage, 1022)),
             Ok(AssuranceObservation::Unchanged)
         );
         assert_eq!(
@@ -1633,7 +1862,7 @@ mod assurance_bridge_tests {
         .unwrap();
         storage.cache.publish_positive(&staged).unwrap();
         assert_eq!(
-            storage.emit_assurance(0, 1031),
+            storage.emit_assurance(0, at(&storage, 1031)),
             Ok(AssuranceObservation::Attempted {
                 sequence: 3,
                 enqueued: true
@@ -1646,7 +1875,7 @@ mod assurance_bridge_tests {
         );
         let count = storage.logs.len();
         assert_eq!(
-            storage.emit_assurance(1, 1031),
+            storage.emit_assurance(1, at(&storage, 1031)),
             Err(AssuranceObservationError::Cache(CacheError::NameOutOfRange))
         );
         assert_eq!(
@@ -1662,11 +1891,11 @@ mod assurance_bridge_tests {
         let mut storage = storage();
         let before = storage.logs.len();
         assert_eq!(
-            storage.emit_assurance(0, 1000),
+            storage.emit_assurance(0, at(&storage, 1000)),
             Err(AssuranceObservationError::Unseeded)
         );
         assert_eq!(
-            storage.emit_assurance(1, 1000),
+            storage.emit_assurance(1, at(&storage, 1000)),
             Err(AssuranceObservationError::Cache(CacheError::NameOutOfRange))
         );
         assert_eq!(storage.logs.len(), before);
@@ -1706,12 +1935,18 @@ mod assurance_bridge_tests {
             "{text}"
         );
         let before = storage.assurance[0].as_ref().unwrap().sequence;
+        let before_clock = storage.assurance_clock.unwrap().last;
         assert_eq!(
-            storage.emit_assurance(1, 1000),
+            storage.emit_assurance(1, at(&storage, 2000)),
             Err(AssuranceObservationError::Cache(CacheError::NameOutOfRange))
         );
         assert_eq!(storage.assurance[0].as_ref().unwrap().sequence, before);
         assert!(storage.assurance[1].is_none());
+        assert_eq!(storage.assurance_clock.unwrap().last, before_clock);
+        assert_eq!(
+            storage.emit_assurance(0, before_clock),
+            Ok(super::AssuranceObservation::Unchanged)
+        );
     }
 
     #[test]
@@ -1744,7 +1979,7 @@ mod assurance_bridge_tests {
         ));
         assert!(storage.assurance[0].is_none());
         assert_eq!(
-            storage.emit_assurance(0, 1000),
+            storage.emit_assurance(0, at(&storage, 1000)),
             Err(AssuranceObservationError::Unseeded)
         );
         assert_eq!(storage.logs.len(), 0);
@@ -1780,7 +2015,7 @@ mod assurance_bridge_tests {
         assert_eq!(storage.assurance[0].as_ref().unwrap().sequence, 0);
         let after = storage.logs.dropped();
         assert_eq!(
-            storage.emit_assurance(0, 1000),
+            storage.emit_assurance(0, at(&storage, 1000)),
             Ok(AssuranceObservation::Unchanged)
         );
         assert_eq!(
@@ -1828,7 +2063,7 @@ mod assurance_bridge_tests {
         .unwrap();
         storage.cache.publish_positive(&staged).unwrap();
         assert_eq!(
-            storage.emit_assurance(0, 1011),
+            storage.emit_assurance(0, at(&storage, 1011)),
             Ok(AssuranceObservation::Attempted {
                 sequence: u64::MAX,
                 enqueued: true
@@ -1856,7 +2091,7 @@ mod assurance_bridge_tests {
         .unwrap();
         storage.cache.publish_positive(&staged).unwrap();
         assert_eq!(
-            storage.emit_assurance(0, 1021),
+            storage.emit_assurance(0, at(&storage, 1021)),
             Ok(AssuranceObservation::Attempted {
                 sequence: u64::MAX,
                 enqueued: true
@@ -1868,7 +2103,7 @@ mod assurance_bridge_tests {
             "{frame}"
         );
         assert_eq!(
-            storage.emit_assurance(0, 1022),
+            storage.emit_assurance(0, at(&storage, 1022)),
             Ok(AssuranceObservation::Unchanged)
         );
     }
@@ -1876,7 +2111,7 @@ mod assurance_bridge_tests {
     #[cfg(feature = "alloc-witness")]
     #[test]
     fn seeded_real_owner_observation_spends_zero_allocations() {
-        use super::{AssuranceObservation, AssuranceState};
+        use super::{AssuranceClock, AssuranceObservation, AssuranceState};
         use crate::alloc::{Phase, run_phase};
         use crate::dns::cache::evidence::{Evidence, ResolverSource};
         use crate::dns::cache::{Family, Generation, StagedPositive};
@@ -1911,7 +2146,8 @@ mod assurance_bridge_tests {
         )
         .unwrap();
         storage.cache.publish_positive(&staged).unwrap();
-        let (result, counts) = run_phase(Phase::Logging, || storage.emit_assurance(0, 1011));
+        let now = at(&storage, 1011);
+        let (result, counts) = run_phase(Phase::Logging, || storage.emit_assurance(0, now));
         assert_eq!(
             result,
             Ok(AssuranceObservation::Attempted {
@@ -1924,11 +2160,12 @@ mod assurance_bridge_tests {
             "owner capture, marker and enqueue: {counts:?}"
         );
         println!(
-            "owner_bytes={} state_slot_bytes={} fixed_32_state_bytes={} snapshot_bytes={}",
+            "owner_bytes={} state_slot_bytes={} fixed_32_state_bytes={} snapshot_bytes={} optional_clock_bytes={}",
             std::mem::size_of::<ServeStorage>(),
             std::mem::size_of::<Option<AssuranceState>>(),
             std::mem::size_of::<[Option<AssuranceState>; 32]>(),
-            std::mem::size_of::<AssuranceSnapshot>()
+            std::mem::size_of::<AssuranceSnapshot>(),
+            std::mem::size_of::<Option<AssuranceClock>>()
         );
     }
 
@@ -2465,7 +2702,7 @@ mod assurance_bridge_tests {
         assert_eq!(storage.logs.dropped(), 0);
         assert!(storage.assurance[0].is_none());
         assert_eq!(
-            storage.emit_assurance(0, 1000),
+            storage.emit_assurance(0, at(&storage, 1000)),
             Err(AssuranceObservationError::Unseeded)
         );
     }

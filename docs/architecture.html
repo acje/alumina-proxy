@@ -1258,10 +1258,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     opens <code>Full</code> (zero unresolved) or <code>Degraded</code> (within
     the allowance). The decision is typed as
     <code>StartupDecision::{Serve(ServingMode), Exit75{unresolved}, Terminated}</code>
-    (<code>src/runtime/storage.rs:150-154</code>): a first-observed SIGTERM short-circuits the
+    (<code>src/runtime/storage.rs:160-164</code>): a first-observed SIGTERM short-circuits the
     window as <code>Terminated</code>, which never binds or attaches a listener.
     A single 90-second exchange report is carried by <code>StartupOutcome</code>
-    (<code>src/runtime/storage.rs:170-177</code>).</p>
+    (<code>src/runtime/storage.rs:180-187</code>).</p>
   <p>The startup window is driven cooperatively by the single serving poll:
   <code>Serving::run_startup_window</code> attaches the retained DNS transport
   to the serving poll <em>before</em> selection starts and advances the exchange
@@ -1298,23 +1298,29 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   from the cached family facts; a capture error is reported as an unknown cache
   snapshot without altering the decision. Termination does not emit boot frames.
   Change and expiry production are not wired
-  (<code>src/runtime/storage.rs:81-112</code>, <code>:265-292</code>, <code>:1260-1313</code>;
+  (<code>src/runtime/storage.rs:82-122</code>, <code>:276-303</code>, <code>:1303-1362</code>;
   <code>src/dns/transport.rs:2907-2908</code>, <code>src/runtime/reactor/startup.rs:200-205</code>;
   <code>src/log/queue.rs:147-166</code>, <code>src/log/encoding.rs:318-410</code>;
   spec <code>docs/alumina-proxy.md:1814-1832</code>;
   <code>src/config/mod.rs:22-25</code>, <code>src/names/hostname.rs:7-11</code>).
   The snapshot size is checked against an existing record slot and a widest-name
   capture-and-enqueue witness checks allocation in the logging phase
-  (<code>src/runtime/storage.rs:1936-1945</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
+  (<code>src/runtime/storage.rs:2173-2182</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
   <p>The storage owner has 32 fixed optional assurance states. Successful boot
   capture seeds each marker and sequence zero before its enqueue attempt; a
   failed capture leaves that slot unseeded. The dormant observation method
-  captures from the same owner at its supplied second, advances the marker and
-  a saturating sequence before one enqueue attempt on a material change, and
-  distinguishes unchanged, attempted, unseeded and cache-error outcomes. No
+  derives its second from a supplied monotonic instant and the mounted owner
+  clock. A startup watermark is sampled after readiness and any listener bind;
+  the initial snapshot still uses the original decision second. Observations
+  before that watermark, before the decision-second floor, or earlier than the
+  last accepted instant return typed errors before state or log mutation. Equal
+  instants are accepted, allowing one instant to be used on both sides of an
+  atomic mutation. A material observation advances the marker and a saturating
+  sequence before one enqueue attempt. Unchanged, attempted, unseeded and
+  cache-error outcomes remain distinct. No
   serving publication or expiry hook calls it yet
-  (<code>src/runtime/storage.rs:59-105</code>, <code>:274-316</code>,
-  <code>:1260-1313</code>).</p>
+  (<code>src/runtime/storage.rs:59-114</code>, <code>:285-358</code>,
+  <code>:1303-1362</code>).</p>
   <p>The cache also exposes a dormant per-entry grade key containing the required
   minimum, each family's current grade and its retained proof's optional class
   and time validity as separate facts. Its fixed-size marker retains last known
@@ -1355,7 +1361,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   cfg(test) constructor: the public document parser still rejects port 0
   (<code>src/config/mod.rs:1179-1186</code>), so operator <code>listen</code> remains
   numeric 1..=65535 and the production bind is unchanged
-  (<code>src/runtime/storage.rs:1407-1414</code>). Startup still exercises the real window,
+  (<code>src/runtime/storage.rs:1456-1463</code>). Startup still exercises the real window,
   readiness, and normal post-readiness bind — the kernel owns the actual
   listener the bind returns, and the full-serve and kernel-assigned-listener
   controls assert and connect to that returned address

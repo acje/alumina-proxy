@@ -3012,9 +3012,13 @@ mod startup_warning {
             let outcome = owner
                 .run_startup_within(addr, 1000, Duration::ZERO)
                 .unwrap();
+            let observed = Instant::now();
             for ordinal in 0..2 {
                 assert_eq!(
-                    owner.serving.storage_mut().emit_assurance(ordinal, 1000),
+                    owner
+                        .serving
+                        .storage_mut()
+                        .emit_assurance(ordinal, observed),
                     Ok(AssuranceObservation::Unchanged)
                 );
             }
@@ -3023,9 +3027,10 @@ mod startup_warning {
             let outcome = storage
                 .run_startup_within(addr, 1000, Duration::ZERO)
                 .unwrap();
+            let observed = Instant::now();
             for ordinal in 0..2 {
                 assert_eq!(
-                    storage.emit_assurance(ordinal, 1000),
+                    storage.emit_assurance(ordinal, observed),
                     Ok(AssuranceObservation::Unchanged)
                 );
             }
@@ -3177,9 +3182,13 @@ mod startup_warning {
             let outcome = owner
                 .run_startup_within(dead_addr, 1000, Duration::ZERO)
                 .expect("startup decision");
+            let observed = Instant::now();
             for ordinal in 0..2 {
                 assert_eq!(
-                    owner.serving.storage_mut().emit_assurance(ordinal, 1000),
+                    owner
+                        .serving
+                        .storage_mut()
+                        .emit_assurance(ordinal, observed),
                     Ok(AssuranceObservation::Unchanged)
                 );
             }
@@ -3188,9 +3197,10 @@ mod startup_warning {
             let outcome = storage
                 .run_startup_within(dead_addr, 1000, Duration::ZERO)
                 .expect("startup decision");
+            let observed = Instant::now();
             for ordinal in 0..2 {
                 assert_eq!(
-                    storage.emit_assurance(ordinal, 1000),
+                    storage.emit_assurance(ordinal, observed),
                     Ok(AssuranceObservation::Unchanged)
                 );
             }
