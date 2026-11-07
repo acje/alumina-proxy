@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use mio::net::TcpListener;
 
 use crate::config::{Config, Fqdn};
+use crate::dns::cache::grade_key::FamilySnapshot;
 use crate::dns::cache::{Cache, CacheError, Family, NameIndex};
 use crate::dns::incident_report::{
     ClosedWindow, EligibleTransition, IncidentReport, IncidentSnapshot, SummaryCache,
@@ -80,6 +81,29 @@ pub struct ServeStorage {
     /// failure or positive publish is attributed to the exact family attempted.
     /// `None` while no serving exchange is in progress.
     active_exchange_family: Option<Family>,
+}
+
+pub(crate) struct AssuranceSnapshot {
+    fqdn: Fqdn,
+    families: [FamilySnapshot; 2],
+    secs: u64,
+}
+
+impl AssuranceSnapshot {
+    pub(crate) const fn fqdn(&self) -> &Fqdn {
+        &self.fqdn
+    }
+
+    pub(crate) const fn secs(&self) -> u64 {
+        self.secs
+    }
+
+    pub(crate) const fn family(&self, family: Family) -> &FamilySnapshot {
+        match family {
+            Family::A => &self.families[0],
+            Family::Aaaa => &self.families[1],
+        }
+    }
 }
 
 /// How serving begins when the startup window closes.
@@ -200,23 +224,31 @@ impl ServeStorage {
         WorkerView::new(&self.config, &self.cache, self.worker.clock())
     }
 
-    /// Ships one owner-telemetry `dns_assurance` frame bound to this
-    /// storage's own config/cache/clock authority (38dl2 M1/L1): assembles
-    /// the view directly from its own fields — never a foreign config, cache,
-    /// or second — captures one monotonic `Instant`, and borrows `logs`
-    /// disjointly from the read view. `seq` is the caller-owned fixed owner
-    /// state; a `CacheError` stays a typed `Err`; a full ring or encode
-    /// overflow drops one `Ok(false)`; queue pressure is the caller's
-    /// per-turn accounting. Unwired until the boot/change producer hooks.
+    pub(crate) fn capture_assurance(
+        &self,
+        ordinal: usize,
+        now: Instant,
+    ) -> Result<AssuranceSnapshot, CacheError> {
+        let view = self.work_view();
+        let fqdn = view.fqdn_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
+        let name = view.name_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
+        let secs = view.cache_secs(now);
+        let a = view.cache().family_snapshot(name, Family::A, secs)?;
+        let aaaa = view.cache().family_snapshot(name, Family::Aaaa, secs)?;
+        Ok(AssuranceSnapshot {
+            fqdn: fqdn.clone(),
+            families: [a, aaaa],
+            secs,
+        })
+    }
+
     pub(crate) fn emit_assurance(
         &mut self,
-        ordinal: usize,
+        snapshot: &AssuranceSnapshot,
         seq: u64,
         phase: crate::log::AssurancePhase,
-    ) -> Result<bool, crate::dns::cache::CacheError> {
-        let view = WorkerView::new(&self.config, &self.cache, self.worker.clock());
-        let now = Instant::now();
-        self.logs.enqueue_assurance(&view, ordinal, seq, phase, now)
+    ) -> bool {
+        self.logs.enqueue_assurance(snapshot, seq, phase)
     }
 
     /// The whole-second DNS/cache serving clock, mounted on the same origin
@@ -1366,7 +1398,7 @@ impl ServeStorage {
 
 #[cfg(test)]
 mod assurance_bridge_tests {
-    use super::{CacheError, ServeStorage};
+    use super::{AssuranceSnapshot, CacheError, ServeStorage};
     use crate::log::AssurancePhase;
     use std::time::Instant;
 
@@ -1379,20 +1411,106 @@ mod assurance_bridge_tests {
     }
 
     #[test]
+    fn assurance_snapshot_fits_existing_record_slot() {
+        let bytes = std::mem::size_of::<AssuranceSnapshot>();
+        println!(
+            "snapshot_bytes={} snapshot_align={} fqdn_bytes={} family_snapshot_bytes={}",
+            bytes,
+            std::mem::align_of::<AssuranceSnapshot>(),
+            std::mem::size_of::<crate::config::Fqdn>(),
+            std::mem::size_of::<crate::dns::cache::grade_key::FamilySnapshot>()
+        );
+        assert!(bytes <= crate::log::SLOT_BYTES);
+    }
+
+    #[test]
     fn owner_assurance_bridge_preserves_owner_identity_and_errors() {
         let mut storage = storage();
-        assert_eq!(storage.emit_assurance(0, 7, AssurancePhase::Boot), Ok(true));
+        let snapshot = storage.capture_assurance(0, Instant::now()).unwrap();
+        assert!(storage.emit_assurance(&snapshot, 7, AssurancePhase::Boot));
         let record = std::str::from_utf8(storage.logs().last_record_bytes().unwrap()).unwrap();
         assert!(record.contains("alpha.example.org"));
         assert!(record.contains("seq=7 phase=boot"));
         let len = storage.logs().len();
         let dropped = storage.logs().dropped();
-        assert_eq!(
-            storage.emit_assurance(1, 8, AssurancePhase::Change),
+        assert!(matches!(
+            storage.capture_assurance(1, Instant::now()),
             Err(CacheError::NameOutOfRange)
-        );
+        ));
         assert_eq!(storage.logs().len(), len);
         assert_eq!(storage.logs().dropped(), dropped);
+    }
+
+    #[test]
+    fn assurance_record_preserves_observed_proof_after_expiry_and_mutation() {
+        use crate::dns::cache::evidence::{Evidence, ProofClass, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::eligibility::NumericAddr;
+        use std::time::Duration;
+
+        let mut storage = storage();
+        let origin = Instant::now()
+            .checked_sub(Duration::from_secs(120))
+            .unwrap();
+        storage.mount_clock(origin, 1000);
+        let name = storage.cache().name_index(0).unwrap();
+        let evidence = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(30),
+            1000,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1000,
+            30,
+            Some(evidence),
+        )
+        .unwrap();
+        storage.cache.publish_positive(&staged).unwrap();
+        storage
+            .cache
+            .evict_nodata_evidenced(name, Family::Aaaa, evidence)
+            .unwrap();
+        let observed_at = origin + Duration::from_secs(5);
+        let view = storage.work_view();
+        let secs = view.cache_secs(observed_at);
+        assert_eq!(secs, 1005);
+        assert_eq!(
+            view.cache()
+                .family_snapshot(name, Family::A, secs)
+                .unwrap()
+                .current(),
+            Some(ProofClass::Delegated)
+        );
+        assert!(view.cache_secs(Instant::now()) >= 1030);
+        let snapshot = storage.capture_assurance(0, observed_at).unwrap();
+        storage.cache.evict_nodata(name, Family::A).unwrap();
+        storage.cache.evict_nodata(name, Family::Aaaa).unwrap();
+        assert!(storage.emit_assurance(&snapshot, 7, AssurancePhase::Boot));
+        let record = std::str::from_utf8(storage.logs().last_record_bytes().unwrap()).unwrap();
+        assert!(
+            record.contains(" secs=1005 "),
+            "captured second must survive: {record}"
+        );
+        assert!(
+            record.contains("a_current=\"delegated\""),
+            "captured proof must survive: {record}"
+        );
+        assert!(
+            record.contains("aaaa_current=\"delegated\""),
+            "captured sibling proof must survive: {record}"
+        );
+        assert!(
+            record.contains("aaaa_outcome=\"nodata\""),
+            "captured sibling outcome must survive: {record}"
+        );
     }
 
     #[cfg(feature = "alloc-witness")]
@@ -1400,8 +1518,10 @@ mod assurance_bridge_tests {
     fn owner_assurance_bridge_spends_zero_allocations() {
         use crate::alloc::{Phase, run_phase};
         let mut storage = storage();
+        let now = Instant::now();
         let (result, counts) = run_phase(Phase::Logging, || {
-            storage.emit_assurance(0, 7, AssurancePhase::Boot)
+            let snapshot = storage.capture_assurance(0, now)?;
+            Ok::<bool, CacheError>(storage.emit_assurance(&snapshot, 7, AssurancePhase::Boot))
         });
         assert_eq!(result, Ok(true));
         assert!(counts.all_zero(), "owner bridge allocations: {counts:?}");

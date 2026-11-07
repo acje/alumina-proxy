@@ -1283,6 +1283,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>:2747-2755</code>, <code>:2866-2881</code>,
   <code>src/runtime/reactor/startup.rs:77-94</code>,
   <code>src/dns/transport.rs:3876-3882</code>).</p>
+  <p>The storage-owned assurance capture helper binds an allowlist ordinal to
+  its validated <code>Fqdn</code>, cache and owner clock, then copies the two
+  family snapshots and captured second into one fixed value. The later queue
+  encoder reads that value rather than the cache or clock; an invalid ordinal
+  returns a cache error before enqueue, and a delayed record does not rewind
+  the queue's current second. The helper is not a boot/change producer
+  (<code>src/runtime/storage.rs:86-106</code>, <code>:227-251</code>;
+  <code>src/log/queue.rs:145-154</code>, <code>src/log/encoding.rs:318-350</code>;
+  <code>src/config/mod.rs:22-25</code>, <code>src/names/hostname.rs:7-11</code>).
+  The snapshot size is checked against an existing record slot and a widest-name
+  capture-and-enqueue witness checks allocation in the logging phase
+  (<code>src/runtime/storage.rs:1414-1426</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
   <p>Only fully validated outcomes reach the cache: the outcome-application
   body <code>dns::publication::apply_outcome</code>
   (<code>src/dns/publication.rs:38</code>, named-re-exported as

@@ -3,9 +3,7 @@ use super::{
     Dimension, Edge, Field, HIGH_PCT_NUMBER, Kind, LOW_PCT_NUMBER, Level, LogStore, QUEUE_MASK,
     QUEUE_SLOTS, SLOT_BYTES, Val, Watermark, encode_record,
 };
-use crate::dns::cache::CacheError;
-use crate::runtime::tunnel::WorkerView;
-use std::time::Instant;
+use crate::runtime::storage::AssuranceSnapshot;
 
 impl LogStore {
     /// Whole-record drops so far; saturates at `u64::MAX`.
@@ -144,33 +142,15 @@ impl LogStore {
             Err(e) => Err(e),
         }
     }
-    /// Producer bridge for one owner-telemetry record, bound to a
-    /// storage-issued [`WorkerView`] so the `Fqdn`, cache `NameIndex`, and
-    /// whole-second serving clock all come from one owner (38dl2 M1): the
-    /// ordinal is resolved on the view's own config and cache before any
-    /// queue interaction, then `secs` is derived from the view's mounted
-    /// clock at `now` and stamped via `set_now` before the attempt (38dl2
-    /// L1), so per-turn queue accounting never stamps a stale second. The
-    /// fallible queue ships the frame: a `CacheError` stays a typed `Err`
-    /// (no commit, no drop, no usage move), a full ring or encode overflow
-    /// drops one and returns `Ok(false)`. `seq` is the caller's fixed owner
-    /// state; queued is not delivered; the caller accounts queue pressure
-    /// once per turn.
+    /// Enqueues one owner-captured snapshot; overflow counts one whole drop.
     pub(crate) fn enqueue_assurance(
         &mut self,
-        view: &WorkerView<'_>,
-        ordinal: usize,
+        snapshot: &AssuranceSnapshot,
         seq: u64,
         phase: AssurancePhase,
-        now: Instant,
-    ) -> Result<bool, CacheError> {
-        let fqdn = view.fqdn_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
-        let name = view.name_at(ordinal).ok_or(CacheError::NameOutOfRange)?;
-        let secs = view.cache_secs(now);
-        self.set_now(secs);
-        self.enqueue_fallible(|slot| {
-            encode_dns_assurance(slot, view.cache(), name, fqdn, secs, seq, phase)
-        })
+    ) -> bool {
+        self.set_now(self.secs.max(snapshot.secs()));
+        self.enqueue_normal(|slot| encode_dns_assurance(slot, snapshot, seq, phase))
     }
     /// Enqueues a reserved priority-class record (docs/alumina-proxy.md:1299-1301).
     /// On a full ring the record is encoded into a stack scratch slot first and

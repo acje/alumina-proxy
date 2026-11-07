@@ -5,10 +5,13 @@ use super::{
 };
 use std::fmt;
 
+#[cfg(test)]
 use crate::config::Fqdn;
 use crate::dns::cache::evidence::{AssuranceRequirement, ProofClass};
 use crate::dns::cache::grade_key::{FamilySnapshot, Outcome, RetainedKind};
+#[cfg(test)]
 use crate::dns::cache::{Cache, CacheError, NameIndex};
+use crate::runtime::storage::AssuranceSnapshot;
 
 /// A single encoded field. `OptVar` variants emit nothing when the value is
 /// absent, so a caller never supplies an empty quoted value.
@@ -261,6 +264,7 @@ fn append_family_grade(w: &mut Entry<'_>, family: Family, snap: &FamilySnapshot)
 /// snapshots, labelled by their exact `Family`. All-or-nothing: overflow
 /// returns `Ok(None)` with the slot uncommitted; an out-of-range name stays
 /// a typed `Err`.
+#[cfg(test)]
 pub(super) fn encode_entry_frame(
     slot_buf: &mut [u8; SLOT_BYTES],
     cache: &Cache,
@@ -309,19 +313,16 @@ impl AssurancePhase {
 }
 
 /// One full owner-telemetry record for a validated owner: canonical
-/// `write_header` with the real `Kind::DnsAssurance` label, then the typed
-/// Fqdn/port, `secs`, the caller's fixed `seq`, the closed `phase`, and both
-/// family grade blocks, newline-terminated within the fixed slot. The frame
-/// is delivered through the LogStore producer bridge.
+/// `write_header` with the real `Kind::DnsAssurance` label, the captured
+/// identity, second and family facts, and the caller's sequence and phase.
 pub(super) fn encode_dns_assurance(
     slot_buf: &mut [u8; SLOT_BYTES],
-    cache: &Cache,
-    name: NameIndex,
-    fqdn: &Fqdn,
-    secs: u64,
+    snapshot: &AssuranceSnapshot,
     seq: u64,
     phase: AssurancePhase,
-) -> Result<Option<usize>, CacheError> {
+) -> Option<usize> {
+    let fqdn = snapshot.fqdn();
+    let secs = snapshot.secs();
     let mut w = Entry {
         buf: slot_buf,
         len: 0,
@@ -338,18 +339,17 @@ pub(super) fn encode_dns_assurance(
         || !w.push(b" phase=")
         || !w.push(phase.as_str().as_bytes())
     {
-        return Ok(None);
+        return None;
     }
     for family in Family::ALL {
-        let snap = cache.family_snapshot(name, family, secs)?;
-        if !append_family_grade(&mut w, family, &snap) {
-            return Ok(None);
+        if !append_family_grade(&mut w, family, snapshot.family(family)) {
+            return None;
         }
     }
     if !w.push(b"\n") {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(w.len))
+    Some(w.len)
 }
 fn write_header(w: &mut Entry<'_>, level: Level, kind: Kind) -> bool {
     w.push(b"level=")

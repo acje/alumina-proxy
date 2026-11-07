@@ -1147,26 +1147,23 @@ mod queue_overflow {
 
     #[test]
     fn logging_enqueue_assurance_real_frame_metadata_and_typed_bound() {
-        use crate::runtime::tunnel::{WorkerClock, WorkerView};
+        use crate::runtime::storage::ServeStorage;
         use std::time::Instant;
         const DNS_EPOCH: u64 = 1_700_000_000;
         let (config, _doc) = widest_legal_config();
-        let cache = crate::dns::cache::Cache::for_config(&config).expect("same-allowlist cache");
+        let mut owner = ServeStorage::boot(&config).expect("same-allowlist owner");
         let (mut store, _file) = file_logstore();
         let fqdn = config.allowlist().get(0).expect("widest owner");
         let epoch = Instant::now();
-        let view = WorkerView::new(&config, &cache, WorkerClock::new(epoch, DNS_EPOCH));
+        owner.mount_clock(epoch, DNS_EPOCH);
+        let snapshot = owner.capture_assurance(0, epoch).expect("owner snapshot");
+        store.set_now(DNS_EPOCH + 100);
         let result = store.enqueue_assurance(
-            &view,
-            0,
+            &snapshot,
             u64::MAX,
             crate::log::encoding::AssurancePhase::Boot,
-            epoch,
         );
-        assert!(
-            matches!(result, Ok(true)),
-            "real owner frame enqueued: {result:?}"
-        );
+        assert!(result, "real owner frame enqueued: {result:?}");
         let text = std::str::from_utf8(store.last_record_bytes().expect("committed frame"))
             .expect("ASCII frame");
         assert!(
@@ -1182,6 +1179,11 @@ mod queue_overflow {
             "typed Fqdn name+port payload intact"
         );
         assert!(text.contains("a_retained=") && text.contains("aaaa_retained="));
+        assert_eq!(
+            store.secs,
+            DNS_EPOCH + 100,
+            "delayed event must not rewind the queue clock"
+        );
         assert!(
             text.len() < SLOT_BYTES,
             "widest owner frame incl header/metadata fits the 2 KiB slot: {}",
@@ -1191,26 +1193,20 @@ mod queue_overflow {
 
     #[test]
     fn logging_enqueue_assurance_typed_lookup_error_and_full_drop_counted() {
-        use crate::runtime::tunnel::{WorkerClock, WorkerView};
+        use crate::runtime::storage::ServeStorage;
         use std::time::Instant;
         const DNS_EPOCH: u64 = 1_700_000_000;
         let (config, _doc) = widest_legal_config();
-        let cache = crate::dns::cache::Cache::for_config(&config).expect("same-allowlist cache");
+        let mut owner = ServeStorage::boot(&config).expect("same-allowlist owner");
         let (mut store, _file) = file_logstore();
         let epoch = Instant::now();
-        let view = WorkerView::new(&config, &cache, WorkerClock::new(epoch, DNS_EPOCH));
+        owner.mount_clock(epoch, DNS_EPOCH);
         let before_len = store.len();
         let before_dropped = store.dropped();
-        let err = store.enqueue_assurance(
-            &view,
-            config.allowlist().len(),
-            1,
-            crate::log::encoding::AssurancePhase::Change,
-            epoch,
-        );
+        let err = owner.capture_assurance(config.allowlist().len(), epoch);
         assert!(
             matches!(err, Err(crate::dns::cache::CacheError::NameOutOfRange)),
-            "out-of-allowlist ordinal is a typed Err, never a counted drop: {err:?}"
+            "out-of-allowlist ordinal is a typed Err, never a counted drop"
         );
         assert_eq!(
             store.len(),
@@ -1231,16 +1227,39 @@ mod queue_overflow {
         }
         assert!(store.is_full(), "ring at capacity");
         let before = store.dropped();
-        let full = store.enqueue_assurance(
-            &view,
-            0,
-            2,
-            crate::log::encoding::AssurancePhase::Change,
-            epoch,
-        );
-        assert_eq!(full, Ok(false), "a full ring drops whole: Ok(false)");
+        let snapshot = owner.capture_assurance(0, epoch).expect("owner snapshot");
+        let full =
+            store.enqueue_assurance(&snapshot, 2, crate::log::encoding::AssurancePhase::Change);
+        assert!(!full, "a full ring drops whole");
         assert_eq!(store.dropped(), before + 1, "one attempt drop counted");
         assert_eq!(store.len(), QUEUE_SLOTS, "capacity bound holds");
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn widest_owner_snapshot_capture_and_enqueue_spends_zero_allocations() {
+        use crate::alloc::{Phase, run_phase};
+        use crate::dns::cache::CacheError;
+        use crate::runtime::storage::ServeStorage;
+        use std::time::Instant;
+        let (config, _) = widest_legal_config();
+        let mut owner = ServeStorage::boot(&config).expect("widest owner");
+        let (mut store, _file) = file_logstore();
+        let epoch = Instant::now();
+        owner.mount_clock(epoch, 1_700_000_000);
+        let (result, counts) = run_phase(Phase::Logging, || {
+            let snapshot = owner.capture_assurance(0, epoch)?;
+            Ok::<bool, CacheError>(store.enqueue_assurance(
+                &snapshot,
+                u64::MAX,
+                crate::log::encoding::AssurancePhase::Boot,
+            ))
+        });
+        assert_eq!(result, Ok(true));
+        assert!(
+            counts.all_zero(),
+            "widest snapshot capture and enqueue: {counts:?}"
+        );
     }
 
     #[test]
