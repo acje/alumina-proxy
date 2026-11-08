@@ -669,6 +669,28 @@ fn build_resolver_set(table: &toml::Table) -> Result<ResolverSet, ConfigError> {
     if values.is_empty() || values.len() > MAX_RESOLVERS {
         return Err(ConfigError::ResolverCountOutOfRange { got: values.len() });
     }
+    let nameservers = validate_resolver_entries(&values)?;
+    let set = resolver::ResolverSet::from_slice(&nameservers).ok_or(
+        ConfigError::ResolverCountOutOfRange {
+            got: nameservers.len(),
+        },
+    )?;
+    if table.get("recursive_dnssec_policy").is_none() {
+        return Ok(set);
+    }
+    let policy = require_string(table, "recursive_dnssec_policy")?;
+    if policy != resolver::RECURSIVE_DNSSEC_POLICY_ROOT_VALIDATING_NO_STALE {
+        return Err(ConfigError::InvalidRecursivePolicy { value: policy });
+    }
+    set.declared_root_validating_no_stale().map_err(|index| {
+        ConfigError::RecursiveDeclaresWeakResolver {
+            index,
+            value: values[index].clone(),
+        }
+    })
+}
+
+fn validate_resolver_entries(values: &[String]) -> Result<Vec<resolver::Nameserver>, ConfigError> {
     let mut nameservers = Vec::with_capacity(values.len());
     let mut plain_trust: Option<bool> = None;
     for (index, value) in values.iter().enumerate() {
@@ -692,24 +714,7 @@ fn build_resolver_set(table: &toml::Table) -> Result<ResolverSet, ConfigError> {
         }
         nameservers.push(ns);
     }
-    let set = resolver::ResolverSet::from_slice(&nameservers).ok_or(
-        ConfigError::ResolverCountOutOfRange {
-            got: nameservers.len(),
-        },
-    )?;
-    if table.get("recursive_dnssec_policy").is_none() {
-        return Ok(set);
-    }
-    let policy = require_string(table, "recursive_dnssec_policy")?;
-    if policy != resolver::RECURSIVE_DNSSEC_POLICY_ROOT_VALIDATING_NO_STALE {
-        return Err(ConfigError::InvalidRecursivePolicy { value: policy });
-    }
-    set.declared_root_validating_no_stale().map_err(|index| {
-        ConfigError::RecursiveDeclaresWeakResolver {
-            index,
-            value: values[index].clone(),
-        }
-    })
+    Ok(nameservers)
 }
 
 /// Parses the mandatory `[any_illegal]` per-control table: exactly the four

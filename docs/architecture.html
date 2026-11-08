@@ -498,8 +498,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>Privilege floor: root/capability/no_new_privs rejection before any DNS.</td>
         <td><code>src/boot/preflight.rs:96-116</code></td></tr>
       <tr><th scope="row"><code>config</code></th>
-        <td>Strict schema parse; allowlist (≤ 32), ports, early_data/ja4 controls, gate sections, CNAME bailiwicks, resolver trust homogeneity.</td>
-        <td><code>src/config/mod.rs:19</code>, <code>:22-74</code>, <code>:593-614</code>, <code>:645-654</code>, <code>:679-683</code>, <code>:1145-1155</code></td></tr>
+        <td>Strict schema parse; allowlist (≤ 32), ports, early_data/ja4 controls, gate sections, CNAME bailiwicks, resolver trust homogeneity. Resolver entry validation is a private phase before set construction and recursive policy checks.</td>
+        <td><code>src/config/mod.rs:19</code>, <code>:22-74</code>, <code>:593-614</code>, <code>:645-654</code>, <code>:667-718</code>, <code>:1150-1160</code></td></tr>
       <tr><th scope="row"><code>runtime/owner</code></th>
         <td>Single-reactor owner; serves as the attached owner after <code>attach</code>; owns overall DNS order and bounded per-turn advancement, delegating refresh admission/start to storage.</td>
         <td><code>src/runtime/owner.rs:221-248</code>, <code>:264-275</code>, <code>:287-295</code>, <code>:344-379</code>, <code>:358</code>, <code>:398-411</code>, <code>:456-472</code></td></tr>
@@ -1163,11 +1163,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   fallback for a DoT entry (<code>Nameserver::port()</code> <code>src/dns/resolver.rs:192-198</code>). Trust
   homogeneity across the resolver set is enforced at configuration time — a mix of
   trust classes is rejected rather than degraded
-  (<code>ConfigError::MixedResolverTrust</code>, <code>src/config/mod.rs:679-683</code>).
+  (<code>ConfigError::MixedResolverTrust</code>, <code>src/config/mod.rs:701-705</code>).
   A separate guard restricts the <code>early_data</code> control’s block scope to
   <code>connection</code> only — an upstream-sourced early-data signal therefore
   cannot select a per-domain or process-wide latch
-  (<code>src/config/mod.rs:1001-1015</code>; see
+  (<code>src/config/mod.rs:1006-1020</code>; see
   <a href="#enforcement">§6.2</a>).</p>
 
   <h3>5.2 DoT trust: pin-or-nothing</h3>
@@ -1448,9 +1448,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   kernel-assigned listener port (0) instead of a pre-probed port
   (<code>src/runtime/storage/startup_integration.rs:25-27</code>; the constructor
   <code>Config::with_kernel_assigned_test_listener</code> at
-  <code>src/config/mod.rs:1415-1418</code>). The port-0 value exists only in that
+  <code>src/config/mod.rs:1420-1423</code>). The port-0 value exists only in that
   cfg(test) constructor: the public document parser still rejects port 0
-  (<code>src/config/mod.rs:1179-1186</code>), so operator <code>listen</code> remains
+  (<code>src/config/mod.rs:1184-1191</code>), so operator <code>listen</code> remains
   numeric 1..=65535 and the production bind is unchanged
   (<code>src/runtime/storage.rs:1658-1665</code>). Startup still exercises the real window,
   readiness, and normal post-readiness bind — the kernel owns the actual
@@ -1475,7 +1475,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   coverage predicate at <code>:920-931</code>), and
   same-bare-name entries across ports must declare byte-identical suffix lists or
   boot fails with <code>DivergentCnameBailiwick</code>
-  (<code>src/config/mod.rs:1145-1155</code>). The flat union of declared suffixes is
+  (<code>src/config/mod.rs:1150-1160</code>). The flat union of declared suffixes is
   bounded by the fixed <code>ALLOWLIST_MAX</code> (32) slot bound, and overflow is
   fail-stop (<code>src/dns/wire.rs:857-900</code>).</p>
   <p><code>ServeStorage::boot</code> installs the exact validated per-entry
@@ -1978,7 +1978,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>Cache::for_config</code> (<code>src/runtime/storage.rs:349-353</code>;
   <code>src/dns/cache.rs:445-451</code>), the sole cache construction site, and
   that same boot-built instance serves both the startup window and every actual
-  dial — the CONNECT attempt re-checks the owner-bound admission before dialing (<code>dial_checked</code>, <code>src/runtime/reactor.rs:2626-2643</code>; <code>dial_admits</code>, <code>src/runtime/tunnel.rs:832-846</code>; the cache predicate <code>src/dns/cache.rs:622-658</code>) — so no dial reads a stale admission source. The typed policies take two owned routes: <code>parse_entry_requirement</code> reads only the per-entry <code>dns_assurance</code> key, omission defaulting to <code>Trusted</code> (<code>src/config/mod.rs:939-951</code>), while <code>build_resolver_set</code> parses the top-level <code>recursive_dnssec_policy</code> into a distinct <code>RecursionPolicy</code> validated by <code>declared_root_validating_no_stale</code> (<code>src/dns/resolver.rs:465-473</code>), the both-strong gate applied by <code>from_table</code> (<code>src/config/mod.rs:631-641</code>), so an unsupported or unrepresentable combination is rejected at load, not at dial time. Evidence provenance is
+  dial — the CONNECT attempt re-checks the owner-bound admission before dialing (<code>dial_checked</code>, <code>src/runtime/reactor.rs:2626-2643</code>; <code>dial_admits</code>, <code>src/runtime/tunnel.rs:832-846</code>; the cache predicate <code>src/dns/cache.rs:622-658</code>) — so no dial reads a stale admission source. The typed policies take two owned routes: <code>parse_entry_requirement</code> reads only the per-entry <code>dns_assurance</code> key, omission defaulting to <code>Trusted</code> (<code>src/config/mod.rs:944-956</code>), while <code>build_resolver_set</code> parses the top-level <code>recursive_dnssec_policy</code> into a distinct <code>RecursionPolicy</code> validated by <code>declared_root_validating_no_stale</code> (<code>src/dns/resolver.rs:465-473</code>), the both-strong gate applied by <code>from_table</code> (<code>src/config/mod.rs:631-641</code>), so an unsupported or unrepresentable combination is rejected at load, not at dial time. Evidence provenance is
   captured once per reply before any policy is consulted: <code>ParsedReply</code> holds only the same-parse outcome, raw AD, extreme flag, and supporting-TTL cap (<code>src/dns/wire.rs:1009-1012</code>, <code>:1031-1048</code>); the delivering connection's immutable source, completed strict-pin handshake, and query-start floor arrive in <code>ApplyOrigin</code> (<code>src/dns/transport.rs:2433-2438</code>, <code>:2528-2555</code>) and join into <code>Evidence</code> only in <code>Evidence::new</code> via <code>ObservedReply::apply</code> (<code>src/dns/wire.rs:1175-1187</code>). Publication checks the owned requirement before the outcome match (<code>src/dns/publication.rs:109-112</code>): <code>InsufficientAssurance</code> is a counted, nonfatal exchange failure — the receive path closes the DNS connection, records <code>note_failure</code>, and returns <code>RecvStep::Failed</code>, distinct from other errors (<code>src/dns/transport.rs:2571-2580</code>), continuing via counted backoff with serving retained (<code>:3734-3766</code>; <code>src/dns/schedule.rs:402-418</code>); the token is <code>insufficient_assurance</code> (<code>src/dns/outcome.rs:24,38</code>); superseded negatives are a separate branch and pure probes return earlier (<code>src/dns/transport.rs:2567-2569</code>, <code>:2518-2526</code>), keeping every entry's stored class consistent with the last successful policy check.</p>
 </section>
 
@@ -2083,8 +2083,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     (<code>src/enforcement/state.rs:317-330</code>), and the configuration parser
     rejects any <code>early_data</code> block whose scope is not
     <code>connection</code> (<code>ConfigError::EarlyDataBlockScopeInvalid</code>,
-    <code>src/config/mod.rs:1001-1015</code>; the parser doc comment at
-    <code>:978-984</code> records that restriction). An upstream-sourced
+    <code>src/config/mod.rs:1006-1020</code>; the parser doc comment at
+    <code>:983-989</code> records that restriction). An upstream-sourced
     early-data signal therefore cannot select a per-domain or process-wide
     latch (<code>docs/alumina-proxy.md:1018-1020</code>). The only reachable raw effects
     for <code>EarlyUpstreamData</code> are therefore <code>BaselineOnly</code>,
@@ -2823,7 +2823,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <code>dp</code> fact (<code>src/dns/transport.rs:3281-3293</code>).</li>
     <li><strong>Trust is homogeneous or boot fails.</strong> A mixed-trust
     resolver set is rejected at configuration time
-    (<code>src/config/mod.rs:679-683</code>).</li>
+    (<code>src/config/mod.rs:701-705</code>).</li>
   </ul>
 </section>
 
@@ -2857,7 +2857,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/transport.rs:55</code>; spec <code>docs/alumina-proxy.md:110</code></td></tr>
       <tr><th scope="row">early_data block scope connection-only; the
       <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
-        <td><code>src/config/mod.rs:1001-1015</code>, <code>:645-647</code>,
+        <td><code>src/config/mod.rs:1006-1020</code>, <code>:645-647</code>,
         <code>:648-654</code>;
         <code>src/enforcement/state.rs:317-330</code>,
         <code>src/enforcement/state/tests.rs:1123</code> (test); <code>docs/alumina-proxy.md:1018-1020</code>,
@@ -2899,7 +2899,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime/storage.rs:574-578</code>; <code>src/runtime/tunnel.rs:88-96</code>;
         <code>src/dns/transport.rs:1386-1392</code></td></tr>
       <tr><th scope="row">Per-entry CNAME bailiwick</th>
-        <td><code>src/dns/wire.rs:856-899</code>, <code>:919-930</code>; <code>src/config/mod.rs:1145-1155</code></td></tr>
+        <td><code>src/dns/wire.rs:856-899</code>, <code>:919-930</code>; <code>src/config/mod.rs:1150-1160</code></td></tr>
       <tr><th scope="row">Stage machine (10 variants vs 9-step path)</th>
         <td><code>src/runtime/reactor.rs:341-352</code></td></tr>
       <tr><th scope="row">CONNECT parse bounds &amp; bare-CR/LF</th>
