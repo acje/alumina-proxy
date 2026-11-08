@@ -1212,7 +1212,7 @@ impl<'a> ObservedReply<'a> {
 /// Returns every refusal in `DnsError` without any cache mutation.
 #[expect(
     clippy::too_many_lines,
-    reason = "long multi-phase DNS response parser (frame, name, RR validation) kept inline for bounded fixed-buffer parsing"
+    reason = "multi-phase DNS response parser with bounded fixed-buffer parsing"
 )]
 pub fn parse_response(
     ws: &mut ResponseWorkspace,
@@ -1325,40 +1325,8 @@ pub fn parse_response(
         reader.skip(rr.rdlen)?;
     }
 
-    for _ in 0..authority_count {
-        let rr = read_rr(msg, &mut reader)?;
-        if rr.class != CLASS_IN {
-            return Err(DnsError::BadClass { got: rr.class });
-        }
-        if rr.ty == TYPE_DNAME {
-            return Err(DnsError::DnameUnsupported);
-        }
-        // E3 fail-closed guard: a malformed A/AAAA rdata in the authority
-        // section aborts the entire parse (no skip/isolate path). The answer
-        // section is guarded the same way inside parse_rdata.
-        check_fixed_addr_rdata_len(rr.ty, rr.rdlen)?;
-        if rr.ty == TYPE_SOA
-            && let Rdata::Soa { minimum } = parse_rdata(msg, rr.rd_start, rr.rdlen, rr.ty)?
-        {
-            if ws.soa.is_some() {
-                return Err(DnsError::SoaCount { got: 2 });
-            }
-            ws.soa = Some((rr.owner, rr.ttl, minimum));
-        }
-        reader.skip(rr.rdlen)?;
-    }
-
-    for _ in 0..additional_count {
-        let rr = read_rr(msg, &mut reader)?;
-        if rr.ty == TYPE_DNAME {
-            return Err(DnsError::DnameUnsupported);
-        }
-        // E3 fail-closed guard: the same strictness applies to
-        // additional/glue records — any malformed A/AAAA rdata here rejects
-        // the entire response rather than being skipped.
-        check_fixed_addr_rdata_len(rr.ty, rr.rdlen)?;
-        reader.skip(rr.rdlen)?;
-    }
+    parse_authority_section(ws, msg, &mut reader, authority_count)?;
+    parse_additional_section(msg, &mut reader, additional_count)?;
 
     if reader.remaining() > 0 {
         return Err(DnsError::TrailingBytes);
@@ -1417,6 +1385,50 @@ pub fn parse_response(
         }
         code => Err(DnsError::BadRcode { code }),
     }
+}
+
+fn parse_authority_section(
+    ws: &mut ResponseWorkspace,
+    msg: &[u8],
+    reader: &mut Reader<'_>,
+    count: usize,
+) -> Result<(), DnsError> {
+    for _ in 0..count {
+        let rr = read_rr(msg, reader)?;
+        if rr.class != CLASS_IN {
+            return Err(DnsError::BadClass { got: rr.class });
+        }
+        if rr.ty == TYPE_DNAME {
+            return Err(DnsError::DnameUnsupported);
+        }
+        check_fixed_addr_rdata_len(rr.ty, rr.rdlen)?;
+        if rr.ty == TYPE_SOA
+            && let Rdata::Soa { minimum } = parse_rdata(msg, rr.rd_start, rr.rdlen, rr.ty)?
+        {
+            if ws.soa.is_some() {
+                return Err(DnsError::SoaCount { got: 2 });
+            }
+            ws.soa = Some((rr.owner, rr.ttl, minimum));
+        }
+        reader.skip(rr.rdlen)?;
+    }
+    Ok(())
+}
+
+fn parse_additional_section(
+    msg: &[u8],
+    reader: &mut Reader<'_>,
+    count: usize,
+) -> Result<(), DnsError> {
+    for _ in 0..count {
+        let rr = read_rr(msg, reader)?;
+        if rr.ty == TYPE_DNAME {
+            return Err(DnsError::DnameUnsupported);
+        }
+        check_fixed_addr_rdata_len(rr.ty, rr.rdlen)?;
+        reader.skip(rr.rdlen)?;
+    }
+    Ok(())
 }
 
 struct Chain {

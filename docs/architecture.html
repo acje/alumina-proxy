@@ -368,7 +368,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   it applies its own independent 63-byte wire-label bound on query encoding
   (<code>write_qname</code>, <code>src/dns/wire.rs:367-403</code>) and on response-name
   reads inside <code>parse_response</code> (<code>read_name</code>/<code>read_rr</code>,
-  <code>src/dns/wire.rs:492-561</code>, called from the parser <code>:1217-1420</code>).
+  <code>src/dns/wire.rs:492-561</code>, called from the parser <code>:1217-1432</code>).
   The boundary adapters keep their intentional strictness — config <code>Fqdn</code>
   rejects uppercase labels and strips one trailing dot before its own
   payload reaches the shared <code>FixedHostname</code> normalizer as a no-op
@@ -537,7 +537,11 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td>Violation lattice (6), effect projection (4), per-class <code>AllScopeGate</code>s, <code>DomainOrdinal</code>, monitor facts.</td>
         <td><code>src/enforcement/policy.rs:89-97</code>, <code>:100-146</code>; <code>src/enforcement/state.rs:71-77</code>, <code>:262-286</code>; <code>src/enforcement/action.rs:98-132</code>; <code>src/enforcement/monitor.rs:12-26</code></td></tr>
       <tr><th scope="row"><code>dns/wire</code>/<code>dns/schedule</code>/<code>dns/cache</code></th>
-        <td>DNS parse + bailiwick; refresh on a nonzero positive TTL clamped to
+        <td>DNS parse + bailiwick; authority and additional sections are parsed
+        in order by private helpers, with authority SOA retained in the reusable
+        workspace and both sections checked for DNAME and fixed address lengths
+        (<code>src/dns/wire.rs:1328-1329</code>, <code>:1390-1432</code>);
+        refresh on a nonzero positive TTL clamped to
         5–900 s, zero TTL at 1 s (no stale serving), validated negative SOA
         30–900 s; retry backoff [1,2,4,8,16,30]; generation-tagged cache with
         stale-publish rejection. An appended crate-private evidence type
@@ -613,7 +617,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         Mutation
         of cache/schedule lives in the private
         <code>dns/publication</code> child, not <code>src/dns/wire.rs</code> itself.</td>
-        <td><code>src/dns/wire.rs:1217</code>, <code>:1217-1420</code>;
+        <td><code>src/dns/wire.rs:1217-1432</code>;
         <code>src/dns/publication.rs:45</code>, <code>:70-97</code>;
         <code>src/dns/schedule.rs:16</code>, <code>:358-389</code>;
         <code>src/dns/cache.rs:122-137</code>, <code>:247-345</code>, <code>:225</code>,
@@ -665,7 +669,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/wire.rs:9-14</code>, <code>:938-1195</code></td></tr>
       <tr><th scope="row"><code>name_rules</code> (private)</th>
         <td>Hostname-grammar byte rules common to the name carriers — the config and resolver <code>Fqdn</code> adapters each wrap the shared <code>FixedHostname</code> payload — : 253/63 bounds, four-variant label classifier, IP-literal-shape predicate; the DNS wire codec keeps its own label bound.</td>
-        <td><code>src/names/rules.rs:1-34</code>; <code>src/dns/wire.rs:367-403</code>, <code>:1217-1420</code></td></tr>
+        <td><code>src/names/rules.rs:1-34</code>; <code>src/dns/wire.rs:367-403</code>, <code>:1217-1432</code></td></tr>
       <tr><th scope="row"><code>hostname</code> (private child of <code>names</code>)</th>
         <td><code>FixedHostname</code> + <code>FQDN_MAX_LEN</code> alias: private
         <code>bytes</code>/<code>len</code> (<code>u8</code>), the
@@ -1549,7 +1553,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   chain or SOA TTL is kept as <code>Some(0)</code>, a known explicit zero whose
   deadline equals the query start, whereas a validated NXDOMAIN without a
   covering SOA has no supporting lifetime and remains unknown
-  <code>None</code> (<code>src/dns/wire.rs:1367-1372</code>, <code>:1400-1417</code>); neither
+  <code>None</code> (<code>src/dns/wire.rs:1335-1340</code>, <code>:1368-1385</code>); neither
   yields a currently reusable lease (<code>Evidence::new</code>,
   <code>src/dns/cache.rs:938-954</code>; <code>valid_class</code>, <code>:1015-1019</code>). A validated
   negative that does not complete tracking is not projected and falls back to
