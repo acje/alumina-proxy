@@ -17,6 +17,8 @@ general-purpose gateway, an ingress defense, or an encrypted-payload inspector.
 
 ## Design principles
 
+Alumina follows [AloxStyle](https://github.com/acje/aloxstyle) for Rust code.
+
 - **Narrow authority.** Admit allowlisted HTTP CONNECT destinations, validate
   the initial TLS 1.3 ClientHello and matching SNI, then relay without
   decryption. Additional protocols and runtime controls are outside the fixed
