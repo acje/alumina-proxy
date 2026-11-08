@@ -5,11 +5,15 @@ capability**. A workload may connect only to explicitly approved domains and
 ports. The proxy has one responsibility: enforce that boundary, with the minimum
 protocol scope and runtime capability needed to do so.
 
-Alumina-proxy provides defense in depth. The application is trusted at rest; the
-design accounts for application compromise. Alumina limits the resulting egress
-opportunities and surfaces deviations from the workload's known-good behavior.
-It is not a general-purpose gateway, an ingress defense, or an encrypted-payload
-inspector.
+Alumina provides defense in depth against application compromise. It reduces a
+compromised workload's opportunities for data exfiltration and command and
+control, and detects departures from known-good behavior visible at the egress
+boundary. The application is trusted at rest; Alumina limits what an attacker
+can do after that trust is broken.
+
+This protection depends on deployment preventing other routes to the network.
+Abuse of approved endpoints remains outside Alumina's visibility. It is not a
+general-purpose gateway, an ingress defense, or an encrypted-payload inspector.
 
 ## Design principles
 
