@@ -2395,7 +2395,7 @@ mod writev_progress {
         }
     }
 
-    /// Full-frame bound: a FQDN_MAX_LEN name plus max port plus both families
+    /// Full-frame bound: a `FQDN_MAX_LEN` name plus max port plus both families
     /// with every retained-detail field present fits the fixed record slot; the
     /// measured byte count (newline included) is a current-frame fact, not a
     /// new resource ceiling.

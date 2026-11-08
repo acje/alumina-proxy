@@ -340,10 +340,10 @@ pub(super) fn encode_dns_assurance(
     {
         return None;
     }
-    if let Some(boot) = snapshot.boot() {
-        if !append_assurance_boot(&mut w, boot) {
-            return None;
-        }
+    if let Some(boot) = snapshot.boot()
+        && !append_assurance_boot(&mut w, boot)
+    {
+        return None;
     }
     for family in Family::ALL {
         if !append_family_grade(&mut w, family, snapshot.family(family)) {

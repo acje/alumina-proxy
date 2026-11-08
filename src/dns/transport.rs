@@ -2514,9 +2514,9 @@ impl StartupDns {
                         let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
                         return Ok(RecvStep::Failed(reason));
                     }
-                    let observed = reply.observe();
+                    let parsed = reply.observe();
                     if ex.class == ExchangeClass::Probe {
-                        let (kind, extreme, _raw_ad_fact) = observed.probe_facts();
+                        let (kind, extreme, _raw_ad_fact) = parsed.probe_facts();
                         if extreme {
                             self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
                         }
@@ -2534,7 +2534,7 @@ impl StartupDns {
                             set.policy_of(source.get())
                         });
                     let obsolete_negative =
-                        matches!(observed.probe_facts().0, PublishedKind::Negative);
+                        matches!(parsed.probe_facts().0, PublishedKind::Negative);
                     let publication_at = Instant::now();
                     let context = crate::dns::publication::ApplyContext {
                         index: ex.ordinal,
@@ -2556,11 +2556,11 @@ impl StartupDns {
                     };
                     let publication = if ex.class == ExchangeClass::Serving {
                         let mut forward = |phase, cache: &Cache, name, secs| {
-                            observer(phase, cache, name, secs, publication_at)
+                            observer(phase, cache, name, secs, publication_at);
                         };
-                        observed.apply_observed(cache, schedules, context, origin, &mut forward)
+                        parsed.apply_observed(cache, schedules, context, origin, &mut forward)
                     } else {
-                        observed.apply(cache, schedules, context, origin)
+                        parsed.apply(cache, schedules, context, origin)
                     };
                     let (kind, extreme, incidents) = match publication {
                         Ok(published) => published,

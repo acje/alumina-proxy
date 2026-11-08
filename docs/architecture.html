@@ -1327,7 +1327,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>src/config/mod.rs:22-25</code>, <code>src/names/hostname.rs:7-11</code>).
   The snapshot size is checked against an existing record slot and a widest-name
   capture-and-enqueue witness checks allocation in the logging phase
-  (<code>src/runtime/storage.rs:2755-2764</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
+  (<code>src/runtime/storage.rs:2800-2809</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
   <p>The storage owner has 32 fixed optional assurance states. Successful boot
   capture seeds each marker and sequence zero before its enqueue attempt; a
   failed capture leaves that slot unseeded. The owner observation view
@@ -1387,9 +1387,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   CONNECT/TLS handshake. The stronger admission fixture seeds validated cache
   evidence under parsed authenticated/delegated requirements rather than
   performing a live resolver TLS handshake
-  (<code>src/runtime/reactor/tests.rs:8943</code>, <code>:9076</code>,
-  <code>:9156</code>, <code>:9232</code>, <code>:9350</code>, <code>:9509</code>;
-  <code>src/runtime/storage.rs:3369</code>).</p>
+  (<code>src/runtime/reactor/tests.rs:8943</code>, <code>:9122</code>,
+  <code>:9202</code>, <code>:9278</code>, <code>:9402</code>, <code>:9563</code>;
+  <code>src/runtime/storage.rs:3458</code>).</p>
   <p>Each of at most 16 interrupted-poll attempts scans at most 32 entries and
   64 candidate deadlines. Each candidate preview uses the same marker decision
   and its bounded cache projections. One post-poll fold considers at most 32
@@ -2295,7 +2295,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/runtime/owner/tests.rs:2911</code>, Serving phase, 17 hot relays + stalled
   DNS + backlog + expiry across 900 owner turns) and
   <code>due_refresh_owner_path_spends_zero_allocations</code>
-  (<code>src/runtime/owner/tests.rs:3976</code>, BackgroundRefresh phase, 200 owner
+  (<code>src/runtime/owner/tests.rs:4007</code>, BackgroundRefresh phase, 200 owner
   turns). A separate pointer-transfer witness, not a numeric allocation
   witness, covers the second claim:
   <code>serving_consumes_boot_traffic_buffers_by_value_not_reallocation</code>
@@ -2336,7 +2336,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   exchange, distinct from the retained named storage the inventory reports — never
   a universal or total-event maximum. The boot-window zero-allocation witness is
   explicit that it applies to the bare-IP/plain-DNS path only
-  (<code>src/dns/transport/tests.rs:1732</code>, <code>:1758</code>, <code>:1765</code>).</p>
+  (<code>src/dns/transport/tests.rs:1745</code>, <code>:1771</code>, <code>:1778</code>).</p>
 
   <h3>7.3 The serving concurrency and scheduling envelope</h3>
   <p>The reactor is a single poll owner (<code>poll: Poll</code> on the
@@ -2849,7 +2849,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">DoT seam allocation profile (warm fixture bound 8)</th>
         <td><code>src/dns/transport.rs:1068-1087</code>, <code>:2085-2121</code>;
         <code>src/dns/transport/dot_tests.rs:1452</code>, <code>:1572-1576</code>;
-        <code>src/dns/transport/tests.rs:1732</code>, <code>:1758</code>, <code>:1765</code></td></tr>
+        <code>src/dns/transport/tests.rs:1745</code>, <code>:1771</code>, <code>:1778</code></td></tr>
       <tr><th scope="row">Memory floor (printed named-buffer plan)</th>
         <td><code>src/inventory.rs:9-49</code>, <code>:173-196</code>,
         <code>:273-285</code>; <code>src/main.rs:33-39</code></td></tr>
@@ -2878,7 +2878,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <tr><th scope="row">Terminal sink state / shutdown-finish emit protocol</th>
         <td><code>src/log/sink.rs:100-179</code>, <code>:87-99</code>,
         <code>:32-47</code>, <code>:61-73</code>; <code>src/runtime/owner.rs:30-40</code>,
-        <code>:201-209</code>, <code>:419-423</code>; <code>src/runtime/owner/tests.rs:3413-3421</code></td></tr>
+        <code>:201-209</code>, <code>:419-423</code>; <code>src/runtime/owner/tests.rs:3418-3426</code></td></tr>
       <tr><th scope="row">Single clock / mount_clock re-anchor</th>
         <td><code>src/runtime/storage.rs:574-578</code>; <code>src/runtime/tunnel.rs:88-96</code>;
         <code>src/dns/transport.rs:1386-1392</code></td></tr>

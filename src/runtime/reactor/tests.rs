@@ -9009,32 +9009,9 @@ fn idle_run_once_observes_trusted_proof_expiry_without_dns_publication() {
             if signal_first {
                 wake.write_all(&[1]).unwrap();
             }
-            let (done, cancelled) = std::sync::mpsc::channel::<()>();
-            let guard = std::thread::spawn(move || {
-                if cancelled.recv_timeout(Duration::from_secs(3)).is_err() {
-                    wake.write_all(&[1]).unwrap();
-                }
-            });
-            let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-                serving.run_once(None)
-            });
-            let _ = done.send(());
-            guard.join().unwrap();
-            result.unwrap();
+            let counts = watched_idle_turn(&mut serving, wake, Duration::from_secs(3));
             assert!(counts.all_zero(), "the actual idle expiry turn must not allocate: {counts:?}");
-            if full_queue {
-                assert_eq!(serving.storage().logs().dropped(), dropped_before + 1);
-                serving.run_once(Some(Duration::ZERO)).unwrap();
-                assert_eq!(serving.storage().logs().dropped(), dropped_before + 1, "dropped expiry must not retry");
-            } else {
-                let frame = serving.storage().logs().last_record_bytes()
-                    .map(|bytes| std::str::from_utf8(bytes).unwrap()).unwrap_or("");
-                assert!(frame.contains("phase=change") && frame.contains("a_current=\"trusted\"")
-                    && frame.contains("a_retained_time_valid=0"), "idle expiry must emit an owned change: {frame}");
-                if dual_family {
-                    assert!(frame.contains("aaaa_retained_time_valid=1"), "{frame}");
-                }
-            }
+            check_idle_expiry_log(&mut serving, full_queue, dual_family, dropped_before);
             if signal_first {
                 assert!(serving.is_shutdown(), "SIGTERM must take effect on the expiry turn");
                 assert!(serving.listener.is_none(), "SIGTERM must stop admission on the expiry turn");
@@ -9042,15 +9019,7 @@ fn idle_run_once_observes_trusted_proof_expiry_without_dns_publication() {
                 assert!(!serving.is_shutdown(), "expiry must wake before the safety signal");
             }
             if dual_family {
-                serving.storage_mut().logs_mut().drain_sink();
-                assert!(reader.read(&mut boot).unwrap() > 0);
-                let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-                    serving.run_once(Some(Duration::from_secs(3)))
-                });
-                result.unwrap();
-                assert!(counts.all_zero(), "dual-family expiry turn allocated: {counts:?}");
-                let frame = std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
-                assert!(frame.contains("seq=2 phase=change") && frame.contains("aaaa_retained_time_valid=0"), "{frame}");
+                check_second_family_expiry(&mut serving, &mut reader, &mut boot);
             }
             assert!(serving.storage().assurance_wake(Instant::now()).unwrap().is_none(),
                 "an already observed expiry must not keep scheduling zero-time waits");
@@ -9066,6 +9035,83 @@ fn idle_run_once_observes_trusted_proof_expiry_without_dns_publication() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[cfg(feature = "alloc-witness")]
+fn check_second_family_expiry(
+    serving: &mut Serving,
+    reader: &mut std::os::unix::net::UnixStream,
+    boot: &mut [u8; 8192],
+) {
+    serving.storage_mut().logs_mut().drain_sink();
+    assert!(reader.read(boot).unwrap() > 0);
+    let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        serving.run_once(Some(Duration::from_secs(3)))
+    });
+    result.unwrap();
+    assert!(
+        counts.all_zero(),
+        "dual-family expiry turn allocated: {counts:?}"
+    );
+    let frame = std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
+    assert!(
+        frame.contains("seq=2 phase=change") && frame.contains("aaaa_retained_time_valid=0"),
+        "{frame}"
+    );
+}
+
+#[cfg(feature = "alloc-witness")]
+fn watched_idle_turn(
+    serving: &mut Serving,
+    mut wake: std::os::unix::net::UnixStream,
+    timeout: Duration,
+) -> crate::alloc::Counts {
+    use std::io::Write as _;
+    let (done, cancelled) = std::sync::mpsc::channel::<()>();
+    let guard = std::thread::spawn(move || {
+        if cancelled.recv_timeout(timeout).is_err() {
+            wake.write_all(&[1]).unwrap();
+        }
+    });
+    let (result, counts) =
+        crate::alloc::run_phase(crate::alloc::Phase::Serving, || serving.run_once(None));
+    let _ = done.send(());
+    guard.join().unwrap();
+    result.unwrap();
+    counts
+}
+
+#[cfg(feature = "alloc-witness")]
+fn check_idle_expiry_log(
+    serving: &mut Serving,
+    full_queue: bool,
+    dual_family: bool,
+    dropped_before: u64,
+) {
+    if full_queue {
+        assert_eq!(serving.storage().logs().dropped(), dropped_before + 1);
+        serving.run_once(Some(Duration::ZERO)).unwrap();
+        assert_eq!(
+            serving.storage().logs().dropped(),
+            dropped_before + 1,
+            "dropped expiry must not retry"
+        );
+    } else {
+        let frame = serving
+            .storage()
+            .logs()
+            .last_record_bytes()
+            .map_or("", |bytes| std::str::from_utf8(bytes).unwrap());
+        assert!(
+            frame.contains("phase=change")
+                && frame.contains("a_current=\"trusted\"")
+                && frame.contains("a_retained_time_valid=0"),
+            "idle expiry must emit an owned change: {frame}"
+        );
+        if dual_family {
+            assert!(frame.contains("aaaa_retained_time_valid=1"), "{frame}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -9140,7 +9186,7 @@ fn idle_negative_expiry_does_not_revive_positive_bindings() {
                 }
                 let now = serving.storage().cache_secs(Instant::now());
                 for family in Family::ALL {
-                    assert!(serving.storage().cache().entry(target, family).unwrap().bindings().is_empty());
+                    assert_eq!(serving.storage().cache().entry(target, family).unwrap().bindings(), &[]);
                     assert!(serving.storage().cache().negative_projection(target, family, now).unwrap().is_none());
                 }
                 assert!(serving.storage().assurance_wake(Instant::now()).unwrap().is_none());
@@ -9235,8 +9281,8 @@ fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
         .spawn(|| {
             use crate::dns::cache::evidence::{Evidence, ResolverSource};
             use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::transport::StartupReport;
             use crate::dns::transport::tests::{Step, spawn_bounded_responder};
-            use crate::dns::transport::{ExchangeClass, StartupReport, TurnResult};
             use crate::eligibility::NumericAddr;
             use std::io::Write as _;
             use std::os::unix::net::UnixStream;
@@ -9282,29 +9328,7 @@ fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
             assert!(reader.read(&mut bytes).unwrap() > 0);
             let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
             let mut serving = Serving::new(storage, listener, traffic).unwrap();
-            serving.attach_dns_shared().unwrap();
-            let exchange_deadline = Instant::now() + Duration::from_secs(5);
-            serving
-                .storage_mut()
-                .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
-                .unwrap();
-            serving.sync_dns_shared().unwrap();
-            for _ in 0..32 {
-                if serving.storage().dns().test_active_receiving() {
-                    break;
-                }
-                assert!(matches!(
-                    serving.storage_mut().advance_dns_serving().unwrap(),
-                    Some(TurnResult::Pending)
-                ));
-                serving.sync_dns_shared().unwrap();
-                if serving.storage().dns().needs_wait()
-                    && !serving.storage().dns().test_active_receiving()
-                {
-                    serving.run_once(Some(Duration::from_millis(100))).unwrap();
-                }
-            }
-            assert!(serving.storage().dns().test_active_receiving());
+            let exchange_deadline = start_waiting_dns_exchange(&mut serving);
             let expiry = serving
                 .storage()
                 .assurance_wake(Instant::now())
@@ -9346,6 +9370,34 @@ fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
 }
 
 #[cfg(feature = "alloc-witness")]
+fn start_waiting_dns_exchange(serving: &mut Serving) -> Instant {
+    use crate::dns::transport::{ExchangeClass, TurnResult};
+    serving.attach_dns_shared().unwrap();
+    let exchange_deadline = Instant::now() + Duration::from_secs(5);
+    serving
+        .storage_mut()
+        .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
+        .unwrap();
+    serving.sync_dns_shared().unwrap();
+    for _ in 0..32 {
+        if serving.storage().dns().test_active_receiving() {
+            break;
+        }
+        assert!(matches!(
+            serving.storage_mut().advance_dns_serving().unwrap(),
+            Some(TurnResult::Pending)
+        ));
+        serving.sync_dns_shared().unwrap();
+        if serving.storage().dns().needs_wait() && !serving.storage().dns().test_active_receiving()
+        {
+            serving.run_once(Some(Duration::from_millis(100))).unwrap();
+        }
+    }
+    assert!(serving.storage().dns().test_active_receiving());
+    exchange_deadline
+}
+
+#[cfg(feature = "alloc-witness")]
 #[test]
 fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
     std::thread::Builder::new()
@@ -9355,7 +9407,6 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
             use crate::dns::cache::{Family, Generation, StagedPositive};
             use crate::dns::transport::StartupReport;
             use crate::eligibility::NumericAddr;
-            use std::io::Write as _;
             use std::os::unix::net::UnixStream;
 
             for full_queue in [false, true] {
@@ -9409,54 +9460,13 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
                 let client =
                     mio::net::TcpStream::connect(peer_listener.local_addr().unwrap()).unwrap();
                 let (mut peer, _) = peer_listener.accept().unwrap();
-                {
-                    let slot = &mut serving.slots[0];
-                    slot.upstream = Some(up);
-                    slot.client = Some(client);
-                    slot.head_len = 4;
-                    slot.buf_base = 0;
-                    slot.buf_len = 0;
-                    slot.idle_deadline = Some(Instant::now() + Duration::from_secs(30));
-                }
-                open_relay(&mut serving, 0);
-                serving.sync_live_deadline(0);
-                serving.register_upstream(0).unwrap();
-                serving.register_client(0).unwrap();
-                serving.run_once(Some(Duration::ZERO)).unwrap();
-                assert!(matches!(serving.slots[0].stage, Stage::Relay));
-                assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
+                prime_expiry_relay(&mut serving, up, client);
                 if full_queue {
-                    for _ in 0..crate::log::QUEUE_SLOTS {
-                        serving.storage_mut().logs_mut().startup_warning_ctx(
-                            1000,
-                            "sub.example.org",
-                            Family::A,
-                            "timeout",
-                            None,
-                        );
-                    }
-                    assert!(serving.storage().logs().is_full());
-                    let now = Instant::now();
-                    let expiry = serving.storage().assurance_wake(now).unwrap().unwrap();
-                    std::thread::sleep(
-                        expiry.saturating_duration_since(now) + Duration::from_millis(25),
-                    );
+                    fill_relay_log_until_expiry(&mut serving);
                 }
                 let dropped = serving.storage().logs().dropped();
-                let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
-                let (done, cancelled) = std::sync::mpsc::channel::<()>();
-                let guard = std::thread::spawn(move || {
-                    if cancelled.recv_timeout(Duration::from_secs(3)).is_err() {
-                        wake.write_all(&[1]).unwrap();
-                    }
-                });
-                let (result, counts) =
-                    crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-                        serving.run_once(None)
-                    });
-                let _ = done.send(());
-                guard.join().unwrap();
-                result.unwrap();
+                let wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
+                let counts = watched_idle_turn(&mut serving, wake, Duration::from_secs(3));
                 assert!(counts.all_zero(), "relay expiry turn allocated: {counts:?}");
                 assert!(!serving.is_shutdown());
                 assert!(matches!(serving.slots[0].stage, Stage::Relay));
@@ -9472,36 +9482,80 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
                         "{frame}"
                     );
                 }
-                peer.write_all(b"ping").unwrap();
-                let mut got = [0u8; 4];
-                let mut received = 0;
-                for _ in 0..100 {
-                    let (result, counts) =
-                        crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-                            serving.run_once(Some(Duration::from_millis(20)))
-                        });
-                    result.unwrap();
-                    assert!(counts.all_zero(), "relay forwarding allocated: {counts:?}");
-                    match sink_stream.read(&mut got[received..]) {
-                        Ok(n) => received += n,
-                        Err(err)
-                            if matches!(
-                                err.kind(),
-                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                            ) => {}
-                        Err(err) => panic!("sink read: {err}"),
-                    }
-                    if received == got.len() {
-                        break;
-                    }
-                }
-                assert_eq!(&got, b"ping");
-                assert!(matches!(serving.slots[0].stage, Stage::Relay));
+                assert_expiry_relay_forwards(&mut serving, &mut peer, &mut sink_stream);
             }
         })
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[cfg(feature = "alloc-witness")]
+fn fill_relay_log_until_expiry(serving: &mut Serving) {
+    for _ in 0..crate::log::QUEUE_SLOTS {
+        serving.storage_mut().logs_mut().startup_warning_ctx(
+            1000,
+            "sub.example.org",
+            Family::A,
+            "timeout",
+            None,
+        );
+    }
+    assert!(serving.storage().logs().is_full());
+    let now = Instant::now();
+    let expiry = serving.storage().assurance_wake(now).unwrap().unwrap();
+    std::thread::sleep(expiry.saturating_duration_since(now) + Duration::from_millis(25));
+}
+
+#[cfg(feature = "alloc-witness")]
+fn prime_expiry_relay(serving: &mut Serving, up: mio::net::TcpStream, client: mio::net::TcpStream) {
+    let slot = &mut serving.slots[0];
+    slot.upstream = Some(up);
+    slot.client = Some(client);
+    slot.head_len = 4;
+    slot.buf_base = 0;
+    slot.buf_len = 0;
+    slot.idle_deadline = Some(Instant::now() + Duration::from_secs(30));
+    open_relay(serving, 0);
+    serving.sync_live_deadline(0);
+    serving.register_upstream(0).unwrap();
+    serving.register_client(0).unwrap();
+    serving.run_once(Some(Duration::ZERO)).unwrap();
+    assert!(matches!(serving.slots[0].stage, Stage::Relay));
+    assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
+}
+
+#[cfg(feature = "alloc-witness")]
+fn assert_expiry_relay_forwards(
+    serving: &mut Serving,
+    peer: &mut TcpStream,
+    sink_stream: &mut TcpStream,
+) {
+    use std::io::Write as _;
+    peer.write_all(b"ping").unwrap();
+    let mut got = [0u8; 4];
+    let mut received = 0;
+    for _ in 0..100 {
+        let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+            serving.run_once(Some(Duration::from_millis(20)))
+        });
+        result.unwrap();
+        assert!(counts.all_zero(), "relay forwarding allocated: {counts:?}");
+        match sink_stream.read(&mut got[received..]) {
+            Ok(n) => received += n,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(err) => panic!("sink read: {err}"),
+        }
+        if received == got.len() {
+            break;
+        }
+    }
+    assert_eq!(&got, b"ping");
+    assert!(matches!(serving.slots[0].stage, Stage::Relay));
 }
 
 #[cfg(feature = "alloc-witness")]
@@ -9571,48 +9625,11 @@ fn actual_client_setup_deadline_precedes_idle_proof_expiry() {
                 .unwrap()
                 .unwrap();
             assert!(client_deadline < proof_deadline);
-            let hard_limit = Instant::now() + Duration::from_secs(11);
-            for _ in 0..16 {
-                if serving.storage().occupied() == 0 {
-                    break;
-                }
-                let remaining = hard_limit.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                let (result, counts) =
-                    crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-                        serving.run_once(Some(remaining))
-                    });
-                result.unwrap();
-                assert!(
-                    counts.all_zero(),
-                    "client deadline turn allocated: {counts:?}"
-                );
-            }
-            let observed = Instant::now();
-            assert_eq!(
-                serving.storage().occupied(),
-                0,
-                "actual setup deadline must release client"
-            );
-            assert!(observed >= client_deadline && observed < proof_deadline);
-            let now = serving.storage().cache_secs(observed);
-            assert!(
-                serving
-                    .storage()
-                    .cache()
-                    .family_retained(name, Family::A, now)
-                    .unwrap()
-                    .unwrap()
-                    .time_valid()
-            );
-            assert!(
-                serving
-                    .storage()
-                    .assurance_wake(observed)
-                    .unwrap()
-                    .is_some_and(|wake| wake > observed)
+            assert_client_deadline_precedes_proof(
+                &mut serving,
+                name,
+                client_deadline,
+                proof_deadline,
             );
             let mut response = [0u8; 512];
             let n = client.read(&mut response).unwrap();
@@ -9631,6 +9648,57 @@ fn actual_client_setup_deadline_precedes_idle_proof_expiry() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[cfg(feature = "alloc-witness")]
+fn assert_client_deadline_precedes_proof(
+    serving: &mut Serving,
+    name: crate::dns::cache::NameIndex,
+    client_deadline: Instant,
+    proof_deadline: Instant,
+) {
+    let hard_limit = Instant::now() + Duration::from_secs(11);
+    for _ in 0..16 {
+        if serving.storage().occupied() == 0 {
+            break;
+        }
+        let remaining = hard_limit.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+            serving.run_once(Some(remaining))
+        });
+        result.unwrap();
+        assert!(
+            counts.all_zero(),
+            "client deadline turn allocated: {counts:?}"
+        );
+    }
+    let observed = Instant::now();
+    assert_eq!(
+        serving.storage().occupied(),
+        0,
+        "actual setup deadline must release client"
+    );
+    assert!(observed >= client_deadline && observed < proof_deadline);
+    let now = serving.storage().cache_secs(observed);
+    assert!(
+        serving
+            .storage()
+            .cache()
+            .family_retained(name, Family::A, now)
+            .unwrap()
+            .unwrap()
+            .time_valid()
+    );
+    assert!(
+        serving
+            .storage()
+            .assurance_wake(observed)
+            .unwrap()
+            .is_some_and(|wake| wake > observed)
+    );
 }
 
 #[cfg(feature = "alloc-witness")]
@@ -9701,43 +9769,46 @@ fn synthetic_expiry_clock_fault_is_reported_without_losing_poll_buffer() {
             serving.slots[0].upstream = Some(upstream);
             serving.slots[0].client = Some(client);
             open_relay(&mut serving, 0);
-            let length = serving.storage().logs().len();
-            serving
-                .storage_mut()
-                .observe_assurance_expiry(Instant::now());
-            assert_eq!(serving.storage().logs().len(), length + 1);
-            let frame =
-                std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
-            assert!(
-                frame.contains("kind=dns_assurance_fault")
-                    && frame.contains("ordinal=0")
-                    && frame.contains("phase=\"expiry\"")
-                    && frame.contains("reason=\"clock_regressed\""),
-                "{frame}"
-            );
-            assert!(!serving.is_shutdown() && serving.listener.is_some());
-            assert!(matches!(serving.slots[0].stage, Stage::Relay));
-            assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
-            let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-                serving.run_once(Some(Duration::ZERO))
-            });
-            assert_eq!(result.unwrap_err().kind, io::ErrorKind::Other);
-            assert_eq!(serving.storage().logs().len(), length + 2);
-            let frame =
-                std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
-            assert!(
-                frame.contains("kind=dns_assurance_fault")
-                    && frame.contains("ordinal=0")
-                    && frame.contains("phase=\"expiry\"")
-                    && frame.contains("reason=\"clock_regressed\""),
-                "{frame}"
-            );
-            assert!(
-                counts.all_zero(),
-                "fault path must retain the poll batch: {counts:?}"
-            );
+            assert_expiry_clock_fault_preserves_poll_buffer(&mut serving);
         })
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[cfg(feature = "alloc-witness")]
+fn assert_expiry_clock_fault_preserves_poll_buffer(serving: &mut Serving) {
+    let length = serving.storage().logs().len();
+    serving
+        .storage_mut()
+        .observe_assurance_expiry(Instant::now());
+    assert_eq!(serving.storage().logs().len(), length + 1);
+    let frame = std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
+    assert!(
+        frame.contains("kind=dns_assurance_fault")
+            && frame.contains("ordinal=0")
+            && frame.contains("phase=\"expiry\"")
+            && frame.contains("reason=\"clock_regressed\""),
+        "{frame}"
+    );
+    assert!(!serving.is_shutdown() && serving.listener.is_some());
+    assert!(matches!(serving.slots[0].stage, Stage::Relay));
+    assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
+    let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        serving.run_once(Some(Duration::ZERO))
+    });
+    assert_eq!(result.unwrap_err().kind, io::ErrorKind::Other);
+    assert_eq!(serving.storage().logs().len(), length + 2);
+    let frame = std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
+    assert!(
+        frame.contains("kind=dns_assurance_fault")
+            && frame.contains("ordinal=0")
+            && frame.contains("phase=\"expiry\"")
+            && frame.contains("reason=\"clock_regressed\""),
+        "{frame}"
+    );
+    assert!(
+        counts.all_zero(),
+        "fault path must retain the poll batch: {counts:?}"
+    );
 }

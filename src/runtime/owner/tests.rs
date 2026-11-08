@@ -3148,6 +3148,11 @@ mod startup_warning {
             outcome
         };
         assert_eq!(outcome.decision(), StartupDecision::Serve(mode));
+        assert_boot_status_frames(&mut reader, mode);
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    fn assert_boot_status_frames(reader: &mut std::os::unix::net::UnixStream, mode: ServingMode) {
         let mut bytes = [0u8; 16384];
         let n = reader.read(&mut bytes).unwrap();
         let text = std::str::from_utf8(&bytes[..n]).unwrap();
@@ -3650,6 +3655,49 @@ mod startup_exchange {
 }
 
 #[cfg(feature = "alloc-witness")]
+fn populate_corroboration_incident(
+    report: &mut crate::dns::incident_report::IncidentReport,
+    secs: u64,
+) {
+    use crate::dns::transport::FailureReason;
+    report.note_incident_open(
+        0,
+        secs,
+        [Some((secs, FailureReason::Timeout.as_str(), None)), None],
+    );
+    report.note_exchange_attempt(0, Family::A, secs);
+    report.note_exchange_attempt(0, Family::Aaaa, secs);
+    report.note_exchange_failure(0, Family::A, secs, FailureReason::Timeout.as_str(), None);
+    report.note_positive(0, Family::A, secs);
+    report.note_positive(0, Family::Aaaa, secs);
+    report.note_tunnel_bytes(0, 0, 7, 42, secs);
+    report.note_stale_admission(0, secs);
+}
+
+#[cfg(feature = "alloc-witness")]
+fn assert_corroboration_incident(
+    runtime: &mut Runtime,
+    mirror: &mut crate::dns::incident_report::IncidentReport,
+    close: u64,
+) {
+    let expected = mirror.close_window(0, close).unwrap();
+    assert_eq!(expected.per_type[0].attempts.value, 1);
+    assert_eq!(expected.per_type[1].attempts.value, 1);
+    assert_eq!(expected.per_type[0].failures.value, 1);
+    assert_eq!(expected.activity.tunnels.value, 1);
+    assert_eq!(expected.activity.bytes.value, 42);
+    assert_eq!(expected.activity.stale.value, 1);
+    assert_eq!(
+        runtime
+            .serving
+            .storage_mut()
+            .incident_report_mut()
+            .close_window(0, close),
+        Some(expected)
+    );
+}
+
+#[cfg(feature = "alloc-witness")]
 #[test]
 fn populated_seeded_owner_corroboration_probe_preserves_authorization_and_reporting() {
     thread::Builder::new()
@@ -3700,19 +3748,9 @@ fn populated_seeded_owner_corroboration_probe_preserves_authorization_and_report
             runtime.serving.storage_mut().schedules_mut().note_exchange_failure(0, Family::A, secs, FailureReason::Timeout).unwrap();
             runtime.serving.storage_mut().schedules_mut().overwrite_due_at(0, Family::A, secs + 300).unwrap();
             runtime.serving.storage_mut().report_incident_if_due(observed);
-            let populate = |report: &mut IncidentReport| {
-                report.note_incident_open(0, secs, [Some((secs, FailureReason::Timeout.as_str(), None)), None]);
-                report.note_exchange_attempt(0, Family::A, secs);
-                report.note_exchange_attempt(0, Family::Aaaa, secs);
-                report.note_exchange_failure(0, Family::A, secs, FailureReason::Timeout.as_str(), None);
-                report.note_positive(0, Family::A, secs);
-                report.note_positive(0, Family::Aaaa, secs);
-                report.note_tunnel_bytes(0, 0, 7, 42, secs);
-                report.note_stale_admission(0, secs);
-            };
-            populate(runtime.serving.storage_mut().incident_report_mut());
+            populate_corroboration_incident(runtime.serving.storage_mut().incident_report_mut(), secs);
             let mut mirror = IncidentReport::new();
-            populate(&mut mirror);
+            populate_corroboration_incident(&mut mirror, secs);
             let cache_before = *runtime.serving.storage().cache();
             let schedules_before = *runtime.serving.storage().schedules();
             assert!(matches!(schedules_before.incident(0, Family::A), Some(crate::dns::schedule::TypeIncident::Open { .. })));
@@ -3738,14 +3776,7 @@ fn populated_seeded_owner_corroboration_probe_preserves_authorization_and_report
             assert_eq!(runtime.serving.storage().dns().current_resolver_index(), Some(0));
             assert_eq!(runtime.serving.storage().enforcement().monitor().facts_dns_anomaly(crate::enforcement::monitor::DnsAnomalyKind::CorroborationConflict), 0);
             let close = runtime.serving.storage().cache_secs(Instant::now());
-            let expected = mirror.close_window(0, close).unwrap();
-            assert_eq!(expected.per_type[0].attempts.value, 1);
-            assert_eq!(expected.per_type[1].attempts.value, 1);
-            assert_eq!(expected.per_type[0].failures.value, 1);
-            assert_eq!(expected.activity.tunnels.value, 1);
-            assert_eq!(expected.activity.bytes.value, 42);
-            assert_eq!(expected.activity.stale.value, 1);
-            assert_eq!(runtime.serving.storage_mut().incident_report_mut().close_window(0, close), Some(expected));
+            assert_corroboration_incident(&mut runtime, &mut mirror, close);
             let now = Instant::now();
             assert_eq!(runtime.serving.storage_mut().emit_assurance(0, now), Ok(AssuranceObservation::Unchanged));
             let secs_after = runtime.serving.storage().cache_secs(now);

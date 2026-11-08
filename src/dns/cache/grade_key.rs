@@ -75,7 +75,7 @@ impl FamilyMarker {
         let class_changed = match (self.known_class, class) {
             (Some(before), Some(after)) => before != after,
             (None, Some(_)) => valid == Some(true) && self.known_valid != Some(true),
-            (Some(_), None) | (None, None) => false,
+            (Some(_) | None, None) => false,
         };
         let validity_changed = matches!(
             (self.known_valid, valid),
@@ -96,7 +96,7 @@ impl FamilyMarker {
     }
 }
 
-fn observed_class(
+const fn observed_class(
     current: Option<ProofClass>,
     retained: Option<RetainedGrade>,
 ) -> Option<ProofClass> {
@@ -268,7 +268,7 @@ pub(crate) struct Retained {
 }
 
 impl Retained {
-    fn new(kind: RetainedKind, evidence: Evidence, now: u64, applicable: bool) -> Retained {
+    const fn new(kind: RetainedKind, evidence: Evidence, now: u64, applicable: bool) -> Retained {
         Retained {
             kind,
             class: evidence.class(),

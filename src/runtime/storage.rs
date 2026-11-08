@@ -115,7 +115,7 @@ pub(crate) enum AssuranceObservationError {
     ClockMismatch,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct AssuranceWakeFault {
     ordinal: usize,
     error: AssuranceObservationError,
@@ -1874,9 +1874,22 @@ mod assurance_bridge_tests {
             crate::runtime::tunnel::WorkerClock::new(storage.origin, storage.now0)
                 .cache_secs(observed)
         );
-        assert!(secs >= 1001 && secs < 1060, "{secs}");
+        assert!((1001..1060).contains(&secs), "{secs}");
+        assert_expiry_recovery_frames(&mut storage, &mut reader, &mut bytes, secs);
+        assert_eq!(storage.assurance[0].unwrap().sequence, 2);
+        responder.finish().unwrap();
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    fn assert_expiry_recovery_frames(
+        storage: &mut ServeStorage,
+        reader: &mut std::os::unix::net::UnixStream,
+        bytes: &mut [u8; 16384],
+        secs: u64,
+    ) {
+        use std::io::Read as _;
         storage.logs.drain_sink();
-        let n = reader.read(&mut bytes).unwrap();
+        let n = reader.read(bytes).unwrap();
         let text = std::str::from_utf8(&bytes[..n]).unwrap();
         let frames: Vec<_> = text
             .lines()
@@ -1898,8 +1911,6 @@ mod assurance_bridge_tests {
                 "{frame}"
             );
         }
-        assert_eq!(storage.assurance[0].unwrap().sequence, 2);
-        responder.finish().unwrap();
     }
 
     #[test]
@@ -1950,7 +1961,13 @@ mod assurance_bridge_tests {
         );
         storage.logs.drain_sink();
         let mut bytes = [0u8; 16384];
-        reader.read(&mut bytes).unwrap();
+        let boot_len = reader.read(&mut bytes).unwrap();
+        assert!(boot_len > 0);
+        assert!(
+            std::str::from_utf8(&bytes[..boot_len])
+                .unwrap()
+                .contains("kind=")
+        );
         let deadline = Instant::now() + Duration::from_secs(5);
         storage
             .start_dns_exchange(0, Family::Aaaa, deadline, ExchangeClass::Serving)
@@ -2011,9 +2028,8 @@ mod assurance_bridge_tests {
 
     fn actual_owner_silent_refresh_body() {
         use crate::dns::cache::Family;
+        use crate::dns::transport::StartupReport;
         use crate::dns::transport::tests::{Step, spawn_bounded_responder};
-        use crate::dns::transport::{ExchangeClass, StartupReport, TurnResult};
-        use crate::eligibility::NumericAddr;
         use std::io::Read;
         use std::net::SocketAddr;
         use std::os::unix::net::UnixStream;
@@ -2056,41 +2072,15 @@ mod assurance_bridge_tests {
         );
         storage.logs.drain_sink();
         let mut bytes = [0u8; 16384];
-        reader.read(&mut bytes).unwrap();
+        let boot_len = reader.read(&mut bytes).unwrap();
+        assert!(boot_len > 0);
+        assert!(
+            std::str::from_utf8(&bytes[..boot_len])
+                .unwrap()
+                .contains("kind=")
+        );
         let name = storage.cache.name_index(0).unwrap();
-        let mut first_generation = None;
-        for (index, family) in [Family::A, Family::Aaaa, Family::A, Family::A]
-            .into_iter()
-            .enumerate()
-        {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            storage
-                .start_dns_exchange(0, family, deadline, ExchangeClass::Serving)
-                .unwrap();
-            loop {
-                match storage.advance_dns_serving().unwrap() {
-                    Some(TurnResult::Pending) => {
-                        storage.dns.wait_dns_readiness(deadline).unwrap();
-                    }
-                    Some(TurnResult::Published(_)) => break,
-                    other => panic!("publication failed: {other:?}"),
-                }
-            }
-            match index {
-                0 => {
-                    first_generation =
-                        Some(storage.cache.entry(name, Family::A).unwrap().generation())
-                }
-                2 => {
-                    let entry = storage.cache.entry(name, Family::A).unwrap();
-                    assert_ne!(Some(entry.generation()), first_generation);
-                    assert_eq!(entry.bindings(), &[NumericAddr::V4([9, 9, 9, 9].into())]);
-                    assert_eq!(storage.assurance[0].unwrap().sequence, 1);
-                }
-                3 => assert_eq!(storage.assurance[0].unwrap().sequence, 1),
-                _ => {}
-            }
-        }
+        drive_silent_refreshes(&mut storage, name);
         storage.logs.drain_sink();
         let n = reader.read(&mut bytes).unwrap();
         let text = std::str::from_utf8(&bytes[..n]).unwrap();
@@ -2116,6 +2106,45 @@ mod assurance_bridge_tests {
                 .is_some()
         );
         responder.finish().unwrap();
+    }
+
+    fn drive_silent_refreshes(storage: &mut ServeStorage, name: crate::dns::cache::NameIndex) {
+        use crate::dns::cache::Family;
+        use crate::dns::transport::{ExchangeClass, TurnResult};
+        use crate::eligibility::NumericAddr;
+        let mut first_generation = None;
+        for (index, family) in [Family::A, Family::Aaaa, Family::A, Family::A]
+            .into_iter()
+            .enumerate()
+        {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            storage
+                .start_dns_exchange(0, family, deadline, ExchangeClass::Serving)
+                .unwrap();
+            loop {
+                match storage.advance_dns_serving().unwrap() {
+                    Some(TurnResult::Pending) => {
+                        storage.dns.wait_dns_readiness(deadline).unwrap();
+                    }
+                    Some(TurnResult::Published(_)) => break,
+                    other => panic!("publication failed: {other:?}"),
+                }
+            }
+            match index {
+                0 => {
+                    first_generation =
+                        Some(storage.cache.entry(name, Family::A).unwrap().generation());
+                }
+                2 => {
+                    let entry = storage.cache.entry(name, Family::A).unwrap();
+                    assert_ne!(Some(entry.generation()), first_generation);
+                    assert_eq!(entry.bindings(), &[NumericAddr::V4([9, 9, 9, 9].into())]);
+                    assert_eq!(storage.assurance[0].unwrap().sequence, 1);
+                }
+                3 => assert_eq!(storage.assurance[0].unwrap().sequence, 1),
+                _ => {}
+            }
+        }
     }
 
     fn storage() -> ServeStorage {
@@ -2351,73 +2380,8 @@ mod assurance_bridge_tests {
             storage.emit_assurance(0, at(&storage, 1009)),
             Ok(AssuranceObservation::Unchanged)
         );
-        assert_eq!(
-            storage.emit_assurance(0, at(&storage, 1010)),
-            Ok(AssuranceObservation::Attempted {
-                sequence: 1,
-                enqueued: true
-            })
-        );
-        let frame = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
-        assert!(
-            frame.contains("secs=1010 seq=1 phase=change")
-                && frame.contains("a_current=\"trusted\"")
-                && frame.contains("a_retained_time_valid=0"),
-            "{frame}"
-        );
-        assert_eq!(
-            storage.emit_assurance(0, at(&storage, 1011)),
-            Ok(AssuranceObservation::Unchanged)
-        );
-        while !storage.logs.is_full() {
-            storage
-                .logs
-                .startup_warning_ctx(1011, "alpha.example.org", Family::A, "timeout", None);
-        }
-        let before_dropped = storage.logs.dropped();
-        let generation = storage.cache.entry(name, Family::A).unwrap().generation();
-        let strong = Evidence::new(
-            true,
-            true,
-            true,
-            ResolverSource::index(0).unwrap(),
-            Some(300),
-            1020,
-        )
-        .unwrap();
-        let staged = StagedPositive::stage_with_evidence(
-            name,
-            Family::A,
-            generation,
-            &[NumericAddr::V4([8, 8, 8, 8].into())],
-            1020,
-            300,
-            Some(strong),
-        )
-        .unwrap();
-        let event_at = at(&storage, 1021);
-        assert_eq!(
-            storage.emit_assurance(0, event_at),
-            Ok(AssuranceObservation::Unchanged)
-        );
-        storage.cache.publish_positive(&staged).unwrap();
-        assert_eq!(
-            storage.emit_assurance(0, event_at),
-            Ok(AssuranceObservation::Attempted {
-                sequence: 2,
-                enqueued: false
-            })
-        );
-        assert_eq!(storage.logs.dropped(), before_dropped + 1);
-        assert_eq!(
-            storage.emit_assurance(0, at(&storage, 1022)),
-            Ok(AssuranceObservation::Unchanged)
-        );
-        assert_eq!(
-            storage.logs.dropped(),
-            before_dropped + 1,
-            "no retry after a dropped observation"
-        );
+        assert_seeded_expiry_transition(&mut storage);
+        exercise_full_queue_expiry_recovery(&mut storage, name);
         let mut bytes = [0u8; 8192];
         assert!(reader.read(&mut bytes).unwrap() > 0);
         storage.logs.drain_sink();
@@ -2464,6 +2428,87 @@ mod assurance_bridge_tests {
             storage.logs.len(),
             count,
             "invalid lookup must not queue or mutate"
+        );
+    }
+
+    fn assert_seeded_expiry_transition(storage: &mut ServeStorage) {
+        use super::AssuranceObservation;
+        assert_eq!(
+            storage.emit_assurance(0, at(storage, 1010)),
+            Ok(AssuranceObservation::Attempted {
+                sequence: 1,
+                enqueued: true
+            })
+        );
+        let frame = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(
+            frame.contains("secs=1010 seq=1 phase=change")
+                && frame.contains("a_current=\"trusted\"")
+                && frame.contains("a_retained_time_valid=0"),
+            "{frame}"
+        );
+        assert_eq!(
+            storage.emit_assurance(0, at(storage, 1011)),
+            Ok(AssuranceObservation::Unchanged)
+        );
+    }
+
+    fn exercise_full_queue_expiry_recovery(
+        storage: &mut ServeStorage,
+        name: crate::dns::cache::NameIndex,
+    ) {
+        use super::AssuranceObservation;
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, StagedPositive};
+        use crate::eligibility::NumericAddr;
+        while !storage.logs.is_full() {
+            storage
+                .logs
+                .startup_warning_ctx(1011, "alpha.example.org", Family::A, "timeout", None);
+        }
+        let before_dropped = storage.logs.dropped();
+        let generation = storage.cache.entry(name, Family::A).unwrap().generation();
+        let strong = Evidence::new(
+            true,
+            true,
+            true,
+            ResolverSource::index(0).unwrap(),
+            Some(300),
+            1020,
+        )
+        .unwrap();
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            generation,
+            &[NumericAddr::V4([8, 8, 8, 8].into())],
+            1020,
+            300,
+            Some(strong),
+        )
+        .unwrap();
+        let event_at = at(storage, 1021);
+        assert_eq!(
+            storage.emit_assurance(0, event_at),
+            Ok(AssuranceObservation::Unchanged)
+        );
+        storage.cache.publish_positive(&staged).unwrap();
+        assert_eq!(
+            storage.emit_assurance(0, event_at),
+            Ok(AssuranceObservation::Attempted {
+                sequence: 2,
+                enqueued: false
+            })
+        );
+        assert_eq!(storage.logs.dropped(), before_dropped + 1);
+        assert_eq!(
+            storage.emit_assurance(0, at(storage, 1022)),
+            Ok(AssuranceObservation::Unchanged)
+        );
+        assert_eq!(
+            storage.logs.dropped(),
+            before_dropped + 1,
+            "no retry after a dropped observation"
         );
     }
 
@@ -3339,7 +3384,7 @@ mod assurance_bridge_tests {
         });
         assert!(result.is_ok());
         assert!(counts.all_zero(), "boot settlement: {counts:?}");
-        let mut bytes = [0u8; 65536];
+        let mut bytes = vec![0u8; 65536];
         let len = reader.read(&mut bytes).unwrap();
         let text = std::str::from_utf8(&bytes[..len]).unwrap();
         let frames = text
@@ -3365,38 +3410,10 @@ mod assurance_bridge_tests {
     }
 
     #[cfg(feature = "alloc-witness")]
-    #[test]
-    fn expiry_fold_32_entries_64_families_is_bounded_and_allocation_free() {
-        use crate::alloc::{Phase, run_phase};
+    fn seed_expiry_families(storage: &mut ServeStorage) {
         use crate::dns::cache::evidence::{Evidence, ResolverSource};
         use crate::dns::cache::{Family, Generation, StagedPositive};
-        use crate::dns::transport::StartupReport;
         use crate::eligibility::NumericAddr;
-        use std::fmt::Write as _;
-        use std::os::unix::net::UnixStream;
-
-        let mut doc = String::from(
-            "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
-        );
-        for i in 0..32 {
-            write!(doc, "[allowed_fqdn.\"n{i}.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n").unwrap();
-        }
-        let config = crate::config::parse_config_document(&doc)
-            .unwrap()
-            .with_kernel_assigned_test_listener();
-        let mut storage = ServeStorage::boot(&config).unwrap();
-        let (_reader, writer) = UnixStream::pair().unwrap();
-        writer.set_nonblocking(true).unwrap();
-        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
-        storage
-            .dns
-            .begin_window(
-                std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
-                *config.resolver_set(),
-                1000,
-                Duration::ZERO,
-            )
-            .unwrap();
         let proof =
             Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
         for ordinal in 0..32 {
@@ -3434,6 +3451,39 @@ mod assurance_bridge_tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    #[test]
+    fn expiry_fold_32_entries_64_families_is_bounded_and_allocation_free() {
+        use crate::alloc::{Phase, run_phase};
+        use crate::dns::transport::StartupReport;
+        use std::fmt::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut doc = String::from(
+            "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
+        );
+        for i in 0..32 {
+            write!(doc, "[allowed_fqdn.\"n{i}.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n").unwrap();
+        }
+        let config = crate::config::parse_config_document(&doc)
+            .unwrap()
+            .with_kernel_assigned_test_listener();
+        let mut storage = ServeStorage::boot(&config).unwrap();
+        let (_reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        storage.logs = crate::log::LogStore::with_fd(&writer).unwrap();
+        storage
+            .dns
+            .begin_window(
+                std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
+                *config.resolver_set(),
+                1000,
+                Duration::ZERO,
+            )
+            .unwrap();
+        seed_expiry_families(&mut storage);
         let outcome = storage
             .settle_startup(1000, StartupReport::default(), 0, false)
             .unwrap();

@@ -3006,24 +3006,28 @@ mod embedded_dot {
 
 mod production_apply_route {
     use super::*;
+    use crate::dns::cache::Generation;
     use crate::dns::cache::evidence::ProofClass;
+    use crate::dns::cache::grade_key::FamilySnapshot;
+    use crate::dns::publication::ObservationPhase;
 
-    fn observed_negative_matrix(nxdomain: bool) {
-        use crate::dns::cache::grade_key::{FamilySnapshot, Outcome as FamilyOutcome};
-        use crate::dns::cache::{Generation, NameIndex, StagedPositive};
-        use crate::dns::publication::ObservationPhase;
+    type CapturedObservation = (
+        ObservationPhase,
+        u64,
+        FamilySnapshot,
+        FamilySnapshot,
+        Generation,
+        Generation,
+    );
+
+    fn seed_observed_negative_cache() -> (Cache, Schedules, crate::dns::cache::NameIndex) {
+        use crate::dns::cache::NameIndex;
+        use crate::dns::cache::StagedPositive;
         use crate::dns::transport::FailureReason;
 
-        let mut ws = ResponseWorkspace::default();
-        let mut msg = header(0x4300, true, if nxdomain { 3 } else { 0 }, 1, 0, 1, 0);
-        msg.extend_from_slice(&qname_bytes("sub.example.org"));
-        msg.extend_from_slice(&1u16.to_be_bytes());
-        msg.extend_from_slice(&1u16.to_be_bytes());
-        msg.extend_from_slice(&soa_record("example.org", 300, 60));
-        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4300, &msg).unwrap();
         let mut cache = Cache::new(1).unwrap();
         let mut schedules = Schedules::new(1).unwrap();
-        let name = cache.name_index(0).unwrap();
+        let name: NameIndex = cache.name_index(0).unwrap();
         for (family, addr) in [
             (Family::A, NumericAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
             (
@@ -3039,16 +3043,29 @@ mod production_apply_route {
                 .note_exchange_failure(0, family, 4980, FailureReason::Connect)
                 .unwrap();
         }
+        (cache, schedules, name)
+    }
+
+    fn observed_negative_message(nxdomain: bool) -> Vec<u8> {
+        let mut msg = header(0x4300, true, if nxdomain { 3 } else { 0 }, 1, 0, 1, 0);
+        msg.extend_from_slice(&qname_bytes("sub.example.org"));
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&soa_record("example.org", 300, 60));
+        msg
+    }
+
+    fn observed_negative_matrix(nxdomain: bool) {
+        use crate::dns::cache::NameIndex;
+        use crate::dns::cache::grade_key::Outcome as FamilyOutcome;
+
+        let mut ws = ResponseWorkspace::default();
+        let msg = observed_negative_message(nxdomain);
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4300, &msg).unwrap();
+        let (mut cache, mut schedules, name) = seed_observed_negative_cache();
         let generation = cache.entry(name, Family::A).unwrap().generation();
         let other_generation = cache.entry(name, Family::Aaaa).unwrap().generation();
-        let mut events: [Option<(
-            ObservationPhase,
-            u64,
-            FamilySnapshot,
-            FamilySnapshot,
-            Generation,
-            Generation,
-        )>; 2] = [None; 2];
+        let mut events: [Option<CapturedObservation>; 2] = [None; 2];
         let mut count = 0;
         let result = {
             let mut observer = |phase, cache: &Cache, name: NameIndex, now| {
@@ -3256,7 +3273,7 @@ mod production_apply_route {
                         .family_snapshot(name, Family::A, now)
                         .unwrap()
                         .retained()
-                        .map(|proof| proof.time_valid());
+                        .map(crate::dns::cache::grade_key::Retained::time_valid);
                 }
                 count += 1;
             };

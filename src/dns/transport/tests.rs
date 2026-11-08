@@ -91,7 +91,11 @@ impl BoundedResponder {
             return Ok(());
         };
         self.cancel.requested.store(true, Ordering::Release);
-        let active = self.cancel.active.lock().unwrap_or_else(|e| e.into_inner());
+        let active = self
+            .cancel
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(stream) = active.as_ref() {
             let _ = stream.shutdown(Shutdown::Both);
         }
@@ -245,10 +249,6 @@ fn wait_script_duration(duration: Duration, cancel: Option<&ResponderCancellatio
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "test harness dispatches one arm per wire behaviour; the length-prefix probe arm keeps it over the heuristic line budget"
-)]
 pub(crate) fn spawn_responder(conn_scripts: Vec<Vec<Step>>) -> Responder {
     spawn_responder_impl(conn_scripts, None)
 }
@@ -328,48 +328,13 @@ fn spawn_responder_impl(
                     Step::Stall(d) => wait_script_duration(d, cancel.as_deref()),
                     Step::Close => break,
                     Step::Malformed(bytes) => {
-                        let mut lenb = [0u8; 2];
-                        if read_exact(&mut sock, &mut lenb).is_err() {
-                            break;
-                        }
-                        let qlen = usize::from(u16::from_be_bytes(lenb));
-                        let mut q = vec![0u8; qlen];
-                        if qlen == 0 || read_exact(&mut sock, &mut q).is_err() {
-                            break;
-                        }
-                        let mut out = Vec::with_capacity(bytes.len() + 2);
-                        out.extend_from_slice(
-                            &u16::try_from(bytes.len())
-                                .expect("reply fits u16 wire length")
-                                .to_be_bytes(),
-                        );
-                        out.extend_from_slice(&bytes);
-                        if sock.write_all(&out).is_err() {
+                        if !send_malformed(&mut sock, &bytes) {
                             break;
                         }
                     }
                     Step::LengthPrefixOnly { len } => {
-                        let mut lenb = [0u8; 2];
-                        if read_exact(&mut sock, &mut lenb).is_err() {
+                        if !probe_length_prefix(&mut sock, len, &closed_after_prefix_thread) {
                             break;
-                        }
-                        let qlen = usize::from(u16::from_be_bytes(lenb));
-                        let mut q = vec![0u8; qlen];
-                        if qlen == 0 || read_exact(&mut sock, &mut q).is_err() {
-                            break;
-                        }
-                        // Write only the 2-byte length prefix, then probe: the
-                        // length-prefix guard must close the connection right
-                        // after the prefix, before any body read or parse. A
-                        // removed guard would instead keep the connection open
-                        // waiting for the never-sent body until the deadline.
-                        if sock.write_all(&len.to_be_bytes()).is_err() {
-                            break;
-                        }
-                        let _ = sock.set_read_timeout(Some(Duration::from_millis(400)));
-                        let mut probe = [0u8; 1];
-                        if matches!(sock.read(&mut probe), Ok(0)) {
-                            closed_after_prefix_thread.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     Step::FragmentedPositive {
@@ -378,52 +343,13 @@ fn spawn_responder_impl(
                         chunk,
                         gap,
                     } => {
-                        let Some(q) = read_query(&mut sock) else {
+                        if !send_fragmented(&mut sock, ttl, octets, chunk, gap, cancel.as_deref()) {
                             break;
-                        };
-                        let msg = positive_a_message(&q, ttl, octets);
-                        let mut out = Vec::with_capacity(msg.len() + 2);
-                        out.extend_from_slice(
-                            &u16::try_from(msg.len())
-                                .expect("reply fits u16 wire length")
-                                .to_be_bytes(),
-                        );
-                        out.extend_from_slice(&msg);
-                        let mut at = 0;
-                        while at < out.len() {
-                            let take = (out.len() - at).min(chunk.max(1));
-                            if sock.write_all(&out[at..at + take]).is_err() {
-                                break;
-                            }
-                            at += take;
-                            if at < out.len() {
-                                wait_script_duration(gap, cancel.as_deref());
-                            }
                         }
                     }
                     step => {
-                        let Some(q) = read_query(&mut sock) else {
+                        if !send_scripted_reply(&mut sock, &step) {
                             break;
-                        };
-                        let reply = respond_for(&q, &step);
-                        if let Some(mut bytes) = reply {
-                            if matches!(step, Step::PositiveAMismatchedTid { .. }) {
-                                let mismatched =
-                                    u16::from_be_bytes([bytes[0], bytes[1]]).wrapping_add(1);
-                                bytes[0] = (mismatched >> 8) as u8;
-                                bytes[1] =
-                                    u8::try_from(mismatched & 0xff).expect("dns tid low byte");
-                            }
-                            let mut out = Vec::with_capacity(bytes.len() + 2);
-                            out.extend_from_slice(
-                                &u16::try_from(bytes.len())
-                                    .expect("reply fits u16 wire length")
-                                    .to_be_bytes(),
-                            );
-                            out.extend_from_slice(&bytes);
-                            if sock.write_all(&out).is_err() {
-                                break;
-                            }
                         }
                     }
                 }
@@ -439,6 +365,93 @@ fn spawn_responder_impl(
         connections,
         closed_after_prefix,
     }
+}
+
+fn send_scripted_reply(sock: &mut TcpStream, step: &Step) -> bool {
+    let Some(q) = read_query(sock) else {
+        return false;
+    };
+    let reply = respond_for(&q, step);
+    if let Some(mut bytes) = reply {
+        if matches!(step, Step::PositiveAMismatchedTid { .. }) {
+            let mismatched = u16::from_be_bytes([bytes[0], bytes[1]]).wrapping_add(1);
+            bytes[0] = (mismatched >> 8) as u8;
+            bytes[1] = u8::try_from(mismatched & 0xff).expect("dns tid low byte");
+        }
+        let mut out = Vec::with_capacity(bytes.len() + 2);
+        out.extend_from_slice(
+            &u16::try_from(bytes.len())
+                .expect("reply fits u16 wire length")
+                .to_be_bytes(),
+        );
+        out.extend_from_slice(&bytes);
+        if sock.write_all(&out).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+fn send_malformed(sock: &mut TcpStream, bytes: &[u8]) -> bool {
+    let Some(_query) = read_query(sock) else {
+        return false;
+    };
+    let mut out = Vec::with_capacity(bytes.len() + 2);
+    out.extend_from_slice(
+        &u16::try_from(bytes.len())
+            .expect("reply fits u16 wire length")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(bytes);
+    sock.write_all(&out).is_ok()
+}
+
+fn probe_length_prefix(sock: &mut TcpStream, len: u16, closed: &AtomicUsize) -> bool {
+    let Some(_query) = read_query(sock) else {
+        return false;
+    };
+    if sock.write_all(&len.to_be_bytes()).is_err() {
+        return false;
+    }
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(400)));
+    let mut probe = [0u8; 1];
+    if matches!(sock.read(&mut probe), Ok(0)) {
+        closed.fetch_add(1, Ordering::Relaxed);
+    }
+    true
+}
+
+fn send_fragmented(
+    sock: &mut TcpStream,
+    ttl: u32,
+    octets: [u8; 4],
+    chunk: usize,
+    gap: Duration,
+    cancel: Option<&ResponderCancellation>,
+) -> bool {
+    let Some(q) = read_query(sock) else {
+        return false;
+    };
+    let msg = positive_a_message(&q, ttl, octets);
+    let mut out = Vec::with_capacity(msg.len() + 2);
+    out.extend_from_slice(
+        &u16::try_from(msg.len())
+            .expect("reply fits u16 wire length")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(&msg);
+    let mut at = 0;
+    while at < out.len() {
+        let take = (out.len() - at).min(chunk.max(1));
+        if sock.write_all(&out[at..at + take]).is_err() {
+            break;
+        }
+        at += take;
+        if at < out.len() {
+            wait_script_duration(gap, cancel);
+        }
+    }
+    true
 }
 
 fn read_query(sock: &mut TcpStream) -> Option<Vec<u8>> {

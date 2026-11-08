@@ -151,14 +151,20 @@ fn actual_attach_registration_failure_on_main(config: &alumina::config::Config) 
             .register(&mut listener, mio::Token(9000), mio::Interest::READABLE)
             .map_err(ServeError::from)
     });
-    assert!(format!("{:?}", control.unwrap_err()).contains("AlreadyExists"));
+    assert!(
+        format!("{:?}", control.unwrap_err()).contains("AlreadyExists"),
+        "control registration must fail because it is already registered"
+    );
     let (result, counts) = run_phase(Phase::Serving, || owner.attach(listener));
     let error = match &result {
         Err(RuntimeBuildError::Attach(error)) => error,
         Err(error) => panic!("unexpected failure: {error:?}"),
         Ok(_) => panic!("duplicate registration unexpectedly succeeded"),
     };
-    assert!(format!("{error:?}").contains("AlreadyExists"));
+    assert!(
+        format!("{error:?}").contains("AlreadyExists"),
+        "attachment must preserve the duplicate-registration failure"
+    );
     assert_eq!(
         counts, baseline,
         "attachment added heap activity beyond the same Mio failure"

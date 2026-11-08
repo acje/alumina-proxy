@@ -44,16 +44,26 @@ fn trusted(receipt: u64, ttl: u32) -> Evidence {
     .unwrap()
 }
 
+#[derive(Clone, Copy)]
+struct PublicationTiming {
+    receipt: u64,
+    ttl: u32,
+}
+
+const fn timing(receipt: u64, ttl: u32) -> PublicationTiming {
+    PublicationTiming { receipt, ttl }
+}
+
 fn publish(
     cache: &mut Cache,
     name: NameIndex,
     family: Family,
     generation: Generation,
     addrs: &[NumericAddr],
-    receipt: u64,
-    ttl: u32,
+    timing: PublicationTiming,
     evidence: Option<Evidence>,
 ) {
+    let PublicationTiming { receipt, ttl } = timing;
     let staged = StagedPositive::stage_with_evidence(
         name,
         family,
@@ -94,8 +104,7 @@ fn reestablish_valid_proof_after_strong_loss_before_address() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let mut marker = EntryGradeMarker::new(a_key(&cache, 1100));
@@ -111,8 +120,7 @@ fn reestablish_valid_proof_after_strong_loss_before_address() {
         Family::A,
         generation,
         &[],
-        1200,
-        600,
+        timing(1200, 600),
         Some(delegated(1200, 600)),
     );
     let proof_only = a_key(&cache, 1201);
@@ -139,8 +147,7 @@ fn reestablish_valid_proof_after_strong_loss_before_address() {
         Family::A,
         generation,
         &[],
-        1300,
-        600,
+        timing(1300, 600),
         Some(delegated(1300, 600)),
     );
     assert!(
@@ -154,8 +161,7 @@ fn reestablish_valid_proof_after_strong_loss_before_address() {
         Family::A,
         generation,
         &[pub_addr()],
-        1400,
-        600,
+        timing(1400, 600),
         Some(delegated(1400, 600)),
     );
     assert!(
@@ -186,8 +192,7 @@ fn reestablish_valid_proof_from_unresolved_aaaa_before_address() {
         Family::Aaaa,
         Generation::INITIAL,
         &[],
-        1100,
-        600,
+        timing(1100, 600),
         Some(evidence(1100)),
     );
     let proof_only = a_key(&cache, 1101);
@@ -214,8 +219,7 @@ fn reestablish_valid_proof_from_unresolved_aaaa_before_address() {
         Family::Aaaa,
         generation,
         &[],
-        1200,
-        600,
+        timing(1200, 600),
         Some(evidence(1200)),
     );
     assert!(
@@ -229,8 +233,7 @@ fn reestablish_valid_proof_from_unresolved_aaaa_before_address() {
         Family::Aaaa,
         generation,
         &[pub_v6()],
-        1300,
-        600,
+        timing(1300, 600),
         Some(evidence(1300)),
     );
     assert!(
@@ -249,8 +252,7 @@ fn material_retention_gap_grade_change_after_address_loss() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let mut marker = EntryGradeMarker::new(a_key(&cache, 1100));
@@ -261,8 +263,7 @@ fn material_retention_gap_grade_change_after_address_loss() {
         Family::A,
         generation,
         &[],
-        1200,
-        600,
+        timing(1200, 600),
         Some(delegated(1200, 600)),
     );
     assert!(
@@ -276,8 +277,7 @@ fn material_retention_gap_grade_change_after_address_loss() {
         Family::A,
         generation,
         &[pub_addr()],
-        1300,
-        600,
+        timing(1300, 600),
         Some(trusted(1300, 600)),
     );
     let downgraded = a_key(&cache, 1301);
@@ -302,8 +302,7 @@ fn material_retention_gap_validity_loss_after_proof_disappearance() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(trusted(1000, 600)),
     );
     let mut marker = EntryGradeMarker::new(a_key(&cache, 1100));
@@ -314,8 +313,7 @@ fn material_retention_gap_validity_loss_after_proof_disappearance() {
         Family::A,
         generation,
         &[pub_addr()],
-        1100,
-        600,
+        timing(1100, 600),
         None,
     );
     assert!(
@@ -329,8 +327,7 @@ fn material_retention_gap_validity_loss_after_proof_disappearance() {
         Family::A,
         generation,
         &[pub_addr()],
-        1200,
-        0,
+        timing(1200, 0),
         Some(trusted(1200, 0)),
     );
     let invalid = a_key(&cache, 1200);
@@ -352,8 +349,7 @@ fn material_retention_gap_no_address_class_roundtrip_and_family_control() {
         Family::A,
         Generation::INITIAL,
         &[],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     publish(
@@ -362,8 +358,7 @@ fn material_retention_gap_no_address_class_roundtrip_and_family_control() {
         Family::Aaaa,
         Generation::INITIAL,
         &[],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let mut marker = EntryGradeMarker::new(a_key(&cache, 1100));
@@ -374,8 +369,7 @@ fn material_retention_gap_no_address_class_roundtrip_and_family_control() {
         Family::A,
         generation,
         &[],
-        1200,
-        600,
+        timing(1200, 600),
         Some(trusted(1200, 600)),
     );
     let weaker = a_key(&cache, 1201);
@@ -392,8 +386,7 @@ fn material_retention_gap_no_address_class_roundtrip_and_family_control() {
         Family::A,
         generation,
         &[],
-        1300,
-        600,
+        timing(1300, 600),
         Some(delegated(1300, 600)),
     );
     let stronger = a_key(&cache, 1301);
@@ -410,8 +403,7 @@ fn material_retention_gap_no_address_class_roundtrip_and_family_control() {
             Family::A,
             generation,
             &[],
-            receipt,
-            600,
+            timing(receipt, 600),
             Some(delegated(receipt, 600)),
         );
         assert!(
@@ -426,8 +418,7 @@ fn material_retention_gap_no_address_class_roundtrip_and_family_control() {
         Family::Aaaa,
         generation,
         &[],
-        1600,
-        600,
+        timing(1600, 600),
         Some(delegated(1600, 600)),
     );
     assert!(
@@ -446,8 +437,7 @@ fn material_retention_gap_initial_empty_strong_grade_is_remembered() {
         Family::A,
         Generation::INITIAL,
         &[],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let mut marker = EntryGradeMarker::new(a_key(&cache, 1100));
@@ -458,8 +448,7 @@ fn material_retention_gap_initial_empty_strong_grade_is_remembered() {
         Family::A,
         generation,
         &[],
-        1200,
-        600,
+        timing(1200, 600),
         Some(trusted(1200, 600)),
     );
     assert!(
@@ -478,8 +467,7 @@ fn invalid_retained_class_churn_does_not_invent_current_assurance() {
         Family::A,
         Generation::INITIAL,
         &[],
-        1000,
-        0,
+        timing(1000, 0),
         Some(trusted(1000, 0)),
     );
     let initial = a_key(&cache, 1000);
@@ -492,8 +480,7 @@ fn invalid_retained_class_churn_does_not_invent_current_assurance() {
         Family::A,
         generation,
         &[],
-        1100,
-        0,
+        timing(1100, 0),
         Some(delegated(1100, 0)),
     );
     let changed_historical = a_key(&cache, 1100);
@@ -514,8 +501,7 @@ fn invalid_retained_class_churn_with_trusted_fallback_is_silent() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let expired = a_key(&cache, 1600);
@@ -528,8 +514,7 @@ fn invalid_retained_class_churn_with_trusted_fallback_is_silent() {
         Family::A,
         generation,
         &[pub_addr()],
-        1700,
-        0,
+        timing(1700, 0),
         Some(trusted(1700, 0)),
     );
     let first = a_key(&cache, 1700);
@@ -542,8 +527,7 @@ fn invalid_retained_class_churn_with_trusted_fallback_is_silent() {
         Family::A,
         generation,
         &[pub_addr()],
-        1800,
-        0,
+        timing(1800, 0),
         Some(delegated(1800, 0)),
     );
     let second = a_key(&cache, 1800);
@@ -564,8 +548,7 @@ fn expired_empty_strong_proof_does_not_make_later_availability_a_downgrade() {
         Family::A,
         Generation::INITIAL,
         &[],
-        1000,
-        2,
+        timing(1000, 2),
         Some(delegated(1000, 2)),
     );
     let mut marker = EntryGradeMarker::new(a_key(&cache, 1001));
@@ -583,8 +566,7 @@ fn expired_empty_strong_proof_does_not_make_later_availability_a_downgrade() {
         Family::A,
         generation,
         &[pub_addr()],
-        1003,
-        0,
+        timing(1003, 0),
         Some(delegated(1003, 0)),
     );
     let available = a_key(&cache, 1003);
@@ -605,8 +587,7 @@ fn h2_same_grade_nodata_and_nx_are_silent() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let before = a_key(&cache, 1100);
@@ -647,8 +628,7 @@ fn m1_trusted_retained_proof_expiry_is_material_once() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(trusted(1000, 600)),
     );
     let in_window = a_key(&cache, 1100);
@@ -672,8 +652,7 @@ fn m1_trusted_retained_proof_expiry_is_material_once() {
         Family::A,
         generation,
         &[pub_addr()],
-        1700,
-        600,
+        timing(1700, 600),
         Some(trusted(1700, 600)),
     );
     let recovered = a_key(&cache, 1701);
@@ -698,8 +677,7 @@ fn strong_expiry_downgrade_and_recovery_change_key() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let fresh = a_key(&cache, 1100);
@@ -718,8 +696,7 @@ fn strong_expiry_downgrade_and_recovery_change_key() {
         Family::A,
         generation,
         &[v4([8, 8, 8, 8])],
-        4000,
-        600,
+        timing(4000, 600),
         Some(delegated(4000, 600)),
     );
     let recovered = a_key(&cache, 4100);
@@ -743,8 +720,7 @@ fn establishment_loss_and_negative_expiry_are_honest() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let established = a_key(&cache, 1100);
@@ -783,8 +759,7 @@ fn strong_grade_loss_is_material_but_same_proof_availability_is_silent() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let available = a_key(&cache, 1100);
@@ -796,8 +771,7 @@ fn strong_grade_loss_is_material_but_same_proof_availability_is_silent() {
         Family::A,
         generation,
         &[],
-        1200,
-        600,
+        timing(1200, 600),
         Some(delegated(1200, 600)),
     );
     let no_address = a_key(&cache, 1201);
@@ -814,8 +788,7 @@ fn strong_grade_loss_is_material_but_same_proof_availability_is_silent() {
         Family::A,
         generation,
         &[pub_addr()],
-        1300,
-        600,
+        timing(1300, 600),
         Some(delegated(1300, 600)),
     );
     let restored = a_key(&cache, 1301);
@@ -839,8 +812,7 @@ fn strong_grade_loss_is_material_but_same_proof_availability_is_silent() {
         Family::A,
         generation,
         &[pub_addr()],
-        1400,
-        600,
+        timing(1400, 600),
         Some(delegated(1400, 600)),
     );
     let recovered = a_key(&cache, 1401);
@@ -861,8 +833,7 @@ fn presence_address_and_source_churn_do_not_fabricate_events() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(trusted(1000, 600)),
     );
     let valid = a_key(&cache, 1100);
@@ -882,8 +853,7 @@ fn presence_address_and_source_churn_do_not_fabricate_events() {
         Family::A,
         generation,
         &[pub_addr()],
-        1101,
-        600,
+        timing(1101, 600),
         Some(relocated),
     );
     let same_grade = a_key(&cache, 1102);
@@ -899,8 +869,7 @@ fn presence_address_and_source_churn_do_not_fabricate_events() {
         Family::A,
         generation,
         &[v4([8, 8, 8, 8])],
-        1200,
-        600,
+        timing(1200, 600),
         None,
     );
     let absent = a_key(&cache, 1201);
@@ -921,8 +890,7 @@ fn presence_address_and_source_churn_do_not_fabricate_events() {
         Family::A,
         generation,
         &[pub_addr()],
-        1300,
-        600,
+        timing(1300, 600),
         Some(trusted(1300, 600)),
     );
     let restored = a_key(&cache, 1301);
@@ -937,18 +905,26 @@ fn presence_address_and_source_churn_do_not_fabricate_events() {
         "a retained proof really expired"
     );
     assert!(marker.observe(expired));
+    assert_recovery_after_expired_absence(&mut cache, name, &mut marker, expired);
+}
+
+fn assert_recovery_after_expired_absence(
+    cache: &mut Cache,
+    name: NameIndex,
+    marker: &mut EntryGradeMarker,
+    expired: EntryGradeKey,
+) {
     let generation = cache.entry(name, Family::A).unwrap().generation();
     publish(
-        &mut cache,
+        cache,
         name,
         Family::A,
         generation,
         &[pub_addr()],
-        1901,
-        600,
+        timing(1901, 600),
         None,
     );
-    let expired_then_absent = a_key(&cache, 1902);
+    let expired_then_absent = a_key(cache, 1902);
     assert!(
         !material(expired, expired_then_absent),
         "expired proof disappearing is not a fabricated recovery"
@@ -956,16 +932,15 @@ fn presence_address_and_source_churn_do_not_fabricate_events() {
     assert!(!marker.observe(expired_then_absent));
     let generation = cache.entry(name, Family::A).unwrap().generation();
     publish(
-        &mut cache,
+        cache,
         name,
         Family::A,
         generation,
         &[pub_addr()],
-        2000,
-        600,
+        timing(2000, 600),
         Some(trusted(2000, 600)),
     );
-    let recovered = a_key(&cache, 2001);
+    let recovered = a_key(cache, 2001);
     assert!(
         marker.observe(recovered),
         "new valid proof after an absent interval is a real recovery"
@@ -983,8 +958,7 @@ fn expired_positive_availability_loss_does_not_repeat_expiry() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(trusted(1000, 600)),
     );
     let expired = a_key(&cache, 1600);
@@ -1007,8 +981,7 @@ fn family_expiry_and_recovery_are_independent() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(trusted(1000, 600)),
     );
     publish(
@@ -1017,8 +990,7 @@ fn family_expiry_and_recovery_are_independent() {
         Family::Aaaa,
         Generation::INITIAL,
         &[pub_v6()],
-        1000,
-        60,
+        timing(1000, 60),
         Some(trusted(1000, 60)),
     );
     let both_valid = a_key(&cache, 1059);
@@ -1039,8 +1011,7 @@ fn family_expiry_and_recovery_are_independent() {
         Family::Aaaa,
         generation,
         &[pub_v6()],
-        1100,
-        60,
+        timing(1100, 60),
         Some(trusted(1100, 60)),
     );
     assert!(material(v6_expired, a_key(&cache, 1101)));
@@ -1059,8 +1030,7 @@ fn fixed_observation_keys_and_material_comparison_spend_zero_allocations() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(trusted(1000, 600)),
     );
     let (result, counts) = run_phase(Phase::Logging, || {
@@ -1096,8 +1066,7 @@ fn distinct_families_are_independently_addressable() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let a_only = a_key(&cache, 1100);
@@ -1114,8 +1083,7 @@ fn distinct_families_are_independently_addressable() {
         Family::Aaaa,
         Generation::INITIAL,
         &[v6],
-        2000,
-        600,
+        timing(2000, 600),
         Some(delegated(2000, 600)),
     );
     let both = a_key(&cache, 2100);
@@ -1151,8 +1119,7 @@ fn retained_expiry_is_stored_not_absent() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let fresh = cache
@@ -1204,8 +1171,7 @@ fn family_snapshot_distinguishes_current_retained_usable() {
         Family::A,
         Generation::INITIAL,
         &[pub_addr()],
-        1000,
-        600,
+        timing(1000, 600),
         Some(delegated(1000, 600)),
     );
     let fresh = cache.family_snapshot(name, Family::A, 1100).unwrap();
@@ -1284,8 +1250,7 @@ fn nx_republished_sibling_is_time_valid_but_not_current() {
         Family::Aaaa,
         sibling_generation,
         &[pub_v6()],
-        1200,
-        600,
+        timing(1200, 600),
         Some(delegated(1200, 600)),
     );
     let side = cache.family_snapshot(name, Family::A, 1300).unwrap();
