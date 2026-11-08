@@ -807,13 +807,8 @@ impl ServeStorage {
             let Some(name_index) = self.cache.name_index(ordinal) else {
                 continue;
             };
-            let has_eligible = usable_name(&self.cache, name_index, secs).unwrap_or(false);
-            if let Some(event) = self
-                .incident_report
-                .note_eligible_state(ordinal, has_eligible)
-            {
-                self.emit_eligible(ordinal, secs, event);
-            }
+            let result = usable_name(&self.cache, name_index, secs);
+            self.reconcile_incident_eligibility(ordinal, secs, result);
         }
         for ordinal in 0..name_count {
             let both_closed = Family::ALL.iter().all(|&family| {
@@ -832,6 +827,30 @@ impl ServeStorage {
             {
                 self.emit_incident_summary(ordinal, closed, Level::Info);
             }
+        }
+    }
+
+    fn reconcile_incident_eligibility(
+        &mut self,
+        ordinal: usize,
+        secs: u64,
+        result: Result<bool, CacheError>,
+    ) {
+        match result {
+            Ok(has_eligible) => {
+                if let Some(event) = self
+                    .incident_report
+                    .note_eligible_state(ordinal, has_eligible)
+                {
+                    self.emit_eligible(ordinal, secs, event);
+                }
+            }
+            Err(error) => self.logs.dns_assurance_fault(
+                secs,
+                ordinal,
+                "incident",
+                AssuranceObservationError::Cache(error).as_str(),
+            ),
         }
     }
 

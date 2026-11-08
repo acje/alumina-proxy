@@ -1857,13 +1857,13 @@ bounded queue, displacement, stranded-record and sink rules still apply.
 An observation that cannot obtain or validate its owner-bound cache or clock
 facts does not become an unchanged result or change the publication decision.
 It attempts an error-level `dns_assurance_fault` record with `secs`, entry
-`ordinal`, `phase` (`before`, `after` or `expiry`) and a closed `reason` token:
+`ordinal`, `phase` (`before`, `after`, `expiry` or `incident`) and a closed `reason` token:
 `name_out_of_range`, `binding_capacity`, `family_mismatch`,
 `generation_exhausted`, `stale_generation`, `deadline_overflow`,
 `evidence_inconsistent`, `insufficient_assurance`, `unseeded`,
 `before_startup`, `clock_regressed` or `clock_mismatch`. This auxiliary fault
 attempt has no assurance sequence and follows the existing whole-record drop
-accounting. On the current route a successful schedule preparation validates
+accounting. A `CacheError` returned by an incident eligible-binding lookup is unknown: it leaves the previous eligible state and incident counters unchanged, and attempts one `phase=incident` fault per affected name per reporting pass without retry. Independent window rotation is unchanged; the fault does not change admission, retry scheduling, established tunnels or serving. On the current route a successful schedule preparation validates
 the fixed index and the later incident clear has no reachable schedule error.
 
 After startup has seeded an entry's observation state, the serving owner also

@@ -86,6 +86,127 @@ fn publish_aaaa(cache: &mut Cache, ordinal: usize, receipt: u64, ttl: u64) {
         .expect("publish AAAA binding");
 }
 
+fn seed_eligibility_incident(report: &mut crate::dns::incident_report::IncidentReport) {
+    report.note_incident_open(0, FRESH, [None, None]);
+    report.note_exchange_attempt(0, Family::A, FRESH);
+    report.note_exchange_failure(0, Family::A, FRESH, "timeout", None);
+    report.note_positive(0, Family::A, FRESH);
+    report.note_tunnel_bytes(0, 0, 7, 42, FRESH);
+    report.note_stale_admission(0, FRESH);
+    assert_eq!(report.note_eligible_state(0, true), None);
+}
+
+#[test]
+fn foreign_cache_lookup_error_is_unknown_without_fabricated_loss() {
+    with_boot_stack(|| {
+        let mut storage = booted(1, 0);
+        publish_a(&mut storage.cache, 0, FRESH, TTL);
+        seed_eligibility_incident(&mut storage.incident_report);
+        let mut mirror = crate::dns::incident_report::IncidentReport::new();
+        seed_eligibility_incident(&mut mirror);
+
+        let foreign = Cache::new(2).unwrap().name_index(1).unwrap();
+        let unknown = usable_name(&storage.cache, foreign, FRESH);
+        assert_eq!(unknown, Err(CacheError::NameOutOfRange));
+        let before = storage.logs.len();
+        storage.reconcile_incident_eligibility(0, FRESH, unknown);
+        assert_eq!(storage.logs.len(), before + 1);
+        let fault = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(fault.contains("kind=dns_assurance_fault"), "{fault}");
+        assert!(fault.contains("phase=\"incident\""), "{fault}");
+        assert!(fault.contains("reason=\"name_out_of_range\""), "{fault}");
+        assert_eq!(storage.incident_report.note_eligible_state(0, true), None);
+        storage.incident_report.note_tunnel_bytes(0, 0, 7, 5, FRESH);
+        mirror.note_tunnel_bytes(0, 0, 7, 5, FRESH);
+        assert_eq!(
+            storage.incident_report.close_window(0, FRESH + 1),
+            mirror.close_window(0, FRESH + 1)
+        );
+
+        let empty = Cache::new(1).unwrap();
+        let unavailable = usable_name(&empty, idx(&empty, 0), FRESH);
+        assert_eq!(unavailable, Ok(false));
+        storage.reconcile_incident_eligibility(0, FRESH + 1, unavailable);
+        assert_eq!(storage.logs.len(), before + 2);
+        let lost = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(lost.contains("kind=incident_eligible_loss"), "{lost}");
+        let available = usable_name(&storage.cache, idx(&storage.cache, 0), FRESH);
+        assert_eq!(available, Ok(true));
+        storage.reconcile_incident_eligibility(0, FRESH + 2, available);
+        assert_eq!(storage.logs.len(), before + 3);
+        let recovered = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(
+            recovered.contains("kind=incident_eligible_recovered"),
+            "{recovered}"
+        );
+    });
+}
+
+#[test]
+fn incident_eligibility_fault_full_ring_drops_once_without_retry_or_loss() {
+    with_boot_stack(|| {
+        let mut storage = booted(1, 0);
+        seed_eligibility_incident(&mut storage.incident_report);
+        let foreign = Cache::new(2).unwrap().name_index(1).unwrap();
+        let unknown = usable_name(&storage.cache, foreign, FRESH);
+        assert_eq!(unknown, Err(CacheError::NameOutOfRange));
+        for _ in 0..crate::log::QUEUE_SLOTS {
+            storage.logs.startup_warning_ctx(
+                FRESH,
+                "alpha.example.org",
+                Family::A,
+                "timeout",
+                None,
+            );
+        }
+        assert!(storage.logs.is_full());
+        let dropped = storage.logs.dropped();
+        storage.reconcile_incident_eligibility(0, FRESH, unknown);
+        assert_eq!(storage.logs.dropped(), dropped + 1);
+        assert_eq!(storage.logs.len(), crate::log::QUEUE_SLOTS);
+        storage.reconcile_incident_eligibility(0, FRESH + 1, Ok(true));
+        assert_eq!(
+            storage.logs.dropped(),
+            dropped + 1,
+            "no retry or false transition"
+        );
+        assert_eq!(
+            storage.incident_report.note_eligible_state(0, false),
+            Some(EligibleTransition::Lost)
+        );
+    });
+}
+
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn incident_eligibility_error_loss_and_recovery_spend_zero_allocations() {
+    with_boot_stack(|| {
+        use crate::alloc::{Phase, run_phase};
+        let mut storage = booted(1, 0);
+        publish_a(&mut storage.cache, 0, FRESH, TTL);
+        seed_eligibility_incident(&mut storage.incident_report);
+        let foreign = Cache::new(2).unwrap().name_index(1).unwrap();
+        let empty = Cache::new(1).unwrap();
+        let empty_name = idx(&empty, 0);
+        let owner_name = idx(&storage.cache, 0);
+        let ((), counts) = run_phase(Phase::Serving, || {
+            let unknown = usable_name(&storage.cache, foreign, FRESH);
+            storage.reconcile_incident_eligibility(0, FRESH, unknown);
+            let unavailable = usable_name(&empty, empty_name, FRESH);
+            storage.reconcile_incident_eligibility(0, FRESH + 1, unavailable);
+            let available = usable_name(&storage.cache, owner_name, FRESH);
+            storage.reconcile_incident_eligibility(0, FRESH + 2, available);
+        });
+        assert!(
+            counts.all_zero(),
+            "incident fault and transitions allocated: {counts:?}"
+        );
+        assert_eq!(storage.logs.len(), 3);
+        let last = std::str::from_utf8(storage.logs.last_record_bytes().unwrap()).unwrap();
+        assert!(last.contains("kind=incident_eligible_recovered"), "{last}");
+    });
+}
+
 #[test]
 fn empty_cache_names_are_unresolved() {
     let cache = Cache::new(1).unwrap();

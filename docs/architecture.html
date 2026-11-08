@@ -185,7 +185,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     <li><strong>Listener conditionality.</strong> The listener is opened only
     when the startup window’s canonical readiness rule holds — the unresolved
     count must be at most the configured allowance, otherwise the process exits
-    with status 75 (<code>src/runtime/storage.rs:263-273</code>, <code>:1408-1425</code>, <code>:1493-1507</code>,
+    with status 75 (<code>src/runtime/storage.rs:263-273</code>, <code>:1427-1444</code>, <code>:1512-1526</code>,
     <code>StartupDecision::{Serve,Exit75,Terminated}</code>). A first observed
     SIGTERM short-circuits the window and never binds.</li>
     <li><strong>Egress only.</strong> Upstream tunnels carry approved hostname
@@ -505,7 +505,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime/owner.rs:221-248</code>, <code>:264-275</code>, <code>:287-295</code>, <code>:344-379</code>, <code>:358</code>, <code>:398-411</code>, <code>:456-472</code></td></tr>
       <tr><th scope="row"><code>runtime/storage</code></th>
         <td>Readiness decision (Serve/Exit75/Terminated); <code>run_startup_within</code>; clock anchor and <code>mount_clock</code> re-anchor seam; serving refresh admission/start and pure refresh-wake projection; per-turn incident pass.</td>
-        <td><code>src/runtime/storage.rs:263-273</code>, <code>:1408-1425</code>, <code>:1459-1478</code>, <code>:553-578</code>, <code>:784-839</code>, <code>:1147-1224</code></td></tr>
+        <td><code>src/runtime/storage.rs:263-273</code>, <code>:1427-1444</code>, <code>:1478-1497</code>, <code>:553-578</code>, <code>:784-858</code>, <code>:1166-1243</code></td></tr>
       <tr><th scope="row"><code>runtime/reactor</code></th>
         <td>Slot table, <code>Stage</code> machine (10 stages), accept backoff, admission (503 on capacity), refusal bodies, run_once reactor turn, reset.</td>
         <td><code>src/runtime/reactor.rs:88-99</code>, <code>:202-203</code>, <code>:341-352</code>, <code>:779-807</code>, <code>:1319</code>, <code>:1321-1406</code></td></tr>
@@ -1307,7 +1307,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   ordinal. This pairing is established at those call sites and checked there,
   not guaranteed by the capture helper's argument types
   (<code>src/runtime/storage.rs:153-163</code>, <code>:201-224</code>,
-  <code>:396-401</code>, <code>:891-924</code>). The later queue
+  <code>:396-401</code>, <code>:910-943</code>). The later queue
   encoder reads that value rather than the cache or clock; an invalid ordinal
   returns a cache error before enqueue, and a delayed record does not rewind
   the queue's current second. Both startup drivers invoke the shared settlement;
@@ -1320,14 +1320,14 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   the startup status, each family's attempted bit and last conclusion separately
   from the cached family facts; a capture error is reported as an unknown cache
   snapshot without altering the decision. Termination does not emit boot frames.
-  (<code>src/runtime/storage.rs:82-115</code>, <code>:386-423</code>, <code>:1486-1545</code>;
+  (<code>src/runtime/storage.rs:82-115</code>, <code>:386-423</code>, <code>:1505-1564</code>;
   <code>src/dns/transport.rs:2937-2939</code>, <code>src/runtime/reactor/startup.rs:200-205</code>;
   <code>src/log/queue.rs:148-166</code>, <code>src/log/encoding.rs:318-410</code>;
   spec <code>docs/alumina-proxy.md:1814-1831</code>;
   <code>src/config/mod.rs:22-25</code>, <code>src/names/hostname.rs:7-11</code>).
   The snapshot size is checked against an existing record slot and a widest-name
   capture-and-enqueue witness checks allocation in the logging phase
-  (<code>src/runtime/storage.rs:2800-2809</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
+  (<code>src/runtime/storage.rs:2819-2828</code>, <code>src/log/tests.rs:1240-1263</code>).</p>
   <p>The storage owner has 32 fixed optional assurance states. Successful boot
   capture seeds each marker and sequence zero before its enqueue attempt; a
   failed capture leaves that slot unseeded. The owner observation view
@@ -1342,7 +1342,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   cache-error outcomes remain distinct. Serving publications and the regular
   expiry fold use this view
   (<code>src/runtime/storage.rs:59-115</code>, <code>:143-224</code>,
-  <code>:506-529</code>, <code>:891-924</code>, <code>:1486-1545</code>).</p>
+  <code>:506-529</code>, <code>:910-943</code>, <code>:1505-1564</code>).</p>
   <p>The cache also exposes a per-entry grade key containing the required
   minimum, each family's current grade and its retained proof's optional class
   and time validity as separate facts. Its fixed-size marker retains last known
@@ -1379,7 +1379,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   epoch, so its epoch subtraction is defined. The comparisons against the
   monotonic clock and the platform <code>Instant</code> addition remain checked
   branches (<code>src/runtime/storage.rs:349-355</code>, <code>:434-494</code>,
-  <code>:1512-1529</code>; <code>src/dns/cache.rs:445-466</code>, <code>:940-960</code>).</p>
+  <code>:1531-1548</code>; <code>src/dns/cache.rs:445-466</code>, <code>:940-960</code>).</p>
   <p>Focused host tests exercise idle positive, negative and independent-family
   expiry, a full-ring drop, a waiting DNS exchange, and an earlier real client
   setup deadline. A separate primed relay fixture retains both loopback sockets
@@ -1389,7 +1389,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   performing a live resolver TLS handshake
   (<code>src/runtime/reactor/tests.rs:8943</code>, <code>:9122</code>,
   <code>:9202</code>, <code>:9278</code>, <code>:9402</code>, <code>:9563</code>;
-  <code>src/runtime/storage.rs:3458</code>).</p>
+  <code>src/runtime/storage.rs:3477</code>).</p>
   <p>Each of at most 16 interrupted-poll attempts scans at most 32 entries and
   64 candidate deadlines. Each candidate preview uses the same marker decision
   and its bounded cache projections. One post-poll fold considers at most 32
@@ -1415,7 +1415,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   result; it carries the second, ordinal, before/after phase and closed reason,
   without an assurance sequence. Queue loss remains counted. Startup and probe exchanges do not invoke
   the serving observer (<code>src/dns/transport.rs:2511-2564</code>, <code>:3050-3074</code>, <code>:3116-3135</code>;
-  <code>src/runtime/storage.rs:124-224</code>, <code>:891-924</code>;
+  <code>src/runtime/storage.rs:124-224</code>, <code>:910-943</code>;
   <code>src/log/mod.rs:244-291</code>, <code>:614-631</code>;
   <code>src/dns/publication.rs:27-30</code>, <code>:70-113</code>,
   <code>:130-141</code>, <code>:147-165</code>, <code>:172-189</code>;
@@ -1448,7 +1448,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   cfg(test) constructor: the public document parser still rejects port 0
   (<code>src/config/mod.rs:1179-1186</code>), so operator <code>listen</code> remains
   numeric 1..=65535 and the production bind is unchanged
-  (<code>src/runtime/storage.rs:1639-1646</code>). Startup still exercises the real window,
+  (<code>src/runtime/storage.rs:1658-1665</code>). Startup still exercises the real window,
   readiness, and normal post-readiness bind — the kernel owns the actual
   listener the bind returns, and the full-serve and kernel-assigned-listener
   controls assert and connect to that returned address
@@ -1506,15 +1506,15 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>start_exchange_impl</code> at <code>src/dns/transport.rs:2970-3009</code>). The retained-resolver
   refresh path requests a <code>Serving</code> exchange
   (<code>prepare_serving_dns_turn</code> at
-  <code>src/runtime/storage.rs:1712-1718</code>; <code>start_dns_exchange</code> in
-  <code>src/runtime/storage.rs:1147-1169</code>), and a cooperative startup window requests
+  <code>src/runtime/storage.rs:1731-1737</code>; <code>start_dns_exchange</code> in
+  <code>src/runtime/storage.rs:1166-1188</code>), and a cooperative startup window requests
   <code>Startup</code> (<code>src/runtime/reactor/startup.rs:129</code>). Per-turn
   cleanup cancels exactly the <code>Startup</code>-class retained work while
   serving exchanges stay outstanding:
   <code>cancel_retained_startup_exchange</code>
   (<code>src/dns/transport.rs:1626-1634</code>, driven from the storage-owned
   <code>prepare_serving_dns_turn</code> at
-  <code>src/runtime/storage.rs:1713</code>) is scoped to the startup class by the typed
+  <code>src/runtime/storage.rs:1732</code>) is scoped to the startup class by the typed
   lifecycle, so no servicing or probe exchange is ever cancelled as leftover
   startup work. Overlap fails closed: a second <code>start_exchange</code> while
   one is active returns <code>ExchangeActive</code> and leaves the outstanding
@@ -1571,7 +1571,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   raw AD/source/qualification values. The
   existing first-global <code>startup_warning</code> is produced by both
   startup-time paths (<code>src/dns/transport.rs:2901-2909</code>;
-  <code>src/runtime/storage.rs:1117-1134</code>) from the current cache
+  <code>src/runtime/storage.rs:1136-1153</code>) from the current cache
   <code>A</code>/<code>AAAA</code> flags (<code>negative_lease_flags</code>,
   <code>src/dns/cache.rs:752-762</code>): it emits the single global attempt with
   a current cache-owner reusable negative-lease family-set context —
@@ -1736,7 +1736,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   and none of that capture mutates any name, report, or probe metadata; the
   per-event <code>exchange_failed</code> actor is captured before the advance
   that settles it (<code>ServeStorage::advance_dns_serving</code>,
-  <code>src/runtime/storage.rs:956-966</code>), driven by the bounded
+  <code>src/runtime/storage.rs:975-985</code>), driven by the bounded
   <code>DNS_ADVANCE_BOUND</code> serve loop (<code>src/runtime/owner.rs:456-472</code>);
   the cooperative startup window calls <code>advance_dns</code> directly and
   never emits <code>exchange_failed</code>. The incident-open and
@@ -1747,7 +1747,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   places the resolver that actually served into <code>IncidentNote::Recovered</code>
   (<code>src/dns/transport.rs:2592-2604</code>; a recovery after failover reads
   <code>1</code> where the failure origin read <code>0</code>), and
-  <code>drain_incident_notes</code> (<code>src/runtime/storage.rs:1077-1112</code>) hands
+  <code>drain_incident_notes</code> (<code>src/runtime/storage.rs:1096-1131</code>) hands
   each carried actor straight to the <code>incident_open</code>/
   <code>incident_recovered</code> emitters. Only the per-family summary pairs
   <code>a_resolver</code>/<code>aaaa_resolver</code> beside each family
@@ -1758,7 +1758,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   per-family counters and <code>window_end</code> into summary fields and
   converts absolute freshness/retirement deadlines to remaining seconds against
   the single sample; <code>emit_incident_summary</code>
-  (<code>src/runtime/storage.rs:841-870</code>) supplies the <code>SummaryCache</code>
+  (<code>src/runtime/storage.rs:860-889</code>) supplies the <code>SummaryCache</code>
   live-cache facts (<code>src/dns/incident_report.rs:138-144</code>), never a live
   current-actor lookup at encoding;
   every record carries <code>resolver=0</code>… or explicit
@@ -1777,7 +1777,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   capture at <code>:504-532</code>), and the cooperative
   <code>Serving::run_startup_window</code> reaches the same record through
   <code>ServeStorage::startup_warning_first</code>
-  (<code>src/runtime/reactor/startup.rs:77-92</code>, <code>src/runtime/storage.rs:1117-1134</code>).
+  (<code>src/runtime/reactor/startup.rs:77-92</code>, <code>src/runtime/storage.rs:1136-1153</code>).
   The once-guard means <code>reason=</code> is populated only by an actually
   observed failure — never fabricated for an unattempted or successful exchange —
   while <code>startup_name</code> stays immutable and
@@ -1825,10 +1825,10 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>The refresh side of that schedule is owned by the same reactor turn: the
   non-shutdown branch of <code>turn</code> delegates the consolidated DNS
   lifecycle selection to storage via <code>prepare_serving_dns_turn</code>
-  (<code>src/runtime/owner.rs:358</code>, <code>src/runtime/storage.rs:1712-1718</code>):
+  (<code>src/runtime/owner.rs:358</code>, <code>src/runtime/storage.rs:1731-1737</code>):
   it cancels a retained startup exchange, advances the post-window probe sweep,
   steps the corroboration, then starts a due serving refresh
-  (<code>start_due_serving_refresh</code>, <code>src/runtime/storage.rs:1196-1224</code>).
+  (<code>start_due_serving_refresh</code>, <code>src/runtime/storage.rs:1215-1243</code>).
   The refresh step is a no-op
   while the probing sweep is active or an exchange is in flight; otherwise it
   reads the current whole second, selects a single due schedule
@@ -1837,7 +1837,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   propagates with the schedule table unchanged; once a token is selected a later
   start error propagates without rolling the selection back — the
   <code>active_exchange_family</code> marker is set before the fallible
-  transport start (<code>src/runtime/storage.rs:1163-1169</code>) and the
+  transport start (<code>src/runtime/storage.rs:1182-1188</code>) and the
   attempt report is recorded only on success.
   <p>A reply whose observations are the same obsolete negative for its family and
   whose apply fails with cache-generation staleness alone takes the Superseded
@@ -1902,7 +1902,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>src/dns/cache.rs:501-514</code>) snapshots the queried family's entry
   generation and the other family's together from the live cache before any
   network work, shared by the startup and serving exchange paths
-  (<code>src/dns/transport.rs:3162-3167</code>, <code>src/runtime/storage.rs:1159-1163</code>). The crate-private
+  (<code>src/dns/transport.rs:3162-3167</code>, <code>src/runtime/storage.rs:1178-1182</code>). The crate-private
   production route re-checks that pair before mutating:
   <code>reject_obsolete_generation</code> (<code>src/dns/publication.rs:217-277</code>,
   invoked at <code>:109</code>) refuses with <code>StaleGeneration</code> when an
@@ -2526,9 +2526,9 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     log store owns stdout there is no fallback channel
     (<code>src/log/sink.rs:16-31</code>). The latch is sticky state: no later
     drain consumes or clears it, so a non-owner drain — the startup-window
-    drains (<code>src/runtime/storage.rs:1628-1634</code>, <code>src/runtime/reactor/startup.rs:166</code>,
+    drains (<code>src/runtime/storage.rs:1647-1653</code>, <code>src/runtime/reactor/startup.rs:166</code>,
     <code>src/dns/transport.rs:2921</code>, <code>:3177-3179</code>) or the
-    resolver-probe drain (<code>src/runtime/storage.rs:1304-1305</code>) — that latches the sink
+    resolver-probe drain (<code>src/runtime/storage.rs:1323-1324</code>) — that latches the sink
     is still observed by the first serving owner turn
     (<code>sink_has_failed</code>, <code>src/log/sink.rs:87-99</code>). The
     serving owner therefore exits <code>EX_IOERR</code> (74) at the owner-turn
@@ -2574,9 +2574,18 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   coalesced skipped windows, sticky per-window incident snapshots, and
   eligible-binding transition tracking (<code>src/dns/incident_report.rs:149-235</code>,
   <code>:299-304</code>). Its per-turn pass over all names
-  (<code>src/runtime/storage.rs:784-839</code>) is O(32) and bounded, but it runs every turn
+  (<code>src/runtime/storage.rs:784-858</code>) is O(32) and bounded, but it runs every turn
   regardless of whether any window is near a boundary — a small, constant,
   always-on cost.</p>
+  <p>The eligibility fold passes the cache lookup result to the incident owner.
+  A successful result updates the existing transition tracker; a lookup error
+  leaves that tracker untouched and attempts one <code>dns_assurance_fault</code>
+  with <code>phase=incident</code> and the typed cache reason. This does not
+  change the separate window rotation or recovery pass
+  (<code>src/runtime/storage.rs:800-855</code>, <code>src/log/mod.rs:614-631</code>;
+  <code>docs/alumina-proxy.md:1857-1867</code>). The foreign-index, full-ring,
+  and serving-phase allocation witnesses exercise that boundary
+  (<code>src/runtime/storage/tests.rs:100</code>, <code>:146</code>, <code>:182</code>).</p>
 
   <h3>8.4 Degradation is observable, never silent</h3>
   <p>Four counted fact families exist precisely so degradation is observable:
@@ -2647,7 +2656,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/log/sink.rs:100-179</code>, <code>:87-99</code></td></tr>
       <tr><th scope="row">75 (<code>EX_TEMPFAIL</code>)</th>
         <td>Startup: unresolved allowlist names &gt; allowance after the 90 s window</td>
-        <td><code>src/main.rs:22</code>, <code>:97</code>; <code>src/runtime/storage.rs:1408-1425</code></td></tr>
+        <td><code>src/main.rs:22</code>, <code>:97</code>; <code>src/runtime/storage.rs:1427-1444</code></td></tr>
       <tr><th scope="row">78 (<code>EX_CONFIG</code>)</th>
         <td>Every <code>owner.run_startup</code> error —
         <code>StartupError::{Dns, Cache, Listener}</code>: DNS
@@ -2837,7 +2846,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/boot/preflight.rs:96-116</code>; <code>src/main.rs:22-23</code>;
         <code>src/boot/mod.rs:9</code></td></tr>
       <tr><th scope="row">Listener conditionality / readiness rule</th>
-        <td><code>src/runtime/storage.rs:263-273</code>, <code>:1408-1425</code>, <code>:1493-1507</code>;
+        <td><code>src/runtime/storage.rs:263-273</code>, <code>:1427-1444</code>, <code>:1512-1526</code>;
         <code>src/dns/transport.rs:55</code>; spec <code>docs/alumina-proxy.md:110</code></td></tr>
       <tr><th scope="row">early_data block scope connection-only; the
       <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
@@ -2860,8 +2869,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/dns/transport.rs:36</code>, <code>:806-812</code></td></tr>
       <tr><th scope="row">Exchange class typed at the start seam</th>
         <td><code>src/dns/transport.rs:2970-3009</code>,
-        <code>:1626-1634</code>; <code>src/runtime/storage.rs:1712-1718</code>;
-        <code>src/runtime/storage.rs:1147-1169</code>; <code>src/runtime/reactor/startup.rs:129</code></td></tr>
+        <code>:1626-1634</code>; <code>src/runtime/storage.rs:1731-1737</code>;
+        <code>src/runtime/storage.rs:1166-1188</code>; <code>src/runtime/reactor/startup.rs:129</code></td></tr>
       <tr><th scope="row">Slot reset reinitializes metadata (retained traffic
       slabs not zeroized)</th>
         <td><code>src/runtime/reactor.rs:779-807</code></td></tr>
@@ -2909,7 +2918,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/log/encoding.rs:11-963</code></td></tr>
       <tr><th scope="row">Incident report</th>
         <td><code>src/dns/incident_report.rs:14-15</code>, <code>:149-235</code>,
-        <code>:299-304</code>; <code>src/runtime/storage.rs:784-839</code></td></tr>
+        <code>:299-304</code>; <code>src/runtime/storage.rs:784-858</code></td></tr>
       <tr><th scope="row">DNS parse / bailiwick / tid+question match / RCODE</th>
         <td><code>src/dns/wire.rs:1217</code>, <code>:857-900</code>, <code>:920-931</code>,
         <code>:1233-1239</code>, <code>:1268-1277</code>, <code>:1384-1419</code>;
