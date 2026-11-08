@@ -165,8 +165,8 @@ never proof of a lossless exit window.
 
 - **Proxy restart** clears all in-memory enforcement state: the per-ordinal
   domain block-latch bitset
-  ([src/enforcement/state.rs](../src/enforcement/state.rs):220-222,233-235,350) and the
-  all-scope block latch (:304-305), plus the JA4 first-seen baselines
+  ([src/enforcement/state.rs](../src/enforcement/state.rs):220-222,233-235,359) and the
+  all-scope block latch (:277-278), plus the JA4 first-seen baselines
   ([src/runtime/reactor.rs](../src/runtime/reactor.rs):579-598, :1098, "reset on restart"). A previously
   blocked or baselined identity is treated as first-seen again, and the monitor
   aggregate (including the drop counters in the summary) starts at zero. Treat a

@@ -535,7 +535,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/runtime/gate.rs:1-43</code>, <code>:45-78</code>, <code>:114-142</code></td></tr>
       <tr><th scope="row"><code>enforcement/*</code></th>
         <td>Violation lattice (6), effect projection (4), per-class <code>AllScopeGate</code>s, <code>DomainOrdinal</code>, monitor facts.</td>
-        <td><code>src/enforcement/policy.rs:89-97</code>, <code>:100-146</code>; <code>src/enforcement/state.rs:71-77</code>, <code>:262-286</code>; <code>src/enforcement/action.rs:98-132</code>; <code>src/enforcement/monitor.rs:12-26</code></td></tr>
+        <td><code>src/enforcement/policy.rs:89-97</code>, <code>:100-146</code>; <code>src/enforcement/state.rs:71-77</code>, <code>:264-265</code>, <code>:311-345</code>; <code>src/enforcement/action.rs:98-132</code>; <code>src/enforcement/monitor.rs:12-26</code></td></tr>
       <tr><th scope="row"><code>dns/wire</code>/<code>dns/schedule</code>/<code>dns/cache</code></th>
         <td>DNS parse + bailiwick; authority and additional sections are parsed
         in order by private helpers, with authority SOA retained in the reusable
@@ -2061,14 +2061,17 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   zero parameter values unrepresentable and say nothing about whether a gate can
   ever arm (<code>src/enforcement/state.rs:26-46</code>). Defaults are threshold 1
   in a 900-second window (<code>:12-17</code>).</p>
-  <p>Arming differs by class. An <code>AnyIllegal</code> counter is noted on every
+  <p><code>Enforcement::decide</code> first selects the gated effect through its
+  private <code>select_gated_effect</code> method, then applies monitoring and
+  sticky actions (<code>src/enforcement/state.rs:264-309</code>, <code>:311-345</code>).
+  Arming differs by class. An <code>AnyIllegal</code> counter is noted on every
   class fact; an early-data or <code>ja4</code> counter is noted only when the
   <em>raw</em> decided effect is <code>Effect::Block { scope: All }</code>, and only
   a raw <code>Effect::Block { scope: All }</code> is gated into an all-scope action
-  (<code>src/enforcement/state.rs:262-334</code>). Each class’s gate counts only
+  (<code>src/enforcement/state.rs:317-344</code>). Each class’s gate counts only
   that class’s facts: the per-class isolation between <code>bad_handshake</code>
   and <code>illegal_fqdn</code> is enforced by which counter each cause notes
-  (<code>src/enforcement/state.rs:264-286</code>).</p>
+  (<code>src/enforcement/state.rs:317-339</code>).</p>
   <div class="callout" role="note">
     <p>The <code>[early_data]</code> gate section is rejected at config load with
     exit 78 (<code>ConfigError::EarlyDataGateRejected</code>,
@@ -2077,7 +2080,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
     all. The rejection is structural, not an oversight: a per-class all-scope
     counter is noted only when the raw decided effect is
     <code>Effect::Block { scope: All }</code>
-    (<code>src/enforcement/state.rs:262-278</code>), and the configuration parser
+    (<code>src/enforcement/state.rs:317-330</code>), and the configuration parser
     rejects any <code>early_data</code> block whose scope is not
     <code>connection</code> (<code>ConfigError::EarlyDataBlockScopeInvalid</code>,
     <code>src/config/mod.rs:1001-1015</code>; the parser doc comment at
@@ -2856,7 +2859,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
       <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
         <td><code>src/config/mod.rs:1001-1015</code>, <code>:645-647</code>,
         <code>:648-654</code>;
-        <code>src/enforcement/state.rs:262-278</code>,
+        <code>src/enforcement/state.rs:317-330</code>,
         <code>src/enforcement/state/tests.rs:1123</code> (test); <code>docs/alumina-proxy.md:1018-1020</code>,
         <code>:822-828</code></td></tr>
       <tr><th scope="row">DoT seam allocation profile (warm fixture bound 8)</th>
@@ -2913,7 +2916,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         (<code>src/enforcement/action.rs:86-95</code>)</td></tr>
       <tr><th scope="row">Per-class gates / nonzero defaults</th>
         <td><code>src/enforcement/state.rs:12-17</code>, <code>:26-46</code>,
-        <code>:71-77</code>, <code>:262-286</code></td></tr>
+        <code>:71-77</code>, <code>:317-339</code></td></tr>
       <tr><th scope="row">Monitor facts (10 recorders)</th>
         <td><code>src/enforcement/monitor.rs:12-26</code>, <code>:178-290</code></td></tr>
       <tr><th scope="row">Log ring / drain / priority</th>

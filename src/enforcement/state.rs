@@ -262,34 +262,7 @@ impl Enforcement {
     }
 
     pub fn decide(&mut self, latch: &mut FirstSlot, violation: Violation, secs: u64) -> Effect {
-        let raw = pure_decide(&self.control, latch, violation);
-        let crossed = match violation {
-            Violation::AnyIllegal { cause } => match cause {
-                AnyIllegalCause::ConnectParse(_)
-                | AnyIllegalCause::TlsProfile(_)
-                | AnyIllegalCause::Ech => self.bad_handshake_gate.note(secs),
-                AnyIllegalCause::HostNotAllowlisted => self.illegal_fqdn_gate.note(secs),
-            },
-            Violation::EarlyUpstreamData { .. } => {
-                if matches!(raw, Effect::Block { scope: Scope::All }) {
-                    self.early_data_gate.note(secs)
-                } else {
-                    false
-                }
-            }
-            Violation::Ja4Change { .. } => {
-                if matches!(raw, Effect::Block { scope: Scope::All }) {
-                    self.ja4_gate.note(secs)
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        };
-        let effect = match raw {
-            Effect::Block { scope: Scope::All } if !crossed => Effect::BaselineOnly,
-            _ => raw,
-        };
+        let effect = self.select_gated_effect(latch, violation, secs);
         match violation {
             Violation::AnyIllegal { cause } => {
                 self.monitor.note_fact_any_illegal(cause);
@@ -333,6 +306,42 @@ impl Enforcement {
             }
         }
         effect
+    }
+
+    fn select_gated_effect(
+        &mut self,
+        latch: &mut FirstSlot,
+        violation: Violation,
+        secs: u64,
+    ) -> Effect {
+        let raw = pure_decide(&self.control, latch, violation);
+        let crossed = match violation {
+            Violation::AnyIllegal { cause } => match cause {
+                AnyIllegalCause::ConnectParse(_)
+                | AnyIllegalCause::TlsProfile(_)
+                | AnyIllegalCause::Ech => self.bad_handshake_gate.note(secs),
+                AnyIllegalCause::HostNotAllowlisted => self.illegal_fqdn_gate.note(secs),
+            },
+            Violation::EarlyUpstreamData { .. } => {
+                if matches!(raw, Effect::Block { scope: Scope::All }) {
+                    self.early_data_gate.note(secs)
+                } else {
+                    false
+                }
+            }
+            Violation::Ja4Change { .. } => {
+                if matches!(raw, Effect::Block { scope: Scope::All }) {
+                    self.ja4_gate.note(secs)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        match raw {
+            Effect::Block { scope: Scope::All } if !crossed => Effect::BaselineOnly,
+            _ => raw,
+        }
     }
 
     /// Applies a per-FQDN effect (from `early_data` or `ja4`) to the monitor
