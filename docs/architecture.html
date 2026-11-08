@@ -264,7 +264,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   serving Full when none are unresolved or Degraded within the configured allowance,
   exiting 75 above it; a first-observed SIGTERM short-circuits the window as
   Terminated and never lets it bind
-  (<code>STARTUP_WINDOW_SECS: u64 = 90</code>, <code>src/dns/transport.rs:55</code>;
+  (<code>STARTUP_WINDOW_SECS: u64 = 90</code>, <code>src/dns/transport.rs:57</code>;
   the readiness rule is the canonical rule at <code>docs/alumina-proxy.md:110</code>).
   Second, the process is single-threaded for both DNS and serving: one
   reactor loop, one owner of the poll, one set of timers
@@ -288,8 +288,8 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   (<code>Serving::SERVING_POLL_INTERRUPT_ALLOWANCE</code> at
   <code>src/runtime/reactor.rs:1302</code>, in <code>run_once</code> at
   <code>src/runtime/reactor.rs:1319</code>; <code>StartupDns::POLL_INTERRUPTED_ALLOWANCE</code>
-  at <code>src/dns/transport.rs:1932</code>, in <code>wait_dns_readiness</code> at
-  <code>src/dns/transport.rs:1944</code>).</p>
+  at <code>src/dns/transport.rs:1939</code>, in <code>wait_dns_readiness</code> at
+  <code>src/dns/transport.rs:1951</code>).</p>
 
   <p>Clock authority is single and explicit: one <code>now0</code> origin plus
   whole-second offsets threads through worker, cache, DNS, and serving, with the
@@ -687,7 +687,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>:295-330</code> (<code>select</code>)</td></tr>
       <tr><th scope="row"><code>dns/transport</code></th>
         <td>Nonblocking DNS state machine; exchange deadline 5 s; failback 900 s; CSPRNG tids; retained-resolver reuse; decision window 90 s; typed exchange class.</td>
-        <td><code>src/dns/transport.rs:54-55</code>, <code>:606</code>, <code>:2970-3009</code>, <code>:3249-3279</code>, <code>:3631-3677</code></td></tr>
+        <td><code>src/dns/transport.rs:56-57</code>, <code>:613</code>, <code>:2970-3009</code>, <code>:3249-3279</code>, <code>:3631-3677</code></td></tr>
       <tr><th scope="row"><code>dns/transport/registration</code> (private child)</th>
         <td>Opaque <code>Registration(Mode)</code> transport-registration owner: Private against the DNS-private poll, or Shared at the serving owner's single poll <code>token</code> with the armed-interest cache; register/re-register/deregister policy branches live here, and during I/O-performing synchronization the armed cache is updated only after a successful registry call, while lifecycle invalidation clears it without a registry call where appropriate.</td>
         <td><code>src/dns/transport/registration.rs:18</code>, <code>:25</code>, <code>:61</code>, <code>:88</code>, <code>:115</code>, <code>:171</code>, <code>:194</code></td></tr>
@@ -1274,7 +1274,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <p>The canonical readiness rule (spec <code>docs/alumina-proxy.md:110</code>) is:
     open the listener when the unresolved count is at most the configured
     allowance, else exit <code>EX_TEMPFAIL</code> (75). The window is a maximum
-    90&nbsp;s (<code>src/dns/transport.rs:55</code>): early closure opens
+    90&nbsp;s (<code>src/dns/transport.rs:57</code>): early closure opens
     <code>Full</code> the moment every name is usable, while at the deadline it
     opens <code>Full</code> (zero unresolved) or <code>Degraded</code> (within
     the allowance). The decision is typed as
@@ -1696,7 +1696,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   <code>src/dns/transport.rs:1592-1596</code>) after close's deregister outcome clears
   the cache (<code>:1564-1582</code>).</p>
   <p>The DoT serving path refreshes on a single connection with a 5 s exchange
-  deadline (<code>EXCHANGE_DEADLINE_SECS</code>, <code>src/dns/transport.rs:54</code>):
+  deadline (<code>EXCHANGE_DEADLINE_SECS</code>, <code>src/dns/transport.rs:56</code>):
   a failed handshake forces a full reconnect — and a fresh rustls configuration —
   on the next exchange (<code>:2092-2128</code>, <code>upgrade_to_tls</code>;
   <code>build_tls_connection</code>
@@ -1705,7 +1705,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
   the next resolver on counted failures
   (<code>on_exchange_failed</code>, <code>src/dns/transport.rs:3631-3677</code>);
   failback returns after a 900 s grace with three consecutive successes
-  (<code>FAILBACK_AFTER_SECS</code>, <code>src/dns/transport.rs:606</code>;
+  (<code>FAILBACK_AFTER_SECS</code>, <code>src/dns/transport.rs:613</code>;
   <code>maybe_begin_failback</code> at <code>:3249-3279</code>,
   <code>on_exchange_succeeded</code> at <code>:3701-3731</code>). Sensor probes
   run behind the post-window sweep and sustained-negative corroboration and never
@@ -2854,7 +2854,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <code>src/boot/mod.rs:9</code></td></tr>
       <tr><th scope="row">Listener conditionality / readiness rule</th>
         <td><code>src/runtime/storage.rs:263-273</code>, <code>:1427-1444</code>, <code>:1512-1526</code>;
-        <code>src/dns/transport.rs:55</code>; spec <code>docs/alumina-proxy.md:110</code></td></tr>
+        <code>src/dns/transport.rs:57</code>; spec <code>docs/alumina-proxy.md:110</code></td></tr>
       <tr><th scope="row">early_data block scope connection-only; the
       <code>[early_data]</code> gate section is rejected at load (exit 78)</th>
         <td><code>src/config/mod.rs:1006-1020</code>, <code>:645-647</code>,
@@ -2960,7 +2960,7 @@ code, samp { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .87e
         <td><code>src/dns/resolver.rs:192-198</code>, <code>:295-330</code></td></tr>
       <tr><th scope="row">Startup DNS machine / deadlines / failover / failback /
       probes</th>
-        <td><code>src/dns/transport.rs:54-55</code>, <code>:606</code>,
+        <td><code>src/dns/transport.rs:56-57</code>, <code>:613</code>,
         <code>:2970-3009</code>, <code>:3249-3279</code>, <code>:3303-3325</code>, <code>:3403-3445</code>, <code>:3472-3514</code>,
         <code>:3631-3677</code>, <code>:3701-3731</code></td></tr>
       <tr><th scope="row">Transport registration owner (private
