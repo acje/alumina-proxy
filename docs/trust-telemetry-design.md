@@ -1,14 +1,18 @@
 # Trust telemetry design note — honest DNS chain-of-trust logging
 
-Status: **design note, not normative**. Behaviour rules stay in
-[`alumina-proxy.md`](alumina-proxy.md); this document records the design of the DNS
-trust/telemetry logging surface, the evidence behind it, and the questions still open for
-review. Implementation is tracked in the issue tracker, not here.
+Status: **historical design note, not normative**. The observations below are
+anchored at `30f943b`; the proposals, vocabulary, measurements and questions
+record that design discussion, not a current implementation checklist or an
+adopted feature set. Current behavior is governed by
+[`alumina-proxy.md`](alumina-proxy.md) and described by the
+[as-built architecture](architecture.html). The implemented assurance
+surface attempts per-entry boot and material-change records, including idle
+expiry, with best-effort delivery under the existing bounded log policy.
 
 ## 1. Problem
 
-Alumina reports DNS outcomes honestly at the *volume* level and dishonestly at the *trust*
-level. Three clamps were confirmed at `30f943b`:
+At `30f943b`, DNS outcomes were reported at the *volume* level but the trust
+surface had three confirmed clamps:
 
 1. **One token for four situations.** `FailureReason::TlsIdentity` (`git:30f943b9689b21c23b123db6077cecd34b013b05:src/startup_dns.rs#L376-L382`)
    covers strict pin mismatch, structural empty-trust-anchor failure, SAN/FQDN mismatch, and

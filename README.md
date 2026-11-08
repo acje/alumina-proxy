@@ -38,8 +38,11 @@ lightweight, statically linked single binary is an implementation of that design
 - **No payload inspection.** The client must verify the upstream certificate
  and hostname. Abuse inside an admitted endpoint's encrypted traffic is outside
  the proxy's visibility.
-- **No DNSSEC today.** DNS uses TCP, optionally strict-pinned DNS over TLS.
- Unpinned DoT currently fails closed; plain DNS does not authenticate DNS data.
+- **Delegated DNS assurance, not local DNSSEC validation.** DNS uses TCP or
+  strict-pinned DNS over TLS. Plain DNS does not authenticate DNS data and
+  unpinned DoT fails closed. Strong profiles require the operator's
+  root-validating policy declaration; delegated DNSSEC depends on that
+  resolver actually validating. An AD bit alone does not prove a root anchor.
 - **Deployment enforces confinement.** Separate workload and proxy network/runtime
  identities are required to prevent direct-egress bypass and workload-controlled
  resets of block state. A same-pod sidecar is cooperative only.
@@ -47,23 +50,28 @@ lightweight, statically linked single binary is an implementation of that design
  collector liveness, and loss alerting. Proxy restarts clear in-memory block
  state and JA4 baselines.
 
-## Planned assurance controls
+## DNS assurance
 
-**Not implemented — a strategic goal, not a current guarantee.** Delegated
-DNSSEC validation is the selected approach; its governed amendment and
-implementation remain future work. A qualified, trusted validating recursive
-resolver would supply the DNSSEC verdicts over authenticated, strict-pinned
-DNS-over-TLS; see the [trust-chain design](docs/trust-chain-design.md).
+Each allowlisted `name:port` has an immutable minimum: omission defaults to
+`resolver_trusted` and preserves legacy bounded stale-serving; operators can
+select `resolver_authenticated` or `delegated_dnssec`. Both stronger settings
+require every configured resolver to be strict-pinned and the operator to
+declare `root_validating_no_stale`. Delegated DNSSEC additionally requires the
+resolver's AD verdict. The proxy does not independently validate DNSSEC or
+establish the resolver's trust anchors, clock or no-stale behavior; those are
+deployment conditions, not consequences of the AD bit.
 
-- **TODO.** Admission would require a configured minimum DNS assurance level and
- a currently valid achieved proof per new CONNECT `name:port` — bounded
- lifetimes, no stale or expired proofs, no unchecked TTL-zero extension, and
- no fallback to a weaker unauthenticated path.
-- **TODO.** Report achieved assurance for every allowlisted `fqdn:port` at the
- startup resolution/readiness decision — successful, degraded, or failed —
- including unresolved and unattempted results, then on meaningful
- validation-level changes. Judge A/AAAA independently; never label the whole
- entry secure from its best family.
+Startup readiness and every actual upstream connection attempt, including
+retries, check the entry's current proof against its minimum. Strong profiles
+do not admit expired or absent proof, promote zero-TTL evidence, or silently
+fall back to weaker resolution. A and AAAA are observed separately, never
+combined into a best-family assurance claim. The proxy attempts bounded
+per-entry assurance records at full, degraded or failed startup and on
+material changes, including idle expiry. Logging is best-effort: a record
+attempt is not a delivery or availability guarantee. See the
+[governing assurance rules](docs/alumina-proxy.md#hardening-per-entry-dns-assurance-and-qualified-admission),
+[as-built architecture](docs/architecture.html), and
+[trust-chain status](docs/trust-chain-design.md).
 
 Endpoint verification stays client-owned: the client — not the proxy — checks
 the upstream server certificate and hostname; client certificates apply only
@@ -97,7 +105,7 @@ For local build and validation prerequisites, follow the
 - [Deployment](docs/deployment.md): container, runtime, and network confinement.
 - [Monitoring](docs/monitoring.md): stdout collection, loss alerting, and restart semantics.
 - [Benchmarks](docs/benchmarks/e2micro-suite.md): methodology, results, and limitations.
-- [Trust-chain design](docs/trust-chain-design.md): future goal, not a current guarantee.
+- [Trust-chain design](docs/trust-chain-design.md): current status and conditional goal.
 
 ## License
 

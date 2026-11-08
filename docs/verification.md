@@ -139,8 +139,12 @@ findings, verdicts, or issue records here).
   (foundations, boot, eligibility, mio_matrix, main_thread_stack,
   monitor_stdout, stdout_stall, stdout_closed) witness-off then witness-on
   (`--features alloc-witness`); the same union also runs release/static-ELF/
-  closure-metadata, clippy, and fmt/whitespace. Off/on totals 998/1035
-  (lib 956/980, foundations 9/13, boot 28/28, eligibility 5/6, mio 0/8).
+  closure-metadata, clippy, and fmt/whitespace. The 2026-11-08 run on
+  `b1ff6909f215b860badec8f519349d7dc85f688c` recorded 1114/1163 lib tests
+  witness-off/on; the libtest integration targets recorded boot 28/28,
+  eligibility 5/6, foundations 9/13, and mio_matrix 0/8. The four
+  process-entry harnesses are separate, not included in those counts. These
+  are observed run counts, not fixed future suite totals.
   `boundary phase1` dispatches union once — never `mid full` separately;
   `mid full` remains a standalone gate-only selector.
 - **The root `--test boot` suite is the broad boot component/API integration

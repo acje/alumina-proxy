@@ -10,6 +10,14 @@ The repository is a **scoped testQA-ready candidate**, not a
 production-qualified or externally-deployed system (qualification gates in
 [../verification.md](../verification.md)).
 
+On 2026-11-08, the local run for source revision
+`b1ff6909f215b860badec8f519349d7dc85f688c` completed its Linux union and
+boot-fixture children; the boundary's final marker remained **BLOCKED** with
+exit 1 by design. Separate relay and shutdown E2E runs passed their selected
+local cases using a plain-DNS fixture, not a live validating-resolver matrix.
+Those receipts are scoped to that source revision and their respective
+artifacts; they do not establish deployment or release qualification.
+
 ## Package contents
 
 | File | Purpose |

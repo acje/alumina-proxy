@@ -14,37 +14,33 @@ verifies the client certificate only under mutual TLS. DNSSEC and the WebPKI
 form two composable trust hierarchies, not one certificate chain, and no DANE
 deployment is required.
 
-The goal is conditional and its boundaries are explicit. It applies only to
-signed DNS data, qualified configuration, and endpoints that perform the
-corresponding checks — without authenticated DNSSEC data, resolution is not
-DNSSEC-secure, and a proposed DNSSEC-strict profile would not downgrade to an
+The goal is conditional and its boundaries are explicit. Delegated DNSSEC
+assurance applies only under the qualified resolver policy and its trusted
+external validation; without authenticated DNSSEC data, resolution is not
+DNSSEC-secure. The selected strong profiles do not downgrade to an
 unauthenticated path. SNI is a client-supplied consistency check, not
-cryptographic proof. The
-chain promises no latest-authoritative-data guarantee (current cache admission
-is bounded freshness and deliberate stale-serving — never authenticated
-proof; upstream staleness is not independently established), no exclusive
-ownership of an admitted endpoint, and no protection against abuse riding
-inside an admitted endpoint's own capabilities. Completing
-it also requires a protected deployment that keeps trust anchors,
-configuration, and time correct and prevents bypass.
+cryptographic proof. Legacy `resolver_trusted` retains bounded stale-serving;
+strong profiles require current proof even when an address remains
+stale-servable. The chain promises no latest-authoritative-data guarantee,
+no exclusive ownership of an admitted endpoint, and no protection against abuse
+riding inside that endpoint's own capabilities. It also requires a protected
+deployment that keeps trust anchors, configuration, and time correct and
+prevents bypass.
 
 | Scope | Current status |
 | --- | --- |
 | Proxy policy binding | Implemented — allowlisted CONNECT `name:port`, validated DNS-derived address eligibility, and SNI matching the approved name (`docs/alumina-proxy.md:59,88,255`) |
 | Resolver transport | Implemented — DNS over TCP only; strict-pinned DoT authenticates the resolver hop by SPKI/TLS-signature key possession (no CA chain needed), while an unpinned DoT entry validates against an empty root store and fails closed (`docs/alumina-proxy.md:107,113`) |
-| DNSSEC assurance | Observation only, admission not implemented — existing A/AAAA queries now set the AD bit (RD set, CD clear, no DO/EDNS), and the raw response AD=0/1 flag is retained as an immutable per-reply observation only; cache admission still runs on freshness and bounded stale-serving, never on authenticated proof, and no authenticated-cache, admission, or log capability exists yet (`docs/alumina-proxy.md:116,119-120`) |
+| DNS assurance | Implemented per allowlist entry — `resolver_trusted` is the legacy default; `resolver_authenticated` requires authenticated-origin proof, and `delegated_dnssec` additionally requires qualified origin and AD=1. Both strong profiles require all resolvers strict-pinned and the operator-declared `root_validating_no_stale` policy. Current proof is checked at startup readiness and every actual dial; A/AAAA assurance records are attempted at boot and material changes, including idle expiry. See the [governing assurance rules](alumina-proxy.md#hardening-per-entry-dns-assurance-and-qualified-admission) and [as-built architecture](architecture.html). |
 | Endpoint & deployment | Client- and deployment-owned — the proxy relays opaque TLS and never authenticates the upstream server; client verification of the upstream server certificate and hostname (with the server verifying a client certificate only when mutual TLS is configured), correct clocks and anchors, and bypass-resistant deployment are operator responsibilities (`docs/alumina-proxy.md:55,90,287`) |
 
-None of the above is a claim that Alumina currently delivers the complete
-chain: this goal is non-normative, and any move toward it is a governed future
-amendment. The byte-frozen [alumina-proxy.md](alumina-proxy.md) remains the
-sole authoritative statement of current behavior, and
-[docs/architecture.html](architecture.html) remains the as-built
-architecture reference — this section records only status against a stated
-intent. Until such an amendment lands, plain-DNS-over-TCP is not cryptographic
-authentication of the resolver or DNS data (`docs/alumina-proxy.md:113`), and
-DNSSEC-strict admission is not yet implemented. The proposed DNSSEC-strict
-profile, once adopted, would not downgrade to an unauthenticated path — a
-stronger posture than today's narrower guarantee, already documented below,
-that a DoT handshake or identity failure never downgrades to plain DNS and
-that mixed plain/DoT resolver arrays are rejected at startup.
+None of the above claims that every deployment delivers the complete chain.
+The proxy performs no local DNSSEC validation; its delegated claim depends on
+the operator's root-validating, correct-time, no-expired-stale resolver policy,
+not on AD alone. Plain DNS over TCP does not cryptographically authenticate the
+resolver or DNS data. Endpoint certificate and hostname verification remain
+client-owned, and authenticated resolver origin is not endpoint validation.
+The [specification](alumina-proxy.md) is the sole governing behavior and is
+byte-frozen by default, subject to scoped governance amendments; the
+[architecture](architecture.html) is the as-built reference. Assurance
+notifications are bounded best-effort attempts, not delivery guarantees.
