@@ -5,50 +5,55 @@ capability**. A workload may connect only to explicitly approved domains and
 ports. The proxy has one responsibility: enforce that boundary, with the minimum
 protocol scope and runtime capability needed to do so.
 
-The application is trusted at rest; the design accounts for
-application compromise. Alumina limits the resulting egress opportunities and
-surfaces deviations from the workload's known-good behavior. It is not a
-general-purpose gateway, an ingress defense, or an encrypted-payload inspector.
+Alumina-proxy provides defense in depth. The application is trusted at rest; the
+design accounts for application compromise. Alumina limits the resulting egress
+opportunities and surfaces deviations from the workload's known-good behavior.
+It is not a general-purpose gateway, an ingress defense, or an encrypted-payload
+inspector.
 
 ## Design principles
 
 - **Narrow authority.** Admit allowlisted HTTP CONNECT destinations, validate
- the initial TLS 1.3 ClientHello and matching SNI, then relay without decryption.
- Additional protocols and runtime controls are outside the fixed scope.
+  the initial TLS 1.3 ClientHello and matching SNI, then relay without
+  decryption. Additional protocols and runtime controls are outside the fixed
+  scope.
 - **Bounded execution.** Fixed capacities, a single boot owner and a single
- serving owner, and two reused 128 KiB directional buffers per tunnel constrain
- resource use and make invariants explicit and verifiable.
+  serving owner, and two reused 128 KiB directional buffers per tunnel constrain
+  resource use and make invariants explicit and verifiable.
 - **Allocation discipline.** Serving and DNS-refresh paths reuse storage
- allocated at initialization, with no first-party heap allocation or deallocation
- except the authorized per-connect DoT setup. Bounded dependency allocations
- are outside that invariant's scope; see the
- [allocation contract](docs/alumina-proxy.md#zero-allocation-invariant-scope).
+  allocated at initialization, with no first-party heap allocation or
+  deallocation except the authorized per-connect DoT setup. Bounded dependency
+  allocations are outside that invariant's scope; see the
+  [allocation contract](docs/alumina-proxy.md#zero-allocation-invariant-scope).
 - **No silent acceptance.** Every deviation on the defined CONNECT,
- initial-ClientHello, and tripwire surfaces triggers action. The operator chooses
- `notify` or `block`; Alumina owns the enforcement semantics.
+  initial-ClientHello, and tripwire surfaces triggers action. The operator
+  chooses `notify` or `block`; Alumina owns the enforcement semantics.
 
 Robustness comes from these constraints, not an expanding feature set. The
-lightweight, statically linked single binary is an implementation of that design.
+lightweight, statically linked single binary is an implementation of that
+design.
 
 ## Security boundaries
 
 - **TLS 1.3-only, client-first.** Clients establish a plaintext HTTP/1.1 CONNECT
- tunnel, then send a TLS 1.3-only ClientHello. ECH and server-first protocols
- are rejected. See [workload compatibility](docs/qa-package/README.md#protocol-compatibility-workloads-dialed-through-alumina).
+  tunnel, then send a TLS 1.3-only ClientHello. ECH and server-first protocols
+  are rejected. See
+  [workload compatibility](docs/qa-package/README.md#protocol-compatibility-workloads-dialed-through-alumina).
 - **No payload inspection.** The client must verify the upstream certificate
- and hostname. Abuse inside an admitted endpoint's encrypted traffic is outside
- the proxy's visibility.
+  and hostname. Abuse inside an admitted endpoint's encrypted traffic is outside
+  the proxy's visibility.
 - **Delegated DNS assurance, not local DNSSEC validation.** DNS uses TCP or
   strict-pinned DNS over TLS. Plain DNS does not authenticate DNS data and
   unpinned DoT fails closed. Strong profiles require the operator's
   root-validating policy declaration; delegated DNSSEC depends on that
   resolver actually validating. An AD bit alone does not prove a root anchor.
-- **Deployment enforces confinement.** Separate workload and proxy network/runtime
- identities are required to prevent direct-egress bypass and workload-controlled
- resets of block state. A same-pod sidecar is cooperative only.
+- **Deployment enforces confinement.** Separate workload and proxy
+  network/runtime identities are required to prevent direct-egress bypass and
+  workload-controlled resets of block state. A same-pod sidecar is cooperative
+  only.
 - **Notifications are best-effort.** The deployment owns stdout collection,
- collector liveness, and loss alerting. Proxy restarts clear in-memory block
- state and JA4 baselines.
+  collector liveness, and loss alerting. Proxy restarts clear in-memory block
+  state and JA4 baselines.
 
 ## DNS assurance
 
@@ -73,10 +78,10 @@ attempt is not a delivery or availability guarantee. See the
 [as-built architecture](docs/architecture.html), and
 [trust-chain status](docs/trust-chain-design.md).
 
-Endpoint verification stays client-owned: the client — not the proxy — checks
-the upstream server certificate and hostname; client certificates apply only
-under mutual TLS; SNI matching is already separate policy. Achieved assurance
-is not an availability guarantee; monitoring follows the
+Endpoint verification stays client-owned: the client — not the proxy —
+checks the upstream server certificate and hostname; client certificates apply
+only under mutual TLS; SNI matching is already separate policy. Achieved
+assurance is not an availability guarantee; monitoring follows the
 [monitoring](docs/monitoring.md) model.
 
 ## Getting started
@@ -103,9 +108,12 @@ For local build and validation prerequisites, follow the
 - [Specification](docs/alumina-proxy.md): sole governing requirements.
 - [Architecture](docs/architecture.html): source-derived, as-built reference.
 - [Deployment](docs/deployment.md): container, runtime, and network confinement.
-- [Monitoring](docs/monitoring.md): stdout collection, loss alerting, and restart semantics.
-- [Benchmarks](docs/benchmarks/e2micro-suite.md): methodology, results, and limitations.
-- [Trust-chain design](docs/trust-chain-design.md): current status and conditional goal.
+- [Monitoring](docs/monitoring.md): stdout collection, loss alerting, and
+  restart semantics.
+- [Benchmarks](docs/benchmarks/e2micro-suite.md): methodology, results, and
+  limitations.
+- [Trust-chain design](docs/trust-chain-design.md): current status and
+  conditional goal.
 
 ## License
 
