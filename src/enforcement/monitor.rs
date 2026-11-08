@@ -621,6 +621,36 @@ impl Monitor {
 
     #[cfg(test)]
     pub(crate) fn saturate_all_for_test(&mut self) {
+        self.saturate_metrics_for_test();
+        for _ in 0..CAPTURE_DETAIL_LEN {
+            let index = (self.capture_head + self.capture_len) % CAPTURE_DETAIL_LEN;
+            self.captures[index] = Some(ConsumedCapture {
+                slot: crate::inventory::TUNNEL_SLOTS - 1,
+                generation: u64::MAX,
+                detail: CapturedDetail {
+                    fact: CapturedFact::AnyIllegal(AnyIllegalCause::TlsProfile(
+                        crate::inspection::client_hello::HelloRejectReason::Profile,
+                    )),
+                    effect: Effect::Block {
+                        scope: crate::enforcement::action::Scope::Domain,
+                    },
+                },
+            });
+            self.capture_len += 1;
+        }
+        self.capture_drops.saturate_for_test();
+        self.sustained_negatives = 32;
+        self.dirty = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_peer_ip_v6_max_for_test(&mut self) {
+        self.facts.ja4_peer_ip = NumericAddr::V6(std::net::Ipv6Addr::from([0xff; 16]));
+        self.dirty = true;
+    }
+
+    #[cfg(test)]
+    fn saturate_metrics_for_test(&mut self) {
         for c in &mut self.facts.any_illegal {
             c.saturate_for_test();
         }
@@ -661,31 +691,6 @@ impl Monitor {
             c.saturate_for_test();
         }
         self.report_drops.saturate_for_test();
-        for _ in 0..CAPTURE_DETAIL_LEN {
-            let index = (self.capture_head + self.capture_len) % CAPTURE_DETAIL_LEN;
-            self.captures[index] = Some(ConsumedCapture {
-                slot: crate::inventory::TUNNEL_SLOTS - 1,
-                generation: u64::MAX,
-                detail: CapturedDetail {
-                    fact: CapturedFact::AnyIllegal(AnyIllegalCause::TlsProfile(
-                        crate::inspection::client_hello::HelloRejectReason::Profile,
-                    )),
-                    effect: Effect::Block {
-                        scope: crate::enforcement::action::Scope::Domain,
-                    },
-                },
-            });
-            self.capture_len += 1;
-        }
-        self.capture_drops.saturate_for_test();
-        self.sustained_negatives = 32;
-        self.dirty = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_peer_ip_v6_max_for_test(&mut self) {
-        self.facts.ja4_peer_ip = NumericAddr::V6(std::net::Ipv6Addr::from([0xff; 16]));
-        self.dirty = true;
     }
 }
 
