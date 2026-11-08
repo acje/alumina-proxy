@@ -4,8 +4,7 @@ Status: **historical design note, not normative**. The observations below are
 anchored at `30f943b`; the proposals, vocabulary, measurements and questions
 record that design discussion, not a current implementation checklist or an
 adopted feature set. Current behavior is governed by
-[`alumina-proxy.md`](alumina-proxy.md) and described by the
-[as-built architecture](architecture.html). The implemented assurance
+[`alumina-proxy.md`](alumina-proxy.md). The implemented assurance
 surface attempts per-entry boot and material-change records, including idle
 expiry, with best-effort delivery under the existing bounded log policy.
 

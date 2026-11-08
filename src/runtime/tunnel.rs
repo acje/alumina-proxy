@@ -23,10 +23,10 @@
 //! owns the counts, so one owner can never release capacity on behalf of
 //! another (9pac H1; 1cws H1r).
 //!
-//! Family alternation (docs/alumina-proxy.md:82) is driven by the *Connecting lifecycle*
-//! previous-family transition input, never by a family bit stored in
-//! [`AttemptCounts`]: the tunnel still stores exactly its two per-family
-//! attempt counters (oracle alumina-ufrw; docs D5a). Each per-attempt connect
+//! Family alternation (docs/alumina-proxy.md §Configuration & DNS) is driven by
+//! the *Connecting lifecycle* previous-family transition input, never by a
+//! family bit stored in [`AttemptCounts`]: the tunnel still stores its two per-family
+//! attempt counters. Each per-attempt connect
 //! deadline is freshly clipped to the absolute setup deadline at the attempt
 //! it initiates (docs/alumina-proxy.md:189).
 

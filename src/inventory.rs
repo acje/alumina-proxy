@@ -271,16 +271,10 @@ mod workspace_byte_constants {
 
     #[test]
     fn slot_workspace_pinned_as_documented_tripwire() {
-        // [Tripwire] The derived per-slot serving workspace is pinned to the
-        // measured type-derived figure. If a retained ClientHello array (JA4
-        // ciphers/extensions/ALPN/sigalgs) or the parser/inspector layout ever
-        // changes, this pin FAILS and the documented figure (the architecture
-        // retained-storage table) must be reconciled and the pin rebased IN
-        // THE SAME CHANGE — never by bumping this number alone.
         let per_slot = size_of::<ConnectParser>() + size_of::<ChInspector>();
         assert_eq!(
             SLOT_WORKSPACE_BYTES, 156_840,
-            "measured type-derived figure is {per_slot} bytes; reconcile the documented figure in the same change as any retained-array/layout edit"
+            "measured type-derived figure is {per_slot} bytes; investigate retained-array/layout changes before rebasing this pin"
         );
     }
 

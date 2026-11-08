@@ -10,10 +10,11 @@ The repository is a **scoped testQA-ready candidate**, not a
 production-qualified or externally-deployed system (qualification gates in
 [../verification.md](../verification.md)).
 
-On 2026-11-08, the local run for source revision
+Historically, on 2026-11-08, the local run for source revision
 `b1ff6909f215b860badec8f519349d7dc85f688c` completed its Linux union and
-boot-fixture children; the boundary's final marker remained **BLOCKED** with
-exit 1 by design. Separate relay and shutdown E2E runs passed their selected
+boot-fixture children; the then-existing boundary wrapper's final marker remained
+**BLOCKED** with exit 1 by design. That wrapper has since been removed. Separate
+relay and shutdown E2E runs passed their selected
 local cases using a plain-DNS fixture, not a live validating-resolver matrix.
 Those receipts are scoped to that source revision and their respective
 artifacts; they do not establish deployment or release qualification.
@@ -23,7 +24,7 @@ artifacts; they do not establish deployment or release qualification.
 | File | Purpose |
 | --- | --- |
 | `config.example.toml` | Example runtime configuration (fixed documented inputs, no secrets) |
-| `validate.sh` | Identity capture + local isolated smoke (positive/negative) + docs + deny/audit; hard-0 gate |
+| `validate.sh` | Source status-list identity + local fixture smoke (positive/negative) + fresh artifact hash and static-ELF probe; not a release gate |
 
 ## Artifact / source identity
 
@@ -32,9 +33,9 @@ command, scope and digest — not interchangeable, no artificial shared identity
 
 | Variant | Path | Built/tested |
 | --- | --- | --- |
-| Exercised smoke artifact (fixture-facts) | `target/fixture-facts/release/alumina` | built by the `fixtures boot` gate from exact source in-run; static-ELF + executed under privilege profile (typed-terminated positive + exit-78 negatives); sha + non-setid + `security.capability` absence proven in-run (`METADATA-OK`) |
-| Production release (MID) | `target/release/alumina` | built by `mid union` (via `boundary phase1` slow tier); static-ELF + whitespace + witness gates; **not executed** by this wrapper |
-| Production release (e2e musl) | `target/aarch64-unknown-linux-musl/release/alumina` | production release target for the native `e2e relay` / `e2e shutdown` host selectors; **not executed by this wrapper** |
+| Exercised smoke artifact (fixture-facts) | `target/fixture-facts/release/alumina` | built by `fixtures boot` in-run; executed under privilege profiles; sha + non-setid + `security.capability` absence checked by the fixture; `validate.sh` probes static ELF and the fresh marker |
+| Production release (MID) | `target/release/alumina` | built by Linux `mid union` or copied out by `host-mid union`; static-ELF + whitespace + witness checks; **not executed** by the validator |
+| Production release (e2e musl) | `target/aarch64-unknown-linux-musl/release/alumina` | production release target for the native `e2e relay` / `e2e shutdown` host selectors; **not executed by the validator** |
 
 `validate.sh` records per-run: source `HEAD`, working-tree status-list identity
 (changed-path list, not content), and sha256 + static-ELF of the exercised
@@ -43,9 +44,8 @@ fixture-facts artifact it just built and ran.
 ## The authoritative smoke: the existing native fixture runner
 
 The packaged binary is a **Linux aarch64 static ELF** — it cannot run on the
-Darwin host; there is **no separate smoke command**. The sole authoritative
-local smoke is the repository's native fixture runner (`validate.sh` delegates
-via `scripts/verify.sh boundary phase1`):
+Darwin host. The local smoke is the repository's native fixture runner;
+`validate.sh` invokes it directly and adds its own artifact checks:
 
 ```sh
 sh scripts/verify.sh fixtures boot
@@ -56,45 +56,32 @@ builds the fixture-facts variant from exact source, executes it under the
 approved privilege profile (uid 65534, `no_new_privs`, empty caps) with staged
 fixed inputs in a disposable container, bounds the child with real SIGTERM +
 10 s deadline, and asserts the typed records with guard-bitten predicates
-(plant/fail/revert/clean proven). **Standalone prerequisites:** the production
-release binary `target/release/alumina` must already be built — on Linux `sh
-scripts/verify.sh mid union`; on macOS run `sh scripts/verify.sh boundary
-phase1` (the `mid` selectors fail closed off-Linux) — and the existing
-rootless **and** rootful podman connections (named by `PODMAN_CONNECTION` /
-`PODMAN_ROOT_CONNECTION`) with the pinned builder image present on both are
-required — `verify.sh` checks them and fails closed otherwise. Connection names
-may be exported in the environment or set in the gitignored local file
-`.ooda/podman-connections.env` (sourced by the harness when present; an
-already-set environment variable wins). The only
-authorized execution route is the pinned builder image over those connections
-— foreground `--rm` only, **no cloud start, no VM/TCP-remote target rotation,
-no daemon**. The wrapper
-`validate.sh` invokes `boundary phase1` (composed: the fast tier — identity +
-change-scope classification + docs/unsafe/whitespace/audit — then the slow
-tier, which dispatches the mid union once and then fixtures), then probes the
-fixture-facts static/hash/freshness. The docs
-control runs once inside `boundary phase1` (the same link/citation check the
-`docs` selector runs); the wrapper does not re-invoke it.
-Its convenience is **build ordering only** — it never provisions VMs,
-connections, or images (existing infrastructure remains prerequisite), and it
-**never invokes the E2E selectors** (`e2e relay`/`e2e shutdown` are separate
-host selectors, not part of this smoke wrapper).
+(plant/fail/revert/clean proven). The production release binary
+`target/release/alumina` must already be built; use `sh scripts/verify.sh mid
+union` on Linux or `sh scripts/verify.sh host-mid union` on macOS. The latter
+copies the release artifact to the host. Existing rootless **and** rootful
+Podman connections (`PODMAN_CONNECTION` / `PODMAN_ROOT_CONNECTION`) and the
+pinned base image on both are required. Connection names may be exported or set
+in the gitignored `.ooda/podman-connections.env` (sourced when present; an
+already-set environment variable wins). The derived `ALT_IMAGE` (also the
+fixture image by default) should already be present on both connections: if
+absent, the script attempts to build it, requiring network access. The harness
+does not provision VMs or connections; container runs use `--rm --pull=never`.
+No build or fixture checks should run concurrently because they share artifacts
+and volumes. The validator does not run MID, docs, audit/deny or E2E checks.
 
 ## Selector host context (sole owner)
 
 Source-derived prerequisite context for every `scripts/verify.sh` selector
 (durable authoritative source table in bd `alumina-1d5x`). Tool/connection/
 image availability is **not asserted here** (not re-tested; no runnable-now
-claim), and this repo never provisions VMs, connections or images.
+claim). The harness does not provision VMs or connections; it may build a
+missing derived image as described below.
 
 - `mid foundations` / `mid boot` — **Linux-only**; fail closed on any
   non-Linux host. These standalone selectors are **behavior-proof only**
   (atest foundations/boot tests, fmt, whitespace): the release build,
-  static-ELF, clippy, and closure-metadata proofs live at `mid union` /
-  `boundary phase1`. On macOS they run through `boundary phase1` (Linux
-  dispatch via the rootless podman connection, `--pull=never`, pinned
-  builder image; requires `podman`, a reachable rootless podman connection and
-  the pinned image present).
+  static-ELF, clippy, and closure-metadata proofs live at `mid union`.
 - `mid full` — **Linux-only**; fail closed on any non-Linux host. Standalone
   gate-only selector: runs the gate-only test surface (lib unit tests + the 6
   gate-only integration binaries: eligibility, mio_matrix, main_thread_stack,
@@ -102,14 +89,20 @@ claim), and this repo never provisions VMs, connections or images.
   (`--features alloc-witness`, incl. the eligibility witness and the
   alloc-witness-only mio_matrix binary); atest-only (no clippy/fmt). Its
   surface is subsumed by `mid union` (one Linux dispatch, lib + all eight
-  integration targets witness-off/on); `boundary phase1` dispatches union
-  alone, never `mid full`. On macOS `mid` selectors fail closed off-Linux — run
-  it only via a direct Linux `mid` dispatch (rootless podman connection,
-  `--pull=never`, pinned builder image; requires `podman`, a reachable
-  rootless podman connection and the pinned image present).
+  integration targets witness-off/on).
+- `host-mid foundations|boot|clippy|union|full` — host Podman dispatch of the
+  corresponding Linux `mid` selector, including on macOS. Requires `podman`, a
+  reachable rootless `PODMAN_CONNECTION` and the derived `ALT_IMAGE` (default
+  `localhost/alumina-verify:20261029`). If missing, the script attempts to
+  build it from the pinned Rust base, including networked package/component
+  installation. It uses named target and Cargo-home volumes by default and
+  creates missing volumes; `ALT_NO_VOLUME=1` uses host target bind-mounts.
+  `host-mid union` copies the production artifact to `target/release/alumina`
+  with volume/host digest comparison (copy is unnecessary in bind-mount mode).
 - `fixtures boot` — **host Podman coordinator (Darwin allowed by source)**;
-  requires existing rootless and rootful podman connections with the pinned
-  builder image present on both (`--pull=never`),
+  requires existing rootless and rootful Podman connections with the pinned
+  base image present on both and the derived fixture image on both (or a
+  successful automatic build),
   prebuilt `target/release/alumina` (requires it, does not build it), and a
   SHA256 tool.
 - `e2e relay` / `e2e shutdown` — **directly host-runnable (Linux or
@@ -126,31 +119,21 @@ claim), and this repo never provisions VMs, connections or images.
   `localhost/alumina-e2e:e2e-20261011`: the immutable harness image ID is
   resolved on that rootful connection, recorded in the receipt, and the
   consumers re-verify the tag resolves to it and run the ID itself.
-- `boundary phase1` — **host coordinator**, split into a fast tier and a slow
-  tier (both exit 1 `BLOCKED` by design; neither ever invokes the e2e
-  selectors). The fast tier (`boundary phase1-fast`) runs cheap host gates
-  only — identity BEFORE, change-scope classification (writes
-  `target/phase1-scope`), docs link gate, unsafe-surface gate, `git diff
-  --check`, audit/deny, identity AFTER/compare — with **no Linux MID, no
-  fixtures**, so a cheap-gate failure aborts before the ~90-min
-  compile-dominated dispatch. The slow tier (`boundary phase1-slow`) reads the
-  scope marker (missing => full, fail-safe): on docs-only it emits an explicit
-  `PHASE1-SLOW-SKIPPED-BY-DESIGN` and skips the MID; on full it dispatches the
-  Linux MID union once (union covers the whole gate-only test surface — lib
-  plus all eight integration targets — witness-off then witness-on), then
-  fixtures, identity AFTER/compare and artifact identity. `mid full` is no
-  longer dispatched separately (`mid union` subsumes it). The composed selector runs the
-  fast tier then the slow tier unless the scope is docs-only. Host
-  tools required and fail closed when absent: `podman` + a reachable rootless
-  podman connection;
-  Node with **`NODE_OPTIONS`/`NODE_PATH` unset** and
-  `scripts/docs_check/check.mjs`; `git`; `sha256sum` (or `shasum`);
-  `python3` (config-candidate observation); `cargo-audit` + `cargo-deny`.
-  **Never invokes the e2e selectors**; exit-zero coordination is not release
-  qualification.
+- `supply-chain audit-deny` — independent host check requiring `cargo-audit`
+  0.22.1, `cargo-deny` 0.19.4 and Cargo toolchain 1.99.0. It runs audit with
+  `--no-fetch` against the local advisory DB, then `cargo deny check`; missing
+  tools, version mismatch or a failing check is nonzero.
+- `identity snapshot <directory>` / `identity compare <before> <after>` —
+  independent source/environment stability receipts. Snapshots require git,
+  SHA256, Python 3 and Node with `NODE_OPTIONS`/`NODE_PATH` unset; they record
+  HEAD, status, hashes of the fixed input set and selected environment/config
+  observations. Compare checks those four records, not every possible input.
+  `identity artifact <path>` hashes an existing file; it does not prove that
+  file was built or executed. Keep snapshots under `target/` to avoid changing
+  the status list.
 - `docs` (`verify.sh docs`) — full offline docs gate, not just links:
   link/fragment over the 8-root `DOCSLINK_ROOTS` (incl.
-  `docs/trust-telemetry-design.md`) + HTML structure + physical INTENDED +
+  `docs/trust-telemetry-design.md`) + physical INTENDED +
   cfg-parentage + unsafe surface + frozen-spec digest; requires Node with
   **`NODE_OPTIONS`/`NODE_PATH` unset** and `scripts/docs_check/check.mjs`
   present; runs no network.
@@ -272,25 +255,16 @@ is only observable with a TLS 1.3-only client.
 sh docs/qa-package/validate.sh
 ```
 
-1. Mandatory prerequisites fail **before any gate effect** (`git rev-parse`,
-   sha256 hasher, `file`): any absence is `QA-PACKAGE-PREREQ-FAIL` and aborts
-   the run before the heavy native gate, never a silent skip and never a
-   pass-by-existing.
-2. Runs `scripts/verify.sh boundary phase1` with `PHASE1_SCOPE=full` forced
-   (the wrapper always exercises the full ceremony — the Linux MID union once,
-   then supervised `fixtures boot` positive + exit-78 negatives, the docs link
-   gate once (`docslink_check`), `cargo audit` + `cargo deny check` — never a
-   docs-only skip).
-3. Probes the exercised fixture-facts artifact the gate just built: static ELF
-   - sha256 + freshness proven against the in-run variant marker the fixture
-   gate wrote.
-4. Emits `QA-PACKAGE-VALIDATE-OK`, exit 0, only when identity resolved, the
-   fresh-variant proof holds and every sub-gate hard-0. Three-state outcome:
-   - **OK** (exit 0) — every sub-gate hard-0, including `boundary phase1`
-     exiting 0.
-   - **BLOCKED** (non-zero) — `boundary phase1` coordinated (emitted
-     `BOUNDARY-OWNER-COORD-OK`) but its completion is `FINAL-PHASE1-COMPLETION:
-     BLOCKED` pending release gates; attribution is still this-run, but
-     `QA-PACKAGE-VALIDATE-OK` is never emitted.
-   - **FAIL** (non-zero) — genuine gate failure (non-zero boundary without the
-     coordination markers, or any probe/identity/freshness failure).
+1. Checks a SHA256 hasher, git HEAD and status, and `file` before any fixture
+   effect. Missing or failing prerequisites produce `QA-PACKAGE-PREREQ-FAIL`.
+   The recorded status-list hash identifies changed paths, **not their content**.
+2. Removes the prior fixture variant marker, then runs `fixtures boot`; it
+   requires the prebuilt production binary and Podman prerequisites above.
+3. Requires an executable fixture-facts artifact and a nonempty in-run marker,
+   compares their SHA256 digests, and checks `file` output for a statically
+   linked ELF. Probe errors, missing or mismatched artifacts and fixture
+   failure are nonzero and never produce success.
+4. Emits `QA-PACKAGE-VALIDATE-OK: fixture smoke only; not release
+   qualification` and exits 0 only after those checks pass. This does not run
+   MID, docs, supply-chain, source snapshot/compare or E2E selectors; run any
+   applicable checks independently using [the command set](../verification.md).

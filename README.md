@@ -80,8 +80,7 @@ combined into a best-family assurance claim. The proxy attempts bounded
 per-entry assurance records at full, degraded or failed startup and on
 material changes, including idle expiry. Logging is best-effort: a record
 attempt is not a delivery or availability guarantee. See the
-[governing assurance rules](docs/alumina-proxy.md#hardening-per-entry-dns-assurance-and-qualified-admission),
-[as-built architecture](docs/architecture.html), and
+[governing assurance rules](docs/alumina-proxy.md#hardening-per-entry-dns-assurance-and-qualified-admission) and
 [trust-chain status](docs/trust-chain-design.md).
 
 Endpoint verification stays client-owned: the client — not the proxy —
@@ -112,7 +111,6 @@ For local build and validation prerequisites, follow the
 ## Documentation
 
 - [Specification](docs/alumina-proxy.md): sole governing requirements.
-- [Architecture](docs/architecture.html): source-derived, as-built reference.
 - [Deployment](docs/deployment.md): container, runtime, and network confinement.
 - [Monitoring](docs/monitoring.md): stdout collection, loss alerting, and
   restart semantics.

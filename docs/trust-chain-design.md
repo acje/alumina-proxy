@@ -31,7 +31,7 @@ prevents bypass.
 | --- | --- |
 | Proxy policy binding | Implemented — allowlisted CONNECT `name:port`, validated DNS-derived address eligibility, and SNI matching the approved name (`docs/alumina-proxy.md:59,88,255`) |
 | Resolver transport | Implemented — DNS over TCP only; strict-pinned DoT authenticates the resolver hop by SPKI/TLS-signature key possession (no CA chain needed), while an unpinned DoT entry validates against an empty root store and fails closed (`docs/alumina-proxy.md:107,113`) |
-| DNS assurance | Implemented per allowlist entry — `resolver_trusted` is the legacy default; `resolver_authenticated` requires authenticated-origin proof, and `delegated_dnssec` additionally requires qualified origin and AD=1. Both strong profiles require all resolvers strict-pinned and the operator-declared `root_validating_no_stale` policy. Current proof is checked at startup readiness and every actual dial; A/AAAA assurance records are attempted at boot and material changes, including idle expiry. See the [governing assurance rules](alumina-proxy.md#hardening-per-entry-dns-assurance-and-qualified-admission) and [as-built architecture](architecture.html). |
+| DNS assurance | Implemented per allowlist entry — `resolver_trusted` is the legacy default; `resolver_authenticated` requires authenticated-origin proof, and `delegated_dnssec` additionally requires qualified origin and AD=1. Both strong profiles require all resolvers strict-pinned and the operator-declared `root_validating_no_stale` policy. Current proof is checked at startup readiness and every actual dial; A/AAAA assurance records are attempted at boot and material changes, including idle expiry. See the [governing assurance rules](alumina-proxy.md#hardening-per-entry-dns-assurance-and-qualified-admission). |
 | Endpoint & deployment | Client- and deployment-owned — the proxy relays opaque TLS and never authenticates the upstream server; client verification of the upstream server certificate and hostname (with the server verifying a client certificate only when mutual TLS is configured), correct clocks and anchors, and bypass-resistant deployment are operator responsibilities (`docs/alumina-proxy.md:55,90,287`) |
 
 None of the above claims that every deployment delivers the complete chain.
@@ -41,6 +41,5 @@ not on AD alone. Plain DNS over TCP does not cryptographically authenticate the
 resolver or DNS data. Endpoint certificate and hostname verification remain
 client-owned, and authenticated resolver origin is not endpoint validation.
 The [specification](alumina-proxy.md) is the sole governing behavior and is
-byte-frozen by default, subject to scoped governance amendments; the
-[architecture](architecture.html) is the as-built reference. Assurance
+byte-frozen by default, subject to scoped governance amendments. Assurance
 notifications are bounded best-effort attempts, not delivery guarantees.

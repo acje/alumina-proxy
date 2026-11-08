@@ -46,26 +46,10 @@ Every change must preserve:
 
 ## Documentation model
 
-- **`docs/architecture.html` is the single source of truth for architecture
-  documentation.** It is *derived from code* and exists so that a reviewer can
-  do higher-level code review without re-reading every module. Every factual
-  claim cites a spec clause or a `file:line` of that code.
-- **It describes, it does not adjudicate.** No findings, severities, review
-  verdicts, recommendations, open questions, decisions, task lists, or bead IDs
-  appear in it. Issues, decisions, evidence, and verdicts live in `bd` only.
-  As-built statements whose subject is a limitation are retained as fact with
-  no issue framing.
 - **`docs/alumina-proxy.md` defines what the code should do.** It is the
   governing specification and byte-frozen until a deliberate governance
   amendment changes it; a design improvement that needs different behaviour
-  amends the spec, the code, the tests, and the architecture document in one
-  governed increment.
-- **One architecture narrative.** `docs/architecture.md` is retired; no other
-  document may carry a second architecture narrative. Practical/QA documents
-  may cite the architecture document, never duplicate it.
-- **Behavioural change carries its documentation.** Any increment that changes
-  observable behaviour updates `docs/architecture.html` in the same increment;
-  its citations must still resolve at the new revision.
+  amends the spec, the code, and the tests in one governed increment.
 
 ### Reconciling a deviation
 
@@ -82,18 +66,18 @@ because one side "wins".
 - `docs/alumina-proxy.md` is the sole, byte-canonical governing
   specification (sha256 `5df760a5e8a442fa709a8610262a3a185666d0b76b5127c1c9a4f6466342bd0e`) and is byte-frozen by default.
   Only an explicitly user-authorized, scoped governance amendment may change
-  it. That increment must update the spec, this digest pin, code, tests and
-  architecture together, pass required independent source and governance
+  it. That increment must update the spec, this digest pin, code and tests
+  together, pass required independent source and governance
   reviews before adoption, and preserve all security and resource limits.
   Other documents only restate or cite the specification.
 - Native verification entry point, QA run and prerequisite ownership are
   `docs/qa-package/README.md`; the verify command set is in
   `docs/verification.md`.
   Doc-only changes: `sh scripts/verify.sh docs`.
-- `mid` selectors are Linux-only and fail closed off-Linux (reach them via
-  `sh scripts/verify.sh boundary phase1` on macOS); `fixtures boot` and the
-  `e2e` selectors are directly host-runnable with existing Podman VM
-  connections/images (`boundary phase1` never executes E2E).
+- `mid` selectors are Linux-only and fail closed off-Linux; on macOS use the
+  corresponding `sh scripts/verify.sh host-mid <scope>` Podman dispatch.
+  `fixtures boot` and the `e2e` selectors are independently host-runnable with
+  the prerequisites described in the QA package.
 - Behavioural changes run red→green and preserve the fixed profile: single
   boot owner and single serving owner, two reused 128 KiB per-tunnel buffers,
   no post-boot *first-party* heap alloc/dealloc (dependency allocations are a

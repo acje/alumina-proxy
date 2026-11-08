@@ -10,18 +10,12 @@ set -eu
 # the verification instruction / command-set authority is docs/verification.md;
 # status and prerequisites are docs/qa-package/README.md.
 #
-# COST STRUCTURE (measured, not assumed). Every gate and every marker line below
-# is the same gate the ceremony always ran; what follows changes only where work
-# happens and how much of it repeats:
-#   I0  per-gate `PHASE1-TIMING: <gate> <ms|NA>` lines and a total, so wall clock
-#       claims are measured. `NA` means no millisecond clock was available.
+# COST STRUCTURE:
 #   I1  ONE Cargo test invocation per feature config (lib units + foundations +
 #       boot + the gate-only binaries together) instead of three per config,
 #       and one target dir per feature config (`$VERIFY_AW_TARGET_DIR`) so
-#       witness-on/off artifacts never share a fingerprint graph. The boundary
-#       slow tier therefore dispatches `mid union` alone: union covers the
-#       gate-only surface, so `mid full` (still available standalone) is not
-#       dispatched twice over the same candidate.
+#       witness-on/off artifacts never share a fingerprint graph. `mid union`
+#       covers the gate-only surface; `mid full` remains available standalone.
 #   I2  both Cargo target trees (production release + the fixture-facts variant)
 #       live in a VM-native podman volume. The variant KEEPS its own target dir:
 #       sharing the production release dir would clobber target/release/alumina,
@@ -41,8 +35,8 @@ set -eu
 # against the pre-I4 scheme. `alt image` / `alt smoke` warm and prove the
 # container plumbing and back no claim.
 #
-# Do not run two boundary ceremonies concurrently: they share target/release and
-# the fixture volumes. Identity snapshots use fixed target/ paths.
+# Do not run build or fixture checks concurrently: they share target/release and
+# the fixture volumes.
 # =============================================================================
 
 # Local podman connection names (gitignored; never committed). Sourced when
@@ -56,8 +50,10 @@ TIER="${1:-}"
 SCOPE="${2:-}"
 
 usage() {
-    echo "usage: verify.sh {inner|mid|boundary|fixtures|e2e} {check|test|foundations|boot|union|full|clippy|phase1|phase1-fast|phase1-slow|relay|shutdown} [target] | verify.sh docs" >&2
+    echo "usage: verify.sh {inner|mid|host-mid|fixtures|e2e|supply-chain|identity} <scope> [args] | verify.sh docs" >&2
     echo "       inner test <target> runs ONE integration target host-natively; backs no done-claim." >&2
+    echo "       host-mid {foundations|boot|union|full|clippy}; supply-chain audit-deny" >&2
+    echo "       identity snapshot <directory> | identity compare <before> <after> | identity artifact <path>" >&2
     exit 2
 }
 
@@ -96,7 +92,6 @@ FIXTURE_BASE_IMAGE="docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48
 # Millisecond timestamps from python3 (an already-required boundary prerequisite,
 # see config_observe). A host without it prints `NA` rather than a fabricated
 # number: an unmeasured phase must never look measured.
-ALT_T0=$(date +%s)
 now_ms() {
     command -v python3 >/dev/null 2>&1 || {
         printf 'NA\n'
@@ -105,35 +100,10 @@ now_ms() {
     python3 -c 'import time; print(int(time.time()*1000))'
 }
 
-# phase_timed <label> <function> [args...]: run a gate, emit one
-# `PHASE1-TIMING: <label> <ms|NA>` line, propagate the gate's own exit status.
-# A gate that calls `exit` terminates the run as before (its timing line is then
-# absent, which is the honest signal that the phase did not complete).
-phase_timed() {
-    _pt_label="$1"
-    shift
-    _pt_t0=$(now_ms)
-    _pt_rc=0
-    "$@" || _pt_rc=$?
-    _pt_t1=$(now_ms)
-    case "${_pt_t0}${_pt_t1}" in
-        *NA*) printf 'PHASE1-TIMING: %s NA\n' "$_pt_label" ;;
-        *) printf 'PHASE1-TIMING: %s %sms\n' "$_pt_label" "$((_pt_t1 - _pt_t0))" ;;
-    esac
-    return "$_pt_rc"
-}
-
 # phase_mark <label> <ms>: emit a timing line for a phase measured inline (the
 # Linux dispatch, the fixture run, a copy-out) where no function call brackets it.
 phase_mark() {
     printf 'PHASE1-TIMING: %s %s\n' "$1" "$2"
-}
-
-# Total elapsed is printed by the boundary marker block only (a global EXIT trap
-# would be clobbered by boot_fixtures' own temp-file trap).
-alt_total_timing() {
-    ALT_TOTAL=$(( $(date +%s) - ALT_T0 ))
-    printf 'PHASE1-TIMING: total %ss\n' "$ALT_TOTAL"
 }
 
 INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/qa/mod.rs src/qa/fault.rs src/qa/fuzz.rs src/config/fqdn_tests.rs src/config/mod.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/dns/resolver.rs src/dns/resolver/tests.rs src/boot/preflight.rs src/inventory.rs src/boot/mod.rs src/boot/tests.rs src/dns/cache.rs src/dns/cache/grade_key.rs src/dns/cache/grade_key/tests.rs src/dns/cache/tests.rs src/inspection/mod.rs src/inspection/connect.rs src/inspection/connect/tests.rs src/inspection/client_hello.rs src/inspection/client_hello/ja4.rs src/inspection/client_hello/tests.rs src/dns/mod.rs src/dns/outcome.rs src/dns/publication.rs src/dns/wire.rs src/dns/wire/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/dns/incident_report.rs src/dns/incident_report/tests.rs src/names/mod.rs src/names/hostname.rs src/names/hostname/tests.rs src/names/rules.rs src/log/mod.rs src/log/queue.rs src/log/sink.rs src/log/encoding.rs src/log/tests.rs src/runtime/gate.rs src/runtime/mod.rs src/runtime/owner.rs src/runtime/owner/tests.rs src/runtime/reactor.rs src/runtime/reactor/policy.rs src/runtime/reactor/reject.rs src/runtime/reactor/startup.rs src/runtime/reactor/tests.rs src/runtime/reactor/tests/refusals.rs src/runtime/storage.rs src/runtime/storage/startup_integration.rs src/runtime/storage/tests.rs src/runtime/tunnel.rs src/runtime/tunnel/tests.rs src/dns/schedule.rs src/dns/schedule/tests.rs src/dns/transport.rs src/dns/transport/registration.rs src/dns/transport/tests.rs src/dns/transport/tests/shared_armed_cache.rs src/dns/transport/dot_tests.rs tests/foundations.rs tests/boot.rs tests/support/temp_dir.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
@@ -142,11 +112,6 @@ INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh 
 # with the identity snapshot so the boundary content identity covers precisely
 # the bytes docslink_check reads (drift-proof by construction).
 DOCSLINK_ROOTS="docs/alumina-proxy.md docs/trust-telemetry-design.md docs/trust-chain-design.md docs/deployment.md docs/monitoring.md docs/verification.md docs/qa-package/README.md README.md"
-
-# html-structure gate roots: structural artefacts docslink_check's Markdown
-# parser cannot see (check.mjs answers unsupported-target/html-anchor-unsupported
-# for HTML), so they get their own gate rather than a DOCSLINK_ROOTS entry.
-HTML_DOC_ROOTS="docs/architecture.html"
 
 # B1: every relevant before/after identity input consumed by the boundary run:
 # source/config/lock/toolchain/deny plus the docs and .gitignore that
@@ -162,15 +127,10 @@ for root in $DOCSLINK_ROOTS; do
         *) GATE_ROOT_EXTRAS="$GATE_ROOT_EXTRAS $root" ;;
     esac
 done
-IDENTITY_FILES="$INTENDED .gitignore$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs scripts/html_check.mjs scripts/html_check_test.mjs $HTML_DOC_ROOTS"
+IDENTITY_FILES="$INTENDED .gitignore AGENTS.md$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs scripts/verify_test.py docs/qa-package/validate.sh docs/qa-package/validate_test.py"
 
-# Snapshot locations live under target/ (gitignored) so they never alter the
-# working-tree scope recorded in the status snapshot. scripts/verify.sh is itself
-# an identity input (it is in INTENDED), so a mid-run edit of the coordinator is
-# detectable by the same before/after comparison.
-IDENTITY_BEFORE="target/identity-before"
-IDENTITY_AFTER="target/identity-after"
-PHASE1_SCOPE_MARKER="target/phase1-scope"
+# Keep snapshot locations under target/ so they do not alter working-tree status.
+# scripts/verify.sh is itself an identity input in INTENDED.
 
 static_gate() {
     binfile="$1"
@@ -455,8 +415,8 @@ mid_full() {
 # is executed (a clearly-separate variant artifact under target/fixture-facts;
 # the production target/release artifact is left untouched, with before/after
 # digest equality enforced) so the fixture binary prints its own kernel facts
-# to stderr at actual entry. Each fixture runs that variant from the ro-mounted
-# actual checkout (never a copy) from cwd=/work holding the fixed documented
+# to stderr at actual entry. Each fixture runs the digest-checked copied variant
+# via a read-only file bind, from cwd=/work holding the fixed documented
 # config/resolver inputs, under a different kernel-grounded process-attribute
 # profile. Fixture stdout and stderr are captured as separate streams: a
 # negative fixture requires EMPTY stdout and byte-exact stderr (exact facts line
@@ -519,9 +479,8 @@ boot_fixtures() {
     echo "BUILD fixture-facts variant (proof-only feature; separate target dir; production artifact untouched):"
     _bf_t0=$(now_ms)
     linux_dispatch 'cargo +${TOOLCHAIN} build --release --locked --features fixture-facts --target-dir target/fixture-facts'
-    # I2/I4: the variant target dir lives in the VM-native volume, so only the
-    # built artifact is copied out. Its digest is asserted on both sides of the
-    # copy: the executed variant is the identified variant.
+    # Copy the built variant out of the rootless volume and bind the file itself
+    # on both connections; uid 65534 need not traverse the host target tree.
     copy_out_artifact "fixture-facts/release/alumina" "target/fixture-facts/release/alumina" || exit 1
     _bf_t1=$(now_ms)
     case "${_bf_t0}${_bf_t1}" in
@@ -561,6 +520,8 @@ boot_fixtures() {
     stage() {
         printf '%s\n' \
             'set -eu' \
+            'python3 /app/scripts/fixture_metadata_probe.py /fixture-alumina "$1" >/dev/null' \
+            'setpriv --reuid 65534 --regid 65534 --clear-groups /bin/sh -c "test -x /fixture-alumina" || { echo "FIXTURE-BLOCKED: variant not executable by uid 65534" >&2; exit 1; }' \
             'mkdir -p /work' \
             "printf '%s\\n' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' 'resolver = [\"127.0.0.1\"]' '[any_illegal]' 'connect_parse = { action = \"notify\", scope = \"connection\" }' 'host_not_allowlisted = { action = \"notify\", scope = \"connection\" }' 'tls_profile = { action = \"notify\", scope = \"connection\" }' 'ech = { action = \"notify\", scope = \"connection\" }' '[allowed_fqdn.\"example.com:443\"]' 'early_data = { action = \"notify\", scope = \"connection\" }' 'ja4 = { action = \"notify\", scope = \"connection\" }' > /work/config.toml" \
             'chown -R 65534:65534 /work'
@@ -584,8 +545,8 @@ boot_fixtures() {
         set +e
         podman --connection "$conn" run --rm --pull=never \
             -v "$ROOT:/app:ro,Z" \
-            $(target_volume_mount) \
-            "$@" "$FIXTURE_IMAGE" sh -c "$(stage) && $run_cmd" >"$outf" 2>"$errf"
+            -v "$VARBIN:/fixture-alumina:ro,Z" \
+            "$@" "$FIXTURE_IMAGE" sh -c "$(stage) && $run_cmd" -- "$variant_sha" >"$outf" 2>"$errf"
         rc=$?
         set -e
         FIXTURE_OUTF="$outf"
@@ -704,7 +665,7 @@ boot_fixtures() {
     #    must be the exact stderr.
     pos_script=$(cat <<'POSPOS'
 cd /work
-/app/target/fixture-facts/release/alumina &
+/fixture-alumina &
 pid=$!
 sleep 3
 kill -TERM "$pid" 2>/dev/null || true
@@ -742,7 +703,7 @@ POSPOS
     #    reported zero at entry. Negative fixtures must have EMPTY stdout and
     #    byte-exact stderr: exactly the facts line then the diagnostic.
     run_fixture "root-rejected" 78 "$CONN" \
-        "cd /work && /app/target/fixture-facts/release/alumina" \
+        "cd /work && /fixture-alumina" \
         --security-opt no-new-privileges --user 0:0
     fixture_require_stdout_empty
     fixture_require_stderr_exact "$(printf '%s\n' \
@@ -752,7 +713,7 @@ POSPOS
     # 3) NNP-MISSING: no no_new_privs flag -> EX_CONFIG 78 (missing-flag
     #    diagnostic); caps empty, uid dropped.
     run_fixture "no-new-privs-missing" 78 "$CONN" \
-        "setpriv --reuid 65534 --regid 65534 --clear-groups /bin/sh -c 'cd /work && /app/target/fixture-facts/release/alumina'" \
+        "setpriv --reuid 65534 --regid 65534 --clear-groups /bin/sh -c 'cd /work && /fixture-alumina'" \
         --user 0:0
     fixture_require_stdout_empty
     fixture_require_stderr_exact "$(printf '%s\n' \
@@ -767,7 +728,7 @@ POSPOS
     #    facts observe all three capability sets non-empty (0x1000 each),
     #    asserting effective-first refusal rather than per-axis isolation.
     run_fixture "caps-effective" 78 "$ROOTCONN" \
-        "setpriv --reuid 65534 --regid 65534 --clear-groups --inh-caps=+net_admin --ambient-caps=+net_admin /bin/sh -c 'cd /work && /app/target/fixture-facts/release/alumina'" \
+        "setpriv --reuid 65534 --regid 65534 --clear-groups --inh-caps=+net_admin --ambient-caps=+net_admin /bin/sh -c 'cd /work && /fixture-alumina'" \
         --security-opt no-new-privileges --cap-add NET_ADMIN --user 0:0
     fixture_require_stdout_empty
     fixture_require_stderr_exact "$(printf '%s\n' \
@@ -805,9 +766,9 @@ POSPOS
     metar=0
     metaout=$(podman --connection "$CONN" run --rm --pull=never \
         -v "$ROOT:/app:ro,Z" \
-        $(target_volume_mount) \
+        -v "$VARBIN:/fixture-alumina:ro,Z" \
         --user 0:0 "$FIXTURE_IMAGE" \
-        sh -c 'python3 /app/scripts/fixture_metadata_probe.py /app/target/fixture-facts/release/alumina "$1"' -- "$variant_sha" 2>&1) || metar=$?
+        sh -c 'python3 /app/scripts/fixture_metadata_probe.py /fixture-alumina "$1"' -- "$variant_sha" 2>&1) || metar=$?
     printf '%s\n' "$metaout" | sed 's/^/  /'
     [ "$metar" -eq 0 ] || {
         echo "BOOT-FIXTURES FAIL: metadata probe exit $metar (probe error / setid / digest mismatch is not verified absence)" >&2
@@ -877,82 +838,6 @@ docslink_check() {
     fi
     echo "DOCSLINK-CHECK-OK"
     echo "CITATION-CHECK-OK"
-}
-
-html_structure_check() {
-    # Offline Node-builtins structural gate for HTML artefacts
-    # (scripts/html_check.mjs): tag balance, duplicate ids, internal fragment
-    # closure, figure <desc> presence, table cell-count consistency, citation
-    # bounds (every <file>:LINE[-LINE] resolves as-given then src/ then tests/
-    # and is in range — a missing file / malformed range / out-of-range line is
-    # a check failure), banned issue apparatus (F-NN / U-NN / bead ids /
-    # (S1-S3) / owner decision / review finding / recommendation — the
-    # legitimate `alumina-proxy` binary name stays clean via a negative
-    # lookahead). The adapter emits one OK marker per
-    # root per check on
-    # success; this gate fails closed if any is missing. The adapter's exit is
-    # captured unmasked (one-way split: operational failures never fold into
-    # 0/1); its output is printed verbatim.
-    command -v node >/dev/null 2>&1 || {
-        echo "HTML-STRUCTURE-BLOCKED: node required for HTML structure check (absent)" >&2
-        exit 1
-    }
-    [ -f scripts/html_check.mjs ] || {
-        echo "HTML-STRUCTURE-BLOCKED: scripts/html_check.mjs missing (no HTML structure check)" >&2
-        exit 1
-    }
-    node_env_preflight
-    hrc=0
-    html_out="$(node scripts/html_check.mjs $HTML_DOC_ROOTS)" || hrc=$?
-    [ -n "$html_out" ] && printf '%s\n' "$html_out"
-    case "$hrc" in
-        0)
-            # fail closed on the markers: a green adapter that skipped a check
-            # (no HTML-CHECK-OK, HTML-CITATION-OK or HTML-APPARATUS-OK line per
-            # root) is a blocked gate, not a pass.
-            for _html_root in $HTML_DOC_ROOTS; do
-                if ! printf '%s\n' "$html_out" | grep -q "^HTML-CHECK-OK $_html_root "; then
-                    echo "HTML-STRUCTURE-BLOCKED: adapter exit 0 but no HTML-CHECK-OK for $_html_root" >&2
-                    exit 2
-                fi
-                if ! printf '%s\n' "$html_out" | grep -q "^HTML-CITATION-OK $_html_root "; then
-                    echo "HTML-STRUCTURE-BLOCKED: adapter exit 0 but no HTML-CITATION-OK for $_html_root" >&2
-                    exit 2
-                fi
-                if ! printf '%s\n' "$html_out" | grep -Eq "^HTML-APPARATUS-OK $_html_root([[:space:]]|$)"; then
-                    echo "HTML-STRUCTURE-BLOCKED: adapter exit 0 but no HTML-APPARATUS-OK for $_html_root" >&2
-                    exit 2
-                fi
-            done
-            ;;
-        1)
-            # The adapter emits HTML-CHECK-RESULT on every non-crash path, so on
-            # exit 1 the marker must be present before this is a domain defect.
-            # A missing marker means the adapter crashed (uncaught throw, syntax
-            # error): an operational failure, not a domain-negative verdict
-            # (error != negative finding). On a real domain failure the
-            # diagnostic names the citation-bounds and issue-apparatus defect
-            # classes alongside the structural ones (specific offenders are
-            # already printed verbatim above by the adapter).
-            if printf '%s\n' "$html_out" | grep -q '^HTML-CHECK-RESULT '; then
-                echo "HTML-STRUCTURE-FAIL (HTML defect: structural — tag imbalance, duplicate id, dangling fragment, missing desc, table cell-count mismatch; citation bounds — missing file, malformed range, out-of-range line; issue apparatus — F-NN/U-NN/bead id/(S1-S3)/owner decision/review finding/recommendation)" >&2
-                exit 1
-            fi
-            echo "HTML-STRUCTURE-OP-FAIL (adapter exit 1 without an HTML-CHECK-RESULT marker)" >&2
-            exit 2
-            ;;
-        2)
-            echo "HTML-STRUCTURE-OP-FAIL (operational or unsupported construct: unreadable file, unsupported HTML markup, or unreadable cited file)" >&2
-            exit 2
-            ;;
-        *)
-            echo "HTML-STRUCTURE-FAIL (adapter exit $hrc)" >&2
-            exit 1
-            ;;
-    esac
-    echo "HTML-CHECK-OK"
-    echo "HTML-CITATION-CHECK-OK"
-    echo "HTML-APPARATUS-CHECK-OK"
 }
 
 unsafe_surface_gate() {
@@ -1171,16 +1056,15 @@ sha256_digest() {
     printf '%s\n' "$digest"
 }
 
-# The executed artifact is a mandatory postbuild identity input: its absence is
-# a fail-closed condition (never a silently dropped identity field).
+# Hash an artifact without claiming execution; absence fails closed.
 artifact_identity() {
     bin="$1"
     [ -f "$bin" ] || {
-        echo "ARTIFACT-IDENTITY FAIL: executed artifact missing: $bin (identity impossible, not PASS)" >&2
+        echo "ARTIFACT-IDENTITY FAIL: artifact missing: $bin (identity impossible, not PASS)" >&2
         return 1
     }
     ah=$(sha256_digest file "$bin") || return 1
-    echo "  executed artifact sha256 $ah  $bin"
+    echo "  artifact sha256 $ah  $bin"
 }
 
 # Authoritative filesystem observation for the config-candidate inventory
@@ -1241,12 +1125,8 @@ identity_snapshot() {
     # The batch expansion is intentionally unquoted: IDENTITY_FILES is a fixed,
     # space-free set (INTENDED plus .gitignore and the docs-arm gate inputs).
     # The appended inputs are identity-carried, not gate roots: the docslink/
-    # citation gate files (scripts/docs_check/*), the structural HTML gate and
-    # its regression fixture (scripts/html_check.mjs and
-    # scripts/html_check_test.mjs), and the html_check root
-    # (docs/architecture.html via $HTML_DOC_ROOTS, expanded here to exactly one
-    # path). Word-splitting thus yields exactly the intended
-    # paths. The hasher's stderr is
+    # citation gate files (scripts/docs_check/*). Word-splitting thus yields
+    # exactly the intended paths. The hasher's stderr is
     # retained so a failed hash names the failing input; it is surfaced before
     # removal, never masked.
     if [ "$IDENTITY_HASHER" = "sha256sum" ]; then
@@ -1433,7 +1313,7 @@ audit_deny_owner() {
         [ "$dr" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo deny exit $dr" >&2; exit 1; }
         echo "AUDIT-DENY-OK (audit $AUDIT_VERSION exit $ar; deny $DENY_VERSION exit $dr)"
     else
-        echo "AUDIT-DENY-BLOCKED: cargo audit or cargo deny absent on this boundary host; applicable phase1 audit/deny cannot complete" >&2
+        echo "AUDIT-DENY-BLOCKED: cargo audit or cargo deny absent on this host" >&2
         exit 1
     fi
 }
@@ -1489,17 +1369,6 @@ ensure_volume() {
         echo "ALT-VOLUME-BLOCKED: cannot create volume '$_vol' on $_vconn" >&2
         exit 1
     }
-}
-
-# target_volume_mount: read-only target-volume mount for fixture-side consumers
-# (they only read the built variant). Emits two words, or nothing under the
-# host bind-mount baseline (ALT_NO_VOLUME=1). The string is fixed and internal,
-# so the unquoted expansion at each call site is intentional and safe.
-target_volume_mount() {
-    if [ "$ALT_NO_VOLUME" = "1" ]; then
-        return 0
-    fi
-    printf '%s\n' "-v" "$ALT_TARGET_VOL:/app/target:ro"
 }
 
 # copy_out_artifact <volume-relative-path> <host-relative-path> (I4): copy one
@@ -1592,6 +1461,7 @@ rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-
 '
     _ld_t0=$(now_ms)
     drc=0
+    mkdir -p "$ROOT/target"
     if [ "$ALT_NO_VOLUME" = "1" ]; then
         # Baseline mode only: verify.sh's original host bind-mount of target/, so
         # the alt can be measured apples-to-apples against verify.sh.
@@ -1611,7 +1481,6 @@ rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-
         ensure_volume "$CONN" "$ALT_CARGO_HOME_VOL"
         # The target path must exist inside the read-only source mount before the
         # volume is mounted over it.
-        mkdir -p "$ROOT/target"
         podman --connection "$CONN" run --rm --pull=never \
             -v "$ROOT:/app:ro,Z" \
             -v "$ALT_TARGET_VOL:/app/target" \
@@ -1634,166 +1503,6 @@ rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-
         echo "LINUX-MID FAIL: '$inner' exit $drc" >&2
         exit 1
     }
-}
-
-# Pure change-scope classifier (B): reads a path list on stdin (one per line),
-# echoes `docs-only` when every path is allowlisted (under docs/, or exactly
-# README.md / AGENTS.md), else `full`. Empty stdin =>
-# full (fail-safe toward more verification, never less). This is the TDD seam:
-# unit-testable with synthetic path lists and no git.
-phase1_scope_classify() {
-    scope="docs-only"
-    seen=0
-    while IFS= read -r p; do
-        [ -n "$p" ] || continue
-        seen=1
-        case "$p" in
-            *".."*) scope="full"; break ;;
-            docs/*|README.md|AGENTS.md) ;;
-            *) scope="full"; break ;;
-        esac
-    done
-    [ "$seen" -eq 1 ] || scope="full"
-    printf '%s\n' "$scope"
-}
-
-# Real change-scope detector (B): unions the committed (HEAD~1..HEAD),
-# uncommitted (HEAD..worktree) and untracked path lists, classifies the union
-# via phase1_scope_classify, echoes the scope, and writes the scope marker to
-# $PHASE1_SCOPE_MARKER (gitignored) so the slow tier can be a separate
-# invocation. Conservative by construction: any git-producer failure, a missing
-# HEAD~1 (root commit), an empty union, or any non-allowlisted path => full
-# (more verification, never less). The PHASE1_SCOPE env override forces
-# full/docs-only; any other value => full (fail-safe).
-phase1_change_scope() {
-    scope="${PHASE1_SCOPE:-}"
-    if [ -n "$scope" ]; then
-        case "$scope" in
-            full|docs-only) ;;
-            *) scope="full" ;;
-        esac
-    else
-        rc=0
-        committed=$(git diff --name-only HEAD~1 HEAD 2>&1) || rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "PHASE1-SCOPE-FAIL: git diff HEAD~1..HEAD exit $rc (root commit or unreadable; full ceremony)" >&2
-            scope="full"
-        fi
-        if [ "$scope" != "full" ]; then
-            rc=0
-            uncommitted=$(git diff --name-only HEAD 2>&1) || rc=$?
-            if [ "$rc" -ne 0 ]; then
-                echo "PHASE1-SCOPE-FAIL: git diff HEAD exit $rc (unreadable diff; full ceremony)" >&2
-                scope="full"
-            fi
-        fi
-        if [ "$scope" != "full" ]; then
-            rc=0
-            untracked=$(git ls-files --others --exclude-standard 2>&1) || rc=$?
-            if [ "$rc" -ne 0 ]; then
-                echo "PHASE1-SCOPE-FAIL: git ls-files --others exit $rc (unreadable untracked list; full ceremony)" >&2
-                scope="full"
-            fi
-        fi
-        if [ "$scope" != "full" ]; then
-            paths=$(printf '%s\n%s\n%s\n' "$committed" "$uncommitted" "$untracked")
-            scope=$(printf '%s\n' "$paths" | phase1_scope_classify)
-        fi
-    fi
-    printf '%s\n' "$scope"
-    mkdir -p target
-    printf '%s\n' "$scope" > "$PHASE1_SCOPE_MARKER"
-}
-
-boundary_phase1_fast() {
-    # Fast tier (C): cheap host gates only — identity BEFORE/AFTER stability
-    # self-check, change-scope classification (B), then docs/unsafe/whitespace/
-    # audit gates. NO linux_dispatch, NO MID, NO fixtures. Runs before the
-    # expensive Linux MID so a failing cheap gate aborts before the
-    # compile-dominated dispatch. None of these mutate identity inputs, so the
-    # BEFORE snapshot stays valid across them.
-    # I0: every gate is individually timed so the fast tier's own contribution to
-    # wall clock is measured rather than assumed.
-    phase_timed "fast.identity-before" identity_snapshot "$IDENTITY_BEFORE"
-    _scope_t0=$(now_ms)
-    phase1_scope=$(phase1_change_scope)
-    _scope_t1=$(now_ms)
-    case "${_scope_t0}${_scope_t1}" in
-        *NA*) phase_mark "fast.scope-classify" NA ;;
-        *) phase_mark "fast.scope-classify" "$((_scope_t1 - _scope_t0))ms" ;;
-    esac
-    phase_timed "fast.docslink" docslink_check
-    phase_timed "fast.intended-coverage" intended_coverage_gate
-    phase_timed "fast.cfg-test-parentage" cfg_test_parentage_gate
-    phase_timed "fast.unsafe-surface" unsafe_surface_gate
-    phase_timed "fast.canonical-digest" canonical_digest_gate
-    phase_timed "fast.git-diff-check" git_diff_check
-    phase_timed "fast.audit-deny" audit_deny_owner
-    phase_timed "fast.identity-after" identity_snapshot "$IDENTITY_AFTER"
-    phase_timed "fast.identity-compare" identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
-    echo "PHASE1-SCOPE-CLASSIFIED: $phase1_scope"
-}
-
-# `git diff --check` wrapped as a gate so it can be timed like its neighbours
-# without changing its semantics (non-zero exits fail the run as before).
-git_diff_check() {
-    git diff --check
-    echo "GIT-DIFF-CHECK-OK"
-}
-
-boundary_phase1_slow() {
-    # Slow tier (C): Linux MID + fixtures + artifact identity. Reads the scope
-    # marker written by the fast tier (missing => full, fail-safe); on docs-only
-    # it self-skips with an explicit classification and no MID. The AFTER
-    # snapshot is re-taken here (after boot_fixtures) and compared to the
-    # BEFORE captured by the fast tier, so a separate slow invocation still
-    # proves identity stability across the MID+fixtures.
-    #
-    # I1: this dispatches `mid union` ONLY. verify.sh dispatched
-    # `mid union && mid full`, and union now covers the gate-only surface for the
-    # same candidate, so the second selector would re-run 2 of 2 test
-    # invocations for zero extra coverage. `mid full` remains available
-    # standalone.
-    # I4: the built artifact is copied out of the build volume with a two-sided
-    # digest assertion before any host-side gate consumes it.
-    scope="full"
-    if [ -f "$PHASE1_SCOPE_MARKER" ]; then
-        scope=$(cat "$PHASE1_SCOPE_MARKER" 2>/dev/null) || scope="full"
-    fi
-    case "$scope" in
-        docs-only)
-            echo "PHASE1-SLOW-SKIPPED-BY-DESIGN: docs-only scope; Linux MID skipped (no Rust/fixture-facts change to verify)"
-            return 0
-            ;;
-        full) ;;
-        *) scope="full" ;;
-    esac
-    linux_dispatch 'sh scripts/verify.sh mid union'
-    copy_out_artifact "release/alumina" "target/release/alumina" || exit 1
-    phase_timed "fixtures" boot_fixtures
-    phase_timed "identity-after" identity_snapshot "$IDENTITY_AFTER"
-    phase_timed "identity-compare" identity_compare "$IDENTITY_BEFORE" "$IDENTITY_AFTER"
-    phase_timed "artifact-identity" artifact_identity target/release/alumina || exit 1
-}
-
-boundary_phase1() {
-    echo "phase1 boundary (owner seam H1): host sole coordinator; Linux MID via existing podman dispatch"
-    boundary_phase1_fast
-    boundary_phase1_slow
-}
-
-boundary_phase1_markers() {
-    echo "F3 mio operation matrix: IMPLEMENTED (tests/mio_matrix.rs: 8 tests incl. linux_epoll_operation_matrix with poll/register/reregister/deregister + alloc-witness controls; recorded native release evidence docs/verification.md#native-proofs-scoped-exact-input, z9m0/po3c); current-serving completeness witness still OPEN (cnrd T3) - not 'unbuilt matrix', not 'complete'"
-    echo "NotImplemented: DNS wire parser fuzz (Slice 2)"
-    echo "NotImplemented: CONNECT/ClientHello parser fuzz (Slices 3-4)"
-    echo "NotImplemented: log-record encoding fuzz (Slice 6)"
-    echo "NotImplemented: deployment confinement + E2E release gates (Slice 7)"
-    echo "RELEASE-NOT-READY: later-slice and release gates remain NotImplemented, not green"
-    echo "BOUNDARY-OWNER-COORD-OK: all applicable phase1 children coordinated and exited 0 on this host"
-    echo "ALT-PARITY: every gate and marker of the pre-I0 ceremony is still present; only cost structure changed (see PHASE1-TIMING lines)"
-    echo "ALT-MODE: target_vol=$ALT_TARGET_VOL cargo_home_vol=$ALT_CARGO_HOME_VOL aw_target_dir=$ALT_AW_TARGET_DIR image=$ALT_IMAGE no_volume=$ALT_NO_VOLUME"
-    alt_total_timing
-    echo "FINAL-PHASE1-COMPLETION: BLOCKED — pending fixture/doc/Rust repairs and review approval before any phase1 done-claim (no E2E equivalence claimed)"
 }
 
 # Real-IO CONNECT/SNI opaque-relay and native SIGTERM shutdown gates against the
@@ -2087,12 +1796,20 @@ case "$TIER/$SCOPE" in
     mid/clippy) mid_clippy ;;
     mid/union) mid_union ;;
     mid/full) mid_full ;;
+    host-mid/foundations|host-mid/boot|host-mid/clippy|host-mid/union|host-mid/full)
+        [ "$#" -eq 2 ] || usage
+        linux_dispatch "sh scripts/verify.sh mid $SCOPE"
+        if [ "$SCOPE" = "union" ]; then
+            copy_out_artifact "release/alumina" "target/release/alumina" || exit 1
+        fi
+        ;;
     fixtures/boot) boot_fixtures ;;
-    boundary/phase1-fast) boundary_phase1_fast; boundary_phase1_markers; exit 1 ;;
-    boundary/phase1-slow) boundary_phase1_slow; boundary_phase1_markers; exit 1 ;;
-    boundary/phase1) boundary_phase1; boundary_phase1_markers; exit 1 ;;
+    supply-chain/audit-deny) [ "$#" -eq 2 ] || usage; audit_deny_owner ;;
+    identity/snapshot) [ "$#" -eq 3 ] && [ -n "$3" ] || usage; identity_snapshot "$3" ;;
+    identity/compare) [ "$#" -eq 4 ] && [ -n "$3" ] && [ -n "$4" ] || usage; identity_compare "$3" "$4" ;;
+    identity/artifact) [ "$#" -eq 3 ] && [ -n "$3" ] || usage; artifact_identity "$3" ;;
     e2e/relay) e2e_relay ;;
     e2e/shutdown) e2e_shutdown ;;
-    docs/*) docslink_check; html_structure_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate ;;
+    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate ;;
     *) usage ;;
 esac

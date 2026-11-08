@@ -1,7 +1,7 @@
-//! The pure two-barrier forwarding gate for one tunnel (architecture D1-D5b;
-//! docs/alumina-proxy.md:32,201). This is the *authority* over byte flow across the two
-//! forwarding barriers; the byte buffers themselves live in the boot-owned
-//! per-slot workspace, so the gate is a small fixed-offset state machine with
+//! The pure two-barrier forwarding gate for one tunnel (docs/alumina-proxy.md
+//! §Protocol contract and §Architecture). This is the *authority* over byte
+//! flow across the two forwarding barriers; the byte buffers live in the
+//! boot-owned per-slot workspace, so the gate is a small fixed-offset state machine with
 //! no sockets and no I/O, deterministic and unit-testable.
 //!
 //! Barrier A (client->upstream): no client bytes, including `ClientHello`, are
@@ -10,16 +10,16 @@
 //! supplies the verdict; the gate tracks the hello boundary in the stream).
 //! Barrier B (upstream->client): no upstream bytes are forwarded before the
 //! gate opens. A successful CONNECT response alone authorizes neither
-//! direction (D2).
+//! direction.
 //!
 //! The gate opens atomically in the same transition whose successful
 //! client->upstream write accounting reaches the end of the validated
-//! `ClientHello` (H), before any subsequent upstream read (D3). A single
+//! `ClientHello` (H), before any subsequent upstream read. A single
 //! successful write may cross H and include coalesced trailing bytes (X);
 //! those X bytes are relay-from-open and already forwarded by that write.
-//! Ordered progress is kept by monotonic committed offsets (D5): a partial
+//! Ordered progress is kept by monotonic committed offsets: a partial
 //! successful write advances its own bytes, WouldBlock/readiness is not
-//! activity (D4), and actual upstream data/EOF/reset observed while barrier B
+//! activity, and actual upstream data/EOF/reset observed while barrier B
 //! is closed terminates setup with no forwarding.
 
 use std::fmt;
@@ -38,7 +38,7 @@ pub enum UpstreamWrite {
     WritingHello { total: usize },
     /// The gate opened in this transition: `crossing` cumulative upstream
     /// bytes committed, of which `relay_from_open` were coalesced trailing
-    /// bytes (X) beyond H forwarded by the same write (D3).
+    /// bytes (X) beyond H forwarded by the same write.
     GateOpened {
         crossing: usize,
         relay_from_open: usize,
@@ -47,7 +47,7 @@ pub enum UpstreamWrite {
     Open,
 }
 
-/// Actual upstream activity observed while barrier B is closed (D4): only
+/// Actual upstream activity observed while barrier B is closed: only
 /// observation terminates setup; `WouldBlock` or readiness alone is not
 /// activity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,10 +210,10 @@ impl TunnelGate {
     /// since the last report (barrier A progress). The gate accumulates the
     /// delta reports into a monotonic committed offset, so a backwards
     /// movement is structurally unrepresentable while partial successful
-    /// writes keep ordered progress (D5). Only a *permitted* write advances
+    /// writes keep ordered progress. Only a *permitted* write advances
     /// the ledger: a terminated or barrier-A-closed gate reports
     /// [`UpstreamWrite::BlockedByBarrierA`] and records nothing (I10). This
-    /// is the only transition that can open the gate (D3).
+    /// is the only transition that can open the gate.
     pub const fn upstream_write(&mut self, advance: usize) -> UpstreamWrite {
         match self.phase {
             GatePhase::Terminated(_) => UpstreamWrite::BlockedByBarrierA,
@@ -243,7 +243,7 @@ impl TunnelGate {
         }
     }
 
-    /// Actual upstream activity observed while barrier B is closed (D4):
+    /// Actual upstream activity observed while barrier B is closed:
     /// terminates setup with no forwarding. WouldBlock/readiness is not
     /// activity and must not be reported here.
     pub fn observe_upstream_activity(&mut self, activity: Activity) {

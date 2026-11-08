@@ -17,7 +17,7 @@
 //! hostname; the gate opens in the same successful write that crosses the
 //! validated hello end. Barrier B (upstream->client) stays closed until the
 //! gate opens; any actual upstream data/EOF/reset observed pre-open
-//! terminates the setup ([`crate::runtime::gate::Activity`], architecture D4). A setup
+//! terminates the setup ([`crate::runtime::gate::Activity`]). A setup
 //! graduates to established work the moment its gate opens, releasing a
 //! pending seat; absolute setup deadlines are enforced by the poll timeout and
 //! an expiry sweep (504).
@@ -3359,7 +3359,7 @@ impl Serving {
 
     /// Expire one pre-gate setup. Pre-200 stages receive the fixed 504 refusal;
     /// once the 200 has begun the slot closes with the in-flight body flushed
-    /// best-effort but never replaced (D1, xz3f N5). A refusal that cannot yet
+    /// best-effort but never replaced (xz3f N5). A refusal that cannot yet
     /// flush is closed on the next sweep, so the passed deadline cannot spin.
     fn expire_setup(&mut self, i: usize) {
         match self.slots[i].stage {
