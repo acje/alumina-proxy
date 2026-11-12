@@ -847,20 +847,38 @@ unsafe_surface_gate() {
     # under src/ (src/*/tests.rs, src/*/dot_tests.rs), whose test-only `unsafe`
     # never compiles into the production binary. Any other *.rs file containing
     # the keyword fails closed, naming the offender(s). Read-only host-side
-    # check; no builds. rg is preferred; a grep -R fallback covers hosts without
-    # rg. target/ and .git are excluded (gitignored for rg, explicit for grep);
-    # the grep fallback also excludes .ooda/ so gitignored scratch never trips
-    # the gate.
+    # check; no builds.
+    # The decision is made over the resolved content of EVERY physical *.rs path
+    # in the working tree, symlinks included. The universe is enumerated by find
+    # (target/, .git/ and .ooda/ pruned, producer exit captured) and handed to the
+    # scanner as explicit file arguments: directory traversal is never the scan
+    # mechanism, because rg and grep -R do not descend into a symlinked file
+    # reached through a directory while both read an explicit symlink argument,
+    # and intended_coverage_gate already admits a resolving src/*.rs symlink. An
+    # explicitly enumerated path list keeps the scanned universe a superset of
+    # the admitted inventory, including untracked and non-src .rs paths (the
+    # bench crate stays covered). rg is preferred; grep -l covers hosts without
+    # rg.
     # Producer exit is captured (cf. sha256_digest): rg/grep exit 1 = no match
     # (clean); any exit >= 2 is a tooling error and fails closed, never passing
-    # on an empty offender list.
+    # on an empty offender list. An empty universe is a scan failure too.
+    frc=0
+    universe="$(find . \( -path ./target -o -path ./.git -o -path ./.ooda \) -prune -o \( -type f -o -type l \) -name '*.rs' -print 2>&1)" || frc=$?
+    [ "$frc" -eq 0 ] || {
+        echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe path enumeration exit $frc (tooling error, not PASS)" >&2
+        exit 1
+    }
+    universe="$(printf '%s\n' "$universe" | sed 's#^\./##')"
+    [ -n "$universe" ] || {
+        echo "UNSAFE-SURFACE-SCAN-FAIL: empty .rs path universe (tooling error, not PASS)" >&2
+        exit 1
+    }
     offenders=""
     scan_rc=0
     if command -v rg >/dev/null 2>&1; then
-        offenders="$(rg -l '\bunsafe\b' --glob '*.rs' --glob '!target/**' 2>/dev/null)" || scan_rc=$?
+        offenders="$(rg -l '\bunsafe\b' -- $universe 2>/dev/null)" || scan_rc=$?
     else
-        offenders="$(grep -Rl --include='*.rs' --exclude-dir=target --exclude-dir=.git --exclude-dir=.ooda -E '\bunsafe\b' . 2>/dev/null)" || scan_rc=$?
-        offenders=$(printf '%s\n' "$offenders" | sed 's#^\./##')
+        offenders="$(grep -l -E '\bunsafe\b' -- $universe 2>/dev/null)" || scan_rc=$?
     fi
     [ "$scan_rc" -lt 2 ] || {
         echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe scan producer exit $scan_rc (tooling error, not PASS)" >&2
@@ -877,7 +895,7 @@ unsafe_surface_gate() {
         echo "UNSAFE-SURFACE-FAIL: 'unsafe' outside allowlist (prod surface: src/alloc.rs, tests/*; cfg(test) unit modules: src/*/tests.rs, src/*/dot_tests.rs):$bad" >&2
         exit 1
     fi
-    echo "UNSAFE-SURFACE-OK: unsafe confined to prod surface src/alloc.rs, tests/* and cfg(test) unit modules src/*/tests.rs, src/*/dot_tests.rs"
+    echo "UNSAFE-SURFACE-OK: every physical .rs path (symlinks resolved) confines unsafe to prod surface src/alloc.rs, tests/* and cfg(test) unit modules src/*/tests.rs, src/*/dot_tests.rs"
 }
 
 # F-new (gate-surface-truth M1): the reviewed identity set (INTENDED) must cover
