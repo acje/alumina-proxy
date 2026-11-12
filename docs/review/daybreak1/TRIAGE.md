@@ -73,8 +73,8 @@ release-assurance gates first, telemetry and test hygiene last.
 
 | ID | Root cause | Findings | Sev | Verdict | Disposition | Pri | Mission |
 |---|---|---|---|---|---|---|---|
-| D1 | JA4 Block leaves the triggering tunnel active (no Connection branch; Domain excludes the offender) | 9 | med | Confirmed | Fix | P1 | M1 |
-| D2 | JA4 block decided after the first upstream flush | 1 | med | Confirmed | Fix | P1 | M1 |
+| D1 | JA4 Block leaves the triggering tunnel active (no Connection branch; Domain excludes the offender) | 9 | med | Confirmed | Fixed — `681e81e`, `0205f69` | P1 | M1 ✓ |
+| D2 | JA4 block decided after the first upstream flush | 1 | med | Confirmed | Fixed — `c0885b3` | P1 | M1 ✓ |
 | D3 | JA4 baseline seeds 16 fingerprints; decision only on overflow | 1 | med | Spec-Intended | Governed amendment G1 | P1 | G1 |
 | D4 | Per-domain JA4 peer attribution collapses to one global pair | 1 | low | Confirmed | Fix | P2 | M3 |
 | D5 | Bare-IP resolver uses plain DNS under default `resolver_trusted` | 1 | med | Confirmed-Conditional | Governed amendment G2 | P2 | G2 |
@@ -98,7 +98,7 @@ Sum check: 9+1+1+1+1+2+2+1+1+1+1+1+1+1+1+5+1+1 = **32**. Mediums: D1(9)+D2(1)+D3
 
 ## 4. Register detail
 
-### D1 — JA4 Block leaves the triggering tunnel active · Confirmed · Fix (M1)
+### D1 — JA4 Block leaves the triggering tunnel active · Confirmed · Fixed (M1)
 
 Claim: with a full 16-entry JA4 baseline for an allowlisted ordinal, a 17th distinct
 ClientHello fingerprint that selects `block` does not close the triggering tunnel.
@@ -129,12 +129,24 @@ Duplicates folded: 9 findings (`csf_5cf9845c…`, `csf_2c5f1141…`, `csf_4c880e
 `csf_a3e98acd…`, `csf_989ba59d…`, `csf_d43ae0b1…`, `csf_1352c94f…`, `csf_b61ca9b8…`,
 `csf_8cc1dbf7…`).
 
-### D2 — JA4 block decided after the first upstream flush · Confirmed · Fix (M1)
+**Fixed at `0205f69`** (candidate): `project_tripwire` gained a `Scope::Connection` arm and
+the Domain arm no longer excludes the offender. Red evidence: 92 B and 98,396 B reached the
+upstream under a configured block; after, zero bytes and the slot closes. Boundary
+`host-mid union` PASS at `0205f69` (`UNION-MID-OK`, `ALT-COPY-OK`, binary sha256
+`af65fa86…`), 1,119 lib tests pass, adversarial review APPROVE (`alumina-gzqn4.2.4`):
+0 Critical/High/Medium.
+
+### D2 — JA4 block decided after the first upstream flush · Confirmed · Fixed (M1)
 
 Verification at HEAD: `src/runtime/reactor.rs:2853` calls `flush_client_upstream(index)`
 immediately before `2854 maybe_record_ja4_baseline(index)`; the drain writes the retained
 buffer at `2935-2943`. The block decision therefore cannot precede the bytes it is meant
 to stop — including for Block All, whose contract is "before any further I/O".
+
+**Fixed at `c0885b3`**: the JA4 decision precedes the first upstream flush, and both the
+`hello_complete` and `dial` paths withhold I/O on a Block effect. Red evidence: Block All
+leaked 98,396 B (ClientHello + coalesced tail) and a `WouldBlock` path leaked 4,096 B
+(SO_SNDBUF partial write); after, both are zero with `buf_len == 0`.
 
 Distinct defect, same seam as D1, separate red test. Remediated in M1 as increment 1.
 
@@ -560,7 +572,7 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 
 | Row | Disposition | Bead | Status |
 |---|---|---|---|
-| D1, D2 | Fix | `alumina-gzqn4.2` | open — dispatching to `@moltke` |
+| D1, D2 | Fixed | `alumina-gzqn4.2` | closed — `0205f69`, boundary PASS, review APPROVE |
 | D3 | Governed amendment G1 | `alumina-gzqn4.3` (draft + decision) | open — options analysis required before any draft |
 | D5 | Governed amendment G2 | `alumina-gzqn4.4` (draft + decision) | open — options analysis required before any draft |
 | D4, D6–D18 | per §3 | `alumina-gzqn4.1` | registered |
