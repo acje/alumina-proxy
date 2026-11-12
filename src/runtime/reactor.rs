@@ -2368,10 +2368,9 @@ impl Serving {
         let _ = self.stop_admission();
     }
 
-    fn stop_domain_block(&mut self, ordinal: DomainOrdinal, except: usize) {
+    fn stop_domain_block(&mut self, ordinal: DomainOrdinal) {
         for index in 0..self.slots.len() {
-            if index != except
-                && self.slots[index].stage != Stage::Idle
+            if self.slots[index].stage != Stage::Idle
                 && self.slots[index].stage != Stage::Closing
                 && self.slot_ordinal(index) == Some(ordinal)
             {
@@ -2423,7 +2422,14 @@ impl Serving {
                 if let Violation::EarlyUpstreamData { ordinal } | Violation::Ja4Change { ordinal } =
                     violation
                 {
-                    self.stop_domain_block(ordinal, index);
+                    self.stop_domain_block(ordinal);
+                    if self.slots[index].stage != Stage::Idle
+                        && self.slots[index].stage != Stage::Closing
+                    {
+                        self.close_slot(index);
+                    }
+                } else {
+                    self.close_slot(index);
                 }
             }
             _ => {}

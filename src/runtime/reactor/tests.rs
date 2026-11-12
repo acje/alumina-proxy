@@ -8937,11 +8937,11 @@ mod ja4_baseline {
         });
     }
 
-    fn cfg_ja4_block_all(port: u16) -> crate::config::Config {
+    fn cfg_ja4_block(port: u16, scope: &str) -> crate::config::Config {
         let doc = format!(
-            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"connection\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"all\" }}\n"
+            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"connection\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"{scope}\" }}\n"
         );
-        crate::config::parse_config_document(&doc).expect("valid ja4 block-all test config")
+        crate::config::parse_config_document(&doc).expect("valid ja4 block test config")
     }
 
     fn seed_full_ja4_set(serving: &mut Serving, ordinal: DomainOrdinal, first_wire: &[u8]) {
@@ -9027,7 +9027,7 @@ mod ja4_baseline {
     #[test]
     fn ja4_block_all_stops_coalesced_trailing_bytes() {
         let port = ephemeral_port();
-        let cfg = cfg_ja4_block_all(port);
+        let cfg = cfg_ja4_block(port, "all");
         with_serving_stack_cfg(port, cfg, move |serving| {
             let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
@@ -9077,7 +9077,7 @@ mod ja4_baseline {
     fn ja4_block_all_stops_bytes_on_wouldblock_upstream() {
         use std::os::fd::AsRawFd;
         let port = ephemeral_port();
-        let cfg = cfg_ja4_block_all(port);
+        let cfg = cfg_ja4_block(port, "all");
         with_serving_stack_cfg(port, cfg, move |serving| {
             let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
@@ -9181,6 +9181,59 @@ mod ja4_baseline {
                 serving.storage().occupied(),
                 0,
                 "the triggering slot must stay released"
+            );
+        });
+    }
+
+    #[test]
+    fn ja4_block_domain_closes_triggering_and_same_ordinal_slots() {
+        let port = ephemeral_port();
+        let cfg = cfg_ja4_block(port, "fqdn");
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&host, 443)
+                .expect("ordinal");
+            let wire_a = hello_wire(b"sub.example.org", false);
+            seed_full_ja4_set(serving, ordinal, &wire_a);
+
+            {
+                let sibling = &mut serving.slots[1];
+                sibling.approved = Some(host);
+                sibling.report_name = Some(ordinal.get());
+                sibling.stage = Stage::Relay;
+            }
+
+            let wire_b = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+            );
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            drive_hello(serving, &wire_b, "sub.example.org");
+
+            assert!(
+                matches!(serving.slots[0].stage, Stage::Idle),
+                "a Block Domain decision must terminate the triggering connection"
+            );
+            assert!(
+                serving.slots[0].handle.is_none(),
+                "the offending slot must release its admission handle"
+            );
+            assert!(
+                matches!(serving.slots[1].stage, Stage::Idle),
+                "a Block Domain decision must also terminate a concurrent same-ordinal flow"
+            );
+            assert!(
+                serving.slots[1].handle.is_none(),
+                "the same-ordinal sibling must release its admission handle"
+            );
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "every same-ordinal slot must stay released"
             );
         });
     }
