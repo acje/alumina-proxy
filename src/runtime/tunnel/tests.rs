@@ -490,10 +490,14 @@ fn worker_admits_up_to_128_pending_setups_and_rejects_the_129th() {
     // The global 128-seat budget fills across distinct peers, because every
     // peer may hold at most MAX_PENDING_PER_PEER pending setups.
     let peers = MAX_PENDING_SETUPS / MAX_PENDING_PER_PEER;
+    let mut first_peer_slot = None;
     for seat in 0..MAX_PENDING_SETUPS {
-        worker
+        let slot = worker
             .admit(t0, peer(seat % peers))
             .expect("admitted within the pending budget");
+        if seat == 0 {
+            first_peer_slot = Some(slot);
+        }
     }
     assert_eq!(worker.pending(), MAX_PENDING_SETUPS);
     assert_eq!(
@@ -501,6 +505,91 @@ fn worker_admits_up_to_128_pending_setups_and_rejects_the_129th() {
         Err(AdmissionError::PendingCapacity),
         "a fresh peer is still refused at the global pending cap"
     );
+    // The global cap, not per-peer ownership, was the blocker: a seat released
+    // by one peer is available to a distinct peer.
+    worker.release(first_peer_slot.expect("first admitted seat"));
+    worker
+        .admit(t0, peer(peers))
+        .expect("a seat freed at the global cap admits a distinct peer");
+    assert_eq!(worker.pending(), MAX_PENDING_SETUPS);
+}
+
+#[test]
+/// The per-peer pending cap: one peer can fill exactly its own seats and is
+/// then refused through the existing `PendingCapacity` path, while a distinct
+/// peer still gets a pending seat — a single reachable peer can never deny
+/// admission to another peer.
+fn per_peer_pending_cap_denies_one_peer_and_admits_a_distinct_peer() {
+    let t0 = anchor();
+    let mut worker = Worker::boot(clock(t0));
+    let peer_a = peer(0);
+    let peer_b = peer(1);
+    for _ in 0..MAX_PENDING_PER_PEER {
+        worker.admit(t0, peer_a).expect("within the per-peer cap");
+    }
+    assert_eq!(worker.pending(), MAX_PENDING_PER_PEER);
+    assert_eq!(
+        worker.admit(t0, peer_a),
+        Err(AdmissionError::PendingCapacity),
+        "a peer at its per-peer pending cap must be refused through the capacity path"
+    );
+    assert_eq!(
+        worker.pending(),
+        MAX_PENDING_PER_PEER,
+        "the refused setup consumes no pending seat"
+    );
+    let b_slot = worker
+        .admit(t0, peer_b)
+        .expect("a distinct peer must still get a pending seat");
+    assert_eq!(
+        worker.pending(),
+        MAX_PENDING_PER_PEER + 1,
+        "the distinct peer's seat is admitted on top of the capped peer's seats"
+    );
+    worker.release(b_slot);
+}
+
+#[test]
+/// Release and graduation free only the releasing peer's own pending seat: a
+/// peer at its cap regains exactly one seat per freed slot (never another
+/// peer's), and the other peer's pending count is untouched.
+fn per_peer_pending_cap_frees_only_its_own_peer_seat() {
+    let t0 = anchor();
+    let mut worker = Worker::boot(clock(t0));
+    let peer_a = peer(0);
+    let peer_b = peer(1);
+    let mut a_slots = Vec::new();
+    for _ in 0..MAX_PENDING_PER_PEER {
+        a_slots.push(worker.admit(t0, peer_a).expect("within the per-peer cap"));
+    }
+    assert_eq!(
+        worker.admit(t0, peer_a),
+        Err(AdmissionError::PendingCapacity)
+    );
+    let b_slot = worker.admit(t0, peer_b).expect("distinct peer admitted");
+
+    // Releasing one A seat restores exactly one A seat.
+    worker.release(a_slots.pop().expect("an A seat to release"));
+    worker
+        .admit(t0, peer_a)
+        .expect("A's released seat restores one A seat");
+    assert_eq!(
+        worker.admit(t0, peer_a),
+        Err(AdmissionError::PendingCapacity),
+        "only the released seat returns; A is not admitted beyond its cap"
+    );
+
+    // Graduating one A setup frees its pending seat the same way.
+    worker.finish_setup(a_slots.pop().expect("an A seat to graduate"));
+    worker
+        .admit(t0, peer_a)
+        .expect("A's graduated setup frees one A pending seat");
+    assert_eq!(
+        worker.pending(),
+        MAX_PENDING_PER_PEER + 1,
+        "A holds its cap again plus B's untouched seat"
+    );
+    worker.release(b_slot);
 }
 
 #[test]

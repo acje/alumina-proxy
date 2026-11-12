@@ -459,7 +459,8 @@ impl Worker {
     /// # Errors
     ///
     /// Returns `SlotCapacity` at [`MAX_TUNNELS`] occupied slots and
-    /// `PendingCapacity` at [`MAX_PENDING_SETUPS`] pending setups; both are
+    /// `PendingCapacity` at [`MAX_PENDING_SETUPS`] pending setups or at
+    /// [`MAX_PENDING_PER_PEER`] pending setups from the same peer; both are
     /// HTTP 503 + close (docs/alumina-proxy.md:193).
     pub(crate) fn admit(
         &mut self,
@@ -473,11 +474,9 @@ impl Worker {
             return Err(AdmissionError::PendingCapacity);
         }
         let peer = peer.to_canonical();
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.pending_from_peer(peer) <= self.pending_count,
-            "a per-peer pending count can never exceed the global pending count"
-        );
+        if self.pending_from_peer(peer) >= MAX_PENDING_PER_PEER {
+            return Err(AdmissionError::PendingCapacity);
+        }
         let index = self.take_min_free();
         self.slots[index as usize] = SlotState::InSetup {
             setup_deadline: Deadline::setup(now),

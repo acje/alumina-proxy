@@ -3,7 +3,7 @@ use std::net::{Ipv4Addr, TcpListener as StdListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use crate::enforcement::policy::UnknownReason;
-use crate::runtime::tunnel::{MAX_PENDING_SETUPS, SETUP_DEADLINE_SECS};
+use crate::runtime::tunnel::{MAX_PENDING_PER_PEER, MAX_PENDING_SETUPS, SETUP_DEADLINE_SECS};
 
 const RETAINED_OFFSET: usize = 137;
 
@@ -1434,27 +1434,31 @@ mod connect_setup {
     }
 
     #[test]
-    fn pending_capacity_refuses_with_503() {
+    fn per_peer_pending_capacity_refuses_with_503() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
+            // Every connection here is the same peer (127.0.0.1), so the
+            // per-peer pending cap is the first admission bound reached; the
+            // global 128-seat budget is exercised across distinct peers at the
+            // Worker level (tunnel::tests).
             let mut socks = Vec::new();
-            for i in 0..=MAX_PENDING_SETUPS {
+            for i in 0..=MAX_PENDING_PER_PEER {
                 socks.push(connect(port));
                 if i % 16 == 15 {
                     pump(serving, 4);
                 }
             }
             pump(serving, 80);
-            let mut last = socks[MAX_PENDING_SETUPS].try_clone().expect("clone");
+            let mut last = socks[MAX_PENDING_PER_PEER].try_clone().expect("clone");
             let body = read_until(&mut last, b"\r\n\r\n");
             assert!(
                 body.starts_with(b"HTTP/1.1 503"),
-                "129th silent connect must receive 503, got {body:?}"
+                "the setup past the per-peer pending cap must receive the capacity 503, got {body:?}"
             );
             assert_eq!(
                 serving.storage().occupied(),
-                MAX_PENDING_SETUPS,
-                "the first 128 silent setups occupy their seats"
+                MAX_PENDING_PER_PEER,
+                "exactly one peer's per-peer pending seats are occupied"
             );
         });
     }
@@ -1464,16 +1468,18 @@ mod connect_setup {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let mut socks = Vec::new();
-            for i in 0..=MAX_PENDING_SETUPS {
+            for i in 0..MAX_PENDING_PER_PEER {
                 socks.push(connect(port));
                 if i % 16 == 15 {
                     pump(serving, 4);
                 }
             }
             pump(serving, 40);
-            let mut probe = socks[MAX_PENDING_SETUPS].try_clone().expect("clone");
-            let body = read_until(&mut probe, b"\r\n\r\n");
-            assert!(body.starts_with(b"HTTP/1.1 503"));
+            assert_eq!(
+                serving.storage().occupied(),
+                MAX_PENDING_PER_PEER,
+                "the silent setups fill one peer's pending seats"
+            );
             let start = Instant::now();
             while serving.storage().occupied() > 0 {
                 serving
@@ -1484,7 +1490,7 @@ mod connect_setup {
                     "setups were admitted with individually spread absolute deadlines; a single poll turn only ever reaches the earliest one (fdtt H2), and the sweep must keep blocking until every deadline has expired, not assert the spread covers all slots in one wake"
                 );
             }
-            for (i, sock) in socks[..MAX_PENDING_SETUPS].iter().enumerate() {
+            for (i, sock) in socks.iter().enumerate() {
                 let mut clone = sock.try_clone().expect("clone");
                 let expired = read_until(&mut clone, b"\r\n\r\n");
                 assert!(
