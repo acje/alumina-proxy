@@ -223,12 +223,45 @@ impl ShutdownExit {
 const BODY_200: &[u8] = b"HTTP/1.1 200 Connection established\r\n\r\n";
 const BODY_503: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 12\r\n\r\nno capacity\n";
 
+/// Capacity of the test-only accept-fault queue (see
+/// [`Serving::inject_accept_fault`]); fixed so the seam never allocates.
+#[cfg(test)]
+const ACCEPT_FAULT_TEST_CAP: usize = 4;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ReadOutcome {
     Activity(Activity),
     Wait,
     Retry,
     Failed,
+}
+
+/// The accept loop's response to one non-`WouldBlock` accept error.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AcceptFault {
+    /// The failed accept belonged to one connection (interrupted, aborted,
+    /// reset while it was being accepted): the listener itself is healthy, so
+    /// drop that connection and keep accepting. Pausing here would let a
+    /// reachable peer convert one aborted connection into a global admission
+    /// throttle.
+    Drain,
+    /// The listener could not accept for a resource reason (fd, memory or
+    /// queue exhaustion): arm the bounded accept backoff and stop accepting
+    /// until it elapses, so the failure is retried on a backed-off cadence.
+    Pause,
+}
+
+/// Classifies one non-`WouldBlock` accept error by scope. Only the three
+/// connection-scoped kinds are drained; every other kind is treated as a
+/// listener/resource failure and paused. `WouldBlock` never reaches here: it is
+/// the accept loop's ordinary termination and arms nothing.
+const fn accept_fault(kind: io::ErrorKind) -> AcceptFault {
+    match kind {
+        io::ErrorKind::Interrupted
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::ConnectionReset => AcceptFault::Drain,
+        _ => AcceptFault::Pause,
+    }
 }
 
 fn classify_read(result: &io::Result<usize>) -> ReadOutcome {
@@ -1007,6 +1040,14 @@ pub struct Serving {
     slots: Vec<SlotWorkspace>,
     events: Events,
     listener_arm: ListenerArm,
+    /// Test-only accept-fault queue: each entry is delivered as the next
+    /// `accept()` error before the real listener is polled, so the accept-loop
+    /// policy is driven through the production loop without a production seam.
+    /// Fixed-size and empty on every production and witness path.
+    #[cfg(test)]
+    accept_faults: [Option<io::ErrorKind>; ACCEPT_FAULT_TEST_CAP],
+    #[cfg(test)]
+    accept_fault_count: usize,
     dns_event: bool,
     visit: VisitState,
     /// Poll-batch generation stamp for per-connection visit dedup: each
@@ -1138,6 +1179,10 @@ impl Serving {
             slots,
             events: Events::with_capacity(POLL_EVENTS_CAP),
             listener_arm: ListenerArm::Registered,
+            #[cfg(test)]
+            accept_faults: [None; ACCEPT_FAULT_TEST_CAP],
+            #[cfg(test)]
+            accept_fault_count: 0,
             dns_event: false,
             visit: VisitState::idle(),
             batch_gen: 0,
@@ -1931,6 +1976,25 @@ impl Serving {
         self.slots[index].visits
     }
 
+    /// Queues `kind` as the next injected accept error (LIFO) for the
+    /// accept-loop policy tests. Test-only: the queue is fixed-size, and empty
+    /// on every production and witness path, so it never allocates.
+    #[cfg(test)]
+    const fn inject_accept_fault(&mut self, kind: io::ErrorKind) {
+        self.accept_faults[self.accept_fault_count] = Some(kind);
+        self.accept_fault_count += 1;
+    }
+
+    /// Takes the most recently injected accept error, if any. Test-only.
+    #[cfg(test)]
+    const fn take_injected_accept_fault(&mut self) -> Option<io::ErrorKind> {
+        if self.accept_fault_count == 0 {
+            return None;
+        }
+        self.accept_fault_count -= 1;
+        self.accept_faults[self.accept_fault_count].take()
+    }
+
     fn accept_all(&mut self) -> Result<(), ServeError> {
         // A paused accept stays paused: no readiness edge may admit a client
         // before `resume_listener` clears the backoff.
@@ -1948,10 +2012,19 @@ impl Serving {
                 self.reregister_listener()?;
                 return Ok(());
             }
-            let Some(listener) = &self.listener else {
-                return Ok(());
+            #[cfg(test)]
+            let injected = self.take_injected_accept_fault();
+            #[cfg(not(test))]
+            let injected: Option<io::ErrorKind> = None;
+            let accepted = if let Some(kind) = injected {
+                Err(io::Error::from(kind))
+            } else {
+                let Some(listener) = &self.listener else {
+                    return Ok(());
+                };
+                listener.accept()
             };
-            match listener.accept() {
+            match accepted {
                 Ok((stream, addr)) => {
                     self.progress.accrue(1);
                     self.admit(stream, addr.ip());
@@ -1960,10 +2033,12 @@ impl Serving {
                     self.progress.accrue(1);
                     return Ok(());
                 }
-                Err(_) => {
+                Err(ref err) => {
                     self.progress.accrue(1);
-                    self.pause_listener(Instant::now())?;
-                    return Ok(());
+                    if accept_fault(err.kind()) == AcceptFault::Pause {
+                        self.pause_listener(Instant::now())?;
+                        return Ok(());
+                    }
                 }
             }
         }

@@ -9845,6 +9845,73 @@ mod listener_backoff {
             );
         });
     }
+
+    #[test]
+    /// A connection-scoped accept failure (`ConnectionAborted`) must not arm the
+    /// backoff or withdraw the listener: the same dispatch drains it and accepts
+    /// the client already queued in the backlog, so a reachable peer cannot turn
+    /// one aborted connection into a global admission throttle.
+    fn aborted_accept_is_drained_and_the_queued_client_is_accepted() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let _client = connect(port);
+            std::thread::sleep(Duration::from_millis(20));
+            serving.inject_accept_fault(io::ErrorKind::ConnectionAborted);
+            serving
+                .dispatch_readiness(
+                    Token(0),
+                    Readiness {
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                )
+                .expect("listener dispatch after a connection-scoped accept error");
+            assert_eq!(
+                serving.storage().occupied(),
+                1,
+                "the queued client must be accepted in the same dispatch as the drained error"
+            );
+            assert!(
+                matches!(serving.listener_arm, ListenerArm::Registered),
+                "a connection-scoped accept error must leave the listener registered"
+            );
+        });
+    }
+
+    #[test]
+    /// A resource-scoped accept failure still arms exactly the bounded backoff
+    /// and withdraws the listener: the D10 pause/wake/rearm path is unchanged.
+    fn resource_accept_failure_still_arms_the_backoff() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let _client = connect(port);
+            std::thread::sleep(Duration::from_millis(20));
+            serving.inject_accept_fault(io::ErrorKind::OutOfMemory);
+            let before = Instant::now();
+            serving
+                .dispatch_readiness(
+                    Token(0),
+                    Readiness {
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                )
+                .expect("listener dispatch after a resource accept failure");
+            let after = Instant::now();
+            let ListenerArm::Paused { at } = serving.listener_arm else {
+                panic!("a resource accept failure must withdraw the listener");
+            };
+            assert!(
+                at >= before + ACCEPT_BACKOFF && at <= after + ACCEPT_BACKOFF,
+                "the pause must be armed exactly ACCEPT_BACKOFF from the resource failure"
+            );
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "the queued client must not be accepted while the resource backoff is armed"
+            );
+        });
+    }
 }
 
 #[cfg(test)]
