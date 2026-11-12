@@ -4,12 +4,31 @@
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
+
+GATE_NAMES = ("unsafe_surface_gate", "cfg_test_parentage_gate")
+
+
+def extract_gates():
+    """The real gate bodies, text-extracted from scripts/verify.sh (the same
+    precedent as test_dirty_agents_content_drift_is_detected): the tests drive
+    the shipped decision logic, never a Python re-implementation of it."""
+    script = (ROOT / "scripts/verify.sh").read_text()
+    bodies = []
+    for name in GATE_NAMES:
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}$", script, re.S | re.M)
+        assert match is not None, f"gate function not found in scripts/verify.sh: {name}"
+        bodies.append(match.group(0))
+    return "\n\n".join(bodies)
+
+
+GATES = extract_gates()
 
 
 class Selectors(unittest.TestCase):
@@ -276,6 +295,138 @@ sys.stderr.write("kernel-facts: ruid=" + facts + "\\nalumina: prerequisite failu
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn(marker, result.stdout + result.stderr)
                     self.assertNotIn("rootful", log.read_text())
+
+
+class GateIntegrity(unittest.TestCase):
+    def run_gate(self, repo, gate, env=None):
+        (repo / "gate.sh").write_text(GATES + f"\n\n{gate}\n")
+        return subprocess.run(
+            ["sh", "gate.sh"], cwd=repo, text=True, capture_output=True,
+            env={**os.environ, **(env or {})},
+        )
+
+    def sandbox(self, temp):
+        repo, outside = Path(temp) / "repo", Path(temp) / "outside"
+        (repo / "src").mkdir(parents=True)
+        outside.mkdir()
+        return repo, outside
+
+    def test_symlinked_unsafe_source_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, outside = self.sandbox(temp)
+            (outside / "probe.rs").write_text(
+                "fn probe() { unsafe { core::hint::unreachable_unchecked() } }\n")
+            (repo / "src/probe_unsafe.rs").symlink_to(outside / "probe.rs")
+            result = self.run_gate(repo, "unsafe_surface_gate")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("UNSAFE-SURFACE-FAIL", result.stderr)
+            self.assertIn("src/probe_unsafe.rs", result.stderr)
+
+    def test_symlinked_clean_source_passes_and_scratch_roots_are_pruned(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, outside = self.sandbox(temp)
+            (outside / "clean.rs").write_text("pub fn clean() {}\n")
+            (repo / "src/lib.rs").write_text("pub mod probe_clean;\n")
+            (repo / "src/probe_clean.rs").symlink_to(outside / "clean.rs")
+            for pruned in ("target", ".ooda"):
+                (repo / pruned).mkdir()
+                (repo / pruned / "planted.rs").write_text("fn planted() { unsafe {} }\n")
+            result = self.run_gate(repo, "unsafe_surface_gate")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("UNSAFE-SURFACE-OK", result.stdout)
+
+    def test_non_src_bench_source_stays_in_scan_universe(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = self.sandbox(temp)
+            bench = repo / "scripts/bench/echo-backend/src"
+            bench.mkdir(parents=True)
+            (bench / "main.rs").write_text("fn main() { unsafe {} }\n")
+            result = self.run_gate(repo, "unsafe_surface_gate")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("scripts/bench/echo-backend/src/main.rs", result.stderr)
+
+    def test_empty_scan_universe_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = self.sandbox(temp)
+            result = self.run_gate(repo, "unsafe_surface_gate")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("UNSAFE-SURFACE-SCAN-FAIL", result.stderr)
+
+    def test_unsafe_scan_producer_error_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = self.sandbox(temp)
+            (repo / "src/lib.rs").write_text("pub fn ok() {}\n")
+            tools = Path(temp) / "tools"
+            tools.mkdir()
+            rg = tools / "rg"
+            rg.write_text("#!/bin/sh\nexit 2\n")
+            rg.chmod(0o755)
+            result = self.run_gate(repo, "unsafe_surface_gate",
+                                   env={"PATH": f"{tools}:{os.environ['PATH']}"})
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("UNSAFE-SURFACE-SCAN-FAIL", result.stderr)
+
+    def test_grep_fallback_reads_an_explicit_symlink_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, outside = self.sandbox(temp)
+            (outside / "evil.rs").write_text("fn evil() { unsafe {} }\n")
+            (repo / "src/linked.rs").symlink_to(outside / "evil.rs")
+            tools = Path(temp) / "tools"
+            tools.mkdir()
+            for name in ("find", "sed", "grep", "awk", "dirname", "basename"):
+                target = shutil.which(name)
+                self.assertIsNotNone(target, name)
+                (tools / name).symlink_to(target)
+            result = self.run_gate(repo, "unsafe_surface_gate", env={"PATH": f"{tools}:/bin"})
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("UNSAFE-SURFACE-FAIL", result.stderr)
+            self.assertIn("src/linked.rs", result.stderr)
+
+    def test_symlinked_test_module_with_cfg_test_parent_passes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, outside = self.sandbox(temp)
+            (repo / "src/log").mkdir()
+            (repo / "src/log/mod.rs").write_text("#[cfg(test)]\nmod tests;\n")
+            (outside / "log_tests.rs").write_text("fn helper() { unsafe {} }\n")
+            (repo / "src/log/tests.rs").symlink_to(outside / "log_tests.rs")
+            for gate, marker in (("cfg_test_parentage_gate", "CFG-TEST-PARENTAGE-OK"),
+                                 ("unsafe_surface_gate", "UNSAFE-SURFACE-OK")):
+                result = self.run_gate(repo, gate)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(marker, result.stdout)
+
+    def test_two_line_form_with_blank_line_and_pub_crate_passes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = self.sandbox(temp)
+            (repo / "src/log").mkdir()
+            (repo / "src/log/mod.rs").write_text("#[cfg(test)]\n\npub(crate) mod dot_tests;\n")
+            (repo / "src/log/dot_tests.rs").write_text("fn t() {}\n")
+            result = self.run_gate(repo, "cfg_test_parentage_gate")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CFG-TEST-PARENTAGE-OK", result.stdout)
+
+    def test_symlinked_test_module_with_non_test_parent_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, outside = self.sandbox(temp)
+            (repo / "src/log").mkdir()
+            (repo / "src/log/mod.rs").write_text('#[cfg(feature = "probe")]\nmod tests;\n')
+            (outside / "log_tests.rs").write_text("fn helper() {}\n")
+            (repo / "src/log/tests.rs").symlink_to(outside / "log_tests.rs")
+            result = self.run_gate(repo, "cfg_test_parentage_gate")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CFG-TEST-PARENTAGE-FAIL", result.stderr)
+            self.assertIn("src/log/tests.rs", result.stderr)
+
+    def test_second_non_cfg_test_declaration_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = self.sandbox(temp)
+            (repo / "src/log").mkdir()
+            (repo / "src/log/mod.rs").write_text(
+                '#[cfg(test)]\nmod tests;\n\n#[cfg(feature = "probe")] mod tests;\n')
+            (repo / "src/log/tests.rs").write_text("fn t() {}\n")
+            result = self.run_gate(repo, "cfg_test_parentage_gate")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CFG-TEST-PARENTAGE-FAIL", result.stderr)
 
 
 if __name__ == "__main__":
