@@ -9632,6 +9632,106 @@ fn check_idle_expiry_log(
     }
 }
 
+mod listener_backoff {
+    use super::*;
+
+    #[test]
+    /// The accept backoff is a real pause, not advisory state: a listener
+    /// readiness dispatch while `listener_pause_until` is in the future must
+    /// admit nothing, even with a client already queued in the kernel backlog.
+    fn paused_listener_dispatch_accepts_nothing() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let _client = connect(port);
+            std::thread::sleep(Duration::from_millis(20));
+            serving.progress.work_since_recheck = 0;
+            serving.listener_pause_until = Some(Instant::now() + ACCEPT_BACKOFF);
+
+            serving
+                .dispatch_readiness(
+                    Token(0),
+                    Readiness {
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                )
+                .expect("paused listener readiness");
+
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "a paused listener must accept nothing while its backoff is in the future"
+            );
+        });
+    }
+
+    #[test]
+    /// The paused listener must supply the poll wake: with the pause armed and
+    /// no nearer deadline, `poll_timeout` returns a wait no longer than the
+    /// remaining backoff, so the resume is guaranteed rather than advisory.
+    fn paused_listener_folds_into_poll_timeout() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let base = serving.poll_timeout();
+            assert!(
+                base.is_none_or(|wait| wait > ACCEPT_BACKOFF),
+                "the baseline wait must not already be bounded by the accept pause: {base:?}"
+            );
+
+            let seeded = Instant::now();
+            serving.listener_pause_until = Some(seeded + ACCEPT_BACKOFF);
+            let remaining = ACCEPT_BACKOFF.saturating_sub(seeded.elapsed());
+            let folded = serving
+                .poll_timeout()
+                .expect("an armed accept pause must contribute a poll wait");
+            assert!(
+                folded > Duration::ZERO && folded <= remaining,
+                "the folded wait {folded:?} must be positive and no longer than the remaining pause {remaining:?}"
+            );
+        });
+    }
+
+    #[test]
+    /// Once the pause has elapsed, `resume_listener` clears it and re-registers
+    /// the listener, and the client queued during the pause is admitted and
+    /// served a real response instead of hanging.
+    fn elapsed_listener_pause_resumes_and_serves_the_queued_client() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let mut client = connect(port);
+            client
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("client read timeout");
+            std::thread::sleep(Duration::from_millis(20));
+            serving.listener_pause_until = Some(Instant::now() + ACCEPT_BACKOFF);
+            pump(serving, 2);
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "the paused listener must not admit the queued client early"
+            );
+
+            serving.listener_pause_until = Some(Instant::now() - Duration::from_millis(1));
+            pump(serving, 3);
+            assert_eq!(
+                serving.storage().occupied(),
+                1,
+                "an elapsed pause must resume admission of the queued client"
+            );
+
+            client
+                .write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("write head");
+            pump(serving, 10);
+            let body = read_until(&mut client, b"\r\n\r\n");
+            assert!(
+                body.starts_with(b"HTTP/1.1 403"),
+                "the resumed listener must serve the queued client, got {body:?}"
+            );
+        });
+    }
+}
+
 #[cfg(test)]
 mod refusals;
 

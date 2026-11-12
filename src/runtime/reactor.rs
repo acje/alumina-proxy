@@ -1882,6 +1882,13 @@ impl Serving {
     }
 
     fn accept_all(&mut self) -> Result<(), ServeError> {
+        // A paused accept stays paused: no readiness edge may admit a client
+        // before `resume_listener` clears the backoff.
+        if let Some(pause) = self.listener_pause_until
+            && Instant::now() < pause
+        {
+            return Ok(());
+        }
         loop {
             if self.block_all_latched() {
                 self.progress.accrue(1);
@@ -1905,10 +1912,27 @@ impl Serving {
                 }
                 Err(_) => {
                     self.progress.accrue(1);
-                    self.listener_pause_until = Some(Instant::now() + ACCEPT_BACKOFF);
+                    self.pause_listener(Instant::now())?;
                     return Ok(());
                 }
             }
+        }
+    }
+
+    /// Puts the listener into its bounded accept pause: the pause is armed at
+    /// `now + ACCEPT_BACKOFF` and the listener is deregistered, so a
+    /// level-triggered readability edge cannot spin the turn loop while
+    /// paused. [`Serving::resume_listener`] is the only site that clears the
+    /// pause and restores the same registration once it has elapsed.
+    fn pause_listener(&mut self, now: Instant) -> Result<(), ServeError> {
+        self.listener_pause_until = Some(now + ACCEPT_BACKOFF);
+        let Some(listener) = self.listener.as_mut() else {
+            return Ok(());
+        };
+        match self.poll.registry().deregister(listener) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -3343,6 +3367,11 @@ impl Serving {
             earliest = Some(deadline);
         }
         let now = Instant::now();
+        if let Some(pause) = self.listener_pause_until
+            && earliest.is_none_or(|e| pause < e)
+        {
+            earliest = Some(pause);
+        }
         if let Some(log_wake) = self.storage.logs().next_drain(now)
             && earliest.is_none_or(|e| log_wake < e)
         {
