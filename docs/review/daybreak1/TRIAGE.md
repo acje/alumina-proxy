@@ -78,7 +78,7 @@ release-assurance gates first, telemetry and test hygiene last.
 | D3 | JA4 baseline seeds 16 fingerprints; decision only on overflow | 1 | med | Spec-Intended | Governed amendment G1 | P1 | G1 |
 | D4 | Per-domain JA4 peer attribution collapses to one global pair | 1 | low | Confirmed | Fix | P2 | M3 |
 | D5 | Bare-IP resolver uses plain DNS under default `resolver_trusted` | 1 | med | Confirmed-Conditional | Governed amendment G2 | P2 | G2 |
-| D6 | Unsafe-surface docs gate can certify production `unsafe` (symlink + second declaration) | 2 | med | Confirmed (1 sub-claim Refuted) | Fix | P1 | M2 |
+| D6 | Unsafe-surface docs gate can certify production `unsafe` (symlink + second declaration) | 2 | med | Confirmed (1 sub-claim Refuted) | Fixed — `467e13c`…`56eb45d` | P1 | M2 ✓ |
 | D7 | E2E receipt omits untracked compiled build inputs | 2 | low | Confirmed | Fix | P2 | M5 |
 | D8 | Shutdown E2E no-admission witness can pass on a forgotten reachable probe | 1 | low | Confirmed | Fix | P2 | M5 |
 | D9 | Expired connect/setup/idle deadline consumed or replaced at a transition | 1 | low | Confirmed-Conditional | Fix | P2 | M4 |
@@ -220,7 +220,7 @@ plus the full governed increment; implementation is gated on that adoption.
 
 Registry: `csf_301d7454…`.
 
-### D6 — Unsafe-surface docs gate can certify production `unsafe` · Confirmed (one sub-claim Refuted) · Fix (M2)
+### D6 — Unsafe-surface docs gate can certify production `unsafe` · Confirmed (one sub-claim Refuted) · Fixed (M2)
 
 Verification at HEAD (`scripts/verify.sh`):
 - **Symlink bypass (holds).** `859-875` scans with `rg -l '\bunsafe\b' --glob '*.rs'`;
@@ -248,6 +248,27 @@ Fix (M2): (a) decide unsafe on the **resolved content of every admitted path** (
 file list or `rg -L`); (b) parentage gate enumerates symlinks and rejects any additional
 non-`cfg(test)` declaration of the same stem. Guard proof required per shape:
 `plant → fail → revert → clean`. Review tier: adversarial.
+
+**Fixed at `56eb45d`** (`467e13c` universe, `3115cd5` every-declaration attribution,
+`8b084b8` regression pins, `549d84c` structural attribution, `56eb45d` NUL-safe transport).
+The scan now decides over the resolved content of the find-enumerated path list passed as
+explicit arguments; the parentage gate counts **every** declaration of the stem under any
+visibility prefix and accepts attribution only from a structural attribute prefix. Guard
+proofs on the final candidate: symlinked production `.rs` → exit 1 (was **0, false pass**);
+second non-`cfg(test)` declaration → exit 1 (was **0**); whitespace-bearing path → exit 1;
+each reverts to exit 0. `verify_test.py` 30 tests OK (23 gate pins, red-proven against
+pre-fix bodies); `verify.sh docs` exit 0; boundary `host-mid union` PASS at `56eb45d`
+with binary sha256 `af65fa86…` — **identical to M1**, independently proving no production
+code was touched. Review round 1 NEEDS WORK (whitespace-path false pass, OK-line
+overclaim) → round 2 APPROVE, 0 blocking.
+
+Accepted residual (recorded, `alumina-gzqn4.5`): the gate is deliberately **stricter than
+Rust**: `cfg(all(test, …))` and doc comments inside an attribute block fail closed, and a
+whitespace-bearing path is a scan failure rather than a scanned path. That is the correct
+bias for an enforcement gate (it can only get stricter, never greener), but it is a
+maintainability cost: a legitimate future shape fails with a named parent and declaration,
+so the remedy is visible. No new dependency; fail-closed producer semantics preserved
+(exit ≥ 2 fails, exit 1 from the producer is a clean no-match).
 
 Registry: `csf_a4bf4a95…`, `csf_f2b0f388…`.
 
@@ -556,8 +577,8 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 
 | Mission | Rows | Bounds | Verification | Tier |
 |---|---|---|---|---|
-| M1 | D1, D2 | `src/runtime/reactor.rs` (+tests) only; no config surface | 3 red tests (Connection/Domain/All with pre-flush bytes); MID runtime; zero-alloc preserved | adversarial |
-| M2 | D6 | `scripts/verify.sh` (+`verify_test.py`) only | guard proofs for symlink + second-declaration shapes; `verify.sh docs` | adversarial |
+| M1 | D1, D2 | `src/runtime/reactor.rs` (+tests) only; no config surface | 3 red tests (Connection/Domain/All with pre-flush bytes); MID runtime; zero-alloc preserved | adversarial | ✓ `0205f69` |
+| M2 | D6 | `scripts/verify.sh` (+`verify_test.py`) only | guard proofs for symlink + second-declaration shapes; `verify.sh docs` | adversarial | ✓ `56eb45d` |
 | M3 | D4, D13, D14, D15, D18 | monitor / log / dns-incident / reactor-readiness | exact-grammar tests; worst-case record still ≤ 8,192 B; per-ordinal peer size budget | standard+ |
 | M4 | D9, D10, D11, D12 | reactor / tunnel; deadlines, admission | clock-stepped expiry tests; injected accept error; 32-bit assertion; pool quota test | adversarial |
 | M5 | D7, D8 | `scripts/verify.sh` E2E receipt; `scripts/e2e_shutdown.py` | untracked-input rejection; held-open-listener case must FAIL | standard |
@@ -566,6 +587,12 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 | G1–G2 | D3, D5 | spec + digest pin + config/table + tests **in one increment**; independent source and governance review; explicit user authorisation of exact text | amendment dossier: options analysis, fixed-profile and size re-measurement, migration note for existing configs | governance |
 | G3–G4 | — | non-canonical docs first; spec only if the spec is the wrong side | `verify.sh docs`; digest re-pin only if spec text changes | standard |
 
+**Sequencing coupling (found during M2 close-out).** M3's D4 fixes per-domain peer
+attribution inside the same JA4 baseline/monitor structure that G1 may redefine. If G1
+chooses per-(ordinal, address) keying, the peer field becomes per-(ordinal, address) and
+D4's storage shape changes with it. Therefore **G1 resolves before M3 starts**; otherwise
+D4 is likely rework. G2 is independent of every remaining row and can proceed in parallel.
+
 ---
 
 ## 10. Ledger
@@ -573,9 +600,10 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 | Row | Disposition | Bead | Status |
 |---|---|---|---|
 | D1, D2 | Fixed | `alumina-gzqn4.2` | closed — `0205f69`, boundary PASS, review APPROVE |
+| D6 | Fixed | `alumina-gzqn4.5` | closed — `56eb45d`, guard proofs + boundary PASS, review r2 APPROVE |
 | D3 | Governed amendment G1 | `alumina-gzqn4.3` (draft + decision) | open — options analysis required before any draft |
 | D5 | Governed amendment G2 | `alumina-gzqn4.4` (draft + decision) | open — options analysis required before any draft |
-| D4, D6–D18 | per §3 | `alumina-gzqn4.1` | registered |
+| D4, D7–D18 | per §3 | `alumina-gzqn4.1` | registered |
 
 Epic: `alumina-gzqn4`. Ledger updates go to `alumina-gzqn4.1`; the register above is the
 durable narrative.
