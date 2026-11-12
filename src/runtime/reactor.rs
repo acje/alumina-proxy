@@ -2611,8 +2611,8 @@ impl Serving {
                 }
                 self.slots[index].upstream = Some(stream);
                 self.slots[index].dest_ip = Some(addr);
-                if self.slots[index].ja4_pending {
-                    self.maybe_record_ja4_baseline(index);
+                if self.slots[index].ja4_pending && self.maybe_record_ja4_baseline(index) {
+                    return Ok(());
                 }
                 if self.register_upstream(index).is_err() {
                     self.close_slot(index);
@@ -2850,8 +2850,9 @@ impl Serving {
             .on_hello_validated(ValidatedHello::new(accepted, end));
         ws.stage = Stage::WritingHello;
         ws.fwd = ws.head_len - ws.buf_base;
-        self.flush_client_upstream(index);
-        self.maybe_record_ja4_baseline(index);
+        if !self.maybe_record_ja4_baseline(index) {
+            self.flush_client_upstream(index);
+        }
     }
 
     /// Records the first-seen JA4 baseline for the slot's connection, or
@@ -2862,42 +2863,49 @@ impl Serving {
     /// the record keys on the established `dest_ip`, so the baseline can never
     /// hold a wrong or missing IP. A `FirstSeen` outcome records a seeding
     /// event; an `Overflow` outcome emits the per-ordinal JA4-change signal to
-    /// the monitor, keyed to the triggering peer's destination IP.
-    fn maybe_record_ja4_baseline(&mut self, index: usize) {
+    /// the monitor, keyed to the triggering peer's destination IP. Returns
+    /// `true` when the record selected a `Block` effect, so the caller can
+    /// withhold the upstream bytes the block forbids.
+    fn maybe_record_ja4_baseline(&mut self, index: usize) -> bool {
         let Some(dest_ip) = self.slots[index].dest_ip else {
             self.slots[index].ja4_pending = true;
-            return;
+            return false;
         };
         let Some(ordinal) = self.slot_ordinal(index) else {
-            return;
+            return false;
         };
         let Some(ja4) = self.slots[index]
             .inspector
             .hello()
             .map(client_hello::ClientHello::ja4)
         else {
-            return;
+            return false;
         };
         self.slots[index].ja4_pending = false;
         if self.slots[index].ja4_seen {
-            return;
+            return false;
         }
         self.slots[index].ja4_seen = true;
         let outcome = self.ja4_baseline.record(ordinal, ja4);
         match outcome {
             BaselineOutcome::FirstSeen => {
                 self.storage.enforcement_mut().note_fact_ja4_seed();
+                false
             }
             BaselineOutcome::Overflow => {
                 let control = self.storage.enforcement().control().ja4(ordinal);
-                if control != Some(PerFqdnControl::Ignore) {
-                    self.storage
-                        .enforcement_mut()
-                        .note_fact_ja4_change(ordinal, ja4, dest_ip);
-                    self.project_tripwire(index, Violation::Ja4Change { ordinal });
+                if control == Some(PerFqdnControl::Ignore) {
+                    return false;
                 }
+                self.storage
+                    .enforcement_mut()
+                    .note_fact_ja4_change(ordinal, ja4, dest_ip);
+                matches!(
+                    self.project_tripwire(index, Violation::Ja4Change { ordinal }),
+                    Effect::Block { .. }
+                )
             }
-            BaselineOutcome::Unchanged => {}
+            BaselineOutcome::Unchanged => false,
         }
     }
 

@@ -8936,6 +8936,216 @@ mod ja4_baseline {
             );
         });
     }
+
+    fn cfg_ja4_block_all(port: u16) -> crate::config::Config {
+        let doc = format!(
+            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"connection\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"all\" }}\n"
+        );
+        crate::config::parse_config_document(&doc).expect("valid ja4 block-all test config")
+    }
+
+    fn seed_full_ja4_set(serving: &mut Serving, ordinal: DomainOrdinal, first_wire: &[u8]) {
+        serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+        drive_hello(serving, first_wire, "sub.example.org");
+        for i in 0..MAX_ADDRESSES - 1 {
+            let mut synthetic = [b'x'; 36];
+            synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
+            assert_eq!(
+                serving.ja4_baseline.record(ordinal, synthetic),
+                BaselineOutcome::FirstSeen,
+                "each fresh synthetic JA4 seeds the set"
+            );
+        }
+    }
+
+    fn arm_ja4_all_gate(serving: &mut Serving) {
+        for alpn in [0x32u8, 0x33] {
+            let wire = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, alpn])],
+            );
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            drive_hello(serving, &wire, "sub.example.org");
+        }
+    }
+
+    fn drain_sink(sink: &mut TcpStream) -> Vec<u8> {
+        std::thread::sleep(Duration::from_millis(20));
+        let mut collected = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match sink.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => collected.extend_from_slice(&chunk[..n]),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+        collected
+    }
+
+    #[test]
+    fn ja4_block_connection_stops_first_upstream_flush() {
+        let port = ephemeral_port();
+        let cfg = cfg_doc1(port, "connection", "block", "connection");
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&host, 443)
+                .expect("ordinal");
+            let wire_a = hello_wire(b"sub.example.org", false);
+            seed_full_ja4_set(serving, ordinal, &wire_a);
+            let wire_b = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+            );
+
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+            let sink_addr = sink.local_addr().expect("sink addr");
+            let upstream = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+            let mut sink_stream = sink.accept().expect("accept sink side").0;
+            sink_stream.set_nonblocking(true).expect("sink nonblocking");
+            serving.slots[0].upstream = Some(upstream);
+
+            drive_hello(serving, &wire_b, "sub.example.org");
+
+            let received = drain_sink(&mut sink_stream);
+            assert!(
+                received.is_empty(),
+                "a Block Connection decision must stop the triggering ClientHello before the first upstream flush, got {} bytes",
+                received.len()
+            );
+        });
+    }
+
+    #[test]
+    fn ja4_block_all_stops_coalesced_trailing_bytes() {
+        let port = ephemeral_port();
+        let cfg = cfg_ja4_block_all(port);
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&host, 443)
+                .expect("ordinal");
+            let wire_a = hello_wire(b"sub.example.org", false);
+            seed_full_ja4_set(serving, ordinal, &wire_a);
+            arm_ja4_all_gate(serving);
+            assert!(
+                !serving.storage().enforcement().block_all(),
+                "the two pre-arm overflows must stay below the all-scope gate threshold"
+            );
+
+            let mut wire_b = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x34])],
+            );
+            wire_b.extend(std::iter::repeat_n(0x5a, 96 * 1024));
+
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+            let sink_addr = sink.local_addr().expect("sink addr");
+            let upstream = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+            let mut sink_stream = sink.accept().expect("accept sink side").0;
+            sink_stream.set_nonblocking(true).expect("sink nonblocking");
+            serving.slots[0].upstream = Some(upstream);
+
+            drive_hello(serving, &wire_b, "sub.example.org");
+
+            let received = drain_sink(&mut sink_stream);
+            assert!(
+                received.is_empty(),
+                "a Block All decision must stop the ClientHello and its coalesced trailing bytes before any upstream write, got {} bytes",
+                received.len()
+            );
+            assert!(
+                serving.storage().enforcement().block_all(),
+                "the threshold-crossing overflow must latch block-all"
+            );
+        });
+    }
+
+    #[test]
+    fn ja4_block_all_stops_bytes_on_wouldblock_upstream() {
+        use std::os::fd::AsRawFd;
+        let port = ephemeral_port();
+        let cfg = cfg_ja4_block_all(port);
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&host, 443)
+                .expect("ordinal");
+            let wire_a = hello_wire(b"sub.example.org", false);
+            seed_full_ja4_set(serving, ordinal, &wire_a);
+            arm_ja4_all_gate(serving);
+
+            let mut wire_b = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x34])],
+            );
+            wire_b.extend(std::iter::repeat_n(0x5a, 96 * 1024));
+
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+            let sink_addr = sink.local_addr().expect("sink addr");
+            let upstream = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+            let mut sink_stream = sink.accept().expect("accept sink side").0;
+            sink_stream.set_nonblocking(true).expect("sink nonblocking");
+            let sndbuf: libc::c_int = 4096;
+            // SAFETY: `setsockopt` requires a valid open socket fd (this connect's
+            // upstream socket) and a readable buffer of at least the given length;
+            // both hold for the `sndbuf` int for the duration of the call.
+            let rc = unsafe {
+                libc::setsockopt(
+                    upstream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&raw const sndbuf).cast::<libc::c_void>(),
+                    libc::socklen_t::try_from(std::mem::size_of::<libc::c_int>())
+                        .expect("an int-sized option length fits socklen_t"),
+                )
+            };
+            assert_eq!(rc, 0, "setsockopt(SO_SNDBUF) must succeed");
+            serving.slots[0].upstream = Some(upstream);
+
+            drive_hello(serving, &wire_b, "sub.example.org");
+
+            let received = drain_sink(&mut sink_stream);
+            assert!(
+                received.is_empty(),
+                "a full upstream send buffer must never receive a blocked ClientHello or its coalesced tail, got {} bytes",
+                received.len()
+            );
+            assert!(
+                matches!(serving.slots[0].stage, Stage::Idle),
+                "the blocked slot must be closed"
+            );
+            assert!(
+                serving.slots[0].handle.is_none(),
+                "the blocked slot must release its admission handle"
+            );
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "the blocked slot must stay released"
+            );
+            assert_eq!(
+                serving.slots[0].buf_len, 0,
+                "the blocked slot must retain no upstream bytes"
+            );
+        });
+    }
 }
 
 #[cfg(feature = "alloc-witness")]
