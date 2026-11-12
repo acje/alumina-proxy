@@ -848,46 +848,87 @@ unsafe_surface_gate() {
     # never compiles into the production binary. Any other *.rs file containing
     # the keyword fails closed, naming the offender(s). Read-only host-side
     # check; no builds.
-    # The decision is made over the resolved content of EVERY physical *.rs path
-    # in the working tree, symlinks included. The universe is enumerated by find
+    # The decision is made over the resolved content of EVERY enumerated *.rs
+    # path: symlinked files are read through (rg and grep -R only skip a
+    # symlinked file reached by directory traversal, so the path list is passed
+    # as explicit arguments — never as a traversal root), symlinked directories
+    # are not traversed, and any file whose immediate path is a whitespace-bearing
+    # name or does not resolve to a regular file is a scan failure rather than a
+    # silently dropped path. The universe is enumerated with `find -print0`
     # (every directory named target, .git or .ooda pruned at any depth — the
     # prior rg/grep exclusion semantics, so a bench crate's generated target/
     # tree cannot turn this gate into a spurious FAIL; producer exit captured)
-    # and handed to the scanner as explicit file arguments: directory traversal
-    # is never the scan mechanism, because rg and grep -R do not descend into a
-    # symlinked file reached through a directory while both read an explicit
-    # symlink argument, and intended_coverage_gate already admits a resolving
-    # src/*.rs symlink. An explicitly enumerated path list keeps the scanned
-    # universe a superset of the admitted inventory, including untracked and
-    # non-src .rs paths (the bench crate stays covered). rg is preferred;
+    # and carried NUL-separated, so no argv word-splitting can lose a path: a
+    # path list carried as shell words silently drops a whitespace-bearing entry
+    # before the decision, which the mission intent forbids (a release-assurance
+    # PASS must not coexist with admitted production unsafe). The list keeps the
+    # scanned universe a superset of the admitted inventory, including untracked
+    # and non-src .rs paths (the bench crate stays covered). rg is preferred;
     # grep -l covers hosts without rg.
-    # Producer exit is captured (cf. sha256_digest): rg/grep exit 1 = no match
+    # Producer exits are captured (cf. sha256_digest): rg/grep exit 1 = no match
     # (clean); any exit >= 2 is a tooling error and fails closed, never passing
-    # on an empty offender list. An empty universe is a scan failure too.
+    # on an empty offender list. The xargs transport collapses per-shard exits
+    # differently per platform (BSD xargs: 1/2; GNU xargs: 123/124/125) and the
+    # shards themselves always exit 0 after mapping a normal match/no-match
+    # decision, so the transport must exit 0: any other code is a scan failure,
+    # never a clean scan. An empty universe is a scan failure too.
+    paths_file=$(mktemp "${TMPDIR:-/tmp}/alumina-unsafe-paths.XXXXXX") || {
+        echo "UNSAFE-SURFACE-SCAN-FAIL: path list temp file unavailable (tooling error, not PASS)" >&2
+        exit 1
+    }
     frc=0
-    universe="$(find . \( -name target -o -name .git -o -name .ooda \) -prune -o \( -type f -o -type l \) -name '*.rs' -print 2>&1)" || frc=$?
+    find . \( -name target -o -name .git -o -name .ooda \) -prune -o \( -type f -o -type l \) -name '*.rs' -print0 > "$paths_file" 2>/dev/null || frc=$?
     [ "$frc" -eq 0 ] || {
+        rm -f "$paths_file"
         echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe path enumeration exit $frc (tooling error, not PASS)" >&2
         exit 1
     }
-    universe="$(printf '%s\n' "$universe" | sed 's#^\./##')"
-    [ -n "$universe" ] || {
+    [ -s "$paths_file" ] || {
+        rm -f "$paths_file"
         echo "UNSAFE-SURFACE-SCAN-FAIL: empty .rs path universe (tooling error, not PASS)" >&2
         exit 1
     }
+    producer=grep
+    if command -v rg >/dev/null 2>&1; then
+        producer=rg
+    fi
     offenders=""
     scan_rc=0
-    if command -v rg >/dev/null 2>&1; then
-        offenders="$(rg -l '\bunsafe\b' -- $universe 2>/dev/null)" || scan_rc=$?
-    else
-        offenders="$(grep -l -E '\bunsafe\b' -- $universe 2>/dev/null)" || scan_rc=$?
-    fi
-    [ "$scan_rc" -lt 2 ] || {
-        echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe scan producer exit $scan_rc (tooling error, not PASS)" >&2
+    offenders="$(xargs -0 sh -c '
+        producer=$1
+        pattern=$2
+        shift 2
+        [ "$#" -gt 0 ] || exit 255
+        for f do
+            case "$f" in
+                *[[:space:]]*)
+                    printf "unsafe scan: whitespace-bearing path is unsupported: %s\n" "$f" >&2
+                    exit 255 ;;
+            esac
+            [ -f "$f" ] || {
+                printf "unsafe scan: enumerated path is not a regular file: %s\n" "$f" >&2
+                exit 255
+            }
+        done
+        if [ "$producer" = rg ]; then
+            rg -l "$pattern" -- "$@"
+        else
+            grep -l -E "$pattern" -- "$@"
+        fi
+        rc=$?
+        [ "$rc" -le 1 ] || exit 255
+        exit 0
+    ' sh "$producer" '\bunsafe\b' < "$paths_file")" || scan_rc=$?
+    rm -f "$paths_file"
+    [ "$scan_rc" -eq 0 ] || {
+        echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe scan transport exit $scan_rc (tooling error, not PASS)" >&2
         exit 1
     }
     bad=""
     for f in $offenders; do
+        case "$f" in
+            ./*) f=${f#./} ;;
+        esac
         case "$f" in
             src/alloc.rs|tests/*|src/*/tests.rs|src/*/dot_tests.rs) ;;
             *) bad="$bad $f" ;;
@@ -897,7 +938,7 @@ unsafe_surface_gate() {
         echo "UNSAFE-SURFACE-FAIL: 'unsafe' outside allowlist (prod surface: src/alloc.rs, tests/*; cfg(test) unit modules: src/*/tests.rs, src/*/dot_tests.rs):$bad" >&2
         exit 1
     fi
-    echo "UNSAFE-SURFACE-OK: every physical .rs path (symlinks resolved) confines unsafe to prod surface src/alloc.rs, tests/* and cfg(test) unit modules src/*/tests.rs, src/*/dot_tests.rs"
+    echo "UNSAFE-SURFACE-OK: every enumerated .rs path outside target/.git/.ooda directories (basenames pruned at any depth, symlinked files resolved, symlinked dirs not traversed, whitespace-free regular files only) confines unsafe to prod surface src/alloc.rs, tests/* and cfg(test) unit modules src/*/tests.rs, src/*/dot_tests.rs"
 }
 
 # F-new (gate-surface-truth M1): the reviewed identity set (INTENDED) must cover
@@ -974,27 +1015,35 @@ cfg_test_parentage_gate() {
         fi
         # Every declaration of `mod <stem>;` in the parent must be attributed
         # under #[cfg(test)]: a bare production `mod <stem>;` fails, and so does
-        # any later non-cfg(test) redeclaration after a cfg(test) one. The
-        # immediately preceding attribute block (modulo blank lines) supplies
-        # the attribution for the two-line form; the single-line form carries
-        # its attributes on the declaration line itself; `pub(crate)` is
-        # accepted on either. Attribution is structural: only the leading
-        # attribute prefix of a recognised declaration (or an anchored attribute
-        # line) can supply it, so trailing text — including a comment that
-        # merely mentions cfg(test) — never counts, while the declaration itself
-        # is still recognised (a masking declaration cannot hide behind
-        # trailing text).
+        # any later non-cfg(test) redeclaration after a cfg(test) one.
+        # Declarations are counted regardless of visibility prefix (`mod`,
+        # `pub mod`, `pub(crate)`, `pub(super)`, `pub(self)`, `pub(in …)`), so an
+        # attributed phantom cannot let a second production declaration pass
+        # uncounted. Attribution is structural: it comes only from the leading
+        # attribute prefix of a recognised declaration (cfg(test) anywhere in it)
+        # or from an anchored attribute line immediately preceding the
+        # declaration (blank lines allowed, other attribute lines preserved);
+        # trailing text — including a comment that merely mentions cfg(test) —
+        # never counts. Accepted forms are exactly those: `#[cfg(test)]
+        # mod tests;`, `#[cfg(test)] pub(crate) mod tests;`, an anchored
+        # `#[cfg(test)]` line (modulo blank lines) before the declaration, and
+        # any visibility prefix. Other legitimate shapes (`cfg(all(test, …))`,
+        # doc comments inside the attribute block) fail closed by design — no
+        # comment or Rust parser is built, so text that happens to form a
+        # declaration can only make the gate stricter, never greener.
         prc=0
         decl=$(awk -v stem="$stem" '
             {
-                if ($0 ~ ("^[[:space:]]*#\\[cfg\\(test\\)\\][[:space:]]*(#\\[[^]]*\\][[:space:]]*)*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) {
-                    total++
-                    pending = 0
-                    next
+                rest = $0
+                cfgt = 0
+                while (match(rest, /^[[:space:]]*#\[[^]]*\][[:space:]]*/)) {
+                    attr = substr(rest, RSTART, RLENGTH)
+                    if (attr ~ /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/) cfgt = 1
+                    rest = substr(rest, RSTART + RLENGTH)
                 }
-                if ($0 ~ ("^[[:space:]]*(#\\[[^]]*\\][[:space:]]*)*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) {
+                if (rest ~ ("^[[:space:]]*(pub([[:space:]]*\\([^)]*\\))?[[:space:]]*)?mod[[:space:]]+" stem "[[:space:]]*;")) {
                     total++
-                    if (!pending) bad++
+                    if (!(pending || cfgt)) bad++
                     pending = 0
                     next
                 }
