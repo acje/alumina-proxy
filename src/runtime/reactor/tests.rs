@@ -9637,15 +9637,17 @@ mod listener_backoff {
 
     #[test]
     /// The accept backoff is a real pause, not advisory state: a listener
-    /// readiness dispatch while `listener_pause_until` is in the future must
-    /// admit nothing, even with a client already queued in the kernel backlog.
+    /// readiness dispatch while the listener is paused must admit nothing, even
+    /// with a client already queued in the kernel backlog.
     fn paused_listener_dispatch_accepts_nothing() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let _client = connect(port);
             std::thread::sleep(Duration::from_millis(20));
             serving.progress.work_since_recheck = 0;
-            serving.listener_pause_until = Some(Instant::now() + ACCEPT_BACKOFF);
+            serving
+                .pause_listener(Instant::now())
+                .expect("pause the live listener");
 
             serving
                 .dispatch_readiness(
@@ -9679,7 +9681,9 @@ mod listener_backoff {
             );
 
             let seeded = Instant::now();
-            serving.listener_pause_until = Some(seeded + ACCEPT_BACKOFF);
+            serving
+                .pause_listener(seeded)
+                .expect("pause the live listener");
             let remaining = ACCEPT_BACKOFF.saturating_sub(seeded.elapsed());
             let folded = serving
                 .poll_timeout()
@@ -9703,7 +9707,9 @@ mod listener_backoff {
                 .set_read_timeout(Some(Duration::from_millis(500)))
                 .expect("client read timeout");
             std::thread::sleep(Duration::from_millis(20));
-            serving.listener_pause_until = Some(Instant::now() + ACCEPT_BACKOFF);
+            serving
+                .pause_listener(Instant::now())
+                .expect("pause the live listener");
             pump(serving, 2);
             assert_eq!(
                 serving.storage().occupied(),
@@ -9711,7 +9717,11 @@ mod listener_backoff {
                 "the paused listener must not admit the queued client early"
             );
 
-            serving.listener_pause_until = Some(Instant::now() - Duration::from_millis(1));
+            // The listener is already withdrawn; only the resume instant moves
+            // into the past, exactly as the elapsed backoff would.
+            serving.listener_arm = ListenerArm::Paused {
+                at: Instant::now() - Duration::from_millis(1),
+            };
             pump(serving, 3);
             assert_eq!(
                 serving.storage().occupied(),
@@ -9727,6 +9737,48 @@ mod listener_backoff {
             assert!(
                 body.starts_with(b"HTTP/1.1 403"),
                 "the resumed listener must serve the queued client, got {body:?}"
+            );
+        });
+    }
+
+    #[test]
+    /// The real pause cycle: pausing the live listener deregisters it, and the
+    /// resume must re-arm it with the registration call that matches the
+    /// deregistered state. On an epoll target a `reregister` of a withdrawn
+    /// source fails with ENOENT, so an unguarded rearm breaks the first real
+    /// accept error fatally; the re-armed listener must also accept and serve
+    /// the client queued during the pause.
+    fn listener_rearm_after_pause_registers_the_deregistered_listener() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let mut client = connect(port);
+            client
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("client read timeout");
+            std::thread::sleep(Duration::from_millis(20));
+
+            serving
+                .pause_listener(Instant::now())
+                .expect("pause the live listener");
+            serving
+                .resume_listener(Instant::now() + ACCEPT_BACKOFF + Duration::from_secs(1))
+                .expect("the rearm must re-register the deregistered listener");
+
+            pump(serving, 3);
+            assert_eq!(
+                serving.storage().occupied(),
+                1,
+                "the re-armed listener must accept the client queued during the pause"
+            );
+
+            client
+                .write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("write head");
+            pump(serving, 10);
+            let body = read_until(&mut client, b"\r\n\r\n");
+            assert!(
+                body.starts_with(b"HTTP/1.1 403"),
+                "the re-armed listener must serve the queued client, got {body:?}"
             );
         });
     }

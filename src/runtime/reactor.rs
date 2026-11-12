@@ -963,13 +963,29 @@ impl DeadlineSlots {
     }
 }
 
+/// The listener's poll-registry state. The accept pause is a real withdrawal
+/// from the registry, so the state that says "paused" is also the state that
+/// says "not registered": the rearm therefore uses `register`, never
+/// `reregister` (mio requires a previously registered source for the latter).
+/// [`Serving::pause_listener`] and [`Serving::resume_listener`] own the pause
+/// cycle; [`Serving::attach_listener`] establishes the registered state for a
+/// newly attached listener, so the two can never disagree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListenerArm {
+    /// Registered for readability: readiness edges are delivered and accepts run.
+    Registered,
+    /// Withdrawn from the poll registry until `at`; the resume turn
+    /// re-registers the listener exactly once.
+    Paused { at: Instant },
+}
+
 pub struct Serving {
     poll: Poll,
     storage: ServeStorage,
     listener: Option<TcpListener>,
     slots: Vec<SlotWorkspace>,
     events: Events,
-    listener_pause_until: Option<Instant>,
+    listener_arm: ListenerArm,
     dns_event: bool,
     visit: VisitState,
     /// Poll-batch generation stamp for per-connection visit dedup: each
@@ -1100,7 +1116,7 @@ impl Serving {
             listener: None,
             slots,
             events: Events::with_capacity(POLL_EVENTS_CAP),
-            listener_pause_until: None,
+            listener_arm: ListenerArm::Registered,
             dns_event: false,
             visit: VisitState::idle(),
             batch_gen: 0,
@@ -1199,6 +1215,9 @@ impl Serving {
             .registry()
             .register(&mut listener, LISTENER, Interest::READABLE)?;
         self.listener = Some(listener);
+        // Attaching registers the listener, so the arm is registered by
+        // construction: a pause cannot outlive the listener it withdrew.
+        self.listener_arm = ListenerArm::Registered;
         Ok(())
     }
 
@@ -1538,17 +1557,27 @@ impl Serving {
         Ok(())
     }
 
-    /// Re-arms an accept-paused listener once its backoff has elapsed, so a
-    /// transient accept failure is retried on a bounded cadence, never an
-    /// immediate readiness hot loop.
+    /// The single rearm site for a paused listener. It re-registers the
+    /// withdrawn listener once the backoff has elapsed, so a transient accept
+    /// failure is retried on a bounded cadence, never an immediate readiness
+    /// hot loop. Because [`Serving::pause_listener`] withdrew the listener from
+    /// the poll registry, the matching call is `register` — `reregister`
+    /// requires a previously registered source and fails on a withdrawn one.
     fn resume_listener(&mut self, now: Instant) -> Result<(), ServeError> {
-        if let Some(pause) = self.listener_pause_until
-            && now >= pause
-        {
-            self.listener_pause_until = None;
-            self.reregister_listener()?;
+        let ListenerArm::Paused { at } = self.listener_arm else {
+            return Ok(());
+        };
+        if now < at {
+            return Ok(());
         }
-        Ok(())
+        self.listener_arm = ListenerArm::Registered;
+        let Some(listener) = self.listener.as_mut() else {
+            return Ok(());
+        };
+        self.poll
+            .registry()
+            .register(listener, LISTENER, Interest::READABLE)
+            .map_err(Into::into)
     }
 
     fn dispatch_readiness(&mut self, token: Token, ready: Readiness) -> Result<(), ServeError> {
@@ -1884,8 +1913,8 @@ impl Serving {
     fn accept_all(&mut self) -> Result<(), ServeError> {
         // A paused accept stays paused: no readiness edge may admit a client
         // before `resume_listener` clears the backoff.
-        if let Some(pause) = self.listener_pause_until
-            && Instant::now() < pause
+        if let ListenerArm::Paused { at } = self.listener_arm
+            && Instant::now() < at
         {
             return Ok(());
         }
@@ -1920,12 +1949,18 @@ impl Serving {
     }
 
     /// Puts the listener into its bounded accept pause: the pause is armed at
-    /// `now + ACCEPT_BACKOFF` and the listener is deregistered, so a
-    /// level-triggered readability edge cannot spin the turn loop while
-    /// paused. [`Serving::resume_listener`] is the only site that clears the
-    /// pause and restores the same registration once it has elapsed.
+    /// `now + ACCEPT_BACKOFF` and the listener is withdrawn from the poll
+    /// registry (one state, so the rearm cannot choose `reregister` for a
+    /// withdrawn source). A level-triggered readability edge therefore cannot
+    /// spin the turn loop while paused. [`Serving::resume_listener`] is the only
+    /// site that clears the pause and re-registers once it has elapsed. A
+    /// `NotFound` deregistration means the listener was not registered, which is
+    /// the same paused state; any other registry error is propagated and the
+    /// turn fails closed with the pause still armed.
     fn pause_listener(&mut self, now: Instant) -> Result<(), ServeError> {
-        self.listener_pause_until = Some(now + ACCEPT_BACKOFF);
+        self.listener_arm = ListenerArm::Paused {
+            at: now + ACCEPT_BACKOFF,
+        };
         let Some(listener) = self.listener.as_mut() else {
             return Ok(());
         };
@@ -3367,10 +3402,10 @@ impl Serving {
             earliest = Some(deadline);
         }
         let now = Instant::now();
-        if let Some(pause) = self.listener_pause_until
-            && earliest.is_none_or(|e| pause < e)
+        if let ListenerArm::Paused { at } = self.listener_arm
+            && earliest.is_none_or(|e| at < e)
         {
-            earliest = Some(pause);
+            earliest = Some(at);
         }
         if let Some(log_wake) = self.storage.logs().next_drain(now)
             && earliest.is_none_or(|e| log_wake < e)
