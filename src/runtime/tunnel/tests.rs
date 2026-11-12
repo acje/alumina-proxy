@@ -72,6 +72,18 @@ fn setup_at(anchor: Instant) -> Deadline {
     Deadline::setup(anchor)
 }
 
+/// One canonical loopback peer for the per-peer accounting tests: distinct
+/// tags are distinct peers without needing a second loopback address (macOS
+/// refuses to bind 127.0.0.0/8 aliases beyond .1).
+fn peer(tag: usize) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(
+        127,
+        0,
+        0,
+        u8::try_from(tag + 1).expect("peer tag fits an IPv4 octet"),
+    ))
+}
+
 fn assert_counters_match_rescan(worker: &Worker) {
     let occupied = worker
         .slots
@@ -475,25 +487,38 @@ fn attempt_budget_exhausted_returns_candidates_exhausted() {
 fn worker_admits_up_to_128_pending_setups_and_rejects_the_129th() {
     let t0 = anchor();
     let mut worker = Worker::boot(clock(t0));
-    for _ in 0..MAX_PENDING_SETUPS {
+    // The global 128-seat budget fills across distinct peers, because every
+    // peer may hold at most MAX_PENDING_PER_PEER pending setups.
+    let peers = MAX_PENDING_SETUPS / MAX_PENDING_PER_PEER;
+    for seat in 0..MAX_PENDING_SETUPS {
         worker
-            .admit(t0)
+            .admit(t0, peer(seat % peers))
             .expect("admitted within the pending budget");
     }
     assert_eq!(worker.pending(), MAX_PENDING_SETUPS);
-    assert_eq!(worker.admit(t0), Err(AdmissionError::PendingCapacity));
+    assert_eq!(
+        worker.admit(t0, peer(peers)),
+        Err(AdmissionError::PendingCapacity),
+        "a fresh peer is still refused at the global pending cap"
+    );
 }
 
 #[test]
 fn releasing_a_setup_slot_frees_pending_capacity() {
     let t0 = anchor();
     let mut worker = Worker::boot(clock(t0));
-    for _ in 0..MAX_PENDING_SETUPS - 1 {
-        worker.admit(t0).expect("admitted");
+    let peers = MAX_PENDING_SETUPS / MAX_PENDING_PER_PEER;
+    for seat in 0..MAX_PENDING_SETUPS - 1 {
+        worker.admit(t0, peer(seat % peers)).expect("admitted");
     }
-    let last = worker.admit(t0).expect("admitted at the pending cap");
+    let last_peer = (MAX_PENDING_SETUPS - 1) % peers;
+    let last = worker
+        .admit(t0, peer(last_peer))
+        .expect("admitted at the pending cap");
     worker.release(last);
-    worker.admit(t0).expect("seat freed by release");
+    worker
+        .admit(t0, peer(last_peer))
+        .expect("seat freed by release");
     assert_eq!(worker.pending(), MAX_PENDING_SETUPS);
 }
 
@@ -503,7 +528,7 @@ fn releasing_a_setup_slot_frees_pending_capacity() {
 fn release_rejects_a_slot_that_is_not_in_setup() {
     let t0 = anchor();
     let mut worker = Worker::boot(clock(t0));
-    let slot = worker.admit(t0).expect("admitted");
+    let slot = worker.admit(t0, peer(0)).expect("admitted");
     worker.slots[slot.index()] = SlotState::Established {
         setup_deadline: Deadline::setup(t0),
     };
@@ -516,10 +541,10 @@ fn worker_binds_slot_capacity_at_512_occupied_tunnels() {
     let mut worker = Worker::boot(clock(t0));
     let mut tunnels = Vec::new();
     for _ in 0..MAX_TUNNELS {
-        let slot = worker.admit(t0).expect("admitted to a free slot");
+        let slot = worker.admit(t0, peer(0)).expect("admitted to a free slot");
         tunnels.push(worker.finish_setup(slot));
     }
-    assert_eq!(worker.admit(t0), Err(AdmissionError::SlotCapacity));
+    assert_eq!(worker.admit(t0, peer(0)), Err(AdmissionError::SlotCapacity));
     assert_eq!(worker.pending(), 0);
     assert_eq!(worker.occupied(), MAX_TUNNELS);
     for tunnel in tunnels {
@@ -533,8 +558,8 @@ fn worker_binds_slot_capacity_at_512_occupied_tunnels() {
 fn graduating_or_releasing_one_slot_never_touches_another_slots_pending() {
     let t0 = anchor();
     let mut worker = Worker::boot(clock(t0));
-    let a = worker.admit(t0).expect("slot a");
-    let b = worker.admit(t0).expect("slot b");
+    let a = worker.admit(t0, peer(0)).expect("slot a");
+    let b = worker.admit(t0, peer(0)).expect("slot b");
     assert_eq!(worker.pending(), 2);
     let a_tunnel = worker.finish_setup(a);
     assert_eq!(
@@ -559,7 +584,7 @@ fn graduating_or_releasing_one_slot_never_touches_another_slots_pending() {
 fn admitted_slot_carries_its_absolute_setup_deadline() {
     let t0 = anchor();
     let mut worker = Worker::boot(clock(t0));
-    let slot = worker.admit(t0).expect("admitted");
+    let slot = worker.admit(t0, peer(0)).expect("admitted");
     assert_eq!(worker.setup_deadline(&slot), Some(Deadline::setup(t0)));
     let tunnel = worker.finish_setup(slot);
     assert_eq!(
@@ -578,14 +603,16 @@ fn cached_occupancy_counters_track_the_slot_table_across_a_lifecycle_churn() {
     let mut worker = Worker::boot(clock(t0));
     let mut tunnels = Vec::new();
     for _ in 0..MAX_TUNNELS {
-        let slot = worker.admit(t0).expect("admitted to a free slot");
+        let slot = worker.admit(t0, peer(0)).expect("admitted to a free slot");
         tunnels.push(worker.finish_setup(slot));
     }
     for tunnel in tunnels {
         worker.release_tunnel(tunnel);
     }
     for _ in 0..MAX_PENDING_SETUPS {
-        let slot = worker.admit(t0).expect("admitted after full teardown");
+        let slot = worker
+            .admit(t0, peer(0))
+            .expect("admitted after full teardown");
         worker.release(slot);
     }
     assert_counters_match_rescan(&worker);
@@ -611,7 +638,7 @@ fn free_list_names_each_free_slot_exactly_once_through_a_full_churn() {
     );
     let mut tunnels = Vec::new();
     for _ in 0..MAX_TUNNELS {
-        let slot = worker.admit(t0).expect("admitted to a free slot");
+        let slot = worker.admit(t0, peer(0)).expect("admitted to a free slot");
         tunnels.push(worker.finish_setup(slot));
     }
     assert_eq!(worker.free_count, 0, "free list empty at full occupancy");
@@ -629,12 +656,12 @@ fn free_list_names_each_free_slot_exactly_once_through_a_full_churn() {
 fn admit_reuses_the_lowest_index_free_slot() {
     let t0 = anchor();
     let mut worker = Worker::boot(clock(t0));
-    let a = worker.admit(t0).expect("admitted");
+    let a = worker.admit(t0, peer(0)).expect("admitted");
     assert_eq!(SlotIndex::index(&a), 0, "first admit takes slot 0");
-    let b = worker.admit(t0).expect("admitted");
+    let b = worker.admit(t0, peer(0)).expect("admitted");
     assert_eq!(SlotIndex::index(&b), 1, "second admit takes slot 1");
     worker.release(a);
-    let c = worker.admit(t0).expect("re-admitted");
+    let c = worker.admit(t0, peer(0)).expect("re-admitted");
     assert_eq!(
         SlotIndex::index(&c),
         0,
@@ -890,7 +917,7 @@ fn worker_decide_reads_the_slot_deadline_instead_of_a_free_setup() {
     publish(&mut cache, n, Family::A, &[pub_v4()], DNS_EPOCH, 3600);
     let view = view_of_clocked(&cfg, &cache, clock);
     let mut worker = Worker::boot(clock);
-    let slot = worker.admit(t0).expect("admitted");
+    let slot = worker.admit(t0, peer(0)).expect("admitted");
     let req = auth_request("sub.example.org");
     let phase = worker
         .decide(&slot, &view.resolve(&req), later(t0, 1))
@@ -1010,7 +1037,9 @@ fn invalid_slot_handle_stays_notinsetup_before_unknown_pair_is_consulted() {
     let view = view_of_clocked(&cfg, &cache, clock);
     let worker = Worker::boot(clock);
     let mut other = Worker::boot(clock);
-    let slot = other.admit(t0).expect("admitted in the other worker");
+    let slot = other
+        .admit(t0, peer(0))
+        .expect("admitted in the other worker");
     let req = auth_request("evil.example.net");
     let err = worker
         .decide(&slot, &view.resolve(&req), later(t0, 1))
@@ -1051,7 +1080,7 @@ fn decide_reads_its_budget_from_the_slot_ledger_not_a_caller_arg() {
     );
     let view = view_of_clocked(&cfg, &cache, clock);
     let mut worker = Worker::boot(clock);
-    let slot = worker.admit(t0).expect("admitted");
+    let slot = worker.admit(t0, peer(0)).expect("admitted");
     let req = auth_request("sub.example.org");
     let phase = worker
         .decide(&slot, &view.resolve(&req), later(t0, 1))
@@ -1104,7 +1133,7 @@ fn record_attempt_updates_the_slot_ledger_and_previous_family() {
     let t0 = anchor();
     let clock = WorkerClock::new(t0, DNS_EPOCH);
     let mut worker = Worker::boot(clock);
-    let slot = worker.admit(t0).expect("admitted");
+    let slot = worker.admit(t0, peer(0)).expect("admitted");
     let fresh = worker.attempt_ledger(&slot).expect("in-setup ledger");
     assert_eq!(fresh.counts().total(), 0, "a fresh ledger has no attempts");
     assert_eq!(
@@ -1141,11 +1170,13 @@ fn releasing_a_slot_consumes_the_handle_and_frees_capacity_for_reuse() {
     let t0 = anchor();
     let clock = WorkerClock::new(t0, DNS_EPOCH);
     let mut worker = Worker::boot(clock);
-    let a = worker.admit(t0).expect("slot a");
+    let a = worker.admit(t0, peer(0)).expect("slot a");
     assert_eq!(worker.occupied(), 1);
     worker.release(a);
     assert_eq!(worker.occupied(), 0, "release consumes the granted handle");
-    let b = worker.admit(t0).expect("the freed seat is reusable");
+    let b = worker
+        .admit(t0, peer(0))
+        .expect("the freed seat is reusable");
     assert_eq!(worker.occupied(), 1);
     let b_tunnel = worker.finish_setup(b);
     assert_eq!(worker.pending(), 0);

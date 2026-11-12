@@ -30,6 +30,7 @@
 //! deadline is freshly clipped to the absolute setup deadline at the attempt
 //! it initiates (docs/alumina-proxy.md:189).
 
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
@@ -45,6 +46,18 @@ pub const MAX_TUNNELS: usize = TUNNEL_SLOTS;
 
 /// Maximum concurrent pending (in-setup) tunnels; never 640 (docs/alumina-proxy.md:160).
 pub const MAX_PENDING_SETUPS: usize = 128;
+
+/// Maximum concurrent pending setups attributed to one peer. It bounds how
+/// many pending seats a single reachable peer can hold, so the rest of the
+/// fixed pending budget stays available to distinct peers; it is an additional
+/// admission condition, never a change to [`MAX_PENDING_SETUPS`]
+/// (docs/alumina-proxy.md:160,193).
+pub const MAX_PENDING_PER_PEER: usize = 32;
+
+const _: () = assert!(
+    MAX_PENDING_PER_PEER < MAX_PENDING_SETUPS,
+    "the per-peer pending cap must leave pending seats for distinct peers"
+);
 
 /// Sequential upstream connection attempts per tunnel (docs/alumina-proxy.md:82).
 pub const MAX_UPSTREAM_ATTEMPTS: usize = 4;
@@ -340,6 +353,11 @@ pub enum SlotState {
     InSetup {
         setup_deadline: Deadline,
         attempts: AttemptLedger,
+        /// The accept-reported peer, canonicalised at admit
+        /// ([`IpAddr::to_canonical`]), so the per-peer pending cap counts
+        /// exactly the peers the kernel accepted and never merges (or splits)
+        /// one peer by address family spelling.
+        peer: IpAddr,
     },
     Established {
         setup_deadline: Deadline,
@@ -378,6 +396,10 @@ impl Worker {
     /// min-heap, so no heapify pass is required. Crate-internal: the single
     /// constructor site is the storage that owns cache, schedules, and this
     /// worker.
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "the fixed slot table is boot-time state (512 x 40 B) built once before serving; it is never a per-visit or per-accept stack allocation"
+    )]
     pub(crate) const fn boot(clock: WorkerClock) -> Worker {
         let mut free_heap = [0; MAX_TUNNELS];
         let mut index = 0;
@@ -430,29 +452,53 @@ impl Worker {
     /// handle [`SlotIndex`]. The handle is moved through the lifecycle and
     /// consumed by [`Worker::release`] or [`Worker::finish_setup`], so a stale
     /// handle can never free a slot reused for another owner (9mq9 H1r).
+    /// `peer` is the accept-reported address; it is canonicalised here and
+    /// fixed on the slot for the pending lifetime, so the per-peer pending cap
+    /// counts the same peer once regardless of address-family spelling.
     ///
     /// # Errors
     ///
     /// Returns `SlotCapacity` at [`MAX_TUNNELS`] occupied slots and
     /// `PendingCapacity` at [`MAX_PENDING_SETUPS`] pending setups; both are
     /// HTTP 503 + close (docs/alumina-proxy.md:193).
-    pub(crate) fn admit(&mut self, now: Instant) -> Result<SlotIndex, AdmissionError> {
+    pub(crate) fn admit(
+        &mut self,
+        now: Instant,
+        peer: IpAddr,
+    ) -> Result<SlotIndex, AdmissionError> {
         if self.occupied_count >= MAX_TUNNELS {
             return Err(AdmissionError::SlotCapacity);
         }
         if self.pending_count >= MAX_PENDING_SETUPS {
             return Err(AdmissionError::PendingCapacity);
         }
+        let peer = peer.to_canonical();
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.pending_from_peer(peer) <= self.pending_count,
+            "a per-peer pending count can never exceed the global pending count"
+        );
         let index = self.take_min_free();
         self.slots[index as usize] = SlotState::InSetup {
             setup_deadline: Deadline::setup(now),
             attempts: AttemptLedger::new(),
+            peer,
         };
         self.occupied_count += 1;
         self.pending_count += 1;
         #[cfg(debug_assertions)]
         self.check_counter_lockstep();
         Ok(SlotIndex(index))
+    }
+
+    /// The in-setup slots attributed to `peer`: one bounded, allocation-free
+    /// scan of the fixed slot table (O([`MAX_TUNNELS`])), so the per-peer
+    /// pending cap needs no second table and no per-visit I/O budget.
+    fn pending_from_peer(&self, peer: IpAddr) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| matches!(slot, SlotState::InSetup { peer: p, .. } if *p == peer))
+            .count()
     }
 
     fn take_min_free(&mut self) -> u16 {

@@ -1942,7 +1942,7 @@ mod generation_tokens {
                 port,
             ))
             .expect("client connect");
-            serving.admit(client);
+            serving.admit(client, IpAddr::V4([127, 0, 0, 1].into()));
             assert_eq!(serving.storage().occupied(), 1);
             let current = serving.slots[0].slot_gen;
             assert_eq!(current, 1, "the first admission owns generation 1");
@@ -2020,7 +2020,7 @@ mod generation_tokens {
                 port,
             ))
             .expect("first client connect");
-            serving.admit(c1);
+            serving.admit(c1, IpAddr::V4([127, 0, 0, 1].into()));
             assert_eq!(serving.storage().occupied(), 1);
             let first_gen = serving.slots[0].slot_gen;
             assert_eq!(first_gen, 1, "the first admission owns generation 1");
@@ -2050,7 +2050,7 @@ mod generation_tokens {
                 port,
             ))
             .expect("second client connect");
-            serving.admit(c2);
+            serving.admit(c2, IpAddr::V4([127, 0, 0, 1].into()));
             assert_eq!(serving.storage().occupied(), 1);
             let new_gen = serving.slots[0].slot_gen;
             assert_eq!(

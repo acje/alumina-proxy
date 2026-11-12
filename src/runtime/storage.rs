@@ -1325,15 +1325,20 @@ impl ServeStorage {
     }
 
     /// Admits a new actual connection into a retained slot at the accept
-    /// instant, capturing its absolute setup deadline. Slot lifecycle actions
-    /// are private to actual accept/connect/close event processing.
+    /// instant, capturing its absolute setup deadline and fixing the
+    /// accept-reported `peer` on the pending setup. Slot lifecycle actions are
+    /// private to actual accept/connect/close event processing.
     ///
     /// # Errors
     ///
     /// `SlotCapacity` or `PendingCapacity`, mapped to HTTP 503 + close
     /// (docs/alumina-proxy.md:193).
-    pub(crate) fn accept(&mut self, now: Instant) -> Result<SlotIndex, AdmissionError> {
-        self.worker.admit(now)
+    pub(crate) fn accept(
+        &mut self,
+        now: Instant,
+        peer: IpAddr,
+    ) -> Result<SlotIndex, AdmissionError> {
+        self.worker.admit(now, peer)
     }
 
     /// The single exact-pair resolution of an already-validated CONNECT for

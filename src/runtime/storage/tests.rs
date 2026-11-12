@@ -6,6 +6,11 @@ use crate::eligibility::NumericAddr;
 use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+/// The canonical accept-reported peer used by the storage admission seam.
+fn test_peer() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+}
+
 const FRESH: u64 = 1000;
 const TTL: u64 = 10;
 const RETIREMENT: u64 = FRESH + TTL + crate::dns::cache::STALE_GRACE;
@@ -421,7 +426,9 @@ fn work_view_is_bound_to_the_owning_storages_state() {
         .expect("connect result present")
         .as_ref()
         .expect("valid connect request");
-    let slot = storage.accept(t0).expect("admitted via the owned seam");
+    let slot = storage
+        .accept(t0, test_peer())
+        .expect("admitted via the owned seam");
     let phase = storage
         .decide(&slot, &storage.resolve_request(&req), now)
         .expect("decision via the owned seam");
@@ -475,7 +482,7 @@ fn storage_decide_reads_slot_deadline_and_epoch_scale() {
     storage.mount_clock(Instant::now(), DNS_EPOCH);
     publish_a(&mut storage.cache, 0, DNS_EPOCH + 1, 1);
     let t0 = Instant::now();
-    let slot = storage.accept(t0).expect("admitted");
+    let slot = storage.accept(t0, test_peer()).expect("admitted");
     let mut parser = ConnectParser::new();
     let head = b"CONNECT alpha.example.org:443 HTTP/1.1\r\n\r\n";
     match parser.feed(head).expect("valid connect head") {

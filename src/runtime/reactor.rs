@@ -1952,9 +1952,9 @@ impl Serving {
                 return Ok(());
             };
             match listener.accept() {
-                Ok((stream, _addr)) => {
+                Ok((stream, addr)) => {
                     self.progress.accrue(1);
-                    self.admit(stream);
+                    self.admit(stream, addr.ip());
                 }
                 Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
                     self.progress.accrue(1);
@@ -1992,9 +1992,9 @@ impl Serving {
         }
     }
 
-    fn admit(&mut self, stream: TcpStream) {
+    fn admit(&mut self, stream: TcpStream, peer: IpAddr) {
         let now = Instant::now();
-        match self.storage.accept(now) {
+        match self.storage.accept(now, peer) {
             Err(_) => {
                 let client = stream.peer_addr().ok();
                 let secs = self.storage.cache_secs(now);
