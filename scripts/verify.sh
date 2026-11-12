@@ -940,16 +940,17 @@ intended_coverage_gate() {
 # src/*/tests.rs or src/*/dot_tests.rs at any depth is trusted as test-only
 # unsafe surface ONLY if its actual immediate parent module (resolved
 # <parent>.rs, else <parent>/mod.rs at the unit module's own path; both
-# present is ambiguous and fails closed) declares the module under
-# #[cfg(test)]. A filename-only admission would let a production `mod tests;`
-# (whose unsafe compiles into the binary) pass the unsafe gate. This is not a
-# filename-only rule: it asserts the actual cfg(test) attribute adjacent to
-# the mod declaration in the parent. Enumerated via find over the working tree
-# (same universe as the unsafe scan, untracked included) at every depth, exit
-# captured so a scan failure fails closed and never reads as PASS.
+# present is ambiguous and fails closed) attributes EVERY `mod <stem>;`
+# declaration under #[cfg(test)]. First-match ACM is not enough: a later
+# `#[cfg(feature = "x")] mod tests;` after a cfg(test) declaration would
+# compile the module's unsafe into the binary while the gate still passed. A
+# filename-only admission would let a production `mod tests;` pass at all.
+# Enumerated via find over the working tree (same universe as the unsafe scan,
+# symlinks included: a symlinked tests.rs is parentage-checked, not skipped),
+# exit captured so a scan failure fails closed and never reads as PASS.
 cfg_test_parentage_gate() {
     fsrc=0
-    umods="$(find src -mindepth 2 -type f \( -name 'tests.rs' -o -name 'dot_tests.rs' \) 2>/dev/null)" || fsrc=$?
+    umods="$(find src -mindepth 2 \( -type f -o -type l \) \( -name 'tests.rs' -o -name 'dot_tests.rs' \) 2>/dev/null)" || fsrc=$?
     [ "$fsrc" -eq 0 ] || {
         echo "CFG-TEST-PARENTAGE-SCAN-FAIL: unit-module scan producer exit $fsrc (tooling error, not PASS)" >&2
         exit 1
@@ -969,32 +970,42 @@ cfg_test_parentage_gate() {
             pg_bad="$pg_bad $m(no parent module: neither $d.rs nor $d/mod.rs)"
             continue
         fi
-        # Assert the parent carries a #[cfg(test)] attribute immediately (modulo
-        # blank lines) preceding `mod <stem>;`. A bare production `mod <stem>;`
-        # without the attribute must NOT satisfy this rule. Single-line
-        # `#[cfg(test)] mod <stem>;` and two-line forms are both recognised.
+        # Every declaration of `mod <stem>;` in the parent must be attributed
+        # under #[cfg(test)]: a bare production `mod <stem>;` fails, and so does
+        # any later non-cfg(test) redeclaration after a cfg(test) one. The
+        # immediately preceding attribute block (modulo blank lines) supplies
+        # the attribution for the two-line form; the single-line form carries
+        # its attributes on the declaration line itself; `pub(crate)` is
+        # accepted on either.
         prc=0
         decl=$(awk -v stem="$stem" '
             {
-                if (!found && $0 ~ ("^[[:space:]]*#\\[cfg\\(test\\)\\][[:space:]]*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) { found = 1; next }
-                if (!found && $0 ~ /^[[:space:]]*#\[cfg\(test\)\]/) { pending = 1; next }
-                if (pending && $0 ~ /^[[:space:]]*$/) next
-                if (pending && $0 ~ ("^[[:space:]]*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) found = 1
+                if ($0 ~ ("^[[:space:]]*(#\\[[^]]*\\][[:space:]]*)*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) {
+                    total++
+                    if (!(pending || $0 ~ /#\[cfg\(test\)\]/)) bad++
+                    pending = 0
+                    next
+                }
+                if ($0 ~ /^[[:space:]]*#\[/) {
+                    if ($0 ~ /#\[cfg\(test\)\]/) pending = 1
+                    next
+                }
+                if ($0 ~ /^[[:space:]]*$/) next
                 pending = 0
             }
-            END { print (found ? "ok" : "missing") }
+            END { print ((total > 0 && bad == 0) ? "ok" : "missing") }
         ' "$parent" 2>&1) || prc=$?
         [ "$prc" -eq 0 ] || {
             echo "CFG-TEST-PARENTAGE-FAIL: awk producer exit $prc on $parent (tooling error, not PASS)" >&2
             exit 1
         }
-        [ "$decl" = "ok" ] || pg_bad="$pg_bad $m(parent:$parent not #[cfg(test)]-declared)"
+        [ "$decl" = "ok" ] || pg_bad="$pg_bad $m(parent:$parent carries a non-#[cfg(test)] 'mod $stem;' declaration)"
     done
     if [ -n "$pg_bad" ]; then
         echo "CFG-TEST-PARENTAGE-FAIL: admitted unit-test modules not declared under #[cfg(test)] by parent:$pg_bad" >&2
         exit 1
     fi
-    echo "CFG-TEST-PARENTAGE-OK: every admitted src/*/tests.rs and src/*/dot_tests.rs is #[cfg(test)]-declared by its parent"
+    echo "CFG-TEST-PARENTAGE-OK: every admitted src/*/tests.rs and src/*/dot_tests.rs (symlinks included) has every 'mod <stem>;' declaration in its parent #[cfg(test)]-attributed"
 }
 
 # Canonical-spec digest control (gate-surface-truth M2, canonical-digest-20261028).
