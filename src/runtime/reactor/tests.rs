@@ -1588,6 +1588,60 @@ mod connect_setup {
             );
         });
     }
+
+    #[test]
+    /// A `WritingHello` slot whose C15 setup snapshot already elapsed must close
+    /// at the graduation transition, never become `Relay` with a fresh idle
+    /// deadline: the snapshot keeps its authority instead of being replaced.
+    fn expired_setup_snapshot_closes_at_hello_graduation() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+            let sink_addr = sink.local_addr().expect("sink addr");
+            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+            let _sink_stream = sink.accept().expect("accept sink side").0;
+
+            let index = 0;
+            {
+                let ws = &mut serving.slots[index];
+                ws.upstream = Some(up);
+                ws.stage = Stage::WritingHello;
+                ws.head_len = 4;
+                ws.buf_base = 0;
+                ws.gate.on_connect_head(4);
+                ws.gate.on_authorized();
+                ws.gate.on_upstream_connected();
+                ws.gate.on_response_ok();
+                ws.gate.on_hello_validated(ValidatedHello::test_new(10));
+                ws.buf[..4].copy_from_slice(b"HEAD");
+                ws.buf[4..16].copy_from_slice(b"hello-relay!");
+                ws.buf_len = 16;
+                ws.fwd = 4;
+                ws.setup_deadline = Some(Instant::now() - Duration::from_millis(1));
+            }
+
+            // The crossing write that would open the gate and graduate the slot.
+            serving.flush_client_upstream(index);
+
+            let ws = &serving.slots[index];
+            assert!(
+                ws.stage != Stage::Relay,
+                "an expired setup snapshot must not graduate to Relay"
+            );
+            assert!(
+                ws.idle_deadline.is_none(),
+                "no fresh idle deadline may be armed once the setup snapshot expired"
+            );
+            assert!(
+                ws.setup_deadline.is_none(),
+                "the expired snapshot must not survive the transition"
+            );
+            assert!(
+                ws.client.is_none() && ws.upstream.is_none(),
+                "the expired setup must close both ends rather than splice a begun response"
+            );
+        });
+    }
 }
 
 mod deadlines {
@@ -3843,10 +3897,173 @@ mod dialing {
             );
         });
     }
+
+    #[test]
+    /// A `Dialing` slot whose per-attempt connect deadline already elapsed must
+    /// be failed/refused when its writable readiness reports `Connected`, never
+    /// advanced to `SendingConnected`/`Relay`: the deadline keeps its authority
+    /// at the transition that would otherwise admit the connection.
+    fn expired_connect_deadline_refuses_at_connected_writable() {
+        use crate::runtime::tunnel::Deadline;
+
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
+            let origin_addr = origin.local_addr().expect("origin addr");
+            let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
+            let _origin_stream = origin.accept().expect("accept origin side").0;
+            wait_upstream_connected(&up);
+
+            let _client = connect(port);
+            pump(serving, 40);
+            assert_eq!(
+                serving.storage().occupied(),
+                1,
+                "the connecting client must be admitted"
+            );
+
+            let index = 0;
+            let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
+            let now = Instant::now();
+            {
+                let ws = &mut serving.slots[index];
+                ws.approved = FixedHostname::normalize(b"sub.example.org");
+                ws.gate.on_connect_head(head_len);
+                ws.gate.on_authorized();
+                ws.stage = Stage::Dialing;
+                ws.upstream = Some(up);
+                // Anchored 3 s ago: the 2 s attempt window elapsed 1 s before
+                // this readiness edge reports Connected.
+                ws.connect_deadline = Some(Deadline::connect_attempt(
+                    now - Duration::from_secs(3),
+                    Deadline::setup(now),
+                ));
+            }
+
+            let token = upstream_token(serving.slots[index].slot_gen, index);
+            serving
+                .dispatch_readiness(
+                    token,
+                    Readiness {
+                        writable: true,
+                        ..Readiness::none()
+                    },
+                )
+                .expect("connected writable event");
+
+            let ws = &serving.slots[index];
+            assert!(
+                !matches!(
+                    ws.stage,
+                    Stage::SendingConnected
+                        | Stage::ValidatingHello
+                        | Stage::WritingHello
+                        | Stage::Relay
+                ),
+                "an expired connect deadline must not be extended by a Connected writable edge"
+            );
+            assert!(
+                ws.client.is_none(),
+                "the tardy dial must never deliver a 200 or open a tunnel"
+            );
+            assert!(
+                ws.upstream.is_none(),
+                "the tardy dial's upstream socket must be dropped"
+            );
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "the expired attempt must be failed/refused and release its seat"
+            );
+        });
+    }
 }
 
 mod relay {
     use super::*;
+
+    #[test]
+    /// An established relay write whose idle deadline already elapsed must close
+    /// the slot instead of re-arming idle, in both directions: the idle bound is
+    /// re-checked at the successful write that would otherwise extend it.
+    fn expired_idle_deadline_closes_on_relay_write_instead_of_rearming() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+            let sink_addr = sink.local_addr().expect("sink addr");
+            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+            let sink_stream = sink.accept().expect("accept sink side").0;
+            sink_stream.set_nonblocking(true).expect("sink nonblocking");
+
+            let peer = StdListener::bind("127.0.0.1:0").expect("peer bind");
+            let peer_addr = peer.local_addr().expect("peer addr");
+            let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
+            let peer_stream = peer.accept().expect("accept peer side").0;
+            peer_stream.set_nonblocking(true).expect("peer nonblocking");
+
+            let up_index = 0;
+            {
+                let ws = &mut serving.slots[up_index];
+                ws.upstream = Some(up);
+                ws.stage = Stage::Relay;
+                ws.head_len = 4;
+                ws.buf_base = 0;
+                ws.buf_len = 20;
+                ws.fwd = 4;
+                ws.buf[..20].copy_from_slice(b"HEADHELLO!0123456789");
+            }
+            open_relay(serving, up_index);
+            serving.register_upstream(up_index).expect("register up");
+            serving.flush_client_upstream(up_index);
+            assert!(
+                serving.slots[up_index].stage == Stage::Relay,
+                "the fixture must start from an established relay"
+            );
+            serving.slots[up_index].idle_deadline = Some(Instant::now() - Duration::from_millis(1));
+            serving.append_client_bytes(up_index, b"FRESH");
+            serving.flush_client_upstream(up_index);
+
+            let down_index = 1;
+            {
+                let ws = &mut serving.slots[down_index];
+                ws.client = Some(client);
+                ws.stage = Stage::Relay;
+                ws.head_len = 4;
+                ws.down[..5].copy_from_slice(b"HELLO");
+                ws.down_len = 5;
+                ws.down_off = 0;
+            }
+            open_relay(serving, down_index);
+            serving
+                .register_client(down_index)
+                .expect("register client");
+            serving.slots[down_index].idle_deadline =
+                Some(Instant::now() - Duration::from_millis(1));
+            serving.flush_down(down_index);
+
+            let mut survived = Vec::new();
+            if serving.slots[up_index].stage == Stage::Relay {
+                survived.push("client->upstream");
+            }
+            if serving.slots[down_index].stage == Stage::Relay {
+                survived.push("upstream->client");
+            }
+            assert!(
+                survived.is_empty(),
+                "a relay write whose idle deadline already elapsed must close the slot instead of re-arming idle; survived: {survived:?}"
+            );
+            assert!(
+                serving.slots[up_index].client.is_none()
+                    && serving.slots[up_index].upstream.is_none(),
+                "the expired client->upstream write must close both ends"
+            );
+            assert!(
+                serving.slots[down_index].client.is_none()
+                    && serving.slots[down_index].upstream.is_none(),
+                "the expired upstream->client write must close both ends"
+            );
+        });
+    }
 
     #[test]
     fn read_outcome_distinguishes_activity_from_retry_wait_and_failure() {

@@ -223,6 +223,14 @@ fn classify_read(result: &io::Result<usize>) -> ReadOutcome {
     }
 }
 
+/// The single expiry comparison for a slot-held absolute deadline held as a
+/// plain instant: exactly [`Deadline::is_expired`]'s `deadline <= now`, so a
+/// protected transition can re-check a deadline before it is consumed or
+/// replaced and an elapsed window keeps its authority.
+fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
+    deadline.is_some_and(|d| now >= d)
+}
+
 /// The complete-visit I/O budget of one connection: how much read+write work
 /// that visit has performed, so every arm of the visit resolves into one
 /// shared counter against the canonical 16-op/64 KiB bound
@@ -2661,6 +2669,12 @@ impl Serving {
                 ConnectState::Pending => Ok(()),
                 ConnectState::Failed => self.fail_current_attempt(index),
                 ConnectState::Connected => {
+                    if self.slots[index]
+                        .connect_deadline
+                        .is_some_and(|d| d.is_expired(Instant::now()))
+                    {
+                        return self.fail_current_attempt(index);
+                    }
                     self.slots[index].gate.on_upstream_connected();
                     let ws = &mut self.slots[index];
                     ws.down_off = 0;
@@ -2931,14 +2945,17 @@ impl Serving {
         Ok(())
     }
 
-    /// Drains buffered client bytes upstream until backpressure, failure, or
-    /// exhaustion. Returns the total bytes successfully written this cycle (a
-    /// structural write delta: `fwd` advanced by exactly that count) plus
-    /// whether a non-WouldBlock failure occurred.
+    /// Drains buffered client bytes upstream until backpressure, failure,
+    /// exhaustion, or an already-elapsed relay idle deadline. Returns the total
+    /// bytes successfully written this cycle (a structural write delta: `fwd`
+    /// advanced by exactly that count) plus whether the slot must close — a
+    /// non-WouldBlock write failure, or a relay write that found its idle
+    /// deadline already expired instead of re-arming it.
     fn drain_to_upstream(&mut self, index: usize) -> (usize, bool) {
         let secs = self.storage.cache_secs(Instant::now());
         let mut written = 0;
         let mut failed = false;
+        let mut idle_expired = false;
         loop {
             if self.visit_exhausted(index) {
                 break;
@@ -2955,7 +2972,11 @@ impl Serving {
                             Ok(n) => {
                                 ws.fwd += n;
                                 if ws.gate.is_open() {
-                                    ws.arm_idle(Instant::now());
+                                    idle_expired =
+                                        deadline_passed(ws.idle_deadline, Instant::now());
+                                    if !idle_expired {
+                                        ws.arm_idle(Instant::now());
+                                    }
                                 }
                                 WriteOutcome::Wrote(n)
                             }
@@ -2973,6 +2994,9 @@ impl Serving {
                     written += n;
                     self.note_op(index, n);
                     self.note_incident_tunnel_bytes(index, n as u64, secs);
+                    if idle_expired {
+                        break;
+                    }
                 }
                 WriteOutcome::Wait => {
                     self.note_op(index, 0);
@@ -2986,7 +3010,7 @@ impl Serving {
                 WriteOutcome::None => break,
             }
         }
-        (written, failed)
+        (written, failed || idle_expired)
     }
 
     fn flush_client_upstream(&mut self, index: usize) {
@@ -3008,6 +3032,11 @@ impl Serving {
             outcome,
             UpstreamWrite::GateOpened { .. } | UpstreamWrite::Open
         ) {
+            if deadline_passed(self.slots[index].setup_deadline, Instant::now()) {
+                self.flush_down(index);
+                self.close_slot(index);
+                return;
+            }
             if self.slots[index].tunnel.is_none() {
                 let slot = self.slots[index].handle.take();
                 if let Some(slot) = slot {
@@ -3039,6 +3068,7 @@ impl Serving {
     fn flush_down(&mut self, index: usize) {
         let secs = self.storage.cache_secs(Instant::now());
         let mut failed = false;
+        let mut idle_expired = false;
         loop {
             if self.visit_exhausted(index) {
                 break;
@@ -3055,7 +3085,11 @@ impl Serving {
                             Ok(n) => {
                                 ws.down_off += n;
                                 if ws.gate.is_open() {
-                                    ws.arm_idle(Instant::now());
+                                    idle_expired =
+                                        deadline_passed(ws.idle_deadline, Instant::now());
+                                    if !idle_expired {
+                                        ws.arm_idle(Instant::now());
+                                    }
                                 }
                                 (false, false, Some(n))
                             }
@@ -3075,11 +3109,11 @@ impl Serving {
                 }
             }
             failed = failed || err;
-            if stalled {
+            if stalled || idle_expired {
                 break;
             }
         }
-        if failed {
+        if failed || idle_expired {
             self.close_slot(index);
             return;
         }
