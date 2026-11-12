@@ -2446,28 +2446,27 @@ mod generation_tokens {
     }
 
     #[test]
-    /// G1.E1 — the 2^53 token-encoding ceiling: at/above it the connection's own
-    /// registered token can never decode back to the live slot generation, so even
-    /// the connection's own token fail-closes as a stale drop: never a false live
-    /// dispatch, never a wrap into the local-id range, and the queued head is never
-    /// read. Ground truth recorded (no production change here): `shifted_generation`
-    /// (src/serving.rs:3317-3321) WRAPS the generation into its low 53 bits — the
-    /// doc-comment (3307-3312) previously claimed all-ones saturation; bc64328
-    /// corrected it to truncation — and the fail-closed verdict still holds because
-    /// the wrapped decoded generation never equals the live ceiling generation.
-    /// Executes the real encode -> `dispatch_decode` -> slot-state path (matrix
-    /// alumina-cdwui.4 §2 G1.E1, EXHAUST — reachable and falsifiable).
-    fn g1_e1_token_ceiling_saturation_fails_closed_never_progresses() {
-        const CEILING: u64 = 1u64 << 53;
-        const LOW53: u64 = (1u64 << 53) - 1; // the packed generation's wrapped field ceiling
+    /// G1.E1 (rewritten to the derived-field invariant) — the stored generation
+    /// increments modulo the token's generation field, so the field boundary is a
+    /// clean wrap: a slot seeded at the field ceiling is admitted at generation 0,
+    /// and the connection's own token (packed at that wrapped generation) still
+    /// dispatches and drives the real read -> parse -> refusal path. At HEAD the
+    /// unmasked counter advanced to 2^53, whose packed field truncated to 0, so the
+    /// connection's own token was dropped as stale and the queued head was never
+    /// read.
+    fn g1_e1_field_ceiling_generation_wraps_and_dispatches_own_token() {
+        // The host pointer width's generation field ceiling, derived exactly as
+        // production derives its canonical field mask.
+        let field_ceiling = (1u64 << (usize::BITS - GEN_SHIFT)) - 1;
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            serving.slots[0].slot_gen = CEILING;
+            serving.slots[0].slot_gen = field_ceiling;
             // Established client flow (mirrors malformed_head_gets_400): the
             // blocking connect completes the handshake, the malformed head is
             // written inbound to the server end, and the accept admits the server
-            // end so admit's wrapping_add(1) lands one past the ceiling.
+            // end so admit's single increment wraps the generation inside the field.
             let mut client = connect(port);
+            let mut reader = client.try_clone().expect("clone client socket");
             client.write_all(b"\r\n\r\n").expect("write malformed head");
             // Bounded accept retry (no timers): until the accept lands, accept_all
             // WouldBlocks and the batch is a no-op, so re-running is idempotent.
@@ -2477,37 +2476,18 @@ mod generation_tokens {
                 serving.in_batch = true;
                 serving
                     .dispatch_coalesced_batch(&accept_batch)
-                    .expect("accept the ceiling connection");
-                if serving.slots[0].slot_gen == CEILING + 1 {
+                    .expect("accept the field-boundary connection");
+                if serving.slots[0].slot_gen != field_ceiling {
                     break;
                 }
                 std::thread::yield_now();
             }
             let live = serving.slots[0].slot_gen;
-            assert_eq!(live, CEILING + 1, "admission advanced one past the ceiling");
-
             let own = client_token(live, 0); // identical to what register_client encoded
             assert_eq!(
                 own.0 & LOCAL_MASK,
                 1,
                 "the token must keep the client local id decodable (never a wrap into the local-id range)"
-            );
-            let decoded = (own.0 >> GEN_SHIFT) as u64;
-            // Ground truth on the actual packing (recorded, not invented): the
-            // packed generation wraps to its low 53 bits — checked_shl only guards
-            // the shift amount (11 < 64), it does not detect result overflow — so a
-            // degenerate generation yields a low-bit generation field, never the
-            // all-ones field the earlier doc-comment (serving.rs:3307-3312) claimed
-            // (corrected to truncation at bc64328); the fail-closed verdict below is
-            // unchanged because the wrapped decoded generation cannot equal this live ceiling.
-            assert_eq!(
-                decoded,
-                live & LOW53,
-                "the packed generation field wraps in the low 53 bits (actual encode behaviour)"
-            );
-            assert_ne!(
-                decoded, live,
-                "the wrapped decoded generation can never match the live generation at the ceiling"
             );
 
             serving
@@ -2518,16 +2498,44 @@ mod generation_tokens {
                         ..Readiness::none()
                     },
                 )
-                .expect("dispatch the connection's own saturated token (fail-closed, no panic)");
+                .expect("dispatch the field-boundary connection's own token");
             assert_eq!(
                 serving.storage().occupied(),
-                1,
-                "fail-closed: the ceiling connection must not be falsely driven or released"
+                0,
+                "the connection's own token must dispatch — the malformed head is read, refused, and the seat released"
             );
-            assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+            assert!(matches!(serving.slots[0].stage, Stage::Idle));
             assert_eq!(
-                serving.slots[0].buf_len, 0,
-                "fail-closed: the ceiling connection's queued head must never be read"
+                live, 0,
+                "the field-ceiling generation wraps to 0 at the single canonical increment"
+            );
+            reader.set_nonblocking(true).expect("nonblocking reader");
+            let mut body = [0u8; 64];
+            let mut got = 0usize;
+            let read_start = Instant::now();
+            loop {
+                match reader.read(&mut body[got..]) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        got += n;
+                        if got > 0 {
+                            break;
+                        }
+                    }
+                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(
+                            read_start.elapsed() < Duration::from_secs(5),
+                            "the field-boundary connection's 400 response never became readable"
+                        );
+                        std::thread::yield_now();
+                    }
+                    Err(err) => panic!("read the field-boundary connection's response: {err}"),
+                }
+            }
+            assert!(
+                body[..got].starts_with(b"HTTP/1.1 400"),
+                "the field-boundary connection's own token drove a real decision (400), got {:?}",
+                &body[..got.min(24)]
             );
         });
     }
@@ -2602,10 +2610,11 @@ mod generation_tokens {
     }
 
     #[test]
-    /// Saturated generation shifts in the token builders must fail closed without
-    /// panic: the local id stays decodable and the generation stays non-matchable
-    /// by any live slot, so a degenerate generation can only produce stale-drop.
-    fn saturated_generation_tokens_fail_closed_without_panic() {
+    /// A non-canonical (saturated) generation is reduced into the token field by
+    /// the defensive encode mask: pack/decode stay exact inverses of the canonical
+    /// `generation & GEN_FIELD_MASK`, the local id stays decodable, and no shift
+    /// panic is reachable.
+    fn saturated_generation_reduces_into_the_field_without_panic() {
         let idx = 3usize;
         let ct = client_token(u64::MAX, idx);
         assert_eq!(
@@ -2613,16 +2622,26 @@ mod generation_tokens {
             idx + 1,
             "the saturated client token must keep its local id decodable"
         );
-        assert_ne!(
-            (ct.0 >> GEN_SHIFT) as u64,
-            u64::MAX,
-            "the saturated generation must not falsely match a live generation"
+        assert_eq!(
+            decode_generation(ct.0, GEN_BITS),
+            GEN_FIELD_MASK,
+            "a saturated generation reduces into the same field the counter is masked to"
+        );
+        assert_eq!(
+            pack_generation(u64::MAX, GEN_BITS),
+            pack_generation(GEN_FIELD_MASK, GEN_BITS),
+            "a saturated input encodes exactly like the field ceiling"
         );
         let ut = upstream_token(u64::MAX, idx);
         assert_eq!(
             ut.0 & LOCAL_MASK,
             UPSTREAM_BASE + idx,
             "the saturated upstream token must keep its local id decodable"
+        );
+        assert_eq!(
+            decode_generation(ut.0, GEN_BITS),
+            GEN_FIELD_MASK,
+            "a saturated upstream generation reduces into the field"
         );
         let generation = 5u64;
         assert_eq!(
@@ -2636,6 +2655,44 @@ mod generation_tokens {
             ((usize::try_from(generation).expect("test generation fits usize") << GEN_SHIFT)
                 | (UPSTREAM_BASE + idx)),
             "ordinary in-range generations must round-trip exactly unchanged"
+        );
+    }
+
+    #[test]
+    /// The token layout derives one generation-field width from
+    /// `usize::BITS - GEN_SHIFT`; the simulated 32-bit shape (21 bits) packs and
+    /// decodes as exact inverses at and past its wrap, so a legitimate token never
+    /// stops matching because the packed field is narrower than the counter.
+    fn generation_field_round_trips_at_the_simulated_32_bit_shape() {
+        const BITS: u32 = 21; // 32 - GEN_SHIFT: the 32-bit pointer shape
+        let mask = generation_mask(BITS);
+        assert_eq!(
+            mask,
+            (1u64 << BITS) - 1,
+            "the field mask is the low BITS bits"
+        );
+        for generation in [mask, 1u64 << BITS, (1u64 << BITS) + 1, u64::MAX] {
+            let packed = pack_generation(generation, BITS);
+            assert_eq!(
+                decode_generation(packed, BITS),
+                generation & mask,
+                "pack/decode must be exact inverses for generation {generation}"
+            );
+            assert_eq!(
+                packed & LOCAL_MASK,
+                0,
+                "the generation field must never spill into the local-id bits"
+            );
+        }
+        assert_eq!(
+            GEN_BITS,
+            usize::BITS - GEN_SHIFT,
+            "the field width is derived from the token layout, never restated"
+        );
+        assert_eq!(
+            GEN_FIELD_MASK,
+            generation_mask(GEN_BITS),
+            "the canonical stored mask is the same field the token packs into"
         );
     }
 }

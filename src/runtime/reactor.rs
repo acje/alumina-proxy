@@ -162,6 +162,27 @@ const _: () = assert!(
     "the reserved signal source must fit the local-id mask"
 );
 
+/// The token's generation field width: every bit above the local-id space,
+/// derived once from the layout (`usize::BITS - GEN_SHIFT` — 53 bits on
+/// 64-bit, 21 bits on 32-bit), so the stored counter and the packed field can
+/// never disagree about their width.
+const GEN_BITS: u32 = usize::BITS - GEN_SHIFT;
+
+/// The low-bit mask of a `bits`-wide generation field, in the stored
+/// counter's `u64`. The `>= u64::BITS` arm keeps the mask total in const code.
+const fn generation_mask(bits: u32) -> u64 {
+    if bits >= u64::BITS {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    }
+}
+
+/// The canonical stored-generation range. The counter is masked to the field
+/// at its single increment site, so a live `slot_gen` is always exactly what
+/// the token's generation field can carry back.
+const GEN_FIELD_MASK: u64 = generation_mask(GEN_BITS);
+
 /// The owner's shutdown phase. `Serving` is ordinary operation; once the
 /// first SIGTERM is observed the owner stops admission, closes pending
 /// setups, cancels the retained DNS transport and drains established tunnels
@@ -1486,7 +1507,7 @@ impl Serving {
             if local == SIGNAL_LOCAL {
                 continue;
             }
-            let event_gen = (raw >> GEN_SHIFT) as u64;
+            let event_gen = decode_generation(raw, GEN_BITS);
             let upstream = local >= UPSTREAM_BASE;
             let index = if upstream {
                 local - UPSTREAM_BASE
@@ -1596,7 +1617,7 @@ impl Serving {
         if local == SIGNAL_LOCAL {
             return self.on_sigterm();
         }
-        let event_gen = (raw >> GEN_SHIFT) as u64;
+        let event_gen = decode_generation(raw, GEN_BITS);
         let upstream = local >= UPSTREAM_BASE;
         let index = if upstream {
             local - UPSTREAM_BASE
@@ -1991,7 +2012,7 @@ impl Serving {
                     ws.setup_deadline = setup_deadline;
                 });
                 let ws = &mut self.slots[index];
-                ws.slot_gen = ws.slot_gen.wrapping_add(1);
+                ws.slot_gen = ws.slot_gen.wrapping_add(1) & GEN_FIELD_MASK;
                 ws.capture = SlotCapture::fresh(index, ws.slot_gen);
                 ws.handle = Some(slot);
                 ws.client = Some(stream);
@@ -3501,24 +3522,28 @@ impl Serving {
     }
 }
 
-/// Packs the token generation field. Encode is truncation, not saturation:
-/// the generation's low bits are shifted into place (53-bit field on 64-bit),
-/// so a slot at or past the 2^53 ceiling encodes `gen mod 2^53`, which never
-/// equals the live `slot_gen` compared at dispatch — its events still fail
-/// closed: a stale drop, never a false live match and never a wrap into the
-/// local-id range.
+/// Packs a stored generation into the token's `bits`-wide generation field.
+/// The generation is masked before the shift, so encoding is the exact inverse
+/// of [`decode_generation`] for every canonical stored generation and a
+/// non-canonical seeded value is reduced into the same field instead of
+/// spilling into the local-id bits.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "token packing takes the generation's low bits on 32-bit targets"
+    reason = "the masked field occupies exactly the bits above GEN_SHIFT, so the shifted value fits usize by construction"
 )]
-fn shifted_generation(generation: u64) -> usize {
-    (generation as usize)
-        .checked_shl(GEN_SHIFT)
-        .unwrap_or(usize::MAX & !LOCAL_MASK)
+const fn pack_generation(generation: u64, bits: u32) -> usize {
+    ((generation & generation_mask(bits)) << GEN_SHIFT) as usize
 }
 
-fn client_token(generation: u64, index: usize) -> Token {
-    Token(shifted_generation(generation) | (index + 1))
+/// Decodes the token's `bits`-wide generation field: the inverse of
+/// [`pack_generation`] for a canonical stored generation. At [`GEN_BITS`] the
+/// mask is the identity, because the shift already yields exactly the field.
+const fn decode_generation(raw: usize, bits: u32) -> u64 {
+    ((raw >> GEN_SHIFT) as u64) & generation_mask(bits)
+}
+
+const fn client_token(generation: u64, index: usize) -> Token {
+    Token(pack_generation(generation, GEN_BITS) | (index + 1))
 }
 
 const fn captured_fact(violation: Violation) -> Option<CapturedFact> {
@@ -3535,8 +3560,8 @@ const fn captured_fact(violation: Violation) -> Option<CapturedFact> {
     }
 }
 
-fn upstream_token(generation: u64, index: usize) -> Token {
-    Token(shifted_generation(generation) | (UPSTREAM_BASE + index))
+const fn upstream_token(generation: u64, index: usize) -> Token {
+    Token(pack_generation(generation, GEN_BITS) | (UPSTREAM_BASE + index))
 }
 
 fn half_close_best_effort(stream: &mut TcpStream) {
