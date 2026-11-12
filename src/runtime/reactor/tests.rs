@@ -9146,6 +9146,44 @@ mod ja4_baseline {
             );
         });
     }
+
+    #[test]
+    fn ja4_block_connection_closes_triggering_slot() {
+        let port = ephemeral_port();
+        let cfg = cfg_doc1(port, "connection", "block", "connection");
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&host, 443)
+                .expect("ordinal");
+            let wire_a = hello_wire(b"sub.example.org", false);
+            seed_full_ja4_set(serving, ordinal, &wire_a);
+            let wire_b = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+            );
+
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            drive_hello(serving, &wire_b, "sub.example.org");
+
+            assert!(
+                matches!(serving.slots[0].stage, Stage::Idle),
+                "a Block Connection decision must terminate the offending connection"
+            );
+            assert!(
+                serving.slots[0].handle.is_none(),
+                "the blocked slot must release its admission handle"
+            );
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "the triggering slot must stay released"
+            );
+        });
+    }
 }
 
 #[cfg(feature = "alloc-witness")]

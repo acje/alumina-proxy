@@ -2415,6 +2415,9 @@ impl Serving {
         match effect {
             Effect::Block { scope: Scope::All } => self.stop_block_all(),
             Effect::Block {
+                scope: Scope::Connection,
+            } => self.close_slot(index),
+            Effect::Block {
                 scope: Scope::Domain,
             } => {
                 if let Violation::EarlyUpstreamData { ordinal } | Violation::Ja4Change { ordinal } =
@@ -2746,6 +2749,10 @@ impl Serving {
                         let ws = &mut self.slots[index];
                         ws.gate.observe_upstream_activity(activity);
                     }
+                    let peer = self.slots[index]
+                        .upstream
+                        .as_ref()
+                        .and_then(|u| u.peer_addr().ok());
                     if activity == Activity::Data {
                         let violation = if validated {
                             self.slot_ordinal(index)
@@ -2757,10 +2764,6 @@ impl Serving {
                         };
                         self.project_tripwire(index, violation);
                     }
-                    let peer = self.slots[index]
-                        .upstream
-                        .as_ref()
-                        .and_then(|u| u.peer_addr().ok());
                     let secs = self.storage.cache_secs(Instant::now());
                     let hostname = approved.as_ref().map(FixedHostname::as_str);
                     self.storage
