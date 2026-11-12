@@ -81,10 +81,10 @@ release-assurance gates first, telemetry and test hygiene last.
 | D6 | Unsafe-surface docs gate can certify production `unsafe` (symlink + second declaration) | 2 | med | Confirmed (1 sub-claim Refuted) | Fixed — `467e13c`…`56eb45d` | P1 | M2 ✓ |
 | D7 | E2E receipt omits untracked compiled build inputs | 2 | low | Confirmed | Fix | P2 | M5 |
 | D8 | Shutdown E2E no-admission witness can pass on a forgotten reachable probe | 1 | low | Confirmed | Fix | P2 | M5 |
-| D9 | Expired connect/setup/idle deadline consumed or replaced at a transition | 1 | low | Confirmed-Conditional | Fix | P2 | M4 |
-| D10 | Listener accept backoff has no pause guard and no poll wake | 1 | med | Confirmed | Fix | P2 | M4 |
-| D11 | 32-bit slot token truncates the generation field | 1 | low | Confirmed-Conditional | Fix | P2 | M4 |
-| D12 | Pending setup pool has no per-peer fairness; 128 incomplete heads deny new clients | 1 | low | Confirmed-Conditional | Fix | P2 | M4 |
+| D9 | Expired connect/setup/idle deadline consumed or replaced at a transition | 1 | low | Confirmed-Conditional | Fixed — `c316ecf` | P2 | M4 ✓ |
+| D10 | Listener accept backoff has no pause guard and no poll wake | 1 | med | Confirmed | Fixed — `f86213d`, `22e63d7`, `e110da9` | P2 | M4 ✓ |
+| D11 | 32-bit slot token truncates the generation field | 1 | low | Confirmed-Conditional | Fixed — `ed7f97c` | P2 | M4 ✓ |
+| D12 | Pending setup pool has no per-peer fairness; 128 incomplete heads deny new clients | 1 | low | Confirmed-Conditional | Fixed — `1d7e1e0` (+`00beb19`) | P2 | M4 ✓ |
 | D13 | Report-time drop accounting mutates after the summary is encoded, then clears | 1 | low | Confirmed | Fix | P2 | M3 |
 | D14 | Reserved forced monitor summary displaces the queued `shutdown_final` verdict | 1 | low | Confirmed | Fix | P2 | M3 |
 | D15 | Reopened DNS incident inherits the other family's prior failure snapshot | 1 | low | Confirmed | Fix | P2 | M3 |
@@ -306,7 +306,7 @@ clients. Fix: make a reachable observation terminal failure for the sample; clas
 probe per sample. Guard proof: a listener held open briefly past SIGTERM must FAIL.
 Registry: `csf_dc9dbfaf…`.
 
-### D9 — Expired deadline consumed/replaced at a transition · Confirmed-Conditional · Fix (M4)
+### D9 — Expired deadline consumed/replaced at a transition · Confirmed-Conditional · Fixed (M4)
 
 Verification at HEAD: expiry is swept at pre-dispatch and periodic batch boundaries, but
 the protected transitions do not re-check:
@@ -316,11 +316,16 @@ the protected transitions do not re-check:
 - connect acceptance consumes an expired connect deadline.
 
 Bypass requires narrow timing around an otherwise valid setup or relay write; destination
-and TLS identity checks still apply. Fix: check expiry **before** consuming or replacing
-the deadline at each transition. Note: the scan also carried this as deferred candidate
-`relay-idle-deadline-001` — same code region, one fix. Registry: `csf_82d66ee4…`.
+and TLS identity checks still apply. Note: the scan also carried this as deferred candidate
+`relay-idle-deadline-001` — same code region, one fix.
 
-### D10 — Listener accept backoff · Confirmed · Fix (M4)
+**Fixed at `c316ecf`**: expiry is re-checked at dial-accept, hello graduation and both
+relay-write transitions. Red evidence: `expired_connect_deadline_refuses_at_connected_writable`
+(advanced → refused), `expired_setup_snapshot_closes_at_hello_graduation` (Relay + fresh idle
+→ close-only), `expired_idle_deadline_closes_on_relay_write_instead_of_rearming` (survived
+both directions → closed). Registry: `csf_82d66ee4…`.
+
+### D10 — Listener accept backoff · Confirmed · Fixed (M4)
 
 Verification at HEAD: `src/runtime/reactor.rs:1898-1901` records `listener_pause_until =
 now + ACCEPT_BACKOFF` on a non-`WouldBlock` accept error, but listener dispatch (`1876-1901`)
@@ -329,11 +334,18 @@ into its earliest-deadline computation. Rearm happens only at the start of a lat
 so neither the 100 ms cadence nor a guaranteed wake is enforced; a quiet owner can leave
 queued clients stalled. This is the only finding the scanner marked `confirmed`.
 
-Fix: guard listener dispatch on the pause and include `listener_pause_until` in
-`poll_timeout`. Test: injected accept error with a prequeued client rearms within ≤ 100 ms.
-Registry: `csf_7a4298f1…`.
+**Fixed at `e110da9`** (`f86213d` pause + fold, `22e63d7` rearm regression, `e110da9`
+error classification): a `ListenerArm` state machine withdraws the listener while paused,
+re-registers (never `reregister`) on rearm, folds the pause into `poll_timeout`, and pauses
+only for resource accept failures — `Interrupted`/`ConnectionAborted`/`ConnectionReset` are
+drained instead, so the backoff cannot be turned into a global throttle. The rearm path was
+a real fatal defect caught in-mission: `reregister` on a withdrawn listener returned
+`ServeError{NotFound}`. Red evidence: `paused_listener_dispatch_accepts_nothing`,
+`paused_listener_folds_into_poll_timeout`,
+`elapsed_listener_pause_resumes_and_serves_the_queued_client`,
+`listener_rearm_after_pause_registers_the_deregistered_listener`. Registry: `csf_7a4298f1…`.
 
-### D11 — 32-bit slot token truncation · Confirmed-Conditional · Fix (M4)
+### D11 — 32-bit slot token truncation · Confirmed-Conditional · Fixed (M4)
 
 Verification at HEAD: `src/runtime/reactor.rs:3399-3406` `shifted_generation` casts the
 `u64` generation to `usize` before shifting; `1470-1477` compares the decoded `event_gen`
@@ -342,11 +354,17 @@ counter, so after enough reuses of one slot a legitimate readiness token can nev
 and the slot stops being serviced. Documented appliance is x86_64, so this is conditional
 on an unsupported target.
 
-Fix: make the mismatch unrepresentable — bind the generation width to the token field
-(wrap on pack) or compile-fail 32-bit. Test: 32-bit target assertion/unit. Registry:
-`csf_7490db28…`.
+**Fixed at `ed7f97c`**: one derived width (`GEN_BITS = usize::BITS - GEN_SHIFT`), the stored
+counter masked at its single increment site, and mask-before-pack/mask-on-decode so
+`decode(pack(g)) == g` at every pointer width. Rejected: compile-fail 32-bit (turns a
+liveness defect into a build break with no red/green on the supported host) and fail-closed
+exhaustion (the defect itself). Red evidence:
+`g1_e1_field_ceiling_generation_wraps_and_dispatches_own_token` (own token dropped →
+serviced), `generation_field_round_trips_at_the_simulated_32_bit_shape` (21-bit round-trip at
+wrap). Generation isolation survives: a stale token lives at most one poll batch, while a
+wrap needs `2^field_bits` accepts. Registry: `csf_7490db28…`.
 
-### D12 — Pending setup pool has no per-peer fairness · Confirmed-Conditional · Fix (M4)
+### D12 — Pending setup pool has no per-peer fairness · Confirmed-Conditional · Fixed (M4)
 
 Verification at HEAD: `src/runtime/tunnel.rs:439-452` `admit` checks only global
 `occupied_count`/`pending_count`; a short incomplete CONNECT head holds a setup slot until
@@ -355,8 +373,17 @@ peer can therefore occupy all 128 pending setups and cause later clients to rece
 Prerequisites: shared reachable ingress and a replenishing offender; the idiomatic
 deployment has one protected client behind an ingress firewall.
 
-Fix is a design choice (per-peer pending cap, shorter incomplete-head deadline, or reserved
-headroom) → `@moltke` packages it under M4. Registry: `csf_0eb83a4a…`.
+**Fixed at `1d7e1e0`** (`00beb19` peer attribution): `MAX_PENDING_PER_PEER = 32` of 128,
+enforced by a bounded O(512) allocation-free scan using the canonical peer already attributed
+to each pending setup; the global 128/512 bounds and the no-eviction rule are untouched.
+Cost: +8 KiB boot-fixed state (`28 → 40 B` per slot), no post-boot allocation (alloc-witness
+green). Rejected: shorter incomplete-head deadline (a replenishing offender still starves),
+reserved headroom (cannot be keyed before the head is read), per-peer table with eviction
+(more state and attack surface for no added guarantee). Red evidence:
+`per_peer_pending_cap_denies_one_peer_and_admits_a_distinct_peer` (33rd peer-A admit `Ok` →
+refused, peer B admitted), `per_peer_cap_frees_only_its_own_peer_seat`,
+`worker_admits_up_to_128_pending_setups_and_rejects_the_129th`,
+`per_peer_pending_capacity_refuses_with_503`. Registry: `csf_0eb83a4a…`.
 
 ### D13 — Monitor report-drop count clears before report · Confirmed · Fix (M3)
 
@@ -588,7 +615,7 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 | M1 | D1, D2 | `src/runtime/reactor.rs` (+tests) only; no config surface | 3 red tests (Connection/Domain/All with pre-flush bytes); MID runtime; zero-alloc preserved | adversarial | ✓ `0205f69` |
 | M2 | D6 | `scripts/verify.sh` (+`verify_test.py`) only | guard proofs for symlink + second-declaration shapes; `verify.sh docs` | adversarial | ✓ `56eb45d` |
 | M3 | D4, D13, D14, D15, D18 | monitor / log / dns-incident / reactor-readiness | exact-grammar tests; every record kind still ≤ **2048 B** slot (`monitor_domain` headroom 678 B re-measured); per-ordinal peer size budget | standard+ |
-| M4 | D9, D10, D11, D12 | reactor / tunnel; deadlines, admission | clock-stepped expiry tests; injected accept error; 32-bit assertion; pool quota test | adversarial |
+| M4 | D9, D10, D11, D12 | reactor / tunnel; deadlines, admission | clock-stepped expiry tests; injected accept error; 32-bit assertion; pool quota test | adversarial | ✓ `e110da9` |
 | M5 | D7, D8 | `scripts/verify.sh` E2E receipt; `scripts/e2e_shutdown.py` | untracked-input rejection; held-open-listener case must FAIL | standard |
 | M6 | D16 | test-only helpers + bench/E2E temp paths | symlink plant test per site; no production path; no new runtime dep | standard |
 | M7 | D17 (+G4) | `docs/deployment.md` (non-canonical docs only) | `verify.sh docs`; no spec digest change | standard |
@@ -611,6 +638,7 @@ D4 is likely rework. G2 is independent of every remaining row and can proceed in
 | D6 | Fixed | `alumina-gzqn4.5` | closed — `56eb45d`, guard proofs + boundary PASS, review r2 APPROVE |
 | D3 | Governed amendment G1 | `alumina-gzqn4.3` | semantics chosen: K=16 set, select on every new fingerprint after the first; exact text + governed increment outstanding |
 | D5 | Governed amendment G2 | `alumina-gzqn4.4` | semantics chosen: explicit `resolver_trusted` required; exact text + governed increment outstanding |
+| D9–D12 | Fixed | `alumina-gzqn4.6` | closed — `e110da9`, boundary PASS, review r2 APPROVE |
 | D4, D7–D18 | per §3 | `alumina-gzqn4.1` | registered |
 
 Epic: `alumina-gzqn4`. Ledger updates go to `alumina-gzqn4.1`; the register above is the
