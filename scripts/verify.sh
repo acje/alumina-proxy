@@ -850,20 +850,22 @@ unsafe_surface_gate() {
     # check; no builds.
     # The decision is made over the resolved content of EVERY physical *.rs path
     # in the working tree, symlinks included. The universe is enumerated by find
-    # (target/, .git/ and .ooda/ pruned, producer exit captured) and handed to the
-    # scanner as explicit file arguments: directory traversal is never the scan
-    # mechanism, because rg and grep -R do not descend into a symlinked file
-    # reached through a directory while both read an explicit symlink argument,
-    # and intended_coverage_gate already admits a resolving src/*.rs symlink. An
-    # explicitly enumerated path list keeps the scanned universe a superset of
-    # the admitted inventory, including untracked and non-src .rs paths (the
-    # bench crate stays covered). rg is preferred; grep -l covers hosts without
-    # rg.
+    # (every directory named target, .git or .ooda pruned at any depth — the
+    # prior rg/grep exclusion semantics, so a bench crate's generated target/
+    # tree cannot turn this gate into a spurious FAIL; producer exit captured)
+    # and handed to the scanner as explicit file arguments: directory traversal
+    # is never the scan mechanism, because rg and grep -R do not descend into a
+    # symlinked file reached through a directory while both read an explicit
+    # symlink argument, and intended_coverage_gate already admits a resolving
+    # src/*.rs symlink. An explicitly enumerated path list keeps the scanned
+    # universe a superset of the admitted inventory, including untracked and
+    # non-src .rs paths (the bench crate stays covered). rg is preferred;
+    # grep -l covers hosts without rg.
     # Producer exit is captured (cf. sha256_digest): rg/grep exit 1 = no match
     # (clean); any exit >= 2 is a tooling error and fails closed, never passing
     # on an empty offender list. An empty universe is a scan failure too.
     frc=0
-    universe="$(find . \( -path ./target -o -path ./.git -o -path ./.ooda \) -prune -o \( -type f -o -type l \) -name '*.rs' -print 2>&1)" || frc=$?
+    universe="$(find . \( -name target -o -name .git -o -name .ooda \) -prune -o \( -type f -o -type l \) -name '*.rs' -print 2>&1)" || frc=$?
     [ "$frc" -eq 0 ] || {
         echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe path enumeration exit $frc (tooling error, not PASS)" >&2
         exit 1
@@ -976,20 +978,28 @@ cfg_test_parentage_gate() {
         # immediately preceding attribute block (modulo blank lines) supplies
         # the attribution for the two-line form; the single-line form carries
         # its attributes on the declaration line itself; `pub(crate)` is
-        # accepted on either.
+        # accepted on either. Attribution is structural: only the leading
+        # attribute prefix of a recognised declaration (or an anchored attribute
+        # line) can supply it, so trailing text — including a comment that
+        # merely mentions cfg(test) — never counts, while the declaration itself
+        # is still recognised (a masking declaration cannot hide behind
+        # trailing text).
         prc=0
         decl=$(awk -v stem="$stem" '
             {
-                if ($0 ~ ("^[[:space:]]*(#\\[[^]]*\\][[:space:]]*)*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) {
+                if ($0 ~ ("^[[:space:]]*#\\[cfg\\(test\\)\\][[:space:]]*(#\\[[^]]*\\][[:space:]]*)*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) {
                     total++
-                    if (!(pending || $0 ~ /#\[cfg\(test\)\]/)) bad++
                     pending = 0
                     next
                 }
-                if ($0 ~ /^[[:space:]]*#\[/) {
-                    if ($0 ~ /#\[cfg\(test\)\]/) pending = 1
+                if ($0 ~ ("^[[:space:]]*(#\\[[^]]*\\][[:space:]]*)*(pub\\(crate\\)[[:space:]]+)?mod[[:space:]]+" stem "[[:space:]]*;")) {
+                    total++
+                    if (!pending) bad++
+                    pending = 0
                     next
                 }
+                if ($0 ~ /^[[:space:]]*#\[cfg\(test\)\]/) { pending = 1; next }
+                if ($0 ~ /^[[:space:]]*#\[/) next
                 if ($0 ~ /^[[:space:]]*$/) next
                 pending = 0
             }

@@ -331,6 +331,9 @@ class GateIntegrity(unittest.TestCase):
             for pruned in ("target", ".ooda"):
                 (repo / pruned).mkdir()
                 (repo / pruned / "planted.rs").write_text("fn planted() { unsafe {} }\n")
+            bench_target = repo / "scripts/bench/echo-backend/target"
+            bench_target.mkdir(parents=True)
+            (bench_target / "planted.rs").write_text("fn planted() { unsafe {} }\n")
             result = self.run_gate(repo, "unsafe_surface_gate")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("UNSAFE-SURFACE-OK", result.stdout)
@@ -427,6 +430,41 @@ class GateIntegrity(unittest.TestCase):
             result = self.run_gate(repo, "cfg_test_parentage_gate")
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("CFG-TEST-PARENTAGE-FAIL", result.stderr)
+
+    def test_trailing_comment_cannot_attribute_a_declaration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = self.sandbox(temp)
+            (repo / "src/log").mkdir()
+            (repo / "src/log/mod.rs").write_text(
+                '#[cfg(test)]\nmod tests;\n\n'
+                '#[cfg(feature = "probe")] mod tests; // #[cfg(test)]\n')
+            (repo / "src/log/tests.rs").write_text("fn t() {}\n")
+            result = self.run_gate(repo, "cfg_test_parentage_gate")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CFG-TEST-PARENTAGE-FAIL", result.stderr)
+
+    def test_trailing_comment_on_attribute_line_cannot_attribute(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = self.sandbox(temp)
+            (repo / "src/log").mkdir()
+            (repo / "src/log/mod.rs").write_text(
+                '#[cfg(test)]\nmod tests;\n\n'
+                '#[cfg(feature = "probe")] // #[cfg(test)]\nmod tests;\n')
+            (repo / "src/log/tests.rs").write_text("fn t() {}\n")
+            result = self.run_gate(repo, "cfg_test_parentage_gate")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CFG-TEST-PARENTAGE-FAIL", result.stderr)
+
+    def test_genuine_cfg_test_after_a_non_test_attribute_stays_green(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, _ = self.sandbox(temp)
+            (repo / "src/log").mkdir()
+            (repo / "src/log/mod.rs").write_text(
+                '#[cfg(feature = "probe")]\n#[cfg(test)]\nmod tests;\n')
+            (repo / "src/log/tests.rs").write_text("fn t() {}\n")
+            result = self.run_gate(repo, "cfg_test_parentage_gate")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("CFG-TEST-PARENTAGE-OK", result.stdout)
 
 
 if __name__ == "__main__":
