@@ -448,12 +448,12 @@ independent source and governance review before adoption, and no relaxation of s
 resource limits. **Nothing in this section is adopted text.** Each row below is a design
 question that must be answered before a draft can exist.
 
-| ID | Question | Options (no default assumed) | Cost / risk |
+| ID | Question | Chosen (user, 2026-11-12) | Consequence |
 |---|---|---|---|
-| G1 | D3: what is the JA4 baseline/change contract? | (a) per-(ordinal, address) baseline as the stale T4 prose says; (b) keep the K=16 set but select an action on **every** new fingerprint after the first; (c) freeze an ordinal's baseline on first connection and treat any later new fingerprint as change | Any option changes selection frequency and the fixed-table shape. Table budget today: 32 × 16 × 36 B = 18,432 B; per-(ordinal,address) is 20,480–27,648 B depending on address width. Record budget is the **2048 B** slot, not 8,192 B (`monitor_summary` 763 B, `monitor_domain` 1,370 B); every option must re-measure |
-| G2 | D5: what is the resolver assurance contract? | (a) default `dns_assurance` becomes `resolver_authenticated`; (b) reject bare-IP resolver entries at startup (exit 78) unless explicitly pinned; (c) keep behaviour but require explicit `resolver_trusted` per entry (remove the omission default) | (a)/(b) break existing bare-IP configs; all three change the config-validation surface and the QA example |
-| G3 | Unverified intake observation: the spec "overstates stdout drop accounting and monitor-summary delivery" relative to `src/log/sink.rs` and `docs/monitoring.md` | Verify first, then reconcile as a documentation correction (or a spec amendment if the spec is the wrong side) | Purely textual unless the spec is wrong |
-| G4 | Deployment-doc inconsistencies: spec names a Cloud Run worker pool while `docs/deployment.md` prescribes a dedicated VM; host-network appliance is said to bind `0.0.0.0:5353` while the shipped example binds `127.0.0.1:5353` | Verify against spec intent, then correct the non-canonical document | Spec amendment only if the spec itself is inconsistent |
+| G1 | D3: what is the JA4 baseline/change contract? | **(b)** keep the K=16 set; the first distinct fingerprint seeds, **every** subsequent new fingerprint selects the configured action; overflow keeps F-08's detail-loss latch | Table unchanged (18,432 B), no per-address state, zero new allocation. `BaselineOutcome` must distinguish an empty row (seed) from a non-empty row gaining a new value (change). The T4 prose at `:700`/`:952` must be rewritten to the per-ordinal set — the amendment also removes the stale "per-ordinal+address" phrasing (G3 instance). Monitor grammar unchanged; `ja4_seed` becomes ≤ 32 per process |
+| G2 | D5: what is the resolver assurance contract? | **(c)** require an explicit `resolver_trusted` per entry; the omission default disappears | Bare-IP stays usable; silent defaulting ends. All four harness configs (`e2e_relay.sh:134`, `e2e_shutdown.sh:93`, `bench/run.sh:159`, `verify.sh:526`), the QA example and every cited non-canonical doc must state the class explicitly; missing key becomes `InvalidDnsAssurance` (exit 78) rather than a default |
+| G3 | Unverified intake observation: the spec "overstates stdout drop accounting and monitor-summary delivery" relative to `src/log/sink.rs` and `docs/monitoring.md` | open | Verify first, then reconcile as a documentation correction (or a spec amendment if the spec is the wrong side). **Verified instances to include:** the JA4 keying prose (G1) and the stale 8,192 B geometry in earlier amendment layers (`:1131`, `:1168`, `:1249`, `:1257`) against the binding 2048 B (spec `:878-903`, `:1309-1319`) |
+| G4 | Deployment-doc inconsistencies: spec names a Cloud Run worker pool while `docs/deployment.md` prescribes a dedicated VM; host-network appliance is said to bind `0.0.0.0:5353` while the shipped example binds `127.0.0.1:5353` | open | Verify against spec intent, then correct the non-canonical document |
 
 G1 and G2 must not be bundled with remediation missions: an amendment that changes
 enforcement semantics and a bug fix that conforms to current semantics are different
@@ -609,8 +609,8 @@ D4 is likely rework. G2 is independent of every remaining row and can proceed in
 |---|---|---|---|
 | D1, D2 | Fixed | `alumina-gzqn4.2` | closed — `0205f69`, boundary PASS, review APPROVE |
 | D6 | Fixed | `alumina-gzqn4.5` | closed — `56eb45d`, guard proofs + boundary PASS, review r2 APPROVE |
-| D3 | Governed amendment G1 | `alumina-gzqn4.3` (draft + decision) | evidence `alumina-gzqn4.7` complete; decision requested |
-| D5 | Governed amendment G2 | `alumina-gzqn4.4` (draft + decision) | evidence `alumina-gzqn4.7` complete; decision requested |
+| D3 | Governed amendment G1 | `alumina-gzqn4.3` | semantics chosen: K=16 set, select on every new fingerprint after the first; exact text + governed increment outstanding |
+| D5 | Governed amendment G2 | `alumina-gzqn4.4` | semantics chosen: explicit `resolver_trusted` required; exact text + governed increment outstanding |
 | D4, D7–D18 | per §3 | `alumina-gzqn4.1` | registered |
 
 Epic: `alumina-gzqn4`. Ledger updates go to `alumina-gzqn4.1`; the register above is the
