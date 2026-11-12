@@ -192,11 +192,19 @@ Arbitration: F-08 (`docs/alumina-proxy.md:1233`) specifies per-domain
 record. **Code violates the spec.**
 
 Fix: per-ordinal peer storage (boot-fixed, zero-heap) or fold peer into the existing
-per-ordinal JA4 record. **Size budget must be re-measured**: the monitor record is at
-8,170 B against an 8,192 B slot (22 B headroom) — adding 32 peer fields affects the
-record, not the slot, but any new fixed table must be accounted.
+per-ordinal JA4 record. **Size budget (corrected after evidence bead `alumina-gzqn4.7`):**
+the log slot is **2048 B** (`SLOT_BYTES`, `MONITOR_RECORD_MAX`, `src/log/mod.rs:54-59`),
+not 8,192 B. Current measured worst cases against that slot: `monitor_summary` 763 B
+(1,285 B headroom), `monitor_domain` 1,370 B (678 B), `monitor_capture` 1,237 B (811 B);
+`resolver_probe` 1,857 B (191 B) is the tightest record in the whole vocabulary.
+`d<j>p` renders inside the per-domain batch (`src/log/encoding.rs:1014-1024`), so this fix
+bites `monitor_domain`: at most 11 domains per batch, up to 44 B per address line, so the
+fabricated worst case rises by roughly 484 B to ~1,854 B — it probably fits, but that is an
+estimate, not a measurement, and M3 must pin the re-measured value in the record-geometry
+test. A per-ordinal peer table also adds boot-fixed state and must be accounted.
 
-Test: two domains overflow in one interval; both `d<j>p` present and correct.
+Test: two domains overflow in one interval; both `d<j>p` present and correct, plus the
+record-geometry test re-measured against 2048 B.
 
 Registry: `csf_ecd441bf…`.
 
@@ -442,7 +450,7 @@ question that must be answered before a draft can exist.
 
 | ID | Question | Options (no default assumed) | Cost / risk |
 |---|---|---|---|
-| G1 | D3: what is the JA4 baseline/change contract? | (a) per-(ordinal, address) baseline as the stale T4 prose says; (b) keep the K=16 set but select an action on **every** new fingerprint after the first; (c) freeze an ordinal's baseline on first connection and treat any later new fingerprint as change | Any option changes selection frequency and the fixed-table shape; all must re-measure the 8,192 B monitor slot and the ~21 KiB table budget |
+| G1 | D3: what is the JA4 baseline/change contract? | (a) per-(ordinal, address) baseline as the stale T4 prose says; (b) keep the K=16 set but select an action on **every** new fingerprint after the first; (c) freeze an ordinal's baseline on first connection and treat any later new fingerprint as change | Any option changes selection frequency and the fixed-table shape. Table budget today: 32 × 16 × 36 B = 18,432 B; per-(ordinal,address) is 20,480–27,648 B depending on address width. Record budget is the **2048 B** slot, not 8,192 B (`monitor_summary` 763 B, `monitor_domain` 1,370 B); every option must re-measure |
 | G2 | D5: what is the resolver assurance contract? | (a) default `dns_assurance` becomes `resolver_authenticated`; (b) reject bare-IP resolver entries at startup (exit 78) unless explicitly pinned; (c) keep behaviour but require explicit `resolver_trusted` per entry (remove the omission default) | (a)/(b) break existing bare-IP configs; all three change the config-validation surface and the QA example |
 | G3 | Unverified intake observation: the spec "overstates stdout drop accounting and monitor-summary delivery" relative to `src/log/sink.rs` and `docs/monitoring.md` | Verify first, then reconcile as a documentation correction (or a spec amendment if the spec is the wrong side) | Purely textual unless the spec is wrong |
 | G4 | Deployment-doc inconsistencies: spec names a Cloud Run worker pool while `docs/deployment.md` prescribes a dedicated VM; host-network appliance is said to bind `0.0.0.0:5353` while the shipped example binds `127.0.0.1:5353` | Verify against spec intent, then correct the non-canonical document | Spec amendment only if the spec itself is inconsistent |
@@ -579,7 +587,7 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 |---|---|---|---|---|
 | M1 | D1, D2 | `src/runtime/reactor.rs` (+tests) only; no config surface | 3 red tests (Connection/Domain/All with pre-flush bytes); MID runtime; zero-alloc preserved | adversarial | ✓ `0205f69` |
 | M2 | D6 | `scripts/verify.sh` (+`verify_test.py`) only | guard proofs for symlink + second-declaration shapes; `verify.sh docs` | adversarial | ✓ `56eb45d` |
-| M3 | D4, D13, D14, D15, D18 | monitor / log / dns-incident / reactor-readiness | exact-grammar tests; worst-case record still ≤ 8,192 B; per-ordinal peer size budget | standard+ |
+| M3 | D4, D13, D14, D15, D18 | monitor / log / dns-incident / reactor-readiness | exact-grammar tests; every record kind still ≤ **2048 B** slot (`monitor_domain` headroom 678 B re-measured); per-ordinal peer size budget | standard+ |
 | M4 | D9, D10, D11, D12 | reactor / tunnel; deadlines, admission | clock-stepped expiry tests; injected accept error; 32-bit assertion; pool quota test | adversarial |
 | M5 | D7, D8 | `scripts/verify.sh` E2E receipt; `scripts/e2e_shutdown.py` | untracked-input rejection; held-open-listener case must FAIL | standard |
 | M6 | D16 | test-only helpers + bench/E2E temp paths | symlink plant test per site; no production path; no new runtime dep | standard |
@@ -601,9 +609,25 @@ D4 is likely rework. G2 is independent of every remaining row and can proceed in
 |---|---|---|---|
 | D1, D2 | Fixed | `alumina-gzqn4.2` | closed — `0205f69`, boundary PASS, review APPROVE |
 | D6 | Fixed | `alumina-gzqn4.5` | closed — `56eb45d`, guard proofs + boundary PASS, review r2 APPROVE |
-| D3 | Governed amendment G1 | `alumina-gzqn4.3` (draft + decision) | open — options analysis required before any draft |
-| D5 | Governed amendment G2 | `alumina-gzqn4.4` (draft + decision) | open — options analysis required before any draft |
+| D3 | Governed amendment G1 | `alumina-gzqn4.3` (draft + decision) | evidence `alumina-gzqn4.7` complete; decision requested |
+| D5 | Governed amendment G2 | `alumina-gzqn4.4` (draft + decision) | evidence `alumina-gzqn4.7` complete; decision requested |
 | D4, D7–D18 | per §3 | `alumina-gzqn4.1` | registered |
 
 Epic: `alumina-gzqn4`. Ledger updates go to `alumina-gzqn4.1`; the register above is the
 durable narrative.
+
+---
+
+## 11. Correction log
+
+Errors found in this register after publication, corrected forward (never silently edited):
+
+| Date | Row | Correction | Source |
+|---|---|---|---|
+| 2026-11-12 | D4, §5 G1, §9 M3 | The log slot is **2048 B** (`SLOT_BYTES`, `MONITOR_RECORD_MAX`), not 8,192 B. The 8,170/8,192 figure came from a superseded spec layer (`docs/alumina-proxy.md:1249`) and was carried into v1 of this register. Current measured worst cases: `monitor_summary` 763 B, `monitor_domain` 1,370 B, `monitor_capture` 1,237 B, `resolver_probe` 1,857 B. | `alumina-gzqn4.7` (evidence); `src/log/mod.rs:54-59`; spec `:878-903`, `:1309-1319` |
+
+The same evidence bead recorded that the spec still contains both JA4 keying phrasings
+with only partial declared supersession (`:700`/`:952` vs `:1070-1073`/`:1233`/`:1164`), and
+that the stale 8,192 B geometry survives in earlier amendment layers (`:1131`, `:1168`,
+`:1249`, `:1257`). Both belong to **G3** (spec/documentation consistency) as verified
+instances, not to G1/G2.
