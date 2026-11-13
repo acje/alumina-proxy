@@ -1,6 +1,9 @@
 use super::encoding::encode_entry_frame;
 use super::*;
 
+#[path = "../../tests/support/temp_dir.rs"]
+mod temp_dir;
+
 use crate::dns::cache::{Cache, Family};
 use std::fmt::Write as _;
 
@@ -14,25 +17,10 @@ use std::io::{Read, Seek};
 
 use std::os::unix::net::UnixStream;
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use std::time::Instant;
 
 fn temp_file() -> File {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "alumina-log-{}-{}.log",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-        .expect("create temp file")
+    temp_dir::TempDir::private_sink_file("alumina-log")
 }
 
 fn file_logstore() -> (LogStore, File) {
