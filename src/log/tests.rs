@@ -738,7 +738,8 @@ mod startup_records {
             "monitor_summary",
             encode_monitor_summary(&mut slot, u64::MAX, &monitor).expect("fits"),
         ));
-        let mut domain_start = 0usize;
+        let first_two_digit_index = 10usize;
+        let mut domain_start = first_two_digit_index;
         worst.push((
             "monitor_domain",
             encode_monitor_domain_batch(&mut slot, u64::MAX, 1, 3, &monitor, &mut domain_start)
@@ -806,15 +807,18 @@ mod startup_records {
             .expect("monitor_domain measured")
             .1;
         assert_eq!(
-            domain_len, 1800,
-            "re-measured monitor_domain worst case: DOMAIN_BATCH=11 saturated domains, \
-             each carrying d<j>f=10, d<j>b=10, d<j>n=10, d<j>r=10, d<j>j=10, a 36-char \
-             d<j>v and a 32-hex-char IPv6 d<j>p, plus secs=u64::MAX and the trailing newline"
+            domain_len, 1870,
+            "re-measured monitor_domain worst case: the maximal batch is DOMAIN_BATCH=11 \
+             domains whose d<j>* keys all render two-digit indices (10..=20). Every key renders \
+             its index in decimal, so a two-digit block costs 164 B against 157 B for a single \
+             digit: five 16-byte u32::MAX counters, a 44-byte quoted 36-char d<j>v and a 40-byte \
+             quoted 32-hex d<j>p. 66 B framing (30 header + 26 secs + 9 part + newline) plus \
+             11 x 164 B = 1870 B is therefore the maximum"
         );
         assert_eq!(
             MONITOR_RECORD_MAX - domain_len,
-            248,
-            "the per-ordinal peer table leaves monitor_domain 248 B of the 2048 B bound"
+            178,
+            "the per-ordinal peer table leaves monitor_domain 178 B of the 2048 B bound"
         );
         let probe_len = worst
             .iter()
