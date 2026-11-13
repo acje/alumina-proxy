@@ -861,6 +861,94 @@ fn wait_readable(stream: &mio::net::TcpStream, label: &str) {
     assert!(readable, "{label} never became readable on the proxy side");
 }
 
+fn stage_relay_slot(serving: &mut Serving, up: mio::net::TcpStream, client: mio::net::TcpStream) {
+    {
+        let ws = &mut serving.slots[0];
+        ws.upstream = Some(up);
+        ws.client = Some(client);
+        ws.stage = Stage::Relay;
+        ws.head_len = 4;
+        ws.buf_base = 0;
+    }
+    open_relay(serving, 0);
+    serving.register_upstream(0).expect("register up");
+    serving.register_client(0).expect("register client");
+}
+
+fn shutdown_upstream_write(sink_stream: &mut TcpStream) {
+    let _ = sink_stream.set_write_timeout(Some(Duration::from_millis(100)));
+    sink_stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("upstream fin");
+}
+
+fn sink_pair() -> (TcpStream, mio::net::TcpStream) {
+    let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+    let sink_addr = sink.local_addr().expect("sink addr");
+    let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+    let sink_stream = sink.accept().expect("accept sink side").0;
+    (sink_stream, up)
+}
+
+fn relay_peer_pair() -> (mio::net::TcpStream, TcpStream) {
+    let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
+    let peer_addr = peer_l.local_addr().expect("peer addr");
+    let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
+    let peer_stream = peer_l.accept().expect("accept peer side").0;
+    (client, peer_stream)
+}
+
+fn await_relay_payload_readable(serving: &Serving, index: usize) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while serving.slots[index]
+        .client
+        .as_ref()
+        .expect("client present")
+        .peek(&mut [0u8; 1])
+        .is_err()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the relay payload never became readable"
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn await_client_fin_readable(serving: &Serving, index: usize) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while serving.slots[index]
+        .client
+        .as_ref()
+        .expect("client present")
+        .peek(&mut [0u8; 1])
+        .is_err()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "client FIN never became readable"
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn await_upstream_fin_readable(serving: &Serving, index: usize) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while serving.slots[index]
+        .upstream
+        .as_ref()
+        .expect("upstream present")
+        .peek(&mut [0u8; 1])
+        .is_err()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "upstream FIN never became readable"
+        );
+        std::thread::yield_now();
+    }
+}
+
 /// A test config allowlisting `sub.example.org:<upstream_port>` behind a
 /// 127.0.0.1 entry listener, for retry/deadline tests that must target a
 /// controllable (possibly closed) upstream port.
@@ -4559,68 +4647,93 @@ mod relay {
         });
     }
 
-    #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "long multi-phase compaction assertion"
-    )]
+    fn stage_compaction_workspace(
+        serving: &mut Serving,
+        up: mio::net::TcpStream,
+    ) -> (usize, Option<usize>, Vec<u8>) {
+        let markers = {
+            let ws = &mut serving.slots[0];
+            ws.upstream = Some(up);
+            ws.head_len = 4;
+            ws.buf_base = 0;
+            ws.fwd = 4;
+            ws.stage = Stage::Relay;
+            ws.gate.on_connect_head(4);
+            ws.gate.on_authorized();
+            ws.gate.on_upstream_connected();
+            ws.gate.on_response_ok();
+            ws.gate.on_hello_validated(ValidatedHello::test_new(10));
+            ws.buf[..4].copy_from_slice(b"HEAD");
+            ws.buf[4..10].copy_from_slice(b"HELLO!");
+            let payload_start = 10usize;
+            let payload = b"0123456789abcdef";
+            let mut filled = payload_start;
+            while filled + payload.len() <= HOLD_CAP - 3 {
+                ws.buf[filled..filled + payload.len()].copy_from_slice(payload);
+                filled += payload.len();
+            }
+            ws.buf_len = HOLD_CAP - 3;
+            assert!(
+                filled <= ws.buf_len,
+                "padded payload must fit within the pre-fill workspace"
+            );
+            ws.buf[filled..ws.buf_len]
+                .copy_from_slice(&test_offset_pattern(ws.buf_len - filled, 8));
+            (
+                ws.buf_base + ws.fwd - ws.head_len,
+                ws.gate.hello_end(),
+                ws.buf[ws.fwd..ws.buf_len].to_vec(),
+            )
+        };
+        serving.register_upstream(0).expect("register up");
+        markers
+    }
+
     #[expect(
         clippy::large_stack_arrays,
         reason = "test staging buffer, not runtime path"
     )]
+    fn drain_compacted_stream(
+        serving: &mut Serving,
+        sink_stream: &mut TcpStream,
+        expected_len: usize,
+    ) -> Vec<u8> {
+        let mut got = Vec::new();
+        let mut tmp = [0u8; 65536];
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while got.len() < expected_len {
+            assert!(
+                Instant::now() < deadline,
+                "compacted stream never fully drained: got {} / {}",
+                got.len(),
+                expected_len
+            );
+            match sink_stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => got.extend_from_slice(&tmp[..n]),
+                Err(_) => {}
+            }
+            serving
+                .run_once(Some(Duration::from_millis(1)))
+                .expect("compaction-drain poll");
+            match sink_stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => got.extend_from_slice(&tmp[..n]),
+                Err(_) => {}
+            }
+        }
+        got
+    }
+
+    #[test]
     fn forced_compaction_preserves_absolute_cursor_and_retained_suffix() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let mut sink_stream = sink.accept().expect("accept sink side").0;
+            let (mut sink_stream, up) = sink_pair();
             sink_stream.set_nonblocking(true).expect("sink nonblocking");
-
             let index = 0;
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.head_len = 4;
-                ws.buf_base = 0;
-                ws.fwd = 4;
-                ws.stage = Stage::Relay;
-                ws.gate.on_connect_head(4);
-                ws.gate.on_authorized();
-                ws.gate.on_upstream_connected();
-                ws.gate.on_response_ok();
-                ws.gate.on_hello_validated(ValidatedHello::test_new(10));
-                ws.buf[..4].copy_from_slice(b"HEAD");
-                ws.buf[4..10].copy_from_slice(b"HELLO!");
-                let payload_start = 10usize;
-                let payload = b"0123456789abcdef";
-                let mut filled = payload_start;
-                while filled + payload.len() <= HOLD_CAP - 3 {
-                    ws.buf[filled..filled + payload.len()].copy_from_slice(payload);
-                    filled += payload.len();
-                }
-                ws.buf_len = HOLD_CAP - 3;
-                assert!(
-                    filled <= ws.buf_len,
-                    "padded payload must fit within the pre-fill workspace"
-                );
-                ws.buf[filled..ws.buf_len]
-                    .copy_from_slice(&test_offset_pattern(ws.buf_len - filled, 8));
-            }
-            serving.register_upstream(index).expect("register up");
-
-            let committed_before = {
-                let ws = &mut serving.slots[index];
-                ws.buf_base + ws.fwd - ws.head_len
-            };
-            let hello_end_before = {
-                let ws = &mut serving.slots[index];
-                ws.gate.hello_end()
-            };
-            let suffix_before: Vec<u8> = {
-                let ws = &mut serving.slots[index];
-                ws.buf[ws.fwd..ws.buf_len].to_vec()
-            };
+            let (committed_before, hello_end_before, suffix_before) =
+                stage_compaction_workspace(serving, up);
 
             serving.append_client_bytes(index, b"FRESH");
 
@@ -4643,30 +4756,7 @@ mod relay {
 
             serving.flush_client_upstream(index);
             let expected_len = suffix_before.len() + 5;
-            let mut got = Vec::new();
-            let mut tmp = [0u8; 65536];
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while got.len() < expected_len {
-                assert!(
-                    Instant::now() < deadline,
-                    "compacted stream never fully drained: got {} / {}",
-                    got.len(),
-                    expected_len
-                );
-                match sink_stream.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => got.extend_from_slice(&tmp[..n]),
-                    Err(_) => {}
-                }
-                serving
-                    .run_once(Some(Duration::from_millis(1)))
-                    .expect("compaction-drain poll");
-                match sink_stream.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => got.extend_from_slice(&tmp[..n]),
-                    Err(_) => {}
-                }
-            }
+            let got = drain_compacted_stream(serving, &mut sink_stream, expected_len);
             let mut expected = Vec::with_capacity(expected_len);
             expected.extend_from_slice(&suffix_before);
             expected.extend_from_slice(b"FRESH");
@@ -4869,74 +4959,66 @@ mod relay {
         });
     }
 
+    fn stage_retained_up_tail(
+        serving: &mut Serving,
+        up: mio::net::TcpStream,
+        client: mio::net::TcpStream,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let index = 0;
+        let prefix = test_offset_pattern(RETAINED_OFFSET, 11);
+        let payload = test_offset_pattern(137, 17);
+        {
+            let ws = &mut serving.slots[index];
+            ws.upstream = Some(up);
+            ws.client = Some(client);
+            ws.stage = Stage::Relay;
+            ws.head_len = 4;
+            ws.buf_base = 0;
+            ws.fwd = 0;
+            ws.buf[..RETAINED_OFFSET].copy_from_slice(&prefix);
+            ws.buf[RETAINED_OFFSET..CHUNK].fill(0xA5);
+            ws.buf_len = RETAINED_OFFSET;
+        }
+        open_relay(serving, index);
+        serving.register_upstream(index).expect("register up");
+        serving.register_client(index).expect("register client");
+        (prefix, payload)
+    }
+
+    fn collect_sink_bytes(sink_stream: &mut TcpStream, expected: usize) -> Vec<u8> {
+        let mut got = Vec::new();
+        let mut tmp = [0u8; 64];
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while got.len() < expected && Instant::now() < deadline {
+            match sink_stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => got.extend_from_slice(&tmp[..n]),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::yield_now(),
+                Err(_) => break,
+            }
+        }
+        got
+    }
+
     #[test]
     fn up_socket_receive_appends_once_at_nonzero_retained_tail() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let mut sink_stream = sink.accept().expect("accept sink side").0;
+            let (mut sink_stream, up) = sink_pair();
             sink_stream.set_nonblocking(true).expect("sink nonblocking");
-
-            let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-            let peer_addr = peer_l.local_addr().expect("peer addr");
-            let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-            let mut peer_stream = peer_l.accept().expect("accept peer side").0;
-
+            let (client, mut peer_stream) = relay_peer_pair();
             let index = 0;
-            let prefix = test_offset_pattern(RETAINED_OFFSET, 11);
-            let payload = test_offset_pattern(137, 17);
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.client = Some(client);
-                ws.stage = Stage::Relay;
-                ws.head_len = 4;
-                ws.buf_base = 0;
-                ws.fwd = 0;
-                ws.buf[..RETAINED_OFFSET].copy_from_slice(&prefix);
-                ws.buf[RETAINED_OFFSET..CHUNK].fill(0xA5);
-                ws.buf_len = RETAINED_OFFSET;
-            }
-            open_relay(serving, index);
-            serving.register_upstream(index).expect("register up");
-            serving.register_client(index).expect("register client");
+            let (prefix, payload) = stage_retained_up_tail(serving, up, client);
 
             peer_stream
                 .write_all(&payload)
                 .expect("write relay payload");
-            let avail = Instant::now() + Duration::from_secs(2);
-            while serving.slots[index]
-                .client
-                .as_ref()
-                .expect("client present")
-                .peek(&mut [0u8; 1])
-                .is_err()
-            {
-                assert!(
-                    Instant::now() < avail,
-                    "the relay payload never became readable"
-                );
-                std::thread::yield_now();
-            }
+            await_relay_payload_readable(serving, index);
 
             serving.client_readable(index).expect("up read visit");
 
             let expected = RETAINED_OFFSET + payload.len();
-            let mut got = Vec::new();
-            let mut tmp = [0u8; 64];
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while got.len() < expected && Instant::now() < deadline {
-                match sink_stream.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(m) => got.extend_from_slice(&tmp[..m]),
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::yield_now();
-                    }
-                    Err(_) => break,
-                }
-            }
+            let got = collect_sink_bytes(&mut sink_stream, expected);
             assert_eq!(
                 got.len(),
                 expected,
@@ -5617,46 +5699,15 @@ mod visit_budget {
     fn eof_read_attempts_count_toward_the_shared_visit_budget() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let sink_stream = sink.accept().expect("accept sink side").0;
-
-            let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-            let peer_addr = peer_l.local_addr().expect("peer addr");
-            let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-            let peer_stream = peer_l.accept().expect("accept peer side").0;
-
+            let (mut sink_stream, up) = sink_pair();
+            let (client, peer_stream) = relay_peer_pair();
             let index = 0;
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.client = Some(client);
-                ws.stage = Stage::Relay;
-                ws.head_len = 4;
-                ws.buf_base = 0;
-            }
-            open_relay(serving, index);
-            serving.register_upstream(index).expect("register up");
-            serving.register_client(index).expect("register client");
+            stage_relay_slot(serving, up, client);
 
             peer_stream
                 .shutdown(std::net::Shutdown::Write)
                 .expect("client fin");
-            let avail = Instant::now();
-            while serving.slots[index]
-                .client
-                .as_ref()
-                .expect("client present")
-                .peek(&mut [0u8; 1])
-                .is_err()
-            {
-                assert!(
-                    avail.elapsed() < Duration::from_secs(2),
-                    "client FIN never became readable"
-                );
-                std::thread::yield_now();
-            }
+            await_client_fin_readable(serving, index);
 
             let client_token = client_token(serving.slots[index].slot_gen, index);
 
@@ -5679,24 +5730,8 @@ mod visit_budget {
                 serving.visit
             );
 
-            let _ = sink_stream.set_write_timeout(Some(Duration::from_millis(100)));
-            sink_stream
-                .shutdown(std::net::Shutdown::Write)
-                .expect("upstream fin");
-            let avail2 = Instant::now();
-            while serving.slots[index]
-                .upstream
-                .as_ref()
-                .expect("upstream present")
-                .peek(&mut [0u8; 1])
-                .is_err()
-            {
-                assert!(
-                    avail2.elapsed() < Duration::from_secs(2),
-                    "upstream FIN never became readable"
-                );
-                std::thread::yield_now();
-            }
+            shutdown_upstream_write(&mut sink_stream);
+            await_upstream_fin_readable(serving, index);
 
             let up_token = upstream_token(serving.slots[index].slot_gen, index);
             serving
@@ -6785,55 +6820,88 @@ mod visit_budget {
         });
     }
 
+    fn connect_orphan_client() -> mio::net::TcpStream {
+        let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
+        let peer_addr = peer_l.local_addr().expect("peer addr");
+        mio::net::TcpStream::connect(peer_addr).expect("client connect")
+    }
+
+    fn stage_gateopening_drain(
+        serving: &mut Serving,
+        up: mio::net::TcpStream,
+        client: mio::net::TcpStream,
+    ) {
+        let index = 0;
+        {
+            let ws = &mut serving.slots[index];
+            ws.upstream = Some(up);
+            ws.client = Some(client);
+            ws.stage = Stage::WritingHello;
+            ws.head_len = 4;
+            ws.buf_base = 0;
+            ws.fwd = 0;
+            ws.gate.on_connect_head(4);
+            ws.gate.on_authorized();
+            ws.gate.on_upstream_connected();
+            ws.gate.on_response_ok();
+            ws.gate.on_hello_validated(ValidatedHello::test_new(1024));
+
+            ws.buf[..4].copy_from_slice(b"HEAD");
+            let hello_region = test_offset_pattern(1020, 11);
+            ws.buf[4..1024].copy_from_slice(&hello_region);
+            let payload_region = test_offset_pattern(HOLD_CAP - 1024, 12);
+            let mut filled = 1024;
+            while filled < ws.buf.len() {
+                let chunk = (ws.buf.len() - filled).min(1024);
+                let window = filled - 1024;
+                ws.buf[filled..filled + chunk]
+                    .copy_from_slice(&payload_region[window..window + chunk]);
+                filled += chunk;
+            }
+            ws.buf_len = ws.buf.len();
+        }
+        serving.register_upstream(index).expect("register up");
+        serving.register_client(index).expect("register client");
+    }
+
+    fn dispatch_one_gate_crossing_visit(
+        serving: &mut Serving,
+        index: usize,
+    ) -> (u16, u32, usize, bool, Stage) {
+        serving.in_batch = true;
+        serving.batch_gen = serving.batch_gen.wrapping_add(1);
+        let token = upstream_token(serving.slots[index].slot_gen, index);
+        serving
+            .dispatch_readiness(
+                token,
+                Readiness {
+                    writable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("one gate-crossing upstream-writable token");
+        let consumed = match serving.visit {
+            VisitState::Live { ops, bytes, .. } => (ops, bytes),
+            VisitState::Idle => {
+                unreachable!("the gate-crossing visit stays live until end of batch")
+            }
+        };
+        let fwd_after = serving.slots[index].fwd;
+        let gate_open = serving.slots[index].gate.is_open();
+        let stage_after = serving.slots[index].stage;
+        serving.in_batch = false;
+        (consumed.0, consumed.1, fwd_after, gate_open, stage_after)
+    }
+
     #[test]
     fn second_gateopening_drain_shares_the_single_visit_budget() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let sink_stream = sink.accept().expect("accept sink side").0;
+            let (sink_stream, up) = sink_pair();
             let _ = sink_stream.set_read_timeout(Some(Duration::from_millis(50)));
-
-            let client = mio::net::TcpStream::connect(
-                StdListener::bind("127.0.0.1:0")
-                    .expect("peer bind")
-                    .local_addr()
-                    .expect("peer addr"),
-            )
-            .expect("client connect");
-
+            let client = connect_orphan_client();
             let index = 0;
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.client = Some(client);
-                ws.stage = Stage::WritingHello;
-                ws.head_len = 4;
-                ws.buf_base = 0;
-                ws.fwd = 0;
-                ws.gate.on_connect_head(4);
-                ws.gate.on_authorized();
-                ws.gate.on_upstream_connected();
-                ws.gate.on_response_ok();
-                ws.gate.on_hello_validated(ValidatedHello::test_new(1024));
-
-                ws.buf[..4].copy_from_slice(b"HEAD");
-                let hello_region = test_offset_pattern(1020, 11);
-                ws.buf[4..1024].copy_from_slice(&hello_region);
-                let payload_region = test_offset_pattern(HOLD_CAP - 1024, 12);
-                let mut filled = 1024;
-                while filled < ws.buf.len() {
-                    let chunk = (ws.buf.len() - filled).min(1024);
-                    let window = filled - 1024;
-                    ws.buf[filled..filled + chunk]
-                        .copy_from_slice(&payload_region[window..window + chunk]);
-                    filled += chunk;
-                }
-                ws.buf_len = ws.buf.len();
-            }
-            serving.register_upstream(index).expect("register up");
-            serving.register_client(index).expect("register client");
+            stage_gateopening_drain(serving, up, client);
             assert!(
                 !serving.slots[index].gate.is_open(),
                 "the gate must still be closed before the crossing visit"
@@ -6841,38 +6909,16 @@ mod visit_budget {
 
             let _ = sink_stream.set_nonblocking(true);
 
-            serving.in_batch = true;
-            serving.batch_gen = serving.batch_gen.wrapping_add(1);
-            let token = upstream_token(serving.slots[index].slot_gen, index);
-            serving
-                .dispatch_readiness(
-                    token,
-                    Readiness {
-                        writable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("one gate-crossing upstream-writable token");
-            let consumed = match serving.visit {
-                VisitState::Live { ops, bytes, .. } => (ops, bytes),
-                VisitState::Idle => {
-                    unreachable!("the gate-crossing visit stays live until end of batch")
-                }
-            };
-            let fwd_after = serving.slots[index].fwd;
-            let gate_open = serving.slots[index].gate.is_open();
-            let stage_after = serving.slots[index].stage;
-            serving.in_batch = false;
+            let (ops, bytes, fwd_after, gate_open, stage_after) =
+                dispatch_one_gate_crossing_visit(serving, index);
 
             assert!(
                 gate_open && matches!(stage_after, Stage::Relay),
                 "the single visit must succeed in opening the gate prior to relay (gate={gate_open})"
             );
             assert!(
-                consumed.0 <= 16 && consumed.1 <= 64 * 1024,
-                "pre-open drain + post-open second drain must share ONE visit budget: {} ops / {} bytes",
-                consumed.0,
-                consumed.1
+                ops <= 16 && bytes <= 64 * 1024,
+                "pre-open drain + post-open second drain must share ONE visit budget: {ops} ops / {bytes} bytes"
             );
             assert!(
                 fwd_after > 1024,
@@ -7507,6 +7553,62 @@ mod enforcement {
         });
     }
 
+    fn stage_blocked_relay_payload(serving: &mut Serving, up: mio::net::TcpStream) {
+        let index = 0;
+        {
+            let ws = &mut serving.slots[index];
+            ws.upstream = Some(up);
+            ws.head_len = 4;
+            ws.buf_base = 0;
+            ws.buf_len = 8;
+            ws.fwd = 4;
+            ws.buf[..8].copy_from_slice(b"UPSTRM00");
+            ws.down[..16].copy_from_slice(b"DOWNSTRM00XXXXXX");
+            ws.down_len = 16;
+            ws.down_off = 0;
+            ws.stage = Stage::Relay;
+            ws.gate.on_connect_head(4);
+            ws.gate.on_authorized();
+            ws.gate.on_upstream_connected();
+            ws.gate.on_response_ok();
+        }
+        serving.register_upstream(index).expect("register upstream");
+    }
+
+    fn assert_pending_relay_payload(serving: &Serving) {
+        let index = 0;
+        assert_eq!(
+            serving.slots[index].buf_len, 8,
+            "a payload is pending client->upstream before the latch"
+        );
+        assert_eq!(
+            serving.slots[index].down_len, 16,
+            "a payload is pending upstream->client before the latch"
+        );
+    }
+
+    fn drive_block_all_latch(serving: &mut Serving, port: u16) {
+        for _ in 0..3 {
+            let mut evil = connect(port);
+            evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("evil head");
+            pump(serving, 40);
+        }
+    }
+
+    fn dispatch_stale_client_writable(serving: &mut Serving, index: usize) {
+        let ctoken = client_token(serving.slots[index].slot_gen, index);
+        serving
+            .dispatch_readiness(
+                ctoken,
+                Readiness {
+                    writable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("stale client writable handled");
+    }
+
     #[test]
     fn block_all_guard_refuses_pending_relay_write_after_latch() {
         let port = ephemeral_port();
@@ -7520,43 +7622,11 @@ mod enforcement {
                 "relay client admitted before the latch"
             );
             let index = 0;
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let _sink_stream = sink.accept().expect("accept sink side").0;
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.head_len = 4;
-                ws.buf_base = 0;
-                ws.buf_len = 8;
-                ws.fwd = 4;
-                ws.buf[..8].copy_from_slice(b"UPSTRM00");
-                ws.down[..16].copy_from_slice(b"DOWNSTRM00XXXXXX");
-                ws.down_len = 16;
-                ws.down_off = 0;
-                ws.stage = Stage::Relay;
-                ws.gate.on_connect_head(4);
-                ws.gate.on_authorized();
-                ws.gate.on_upstream_connected();
-                ws.gate.on_response_ok();
-            }
-            serving.register_upstream(index).expect("register upstream");
-            assert_eq!(
-                serving.slots[index].buf_len, 8,
-                "a payload is pending client->upstream before the latch"
-            );
-            assert_eq!(
-                serving.slots[index].down_len, 16,
-                "a payload is pending upstream->client before the latch"
-            );
+            let (_sink_stream, up) = sink_pair();
+            stage_blocked_relay_payload(serving, up);
+            assert_pending_relay_payload(serving);
 
-            for _ in 0..3 {
-                let mut evil = connect(port);
-                evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
-                    .expect("evil head");
-                pump(serving, 40);
-            }
+            drive_block_all_latch(serving, port);
             assert!(
                 serving.storage().enforcement().block_all(),
                 "the AnyIllegal All latch fires"
@@ -7567,16 +7637,7 @@ mod enforcement {
                 "the latch closed the relay slot and its pending payload"
             );
 
-            let ctoken = client_token(serving.slots[index].slot_gen, index);
-            serving
-                .dispatch_readiness(
-                    ctoken,
-                    Readiness {
-                        writable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("stale client writable handled");
+            dispatch_stale_client_writable(serving, index);
             assert_eq!(
                 serving.storage().occupied(),
                 0,
@@ -8347,51 +8408,91 @@ mod admission {
         });
     }
 
-    #[test]
-    fn admitted_stale_peer_folds_through_real_decision_and_retry_does_not_recount() {
+    fn arm_stale_peer_setup(
+        serving: &mut Serving,
+        port: u16,
+        upstream_port: u16,
+    ) -> (Instant, TcpStream, usize, Feed) {
+        let origin = Instant::now();
+        let client = connect(port);
+        pump(serving, 10);
+        let index = serving
+            .slots
+            .iter()
+            .position(|slot| slot.handle.is_some() && slot.stage == Stage::ReadingConnect)
+            .expect("an in-setup slot reading the CONNECT head");
+        let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
+        let feed = serving.slots[index]
+            .parser
+            .feed(head.as_bytes())
+            .expect("head feed");
+        (origin, client, index, feed)
+    }
+
+    fn assert_not_serving_stale(serving: &Serving) {
+        assert!(
+            !serving.storage().enforcement().monitor().serving_stale(),
+            "a fresh monitor must not be serving stale"
+        );
+    }
+
+    fn assert_serving_stale(serving: &Serving) {
+        assert!(
+            serving.storage().enforcement().monitor().serving_stale(),
+            "a real stale Peer grant must latch the serving-stale level bit"
+        );
+    }
+
+    fn assert_incident_summary_counts_stale_once(serving: &mut Serving, origin: Instant) {
+        serving
+            .storage_mut()
+            .report_incident_if_due(origin + Duration::from_secs(3600));
+        let record = serving
+            .storage()
+            .logs()
+            .last_record_bytes()
+            .expect("incident summary record");
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            text.contains("kind=incident_summary") && text.contains("stale=1"),
+            "the summary must count the stale admission once per connection: {text}"
+        );
+    }
+
+    fn seed_stale_binding(serving: &mut Serving, origin: Instant) {
         use crate::dns::cache::Family;
         use crate::dns::transport::FailureReason;
         use crate::eligibility::NumericAddr;
-        use crate::inspection::connect::Feed;
         use std::net::Ipv4Addr;
+        serving.storage_mut().mount_clock(origin, 1000);
+        serving
+            .storage_mut()
+            .schedules_mut()
+            .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
+            .expect("open A incident");
+        serving.storage_mut().report_incident_if_due(origin);
+        serving.storage_mut().publish_test_addr(
+            0,
+            NumericAddr::V4(Ipv4Addr::from([1, 1, 1, 1])),
+            Family::A,
+        );
+        serving.storage_mut().mount_clock(origin, 1601);
+    }
+
+    #[test]
+    fn admitted_stale_peer_folds_through_real_decision_and_retry_does_not_recount() {
         let port = ephemeral_port();
         let upstream_port = ephemeral_port();
         let cfg = config_pair(port, upstream_port);
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let origin = Instant::now();
-            let client = connect(port);
-            pump(serving, 10);
-            let index = serving
-                .slots
-                .iter()
-                .position(|slot| slot.handle.is_some() && slot.stage == Stage::ReadingConnect)
-                .expect("an in-setup slot reading the CONNECT head");
-            let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
-            match serving.slots[index]
-                .parser
-                .feed(head.as_bytes())
-                .expect("head feed")
-            {
+            use crate::inspection::connect::Feed;
+            let (origin, client, index, feed) = arm_stale_peer_setup(serving, port, upstream_port);
+            match feed {
                 Feed::Complete { .. } => {}
                 Feed::Incomplete => panic!("the full head must parse to completion"),
             }
-            serving.storage_mut().mount_clock(origin, 1000);
-            serving
-                .storage_mut()
-                .schedules_mut()
-                .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
-                .expect("open A incident");
-            serving.storage_mut().report_incident_if_due(origin);
-            serving.storage_mut().publish_test_addr(
-                0,
-                NumericAddr::V4(Ipv4Addr::from([1, 1, 1, 1])),
-                Family::A,
-            );
-            serving.storage_mut().mount_clock(origin, 1601);
-            assert!(
-                !serving.storage().enforcement().monitor().serving_stale(),
-                "a fresh monitor must not be serving stale"
-            );
+            seed_stale_binding(serving, origin);
+            assert_not_serving_stale(serving);
             let request = serving.slots[index]
                 .parser
                 .result()
@@ -8414,10 +8515,7 @@ mod admission {
             };
             let observed = resolved.peer_state(family, now);
             serving.note_peer_freshness(observed, ordinal, now, index);
-            assert!(
-                serving.storage().enforcement().monitor().serving_stale(),
-                "a real stale Peer grant must latch the serving-stale level bit"
-            );
+            assert_serving_stale(serving);
             serving
                 .storage_mut()
                 .record_attempt(&handle, family)
@@ -8433,19 +8531,7 @@ mod admission {
                 ),
                 "the exhausted single binding must not regrant a peer on retry"
             );
-            serving
-                .storage_mut()
-                .report_incident_if_due(origin + Duration::from_secs(3600));
-            let record = serving
-                .storage()
-                .logs()
-                .last_record_bytes()
-                .expect("incident summary record");
-            let text = String::from_utf8_lossy(record);
-            assert!(
-                text.contains("kind=incident_summary") && text.contains("stale=1"),
-                "the summary must count the stale admission once per connection: {text}"
-            );
+            assert_incident_summary_counts_stale_once(serving, origin);
             drop(client);
         });
     }
@@ -10233,97 +10319,239 @@ mod ja4_baseline {
 }
 
 #[cfg(feature = "alloc-witness")]
+struct IdleExpiryCase {
+    serving: Serving,
+    reader: std::os::unix::net::UnixStream,
+    boot: [u8; 8192],
+}
+
+#[cfg(feature = "alloc-witness")]
+fn publish_idle_expiry_a(storage: &mut ServeStorage) {
+    use crate::dns::cache::evidence::{Evidence, ResolverSource};
+    use crate::dns::cache::{Family, Generation, StagedPositive};
+    use crate::eligibility::NumericAddr;
+    let name = storage.cache().name_index(0).expect("cached name index");
+    let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000)
+        .expect("A proof evidence");
+    let staged = StagedPositive::stage_with_evidence(
+        name,
+        Family::A,
+        Generation::INITIAL,
+        &[NumericAddr::V4([8, 8, 8, 8].into())],
+        1000,
+        1,
+        Some(proof),
+    )
+    .expect("stage the A positive");
+    storage
+        .cache_mut()
+        .publish_positive(&staged)
+        .expect("publish the A positive");
+}
+
+#[cfg(feature = "alloc-witness")]
+fn publish_idle_expiry_aaaa(storage: &mut ServeStorage) {
+    use crate::dns::cache::evidence::{Evidence, ResolverSource};
+    use crate::dns::cache::{Family, Generation, StagedPositive};
+    use crate::eligibility::NumericAddr;
+    let name = storage.cache().name_index(0).expect("cached name index");
+    let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(2), 1000)
+        .expect("Aaaa proof evidence");
+    let staged = StagedPositive::stage_with_evidence(
+        name,
+        Family::Aaaa,
+        Generation::INITIAL,
+        &[NumericAddr::V6(
+            [
+                0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+            ]
+            .into(),
+        )],
+        1000,
+        2,
+        Some(proof),
+    )
+    .expect("stage the Aaaa positive");
+    storage
+        .cache_mut()
+        .publish_positive(&staged)
+        .expect("publish the Aaaa positive");
+}
+
+#[cfg(feature = "alloc-witness")]
+fn seeded_idle_expiry_case(dual_family: bool) -> IdleExpiryCase {
+    use crate::dns::transport::StartupReport;
+    use std::os::unix::net::UnixStream;
+
+    let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+    let mut storage = ServeStorage::boot(&config).expect("boot the idle expiry storage");
+    let (mut reader, writer) = UnixStream::pair().expect("unix log pair");
+    reader.set_nonblocking(true).expect("reader nonblocking");
+    writer.set_nonblocking(true).expect("writer nonblocking");
+    *storage.logs_mut() =
+        crate::log::LogStore::with_fd(&writer).expect("log store on the unix writer");
+    storage
+        .dns_mut()
+        .begin_window(
+            SocketAddr::from(([127, 0, 0, 1], 9)),
+            *config.resolver_set(),
+            1000,
+            Duration::ZERO,
+        )
+        .expect("open the idle expiry DNS window");
+    publish_idle_expiry_a(&mut storage);
+    if dual_family {
+        publish_idle_expiry_aaaa(&mut storage);
+    }
+    let outcome = storage
+        .settle_startup(1000, StartupReport::default(), 0, false)
+        .expect("settle the seeded startup");
+    let listener = outcome.into_listener().expect("seeded startup is serving");
+    storage.logs_mut().drain_sink();
+    let mut boot = [0u8; 8192];
+    assert!(reader.read(&mut boot).unwrap() > 0);
+    assert_eq!(storage.logs().len(), 0);
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic storage");
+    let serving = Serving::new(storage, listener, traffic).expect("serving on the seeded storage");
+    assert_eq!(serving.storage().dns().now_u64(), 1000);
+    IdleExpiryCase {
+        serving,
+        reader,
+        boot,
+    }
+}
+
+#[cfg(feature = "alloc-witness")]
+fn fill_idle_log_queue(serving: &mut Serving) {
+    use crate::dns::cache::Family;
+    for _ in 0..crate::log::QUEUE_SLOTS {
+        serving.storage_mut().logs_mut().startup_warning_ctx(
+            1000,
+            "sub.example.org",
+            Family::A,
+            "timeout",
+            None,
+        );
+    }
+    assert!(serving.storage().logs().is_full());
+}
+
+#[cfg(feature = "alloc-witness")]
+fn await_proof_expiry_gap(serving: &mut Serving) {
+    let before = Instant::now();
+    let expiry = serving
+        .storage()
+        .assurance_wake(before)
+        .expect("assurance wake query")
+        .expect("valid proof has an expiry wake");
+    assert!(expiry > before);
+    std::thread::sleep(expiry.saturating_duration_since(before) + Duration::from_millis(25));
+    let after = Instant::now();
+    assert!(after >= expiry);
+    assert_eq!(
+        serving
+            .storage()
+            .assurance_wake(after)
+            .expect("post-gap assurance wake query"),
+        Some(after),
+        "an overdue, unobserved expiry remains immediate after crossing the clock gap"
+    );
+}
+
+#[cfg(feature = "alloc-witness")]
+fn check_idle_signal_effect(serving: &Serving, signal_first: bool) {
+    if signal_first {
+        assert!(
+            serving.is_shutdown(),
+            "SIGTERM must take effect on the expiry turn"
+        );
+        assert!(
+            serving.listener.is_none(),
+            "SIGTERM must stop admission on the expiry turn"
+        );
+    } else {
+        assert!(
+            !serving.is_shutdown(),
+            "expiry must wake before the safety signal"
+        );
+    }
+}
+
+#[cfg(feature = "alloc-witness")]
+fn finish_idle_expiry_case(case: &mut IdleExpiryCase, full_queue: bool, signal_first: bool) {
+    if !full_queue {
+        case.serving.storage_mut().logs_mut().drain_sink();
+        assert!(case.reader.read(&mut case.boot).unwrap() > 0);
+        if !signal_first {
+            assert!(
+                case.serving.poll_timeout().is_none(),
+                "no slot, DNS, log or refresh deadline remains"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "alloc-witness")]
+fn run_idle_expiry_case(
+    gap_after_preview: bool,
+    full_queue: bool,
+    dual_family: bool,
+    signal_first: bool,
+) {
+    use std::io::Write as _;
+
+    let mut case = seeded_idle_expiry_case(dual_family);
+    if full_queue {
+        fill_idle_log_queue(&mut case.serving);
+    }
+    let dropped_before = case.serving.storage().logs().dropped();
+    if gap_after_preview {
+        await_proof_expiry_gap(&mut case.serving);
+    }
+    let mut wake = case
+        .serving
+        .signal_wake_mut()
+        .expect("signal wake writer")
+        .try_clone()
+        .expect("cloned signal wake writer");
+    if signal_first {
+        wake.write_all(&[1]).expect("pre-signalled wake byte");
+    }
+    let counts = watched_idle_turn(&mut case.serving, wake, Duration::from_secs(3));
+    assert!(
+        counts.all_zero(),
+        "the actual idle expiry turn must not allocate: {counts:?}"
+    );
+    check_idle_expiry_log(&mut case.serving, full_queue, dual_family, dropped_before);
+    check_idle_signal_effect(&case.serving, signal_first);
+    if dual_family {
+        check_second_family_expiry(&mut case.serving, &mut case.reader, &mut case.boot);
+    }
+    assert!(
+        case.serving
+            .storage()
+            .assurance_wake(Instant::now())
+            .unwrap()
+            .is_none(),
+        "an already observed expiry must not keep scheduling zero-time waits"
+    );
+    finish_idle_expiry_case(&mut case, full_queue, signal_first);
+}
+
+#[cfg(feature = "alloc-witness")]
 #[test]
 fn idle_run_once_observes_trusted_proof_expiry_without_dns_publication() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            for (gap_after_preview, full_queue, dual_family, signal_first) in [(false, false, false, false), (true, false, false, false), (true, true, false, false), (false, false, true, false), (true, false, false, true)] {
-            use crate::dns::cache::evidence::{Evidence, ResolverSource};
-            use crate::dns::cache::{Family, Generation, StagedPositive};
-            use crate::dns::transport::StartupReport;
-            use crate::eligibility::NumericAddr;
-            use std::io::Write as _;
-            use std::os::unix::net::UnixStream;
-
-            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
-            let mut storage = ServeStorage::boot(&config).unwrap();
-            let (mut reader, writer) = UnixStream::pair().unwrap();
-            reader.set_nonblocking(true).unwrap();
-            writer.set_nonblocking(true).unwrap();
-            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
-            storage.dns_mut().begin_window(
-                SocketAddr::from(([127, 0, 0, 1], 9)),
-                *config.resolver_set(),
-                1000,
-                Duration::ZERO,
-            ).unwrap();
-            let name = storage.cache().name_index(0).unwrap();
-            let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
-            let staged = StagedPositive::stage_with_evidence(
-                name, Family::A, Generation::INITIAL,
-                &[NumericAddr::V4([8, 8, 8, 8].into())], 1000, 1, Some(proof),
-            ).unwrap();
-            storage.cache_mut().publish_positive(&staged).unwrap();
-            if dual_family {
-                let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(2), 1000).unwrap();
-                let staged = StagedPositive::stage_with_evidence(
-                    name, Family::Aaaa, Generation::INITIAL,
-                    &[NumericAddr::V6([0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11].into())], 1000, 2, Some(proof),
-                ).unwrap();
-                storage.cache_mut().publish_positive(&staged).unwrap();
-            }
-            let outcome = storage.settle_startup(1000, StartupReport::default(), 0, false).unwrap();
-            let listener = outcome.into_listener().expect("seeded startup is serving");
-            storage.logs_mut().drain_sink();
-            let mut boot = [0u8; 8192];
-            assert!(reader.read(&mut boot).unwrap() > 0);
-            assert_eq!(storage.logs().len(), 0);
-            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-            let mut serving = Serving::new(storage, listener, traffic).unwrap();
-            assert_eq!(serving.storage().dns().now_u64(), 1000);
-            if full_queue {
-                for _ in 0..crate::log::QUEUE_SLOTS {
-                    serving.storage_mut().logs_mut().startup_warning_ctx(1000, "sub.example.org", Family::A, "timeout", None);
-                }
-                assert!(serving.storage().logs().is_full());
-            }
-            let dropped_before = serving.storage().logs().dropped();
-            if gap_after_preview {
-                let before = Instant::now();
-                let expiry = serving.storage().assurance_wake(before).unwrap().expect("valid proof has an expiry wake");
-                assert!(expiry > before);
-                std::thread::sleep(expiry.saturating_duration_since(before) + Duration::from_millis(25));
-                let after = Instant::now();
-                assert!(after >= expiry);
-                assert_eq!(serving.storage().assurance_wake(after).unwrap(), Some(after),
-                    "an overdue, unobserved expiry remains immediate after crossing the clock gap");
-            }
-            let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
-            if signal_first {
-                wake.write_all(&[1]).unwrap();
-            }
-            let counts = watched_idle_turn(&mut serving, wake, Duration::from_secs(3));
-            assert!(counts.all_zero(), "the actual idle expiry turn must not allocate: {counts:?}");
-            check_idle_expiry_log(&mut serving, full_queue, dual_family, dropped_before);
-            if signal_first {
-                assert!(serving.is_shutdown(), "SIGTERM must take effect on the expiry turn");
-                assert!(serving.listener.is_none(), "SIGTERM must stop admission on the expiry turn");
-            } else {
-                assert!(!serving.is_shutdown(), "expiry must wake before the safety signal");
-            }
-            if dual_family {
-                check_second_family_expiry(&mut serving, &mut reader, &mut boot);
-            }
-            assert!(serving.storage().assurance_wake(Instant::now()).unwrap().is_none(),
-                "an already observed expiry must not keep scheduling zero-time waits");
-            if !full_queue {
-                serving.storage_mut().logs_mut().drain_sink();
-                assert!(reader.read(&mut boot).unwrap() > 0);
-                if !signal_first {
-                    assert!(serving.poll_timeout().is_none(), "no slot, DNS, log or refresh deadline remains");
-                }
-            }
+            for (gap_after_preview, full_queue, dual_family, signal_first) in [
+                (false, false, false, false),
+                (true, false, false, false),
+                (true, true, false, false),
+                (false, false, true, false),
+                (true, false, false, true),
+            ] {
+                run_idle_expiry_case(gap_after_preview, full_queue, dual_family, signal_first);
             }
         })
         .unwrap()
