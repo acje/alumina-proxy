@@ -77,7 +77,7 @@ release-assurance gates first, telemetry and test hygiene last.
 | D2 | JA4 block decided after the first upstream flush | 1 | med | Confirmed | Fixed — `c0885b3` | P1 | M1 ✓ |
 | D3 | JA4 baseline seeds 16 fingerprints; decision only on overflow | 1 | med | Spec-Intended | Governed amendment G1 | P1 | G1 |
 | D4 | Per-domain JA4 peer attribution collapses to one global pair | 1 | low | Confirmed | Fix | P2 | M3 |
-| D5 | Bare-IP resolver uses plain DNS under default `resolver_trusted` | 1 | med | Confirmed-Conditional | Governed amendment G2 | P2 | G2 |
+| D5 | Bare-IP resolver uses plain DNS under default `resolver_trusted` | 1 | med | Confirmed-Conditional | Fixed — amendment G2 (`b48e320`) + G2a (`cbaecfa`) | P2 | G2 ✓ |
 | D6 | Unsafe-surface docs gate can certify production `unsafe` (symlink + second declaration) | 2 | med | Confirmed (1 sub-claim Refuted) | Fixed — `467e13c`…`56eb45d` | P1 | M2 ✓ |
 | D7 | E2E receipt omits untracked compiled build inputs | 2 | low | Confirmed | Fix | P2 | M5 |
 | D8 | Shutdown E2E no-admission witness can pass on a forgotten reachable probe | 1 | low | Confirmed | Fix | P2 | M5 |
@@ -208,7 +208,7 @@ record-geometry test re-measured against 2048 B.
 
 Registry: `csf_ecd441bf…`.
 
-### D5 — Plain-DNS resolver under default assurance · Confirmed-Conditional · Governance G2
+### D5 — Plain-DNS resolver under default assurance · Confirmed-Conditional · Fixed (G2 + G2a)
 
 Verification at HEAD: `src/dns/resolver.rs:190-212` gives a bare-IP entry port 53 (plain
 TCP) and no DoT identity; `src/config/mod.rs:946-957` defaults per-entry
@@ -222,9 +222,17 @@ declared operator capability, not an implementation bug. Impact is bounded by th
 allowlist and by client-side TLS verification.
 
 Disposition: **G2** — the user elected on 2026-11-12 to open a governed amendment rather
-than record an acceptance. Draft only; the target semantics are a decision, not an
-implementation detail (see §5). Adoption requires explicit authorisation of the exact text
-plus the full governed increment; implementation is gated on that adoption.
+than record an acceptance; semantics chosen and text authorised 2026-11-13.
+
+**Adopted at `cbaecfa`** (`b48e320` amendment, `ea1661a`/`408b550`/`ab63f18`/`7a54d76`
+migration, `cbaecfa` coherence). `dns_assurance` is now a mandatory per-entry key; a missing
+key is `InvalidDnsAssurance` (exit 78), never a silent legacy admission. Five spec sites
+were corrected in G2a after adoption closed two live self-contradictions (`:792-793` had made
+the mandatory key invalid). One deliberate deviation, reviewed and accepted: the parser
+holds `Vec<AssuranceRequirement>` instead of a fixed array, because a fixed array needs the
+removed placeholder; allocation stays pre-serving and `ALLOWLIST_MAX` is still enforced.
+Residual: no unauthenticated *path* remains, but `resolver_trusted` still admits
+unauthenticated evidence when explicitly declared — accepted as the operator's stated choice.
 
 Registry: `csf_301d7454…`.
 
@@ -478,7 +486,7 @@ question that must be answered before a draft can exist.
 | ID | Question | Chosen (user, 2026-11-12) | Consequence |
 |---|---|---|---|
 | G1 | D3: what is the JA4 baseline/change contract? | **(b)** keep the K=16 set; the first distinct fingerprint seeds, **every** subsequent new fingerprint selects the configured action; overflow keeps F-08's detail-loss latch | Table unchanged (18,432 B), no per-address state, zero new allocation. `BaselineOutcome` must distinguish an empty row (seed) from a non-empty row gaining a new value (change). The T4 prose at `:700`/`:952` must be rewritten to the per-ordinal set — the amendment also removes the stale "per-ordinal+address" phrasing (G3 instance). Monitor grammar unchanged; `ja4_seed` becomes ≤ 32 per process |
-| G2 | D5: what is the resolver assurance contract? | **(c)** require an explicit `resolver_trusted` per entry; the omission default disappears. Authorised 2026-11-13 with a second spec hunk (in-place rewrite of the SP-014 paragraph) and a 61-line fixture migration across 17 test files | Bare-IP stays usable; silent defaulting ends. All four harness configs (`e2e_relay.sh:134`, `e2e_shutdown.sh:93`, `bench/run.sh:159`, `verify.sh:526`), the QA example and every cited non-canonical doc must state the class explicitly; missing key becomes `InvalidDnsAssurance` (exit 78) rather than a default |
+| G2 | D5: what is the resolver assurance contract? | **(c)** require an explicit `resolver_trusted` per entry; the omission default disappears. **Adopted** 2026-11-13 (`b48e320`, `cbaecfa`): digest `b9941f00…`, both reviews APPROVE, spec + pin + parser + tests + 102 fixture lines migrated together | Bare-IP stays usable; silent defaulting ends. All four harness configs (`e2e_relay.sh:134`, `e2e_shutdown.sh:93`, `bench/run.sh:159`, `verify.sh:526`), the QA example and every cited non-canonical doc must state the class explicitly; missing key becomes `InvalidDnsAssurance` (exit 78) rather than a default |
 | G3 | Unverified intake observation: the spec "overstates stdout drop accounting and monitor-summary delivery" relative to `src/log/sink.rs` and `docs/monitoring.md` | open | Verify first, then reconcile as a documentation correction (or a spec amendment if the spec is the wrong side). **Verified instances to include:** the JA4 keying prose (G1) and the stale 8,192 B geometry in earlier amendment layers (`:1131`, `:1168`, `:1249`, `:1257`) against the binding 2048 B (spec `:878-903`, `:1309-1319`) |
 | G4 | Deployment-doc inconsistencies: spec names a Cloud Run worker pool while `docs/deployment.md` prescribes a dedicated VM; host-network appliance is said to bind `0.0.0.0:5353` while the shipped example binds `127.0.0.1:5353` | open | Verify against spec intent, then correct the non-canonical document |
 
@@ -637,7 +645,7 @@ D4 is likely rework. G2 is independent of every remaining row and can proceed in
 | D1, D2 | Fixed | `alumina-gzqn4.2` | closed — `0205f69`, boundary PASS, review APPROVE |
 | D6 | Fixed | `alumina-gzqn4.5` | closed — `56eb45d`, guard proofs + boundary PASS, review r2 APPROVE |
 | D3 | Governed amendment G1 | `alumina-gzqn4.3` | semantics chosen: K=16 set, select on every new fingerprint after the first; exact text + governed increment outstanding |
-| D5 | Governed amendment G2 | `alumina-gzqn4.4` | semantics chosen: explicit `resolver_trusted` required; exact text + governed increment outstanding |
+| D5 | Fixed (G2 + G2a) | `alumina-gzqn4.4`, `alumina-gzqn4.15` | closed — `cbaecfa`, digest `b9941f00…`, source + governance APPROVE |
 | D9–D12 | Fixed | `alumina-gzqn4.6` | closed — `e110da9`, boundary PASS, review r2 APPROVE |
 | D4, D7–D18 | per §3 | `alumina-gzqn4.1` | registered |
 
