@@ -389,8 +389,7 @@ fn config_load_missing_file_fails() {
 #[test]
 fn config_non_utf8_document_fails_with_dedicated_encoding_error() {
     let dir = TempDir::new("nonutf8");
-    let path = dir.write("config.toml", "");
-    std::fs::write(&path, [0x66, 0x6f, 0x6f, 0xff, 0xfe]).expect("write invalid UTF-8 fixture");
+    let path = dir.write_bytes("config.toml", &[0x66, 0x6f, 0x6f, 0xff, 0xfe]);
     let err = config::load_config_document(&path.to_string_lossy());
     assert!(
         matches!(err, Err(ConfigError::NotUtf8 { .. })),
@@ -707,4 +706,141 @@ fn inventory_reports_retained_vs_transient_vs_reserved_honestly() {
         inv.dns_named_buffer_bytes() > 512 + 16 * 1024,
         "DNS named buffers must cover the query buffer plus the message-limit response buffer"
     );
+}
+
+fn plant_symlink(link: &std::path::Path, target: &std::path::Path) {
+    std::os::unix::fs::symlink(target, link).expect("plant symlink");
+}
+
+#[test]
+fn temp_dir_name_is_unpredictable() {
+    let first = TempDir::new("guard");
+    let second = TempDir::new("guard");
+    let name = |dir: &TempDir| {
+        dir.path()
+            .file_name()
+            .expect("temp dir name")
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert_ne!(
+        name(&first),
+        name(&second),
+        "two constructions with one tag must not share a name"
+    );
+    let suffix = name(&first)
+        .rsplit('-')
+        .next()
+        .expect("name suffix")
+        .to_owned();
+    assert_eq!(
+        suffix.len(),
+        32,
+        "temp dir name {suffix:?} must end with 32 entropy hex chars"
+    );
+    assert!(
+        suffix.bytes().all(|c| c.is_ascii_hexdigit()),
+        "temp dir name {suffix:?} must end with 32 entropy hex chars"
+    );
+}
+
+#[test]
+fn temp_dir_is_private_0700() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("private");
+    let mode = std::fs::metadata(dir.path())
+        .expect("stat temp dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "temp dir mode must be 0700, got {mode:04o}");
+}
+
+#[test]
+fn temp_dir_write_refuses_a_pre_existing_path() {
+    let dir = TempDir::new("guard-write");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, b"sentinel").expect("plant file");
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = dir.write("config.toml", "clobber");
+    }))
+    .is_err();
+    assert!(
+        refused,
+        "write must refuse a pre-existing path rather than clobber it"
+    );
+    assert_eq!(std::fs::read(&path).expect("read plant"), b"sentinel");
+}
+
+#[test]
+fn temp_dir_write_does_not_follow_a_symlink() {
+    let dir = TempDir::new("guard-write-link");
+    let outside = TempDir::new("guard-write-outside");
+    let victim = outside.path().join("victim");
+    plant_symlink(&dir.path().join("config.toml"), &victim);
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = dir.write("config.toml", "clobber");
+    }))
+    .is_err();
+    assert!(refused, "write must refuse a symlink rather than follow it");
+    assert!(!victim.exists(), "the symlink target must not be created");
+}
+
+#[test]
+fn temp_dir_write_creates_a_regular_file() {
+    let dir = TempDir::new("guard-write-regular");
+    let path = dir.write("config.toml", "body");
+    let meta = std::fs::symlink_metadata(&path).expect("stat written file");
+    assert!(
+        !meta.file_type().is_symlink(),
+        "the written fixture must be a regular file"
+    );
+    assert_eq!(std::fs::read(&path).expect("read written file"), b"body");
+}
+
+#[test]
+fn temp_dir_refuses_a_preplanted_directory_path() {
+    let root = TempDir::new("guard-plant");
+    let planted = root.path().join("already-here");
+    std::fs::create_dir(&planted).expect("plant directory");
+    let err = TempDir::create_at(planted)
+        .map(|_| ())
+        .expect_err("a preplanted directory path must be refused");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::AlreadyExists,
+        "refusal must be the exclusive-creation EEXIST, got {err}"
+    );
+}
+
+#[test]
+fn temp_dir_refuses_a_preplanted_symlink_path() {
+    let root = TempDir::new("guard-link-plant");
+    let victim = root.path().join("victim");
+    std::fs::create_dir(&victim).expect("victim directory");
+    let planted = root.path().join("redirect");
+    plant_symlink(&planted, &victim);
+    TempDir::create_at(planted)
+        .map(|_| ())
+        .expect_err("a preplanted symlink path must be refused");
+    assert!(
+        std::fs::read_dir(&victim)
+            .expect("read victim")
+            .next()
+            .is_none(),
+        "the symlink target must not receive the private directory"
+    );
+}
+
+#[test]
+fn temp_dir_create_at_yields_a_fresh_private_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = TempDir::new("guard-fresh");
+    let fresh = TempDir::create_at(root.path().join("fresh")).expect("fresh private dir");
+    let mode = std::fs::metadata(fresh.path())
+        .expect("stat fresh dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "created dir mode must be 0700, got {mode:04o}");
 }
