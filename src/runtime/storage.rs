@@ -1822,12 +1822,17 @@ mod assurance_bridge_tests {
     }
 
     #[cfg(feature = "alloc-witness")]
-    fn actual_owner_expiry_then_recovery_body() {
-        use crate::dns::cache::evidence::{Evidence, ResolverSource};
-        use crate::dns::cache::{Family, Generation, StagedPositive};
+    struct ExpiryRecoveryArrange {
+        responder: crate::dns::transport::tests::BoundedResponder,
+        storage: ServeStorage,
+        reader: std::os::unix::net::UnixStream,
+        bytes: [u8; 16384],
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    fn arrange_expiry_recovery() -> ExpiryRecoveryArrange {
+        use crate::dns::transport::StartupReport;
         use crate::dns::transport::tests::{Step, spawn_bounded_responder};
-        use crate::dns::transport::{ExchangeClass, StartupReport, TurnResult};
-        use crate::eligibility::NumericAddr;
         use std::io::Read;
         use std::net::SocketAddr;
         use std::os::unix::net::UnixStream;
@@ -1850,6 +1855,36 @@ mod assurance_bridge_tests {
             .dns
             .begin_window(peer, *storage.config.resolver_set(), 1000, Duration::ZERO)
             .unwrap();
+        publish_expiry_recovery_proof(&mut storage);
+        let startup = storage
+            .settle_startup(1000, StartupReport::default(), 0, false)
+            .unwrap();
+        assert_eq!(
+            startup.decision(),
+            super::StartupDecision::Serve(super::ServingMode::Full)
+        );
+        storage.logs.drain_sink();
+        let mut bytes = [0u8; 16384];
+        let n = reader.read(&mut bytes).unwrap();
+        assert!(
+            std::str::from_utf8(&bytes[..n])
+                .unwrap()
+                .contains("phase=boot")
+        );
+        ExpiryRecoveryArrange {
+            responder,
+            storage,
+            reader,
+            bytes,
+        }
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    fn publish_expiry_recovery_proof(storage: &mut ServeStorage) {
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Family, Generation, StagedPositive};
+        use crate::eligibility::NumericAddr;
+
         let name = storage.cache.name_index(0).unwrap();
         let old =
             Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
@@ -1864,13 +1899,36 @@ mod assurance_bridge_tests {
         )
         .unwrap();
         storage.cache.publish_positive(&staged).unwrap();
-        let startup = storage
-            .settle_startup(1000, StartupReport::default(), 0, false)
-            .unwrap();
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    fn assert_expiry_recovery_settled(
+        arrange: &mut ExpiryRecoveryArrange,
+        started: Instant,
+        returned: Instant,
+    ) {
+        let storage = &mut arrange.storage;
+        let observed = storage.assurance_clock.unwrap().last;
+        assert!(started <= observed && observed <= returned);
+        let secs = storage.cache_secs(observed);
         assert_eq!(
-            startup.decision(),
-            super::StartupDecision::Serve(super::ServingMode::Full)
+            secs,
+            crate::runtime::tunnel::WorkerClock::new(storage.origin, storage.now0)
+                .cache_secs(observed)
         );
+        assert!((1001..1060).contains(&secs), "{secs}");
+        assert_expiry_recovery_frames(storage, &mut arrange.reader, &mut arrange.bytes, secs);
+        assert_eq!(storage.assurance[0].unwrap().sequence, 2);
+    }
+
+    #[cfg(feature = "alloc-witness")]
+    fn actual_owner_expiry_then_recovery_body() {
+        use crate::dns::cache::Family;
+        use crate::dns::transport::{ExchangeClass, TurnResult};
+
+        let mut arrange = arrange_expiry_recovery();
+        let storage = &mut arrange.storage;
+        let name = storage.cache.name_index(0).unwrap();
         assert_eq!(storage.dns.now_u64(), 1000);
         assert!(
             storage
@@ -1880,14 +1938,6 @@ mod assurance_bridge_tests {
                 .retained()
                 .unwrap()
                 .time_valid()
-        );
-        storage.logs.drain_sink();
-        let mut bytes = [0u8; 16384];
-        let n = reader.read(&mut bytes).unwrap();
-        assert!(
-            std::str::from_utf8(&bytes[..n])
-                .unwrap()
-                .contains("phase=boot")
         );
         let started = Instant::now();
         let deadline = started + Duration::from_secs(5);
@@ -1909,18 +1959,8 @@ mod assurance_bridge_tests {
         assert!(matches!(terminal, TurnResult::Published(_)), "{terminal:?}");
         assert!(counts.all_zero(), "{counts:?}");
         let returned = Instant::now();
-        let observed = storage.assurance_clock.unwrap().last;
-        assert!(started <= observed && observed <= returned);
-        let secs = storage.cache_secs(observed);
-        assert_eq!(
-            secs,
-            crate::runtime::tunnel::WorkerClock::new(storage.origin, storage.now0)
-                .cache_secs(observed)
-        );
-        assert!((1001..1060).contains(&secs), "{secs}");
-        assert_expiry_recovery_frames(&mut storage, &mut reader, &mut bytes, secs);
-        assert_eq!(storage.assurance[0].unwrap().sequence, 2);
-        responder.finish().unwrap();
+        assert_expiry_recovery_settled(&mut arrange, started, returned);
+        arrange.responder.finish().unwrap();
     }
 
     #[cfg(feature = "alloc-witness")]
