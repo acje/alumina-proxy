@@ -983,34 +983,84 @@ impl LogStore {
         self.enqueue(Level::Info, Kind::ShutdownFinal, &fields);
     }
 
+    /// Emits the reserved monitor summary plus the best-effort detail batches.
+    /// The summary is the authoritative report of report-time loss
+    /// (docs/alumina-proxy.md:344), so the admission of every detail batch is
+    /// planned from the exact capacity the reserved commit leaves and each
+    /// refused batch is counted on the monitor *before* the summary is
+    /// encoded: the summary that reports the loss is the one that caused it.
+    /// Only the admitted batches are then enqueued, so no loss is counted
+    /// twice; admitted batches keep their `part=n/total` position in the full
+    /// batch set and share one encoder cursor, preserving admission order.
+    ///
+    /// Accepted residual: the summary encoder is proven to fit by the
+    /// record-geometry test, so an encode failure there is an invariant
+    /// violation — debug-asserted rather than folded back into the loss
+    /// counters. Likewise an admitted batch cannot fail on capacity; a release
+    /// build that violated the geometry would count a whole-record store drop
+    /// without a matching monitor loss, which the geometry test excludes.
     pub(crate) fn monitor_summary(&mut self, secs: u64, monitor: &mut Monitor) -> bool {
         self.set_now(secs);
+        let domain_total = count_domain_batches(monitor);
+        let capture_total = count_capture_batches(monitor);
+        let spare = u32::try_from(self.spare_after_reserved()).unwrap_or(u32::MAX);
+        let admitted_domain = domain_total.min(spare);
+        let admitted_capture = capture_total.min(spare - admitted_domain);
+        let lost_domain = domain_total - admitted_domain;
+        let lost_capture = capture_total - admitted_capture;
+        for _ in 0..lost_domain {
+            monitor.note_report_drop();
+        }
+        for _ in 0..lost_capture {
+            monitor.note_suppressed_detail();
+        }
+        for _ in 0..(lost_domain + lost_capture) {
+            self.drop_one();
+        }
         let committed = self.enqueue_reserved(Kind::Monitor, |buf| {
             let monitor_ref = &*monitor;
             encode_monitor_summary(buf, secs, monitor_ref)
         });
+        debug_assert!(
+            committed,
+            "the reserved summary always commits: a free slot admits it and a full ring displaces a normal record"
+        );
         if committed {
             let mut start = 0usize;
-            let total = count_domain_batches(monitor);
-            for part in 1..=total {
+            for part in 1..=admitted_domain {
                 let ok = self.enqueue_normal(|buf| {
                     let monitor_ref = &*monitor;
-                    encode_monitor_domain_batch(buf, secs, part, total, monitor_ref, &mut start)
+                    encode_monitor_domain_batch(
+                        buf,
+                        secs,
+                        part,
+                        domain_total,
+                        monitor_ref,
+                        &mut start,
+                    )
                 });
-                if !ok {
-                    monitor.note_report_drop();
-                }
+                debug_assert!(
+                    ok,
+                    "an admitted domain batch has capacity and fits its slot"
+                );
             }
             let mut start = 0usize;
-            let total = count_capture_batches(monitor);
-            for part in 1..=total {
+            for part in 1..=admitted_capture {
                 let ok = self.enqueue_normal(|buf| {
                     let monitor_ref = &*monitor;
-                    encode_monitor_capture_batch(buf, secs, part, total, monitor_ref, &mut start)
+                    encode_monitor_capture_batch(
+                        buf,
+                        secs,
+                        part,
+                        capture_total,
+                        monitor_ref,
+                        &mut start,
+                    )
                 });
-                if !ok {
-                    monitor.note_suppressed_detail();
-                }
+                debug_assert!(
+                    ok,
+                    "an admitted capture batch has capacity and fits its slot"
+                );
             }
         }
         self.note_queue_usage();

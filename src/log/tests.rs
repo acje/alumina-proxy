@@ -1449,6 +1449,191 @@ mod monitor_queue {
         );
     }
 
+    /// Every line of `text` that is a record of `kind`: the leading
+    /// `level=info kind=` header excludes the longer detail-batch kinds.
+    fn records_of_kind<'a>(text: &'a str, kind: &str) -> Vec<&'a str> {
+        let header = format!("level=info kind={kind} ");
+        text.lines()
+            .filter(|line| line.starts_with(&header))
+            .collect()
+    }
+
+    #[test]
+    fn logging_monitor_summary_carries_the_domain_loss_it_causes() {
+        let (mut store, mut file) = file_logstore();
+        let mut guard = 0usize;
+        while store.len() < QUEUE_SLOTS - 2 && guard < 8 * QUEUE_SLOTS {
+            store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
+            guard += 1;
+        }
+        assert_eq!(
+            store.len(),
+            QUEUE_SLOTS - 2,
+            "two free slots: one for the reserved summary, one for a single detail batch"
+        );
+        let mut m = Monitor::new();
+        for index in 0..=DOMAIN_BATCH {
+            m.note_fact_early_data(DomainOrdinal::from_index(index).expect("ordinal in range"));
+        }
+        assert_eq!(
+            count_domain_batches(&m),
+            2,
+            "DOMAIN_BATCH+1 nonzero ordinals need two monitor_domain batches"
+        );
+        let dropped_before = store.dropped();
+        assert!(
+            store.monitor_summary(9, &mut m),
+            "the reserved summary commits into a free slot without displacing"
+        );
+        assert_eq!(
+            store.len(),
+            QUEUE_SLOTS,
+            "the summary plus the one admitted detail batch fill the ring"
+        );
+        assert_eq!(
+            m.report_drops(),
+            1,
+            "the second domain batch cannot be admitted: one report-time loss"
+        );
+        assert_eq!(
+            store.dropped(),
+            dropped_before + 1,
+            "the refused batch is still a whole-record drop"
+        );
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).expect("utf8 records");
+        let summary = records_of_kind(&text, "monitor");
+        assert_eq!(summary.len(), 1, "exactly one summary in this window");
+        assert!(
+            summary[0].contains(" report_drops=1 "),
+            "the summary that reports the loss is the one that caused it: {}",
+            summary[0]
+        );
+        let admitted = records_of_kind(&text, "monitor_domain");
+        assert_eq!(
+            admitted.len(),
+            1,
+            "only the admitted batch reaches the sink: {text}"
+        );
+        assert!(
+            admitted[0].contains(" part=1/2 "),
+            "the admitted batch keeps its position in the full batch set: {}",
+            admitted[0]
+        );
+
+        let first_len = text.len();
+        assert!(
+            store.monitor_summary(10, &mut m),
+            "the follow-up summary commits into the drained ring"
+        );
+        assert_eq!(
+            store.dropped(),
+            dropped_before + 1,
+            "a summary that loses nothing drops nothing"
+        );
+        assert_eq!(
+            m.report_drops(),
+            1,
+            "the same loss is never accounted twice"
+        );
+        flush_all(&mut store);
+        let follow_up_text = String::from_utf8(read_all(&mut file)).expect("utf8 records");
+        let follow_up_text = &follow_up_text[first_len..];
+        let follow_up = records_of_kind(follow_up_text, "monitor");
+        assert_eq!(follow_up.len(), 1, "exactly one follow-up summary");
+        assert!(
+            follow_up[0].contains(" report_drops=1 "),
+            "the follow-up carries the already-delivered total, never a phantom loss: {}",
+            follow_up[0]
+        );
+        let parts = records_of_kind(follow_up_text, "monitor_domain");
+        assert_eq!(parts.len(), 2, "both batches fit the drained ring");
+        assert!(
+            parts[0].contains(" part=1/2 "),
+            "first admitted batch stays 1/2: {}",
+            parts[0]
+        );
+        assert!(
+            parts[1].contains(" part=2/2 "),
+            "the cursor resumes at the next batch and stays 2/2: {}",
+            parts[1]
+        );
+    }
+
+    #[test]
+    fn logging_monitor_summary_carries_the_capture_loss_it_causes() {
+        use crate::enforcement::monitor::{CapturedDetail, SlotCapture};
+        let (mut store, mut file) = file_logstore();
+        let mut guard = 0usize;
+        while store.len() < QUEUE_SLOTS - 2 && guard < 8 * QUEUE_SLOTS {
+            store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
+            guard += 1;
+        }
+        assert_eq!(store.len(), QUEUE_SLOTS - 2, "one spare detail slot");
+        let mut m = Monitor::new();
+        let cause = AnyIllegalCause::HostNotAllowlisted;
+        let effect = Effect::Block {
+            scope: Scope::Connection,
+        };
+        for i in 0..=CAPTURE_BATCH {
+            m.note_consumed_capture(SlotCapture {
+                slot: i,
+                generation: 1,
+                detail: Some(CapturedDetail {
+                    fact: CapturedFact::AnyIllegal(cause),
+                    effect,
+                }),
+            });
+        }
+        assert_eq!(
+            count_capture_batches(&m),
+            2,
+            "CAPTURE_BATCH+1 captures need two monitor_capture batches"
+        );
+        assert_eq!(
+            count_domain_batches(&m),
+            0,
+            "no domain detail in this window"
+        );
+        let dropped_before = store.dropped();
+        assert!(store.monitor_summary(9, &mut m), "summary commits");
+        assert_eq!(
+            m.capture_drops(),
+            1,
+            "the refused capture batch keeps its own suppressed-detail channel"
+        );
+        assert_eq!(
+            m.report_drops(),
+            0,
+            "a refused capture batch is never a domain report_drop"
+        );
+        assert_eq!(
+            store.dropped(),
+            dropped_before + 1,
+            "the refused capture batch is one whole-record drop"
+        );
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).expect("utf8 records");
+        let summary = records_of_kind(&text, "monitor");
+        assert_eq!(summary.len(), 1, "exactly one summary");
+        assert!(
+            summary[0].contains(" capture_drops=1 ") && summary[0].contains(" report_drops=0 "),
+            "the summary carries the projected capture loss on its own counter: {}",
+            summary[0]
+        );
+        let admitted = records_of_kind(&text, "monitor_capture");
+        assert_eq!(
+            admitted.len(),
+            1,
+            "only the admitted batch reaches the sink"
+        );
+        assert!(
+            admitted[0].contains(" part=1/2 "),
+            "the admitted batch keeps its position in the full batch set: {}",
+            admitted[0]
+        );
+    }
+
     #[test]
     fn logging_monitor_queued_capture_batch_stranded_on_sink_failure_is_generic_drop() {
         use crate::enforcement::monitor::{CapturedDetail, SlotCapture};

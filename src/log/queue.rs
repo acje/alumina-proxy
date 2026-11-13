@@ -75,6 +75,13 @@ impl LogStore {
     pub(super) const fn write_index(&self) -> usize {
         (self.front + self.count) & QUEUE_MASK
     }
+    /// Free normal-record capacity left after one reserved record commits: a
+    /// reserved commit takes a free slot, or on a full ring displaces a normal
+    /// record and leaves the ring full. Known before the reserved bytes exist,
+    /// so a caller can plan a best-effort tail against it.
+    pub(super) const fn spare_after_reserved(&self) -> usize {
+        QUEUE_SLOTS.saturating_sub(self.count).saturating_sub(1)
+    }
     pub(super) fn enqueue(&mut self, level: Level, kind: Kind, fields: &[Field<'_>]) {
         if self.count >= QUEUE_SLOTS {
             self.drop_one();
