@@ -480,21 +480,66 @@ mod startup_records {
         );
     }
 
-    #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one measurement table building the worst-case input for every record kind"
-    )]
-    fn logging_worst_case_record_per_kind_fits_the_slot_with_margin() {
-        use crate::dns::incident_report::TypeSummary;
-        use crate::dns::outcome::{FailureReason, NotAttemptedReason, ProbeVerdict};
-        use crate::enforcement::monitor::Monitor;
-        let (config, doc) = widest_legal_config();
-        let name = config.allowlist().get(0).expect("widest name").as_str();
-        assert_eq!(name.len(), FQDN_MAX_LEN);
-        let mut slot = [0u8; SLOT_BYTES];
-        let mut worst: Vec<(&str, usize)> = Vec::new();
+    use crate::dns::incident_report::TypeSummary;
+    use crate::dns::outcome::{FailureReason, NotAttemptedReason};
 
+    /// One measurement table over the shared slot: `record` encodes a record
+    /// kind into the slot and appends its framed length under a stable label.
+    struct WorstCase<'a> {
+        slot: &'a mut [u8; SLOT_BYTES],
+        measured: &'a mut Vec<(&'static str, usize)>,
+    }
+
+    impl WorstCase<'_> {
+        fn record(
+            &mut self,
+            label: &'static str,
+            level: Level,
+            kind: Kind,
+            fields: &[Field<'_>],
+        ) -> usize {
+            let bytes = encode_record(&mut *self.slot, level, kind, fields)
+                .expect("worst-case record fits the slot");
+            self.measured.push((label, bytes));
+            bytes
+        }
+    }
+
+    /// The measured length under `label`; every label asserted by the table is
+    /// present in it by construction.
+    fn measured(table: &[(&'static str, usize)], label: &str) -> usize {
+        table
+            .iter()
+            .find(|(kind, _)| *kind == label)
+            .expect("the measurement table holds every asserted record kind")
+            .1
+    }
+
+    /// Every measured record must fit the shared slot and, for the monitor
+    /// family, the tighter monitor-record bound.
+    fn assert_worst_case_table(worst: &[(&'static str, usize)]) {
+        assert_eq!(worst.len(), 21, "every record kind is measured");
+        for (kind_name, len) in worst {
+            eprintln!(
+                "worst-case {kind_name:<16} {len:>5} B record, {:>5} B margin",
+                SLOT_BYTES - len
+            );
+            assert!(
+                *len < SLOT_BYTES,
+                "{kind_name} worst case incl framing fits the 2 KiB entry: {len}"
+            );
+            if kind_name.starts_with("monitor") {
+                assert!(
+                    *len <= MONITOR_RECORD_MAX,
+                    "{kind_name} worst case fits the 2048 B monitor record bound: {len}"
+                );
+            }
+        }
+    }
+
+    /// The startup warning, split per-name record, and final summary, all
+    /// driven by the widest legal FQDN.
+    fn measure_startup_records(case: &mut WorstCase<'_>, name: &str) {
         let warn = [
             Field::new("secs", Val::U64(u64::MAX)),
             Field::new("name", Val::Str(name)),
@@ -502,27 +547,23 @@ mod startup_records {
             Field::new("reason", Val::Str("window_closed")),
             Field::new("context", Val::OptStr(Some("both"))),
         ];
-        let warn_bytes =
-            encode_record(&mut slot, Level::Warn, Kind::StartupWarning, &warn).expect("fits");
+        let warn_bytes = case.record("startup_warning", Level::Warn, Kind::StartupWarning, &warn);
         eprintln!(
             "measured startup_warning worst bytes={warn_bytes} headroom={}",
             SLOT_BYTES - warn_bytes
         );
-        worst.push(("startup_warning", warn_bytes));
 
-        worst.push((
-            "startup_name",
-            encode_record_name(
-                &mut slot,
-                u64::MAX,
-                &StartupUnresolved {
-                    ordinal: u32::MAX,
-                    name,
-                    outcome: NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed),
-                },
-            )
-            .expect("fits"),
-        ));
+        let name_bytes = encode_record_name(
+            &mut *case.slot,
+            u64::MAX,
+            &StartupUnresolved {
+                ordinal: u32::MAX,
+                name,
+                outcome: NameOutcome::NotAttempted(NotAttemptedReason::WindowClosed),
+            },
+        )
+        .expect("worst-case record fits the slot");
+        case.measured.push(("startup_name", name_bytes));
 
         let summary = [
             Field::new("secs", Val::U64(u64::MAX)),
@@ -536,31 +577,30 @@ mod startup_records {
             Field::new("dropped", Val::U64(u64::MAX)),
             Field::new("names_dropped", Val::U64(u64::MAX)),
         ];
-        worst.push((
-            "startup_final",
-            encode_record_final(&mut slot, Level::Info, Kind::StartupFinal, &summary)
-                .expect("fits"),
-        ));
+        case.record("startup_final", Level::Info, Kind::StartupFinal, &summary);
+    }
 
+    /// The terminal, rejection, and early-activity records: the widest peer
+    /// address and the widest FQDN drive the address-bearing kinds.
+    fn measure_terminal_records(case: &mut WorstCase<'_>, name: &str) {
         let fatal_msg = "m".repeat(300);
         let fatal = [
             Field::new("secs", Val::U64(u64::MAX)),
             Field::new("message", Val::Str(&fatal_msg)),
         ];
-        worst.push((
-            "fatal",
-            encode_record(&mut slot, Level::Error, Kind::Fatal, &fatal).expect("fits"),
-        ));
+        case.record("fatal", Level::Error, Kind::Fatal, &fatal);
 
         let shutdown = [
             Field::new("secs", Val::U64(u64::MAX)),
             Field::new("status", Val::Str("drained")),
             Field::new("dropped", Val::U64(u64::MAX)),
         ];
-        worst.push((
+        case.record(
             "shutdown_final",
-            encode_record(&mut slot, Level::Info, Kind::ShutdownFinal, &shutdown).expect("fits"),
-        ));
+            Level::Info,
+            Kind::ShutdownFinal,
+            &shutdown,
+        );
 
         let peer: SocketAddr = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535"
             .parse()
@@ -571,10 +611,7 @@ mod startup_records {
             Field::new("client", Val::OptAddr(Some(peer))),
             Field::new("hostname", Val::OptStr(Some(name))),
         ];
-        worst.push((
-            "reject",
-            encode_record(&mut slot, Level::Warn, Kind::Reject, &reject).expect("fits"),
-        ));
+        case.record("reject", Level::Warn, Kind::Reject, &reject);
 
         let activity = [
             Field::new("secs", Val::U64(u64::MAX)),
@@ -582,11 +619,16 @@ mod startup_records {
             Field::new("peer", Val::OptAddr(Some(peer))),
             Field::new("activity", Val::Str("reset")),
         ];
-        worst.push((
+        case.record(
             "early_activity",
-            encode_record(&mut slot, Level::Warn, Kind::EarlyActivity, &activity).expect("fits"),
-        ));
+            Level::Warn,
+            Kind::EarlyActivity,
+            &activity,
+        );
+    }
 
+    /// The high/low capacity and queue thresholds share one field shape.
+    fn measure_threshold_records(case: &mut WorstCase<'_>) {
         let threshold = [
             Field::new("secs", Val::U64(u64::MAX)),
             Field::new("dimension", Val::Str("setups")),
@@ -599,22 +641,25 @@ mod startup_records {
             ("queue_high", Kind::QueueHigh, Level::Error),
             ("queue_low", Kind::QueueLow, Level::Info),
         ] {
-            worst.push((
-                kind_name,
-                encode_record(&mut slot, level, kind, &threshold).expect("fits"),
-            ));
+            case.record(kind_name, level, kind, &threshold);
         }
+    }
 
+    /// The exchange-failure and incident open/recovered records carry the
+    /// widest resolver value beside the widest FQDN.
+    fn measure_exchange_records(case: &mut WorstCase<'_>, name: &str) {
         let exchange = [
             Field::new("secs", Val::U64(u64::MAX)),
             Field::new("name", Val::OptStr(Some(name))),
             Field::new("reason", Val::Str("pin_mismatch")),
             Field::new("resolver", resolver_val(true, None)),
         ];
-        worst.push((
+        case.record(
             "exchange_failed",
-            encode_record(&mut slot, Level::Warn, Kind::ExchangeFailed, &exchange).expect("fits"),
-        ));
+            Level::Warn,
+            Kind::ExchangeFailed,
+            &exchange,
+        );
 
         let incident_open = [
             Field::new("secs", Val::U64(u64::MAX)),
@@ -623,11 +668,12 @@ mod startup_records {
             Field::new("reason", Val::Str("pin_mismatch")),
             Field::new("resolver", resolver_val(true, None)),
         ];
-        worst.push((
+        case.record(
             "incident_open",
-            encode_record(&mut slot, Level::Warn, Kind::IncidentOpen, &incident_open)
-                .expect("fits"),
-        ));
+            Level::Warn,
+            Kind::IncidentOpen,
+            &incident_open,
+        );
 
         let incident_recovered = [
             Field::new("secs", Val::U64(u64::MAX)),
@@ -636,114 +682,114 @@ mod startup_records {
             Field::new("duration", Val::U64(u64::MAX)),
             Field::new("resolver", resolver_val(true, None)),
         ];
-        worst.push((
+        case.record(
             "incident_recovered",
-            encode_record(
-                &mut slot,
-                Level::Info,
-                Kind::IncidentRecovered,
-                &incident_recovered,
-            )
-            .expect("fits"),
-        ));
+            Level::Info,
+            Kind::IncidentRecovered,
+            &incident_recovered,
+        );
+    }
 
-        let incident_summary = IncidentSummary {
+    fn widest_type_summary() -> TypeSummary {
+        TypeSummary {
+            start: Some(u64::MAX - 1),
+            elapsed: u64::MAX,
+            reason: Some("pin_mismatch"),
+            resolver: None,
+            last_positive: Some(u64::MAX),
+            attempts: u64::MAX,
+            failures: u64::MAX,
+            addrs: u64::MAX,
+            state: "retired",
+            freshness: Some(u64::MAX),
+            retirement: Some(u64::MAX),
+        }
+    }
+
+    fn widest_incident_summary() -> IncidentSummary {
+        IncidentSummary {
             window_start: u64::MAX - 1,
             window_end: u64::MAX,
             duration: 1,
             skipped: u32::MAX,
             overflow: true,
-            types: [
-                TypeSummary {
-                    start: Some(u64::MAX - 1),
-                    elapsed: u64::MAX,
-                    reason: Some("pin_mismatch"),
-                    resolver: None,
-                    last_positive: Some(u64::MAX),
-                    attempts: u64::MAX,
-                    failures: u64::MAX,
-                    addrs: u64::MAX,
-                    state: "retired",
-                    freshness: Some(u64::MAX),
-                    retirement: Some(u64::MAX),
-                },
-                TypeSummary {
-                    start: Some(u64::MAX - 1),
-                    elapsed: u64::MAX,
-                    reason: Some("pin_mismatch"),
-                    resolver: None,
-                    last_positive: Some(u64::MAX),
-                    attempts: u64::MAX,
-                    failures: u64::MAX,
-                    addrs: u64::MAX,
-                    state: "retired",
-                    freshness: Some(u64::MAX),
-                    retirement: Some(u64::MAX),
-                },
-            ],
+            types: [widest_type_summary(), widest_type_summary()],
             tunnels: u64::MAX,
             bytes: u64::MAX,
             stale: u64::MAX,
-        };
-        worst.push((
+        }
+    }
+
+    /// The incident summary with both per-type slots saturated, plus the
+    /// eligible loss/recovery records that carry only the widest FQDN.
+    fn measure_incident_summary_records(case: &mut WorstCase<'_>, name: &str) {
+        let incident_summary = widest_incident_summary();
+        case.record(
             "incident_summary",
-            encode_record(
-                &mut slot,
-                Level::Error,
-                Kind::IncidentSummary,
-                &incident_summary_fields(u64::MAX, name, &incident_summary),
-            )
-            .expect("fits"),
-        ));
+            Level::Error,
+            Kind::IncidentSummary,
+            &incident_summary_fields(u64::MAX, name, &incident_summary),
+        );
 
         let incident_eligible = [
             Field::new("secs", Val::U64(u64::MAX)),
             Field::new("name", Val::Str(name)),
         ];
-        worst.push((
+        case.record(
             "incident_eligible_loss",
-            encode_record(
-                &mut slot,
-                Level::Error,
-                Kind::IncidentEligibleLoss,
-                &incident_eligible,
-            )
-            .expect("fits"),
-        ));
-        worst.push((
+            Level::Error,
+            Kind::IncidentEligibleLoss,
+            &incident_eligible,
+        );
+        case.record(
             "incident_eligible_recovered",
-            encode_record(
-                &mut slot,
-                Level::Info,
-                Kind::IncidentEligibleRecovered,
-                &incident_eligible,
-            )
-            .expect("fits"),
-        ));
+            Level::Info,
+            Kind::IncidentEligibleRecovered,
+            &incident_eligible,
+        );
+    }
 
+    /// The monitor family at full saturation: one summary plus the domain and
+    /// capture detail batches it carries.
+    fn measure_monitor_records(case: &mut WorstCase<'_>) {
         let mut monitor = Monitor::new();
         monitor.saturate_all_for_test();
         monitor.set_peer_ip_v6_max_for_test();
         monitor.note_serving_stale();
         monitor.note_fact_downgrade_to_plain();
-        worst.push((
-            "monitor_summary",
-            encode_monitor_summary(&mut slot, u64::MAX, &monitor).expect("fits"),
-        ));
+        let summary = encode_monitor_summary(&mut *case.slot, u64::MAX, &monitor)
+            .expect("worst-case record fits the slot");
+        case.measured.push(("monitor_summary", summary));
+
         let first_two_digit_index = 10usize;
         let mut domain_start = first_two_digit_index;
-        worst.push((
-            "monitor_domain",
-            encode_monitor_domain_batch(&mut slot, u64::MAX, 1, 3, &monitor, &mut domain_start)
-                .expect("fits"),
-        ));
-        let mut capture_start = 0usize;
-        worst.push((
-            "monitor_capture",
-            encode_monitor_capture_batch(&mut slot, u64::MAX, 1, 3, &monitor, &mut capture_start)
-                .expect("fits"),
-        ));
+        let domain = encode_monitor_domain_batch(
+            &mut *case.slot,
+            u64::MAX,
+            1,
+            3,
+            &monitor,
+            &mut domain_start,
+        )
+        .expect("worst-case record fits the slot");
+        case.measured.push(("monitor_domain", domain));
 
+        let mut capture_start = 0usize;
+        let capture = encode_monitor_capture_batch(
+            &mut *case.slot,
+            u64::MAX,
+            1,
+            3,
+            &monitor,
+            &mut capture_start,
+        )
+        .expect("worst-case record fits the slot");
+        case.measured.push(("monitor_capture", capture));
+    }
+
+    /// The resolver probe with `MAX_RESOLVERS` failed segments, each carrying
+    /// the widest configured FQDN and pin.
+    fn measure_probe_record(case: &mut WorstCase<'_>, config: &crate::config::Config) {
         let set = config.resolver_set();
         let mut segments = [ResolverProbeSegment {
             index: 0,
@@ -762,42 +808,37 @@ mod startup_records {
                 verdict: ProbeVerdict::Failed(FailureReason::PinMismatch),
             };
         }
-        worst.push((
-            "resolver_probe",
-            encode_record_probe(&mut slot, u64::MAX, &segments).expect("fits"),
-        ));
+        let probe = encode_record_probe(&mut *case.slot, u64::MAX, &segments)
+            .expect("worst-case record fits the slot");
+        case.measured.push(("resolver_probe", probe));
+    }
 
-        assert_eq!(worst.len(), 21, "every record kind is measured");
-        for (kind_name, len) in &worst {
-            eprintln!(
-                "worst-case {kind_name:<16} {len:>5} B record, {:>5} B margin",
-                SLOT_BYTES - len
-            );
-            assert!(
-                *len < SLOT_BYTES,
-                "{kind_name} worst case incl framing fits the 2 KiB entry: {len}"
-            );
-            if kind_name.starts_with("monitor") {
-                assert!(
-                    *len <= MONITOR_RECORD_MAX,
-                    "{kind_name} worst case fits the 2048 B monitor record bound: {len}"
-                );
-            }
-        }
-        let name_len = worst
-            .iter()
-            .find(|(k, _)| *k == "startup_name")
-            .expect("startup_name measured")
-            .1;
+    #[test]
+    fn logging_worst_case_record_per_kind_fits_the_slot_with_margin() {
+        let (config, doc) = widest_legal_config();
+        let name = config.allowlist().get(0).expect("widest name").as_str();
+        assert_eq!(name.len(), FQDN_MAX_LEN);
+        let mut slot = [0u8; SLOT_BYTES];
+        let mut worst: Vec<(&'static str, usize)> = Vec::new();
+        let mut case = WorstCase {
+            slot: &mut slot,
+            measured: &mut worst,
+        };
+        measure_startup_records(&mut case, name);
+        measure_terminal_records(&mut case, name);
+        measure_threshold_records(&mut case);
+        measure_exchange_records(&mut case, name);
+        measure_incident_summary_records(&mut case, name);
+        measure_monitor_records(&mut case);
+        measure_probe_record(&mut case, &config);
+
+        assert_worst_case_table(&worst);
         assert_eq!(
-            name_len, STARTUP_NAME_MAX,
+            measured(&worst, "startup_name"),
+            STARTUP_NAME_MAX,
             "the measured startup_name worst case is exactly the const bound"
         );
-        let domain_len = worst
-            .iter()
-            .find(|(k, _)| *k == "monitor_domain")
-            .expect("monitor_domain measured")
-            .1;
+        let domain_len = measured(&worst, "monitor_domain");
         assert_eq!(
             domain_len, 1870,
             "re-measured monitor_domain worst case: the maximal batch is DOMAIN_BATCH=11 \
@@ -812,20 +853,11 @@ mod startup_records {
             178,
             "the per-ordinal peer table leaves monitor_domain 178 B of the 2048 B bound"
         );
-        let probe_len = worst
-            .iter()
-            .find(|(k, _)| *k == "resolver_probe")
-            .expect("probe measured")
-            .1;
         assert!(
-            probe_len <= RESOLVER_PROBE_MAX,
-            "measured resolver_probe worst case {probe_len} within the const bound {RESOLVER_PROBE_MAX}"
+            measured(&worst, "resolver_probe") <= RESOLVER_PROBE_MAX,
+            "measured resolver_probe worst case within the const bound {RESOLVER_PROBE_MAX}"
         );
-        let summary_len = worst
-            .iter()
-            .find(|(k, _)| *k == "incident_summary")
-            .expect("summary measured")
-            .1;
+        let summary_len = measured(&worst, "incident_summary");
         assert!(
             summary_len <= 2048,
             "worst unknown resolver-shape incident summary {summary_len} fits the 2048 B record bound"
