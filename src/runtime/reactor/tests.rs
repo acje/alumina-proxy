@@ -264,10 +264,114 @@ fn drive_hello(serving: &mut Serving, wire: &[u8], approved: &str) {
     serving.buffer_and_validate(index, &[]);
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "deterministic budget-visit fixture; staged relay setup is long by design"
-)]
+fn spawn_sink_reader(
+    mut sink_stream: TcpStream,
+    received: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut tmp = [0u8; 16384];
+        loop {
+            match sink_stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => received.lock().unwrap().extend_from_slice(&tmp[..n]),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+fn wait_for_queued_burst(serving: &Serving, index: usize, peek_target: usize) {
+    let mut peekbuf = vec![0u8; 32 * 1024];
+    let avail_start = Instant::now();
+    loop {
+        let peeked = serving.slots[index]
+            .client
+            .as_ref()
+            .expect("client present")
+            .peek(&mut peekbuf);
+        assert!(
+            !matches!(
+                peeked,
+                Err(ref error) if error.kind() != io::ErrorKind::WouldBlock
+            ),
+            "client peek failed: {peeked:?}"
+        );
+        let queued = peeked.unwrap_or(0);
+        if queued >= peek_target {
+            break;
+        }
+        assert!(
+            avail_start.elapsed() < Duration::from_secs(2),
+            "the client burst never queued {peek_target} bytes before the visit (peek showed {queued})"
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn armed_budget_relay(
+    serving: &mut Serving,
+    index: usize,
+) -> (
+    TcpStream,
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    std::thread::JoinHandle<()>,
+) {
+    let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+    let sink_addr = sink.local_addr().expect("sink addr");
+    let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+    let sink_stream = sink.accept().expect("accept sink side").0;
+    sink_stream.set_nonblocking(true).expect("sink nonblocking");
+
+    let peer = StdListener::bind("127.0.0.1:0").expect("peer bind");
+    let peer_addr = peer.local_addr().expect("peer addr");
+    let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
+    let peer_stream = peer.accept().expect("accept peer side").0;
+
+    {
+        let ws = &mut serving.slots[index];
+        ws.upstream = Some(up);
+        ws.client = Some(client);
+        ws.stage = Stage::Relay;
+        ws.head_len = 4;
+        ws.buf_base = 0;
+    }
+    open_relay(serving, index);
+    serving.register_upstream(index).expect("register up");
+    serving.register_client(index).expect("register client");
+
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_reader = spawn_sink_reader(sink_stream, std::sync::Arc::clone(&received));
+    (peer_stream, received, sink_reader)
+}
+
+fn drain_rescheduled_visit(
+    serving: &mut Serving,
+    token: Token,
+    received: &std::sync::Mutex<Vec<u8>>,
+    payload_len: usize,
+) {
+    let start = Instant::now();
+    while received.lock().unwrap().len() < payload_len {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the rescheduled client burst never fully relayed"
+        );
+        serving
+            .dispatch_readiness(
+                token,
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("resume client visit");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn run_budget_visit_fixture(
     port: u16,
     first_n: usize,
@@ -275,45 +379,8 @@ fn run_budget_visit_fixture(
     assert_first_visit: impl FnOnce(&mut Serving, usize) + Send + 'static,
 ) {
     with_serving_stack(port, move |serving| {
-        let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-        let sink_addr = sink.local_addr().expect("sink addr");
-        let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-        let mut sink_stream = sink.accept().expect("accept sink side").0;
-        sink_stream.set_nonblocking(true).expect("sink nonblocking");
-
-        let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-        let peer_addr = peer_l.local_addr().expect("peer addr");
-        let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-        let mut peer_stream = peer_l.accept().expect("accept peer side").0;
-
         let index = 0;
-        {
-            let ws = &mut serving.slots[index];
-            ws.upstream = Some(up);
-            ws.client = Some(client);
-            ws.stage = Stage::Relay;
-            ws.head_len = 4;
-            ws.buf_base = 0;
-        }
-        open_relay(serving, index);
-        serving.register_upstream(index).expect("register up");
-        serving.register_client(index).expect("register client");
-
-        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let received_reader = std::sync::Arc::clone(&received);
-        let sink_reader = std::thread::spawn(move || {
-            let mut tmp = [0u8; 16384];
-            loop {
-                match sink_stream.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => received_reader.lock().unwrap().extend_from_slice(&tmp[..n]),
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+        let (mut peer_stream, received, sink_reader) = armed_budget_relay(serving, index);
 
         let payload = test_offset_pattern(96 * 1024, 10);
         let token = client_token(serving.slots[index].slot_gen, index);
@@ -325,31 +392,7 @@ fn run_budget_visit_fixture(
             .write_all(&payload[..first_n])
             .expect("pre-visit burst");
 
-        let mut peekbuf = vec![0u8; 32 * 1024];
-        let avail_start = Instant::now();
-        loop {
-            let peeked = serving.slots[index]
-                .client
-                .as_ref()
-                .expect("client present")
-                .peek(&mut peekbuf);
-            assert!(
-                !matches!(
-                    peeked,
-                    Err(ref error) if error.kind() != io::ErrorKind::WouldBlock
-                ),
-                "client peek failed: {peeked:?}"
-            );
-            let queued = peeked.unwrap_or(0);
-            if queued >= peek_target {
-                break;
-            }
-            assert!(
-                avail_start.elapsed() < Duration::from_secs(2),
-                "the client burst never queued {peek_target} bytes before the visit (peek showed {queued})"
-            );
-            std::thread::yield_now();
-        }
+        wait_for_queued_burst(serving, index, peek_target);
 
         let arms_before = serving.reschedule_client_arms;
         serving
@@ -368,23 +411,7 @@ fn run_budget_visit_fixture(
             .write_all(&payload[first_n..])
             .expect("post-visit burst");
 
-        let start = Instant::now();
-        while received.lock().unwrap().len() < payload.len() {
-            assert!(
-                start.elapsed() < Duration::from_secs(5),
-                "the rescheduled client burst never fully relayed"
-            );
-            serving
-                .dispatch_readiness(
-                    token,
-                    Readiness {
-                        readable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("resume client visit");
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        drain_rescheduled_visit(serving, token, &received, payload.len());
         let got = received.lock().unwrap();
         assert_eq!(
             got.len(),
@@ -2012,6 +2039,104 @@ mod generation_tokens {
         });
     }
 
+    fn release_slot_once_without_double_accounting(serving: &mut Serving) {
+        serving.close_slot(0);
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "release frees the seat once"
+        );
+        assert_eq!(serving.storage().pending(), 0);
+        serving.close_slot(0);
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "a second close of a released slot must not double-release (handle consumed)"
+        );
+        assert_eq!(serving.storage().pending(), 0);
+    }
+
+    fn arm_dialing_origin_early_data(serving: &mut Serving) -> TcpStream {
+        let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
+        let origin_addr = origin.local_addr().expect("origin addr");
+        let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
+        let mut origin_stream = origin.accept().expect("accept origin side").0;
+        {
+            let ws = &mut serving.slots[0];
+            ws.upstream = Some(up);
+            ws.approved = FixedHostname::normalize(b"sub.example.org");
+            ws.gate.on_connect_head(7);
+            ws.gate.on_authorized();
+            ws.stage = Stage::Dialing;
+        }
+        origin_stream
+            .write_all(b"X")
+            .expect("origin writes early data");
+        origin_stream
+    }
+
+    fn dispatch_stale_upstream(serving: &mut Serving, stale_up: Token, probe: &mut [u8; 1]) {
+        let before = (
+            serving.slots[0].buf_len,
+            serving.slots[0].fwd,
+            serving.slots[0].slot_gen,
+        );
+        serving
+            .dispatch_readiness(
+                stale_up,
+                Readiness {
+                    readable: true,
+                    writable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch stale upstream token");
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the stale upstream token must not dispatch or release the new connection"
+        );
+        assert!(matches!(serving.slots[0].stage, Stage::Dialing));
+        assert_eq!(
+            (
+                serving.slots[0].buf_len,
+                serving.slots[0].fwd,
+                serving.slots[0].slot_gen,
+            ),
+            before,
+            "stale upstream readiness must not mutate cursors or generation state"
+        );
+        assert!(
+            matches!(
+                serving.slots[0]
+                    .upstream
+                    .as_ref()
+                    .expect("upstream present")
+                    .peek(&mut probe[..]),
+                Ok(1)
+            ),
+            "the stale upstream token must be dropped before any socket read (early data still queued)"
+        );
+    }
+
+    fn dispatch_live_upstream_tripwire(serving: &mut Serving) {
+        serving
+            .dispatch_readiness(
+                upstream_token(serving.slots[0].slot_gen, 0),
+                Readiness {
+                    readable: true,
+                    writable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch live upstream token");
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the live-generation upstream token must dispatch the early-data tripwire"
+        );
+    }
+
     #[test]
     /// G1.R2 — a stale upstream token is dropped before any socket I/O: after a
     /// real release/reuse of slot 0 to a new generation, the previous generation's
@@ -2020,14 +2145,9 @@ mod generation_tokens {
     /// accounting runs exactly once (typed-handle consumption).
     /// Only the current-generation upstream token drives the upstream arm (matrix
     /// alumina-cdwui.4 §2 G1.R2, REJECT class).
-    #[expect(
-        clippy::too_many_lines,
-        reason = "full G1.R2 reuse then stale-drop cycle"
-    )]
     fn g1_r2_stale_upstream_token_after_reuse_is_dropped_before_socket_io() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            // First connection occupies slot 0 at generation 1.
             let c1 = mio::net::TcpStream::connect(SocketAddr::new(
                 IpAddr::V4([127, 0, 0, 1].into()),
                 port,
@@ -2039,25 +2159,8 @@ mod generation_tokens {
             assert_eq!(first_gen, 1, "the first admission owns generation 1");
             let stale_up = upstream_token(first_gen.wrapping_sub(1), 0);
 
-            // Real release path: the seat returns; release accounting is exactly
-            // once per admitted slot (typed-handle consumption — a second close has
-            // no handle left to release).
-            serving.close_slot(0);
-            assert_eq!(
-                serving.storage().occupied(),
-                0,
-                "release frees the seat once"
-            );
-            assert_eq!(serving.storage().pending(), 0);
-            serving.close_slot(0);
-            assert_eq!(
-                serving.storage().occupied(),
-                0,
-                "a second close of a released slot must not double-release (handle consumed)"
-            );
-            assert_eq!(serving.storage().pending(), 0);
+            release_slot_once_without_double_accounting(serving);
 
-            // Real admit path reuses slot 0 at a new generation.
             let c2 = mio::net::TcpStream::connect(SocketAddr::new(
                 IpAddr::V4([127, 0, 0, 1].into()),
                 port,
@@ -2077,31 +2180,15 @@ mod generation_tokens {
                 "the stale upstream token's generation is the prior epoch, never the live one"
             );
 
-            // Attach a live upstream socket and arm the dialing/gate state so a
-            // real dispatch would react to early origin data (pattern tests.rs:1154).
-            let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
-            let origin_addr = origin.local_addr().expect("origin addr");
-            let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
-            let mut origin_stream = origin.accept().expect("accept origin side").0;
-            {
-                let ws = &mut serving.slots[0];
-                ws.upstream = Some(up);
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
-                ws.gate.on_connect_head(7);
-                ws.gate.on_authorized();
-                ws.stage = Stage::Dialing;
-            }
-            origin_stream
-                .write_all(b"X")
-                .expect("origin writes early data");
             let mut probe = [0u8; 1];
+            let _origin = arm_dialing_origin_early_data(serving);
             let mut waits = 0;
             loop {
                 match serving.slots[0]
                     .upstream
                     .as_ref()
                     .expect("upstream present")
-                    .peek(&mut probe)
+                    .peek(&mut probe[..])
                 {
                     Ok(1) => break,
                     Ok(_) => {}
@@ -2115,66 +2202,8 @@ mod generation_tokens {
                 );
                 std::thread::yield_now();
             }
-            let before = (
-                serving.slots[0].buf_len,
-                serving.slots[0].fwd,
-                serving.slots[0].slot_gen,
-            );
-            serving
-                .dispatch_readiness(
-                    stale_up,
-                    Readiness {
-                        readable: true,
-                        writable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("dispatch stale upstream token");
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the stale upstream token must not dispatch or release the new connection"
-            );
-            assert!(matches!(serving.slots[0].stage, Stage::Dialing));
-            assert_eq!(
-                (
-                    serving.slots[0].buf_len,
-                    serving.slots[0].fwd,
-                    serving.slots[0].slot_gen,
-                ),
-                before,
-                "stale upstream readiness must not mutate cursors or generation state"
-            );
-            assert!(
-                matches!(
-                    serving.slots[0]
-                        .upstream
-                        .as_ref()
-                        .expect("upstream present")
-                        .peek(&mut probe),
-                    Ok(1)
-                ),
-                "the stale upstream token must be dropped before any socket read (early data still queued)"
-            );
-
-            // Positive control through the real path: the current-generation
-            // upstream token does dispatch and the dialing early-data tripwire
-            // reacts (same pending byte).
-            serving
-                .dispatch_readiness(
-                    upstream_token(serving.slots[0].slot_gen, 0),
-                    Readiness {
-                        readable: true,
-                        writable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("dispatch live upstream token");
-            assert_eq!(
-                serving.storage().occupied(),
-                0,
-                "the live-generation upstream token must dispatch the early-data tripwire"
-            );
+            dispatch_stale_upstream(serving, stale_up, &mut probe);
+            dispatch_live_upstream_tripwire(serving);
         });
     }
 
