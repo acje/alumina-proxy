@@ -3108,11 +3108,11 @@ mod startup_warning {
         use crate::eligibility::NumericAddr;
 
         let config = crate::config::parse_config_document(&boot_status_document(mode))
-            .unwrap()
+            .expect("boot-status config parses")
             .with_kernel_assigned_test_listener();
-        let mut storage = ServeStorage::boot(&config).unwrap();
+        let mut storage = ServeStorage::boot(&config).expect("boot storage");
         for ordinal in 0..1 + usize::from(mode == ServingMode::Full) {
-            let name = storage.cache().name_index(ordinal).unwrap();
+            let name = storage.cache().name_index(ordinal).expect("ordinal");
             let staged = StagedPositive::stage(
                 name,
                 Family::A,
@@ -3121,20 +3121,21 @@ mod startup_warning {
                 1000,
                 60,
             )
-            .unwrap();
-            storage.cache_mut().publish_positive(&staged).unwrap();
+            .expect("staged positive");
+            let cache = storage.cache_mut();
+            cache.publish_positive(&staged).expect("published");
         }
-        let (mut reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
-        reader.set_nonblocking(true).unwrap();
-        writer.set_nonblocking(true).unwrap();
-        *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+        let (mut reader, writer) = std::os::unix::net::UnixStream::pair().expect("log socket pair");
+        reader.set_nonblocking(true).expect("nonblocking reader");
+        writer.set_nonblocking(true).expect("nonblocking writer");
+        *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).expect("log sink");
         let addr = SocketAddr::from(([127, 0, 0, 1], 9));
         let outcome = if cooperative {
-            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-            let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
+            let traffic = crate::inventory::TrafficStorage::allocate().expect("traffic");
+            let mut owner = Preallocated::preallocate(storage, traffic).expect("owner");
             let outcome = owner
                 .run_startup_within(addr, 1000, Duration::ZERO)
-                .unwrap();
+                .expect("startup decision");
             let observed = Instant::now();
             for ordinal in 0..2 {
                 assert_eq!(
@@ -3149,7 +3150,7 @@ mod startup_warning {
         } else {
             let outcome = storage
                 .run_startup_within(addr, 1000, Duration::ZERO)
-                .unwrap();
+                .expect("startup decision");
             let observed = Instant::now();
             for ordinal in 0..2 {
                 assert_eq!(
@@ -3166,8 +3167,8 @@ mod startup_warning {
     #[cfg(feature = "alloc-witness")]
     fn assert_boot_status_frames(reader: &mut std::os::unix::net::UnixStream, mode: ServingMode) {
         let mut bytes = [0u8; 16384];
-        let n = reader.read(&mut bytes).unwrap();
-        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let n = reader.read(&mut bytes).expect("boot-status records");
+        let text = std::str::from_utf8(&bytes[..n]).expect("log text");
         let frames: Vec<_> = text
             .lines()
             .filter(|line| line.contains("kind=dns_assurance"))
@@ -3227,28 +3228,28 @@ mod startup_warning {
     fn actual_failure_boot(cooperative: bool) {
         use std::os::unix::net::UnixStream;
         let config = config_two_names(ephemeral_port());
-        let mut storage = ServeStorage::boot(&config).unwrap();
-        let (mut reader, writer) = UnixStream::pair().unwrap();
-        reader.set_nonblocking(true).unwrap();
-        writer.set_nonblocking(true).unwrap();
-        *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
+        let mut storage = ServeStorage::boot(&config).expect("boot storage");
+        let (mut reader, writer) = UnixStream::pair().expect("log socket pair");
+        reader.set_nonblocking(true).expect("nonblocking reader");
+        writer.set_nonblocking(true).expect("nonblocking writer");
+        *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).expect("log sink");
         let addr = SocketAddr::from(([127, 0, 0, 1], ephemeral_port()));
         let outcome = if cooperative {
-            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-            let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
+            let traffic = crate::inventory::TrafficStorage::allocate().expect("traffic");
+            let mut owner = Preallocated::preallocate(storage, traffic).expect("owner");
             owner.run_startup_within(addr, 1000, Duration::from_millis(300))
         } else {
             storage.run_startup_within(addr, 1000, Duration::from_millis(300))
         }
-        .unwrap();
+        .expect("startup decision");
         assert!(matches!(
             outcome.decision(),
             StartupDecision::Exit75 { unresolved: 2 }
         ));
         assert!(outcome.report.failed > 0);
         let mut bytes = [0u8; 16384];
-        let n = reader.read(&mut bytes).unwrap();
-        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+        let n = reader.read(&mut bytes).expect("failure boot records");
+        let text = std::str::from_utf8(&bytes[..n]).expect("log text");
         let frames: Vec<_> = text
             .lines()
             .filter(|line| line.contains("kind=dns_assurance"))
@@ -3258,7 +3259,7 @@ mod startup_warning {
             let frame = frames
                 .iter()
                 .find(|frame| frame.contains(name.as_str()))
-                .unwrap();
+                .expect("frame per allowlisted name");
             assert!(frame.contains("boot_status=\"failure\""));
             for (index, family) in ["a", "aaaa"].iter().enumerate() {
                 assert!(
@@ -3684,7 +3685,9 @@ fn assert_corroboration_incident(
     mirror: &mut crate::dns::incident_report::IncidentReport,
     close: u64,
 ) {
-    let expected = mirror.close_window(0, close).unwrap();
+    let expected = mirror
+        .close_window(0, close)
+        .expect("mirror incident window closes");
     assert_eq!(expected.per_type[0].attempts.value, 1);
     assert_eq!(expected.per_type[1].attempts.value, 1);
     assert_eq!(expected.per_type[0].failures.value, 1);
