@@ -701,6 +701,39 @@ fn advance_turn(
         .expect("exchange turn")
 }
 
+/// Starts the first exchange on `transport` for `fqdn0` and returns the typed
+/// refusal a second start on `fqdn1` for the same seat produces.
+fn start_first_then_refused_second(
+    transport: &mut StartupDns,
+    fqdn0: &Fqdn,
+    fqdn1: &Fqdn,
+    deadline: Instant,
+) -> StartupDnsError {
+    transport
+        .start_exchange(
+            fqdn0,
+            Family::A,
+            0,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
+        .expect("the first start is admitted");
+    transport
+        .start_exchange(
+            fqdn1,
+            Family::A,
+            1,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
+        .expect_err(
+            "a second start on an active exchange must be refused, never silently \
+         replace the outstanding exchange",
+        )
+}
+
 /// Drives one exchange to its terminal turn under [`EXCHANGE_DRIVE_TURNS`],
 /// waiting for the owner-owned readiness the turn asked for unless the exchange
 /// deadline is already spent (waiting past it would block); `None` means the
@@ -1990,14 +2023,10 @@ mod apply {
         );
     }
     #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "long two-part assertion that a refused second start leaves the first exchange surviving"
-    )]
     fn start_active_exchange_is_refused_and_first_survives() {
         let cfg = config();
-        let fqdn0 = cfg.allowlist().get(0).unwrap();
-        let fqdn1 = cfg.allowlist().get(1).unwrap();
+        let fqdn0 = cfg.allowlist().get(0).unwrap().clone();
+        let fqdn1 = cfg.allowlist().get(1).unwrap().clone();
         let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
         {
             let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe");
@@ -2006,29 +2035,7 @@ mod apply {
             let mut transport = StartupDns::new().unwrap();
             transport.addr = ns(dead_port);
             transport.now0 = 1_000_000;
-            transport
-                .start_exchange(
-                    fqdn0,
-                    Family::A,
-                    0,
-                    deadline,
-                    Generation::INITIAL,
-                    ExchangeClass::Startup,
-                )
-                .unwrap();
-            let err = transport
-                .start_exchange(
-                    fqdn1,
-                    Family::A,
-                    1,
-                    deadline,
-                    Generation::INITIAL,
-                    ExchangeClass::Startup,
-                )
-                .expect_err(
-                    "a second start on an active exchange must be refused, never silently \
-                 replace the outstanding exchange",
-                );
+            let err = start_first_then_refused_second(&mut transport, &fqdn0, &fqdn1, deadline);
             assert_eq!(
                 err,
                 StartupDnsError::ExchangeActive,
@@ -2036,62 +2043,26 @@ mod apply {
             );
         }
         {
-            let responder = spawn_responder(vec![vec![
-                Step::PositiveA {
-                    ttl: 120,
-                    octets: [93, 184, 216, 34],
-                },
-                Step::Close,
-            ]]);
-            let mut cache = Cache::new(2).unwrap();
-            let mut schedules = Schedules::new(2).unwrap();
-            let mut transport = StartupDns::new().unwrap();
-            transport.addr = ns(responder.port());
-            transport.now0 = 1_000_000;
-            transport
-                .start_exchange(
-                    fqdn0,
-                    Family::A,
-                    0,
-                    deadline,
-                    Generation::INITIAL,
-                    ExchangeClass::Startup,
-                )
-                .unwrap();
-            let err = transport
-                .start_exchange(
-                    fqdn1,
-                    Family::A,
-                    1,
-                    deadline,
-                    Generation::INITIAL,
-                    ExchangeClass::Startup,
-                )
-                .expect_err("a refused second start must not be absorbed or deferred; it is typed");
+            let ScriptedPositive {
+                responder,
+                mut transport,
+                mut cache,
+                mut schedules,
+                fqdn,
+                deadline,
+            } = scripted_positive(120, [93, 184, 216, 34]);
+            let err = start_first_then_refused_second(&mut transport, &fqdn, &fqdn1, deadline);
             assert_eq!(err, StartupDnsError::ExchangeActive);
-            let mut result = None;
-            for _ in 0..200 {
-                match transport
-                    .advance_exchange(fqdn0, &mut cache, &mut schedules)
-                    .unwrap()
-                {
-                    TurnResult::Pending => {
-                        if transport
-                            .exchange_deadline()
-                            .is_some_and(|d| Instant::now() >= d)
-                        {
-                            continue;
-                        }
-                        let _ = transport.wait_dns_readiness(deadline).unwrap();
-                    }
-                    term => {
-                        result = Some(term);
-                        break;
-                    }
-                }
-            }
+            let result = drive_exchange_to_terminal(
+                &mut transport,
+                &fqdn,
+                &mut cache,
+                &mut schedules,
+                deadline,
+            )
+            .expect("the first exchange concludes");
             assert!(
-                matches!(result, Some(TurnResult::Published(_))),
+                matches!(result, Ok(TurnResult::Published(_))),
                 "the first exchange must still conclude despite the refused second start, got {result:?}"
             );
             assert_eq!(
@@ -4877,6 +4848,41 @@ mod turn_result {
             drop(malformed);
         }
     }
+/// Asserts every derived route over a `len`-resolver set keeps `index < len`:
+/// the primary seat, every in-range selection, and the two refusals at the set
+/// length and at `usize::MAX`.
+fn assert_derived_routes_cover(len: usize, set: &ResolverSet) {
+    assert_eq!(
+        ActiveResolver::primary_of(set),
+        ActiveResolver {
+            index: 0,
+            set_len: len
+        }
+    );
+    for index in 0..len {
+        let Some(active) = ActiveResolver::primary_of(set).with_index(index) else {
+            panic!("in-range index {index} of a {len}-resolver set must be a candidate");
+        };
+        assert_eq!(
+            active,
+            ActiveResolver {
+                index,
+                set_len: len
+            }
+        );
+    }
+    assert_eq!(
+        ActiveResolver::primary_of(set).with_index(len),
+        None,
+        "index equal to the set length is out of range"
+    );
+    assert_eq!(
+        ActiveResolver::primary_of(set).with_index(usize::MAX),
+        None,
+        "an out-of-range selected index is no candidate"
+    );
+}
+
     /// Construction boundary with the derived-only routes: every route keeps
     /// `index < set_len` and `set_len` in `1..=MAX_RESOLVERS` (the length travels
     /// only from a validated non-empty [`ResolverSet`] or the fixed singleton
@@ -4894,35 +4900,7 @@ mod turn_result {
             resolver_set_of(&["1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4", "5.5.5.5"]),
         ];
         for (len, set) in sets.into_iter().enumerate().map(|(i, s)| (i + 1, s)) {
-            assert_eq!(
-                ActiveResolver::primary_of(&set),
-                ActiveResolver {
-                    index: 0,
-                    set_len: len
-                }
-            );
-            for index in 0..len {
-                let Some(active) = ActiveResolver::primary_of(&set).with_index(index) else {
-                    panic!("in-range index {index} of a {len}-resolver set must be a candidate");
-                };
-                assert_eq!(
-                    active,
-                    ActiveResolver {
-                        index,
-                        set_len: len
-                    }
-                );
-            }
-            assert_eq!(
-                ActiveResolver::primary_of(&set).with_index(len),
-                None,
-                "index equal to the set length is out of range"
-            );
-            assert_eq!(
-                ActiveResolver::primary_of(&set).with_index(usize::MAX),
-                None,
-                "an out-of-range selected index is no candidate"
-            );
+            assert_derived_routes_cover(len, &set);
         }
         assert_eq!(
             ActiveResolver::singleton(),
@@ -5354,6 +5332,47 @@ fn zero_window_reports_current_cache_admission_without_exchange() {
     );
 }
 
+/// A serving window opened on a bounded responder that replays one positive-AA
+/// reply, with its first serving exchange started at the window's owner second.
+struct ServingWindow {
+    responder: BoundedResponder,
+    transport: StartupDns,
+    cache: Cache,
+    schedules: Schedules,
+    fqdn: Fqdn,
+    started: Instant,
+    deadline: Instant,
+}
+
+fn serving_window(ttl: u32, octets: [u8; 4]) -> ServingWindow {
+    let responder = spawn_bounded_responder(vec![vec![Step::PositiveAAd { ttl, octets }]]);
+    let config = config();
+    let cache = Cache::for_config(&config).unwrap();
+    let schedules = Schedules::new(config.allowlist().len()).unwrap();
+    let mut transport = StartupDns::new().unwrap();
+    let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+    transport
+        .begin_window(peer, *config.resolver_set(), 1000, Duration::ZERO)
+        .expect("the serving window begins");
+    let name = cache.name_index(0).unwrap();
+    let pair = cache.generations_before_query(name, Family::A).unwrap();
+    let fqdn = config.allowlist().get(0).unwrap().clone();
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(5);
+    transport
+        .start_exchange(&fqdn, Family::A, 0, deadline, pair, ExchangeClass::Serving)
+        .expect("the serving exchange starts");
+    ServingWindow {
+        responder,
+        transport,
+        cache,
+        schedules,
+        fqdn,
+        started,
+        deadline,
+    }
+}
+
 #[test]
 fn actual_transport_publication_callbacks_share_one_instant_and_owner_second() {
     std::thread::Builder::new()
@@ -5362,27 +5381,8 @@ fn actual_transport_publication_callbacks_share_one_instant_and_owner_second() {
             use crate::dns::publication::ObservationPhase;
             use crate::runtime::tunnel::WorkerClock;
 
-            let responder = spawn_bounded_responder(vec![vec![Step::PositiveAAd {
-                ttl: 60,
-                octets: [9, 9, 9, 9],
-            }]]);
-            let config = config();
-            let mut cache = Cache::for_config(&config).unwrap();
-            let mut schedules = Schedules::new(config.allowlist().len()).unwrap();
-            let mut transport = StartupDns::new().unwrap();
-            let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
-            transport
-                .begin_window(peer, *config.resolver_set(), 1000, Duration::ZERO)
-                .unwrap();
-            let clock = WorkerClock::new(transport.window_start(), 1000);
-            let name = cache.name_index(0).unwrap();
-            let pair = cache.generations_before_query(name, Family::A).unwrap();
-            let fqdn = config.allowlist().get(0).unwrap();
-            let started = Instant::now();
-            let deadline = started + Duration::from_secs(5);
-            transport
-                .start_exchange(fqdn, Family::A, 0, deadline, pair, ExchangeClass::Serving)
-                .unwrap();
+            let mut window = serving_window(60, [9, 9, 9, 9]);
+            let clock = WorkerClock::new(window.transport.window_start(), 1000);
             let mut observations = [None, None];
             let mut count = 0;
             let mut observer = |phase, _cache: &Cache, _name, secs, instant| {
@@ -5390,12 +5390,21 @@ fn actual_transport_publication_callbacks_share_one_instant_and_owner_second() {
                 count += 1;
             };
             loop {
-                match transport
-                    .advance_exchange_observed(fqdn, &mut cache, &mut schedules, &mut observer)
-                    .unwrap()
+                match window
+                    .transport
+                    .advance_exchange_observed(
+                        &window.fqdn,
+                        &mut window.cache,
+                        &mut window.schedules,
+                        &mut observer,
+                    )
+                    .expect("observed exchange turn")
                 {
                     TurnResult::Pending => {
-                        transport.wait_dns_readiness(deadline).unwrap();
+                        window
+                            .transport
+                            .wait_dns_readiness(window.deadline)
+                            .expect("dns wait");
                     }
                     TurnResult::Published(_) => break,
                     other => panic!("publication failed: {other:?}"),
@@ -5408,10 +5417,10 @@ fn actual_transport_publication_callbacks_share_one_instant_and_owner_second() {
             assert_eq!(before_phase, ObservationPhase::BeforeCommit);
             assert_eq!(after_phase, ObservationPhase::AfterCommit);
             assert_eq!(before, after);
-            assert!(started <= before && after <= returned);
+            assert!(window.started <= before && after <= returned);
             assert_eq!(before_secs, after_secs);
             assert_eq!(before_secs, clock.cache_secs(before));
-            responder.finish().unwrap();
+            window.responder.finish().unwrap();
         })
         .unwrap()
         .join()
