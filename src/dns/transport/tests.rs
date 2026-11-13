@@ -171,67 +171,98 @@ fn record(owner: &[u8], ty: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
     rec
 }
 
-fn respond_for(query: &[u8], step: &Step) -> Option<Vec<u8>> {
-    let tid = u16::from_be_bytes([query[0], query[1]]);
-    let qname = &query[12..query.len() - 4];
-    let question = question_from(query);
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&tid.to_be_bytes());
-    let (rcode, an, ns, answers, authority): (u16, u16, u16, Vec<Vec<u8>>, Vec<Vec<u8>>) =
-        match step {
-            Step::PositiveA { ttl, octets }
-            | Step::PositiveAAd { ttl, octets }
-            | Step::PositiveAMismatchedTid { ttl, octets } => {
-                (0, 1, 0, vec![record(qname, 1, *ttl, octets)], vec![])
-            }
-            Step::PositiveAaaa { ttl, octets } => {
-                (0, 1, 0, vec![record(qname, 28, *ttl, octets)], vec![])
-            }
-            Step::NodataWithSoa { ttl, min } => {
-                let soa = soa_rdata("example.org", *min);
-                let owner = qname_bytes("example.org");
-                (0, 0, 1, vec![], vec![record(&owner, 6, *ttl, &soa)])
-            }
-            Step::NxdomainWithSoa { ttl, min } => {
-                let soa = soa_rdata("example.org", *min);
-                let owner = qname_bytes("example.org");
-                (3, 0, 1, vec![], vec![record(&owner, 6, *ttl, &soa)])
-            }
-            Step::BailiwickViolationCname { ttl } => (
-                0,
-                1,
-                0,
-                vec![record(qname, 5, *ttl, &qname_bytes("evil.com"))],
-                vec![],
-            ),
-            Step::Stall(_)
-            | Step::Malformed(_)
-            | Step::LengthPrefixOnly { .. }
-            | Step::FragmentedPositive { .. }
-            | Step::Close => {
-                return None;
-            }
-        };
+/// The reply sections one scripted step contributes: the response code plus the
+/// answer and authority records, whose counts the header derives.
+struct AnswerSections {
+    rcode: u16,
+    answers: Vec<Vec<u8>>,
+    authority: Vec<Vec<u8>>,
+}
+
+/// The SOA record a negative scripted step puts in the authority section.
+fn soa_record(ttl: u32, min: u32) -> Vec<u8> {
+    record(
+        &qname_bytes("example.org"),
+        6,
+        ttl,
+        &soa_rdata("example.org", min),
+    )
+}
+
+/// Names the reply sections for one step, or `None` for the steps that answer
+/// nothing on the wire (stall, close, malformed, length-prefix, fragmented).
+fn answer_sections(qname: &[u8], step: &Step) -> Option<AnswerSections> {
+    let sections = match step {
+        Step::PositiveA { ttl, octets }
+        | Step::PositiveAAd { ttl, octets }
+        | Step::PositiveAMismatchedTid { ttl, octets } => AnswerSections {
+            rcode: 0,
+            answers: vec![record(qname, 1, *ttl, octets)],
+            authority: Vec::new(),
+        },
+        Step::PositiveAaaa { ttl, octets } => AnswerSections {
+            rcode: 0,
+            answers: vec![record(qname, 28, *ttl, octets)],
+            authority: Vec::new(),
+        },
+        Step::NodataWithSoa { ttl, min } => AnswerSections {
+            rcode: 0,
+            answers: Vec::new(),
+            authority: vec![soa_record(*ttl, *min)],
+        },
+        Step::NxdomainWithSoa { ttl, min } => AnswerSections {
+            rcode: 3,
+            answers: Vec::new(),
+            authority: vec![soa_record(*ttl, *min)],
+        },
+        Step::BailiwickViolationCname { ttl } => AnswerSections {
+            rcode: 0,
+            answers: vec![record(qname, 5, *ttl, &qname_bytes("evil.com"))],
+            authority: Vec::new(),
+        },
+        Step::Stall(_)
+        | Step::Malformed(_)
+        | Step::LengthPrefixOnly { .. }
+        | Step::FragmentedPositive { .. }
+        | Step::Close => return None,
+    };
+    Some(sections)
+}
+
+/// Assembles one wire reply from `sections`, mirroring the request tid and
+/// question and setting the authoritative bit for the AA step.
+fn assemble_reply(tid: u16, step: &Step, question: &[u8], sections: AnswerSections) -> Vec<u8> {
     let flags = 0x8000
-        | rcode
+        | sections.rcode
         | if matches!(step, Step::PositiveAAd { .. }) {
             0x20
         } else {
             0
         };
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&tid.to_be_bytes());
     msg.extend_from_slice(&flags.to_be_bytes());
     msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&an.to_be_bytes());
-    msg.extend_from_slice(&ns.to_be_bytes());
+    for count in [sections.answers.len(), sections.authority.len()] {
+        msg.extend_from_slice(
+            &u16::try_from(count)
+                .expect("section count fits u16 wire length")
+                .to_be_bytes(),
+        );
+    }
     msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&question);
-    for rec in answers {
+    msg.extend_from_slice(question);
+    for rec in sections.answers.into_iter().chain(sections.authority) {
         msg.extend_from_slice(&rec);
     }
-    for rec in authority {
-        msg.extend_from_slice(&rec);
-    }
-    Some(msg)
+    msg
+}
+
+fn respond_for(query: &[u8], step: &Step) -> Option<Vec<u8>> {
+    let sections = answer_sections(&query[12..query.len() - 4], step)?;
+    let tid = u16::from_be_bytes([query[0], query[1]]);
+    let question = question_from(query);
+    Some(assemble_reply(tid, step, &question, sections))
 }
 
 fn wait_script_duration(duration: Duration, cancel: Option<&ResponderCancellation>) {
