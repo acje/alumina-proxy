@@ -1011,14 +1011,12 @@ pub(super) fn encode_monitor_domain_batch(
                 if !push_indexed_key_quoted(&mut w, b"d", index32, b"v", ja4) {
                     return None;
                 }
-                if monitor.ja4_peer_ordinal() == Some(ordinal)
-                    && !push_indexed_key_addr(
-                        &mut w,
-                        b"d",
-                        index32,
-                        monitor.ja4_peer_ip().to_ip_addr(),
-                    )
-                {
+                if !push_indexed_key_addr(
+                    &mut w,
+                    b"d",
+                    index32,
+                    monitor.ja4_peer_ip(ordinal).to_ip_addr(),
+                ) {
                     return None;
                 }
             }

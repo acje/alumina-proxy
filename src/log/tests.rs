@@ -800,6 +800,22 @@ mod startup_records {
             name_len, STARTUP_NAME_MAX,
             "the measured startup_name worst case is exactly the const bound"
         );
+        let domain_len = worst
+            .iter()
+            .find(|(k, _)| *k == "monitor_domain")
+            .expect("monitor_domain measured")
+            .1;
+        assert_eq!(
+            domain_len, 1800,
+            "re-measured monitor_domain worst case: DOMAIN_BATCH=11 saturated domains, \
+             each carrying d<j>f=10, d<j>b=10, d<j>n=10, d<j>r=10, d<j>j=10, a 36-char \
+             d<j>v and a 32-hex-char IPv6 d<j>p, plus secs=u64::MAX and the trailing newline"
+        );
+        assert_eq!(
+            MONITOR_RECORD_MAX - domain_len,
+            248,
+            "the per-ordinal peer table leaves monitor_domain 248 B of the 2048 B bound"
+        );
         let probe_len = worst
             .iter()
             .find(|(k, _)| *k == "resolver_probe")
@@ -1657,6 +1673,39 @@ mod monitor_records {
         assert!(
             !text.contains("d1j="),
             "a zero ja4-change fold on another ordinal stays suppressed: {text}"
+        );
+    }
+
+    #[test]
+    fn logging_monitor_domain_ja4_changes_carry_each_ordinals_own_peer() {
+        use crate::eligibility::NumericAddr;
+        use crate::enforcement::action::DomainOrdinal;
+        use crate::enforcement::monitor::Monitor;
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let mut m = Monitor::new();
+        let first = DomainOrdinal::from_index(0).expect("bound-level ordinal");
+        let second = DomainOrdinal::from_index(1).expect("bound-level ordinal");
+        m.note_fact_ja4_change(
+            first,
+            *b"t13d1516h2_8daaf6152771_02713d6af862",
+            NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 5])),
+        );
+        m.note_fact_ja4_change(
+            second,
+            *b"t13d1516h2_8daaf6152771_02713d6af863",
+            NumericAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1)),
+        );
+        let (mut store, mut file) = file_logstore();
+        assert!(store.monitor_summary(7, &mut m), "summary committed");
+        flush_all(&mut store);
+        let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert!(
+            text.contains(" d0p=\"cb007105\""),
+            "the first ordinal's change carries its own triggering peer: {text}"
+        );
+        assert!(
+            text.contains(" d1p=\"20010db8000000000000000000000001\""),
+            "the second ordinal's change carries its own triggering peer: {text}"
         );
     }
 

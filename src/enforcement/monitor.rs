@@ -22,8 +22,7 @@ pub struct FactCounters {
     pub(crate) ja4_change_loss: [bool; ALLOWLIST_MAX],
     pub(crate) ja4_value: [[u8; 36]; ALLOWLIST_MAX],
     pub(crate) ja4_seed: SaturatingCounter,
-    pub(crate) ja4_peer_ip: NumericAddr,
-    pub(crate) ja4_peer_ordinal: Option<DomainOrdinal>,
+    pub(crate) ja4_peer_ip: [NumericAddr; ALLOWLIST_MAX],
 }
 
 impl Default for FactCounters {
@@ -41,8 +40,7 @@ impl Default for FactCounters {
             ja4_change_loss: [false; ALLOWLIST_MAX],
             ja4_value: [[0; 36]; ALLOWLIST_MAX],
             ja4_seed: SaturatingCounter::new(),
-            ja4_peer_ip: NumericAddr::V4(Ipv4Addr::UNSPECIFIED),
-            ja4_peer_ordinal: None,
+            ja4_peer_ip: [NumericAddr::V4(Ipv4Addr::UNSPECIFIED); ALLOWLIST_MAX],
         }
     }
 }
@@ -264,8 +262,9 @@ impl Monitor {
     /// that is not already in the ordinal's set (the set holds up to
     /// `MAX_ADDRESSES` distinct strings). The per-ordinal counter is an event
     /// fold, emitted by the monitor record's JA4-change surface; the 36-byte
-    /// value is retained as the latest changed JA4 for the ordinal, keyed to
-    /// the triggering peer's destination IP (SP-013).
+    /// value is retained as the latest changed JA4 for the ordinal, and the
+    /// triggering peer's destination IP is retained for that same ordinal
+    /// (SP-013), so two ordinals changing in one interval keep their own peers.
     pub(crate) const fn note_fact_ja4_change(
         &mut self,
         ordinal: DomainOrdinal,
@@ -274,8 +273,7 @@ impl Monitor {
     ) {
         self.facts.ja4_change[ordinal.get()].bump();
         self.facts.ja4_value[ordinal.get()] = ja4;
-        self.facts.ja4_peer_ip = peer_ip;
-        self.facts.ja4_peer_ordinal = Some(ordinal);
+        self.facts.ja4_peer_ip[ordinal.get()] = peer_ip;
         self.dirty = true;
     }
 
@@ -405,12 +403,8 @@ impl Monitor {
         self.facts.ja4_seed.value()
     }
 
-    pub(crate) const fn ja4_peer_ordinal(&self) -> Option<DomainOrdinal> {
-        self.facts.ja4_peer_ordinal
-    }
-
-    pub(crate) const fn ja4_peer_ip(&self) -> NumericAddr {
-        self.facts.ja4_peer_ip
+    pub(crate) const fn ja4_peer_ip(&self, ordinal: DomainOrdinal) -> NumericAddr {
+        self.facts.ja4_peer_ip[ordinal.get()]
     }
 
     #[cfg(test)]
@@ -648,7 +642,9 @@ impl Monitor {
 
     #[cfg(test)]
     pub(crate) fn set_peer_ip_v6_max_for_test(&mut self) {
-        self.facts.ja4_peer_ip = NumericAddr::V6(std::net::Ipv6Addr::from([0xff; 16]));
+        self.facts
+            .ja4_peer_ip
+            .fill(NumericAddr::V6(std::net::Ipv6Addr::from([0xff; 16])));
         self.dirty = true;
     }
 
@@ -671,8 +667,9 @@ impl Monitor {
         self.facts.probe_relocations.saturate_for_test();
         self.facts.expired_pin_certs.saturate_for_test();
         self.facts.ja4_seed.saturate_for_test();
-        self.facts.ja4_peer_ip = NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1]));
-        self.facts.ja4_peer_ordinal = DomainOrdinal::from_index(ALLOWLIST_MAX - 1);
+        self.facts
+            .ja4_peer_ip
+            .fill(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
         for c in &mut self.facts.ja4_change {
             c.saturate_for_test();
         }

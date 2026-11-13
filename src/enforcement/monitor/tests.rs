@@ -150,17 +150,20 @@ fn ja4_facts_fold_into_facts_total_and_saturate() {
         m.facts_ja4_change_loss(ordinal),
         "an overflowed baseline suppresses detail and latches the loss flag"
     );
-    assert_eq!(m.ja4_peer_ordinal(), Some(ordinal));
-    assert_eq!(m.ja4_peer_ip(), peer);
+    assert_eq!(
+        m.ja4_peer_ip(ordinal),
+        peer,
+        "a change retains its own triggering peer under its ordinal"
+    );
     m.saturate_all_for_test();
     assert_eq!(m.facts_ja4_change(ordinal), u32::MAX);
     assert!(m.facts_ja4_change_overflow());
     assert_eq!(m.facts_ja4_seed(), u32::MAX);
     assert!(m.facts_ja4_seed_overflow());
     assert_eq!(
-        m.ja4_peer_ordinal(),
-        DomainOrdinal::from_index(ALLOWLIST_MAX - 1),
-        "saturation keys the latest-overflow peer to the last ordinal"
+        m.ja4_peer_ip(ordinal),
+        NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
+        "saturation re-keys every ordinal's change peer to the saturated peer"
     );
 }
 

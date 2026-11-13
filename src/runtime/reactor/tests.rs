@@ -9292,7 +9292,7 @@ mod ja4_baseline {
                 "the changed value is retained"
             );
             assert_eq!(
-                counters.ja4_peer_ip(),
+                counters.ja4_peer_ip(ordinal),
                 NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 2])),
                 "the change carries its own triggering peer"
             );
@@ -9318,7 +9318,7 @@ mod ja4_baseline {
                 "the retained value follows the newest change"
             );
             assert_eq!(
-                counters.ja4_peer_ip(),
+                counters.ja4_peer_ip(ordinal),
                 NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 3])),
                 "the peer follows the newest change"
             );
