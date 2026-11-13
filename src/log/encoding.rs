@@ -275,11 +275,7 @@ pub(super) fn encode_entry_frame(
         buf: slot_buf,
         len: 0,
     };
-    if !w.push(b"level=info kind=entry_frame name=\"")
-        || !push_escaped(&mut w, fqdn.as_str())
-        || !w.push(b"\" port=")
-        || fmt::Write::write_fmt(&mut w, format_args!("{}", fqdn.port())).is_err()
-    {
+    if !write_entry_frame_open(&mut w, fqdn) {
         return Ok(None);
     }
     for family in Family::ALL {
@@ -292,6 +288,15 @@ pub(super) fn encode_entry_frame(
         return Ok(None);
     }
     Ok(Some(w.len))
+}
+
+/// Writes the test-only `entry_frame` header and the caller's name and port.
+#[cfg(test)]
+fn write_entry_frame_open(w: &mut Entry<'_>, fqdn: &Fqdn) -> bool {
+    w.push(b"level=info kind=entry_frame name=\"")
+        && push_escaped(w, fqdn.as_str())
+        && w.push(b"\" port=")
+        && fmt::Write::write_fmt(w, format_args!("{}", fqdn.port())).is_ok()
 }
 
 /// The closed owned-phase label of an owner-telemetry record: boot or
@@ -329,11 +334,7 @@ pub(super) fn encode_dns_assurance(
     if !write_assurance_preamble(&mut w, Kind::DnsAssurance, fqdn, secs) {
         return None;
     }
-    if !w.push(b" seq=")
-        || fmt::Write::write_fmt(&mut w, format_args!("{seq}")).is_err()
-        || !w.push(b" phase=")
-        || !w.push(phase.as_str().as_bytes())
-    {
+    if !write_assurance_identity(&mut w, seq, phase) {
         return None;
     }
     if let Some(boot) = snapshot.boot()
@@ -350,6 +351,14 @@ pub(super) fn encode_dns_assurance(
         return None;
     }
     Some(w.len)
+}
+
+/// Writes the caller's `seq=` and `phase=` identity fields.
+fn write_assurance_identity(w: &mut Entry<'_>, seq: u64, phase: AssurancePhase) -> bool {
+    w.push(b" seq=")
+        && fmt::Write::write_fmt(w, format_args!("{seq}")).is_ok()
+        && w.push(b" phase=")
+        && w.push(phase.as_str().as_bytes())
 }
 
 /// Writes the canonical `level=`/`kind=`/`name=`/`port=`/`secs=` prefix.
@@ -573,7 +582,10 @@ fn push_indexed_key_quoted(
     if fmt::Write::write_fmt(w, format_args!("{index}")).is_err() {
         return false;
     }
-    if !w.push(suffix) || !w.push(b"=\"") || !push_escaped(w, text) || !w.push(b"\"") {
+    if !w.push(suffix) {
+        return false;
+    }
+    if !w.push(b"=\"") || !push_escaped(w, text) || !w.push(b"\"") {
         return false;
     }
     true
