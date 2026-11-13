@@ -77,11 +77,14 @@ import platform
 import random
 import select
 import selectors
+import shlex
+import shutil
 import socket
 import ssl
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -2708,10 +2711,11 @@ def run_selftest(tmpdir):
         pb.close()
 
     # --- B8: shell supervision init-before-traps; stop waits + classifies ---
+    out8_path = os.path.join(tmpdir, "seam_shell8.out")
     shell8 = r'''
 set -eu
 ALU=0; SRV=0; DNSPID=0; CLEANED=0
-O8=/tmp/seam_shell8.out
+O8=__B8_OUT__
 : > "$O8"
 stop() { pid="$1"; strict="$2"
     [ "${pid:-0}" -gt 0 ] 2>/dev/null || return 0
@@ -2742,11 +2746,12 @@ rc=0
 stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
 [ "$rc" -eq 0 ]
 '''
+    shell8 = shell8.replace("__B8_OUT__", shlex.quote(out8_path))
     proc8 = subprocess.run(["/bin/sh", "-c", shell8], capture_output=True,
                            text=True, timeout=20)
     out8 = ""
     try:
-        with open("/tmp/seam_shell8.out") as fh:
+        with open(out8_path) as fh:
             out8 = fh.read()
     except OSError:
         pass
@@ -2998,9 +3003,10 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     f4_end = next(i for i in range(f4_start + 1, len(f4_lines))
                   if f4_lines[i].strip() == b"}")
     f4_stop = b"\n".join(f4_lines[f4_start:f4_end + 1]).decode()
+    f4_out_dir = shlex.quote(os.path.join(tmpdir, ""))
     f4_probe = (
         "set -eu\n"
-        "OUT=/tmp/f4.$$\n"
+        "OUT=__F4_OUT__\n"
         ": > \"$OUT\"\n"
         + f4_stop +
         "\n"
@@ -3022,6 +3028,7 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
         "c=$!\nwait \"$c\" || true\n"
         "caseC \"$c\"\n"
         "cat \"$OUT\"\n")
+    f4_probe = f4_probe.replace("__F4_OUT__", "%s/f4.$$" % f4_out_dir)
     f4_res = subprocess.run(["/bin/sh", "-c", f4_probe], capture_output=True,
                             text=True, timeout=40)
     def _f4rc(tag, out):
@@ -3400,7 +3407,14 @@ def main(argv):
     args = ap.parse_args(argv)
 
     if args.role == "selftest" or getattr(args, "selftest", False):
-        return run_selftest(args.selftest_tmp or "/tmp")
+        if args.selftest_tmp:
+            return run_selftest(args.selftest_tmp)
+        workspace = tempfile.mkdtemp(prefix="alumina-bench-selftest-")
+        os.chmod(workspace, 0o700)
+        try:
+            return run_selftest(workspace)
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
     if args.role is None:
         print("bench-err: --role required (backend|client|dns-responder) unless --selftest",
               file=sys.stderr)
