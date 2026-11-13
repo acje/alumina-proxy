@@ -674,15 +674,19 @@ struct ScriptedPositive {
 
 fn scripted_positive(ttl: u32, octets: [u8; 4]) -> ScriptedPositive {
     let responder = spawn_responder(vec![vec![Step::PositiveA { ttl, octets }, Step::Close]]);
-    let mut transport = StartupDns::new().unwrap();
+    let mut transport = StartupDns::new().expect("the fixture transport constructs");
     transport.addr = ns(responder.port());
     transport.now0 = 1_000_000;
     ScriptedPositive {
         responder,
         transport,
-        cache: Cache::new(2).unwrap(),
-        schedules: Schedules::new(2).unwrap(),
-        fqdn: config().allowlist().get(0).unwrap().clone(),
+        cache: Cache::new(2).expect("the fixture cache admits two names"),
+        schedules: Schedules::new(2).expect("the fixture schedules admit two names"),
+        fqdn: config()
+            .allowlist()
+            .get(0)
+            .expect("the fixture config allows a first name")
+            .clone(),
         deadline: Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS),
     }
 }
@@ -789,7 +793,7 @@ fn resolver_set_of(addrs: &[&str]) -> ResolverSet {
 /// as [`StartupDns::begin_window`] leaves it: the primary is recorded as
 /// exercised by the startup window.
 fn seeded_transport(set: ResolverSet) -> StartupDns {
-    let mut transport = StartupDns::new().unwrap();
+    let mut transport = StartupDns::new().expect("the seeded fixture transport constructs");
     transport.resolvers = Some(set);
     transport.active_resolver = ActiveResolver::primary_of(&set);
     transport.window_exercised[0] = true;
@@ -822,7 +826,7 @@ fn serving_transport(configured: bool) -> StartupDns {
     if configured {
         seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8"]))
     } else {
-        StartupDns::new().unwrap()
+        StartupDns::new().expect("the unconfigured fixture transport constructs")
     }
 }
 
@@ -907,8 +911,8 @@ fn assert_serving_recovery_notes(
 
 fn serving_positive_recovered_note_case(configured: bool) {
     let mut transport = serving_transport(configured);
-    let mut cache = Cache::new(2).unwrap();
-    let mut schedules = Schedules::new(2).unwrap();
+    let mut cache = Cache::new(2).expect("the fixture cache admits two names");
+    let mut schedules = Schedules::new(2).expect("the fixture schedules admit two names");
     advance_serving_incident_to_relocation(&mut transport, &mut schedules, configured);
     let responder = spawn_responder(vec![vec![
         Step::PositiveA {
@@ -918,7 +922,11 @@ fn serving_positive_recovered_note_case(configured: bool) {
         Step::Close,
     ]]);
     transport.addr = ns(responder.port());
-    let fqdn = config().allowlist().get(0).unwrap().clone();
+    let fqdn = config()
+        .allowlist()
+        .get(0)
+        .expect("the fixture config allows a first name")
+        .clone();
     let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
     start_first_exchange(&mut transport, &fqdn, deadline, ExchangeClass::Serving);
     let result =
