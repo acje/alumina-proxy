@@ -551,7 +551,8 @@ fn assert_hot_relay_stalled_dns(progress: &HotProgress, high_water: u16) {
 fn assert_hot_relay_lanes(progress: &HotProgress, tails: &[Vec<u8>], per_slot: usize) {
     let per_slot_kib = per_slot / 1024;
     let visits_per_slot = per_slot.div_ceil(64 * 1024);
-    for (i, tail) in tails.iter().enumerate() {
+    for i in 0..HOT_SLOTS {
+        let tail = &tails[i];
         assert!(
             (1..=i32::try_from(HOT_SLOTS).expect("HOT_SLOTS fits i32"))
                 .contains(&progress.second_visit_turn[i]),
@@ -1047,7 +1048,12 @@ fn reconnect_falsifier_body() {
     let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
     let (responder_addr, responder) = spawn_responder_close_after_answer();
 
-    start_serving_exchange(&mut runtime, responder_addr, Family::A);
+    start_serving_exchange(
+        &mut runtime,
+        responder_addr,
+        Family::A,
+        Instant::now() + Duration::from_secs(10),
+    );
     let first = turn_until(
         &mut runtime,
         Some(Duration::from_millis(5)),
@@ -1059,7 +1065,12 @@ fn reconnect_falsifier_body() {
         "the first exchange must publish against a responder that closes after answering"
     );
 
-    start_serving_exchange(&mut runtime, responder_addr, Family::Aaaa);
+    start_serving_exchange(
+        &mut runtime,
+        responder_addr,
+        Family::Aaaa,
+        Instant::now() + Duration::from_secs(10),
+    );
     let second = turn_until(
         &mut runtime,
         Some(Duration::from_millis(5)),
@@ -2015,24 +2026,6 @@ fn begin_two_resolver_window(runtime: &mut Runtime, peer: SocketAddr) {
         .expect("begin window");
 }
 
-fn start_expired_serving_exchange(runtime: &mut Runtime, peer: SocketAddr) {
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .set_peer_for_test(peer);
-    runtime
-        .serving
-        .storage_mut()
-        .start_dns_exchange(
-            0,
-            Family::A,
-            Instant::now() - Duration::from_secs(1),
-            ExchangeClass::Serving,
-        )
-        .expect("start serving exchange");
-}
-
 fn settle_probe_against_dead_peer(runtime: &mut Runtime, peer: SocketAddr) {
     let fqdn = crate::config::Fqdn::parse("sub.example.org:443").expect("fqdn");
     runtime
@@ -2165,7 +2158,12 @@ fn probe_exchange_failed_reports_per_event_resolver_body() {
     let (mut runtime, mut file) = sink_runtime(port);
     let (_held, held_addr) = held_loopback_peer();
     begin_two_resolver_window(&mut runtime, held_addr);
-    start_expired_serving_exchange(&mut runtime, held_addr);
+    start_serving_exchange(
+        &mut runtime,
+        held_addr,
+        Family::A,
+        Instant::now() - Duration::from_secs(1),
+    );
     runtime.cooperative_dns_turn().expect("serving turn");
 
     let (dead, dead_addr) = held_loopback_peer();
@@ -2188,7 +2186,12 @@ fn failover_and_recovery_emit_truthful_origin_body() {
     drop(dead);
     begin_two_resolver_window(&mut runtime, dead_addr);
     for _ in 0..3 {
-        start_expired_serving_exchange(&mut runtime, dead_addr);
+        start_serving_exchange(
+            &mut runtime,
+            dead_addr,
+            Family::A,
+            Instant::now() - Duration::from_secs(1),
+        );
         runtime
             .turn(Some(Duration::from_millis(1)))
             .expect("owner turn");
@@ -2511,8 +2514,8 @@ fn due_time_of(runtime: &Runtime, family: Family) -> u64 {
         .storage()
         .schedules()
         .due_time(0, family)
-        .expect("A due query")
-        .expect("A scheduled")
+        .expect("due-time query")
+        .expect("family scheduled")
 }
 
 fn fresh_session_opened(sessions: &std::sync::atomic::AtomicUsize) -> bool {
@@ -2565,7 +2568,7 @@ fn turn_until(
     false
 }
 
-fn start_serving_exchange(runtime: &mut Runtime, peer: SocketAddr, family: Family) {
+fn start_serving_exchange(runtime: &mut Runtime, peer: SocketAddr, family: Family, due: Instant) {
     runtime
         .serving
         .storage_mut()
@@ -2574,12 +2577,7 @@ fn start_serving_exchange(runtime: &mut Runtime, peer: SocketAddr, family: Famil
     runtime
         .serving
         .storage_mut()
-        .start_dns_exchange(
-            0,
-            family,
-            Instant::now() + Duration::from_secs(10),
-            ExchangeClass::Serving,
-        )
+        .start_dns_exchange(0, family, due, ExchangeClass::Serving)
         .expect("start serving exchange");
 }
 
@@ -2760,7 +2758,6 @@ fn sigterm_suppression_body() {
     stop_and_join_responder(responder_addr, &stop, responder);
 }
 
-#[cfg(feature = "alloc-witness")]
 #[cfg(feature = "alloc-witness")]
 fn refresh_alloc_witness_body() {
     let (responder_addr, stop, _queries, responder) = spawn_supervised_positive_with_count();
@@ -3093,7 +3090,6 @@ mod startup_warning {
         }).unwrap().join().unwrap();
     }
 
-    #[cfg(feature = "alloc-witness")]
     #[cfg(feature = "alloc-witness")]
     fn boot_status_document(mode: ServingMode) -> String {
         let allowance = u8::from(mode == ServingMode::Degraded);
