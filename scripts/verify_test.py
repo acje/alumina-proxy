@@ -745,7 +745,7 @@ class ShutdownWitness(unittest.TestCase):
 
 def extract_untracked_allowlist_default():
     """The shipped allowlist line, so the tests exercise the real default and
-    can supply a non-empty list for the glob-semantics pin."""
+    can supply a non-empty list for the prefix-semantics pins."""
     match = re.search(r'^E2E_UNTRACKED_ALLOW="([^"]*)"$',
                       (ROOT / "scripts/verify.sh").read_text(), re.M)
     assert match is not None, "E2E_UNTRACKED_ALLOW default not found in scripts/verify.sh"
@@ -775,15 +775,23 @@ class E2EReceiptInputs(unittest.TestCase):
         (self.repo / "Cargo.toml").write_text('[package]\nname = "probe"\n')
         (self.repo / "scripts/e2e_shutdown.py").write_text("# harness\n")
         (self.repo / "scripts/e2e_shutdown.sh").write_text("# harness\n")
-        self.git("init", "-q")
+        self.git("init", "-q", "--template=")
         self.git("add", "-A")
         self.git("-c", "user.email=probe@example.invalid", "-c", "user.name=probe",
                  "commit", "-qm", "base")
         self.head = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip()
 
+    def git_env(self):
+        """Hermetic git: the developer's global/system config must not decide
+        what the guard observes (an inherited core.excludesFile could hide a
+        planted input and turn a real pin into a false red)."""
+        return {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
     def git(self, *args):
-        subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", *args], cwd=self.repo, check=True,
+                       capture_output=True, env=self.git_env())
 
     def receipt_script(self, allow=None):
         allow_line = (extract_untracked_allowlist_default().group(0) if allow is None
@@ -791,19 +799,30 @@ class E2EReceiptInputs(unittest.TestCase):
         bodies = "\n\n".join(extract_function(name)
                              for name in self.RECEIPT_BODIES)
         driver = self.temp / "receipt.sh"
+        # set -eu: the driver runs the shipped bodies under the interpreter
+        # options scripts/verify.sh itself uses.
         driver.write_text(
-            bodies + "\n\n" + allow_line + '\nTGT="$PWD/target"\nmkdir -p "$TGT"\n'
+            "set -eu\n" + bodies + "\n\n" + allow_line + '\nTGT="$PWD/target"\nmkdir -p "$TGT"\n'
             "e2e_receipt_fields relay scripts/e2e_shutdown.py scripts/e2e_shutdown.sh\n")
         return driver
 
     def run_receipt(self, cwd=None, allow=None):
         return subprocess.run(
             ["sh", str(self.receipt_script(allow))], cwd=cwd or self.repo,
-            text=True, capture_output=True)
+            text=True, capture_output=True, env=self.git_env())
 
-    def test_the_shipped_allowlist_is_empty(self):
-        self.assertEqual(extract_untracked_allowlist_default().group(1), "",
-                         "an allowlist entry is a visible reviewed bypass, never a default")
+    def test_the_shipped_allowlist_names_only_the_local_index_cache(self):
+        self.assertEqual(extract_untracked_allowlist_default().group(1), ".repowise/",
+                         "an allowlist entry is a visible reviewed bypass, never a convenience")
+        for entry in extract_untracked_allowlist_default().group(1).split():
+            self.assertTrue(entry.endswith("/"), f"allowlist entry is not a directory prefix: {entry}")
+
+    def test_the_guard_is_wired_into_the_shared_receipt_owner(self):
+        # Every sampling point (pre-build, post-build, post-harness) inherits the
+        # guard only because it lives in e2e_receipt_fields itself; a later
+        # removal of that call would otherwise leave every behavioural pin green.
+        self.assertIn('e2e_untracked_input_guard "$_gate"',
+                      extract_function("e2e_receipt_fields"))
 
     def test_a_clean_tree_is_certified(self):
         result = self.run_receipt()
@@ -824,6 +843,16 @@ class E2EReceiptInputs(unittest.TestCase):
         again = self.run_receipt()
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
 
+    def test_a_local_ignore_entry_cannot_hide_a_build_input(self):
+        # `--exclude-standard` would honour .git/info/exclude and certify this
+        # checkout with an untracked, Cargo-consumed build.rs.
+        (self.repo / ".git/info").mkdir(parents=True, exist_ok=True)
+        (self.repo / ".git/info/exclude").write_text("build.rs\n")
+        (self.repo / "build.rs").write_text("fn main() {}\n")
+        result = self.run_receipt()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("build.rs", result.stderr)
+
     def test_gitignored_build_artifacts_do_not_refuse_the_receipt(self):
         (self.repo / "target").mkdir()
         (self.repo / "target/artifact").write_text("generated\n")
@@ -833,13 +862,20 @@ class E2EReceiptInputs(unittest.TestCase):
     def test_the_allowlist_excuses_only_the_named_generated_artifact(self):
         (self.repo / "generated").mkdir()
         (self.repo / "generated/facts.txt").write_text("generated\n")
-        allowed = self.run_receipt(allow="generated/*.txt")
+        allowed = self.run_receipt(allow="generated/")
         self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
         (self.repo / "build.rs").write_text("fn main() {}\n")
-        refused = self.run_receipt(allow="generated/*.txt")
+        refused = self.run_receipt(allow="generated/")
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("build.rs", refused.stderr)
         self.assertNotIn("generated/facts.txt", refused.stderr)
+
+    def test_a_path_prefix_does_not_excuse_a_lookalike_sibling(self):
+        (self.repo / "generated-evil").mkdir()
+        (self.repo / "generated-evil/build.rs").write_text("fn main() {}\n")
+        result = self.run_receipt(allow="generated/")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("generated-evil/build.rs", result.stderr)
 
     def test_an_unobservable_untracked_universe_fails_closed(self):
         # no work tree: the producer fails, so the receipt must not certify

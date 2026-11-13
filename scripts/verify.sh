@@ -1610,40 +1610,62 @@ rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-
 # D7: `git diff HEAD` cannot see untracked files, so without this guard the
 # receipt would certify a checkout whose build consumed an input it never
 # covered (a root `build.rs`, a `.cargo/config.toml`, a new module). Every
-# untracked, non-ignored path in the checkout refuses the receipt BEFORE the
-# build. The observation is the producer's own (git ls-files exit checked, never
-# a masked pipeline: an unreadable observation is BLOCKED, never clean), and
-# each path is classified by exact glob match against this explicit allowlist:
+# untracked path the PINNED ignore universe admits refuses the receipt BEFORE
+# the build.
 #
-#   E2E_UNTRACKED_ALLOW  space-separated glob patterns, relative to the repo root
+# The universe is pinned deliberately: `--exclude-per-directory=.gitignore`
+# reads only the per-directory .gitignore files (tracked, therefore
+# receipt-covered) and drops the unpinned sources `--exclude-standard` would
+# honour ($GIT_DIR/info/exclude and core.excludesFile). A local ignore entry
+# could otherwise hide a Cargo-consumed input from the receipt completely. The
+# producer exit is checked (an unreadable observation is BLOCKED, never clean),
+# its stderr is kept out of the observed path list, and --full-name keeps paths
+# repo-root-relative. Paths are compared in git's C-quoted form, so a path
+# containing a tab, backslash or non-ASCII byte cannot match an allowlist entry:
+# that is fail-closed, never an escape.
 #
-# Empty by default, and it stays empty unless a NON-ignored generated artifact
-# genuinely must exist before the build: the known generated artifacts
-# (target/, .ooda/, node_modules/, .beads/, *.db) are gitignored, so they never
-# appear in the observation at all. An entry is a deliberately visible,
-# reviewed bypass — add it with its rationale in the same commit, never from
-# the environment.
-E2E_UNTRACKED_ALLOW=""
+# Each observed path is classified against this explicit allowlist:
+#
+#   E2E_UNTRACKED_ALLOW  space-separated path PREFIXES, relative to the repo root
+#
+# A path is excused when it equals an entry or lies under it (`generated/`
+# excuses `generated/facts.txt` and never `generated-evil/`). The repo's own
+# generated artifacts (target/, .ooda/, node_modules/, .beads/, *.db) are
+# covered by the tracked .gitignore, so they never reach this classification.
+# An entry is a deliberately visible, reviewed bypass: add it with its rationale
+# in the same commit, never from the environment. `.repowise/` is the one
+# standing entry — a local semantic-index cache that developer machines exclude
+# through the unpinned .git/info/exclude and that is never a Cargo input; a
+# machine with a different local cache must name it here, which is the point.
+E2E_UNTRACKED_ALLOW=".repowise/"
 e2e_untracked_input_guard() {
     _gate="$1"
+    _ug_err=$(mktemp) || {
+        echo "E2E-$_gate-BLOCKED: mktemp failed (untracked-input observation impossible, not a receipt)" >&2
+        exit 1
+    }
     _ug_rc=0
-    _ug_list=$(git ls-files --others --exclude-standard 2>&1) || _ug_rc=$?
+    _ug_list=$(git ls-files --others --full-name --exclude-per-directory=.gitignore 2>"$_ug_err") || _ug_rc=$?
     if [ "$_ug_rc" -ne 0 ]; then
         echo "E2E-$_gate-BLOCKED: git ls-files --others exit $_ug_rc (untracked-input observation failed, not a receipt)" >&2
-        printf '  %s\n' "$_ug_list" >&2
+        if [ -s "$_ug_err" ]; then
+            sed 's/^/  /' "$_ug_err" >&2
+        fi
+        rm -f "$_ug_err"
         exit 1
     fi
+    rm -f "$_ug_err"
     [ -n "$_ug_list" ] || return 0
     _ug_bad=""
     while IFS= read -r _ug_path; do
         [ -n "$_ug_path" ] || continue
         _ug_allowed=0
         # The expansion is intentionally unquoted: the allowlist is a fixed,
-        # space-separated pattern set and word-splitting is the list separator.
+        # space-separated prefix set and word-splitting is the list separator.
         # shellcheck disable=SC2086
-        for _ug_pattern in $E2E_UNTRACKED_ALLOW; do
+        for _ug_prefix in $E2E_UNTRACKED_ALLOW; do
             case "$_ug_path" in
-                $_ug_pattern) _ug_allowed=1 ;;
+                "$_ug_prefix"*) _ug_allowed=1 ;;
             esac
         done
         [ "$_ug_allowed" -eq 1 ] || _ug_bad="$_ug_bad
@@ -1655,7 +1677,7 @@ EOF
         return 0
     fi
     echo "E2E-$_gate-BLOCKED: untracked path(s) outside the explicit allowlist (git diff HEAD cannot cover them, so the receipt would not bind the built binary):$_ug_bad" >&2
-    echo "E2E-$_gate-BLOCKED: commit the path(s), remove them, or add a named E2E_UNTRACKED_ALLOW entry with its rationale in the same commit" >&2
+    echo "E2E-$_gate-BLOCKED: commit the path(s), remove them, or name a path prefix in E2E_UNTRACKED_ALLOW with its rationale in the same commit" >&2
     exit 1
 }
 
