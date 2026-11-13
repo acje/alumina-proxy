@@ -326,14 +326,10 @@ pub(super) fn encode_dns_assurance(
         buf: slot_buf,
         len: 0,
     };
-    if !write_header(&mut w, Level::Info, Kind::DnsAssurance)
-        || !w.push(b" name=\"")
-        || !push_escaped(&mut w, fqdn.as_str())
-        || !w.push(b"\" port=")
-        || fmt::Write::write_fmt(&mut w, format_args!("{}", fqdn.port())).is_err()
-        || !w.push(b" secs=")
-        || fmt::Write::write_fmt(&mut w, format_args!("{secs}")).is_err()
-        || !w.push(b" seq=")
+    if !write_assurance_preamble(&mut w, Kind::DnsAssurance, fqdn, secs) {
+        return None;
+    }
+    if !w.push(b" seq=")
         || fmt::Write::write_fmt(&mut w, format_args!("{seq}")).is_err()
         || !w.push(b" phase=")
         || !w.push(phase.as_str().as_bytes())
@@ -354,6 +350,17 @@ pub(super) fn encode_dns_assurance(
         return None;
     }
     Some(w.len)
+}
+
+/// Writes the canonical `level=`/`kind=`/`name=`/`port=`/`secs=` prefix.
+fn write_assurance_preamble(w: &mut Entry<'_>, kind: Kind, fqdn: &Fqdn, secs: u64) -> bool {
+    write_header(w, Level::Info, kind)
+        && w.push(b" name=\"")
+        && push_escaped(w, fqdn.as_str())
+        && w.push(b"\" port=")
+        && fmt::Write::write_fmt(w, format_args!("{}", fqdn.port())).is_ok()
+        && w.push(b" secs=")
+        && fmt::Write::write_fmt(w, format_args!("{secs}")).is_ok()
 }
 
 fn append_assurance_boot(w: &mut Entry<'_>, boot: AssuranceBoot) -> bool {
