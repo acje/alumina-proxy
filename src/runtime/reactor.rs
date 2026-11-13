@@ -1696,14 +1696,6 @@ impl Serving {
             } else {
                 false
             };
-            // The readiness error alone closes the slot, but activity the
-            // upstream already sent is only observable from the bytes: on a
-            // combined error+readable event the pre-gate read must precede the
-            // close, or the early-activity fact and its tripwire projection are
-            // lost for exactly the event an operator most needs to see (D18).
-            // A never-opened gate admitted nothing, so the read closes without
-            // forwarding a byte; a sealed or spent visit defers the event to
-            // its re-armed redelivery instead of dropping the fact.
             if upstream && ready.readable && !self.slots[index].gate.is_open() {
                 if !self.enter_visit(index, RescheduleArm::Upstream) {
                     return Ok(());
