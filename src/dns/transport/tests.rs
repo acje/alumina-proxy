@@ -887,15 +887,20 @@ fn assert_serving_recovery_notes(
     notes: [Option<IncidentNote>; 2],
     configured: bool,
 ) {
-    let Some(IncidentNote::Recovered {
-        ordinal: 0,
-        family: Family::A,
-        resolver,
-        ..
-    }) = notes[0]
-    else {
-        panic!("the recovery must be a serving A note, got {notes:?}");
+    let recovered = match notes[0] {
+        Some(IncidentNote::Recovered {
+            ordinal: 0,
+            family: Family::A,
+            resolver,
+            ..
+        }) => Some(resolver),
+        _ => None,
     };
+    assert!(
+        recovered.is_some(),
+        "the recovery must be a serving A note, got {notes:?}"
+    );
+    let resolver = recovered.expect("the recovery is a serving A note");
     assert_eq!(
         resolver,
         configured.then_some(1),
