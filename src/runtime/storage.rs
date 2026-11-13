@@ -457,42 +457,56 @@ impl ServeStorage {
         let secs = self.now0.saturating_add(elapsed.as_secs());
         let mut earliest: Option<Instant> = None;
         for ordinal in 0..self.config.allowlist().len() {
-            let Some(state) = self.assurance[ordinal] else {
+            let Some(wake) = self.assurance_ordinal_wake(ordinal, secs, now)? else {
                 continue;
             };
-            let fault = |error| AssuranceWakeFault {
-                ordinal,
-                error: AssuranceObservationError::Cache(error),
-            };
-            let name = self
+            earliest = Some(earliest.map_or(wake, |current| current.min(wake)));
+        }
+        Ok(earliest)
+    }
+
+    fn assurance_ordinal_wake(
+        &self,
+        ordinal: usize,
+        secs: u64,
+        now: Instant,
+    ) -> Result<Option<Instant>, AssuranceWakeFault> {
+        let Some(state) = self.assurance[ordinal] else {
+            return Ok(None);
+        };
+        let fault = |error| AssuranceWakeFault {
+            ordinal,
+            error: AssuranceObservationError::Cache(error),
+        };
+        let name = self
+            .cache
+            .name_index(ordinal)
+            .ok_or_else(|| fault(CacheError::NameOutOfRange))?;
+        let mut earliest: Option<Instant> = None;
+        for family in Family::ALL {
+            let Some(deadline) = self
                 .cache
-                .name_index(ordinal)
-                .ok_or_else(|| fault(CacheError::NameOutOfRange))?;
-            for family in Family::ALL {
-                let Some(deadline) = self
-                    .cache
-                    .retained_evidential_deadline(name, family)
-                    .map_err(fault)?
-                else {
-                    continue;
-                };
-                let observed_secs = secs.max(deadline);
-                let mut preview = state.marker;
-                if !preview.observe(self.cache.grade_key(name, observed_secs).map_err(fault)?) {
-                    continue;
-                }
-                let wake = if deadline <= secs {
-                    now
-                } else {
-                    let offset = deadline
-                        .checked_sub(self.now0)
-                        .ok_or_else(|| fault(CacheError::DeadlineOverflow))?;
-                    self.origin
-                        .checked_add(Duration::from_secs(offset))
-                        .ok_or_else(|| fault(CacheError::DeadlineOverflow))?
-                };
-                earliest = Some(earliest.map_or(wake, |current| current.min(wake)));
+                .retained_evidential_deadline(name, family)
+                .map_err(fault)?
+            else {
+                continue;
+            };
+            let observed_secs = secs.max(deadline);
+            let mut preview = state.marker;
+            if !preview.observe(self.cache.grade_key(name, observed_secs).map_err(fault)?) {
+                continue;
             }
+            let wake = if deadline <= secs {
+                now
+            } else {
+                let offset = deadline
+                    .checked_sub(self.now0)
+                    .ok_or_else(|| fault(CacheError::DeadlineOverflow))?;
+                self.origin
+                    .checked_add(Duration::from_secs(offset))
+                    .ok_or_else(|| fault(CacheError::DeadlineOverflow))?
+            };
+            earliest = Some(earliest.map_or(wake, |current| current.min(wake)));
         }
         Ok(earliest)
     }
