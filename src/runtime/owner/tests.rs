@@ -2066,36 +2066,44 @@ fn corroboration_concludes_through_serving_turns_body() {
     drop(responder);
 }
 
-fn probe_exchange_failed_reports_per_event_resolver_body() {
-    let port = ephemeral_port();
+fn sink_runtime(port: u16) -> (Runtime, std::fs::File) {
     let mut storage = ServeStorage::boot(&config(port)).expect("boot storage");
-    let mut file = test_sink_file();
+    let file = test_sink_file();
     *storage.logs_mut() = crate::log::LogStore::with_fd(&file).expect("file sink store");
     let listener =
         TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+    let runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+    (runtime, file)
+}
 
+fn held_loopback_peer() -> (StdListener, SocketAddr) {
+    let held = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind held peer");
+    let addr = held.local_addr().expect("held peer addr");
+    (held, addr)
+}
+
+fn begin_two_resolver_window(runtime: &mut Runtime, peer: SocketAddr) {
     let set = crate::dns::resolver::ResolverSet::from_slice(&[
         crate::dns::resolver::select("127.0.0.1").expect("loopback resolver"),
         crate::dns::resolver::select("127.0.0.1").expect("loopback resolver"),
     ])
     .expect("two-resolver set");
-    let held = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("bind held peer");
-    let held_addr = held.local_addr().expect("held peer addr");
-    let now0 = runtime.serving.storage().dns().now_u64();
+    let now = runtime.serving.storage().dns().now_u64();
     runtime
         .serving
         .storage_mut()
         .dns_mut()
-        .begin_window(held_addr, set, now0, Duration::from_secs(10))
+        .begin_window(peer, set, now, Duration::from_secs(10))
         .expect("begin window");
+}
 
+fn start_expired_serving_exchange(runtime: &mut Runtime, peer: SocketAddr) {
     runtime
         .serving
         .storage_mut()
         .dns_mut()
-        .set_peer_for_test(held_addr);
+        .set_peer_for_test(peer);
     runtime
         .serving
         .storage_mut()
@@ -2106,17 +2114,15 @@ fn probe_exchange_failed_reports_per_event_resolver_body() {
             ExchangeClass::Serving,
         )
         .expect("start serving exchange");
-    runtime.cooperative_dns_turn().expect("serving turn");
+}
 
-    let dead = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("dead peer");
-    let dead_addr = dead.local_addr().expect("dead peer addr");
-    drop(dead);
+fn settle_probe_against_dead_peer(runtime: &mut Runtime, peer: SocketAddr) {
     let fqdn = crate::config::Fqdn::parse("sub.example.org:443").expect("fqdn");
     runtime
         .serving
         .storage_mut()
         .dns_mut()
-        .set_peer_for_test(dead_addr);
+        .set_peer_for_test(peer);
     runtime
         .serving
         .storage_mut()
@@ -2135,8 +2141,9 @@ fn probe_exchange_failed_reports_per_event_resolver_body() {
         !runtime.serving.storage().dns().has_active_exchange(),
         "the seeded probe exchange must settle through the serving turns"
     );
+}
 
-    let text = drain_sink_text(&mut file);
+fn assert_per_event_resolver_attribution(text: &str) {
     let failed: Vec<&str> = text
         .lines()
         .filter(|line| line.contains("kind=exchange_failed"))
@@ -2158,73 +2165,14 @@ fn probe_exchange_failed_reports_per_event_resolver_body() {
         serving.contains("resolver=0"),
         "serving keeps resolver 0: {serving}"
     );
-    assert_eq!(
-        runtime.serving.storage().dns().current_resolver_index(),
-        Some(0),
-        "the failed probe must restore the pre-probe resolver 0"
-    );
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "long real-pipeline falsifier: the causally ordered counted failures, relocation, real recovery, and per-record origin/summary assertions belong in one body"
-)]
-fn failover_and_recovery_emit_truthful_origin_body() {
-    let port = ephemeral_port();
-    let mut storage = ServeStorage::boot(&config(port)).expect("boot storage");
-    let mut file = test_sink_file();
-    *storage.logs_mut() = crate::log::LogStore::with_fd(&file).expect("file sink store");
-    let listener =
-        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
-    let set = crate::dns::resolver::ResolverSet::from_slice(&[
-        crate::dns::resolver::select("127.0.0.1").expect("loopback resolver 0"),
-        crate::dns::resolver::select("127.0.0.1").expect("loopback resolver 1"),
-    ])
-    .expect("two-resolver set");
-    let dead = StdListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("dead peer");
-    let dead_addr = dead.local_addr().expect("dead peer addr");
-    drop(dead);
-    let now0 = runtime.serving.storage().dns().now_u64();
+fn drive_recovery_until_published(runtime: &mut Runtime, peer: SocketAddr) {
     runtime
         .serving
         .storage_mut()
         .dns_mut()
-        .begin_window(dead_addr, set, now0, Duration::from_secs(10))
-        .expect("begin window");
-    for _ in 0..3 {
-        runtime
-            .serving
-            .storage_mut()
-            .dns_mut()
-            .set_peer_for_test(dead_addr);
-        runtime
-            .serving
-            .storage_mut()
-            .start_dns_exchange(
-                0,
-                Family::A,
-                Instant::now() - Duration::from_secs(1),
-                ExchangeClass::Serving,
-            )
-            .expect("start serving exchange");
-        runtime
-            .turn(Some(Duration::from_millis(1)))
-            .expect("owner turn");
-    }
-    assert_eq!(
-        runtime.serving.storage().dns().current_resolver_index(),
-        Some(1),
-        "three counted failures must relocate the active resolver to 1"
-    );
-    let (responder_addr, responder) = spawn_responder_keep_alive();
-    std::thread::sleep(Duration::from_millis(1200));
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .set_peer_for_test(responder_addr);
+        .set_peer_for_test(peer);
     runtime
         .serving
         .storage_mut()
@@ -2239,25 +2187,13 @@ fn failover_and_recovery_emit_truthful_origin_body() {
         runtime
             .turn(Some(Duration::from_millis(1)))
             .expect("recovery turn");
-        if name_published(&runtime, 0, Family::A) {
+        if name_published(runtime, 0, Family::A) {
             break;
         }
     }
-    assert!(
-        name_published(&runtime, 0, Family::A),
-        "the real validated answer must publish ordinal 0 family A"
-    );
-    assert_eq!(
-        runtime
-            .serving
-            .storage()
-            .dns()
-            .last_failure_origin(0, Family::A),
-        Some(0),
-        "the saved last-failed origin must survive the recovery"
-    );
-    drop(responder);
-    let text = drain_sink_text(&mut file);
+}
+
+fn assert_failover_origin_frames(text: &str) {
     let kind = |needle: &str| {
         text.lines()
             .filter(|line| line.contains(&format!("kind={needle}")))
@@ -2295,6 +2231,67 @@ fn failover_and_recovery_emit_truthful_origin_body() {
         "the closed window counted three failures: {}",
         summary[0]
     );
+}
+
+fn probe_exchange_failed_reports_per_event_resolver_body() {
+    let port = ephemeral_port();
+    let (mut runtime, mut file) = sink_runtime(port);
+    let (_held, held_addr) = held_loopback_peer();
+    begin_two_resolver_window(&mut runtime, held_addr);
+    start_expired_serving_exchange(&mut runtime, held_addr);
+    runtime.cooperative_dns_turn().expect("serving turn");
+
+    let (dead, dead_addr) = held_loopback_peer();
+    drop(dead);
+    settle_probe_against_dead_peer(&mut runtime, dead_addr);
+
+    let text = drain_sink_text(&mut file);
+    assert_per_event_resolver_attribution(&text);
+    assert_eq!(
+        runtime.serving.storage().dns().current_resolver_index(),
+        Some(0),
+        "the failed probe must restore the pre-probe resolver 0"
+    );
+}
+
+fn failover_and_recovery_emit_truthful_origin_body() {
+    let port = ephemeral_port();
+    let (mut runtime, mut file) = sink_runtime(port);
+    let (dead, dead_addr) = held_loopback_peer();
+    drop(dead);
+    begin_two_resolver_window(&mut runtime, dead_addr);
+    for _ in 0..3 {
+        start_expired_serving_exchange(&mut runtime, dead_addr);
+        runtime
+            .turn(Some(Duration::from_millis(1)))
+            .expect("owner turn");
+    }
+    assert_eq!(
+        runtime.serving.storage().dns().current_resolver_index(),
+        Some(1),
+        "three counted failures must relocate the active resolver to 1"
+    );
+
+    let (responder_addr, responder) = spawn_responder_keep_alive();
+    std::thread::sleep(Duration::from_millis(1200));
+    drive_recovery_until_published(&mut runtime, responder_addr);
+    assert!(
+        name_published(&runtime, 0, Family::A),
+        "the real validated answer must publish ordinal 0 family A"
+    );
+    assert_eq!(
+        runtime
+            .serving
+            .storage()
+            .dns()
+            .last_failure_origin(0, Family::A),
+        Some(0),
+        "the saved last-failed origin must survive the recovery"
+    );
+    drop(responder);
+
+    let text = drain_sink_text(&mut file);
+    assert_failover_origin_frames(&text);
 }
 
 enum SessionGate {
