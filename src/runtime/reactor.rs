@@ -1687,13 +1687,34 @@ impl Serving {
             return Ok(());
         }
         if ready.error {
-            let connecting_dial = upstream && self.slots[index].stage == Stage::Dialing;
-            if connecting_dial {
+            let dial_connected = if upstream && self.slots[index].stage == Stage::Dialing {
                 match self.upstream_connectedness(index) {
                     ConnectState::Pending => return Ok(()),
                     ConnectState::Failed => return self.fail_current_attempt(index),
-                    ConnectState::Connected => return self.upstream_writable(index),
+                    ConnectState::Connected => true,
                 }
+            } else {
+                false
+            };
+            // The readiness error alone closes the slot, but activity the
+            // upstream already sent is only observable from the bytes: on a
+            // combined error+readable event the pre-gate read must precede the
+            // close, or the early-activity fact and its tripwire projection are
+            // lost for exactly the event an operator most needs to see (D18).
+            // A never-opened gate admitted nothing, so the read closes without
+            // forwarding a byte; a sealed or spent visit defers the event to
+            // its re-armed redelivery instead of dropping the fact.
+            if upstream && ready.readable && !self.slots[index].gate.is_open() {
+                if !self.enter_visit(index, RescheduleArm::Upstream) {
+                    return Ok(());
+                }
+                self.upstream_readable(index)?;
+                if self.slots[index].stage == Stage::Idle || self.visit.exhausted() {
+                    return Ok(());
+                }
+            }
+            if dial_connected {
+                return self.upstream_writable(index);
             }
             self.close_slot(index);
             return Ok(());

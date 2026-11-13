@@ -2838,6 +2838,243 @@ mod dialing {
         });
     }
 
+    /// One pre-gate dialing upstream slot with `test_data` queued for the next
+    /// read. The gate stays closed: no upstream byte has been permitted
+    /// through it, and the hello boundary is not validated, so a read projects
+    /// `EvidenceInsufficient` exactly as a real dialing slot does.
+    fn fabric_pre_gate_queued_upstream(serving: &mut Serving, test_data: usize) {
+        fabric_validated_early_data(serving, Some(test_data));
+    }
+
+    /// The same pre-gate slot with the validated hello boundary already
+    /// committed, standing in for the `ValidatingHello` stage: an upstream data
+    /// read there projects `EarlyUpstreamData` against the committed ordinal.
+    fn fabric_validated_pre_gate_queued_upstream(serving: &mut Serving, test_data: usize) {
+        fabric_pre_gate_queued_upstream(serving, test_data);
+        {
+            let ws = &mut serving.slots[0];
+            ws.gate.on_response_ok();
+            ws.gate.on_hello_validated(ValidatedHello::test_new(10));
+            ws.stage = Stage::ValidatingHello;
+        }
+    }
+
+    /// The slot's committed domain ordinal, captured before a close resets the
+    /// slot's approved pair.
+    fn committed_ordinal(serving: &Serving) -> crate::enforcement::action::DomainOrdinal {
+        serving
+            .storage()
+            .ordinal_for_pair(
+                &FixedHostname::normalize(b"sub.example.org").expect("approved hostname"),
+                serving.slots[0].approved_port,
+            )
+            .expect("committed ordinal")
+    }
+
+    #[test]
+    /// D18 (alumina-gzqn4.17.5): one readiness event carrying **both** an error
+    /// and readability on a pre-gate upstream must still record the activity the
+    /// upstream already sent, and its tripwire projection, before the slot
+    /// closes. The error alone closes the slot, but the fact lives only in the
+    /// bytes, so the read must precede the close.
+    fn combined_error_readable_pre_gate_upstream_records_early_activity() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let mut client = connect(port);
+            client
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .expect("client read timeout");
+            pump(serving, 40);
+            assert_eq!(
+                serving.storage().occupied(),
+                1,
+                "the connecting client must be admitted"
+            );
+
+            fabric_validated_pre_gate_queued_upstream(serving, 8);
+            let ordinal = committed_ordinal(serving);
+            let token = upstream_token(serving.slots[0].slot_gen, 0);
+            serving
+                .dispatch_readiness(
+                    token,
+                    Readiness {
+                        error: true,
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                )
+                .expect("combined error+readable pre-gate event");
+
+            let record = serving
+                .storage()
+                .logs()
+                .last_record_bytes()
+                .expect("the combined event must record the early-activity fact");
+            let text = String::from_utf8_lossy(record);
+            assert!(
+                text.contains("kind=early_activity")
+                    && text.contains("hostname=\"sub.example.org\"")
+                    && text.contains("peer=\"127.0.0.1:")
+                    && text.contains("activity=\"data\""),
+                "the fact must name the observed activity kind and peer: {text}"
+            );
+            assert_eq!(
+                serving
+                    .storage()
+                    .enforcement()
+                    .counters()
+                    .facts_early_data(ordinal),
+                1,
+                "the early-activity tripwire projection must still run on the combined event"
+            );
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "the slot must still release its admitted seat"
+            );
+            assert!(
+                serving.slots[0].stage == Stage::Idle,
+                "the slot must close after the pre-gate read"
+            );
+            assert!(
+                read_until(&mut client, b"\r\n\r\n").is_empty(),
+                "detection telemetry must never forward a byte to the client"
+            );
+        });
+    }
+
+    #[test]
+    /// D18 on the Dialing classification path: a combined error+readable event
+    /// on a connected, pre-gate dialing upstream must observe the queued origin
+    /// bytes — and project its tripwire fact — before the
+    /// `Connected -> upstream_writable` branch can flush the 200 for a slot that
+    /// is about to close.
+    fn dialing_combined_error_readable_records_early_activity_before_connected_flush() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let mut client = connect(port);
+            client
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .expect("client read timeout");
+            pump(serving, 40);
+            assert_eq!(
+                serving.storage().occupied(),
+                1,
+                "the connecting client must be admitted"
+            );
+
+            fabric_pre_gate_queued_upstream(serving, 8);
+            let token = upstream_token(serving.slots[0].slot_gen, 0);
+            serving
+                .dispatch_readiness(
+                    token,
+                    Readiness {
+                        error: true,
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                )
+                .expect("combined error+readable dialing event");
+
+            let record = serving
+                .storage()
+                .logs()
+                .last_record_bytes()
+                .expect("the dialing combined event must record the early-activity fact");
+            let text = String::from_utf8_lossy(record);
+            assert!(
+                text.contains("kind=early_activity") && text.contains("activity=\"data\""),
+                "the dialing combined event must record the observed early activity: {text}"
+            );
+            assert_eq!(
+                serving
+                    .storage()
+                    .enforcement()
+                    .counters()
+                    .facts_unknown(UnknownReason::NotYetValidated),
+                1,
+                "a dialing slot's unvalidated upstream data still projects its tripwire fact"
+            );
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "the observed early activity must release the admitted seat"
+            );
+            assert!(
+                serving.slots[0].stage == Stage::Idle,
+                "the slot must close on the observed activity, not advance to send the 200"
+            );
+            assert!(
+                read_until(&mut client, b"\r\n\r\n").is_empty(),
+                "the connected-dial flush must not emit a 200 for a slot that closes on the same event"
+            );
+        });
+    }
+
+    #[test]
+    /// D18 guard: an error-only readiness event on the same pre-gate slot still
+    /// closes it and must **not** fabricate an early-activity fact — nothing was
+    /// readable, so the queued read is never consumed.
+    fn error_only_pre_gate_upstream_closes_without_early_activity() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let _client = connect(port);
+            pump(serving, 40);
+            assert_eq!(
+                serving.storage().occupied(),
+                1,
+                "the connecting client must be admitted"
+            );
+
+            fabric_validated_pre_gate_queued_upstream(serving, 8);
+            let ordinal = committed_ordinal(serving);
+            let token = upstream_token(serving.slots[0].slot_gen, 0);
+            serving
+                .dispatch_readiness(
+                    token,
+                    Readiness {
+                        error: true,
+                        ..Readiness::none()
+                    },
+                )
+                .expect("error-only pre-gate event");
+
+            assert_eq!(
+                serving.storage().occupied(),
+                0,
+                "an error-only event must still close the pre-gate slot"
+            );
+            assert!(
+                serving.slots[0].stage == Stage::Idle,
+                "an error-only event must still close the pre-gate slot"
+            );
+            let last = serving
+                .storage()
+                .logs()
+                .last_record_bytes()
+                .map(String::from_utf8_lossy);
+            assert!(
+                last.as_deref()
+                    .is_none_or(|text| !text.contains("kind=early_activity")),
+                "no fact may be fabricated from a readiness event that observed nothing: {last:?}"
+            );
+            assert_eq!(
+                serving
+                    .storage()
+                    .enforcement()
+                    .counters()
+                    .facts_early_data(ordinal),
+                0,
+                "the tripwire projection must not run without an observed activity"
+            );
+            assert_eq!(
+                serving.slots[0].test_reads.len(),
+                1,
+                "the queued read must survive untouched: an error-only event reads nothing"
+            );
+        });
+    }
+
     #[test]
     fn upstream_read_interrupted_exhaustion_rewires_and_terminates_on_pending_data() {
         let port = ephemeral_port();
