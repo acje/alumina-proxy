@@ -1047,61 +1047,25 @@ fn reconnect_falsifier_body() {
     let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
     let (responder_addr, responder) = spawn_responder_close_after_answer();
 
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .set_peer_for_test(responder_addr);
-    runtime
-        .serving
-        .storage_mut()
-        .start_dns_exchange(
-            0,
-            Family::A,
-            Instant::now() + Duration::from_secs(10),
-            ExchangeClass::Serving,
-        )
-        .expect("start exchange A");
-    let mut first = false;
-    for _ in 0..200 {
-        runtime
-            .turn(Some(Duration::from_millis(5)))
-            .expect("owner turn");
-        if name_published(&runtime, 0, Family::A) {
-            first = true;
-            break;
-        }
-    }
+    start_serving_exchange(&mut runtime, responder_addr, Family::A);
+    let first = turn_until(
+        &mut runtime,
+        Some(Duration::from_millis(5)),
+        200,
+        |runtime| name_published(runtime, 0, Family::A),
+    );
     assert!(
         first,
         "the first exchange must publish against a responder that closes after answering"
     );
 
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .set_peer_for_test(responder_addr);
-    runtime
-        .serving
-        .storage_mut()
-        .start_dns_exchange(
-            0,
-            Family::Aaaa,
-            Instant::now() + Duration::from_secs(10),
-            ExchangeClass::Serving,
-        )
-        .expect("start exchange Aaaa");
-    let mut second = false;
-    for _ in 0..200 {
-        runtime
-            .turn(Some(Duration::from_millis(5)))
-            .expect("owner turn");
-        if name_published(&runtime, 0, Family::Aaaa) {
-            second = true;
-            break;
-        }
-    }
+    start_serving_exchange(&mut runtime, responder_addr, Family::Aaaa);
+    let second = turn_until(
+        &mut runtime,
+        Some(Duration::from_millis(5)),
+        200,
+        |runtime| name_published(runtime, 0, Family::Aaaa),
+    );
     drop(responder);
     assert!(
         second,
@@ -1402,27 +1366,23 @@ fn startup_reuse_window_body() {
 /// exchange immediately instead of riding out the window deadline; once the
 /// countdown releases, the held handshake resumes and the window still
 /// resolves every name promptly, never to the exchange/window deadline.
-fn startup_zero_wait_body() {
-    let config_port = ephemeral_port();
-    let storage = ServeStorage::boot(&dot_config_window(config_port, &pinned_resolver()))
-        .expect("boot storage");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
-    owner
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .set_hold_handshake_defer_remaining(6);
+#[derive(Default)]
+struct ZeroWaitObservation {
+    observations: std::rc::Rc<std::cell::Cell<usize>>,
+    worst_gap: std::rc::Rc<std::cell::Cell<Duration>>,
+    last: std::rc::Rc<std::cell::Cell<Option<Instant>>>,
+    observed_continue: std::rc::Rc<std::cell::Cell<bool>>,
+}
 
-    let observations = std::rc::Rc::new(std::cell::Cell::new(0usize));
-    let worst_gap = std::rc::Rc::new(std::cell::Cell::new(Duration::ZERO));
-    let last = std::rc::Rc::new(std::cell::Cell::new(None::<Instant>));
-    let observed_continue = std::rc::Rc::new(std::cell::Cell::new(false));
-    let obs_hook = std::rc::Rc::clone(&observations);
-    let gap_hook = std::rc::Rc::clone(&worst_gap);
-    let last_hook = std::rc::Rc::clone(&last);
-    let continue_hook = std::rc::Rc::clone(&observed_continue);
-    let hook = std::rc::Rc::new(move |serving: &crate::runtime::reactor::Serving| {
+fn arm_zero_wait_hook(owner: &mut Preallocated) -> ZeroWaitObservation {
+    use std::rc::Rc;
+
+    let observation = ZeroWaitObservation::default();
+    let obs_hook = Rc::clone(&observation.observations);
+    let gap_hook = Rc::clone(&observation.worst_gap);
+    let last_hook = Rc::clone(&observation.last);
+    let continue_hook = Rc::clone(&observation.observed_continue);
+    let hook = Rc::new(move |serving: &Serving| {
         let dns = serving.storage().dns();
         if !dns.has_active_exchange() || dns.needs_wait() {
             return;
@@ -1441,6 +1401,21 @@ fn startup_zero_wait_body() {
         last_hook.set(Some(now));
     });
     owner.serving.arm_pre_poll_hook(hook);
+    observation
+}
+
+fn startup_zero_wait_body() {
+    let config_port = ephemeral_port();
+    let storage = ServeStorage::boot(&dot_config_window(config_port, &pinned_resolver()))
+        .expect("boot storage");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
+    owner
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_hold_handshake_defer_remaining(6);
+    let observation = arm_zero_wait_hook(&mut owner);
 
     let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
     let port = responder.port();
@@ -1462,18 +1437,18 @@ fn startup_zero_wait_body() {
     drop(responder);
 
     assert!(
-        observed_continue.get(),
+        observation.observed_continue.get(),
         "the window must park the held handshake in HandshakeContinue"
     );
     assert!(
-        observations.get() >= 2,
+        observation.observations.get() >= 2,
         "the pump must re-advance a sendable exchange more than once, saw {:?}",
-        observations.get()
+        observation.observations.get()
     );
     assert!(
-        worst_gap.get() < Duration::from_millis(250),
+        observation.worst_gap.get() < Duration::from_millis(250),
         "a sendable exchange must never get a real deadline-length wait; worst gap {:?}",
-        worst_gap.get()
+        observation.worst_gap.get()
     );
     assert!(
         elapsed < Duration::from_secs(3),
@@ -1494,38 +1469,20 @@ fn startup_zero_wait_body() {
 /// across later turns (oracle 991u C1, dm48, U1).
 fn selfpipe_receiving_cancellation_body() {
     let port = ephemeral_port();
-    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
-    let listener =
-        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
-    let (responder_addr, responder) = spawn_stall_responder();
+    let (mut runtime, responder) =
+        boot_stalled_runtime(port, &config(port), Duration::from_secs(30));
 
-    let exchange_deadline = Instant::now() + Duration::from_secs(30);
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .set_peer_for_test(responder_addr);
-    runtime
-        .serving
-        .storage_mut()
-        .start_dns_exchange(0, Family::A, exchange_deadline, ExchangeClass::Serving)
-        .expect("start exchange");
-
-    let mut saw_receiving = false;
-    for _ in 0..300 {
-        runtime
-            .turn(Some(Duration::from_millis(2)))
-            .expect("owner turn to Receiving");
-        if matches!(
-            runtime.serving.storage().dns().exchange_step(),
-            Some(crate::dns::transport::ExchangeStep::Receiving)
-        ) {
-            saw_receiving = true;
-            break;
-        }
-    }
+    let saw_receiving = turn_until(
+        &mut runtime,
+        Some(Duration::from_millis(2)),
+        300,
+        |runtime| {
+            matches!(
+                runtime.serving.storage().dns().exchange_step(),
+                Some(crate::dns::transport::ExchangeStep::Receiving)
+            )
+        },
+    );
     assert!(
         saw_receiving,
         "the retained DNS exchange must observably reach Receiving against a silent peer"
@@ -1617,15 +1574,16 @@ fn post_all_resolved_settlement_body() {
 /// transport cancellation in `on_sigterm` clears the active exchange inside
 /// the same turn, and the post-poll loop head re-checks shutdown before
 /// `advance_dns` runs — either alone keeps the final name unpublished.
-fn both_ready_settlement_body() {
-    let port = ephemeral_port();
-    let storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
+struct HeldFinalControl {
+    held: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    release: std::sync::mpsc::Sender<()>,
+    wrote: std::sync::mpsc::Receiver<()>,
+}
 
-    let (responder_addr, held_flag, release_tx, wrote_rx, responder) = spawn_responder_hold_final();
+fn arm_both_ready_hook(owner: &mut Preallocated, control: HeldFinalControl) {
+    use std::cell::{Cell, RefCell};
 
-    let wake = std::cell::RefCell::new(
+    let wake = RefCell::new(
         owner
             .serving
             .signal_wake_mut()
@@ -1633,11 +1591,12 @@ fn both_ready_settlement_body() {
             .try_clone()
             .expect("clone the self-pipe write end"),
     );
-
-    let fired = std::cell::Cell::new(false);
-    let held_for_hook = held_flag;
-    let release = release_tx;
-    let wrote = wrote_rx;
+    let fired = Cell::new(false);
+    let HeldFinalControl {
+        held,
+        release,
+        wrote,
+    } = control;
     let hook = std::rc::Rc::new(move |serving: &Serving| {
         if fired.get() {
             return;
@@ -1646,7 +1605,7 @@ fn both_ready_settlement_body() {
             return;
         }
         let spin_deadline = Instant::now() + Duration::from_millis(1500);
-        while !held_for_hook.load(std::sync::atomic::Ordering::SeqCst) {
+        while !held.load(std::sync::atomic::Ordering::SeqCst) {
             if serving.test_active_ordinal() != Some(1) {
                 return;
             }
@@ -1663,19 +1622,32 @@ fn both_ready_settlement_body() {
         wrote
             .recv_timeout(Duration::from_secs(5))
             .expect("the held answer write_response must return before the signal byte");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !serving.test_dns_fd_readable() {
-            assert!(
-                Instant::now() < deadline,
-                "owner DNS fd must become readable after the write ack"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        assert!(
+            spin_until_dns_readable(serving, Duration::from_secs(5)),
+            "owner DNS fd must become readable after the write ack"
+        );
         wake.borrow_mut()
             .write_all(&[1])
             .expect("queue a SIGTERM byte only after DNS-ready is observed");
     });
     owner.serving.arm_pre_poll_hook(hook);
+}
+
+fn both_ready_settlement_body() {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
+
+    let (responder_addr, held_flag, release_tx, wrote_rx, responder) = spawn_responder_hold_final();
+    arm_both_ready_hook(
+        &mut owner,
+        HeldFinalControl {
+            held: held_flag,
+            release: release_tx,
+            wrote: wrote_rx,
+        },
+    );
 
     let outcome = owner
         .run_startup_within(responder_addr, 1000, Duration::from_secs(5))
@@ -1741,22 +1713,11 @@ fn startup_expiry_gates_already_readable_response_body() {
         wrote
             .recv_timeout(Duration::from_secs(5))
             .expect("the held answer write_response must return before the exchange deadline");
-        let readable_deadline = Instant::now() + Duration::from_secs(5);
-        while !serving.test_dns_fd_readable() {
-            assert!(
-                Instant::now() < readable_deadline,
-                "the complete response must become readable before the exchange deadline"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let ex_deadline = serving
-            .storage()
-            .dns()
-            .exchange_deadline()
-            .expect("the final exchange must still be active with a deadline");
-        while Instant::now() < ex_deadline {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        assert!(
+            spin_until_dns_readable(serving, Duration::from_secs(5)),
+            "the complete response must become readable before the exchange deadline"
+        );
+        spin_until(exchange_deadline(serving));
     });
     owner.serving.arm_pre_poll_hook(hook);
 
@@ -1811,28 +1772,17 @@ fn startup_expiry_gates_response_completing_during_final_turn_body() {
             std::thread::sleep(Duration::from_millis(1));
         }
         fired.set(true);
-        let ex_deadline = serving
-            .storage()
-            .dns()
-            .exchange_deadline()
-            .expect("the final exchange must still be active with a deadline");
-        while Instant::now() < ex_deadline {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        spin_until(exchange_deadline(serving));
         release
             .send(())
             .expect("release the held final allowlist answer after expiry");
         wrote
             .recv_timeout(Duration::from_secs(5))
             .expect("the held answer write_response must return after expiry");
-        let readable_deadline = Instant::now() + Duration::from_millis(500);
-        while !serving.test_dns_fd_readable() {
-            assert!(
-                Instant::now() < readable_deadline,
-                "the response must complete after the exchange deadline"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        assert!(
+            spin_until_dns_readable(serving, Duration::from_millis(500)),
+            "the response must complete after the exchange deadline"
+        );
     });
     owner.serving.arm_pre_poll_hook(hook);
 
@@ -1919,44 +1869,21 @@ fn retained_startup_exchange_cannot_advance_body() {
 /// call site.
 fn serving_refresh_survives_next_turn_body() {
     let port = ephemeral_port();
-    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
-    let listener =
-        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
-    // The stall responder withholds the answer for 300 ms so the started
-    // exchange cannot conclude inside its start turn (`DNS_ADVANCE_BOUND = 8`,
-    // runtime.rs:24) and the in-flight classification can be observed
-    // deterministically.
-    let (responder_addr, responder) = spawn_stall_responder();
+    let (mut runtime, responder) = boot_peer_runtime(port, &config(port));
 
-    runtime
-        .serving
-        .storage_mut()
-        .dns_mut()
-        .set_peer_for_test(responder_addr);
     let secs = runtime.serving().storage().dns().now_u64();
-    runtime
-        .serving
-        .storage_mut()
-        .schedules_mut()
-        .overwrite_due_at(0, Family::A, secs)
-        .expect("due the A family now");
+    set_due(&mut runtime, Family::A, secs);
     assert!(
         !runtime.serving().storage().dns().has_active_exchange(),
         "the retained transport must be idle before the due refresh"
     );
 
-    let mut started = false;
-    for _ in 0..200 {
-        runtime
-            .turn(Some(Duration::from_millis(2)))
-            .expect("owner turn");
-        if runtime.serving().storage().dns().has_active_exchange() {
-            started = true;
-            break;
-        }
-    }
+    let started = turn_until(
+        &mut runtime,
+        Some(Duration::from_millis(2)),
+        200,
+        |runtime| runtime.serving().storage().dns().has_active_exchange(),
+    );
     assert!(
         started,
         "an idle serving owner must auto-start the due refresh through \
@@ -1971,7 +1898,6 @@ fn serving_refresh_survives_next_turn_body() {
     runtime
         .turn(Some(Duration::from_millis(2)))
         .expect("one more serving turn");
-
     assert!(
         runtime.serving().storage().dns().has_active_exchange(),
         "a Serving-class refresh must survive the next turn's startup-exchange \
@@ -1982,16 +1908,12 @@ fn serving_refresh_survives_next_turn_body() {
         "and must still be classified Serving after that turn"
     );
 
-    let mut concluded = false;
-    for _ in 0..200 {
-        runtime
-            .turn(Some(Duration::from_millis(5)))
-            .expect("owner turn to conclusion");
-        if !runtime.serving().storage().dns().has_active_exchange() {
-            concluded = true;
-            break;
-        }
-    }
+    let concluded = turn_until(
+        &mut runtime,
+        Some(Duration::from_millis(5)),
+        200,
+        |runtime| !runtime.serving().storage().dns().has_active_exchange(),
+    );
     assert!(
         concluded,
         "the survived Serving refresh must conclude through the serving turns \
@@ -2467,47 +2389,28 @@ fn stop_and_join_responder(
 }
 
 fn idle_refresh_body() {
-    let port = ephemeral_port();
-    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
     let (responder_addr, stop, queries, responder) = spawn_supervised_positive_with_count();
-    let outcome = owner
-        .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
-        .expect("startup window");
+    let mut owner = preallocated_owner();
+    let outcome = serving_outcome(&mut owner, responder_addr);
     assert_eq!(
         outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the startup window must resolve the allowlist name"
     );
-    let mut runtime = owner
-        .attach(outcome.into_listener().expect("serving listener"))
-        .expect("attach");
+    let mut runtime = attach_serving(owner, outcome);
 
     let queries_at_attach = queries.load(std::sync::atomic::Ordering::SeqCst);
     let secs = runtime.serving().storage().dns().now_u64();
-    runtime
-        .serving
-        .storage_mut()
-        .schedules_mut()
-        .overwrite_due_at(0, Family::A, secs)
-        .expect("due the A family now");
+    set_due(&mut runtime, Family::A, secs);
     assert!(
         !runtime.serving().storage().dns().has_active_exchange(),
         "the retained transport must be idle before the due probe"
     );
 
     let probe_start = Instant::now();
-    let mut started = false;
-    for _ in 0..200 {
-        runtime
-            .turn(None)
-            .expect("owner turn on the production indefinite poll");
-        if runtime.serving().storage().dns().has_active_exchange() {
-            started = true;
-            break;
-        }
-    }
+    let started = turn_until(&mut runtime, None, 200, |runtime| {
+        runtime.serving().storage().dns().has_active_exchange()
+    });
     assert!(
         probe_start.elapsed() < Duration::from_secs(10),
         "the indefinite production poll must wake on its own fold to start a due refresh"
@@ -2518,30 +2421,14 @@ fn idle_refresh_body() {
          indefinite poll, woken by its own poll fold rather than a test-supplied timeout"
     );
 
-    let pre_refresh_due = runtime
-        .serving()
-        .storage()
-        .schedules()
-        .due_time(0, Family::A)
-        .expect("A due query")
-        .expect("A scheduled");
-    let mut renewed = false;
-    for _ in 0..200 {
-        if !runtime.serving().storage().dns().has_active_exchange()
-            && let Ok(Some(due)) = runtime
-                .serving()
-                .storage()
-                .schedules()
-                .due_time(0, Family::A)
-            && due > pre_refresh_due
-        {
-            renewed = true;
-            break;
-        }
-        runtime
-            .turn(None)
-            .expect("owner turn to renewal on the indefinite poll");
-    }
+    let pre_refresh_due = due_time_of(&runtime, Family::A);
+    let renewed = turn_until(&mut runtime, None, 200, |runtime| {
+        !runtime.serving().storage().dns().has_active_exchange()
+            && matches!(
+                runtime.serving().storage().schedules().due_time(0, Family::A),
+                Ok(Some(due)) if due > pre_refresh_due
+            )
+    });
     let queries_after = queries.load(std::sync::atomic::Ordering::SeqCst);
     stop_and_join_responder(responder_addr, &stop, responder);
     assert!(
@@ -2560,46 +2447,27 @@ fn idle_refresh_body() {
 }
 
 fn multicycle_body() {
-    let port = ephemeral_port();
-    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
     let (responder_addr, stop, queries, responder) = spawn_supervised_positive_with_count();
-    let outcome = owner
-        .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
-        .expect("startup window");
+    let mut owner = preallocated_owner();
+    let outcome = serving_outcome(&mut owner, responder_addr);
     assert_eq!(
         outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "startup must resolve the allowlist name"
     );
-    let mut runtime = owner
-        .attach(outcome.into_listener().expect("serving listener"))
-        .expect("attach");
+    let mut runtime = attach_serving(owner, outcome);
 
     let mut completed_cycles = 0usize;
     for _ in 0..2 {
         let queries_before = queries.load(std::sync::atomic::Ordering::SeqCst);
         let secs = runtime.serving().storage().dns().now_u64();
-        runtime
-            .serving
-            .storage_mut()
-            .schedules_mut()
-            .overwrite_due_at(0, Family::A, secs)
-            .expect("due the A family for a refresh cycle");
+        set_due(&mut runtime, Family::A, secs);
         loop {
             runtime
                 .turn(None)
                 .expect("owner turn on the production indefinite poll");
             if !runtime.serving().storage().dns().has_active_exchange()
-                && runtime
-                    .serving()
-                    .storage()
-                    .schedules()
-                    .due_time(0, Family::A)
-                    .expect("A due query")
-                    .expect("A scheduled")
-                    > secs
+                && due_time_of(&runtime, Family::A) > secs
             {
                 break;
             }
@@ -2628,22 +2496,49 @@ fn multicycle_body() {
     );
 }
 
-fn serving_runtime(responder: SocketAddr) -> Runtime {
-    let port = ephemeral_port();
-    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
-    let outcome = owner
-        .run_startup_within(responder, 1000, Duration::from_secs(3))
-        .expect("startup window");
-    assert_eq!(
-        outcome.decision(),
-        StartupDecision::Serve(ServingMode::Full),
-        "the startup window must resolve the allowlist name"
-    );
+fn attach_serving(
+    owner: Preallocated,
+    outcome: crate::runtime::storage::StartupOutcome,
+) -> Runtime {
     owner
         .attach(outcome.into_listener().expect("serving listener"))
         .expect("attach")
+}
+
+fn due_time_of(runtime: &Runtime, family: Family) -> u64 {
+    runtime
+        .serving()
+        .storage()
+        .schedules()
+        .due_time(0, family)
+        .expect("A due query")
+        .expect("A scheduled")
+}
+
+fn fresh_session_opened(sessions: &std::sync::atomic::AtomicUsize) -> bool {
+    for _ in 0..200 {
+        if sessions.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+fn preallocated_owner() -> Preallocated {
+    let port = ephemeral_port();
+    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    Preallocated::preallocate(storage, traffic).expect("preallocate")
+}
+
+fn serving_outcome(
+    owner: &mut Preallocated,
+    responder: SocketAddr,
+) -> crate::runtime::storage::StartupOutcome {
+    owner
+        .run_startup_within(responder, 1000, Duration::from_secs(3))
+        .expect("startup window")
 }
 
 fn set_due(runtime: &mut Runtime, family: Family, secs: u64) {
@@ -2657,11 +2552,12 @@ fn set_due(runtime: &mut Runtime, family: Family, secs: u64) {
 
 fn turn_until(
     runtime: &mut Runtime,
+    poll: Option<Duration>,
     attempts: usize,
     mut done: impl FnMut(&Runtime) -> bool,
 ) -> bool {
     for _ in 0..attempts {
-        runtime.turn(None).expect("owner turn");
+        runtime.turn(poll).expect("owner turn");
         if done(runtime) {
             return true;
         }
@@ -2669,16 +2565,103 @@ fn turn_until(
     false
 }
 
+fn start_serving_exchange(runtime: &mut Runtime, peer: SocketAddr, family: Family) {
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(peer);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(
+            0,
+            family,
+            Instant::now() + Duration::from_secs(10),
+            ExchangeClass::Serving,
+        )
+        .expect("start serving exchange");
+}
+
+fn boot_peer_runtime(
+    port: u16,
+    config: &crate::config::Config,
+) -> (Runtime, thread::JoinHandle<()>) {
+    let storage = ServeStorage::boot(config).expect("boot storage");
+    let listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).expect("bind listener");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
+    let mut runtime = Runtime::new(storage, listener, traffic).expect("runtime");
+    let (responder_addr, responder) = spawn_stall_responder();
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(responder_addr);
+    (runtime, responder)
+}
+
+fn boot_stalled_runtime(
+    port: u16,
+    config: &crate::config::Config,
+    deadline: Duration,
+) -> (Runtime, thread::JoinHandle<()>) {
+    let (mut runtime, responder) = boot_peer_runtime(port, config);
+    runtime
+        .serving
+        .storage_mut()
+        .start_dns_exchange(
+            0,
+            Family::A,
+            Instant::now() + deadline,
+            ExchangeClass::Serving,
+        )
+        .expect("start exchange");
+    (runtime, responder)
+}
+
+fn spin_until_dns_readable(serving: &Serving, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while !serving.test_dns_fd_readable() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    true
+}
+
+fn spin_until(deadline: Instant) {
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn exchange_deadline(serving: &Serving) -> Instant {
+    serving
+        .storage()
+        .dns()
+        .exchange_deadline()
+        .expect("the final exchange must still be active with a deadline")
+}
+
 fn refresh_retry_body() {
     let (responder_addr, stop, sessions, responder) =
         spawn_supervised_first_session_positive_then_silent_with_count();
-    let mut runtime = serving_runtime(responder_addr);
+    let mut owner = preallocated_owner();
+    let outcome = serving_outcome(&mut owner, responder_addr);
+    assert_eq!(
+        outcome.decision(),
+        StartupDecision::Serve(ServingMode::Full),
+        "the first responder session must resolve the allowlist name"
+    );
+    let mut runtime = attach_serving(owner, outcome);
 
     let secs = runtime.serving().storage().dns().now_u64();
     set_due(&mut runtime, Family::A, secs);
     set_due(&mut runtime, Family::Aaaa, secs);
 
-    let inflight = turn_until(&mut runtime, 200, |runtime| {
+    let inflight = turn_until(&mut runtime, None, 200, |runtime| {
         runtime.serving().storage().dns().has_active_exchange()
     });
     assert!(
@@ -2686,7 +2669,7 @@ fn refresh_retry_body() {
         "the owner must auto-start the first due refresh under the production indefinite poll"
     );
 
-    let receiving = turn_until(&mut runtime, 200, |runtime| {
+    let receiving = turn_until(&mut runtime, None, 200, |runtime| {
         matches!(
             runtime.serving().storage().dns().exchange_step(),
             Some(crate::dns::transport::ExchangeStep::Receiving)
@@ -2696,16 +2679,8 @@ fn refresh_retry_body() {
         receiving,
         "the first refresh must reach the silent session and wait on the response"
     );
-    let mut fresh_session = false;
-    for _ in 0..200 {
-        if sessions.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
-            fresh_session = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(1));
-    }
     assert!(
-        !fresh_session,
+        !fresh_session_opened(&sessions),
         "the first refresh must reuse the retained session-1 transport (F1 retention), \
          not open a fresh session"
     );
@@ -2719,7 +2694,7 @@ fn refresh_retry_body() {
          with a selectable-now sibling (no zero-wait busy-spin): {probe_elapsed:?}"
     );
 
-    let retried_after_failure = turn_until(&mut runtime, 60, |_| {
+    let retried_after_failure = turn_until(&mut runtime, None, 60, |_| {
         sessions.load(std::sync::atomic::Ordering::SeqCst) >= 3
     });
     stop_and_join_responder(responder_addr, &stop, responder);
@@ -2735,41 +2710,22 @@ fn refresh_retry_body() {
 }
 
 fn sigterm_suppression_body() {
-    let port = ephemeral_port();
-    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
     let (responder_addr, stop, _queries, responder) = spawn_supervised_positive_with_count();
-    let outcome = owner
-        .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
-        .expect("startup window");
+    let mut owner = preallocated_owner();
+    let outcome = serving_outcome(&mut owner, responder_addr);
     assert_eq!(
         outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "the startup window must resolve the allowlist name"
     );
-    let mut runtime = owner
-        .attach(outcome.into_listener().expect("serving listener"))
-        .expect("attach");
+    let mut runtime = attach_serving(owner, outcome);
 
     let secs = runtime.serving().storage().dns().now_u64();
-    runtime
-        .serving
-        .storage_mut()
-        .schedules_mut()
-        .overwrite_due_at(0, Family::A, secs)
-        .expect("due the A family now");
+    set_due(&mut runtime, Family::A, secs);
 
-    let mut started = false;
-    for _ in 0..200 {
-        runtime
-            .turn(None)
-            .expect("owner turn to due start on the indefinite poll");
-        if runtime.serving().storage().dns().has_active_exchange() {
-            started = true;
-            break;
-        }
-    }
+    let started = turn_until(&mut runtime, None, 200, |runtime| {
+        runtime.serving().storage().dns().has_active_exchange()
+    });
     assert!(
         started,
         "a due refresh must start before the signal so the suppression probe is meaningful"
@@ -2786,18 +2742,8 @@ fn sigterm_suppression_body() {
         .write_all(&[1])
         .expect("queue a SIGTERM byte through the real self-pipe");
     let secs = runtime.serving().storage().dns().now_u64();
-    runtime
-        .serving
-        .storage_mut()
-        .schedules_mut()
-        .overwrite_due_at(0, Family::A, secs)
-        .expect("re-arm the A family due after the signal");
-    runtime
-        .serving
-        .storage_mut()
-        .schedules_mut()
-        .overwrite_due_at(0, Family::Aaaa, secs)
-        .expect("re-arm the Aaaa family due after the signal");
+    set_due(&mut runtime, Family::A, secs);
+    set_due(&mut runtime, Family::Aaaa, secs);
     for _ in 0..20 {
         runtime
             .turn(Some(Duration::from_millis(5)))
@@ -2815,60 +2761,40 @@ fn sigterm_suppression_body() {
 }
 
 #[cfg(feature = "alloc-witness")]
+#[cfg(feature = "alloc-witness")]
 fn refresh_alloc_witness_body() {
-    let port = ephemeral_port();
-    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
-    let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
     let (responder_addr, stop, _queries, responder) = spawn_supervised_positive_with_count();
-    let outcome = owner
-        .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
-        .expect("startup window");
+    let mut owner = preallocated_owner();
+    let outcome = serving_outcome(&mut owner, responder_addr);
     assert_eq!(
         outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
         "startup resolves before the witness"
     );
-    let mut runtime = owner
-        .attach(outcome.into_listener().expect("serving listener"))
-        .expect("attach");
+    let mut runtime = attach_serving(owner, outcome);
     let secs = runtime.serving().storage().dns().now_u64();
-    runtime
-        .serving
-        .storage_mut()
-        .schedules_mut()
-        .overwrite_due_at(0, Family::A, secs)
-        .expect("due today for the witness");
+    set_due(&mut runtime, Family::A, secs);
 
     let runtime = {
         let (runtime, counts) =
             crate::alloc::run_phase(crate::alloc::Phase::BackgroundRefresh, || {
                 let mut runtime = runtime;
-                let pre_due = runtime
-                    .serving()
-                    .storage()
-                    .schedules()
-                    .due_time(0, Family::A)
-                    .expect("A due query")
-                    .expect("A scheduled");
+                let pre_due = due_time_of(&runtime, Family::A);
                 let mut published = false;
                 for _ in 0..200 {
                     runtime
                         .turn(Some(Duration::from_millis(5)))
                         .expect("witness owner turn");
-                    if !runtime.serving().storage().dns().has_active_exchange() {
-                        let Ok(Some(due)) = runtime
+                    if !runtime.serving().storage().dns().has_active_exchange()
+                        && let Ok(Some(due)) = runtime
                             .serving()
                             .storage()
                             .schedules()
                             .due_time(0, Family::A)
-                        else {
-                            continue;
-                        };
-                        if due > pre_due {
-                            published = true;
-                            break;
-                        }
+                        && due > pre_due
+                    {
+                        published = true;
+                        break;
                     }
                 }
                 assert!(
@@ -3168,22 +3094,24 @@ mod startup_warning {
     }
 
     #[cfg(feature = "alloc-witness")]
+    #[cfg(feature = "alloc-witness")]
+    fn boot_status_document(mode: ServingMode) -> String {
+        let allowance = u8::from(mode == ServingMode::Degraded);
+        format!(
+            "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
+        )
+    }
+
+    #[cfg(feature = "alloc-witness")]
     fn actual_boot_status(cooperative: bool, mode: ServingMode) {
         use crate::dns::cache::{Generation, StagedPositive};
         use crate::eligibility::NumericAddr;
-        use crate::runtime::storage::AssuranceObservation;
-        use std::os::unix::net::UnixStream;
 
-        let allowance = u8::from(mode == ServingMode::Degraded);
-        let doc = format!(
-            "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = {allowance}\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
-        );
-        let config = crate::config::parse_config_document(&doc)
+        let config = crate::config::parse_config_document(&boot_status_document(mode))
             .unwrap()
             .with_kernel_assigned_test_listener();
         let mut storage = ServeStorage::boot(&config).unwrap();
-        let count = if mode == ServingMode::Full { 2 } else { 1 };
-        for ordinal in 0..count {
+        for ordinal in 0..1 + usize::from(mode == ServingMode::Full) {
             let name = storage.cache().name_index(ordinal).unwrap();
             let staged = StagedPositive::stage(
                 name,
@@ -3196,7 +3124,7 @@ mod startup_warning {
             .unwrap();
             storage.cache_mut().publish_positive(&staged).unwrap();
         }
-        let (mut reader, writer) = UnixStream::pair().unwrap();
+        let (mut reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
         writer.set_nonblocking(true).unwrap();
         *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
@@ -3214,7 +3142,7 @@ mod startup_warning {
                         .serving
                         .storage_mut()
                         .emit_assurance(ordinal, observed),
-                    Ok(AssuranceObservation::Unchanged)
+                    Ok(crate::runtime::storage::AssuranceObservation::Unchanged)
                 );
             }
             outcome
@@ -3226,7 +3154,7 @@ mod startup_warning {
             for ordinal in 0..2 {
                 assert_eq!(
                     storage.emit_assurance(ordinal, observed),
-                    Ok(AssuranceObservation::Unchanged)
+                    Ok(crate::runtime::storage::AssuranceObservation::Unchanged)
                 );
             }
             outcome
@@ -3366,6 +3294,46 @@ mod startup_warning {
             .unwrap();
     }
 
+    fn assert_initial_assurance_frames(reader: &mut std::os::unix::net::UnixStream) {
+        let mut buf = [0u8; 16384];
+        let len = reader.read(&mut buf).expect("startup records");
+        let text = std::str::from_utf8(&buf[..len]).expect("log text");
+        let frames: Vec<_> = text
+            .lines()
+            .filter(|line| line.contains("kind=dns_assurance"))
+            .collect();
+        assert_eq!(frames.len(), 2, "one boot frame per entry: {text}");
+        for name in ["sub.example.org", "other.example.org"] {
+            assert!(
+                frames.iter().any(|frame| frame.contains(name)),
+                "missing {name}: {text}"
+            );
+        }
+        for frame in frames {
+            assert!(
+                frame.contains("secs=1000 seq=0 phase=boot"),
+                "decision clock: {frame}"
+            );
+            assert!(
+                frame.contains("boot_status=\"failure\""),
+                "startup decision: {frame}"
+            );
+            assert!(
+                frame.contains("a_attempted=0 a_last=\"none\""),
+                "A unattempted: {frame}"
+            );
+            assert!(
+                frame.contains("aaaa_attempted=0 aaaa_last=\"none\""),
+                "AAAA unattempted: {frame}"
+            );
+            assert!(
+                frame.contains("a_outcome=\"unknown\"")
+                    && frame.contains("aaaa_outcome=\"unknown\""),
+                "unresolved cache: {frame}"
+            );
+        }
+    }
+
     fn initial_assurance_from_real_owner(cooperative: bool) {
         use crate::runtime::storage::AssuranceObservation;
         use std::os::unix::net::UnixStream;
@@ -3410,43 +3378,7 @@ mod startup_warning {
             outcome.decision(),
             StartupDecision::Exit75 { unresolved: 2 }
         ));
-        let mut buf = [0u8; 16384];
-        let len = reader.read(&mut buf).expect("startup records");
-        let text = std::str::from_utf8(&buf[..len]).expect("log text");
-        let frames: Vec<_> = text
-            .lines()
-            .filter(|line| line.contains("kind=dns_assurance"))
-            .collect();
-        assert_eq!(frames.len(), 2, "one boot frame per entry: {text}");
-        for name in ["sub.example.org", "other.example.org"] {
-            assert!(
-                frames.iter().any(|frame| frame.contains(name)),
-                "missing {name}: {text}"
-            );
-        }
-        for frame in frames {
-            assert!(
-                frame.contains("secs=1000 seq=0 phase=boot"),
-                "decision clock: {frame}"
-            );
-            assert!(
-                frame.contains("boot_status=\"failure\""),
-                "startup decision: {frame}"
-            );
-            assert!(
-                frame.contains("a_attempted=0 a_last=\"none\""),
-                "A unattempted: {frame}"
-            );
-            assert!(
-                frame.contains("aaaa_attempted=0 aaaa_last=\"none\""),
-                "AAAA unattempted: {frame}"
-            );
-            assert!(
-                frame.contains("a_outcome=\"unknown\"")
-                    && frame.contains("aaaa_outcome=\"unknown\""),
-                "unresolved cache: {frame}"
-            );
-        }
+        assert_initial_assurance_frames(&mut reader);
     }
 
     #[test]
