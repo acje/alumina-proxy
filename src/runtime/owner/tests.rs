@@ -743,6 +743,26 @@ fn write_response(sock: &mut TcpStream, reply: &[u8]) -> io::Result<()> {
     sock.write_all(reply)
 }
 
+fn answer_queries_until_write_error(sock: &mut TcpStream) {
+    while let Some(query) = read_query(sock) {
+        if let Some(reply) = positive_response(&query)
+            && write_response(sock, &reply).is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn drain_until_peer_close(sock: &mut TcpStream) {
+    let mut sink = [0u8; 64];
+    loop {
+        match sock.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+}
+
 fn spawn_responder_keep_alive() -> (SocketAddr, thread::JoinHandle<()>) {
     let listener = StdListener::bind("127.0.0.1:0").expect("bind responder");
     let addr = listener.local_addr().expect("responder addr");
@@ -751,13 +771,7 @@ fn spawn_responder_keep_alive() -> (SocketAddr, thread::JoinHandle<()>) {
             let Ok((mut sock, _)) = listener.accept() else {
                 break;
             };
-            while let Some(q) = read_query(&mut sock) {
-                if let Some(reply) = positive_response(&q)
-                    && write_response(&mut sock, &reply).is_err()
-                {
-                    break;
-                }
-            }
+            answer_queries_until_write_error(&mut sock);
         }
     });
     (addr, handle)
@@ -797,21 +811,9 @@ fn spawn_responder_first_session_only() -> (SocketAddr, thread::JoinHandle<()>) 
                 break;
             };
             if sessions == 0 {
-                while let Some(q) = read_query(&mut sock) {
-                    if let Some(reply) = positive_response(&q)
-                        && write_response(&mut sock, &reply).is_err()
-                    {
-                        break;
-                    }
-                }
+                answer_queries_until_write_error(&mut sock);
             } else {
-                let mut sink = [0u8; 64];
-                loop {
-                    match sock.read(&mut sink) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                }
+                drain_until_peer_close(&mut sock);
             }
             sessions += 1;
         }
