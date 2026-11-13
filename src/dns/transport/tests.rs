@@ -658,10 +658,7 @@ struct ScriptedPositive {
 }
 
 fn scripted_positive(ttl: u32, octets: [u8; 4]) -> ScriptedPositive {
-    let responder = spawn_responder(vec![vec![
-        Step::PositiveA { ttl, octets },
-        Step::Close,
-    ]]);
+    let responder = spawn_responder(vec![vec![Step::PositiveA { ttl, octets }, Step::Close]]);
     let mut transport = StartupDns::new().unwrap();
     transport.addr = ns(responder.port());
     transport.now0 = 1_000_000;
@@ -966,6 +963,41 @@ fn active_at(len: usize, index: usize) -> ActiveResolver {
     ActiveResolver::primary_of(&set)
         .with_index(index)
         .expect("in-range fixture")
+}
+
+/// Asserts every derived route over a `len`-resolver set keeps `index < len`:
+/// the primary seat, every in-range selection, and the two refusals at the set
+/// length and at `usize::MAX`.
+fn assert_derived_routes_cover(len: usize, set: &ResolverSet) {
+    assert_eq!(
+        ActiveResolver::primary_of(set),
+        ActiveResolver {
+            index: 0,
+            set_len: len
+        }
+    );
+    for index in 0..len {
+        let Some(active) = ActiveResolver::primary_of(set).with_index(index) else {
+            panic!("in-range index {index} of a {len}-resolver set must be a candidate");
+        };
+        assert_eq!(
+            active,
+            ActiveResolver {
+                index,
+                set_len: len
+            }
+        );
+    }
+    assert_eq!(
+        ActiveResolver::primary_of(set).with_index(len),
+        None,
+        "index equal to the set length is out of range"
+    );
+    assert_eq!(
+        ActiveResolver::primary_of(set).with_index(usize::MAX),
+        None,
+        "an out-of-range selected index is no candidate"
+    );
 }
 
 #[cfg(test)]
@@ -1635,14 +1667,9 @@ mod cooperative {
             deadline,
         } = scripted_positive(120, [93, 184, 216, 34]);
         start_first_exchange(&mut transport, &fqdn, deadline, ExchangeClass::Startup);
-        let result = drive_exchange_to_terminal(
-            &mut transport,
-            &fqdn,
-            &mut cache,
-            &mut schedules,
-            deadline,
-        )
-        .expect("the exchange concludes");
+        let result =
+            drive_exchange_to_terminal(&mut transport, &fqdn, &mut cache, &mut schedules, deadline)
+                .expect("the exchange concludes");
         assert!(
             matches!(result, Ok(TurnResult::Published(_))),
             "a valid response must publish at the primitive level, got {result:?}"
@@ -1755,14 +1782,9 @@ mod cooperative {
             "after an actual sending WouldBlock the owner wait must perform a \
          real poll (awaiting-writable), not an instant-returning busy loop"
         );
-        let result = drive_exchange_to_terminal(
-            &mut transport,
-            &fqdn,
-            &mut cache,
-            &mut schedules,
-            deadline,
-        )
-        .expect("the exchange concludes");
+        let result =
+            drive_exchange_to_terminal(&mut transport, &fqdn, &mut cache, &mut schedules, deadline)
+                .expect("the exchange concludes");
         assert!(
             matches!(result, Ok(TurnResult::Published(_))),
             "a valid response must publish after an awaited would-block send, got {result:?}"
@@ -1956,14 +1978,9 @@ mod apply {
         )
         .unwrap();
         cache.publish_positive(&staged).unwrap();
-        let result = drive_exchange_to_terminal(
-            &mut transport,
-            &fqdn,
-            &mut cache,
-            &mut schedules,
-            deadline,
-        )
-        .expect("the exchange concludes");
+        let result =
+            drive_exchange_to_terminal(&mut transport, &fqdn, &mut cache, &mut schedules, deadline)
+                .expect("the exchange concludes");
         assert!(
             matches!(
                 result,
@@ -4848,41 +4865,6 @@ mod turn_result {
             drop(malformed);
         }
     }
-/// Asserts every derived route over a `len`-resolver set keeps `index < len`:
-/// the primary seat, every in-range selection, and the two refusals at the set
-/// length and at `usize::MAX`.
-fn assert_derived_routes_cover(len: usize, set: &ResolverSet) {
-    assert_eq!(
-        ActiveResolver::primary_of(set),
-        ActiveResolver {
-            index: 0,
-            set_len: len
-        }
-    );
-    for index in 0..len {
-        let Some(active) = ActiveResolver::primary_of(set).with_index(index) else {
-            panic!("in-range index {index} of a {len}-resolver set must be a candidate");
-        };
-        assert_eq!(
-            active,
-            ActiveResolver {
-                index,
-                set_len: len
-            }
-        );
-    }
-    assert_eq!(
-        ActiveResolver::primary_of(set).with_index(len),
-        None,
-        "index equal to the set length is out of range"
-    );
-    assert_eq!(
-        ActiveResolver::primary_of(set).with_index(usize::MAX),
-        None,
-        "an out-of-range selected index is no candidate"
-    );
-}
-
     /// Construction boundary with the derived-only routes: every route keeps
     /// `index < set_len` and `set_len` in `1..=MAX_RESOLVERS` (the length travels
     /// only from a validated non-empty [`ResolverSet`] or the fixed singleton
