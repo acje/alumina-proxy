@@ -32,7 +32,9 @@ fn any_illegal_default() -> String {
 
 /// A per-FQDN entry with raw `early_data`/`ja4` value spellings.
 fn entry(key: &str, early: &str, ja4: &str) -> String {
-    format!("[allowed_fqdn.\"{key}\"]\nearly_data = {early}\nja4 = {ja4}\ndns_assurance = \"resolver_trusted\"\n")
+    format!(
+        "[allowed_fqdn.\"{key}\"]\nearly_data = {early}\nja4 = {ja4}\ndns_assurance = \"resolver_trusted\"\n"
+    )
 }
 
 /// A per-FQDN entry with table-form controls.
