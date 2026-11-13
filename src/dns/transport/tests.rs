@@ -5233,13 +5233,14 @@ fn startup_refresh_error_atomic_preserves_prior_mask() {
 
 fn zero_window_report(cache: &mut Cache, now0: u64) -> (StartupReport, u64) {
     let cfg = config();
-    let mut schedules = Schedules::new(2).unwrap();
-    let mut transport = StartupDns::new().unwrap();
+    let mut schedules = Schedules::new(2).expect("the fixture schedules admit two names");
+    let mut transport = StartupDns::new().expect("the fixture transport constructs");
     let sink = std::fs::OpenOptions::new()
         .write(true)
         .open("/dev/null")
-        .unwrap();
-    let mut logs = crate::log::LogStore::with_fd(&sink).unwrap();
+        .expect("the fixture log sink opens the null device");
+    let mut logs =
+        crate::log::LogStore::with_fd(&sink).expect("the fixture log store wraps the null sink");
     transport
         .resolve_window(
             WindowInputs {
@@ -5252,7 +5253,7 @@ fn zero_window_report(cache: &mut Cache, now0: u64) -> (StartupReport, u64) {
             },
             &mut logs,
         )
-        .unwrap()
+        .expect("a zero-length resolution window reports without error")
 }
 
 #[test]
@@ -5364,16 +5365,26 @@ struct ServingWindow {
 fn serving_window(ttl: u32, octets: [u8; 4]) -> ServingWindow {
     let responder = spawn_bounded_responder(vec![vec![Step::PositiveAAd { ttl, octets }]]);
     let config = config();
-    let cache = Cache::for_config(&config).unwrap();
-    let schedules = Schedules::new(config.allowlist().len()).unwrap();
-    let mut transport = StartupDns::new().unwrap();
+    let cache =
+        Cache::for_config(&config).expect("the fixture cache admits the configured allowlist");
+    let schedules = Schedules::new(config.allowlist().len())
+        .expect("the fixture schedules admit the configured allowlist");
+    let mut transport = StartupDns::new().expect("the fixture transport constructs");
     let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
     transport
         .begin_window(peer, *config.resolver_set(), 1000, Duration::ZERO)
         .expect("the serving window begins");
-    let name = cache.name_index(0).unwrap();
-    let pair = cache.generations_before_query(name, Family::A).unwrap();
-    let fqdn = config.allowlist().get(0).unwrap().clone();
+    let name = cache
+        .name_index(0)
+        .expect("the fixture cache holds name ordinal 0");
+    let pair = cache
+        .generations_before_query(name, Family::A)
+        .expect("the fixture cache reports the generations before a first query");
+    let fqdn = config
+        .allowlist()
+        .get(0)
+        .expect("the fixture config allows a first name")
+        .clone();
     let started = Instant::now();
     let deadline = started + Duration::from_secs(5);
     transport
