@@ -2,7 +2,10 @@
 //! unpredictable name created exclusively, and every file is created with
 //! `O_EXCL` inside it, so a co-tenant of a shared temp directory cannot
 //! preplant a path or symlink and redirect a write.
-#![allow(dead_code)] // shared `#[path]` include; each inclusion site uses a subset
+#![allow(
+    dead_code,
+    reason = "shared `#[path]` owner; each inclusion site uses only its subset"
+)]
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
