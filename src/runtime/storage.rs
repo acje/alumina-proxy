@@ -977,8 +977,13 @@ impl ServeStorage {
         match result {
             TurnResult::Failed(reason) => {
                 let origin = self.dns.last_failure_origin(ordinal, family);
-                self.incident_report
-                    .note_exchange_failure(ordinal, family, secs, reason.as_str(), origin);
+                self.incident_report.note_exchange_failure(
+                    ordinal,
+                    family,
+                    secs,
+                    reason.as_str(),
+                    origin,
+                );
             }
             TurnResult::Published(PublishedKind::ResolvedPositive) => {
                 self.incident_report.note_positive(ordinal, family, secs);
