@@ -390,6 +390,26 @@ impl HotProgress {
 }
 
 #[cfg(feature = "alloc-witness")]
+fn install_relay(runtime: &mut Runtime, slot: usize) -> (TcpStream, TcpStream) {
+    let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+    let sink_addr = sink.local_addr().expect("sink addr");
+    let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+    let sink_stream = sink.accept().expect("accept sink side").0;
+    sink_stream.set_nonblocking(true).expect("sink nonblocking");
+
+    let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
+    let peer_addr = peer_l.local_addr().expect("peer addr");
+    let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
+    let peer_stream = peer_l.accept().expect("accept peer side").0;
+
+    runtime
+        .serving_mut()
+        .test_setup_relay(slot, up, client)
+        .expect("install relay");
+    (sink_stream, peer_stream)
+}
+
+#[cfg(feature = "alloc-witness")]
 #[expect(
     clippy::large_stack_arrays,
     reason = "test staging buffer, not runtime path"
@@ -403,21 +423,7 @@ fn install_hot_relay(
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
-    let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-    let sink_addr = sink.local_addr().expect("sink addr");
-    let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-    let mut sink_stream = sink.accept().expect("accept sink side").0;
-    sink_stream.set_nonblocking(true).expect("sink nonblocking");
-
-    let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-    let peer_addr = peer_l.local_addr().expect("peer addr");
-    let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-    let mut peer_stream = peer_l.accept().expect("accept peer side").0;
-
-    runtime
-        .serving_mut()
-        .test_setup_relay(slot, up, client)
-        .expect("install relay");
+    let (mut sink_stream, mut peer_stream) = install_relay(runtime, slot);
 
     let pattern = crate::runtime::reactor::test_offset_pattern(
         per_slot,
@@ -452,19 +458,8 @@ fn install_hot_relay(
 
 #[cfg(feature = "alloc-witness")]
 fn install_expired_relay(runtime: &mut Runtime, slot: usize) -> TcpStream {
-    let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-    let sink_addr = sink.local_addr().expect("sink addr");
-    let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-    let sink_stream = sink.accept().expect("accept sink side").0;
-    let _ = sink_stream;
-    let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-    let peer_addr = peer_l.local_addr().expect("peer addr");
-    let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-    let mut peer_stream = peer_l.accept().expect("accept peer side").0;
-    runtime
-        .serving_mut()
-        .test_setup_relay(slot, up, client)
-        .expect("install expired-timer relay");
+    let (sink_stream, mut peer_stream) = install_relay(runtime, slot);
+    drop(sink_stream);
     peer_stream
         .write_all(&crate::runtime::reactor::test_offset_pattern(4096, 99))
         .expect("preload expired-timer relay");
@@ -2233,6 +2228,16 @@ fn assert_failover_origin_frames(text: &str) {
     );
 }
 
+#[cfg(feature = "alloc-witness")]
+fn drive_until_exchange_settles(runtime: &mut Runtime, attempts: usize, step: Duration) {
+    for _ in 0..attempts {
+        runtime.turn(Some(step)).expect("owner turn");
+        if !runtime.serving.storage().dns().has_active_exchange() {
+            break;
+        }
+    }
+}
+
 fn probe_exchange_failed_reports_per_event_resolver_body() {
     let port = ephemeral_port();
     let (mut runtime, mut file) = sink_runtime(port);
@@ -2630,71 +2635,70 @@ fn multicycle_body() {
     );
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "long refresh-retry falsifier body composing responder, startup, and backoff assertions"
-)]
-fn refresh_retry_body() {
+fn serving_runtime(responder: SocketAddr) -> Runtime {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
     let mut owner = Preallocated::preallocate(storage, traffic).expect("preallocate");
-    let (responder_addr, stop, sessions, responder) =
-        spawn_supervised_first_session_positive_then_silent_with_count();
     let outcome = owner
-        .run_startup_within(responder_addr, 1000, Duration::from_secs(3))
+        .run_startup_within(responder, 1000, Duration::from_secs(3))
         .expect("startup window");
     assert_eq!(
         outcome.decision(),
         StartupDecision::Serve(ServingMode::Full),
-        "the first responder session must resolve the allowlist name"
+        "the startup window must resolve the allowlist name"
     );
-    let mut runtime = owner
+    owner
         .attach(outcome.into_listener().expect("serving listener"))
-        .expect("attach");
+        .expect("attach")
+}
 
-    let secs = runtime.serving().storage().dns().now_u64();
+fn set_due(runtime: &mut Runtime, family: Family, secs: u64) {
     runtime
         .serving
         .storage_mut()
         .schedules_mut()
-        .overwrite_due_at(0, Family::A, secs)
-        .expect("due the A family now");
-    runtime
-        .serving
-        .storage_mut()
-        .schedules_mut()
-        .overwrite_due_at(0, Family::Aaaa, secs)
-        .expect("due the Aaaa family now");
+        .overwrite_due_at(0, family, secs)
+        .expect("due the family now");
+}
 
-    let mut inflight = false;
-    for _ in 0..200 {
-        runtime
-            .turn(None)
-            .expect("owner turn to first refresh on the indefinite poll");
-        if runtime.serving().storage().dns().has_active_exchange() {
-            inflight = true;
-            break;
+fn turn_until(
+    runtime: &mut Runtime,
+    attempts: usize,
+    mut done: impl FnMut(&Runtime) -> bool,
+) -> bool {
+    for _ in 0..attempts {
+        runtime.turn(None).expect("owner turn");
+        if done(runtime) {
+            return true;
         }
     }
+    false
+}
+
+fn refresh_retry_body() {
+    let (responder_addr, stop, sessions, responder) =
+        spawn_supervised_first_session_positive_then_silent_with_count();
+    let mut runtime = serving_runtime(responder_addr);
+
+    let secs = runtime.serving().storage().dns().now_u64();
+    set_due(&mut runtime, Family::A, secs);
+    set_due(&mut runtime, Family::Aaaa, secs);
+
+    let inflight = turn_until(&mut runtime, 200, |runtime| {
+        runtime.serving().storage().dns().has_active_exchange()
+    });
     assert!(
         inflight,
         "the owner must auto-start the first due refresh under the production indefinite poll"
     );
 
-    let mut receiving = false;
-    for _ in 0..200 {
-        runtime
-            .turn(None)
-            .expect("owner turn advancing the first refresh");
-        if matches!(
+    let receiving = turn_until(&mut runtime, 200, |runtime| {
+        matches!(
             runtime.serving().storage().dns().exchange_step(),
             Some(crate::dns::transport::ExchangeStep::Receiving)
-        ) {
-            receiving = true;
-            break;
-        }
-    }
+        )
+    });
     assert!(
         receiving,
         "the first refresh must reach the silent session and wait on the response"
@@ -2722,15 +2726,9 @@ fn refresh_retry_body() {
          with a selectable-now sibling (no zero-wait busy-spin): {probe_elapsed:?}"
     );
 
-    let mut retried_after_failure = false;
-    for _ in 0..60 {
-        runtime.turn(None).expect("owner turn on backoff");
-        let seen = sessions.load(std::sync::atomic::Ordering::SeqCst);
-        if seen >= 3 {
-            retried_after_failure = true;
-            break;
-        }
-    }
+    let retried_after_failure = turn_until(&mut runtime, 60, |_| {
+        sessions.load(std::sync::atomic::Ordering::SeqCst) >= 3
+    });
     stop_and_join_responder(responder_addr, &stop, responder);
     assert!(
         retried_after_failure,
@@ -3637,6 +3635,26 @@ mod startup_exchange {
     }
 
     #[cfg(feature = "alloc-witness")]
+    fn pump_until_relayed(
+        runtime: &mut Runtime,
+        sink: &mut TcpStream,
+        expected: &[u8],
+        attempts: usize,
+    ) -> bool {
+        let mut got = Vec::new();
+        for _ in 0..attempts {
+            runtime
+                .turn(Some(Duration::from_millis(2)))
+                .expect("owner turn pumping the relay");
+            pump_drain(sink, &mut got);
+            if got.windows(expected.len()).any(|window| window == expected) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(feature = "alloc-witness")]
     fn obsolete_negative_through_established_relay_survives_owner_turn_body() {
         const RELAY_SLOT: usize = 30;
         let port = ephemeral_port();
@@ -3649,45 +3667,29 @@ mod startup_exchange {
             crate::dns::transport::tests::Step::NxdomainWithSoa { ttl: 300, min: 60 },
         ]]);
         let responder_addr = SocketAddr::from(([127, 0, 0, 1], responder.port()));
-        let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-        let sink_addr = sink.local_addr().expect("sink addr");
-        let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-        let mut sink_stream = sink.accept().expect("accept sink side").0;
-        sink_stream.set_nonblocking(true).expect("sink nonblocking");
-        let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-        let peer_addr = peer_l.local_addr().expect("peer addr");
-        let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-        let mut peer_stream = peer_l.accept().expect("accept peer side").0;
-        runtime
-            .serving_mut()
-            .test_setup_relay(RELAY_SLOT, up, client)
-            .expect("install established relay");
+        let (mut sink_stream, mut peer_stream) = install_relay(&mut runtime, RELAY_SLOT);
+
         let probe: &[u8] = b"pre-dns-established-peer";
         peer_stream.write_all(probe).expect("write client probe");
-        let mut got: Vec<u8> = Vec::new();
-        for _ in 0..400 {
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("owner turn pumping the relay");
-            pump_drain(&mut sink_stream, &mut got);
-            if got.windows(probe.len()).any(|w| w == probe) {
-                break;
-            }
-        }
         assert!(
-            got.windows(probe.len()).any(|w| w == probe),
+            pump_until_relayed(&mut runtime, &mut sink_stream, probe, 400),
             "established peers already relay before DNS starts"
         );
+
         runtime
             .serving
             .storage_mut()
             .dns_mut()
             .set_peer_for_test(responder_addr);
-        let deadline = Instant::now() + Duration::from_secs(10);
         runtime
             .serving
             .storage_mut()
-            .start_dns_exchange(0, Family::A, deadline, ExchangeClass::Serving)
+            .start_dns_exchange(
+                0,
+                Family::A,
+                Instant::now() + Duration::from_secs(10),
+                ExchangeClass::Serving,
+            )
             .expect("start serving exchange");
         let name_index = runtime
             .serving
@@ -3701,34 +3703,18 @@ mod startup_exchange {
             .cache_mut()
             .evict_nodata(name_index, Family::Aaaa)
             .expect("advance only the other family after start");
-        for _ in 0..400 {
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("superseded negative must not abort serving owner");
-            if !runtime.serving().storage().dns().has_active_exchange() {
-                break;
-            }
-        }
+        drive_until_exchange_settles(&mut runtime, 400, Duration::from_millis(2));
         assert!(
             !runtime.serving().storage().dns().has_active_exchange(),
             "the obsolete negative concludes through owner turns"
         );
+
         let after: &[u8] = b"post-completion-fresh-bytes";
         peer_stream
             .write_all(after)
             .expect("write fresh client bytes");
-        let mut got2: Vec<u8> = Vec::new();
-        for _ in 0..200 {
-            pump_drain(&mut sink_stream, &mut got2);
-            if got2.windows(after.len()).any(|w| w == after) {
-                break;
-            }
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("owner turn relaying post-completion bytes");
-        }
         assert!(
-            got2.windows(after.len()).any(|w| w == after),
+            pump_until_relayed(&mut runtime, &mut sink_stream, after, 200),
             "occupied tunnel relays fresh bytes on the same established peers"
         );
         drop(responder);
@@ -3791,109 +3777,287 @@ fn assert_corroboration_incident(
 }
 
 #[cfg(feature = "alloc-witness")]
+fn seed_populated_families(storage: &mut ServeStorage) -> crate::dns::cache::NameIndex {
+    use crate::dns::cache::evidence::{Evidence, ResolverSource};
+    use crate::dns::cache::{Generation, StagedPositive};
+    use crate::eligibility::NumericAddr;
+
+    let name = storage
+        .cache()
+        .name_index(0)
+        .expect("ordinal-zero name index");
+    let proof = Evidence::new(
+        false,
+        false,
+        false,
+        ResolverSource::index(0).expect("resolver zero"),
+        Some(600),
+        1000,
+    )
+    .expect("consistent evidence");
+    storage
+        .cache()
+        .check_publication_requirement(name, Some(proof), 1000)
+        .expect("publication requirement");
+    for (family, address) in [
+        (Family::A, NumericAddr::V4([8, 8, 8, 8].into())),
+        (
+            Family::Aaaa,
+            NumericAddr::V6(
+                [
+                    0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+                ]
+                .into(),
+            ),
+        ),
+    ] {
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            family,
+            Generation::INITIAL,
+            &[address],
+            1000,
+            600,
+            Some(proof),
+        )
+        .expect("stage admissible positive");
+        storage
+            .cache_mut()
+            .publish_positive(&staged)
+            .expect("publish admissible positive");
+        assert!(
+            storage
+                .cache()
+                .is_peer_admissible(name, family, address, 1000)
+                .unwrap()
+        );
+        assert!(
+            storage
+                .cache()
+                .family_retained(name, family, 1000)
+                .unwrap()
+                .unwrap()
+                .time_valid()
+        );
+    }
+    name
+}
+
+#[cfg(feature = "alloc-witness")]
+fn assert_single_boot_frame(boot: &str) {
+    assert_eq!(
+        boot.lines()
+            .filter(|line| line.contains("kind=dns_assurance ") && line.contains("seq=0 phase=boot"))
+            .count(),
+        1,
+        "{boot}"
+    );
+    assert!(
+        !boot.contains("phase=change") && !boot.contains("kind=dns_assurance_fault"),
+        "{boot}"
+    );
+}
+
+#[cfg(feature = "alloc-witness")]
+fn seed_open_incident(
+    runtime: &mut Runtime,
+    secs: u64,
+    observed: Instant,
+) -> crate::dns::incident_report::IncidentReport {
+    use crate::dns::incident_report::IncidentReport;
+    use crate::dns::transport::FailureReason;
+
+    assert!(secs < 1600);
+    runtime
+        .serving
+        .storage_mut()
+        .schedules_mut()
+        .note_exchange_failure(0, Family::A, secs, FailureReason::Timeout)
+        .expect("note exchange failure");
+    runtime
+        .serving
+        .storage_mut()
+        .schedules_mut()
+        .overwrite_due_at(0, Family::A, secs + 300)
+        .expect("due after the failed exchange");
+    runtime
+        .serving
+        .storage_mut()
+        .report_incident_if_due(observed);
+    populate_corroboration_incident(runtime.serving.storage_mut().incident_report_mut(), secs);
+    let mut mirror = IncidentReport::new();
+    populate_corroboration_incident(&mut mirror, secs);
+    assert!(matches!(
+        runtime.serving.storage().schedules().incident(0, Family::A),
+        Some(crate::dns::schedule::TypeIncident::Open { .. })
+    ));
+    mirror
+}
+
+#[cfg(feature = "alloc-witness")]
+fn seed_and_settle_corroboration_probe(
+    runtime: &mut Runtime,
+    peer: SocketAddr,
+    fqdn: &crate::config::Fqdn,
+) -> bool {
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .set_peer_for_test(peer);
+    runtime
+        .serving
+        .storage_mut()
+        .dns_mut()
+        .seed_corroboration_for_test(fqdn)
+        .expect("seed corroboration");
+    assert!(runtime.serving.storage().dns().has_active_exchange());
+    assert!(!runtime.serving.storage().dns().active_is_serving());
+    let (done, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
+        for _ in 0..200 {
+            runtime
+                .turn(Some(Duration::from_millis(5)))
+                .expect("probe owner turn");
+            if !runtime.serving.storage().dns().has_active_exchange() {
+                return true;
+            }
+        }
+        false
+    });
+    assert!(counts.all_zero(), "owner probe turns allocated: {counts:?}");
+    done
+}
+
+#[cfg(feature = "alloc-witness")]
+fn boot_logged_runtime(
+    storage: ServeStorage,
+) -> (Runtime, std::os::unix::net::UnixStream, [u8; 16384]) {
+    use std::os::unix::net::UnixStream;
+
+    let (mut reader, writer) = UnixStream::pair().expect("log socket pair");
+    reader.set_nonblocking(true).expect("nonblocking reader");
+    writer.set_nonblocking(true).expect("nonblocking writer");
+    let mut storage = storage;
+    *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).expect("log sink");
+    let traffic = crate::inventory::TrafficStorage::allocate().expect("traffic");
+    let mut owner = Preallocated::preallocate(storage, traffic).expect("owner");
+    let startup = owner
+        .run_startup_within(SocketAddr::from(([127, 0, 0, 1], 9)), 1000, Duration::ZERO)
+        .expect("startup decision");
+    assert_eq!(
+        startup.decision(),
+        StartupDecision::Serve(ServingMode::Full)
+    );
+    let mut buf = [0u8; 16384];
+    let n = reader.read(&mut buf).expect("startup records");
+    assert_single_boot_frame(std::str::from_utf8(&buf[..n]).expect("log text"));
+    let runtime = owner
+        .attach(startup.into_listener().expect("serving listener"))
+        .expect("attach");
+    (runtime, reader, buf)
+}
+
+#[cfg(feature = "alloc-witness")]
+fn assert_probe_state_frozen(
+    runtime: &Runtime,
+    cache: crate::dns::cache::Cache,
+    schedules: crate::dns::schedule::Schedules,
+    dropped: u64,
+) {
+    assert_eq!(*runtime.serving.storage().cache(), cache);
+    assert_eq!(*runtime.serving.storage().schedules(), schedules);
+    assert_eq!(runtime.serving.storage().log_dropped(), dropped);
+    assert_eq!(
+        runtime.serving.storage().dns().current_resolver_index(),
+        Some(0)
+    );
+    assert_eq!(
+        runtime
+            .serving
+            .storage()
+            .enforcement()
+            .monitor()
+            .facts_dns_anomaly(crate::enforcement::monitor::DnsAnomalyKind::CorroborationConflict),
+        0
+    );
+}
+
+#[cfg(feature = "alloc-witness")]
+fn assert_families_retained(runtime: &Runtime, name: crate::dns::cache::NameIndex, secs: u64) {
+    for family in Family::ALL {
+        assert!(
+            runtime
+                .serving
+                .storage()
+                .cache()
+                .family_retained(name, family, secs)
+                .expect("retained lookup")
+                .expect("retained family")
+                .time_valid()
+        );
+    }
+}
+
+#[cfg(feature = "alloc-witness")]
 #[test]
 fn populated_seeded_owner_corroboration_probe_preserves_authorization_and_reporting() {
-    thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            use crate::dns::cache::evidence::{Evidence, ResolverSource};
-            use crate::dns::cache::{Generation, StagedPositive};
-            use crate::dns::incident_report::IncidentReport;
-            use crate::dns::transport::FailureReason;
-            use crate::dns::transport::tests::{Step, spawn_bounded_responder};
-            use crate::eligibility::NumericAddr;
-            use crate::runtime::storage::AssuranceObservation;
-            use std::os::unix::net::UnixStream;
+    use crate::dns::transport::tests::{Step, spawn_bounded_responder};
+    use crate::runtime::storage::AssuranceObservation;
 
-            let responder = spawn_bounded_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
-            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
-            let fqdn = config.allowlist().get(0).unwrap().clone();
-            let mut storage = ServeStorage::boot(&config).unwrap();
-            let name = storage.cache().name_index(0).unwrap();
-            let proof = Evidence::new(false, false, false, ResolverSource::index(0).unwrap(), Some(600), 1000).unwrap();
-            storage.cache().check_publication_requirement(name, Some(proof), 1000).unwrap();
-            for (family, address) in [
-                (Family::A, NumericAddr::V4([8, 8, 8, 8].into())),
-                (Family::Aaaa, NumericAddr::V6([0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11].into())),
-            ] {
-                let staged = StagedPositive::stage_with_evidence(name, family, Generation::INITIAL, &[address], 1000, 600, Some(proof)).unwrap();
-                storage.cache_mut().publish_positive(&staged).unwrap();
-                assert!(storage.cache().is_peer_admissible(name, family, address, 1000).unwrap());
-                assert!(storage.cache().family_retained(name, family, 1000).unwrap().unwrap().time_valid());
-            }
-            let (mut reader, writer) = UnixStream::pair().unwrap();
-            reader.set_nonblocking(true).unwrap();
-            writer.set_nonblocking(true).unwrap();
-            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
-            let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-            let mut owner = Preallocated::preallocate(storage, traffic).unwrap();
-            let startup = owner.run_startup_within(SocketAddr::from(([127, 0, 0, 1], 9)), 1000, Duration::ZERO).unwrap();
-            assert_eq!(startup.decision(), StartupDecision::Serve(ServingMode::Full));
-            let mut buf = [0u8; 16384];
-            let n = reader.read(&mut buf).unwrap();
-            let boot = std::str::from_utf8(&buf[..n]).unwrap();
-            assert_eq!(boot.lines().filter(|line| line.contains("kind=dns_assurance ") && line.contains("seq=0 phase=boot")).count(), 1, "{boot}");
-            assert!(!boot.contains("phase=change") && !boot.contains("kind=dns_assurance_fault"), "{boot}");
-            let mut runtime = owner.attach(startup.into_listener().unwrap()).unwrap();
-            let observed = Instant::now();
-            let secs = runtime.serving.storage().cache_secs(observed);
-            assert!(secs < 1600);
-            runtime.serving.storage_mut().schedules_mut().note_exchange_failure(0, Family::A, secs, FailureReason::Timeout).unwrap();
-            runtime.serving.storage_mut().schedules_mut().overwrite_due_at(0, Family::A, secs + 300).unwrap();
-            runtime.serving.storage_mut().report_incident_if_due(observed);
-            populate_corroboration_incident(runtime.serving.storage_mut().incident_report_mut(), secs);
-            let mut mirror = IncidentReport::new();
-            populate_corroboration_incident(&mut mirror, secs);
-            let cache_before = *runtime.serving.storage().cache();
-            let schedules_before = *runtime.serving.storage().schedules();
-            assert!(matches!(schedules_before.incident(0, Family::A), Some(crate::dns::schedule::TypeIncident::Open { .. })));
-            let dropped_before = runtime.serving.storage().log_dropped();
-            assert_eq!(dropped_before, 0);
-            let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
-            runtime.serving.storage_mut().dns_mut().set_peer_for_test(peer);
-            runtime.serving.storage_mut().dns_mut().seed_corroboration_for_test(&fqdn).unwrap();
-            assert!(runtime.serving.storage().dns().has_active_exchange());
-            assert!(!runtime.serving.storage().dns().active_is_serving());
-            let (done, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-                for _ in 0..200 {
-                    runtime.turn(Some(Duration::from_millis(5))).unwrap();
-                    if !runtime.serving.storage().dns().has_active_exchange() { return true; }
-                }
-                false
-            });
-            assert!(done, "the seeded corroboration probe must conclude through real owner turns");
-            assert!(counts.all_zero(), "owner probe turns allocated: {counts:?}");
-            assert_eq!(*runtime.serving.storage().cache(), cache_before);
-            assert_eq!(*runtime.serving.storage().schedules(), schedules_before);
-            assert_eq!(runtime.serving.storage().log_dropped(), dropped_before);
-            assert_eq!(runtime.serving.storage().dns().current_resolver_index(), Some(0));
-            assert_eq!(runtime.serving.storage().enforcement().monitor().facts_dns_anomaly(crate::enforcement::monitor::DnsAnomalyKind::CorroborationConflict), 0);
-            let close = runtime.serving.storage().cache_secs(Instant::now());
-            assert_corroboration_incident(&mut runtime, &mut mirror, close);
-            let now = Instant::now();
-            assert_eq!(runtime.serving.storage_mut().emit_assurance(0, now), Ok(AssuranceObservation::Unchanged));
-            let secs_after = runtime.serving.storage().cache_secs(now);
-            for family in Family::ALL {
-                assert!(runtime.serving.storage().cache().family_retained(name, family, secs_after).unwrap().unwrap().time_valid());
-            }
-            let mut captured = Vec::new();
-            for _ in 0..16 {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => captured.extend_from_slice(&buf[..n]),
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(error) => panic!("log read: {error}"),
-                }
-            }
-            assert!(matches!(reader.read(&mut buf), Err(error) if error.kind() == io::ErrorKind::WouldBlock), "all probe log bytes must be inspected");
-            let logs = std::str::from_utf8(&captured).unwrap();
-            assert!(!logs.contains("kind=dns_assurance ") && !logs.contains("kind=dns_assurance_fault"), "{logs}");
-            assert!(!logs.contains("kind=exchange_failed"), "the corroboration probe must succeed: {logs}");
-            responder.finish().unwrap();
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    let responder =
+        spawn_bounded_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
+    let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+    let fqdn = config.allowlist().get(0).unwrap().clone();
+    let mut storage = ServeStorage::boot(&config).unwrap();
+    let name = seed_populated_families(&mut storage);
+    let (mut runtime, mut reader, mut buf) = boot_logged_runtime(storage);
+
+    let observed = Instant::now();
+    let secs = runtime.serving.storage().cache_secs(observed);
+    let mut mirror = seed_open_incident(&mut runtime, secs, observed);
+    let cache_before = *runtime.serving.storage().cache();
+    let schedules_before = *runtime.serving.storage().schedules();
+    let dropped_before = runtime.serving.storage().log_dropped();
+    assert_eq!(dropped_before, 0);
+
+    let peer = SocketAddr::from(([127, 0, 0, 1], responder.port()));
+    assert!(
+        seed_and_settle_corroboration_probe(&mut runtime, peer, &fqdn),
+        "the seeded corroboration probe must conclude through real owner turns"
+    );
+    assert_probe_state_frozen(&runtime, cache_before, schedules_before, dropped_before);
+    let close = runtime.serving.storage().cache_secs(Instant::now());
+    assert_corroboration_incident(&mut runtime, &mut mirror, close);
+
+    let now = Instant::now();
+    assert_eq!(
+        runtime.serving.storage_mut().emit_assurance(0, now),
+        Ok(AssuranceObservation::Unchanged)
+    );
+    assert_families_retained(&runtime, name, runtime.serving.storage().cache_secs(now));
+    let mut captured = Vec::new();
+    for _ in 0..16 {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => captured.extend_from_slice(&buf[..n]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("log read: {error}"),
+        }
+    }
+    assert!(
+        matches!(reader.read(&mut buf), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+        "all probe log bytes must be inspected"
+    );
+    let logs = std::str::from_utf8(&captured).unwrap();
+    assert!(
+        !logs.contains("kind=dns_assurance ") && !logs.contains("kind=dns_assurance_fault"),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains("kind=exchange_failed"),
+        "the corroboration probe must succeed: {logs}"
+    );
+    responder.finish().unwrap();
 }
 
 mod probe_records {
