@@ -190,10 +190,14 @@ APPROVE (`alumina-gzqn4.3.3` source, `alumina-gzqn4.3.6` governance). Boundary a
 failed on the pre-existing `due_refresh::sigterm_stops_due_refresh_flow` ephemeral-port race
 (`alumina-t4vlg`), unrelated to JA4; attempt 2 passed.
 
-Open residuals from adoption (both need a scoped spec-text authorisation, not code):
-`alumina-039tz` — T4 `:951-958` still reads "first-seen establishes the baseline", which is
-imprecise for a value new to a non-empty row; `alumina-0iyh9` — authorised hunk C cites
-`monitor.rs:272-284`, which now straddles the split method at 269-280.
+**G1a repair (`53810b8`, digest `73bd18be…`)**: T4 now states the trigger as a delta from
+the per-ordinal baseline and names the ordinal's first distinct fingerprint as the seed;
+SP-015's citation of `note_fact_ja4_change` corrected to `monitor.rs:269-280`. Governance
+APPROVE (`alumina-gzqn4.3.7`); no source review, because the increment changed no code.
+
+Remaining text residuals are **batched into G3**, not chased per-nit: `:701` (SP-015's
+other declared-superseded sentence, still byte-identical by design) and `:1348` (a second
+stale `monitor.rs` line citation). Both are citation/precision drift, not false claims.
 
 Registry: `csf_bf60a65e…` (`ja4-change-detection-bypass`).
 
