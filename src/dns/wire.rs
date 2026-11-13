@@ -492,73 +492,133 @@ impl<'a> Reader<'a> {
 /// the correct offset after a compressed owner, CNAME target, or SOA name.
 fn read_name(msg: &[u8], at: usize, strict: bool) -> Result<(DnsName, usize), DnsError> {
     let mut out = DnsName::default();
-    let mut field = at;
-    let mut decode = at;
-    let mut total = 0usize;
-    let mut pointers = 0usize;
-    let mut closed_by_pointer = false;
+    let mut cursor = NameCursor::new(at);
     loop {
-        let byte = msg.get(decode).copied().ok_or(DnsError::MessageTooLong)?;
+        let byte = msg
+            .get(cursor.decode)
+            .copied()
+            .ok_or(DnsError::MessageTooLong)?;
         match byte & 0xc0 {
             0x00 => {
-                let len = usize::from(byte);
-                if len == 0 {
-                    total += 1;
-                    if total > MAX_NAME_BYTES {
-                        return Err(DnsError::NameTooLong);
-                    }
-                    return Ok((out, if closed_by_pointer { field } else { field + 1 }));
-                }
-                if len > 63 {
-                    return Err(DnsError::LabelTooLong { len });
-                }
-                total += len + 1;
-                if total > MAX_NAME_BYTES {
-                    return Err(DnsError::NameTooLong);
-                }
-                let start = decode + 1;
-                let end = start + len;
-                if end >= msg.len() {
-                    return Err(DnsError::MessageTooLong);
-                }
-                if !out.is_empty() {
-                    out.push(b'.')?;
-                }
-                for &b in &msg[start..end] {
-                    if strict && b == b'.' {
-                        return Err(DnsError::EmbeddedDotInLabel);
-                    }
-                    out.push(b.to_ascii_lowercase())?;
-                }
-                decode = end;
-                if !closed_by_pointer {
-                    field = end;
+                if let Some(end) = cursor.read_label(msg, byte, strict, &mut out)? {
+                    return Ok((out, end));
                 }
             }
-            0xc0 => {
-                let hi = usize::from(byte & 0x3f);
-                let lo = usize::from(
-                    msg.get(decode + 1)
-                        .copied()
-                        .ok_or(DnsError::MessageTooLong)?,
-                );
-                let target = (hi << 8) | lo;
-                if target >= decode {
-                    return Err(DnsError::PointerNotBackward);
-                }
-                if !closed_by_pointer {
-                    field = decode + 2;
-                    closed_by_pointer = true;
-                }
-                decode = target;
-                pointers += 1;
-                if pointers > 8 {
-                    return Err(DnsError::PointerCycle);
-                }
+            0xc0 => cursor.follow_pointer(msg, byte)?,
+            _ => {
+                return Err(DnsError::ReservedLabelType {
+                    offset: cursor.decode,
+                });
             }
-            _ => return Err(DnsError::ReservedLabelType { offset: decode }),
         }
     }
+}
+
+/// Decode cursor for one name: the encoded-field offset, the decode offset, the
+/// accumulated name length, and the bounded pointer count.
+struct NameCursor {
+    field: usize,
+    decode: usize,
+    total: usize,
+    pointers: usize,
+    closed_by_pointer: bool,
+}
+
+impl NameCursor {
+    const fn new(at: usize) -> NameCursor {
+        NameCursor {
+            field: at,
+            decode: at,
+            total: 0,
+            pointers: 0,
+            closed_by_pointer: false,
+        }
+    }
+
+    /// Consumes one label, returning the encoded-field cursor once the root
+    /// label closes the name.
+    fn read_label(
+        &mut self,
+        msg: &[u8],
+        byte: u8,
+        strict: bool,
+        out: &mut DnsName,
+    ) -> Result<Option<usize>, DnsError> {
+        let len = usize::from(byte);
+        if len == 0 {
+            return self.read_root().map(Some);
+        }
+        if len > 63 {
+            return Err(DnsError::LabelTooLong { len });
+        }
+        self.total += len + 1;
+        if self.total > MAX_NAME_BYTES {
+            return Err(DnsError::NameTooLong);
+        }
+        let start = self.decode + 1;
+        let end = start + len;
+        if end >= msg.len() {
+            return Err(DnsError::MessageTooLong);
+        }
+        if !out.is_empty() {
+            out.push(b'.')?;
+        }
+        push_label_bytes(out, &msg[start..end], strict)?;
+        self.decode = end;
+        if !self.closed_by_pointer {
+            self.field = end;
+        }
+        Ok(None)
+    }
+
+    /// Consumes the root label, returning the cursor just past the encoded name.
+    fn read_root(&mut self) -> Result<usize, DnsError> {
+        self.total += 1;
+        if self.total > MAX_NAME_BYTES {
+            return Err(DnsError::NameTooLong);
+        }
+        if self.closed_by_pointer {
+            Ok(self.field)
+        } else {
+            Ok(self.field + 1)
+        }
+    }
+
+    /// Follows one backward compression pointer, bounding the visited count.
+    fn follow_pointer(&mut self, msg: &[u8], byte: u8) -> Result<(), DnsError> {
+        let hi = usize::from(byte & 0x3f);
+        let lo = usize::from(
+            msg.get(self.decode + 1)
+                .copied()
+                .ok_or(DnsError::MessageTooLong)?,
+        );
+        let target = (hi << 8) | lo;
+        if target >= self.decode {
+            return Err(DnsError::PointerNotBackward);
+        }
+        if !self.closed_by_pointer {
+            self.field = self.decode + 2;
+            self.closed_by_pointer = true;
+        }
+        self.decode = target;
+        self.pointers += 1;
+        if self.pointers > 8 {
+            return Err(DnsError::PointerCycle);
+        }
+        Ok(())
+    }
+}
+
+/// Appends one label's bytes in lowercase, rejecting an embedded dot under
+/// strict decoding.
+fn push_label_bytes(out: &mut DnsName, bytes: &[u8], strict: bool) -> Result<(), DnsError> {
+    for &b in bytes {
+        if strict && b == b'.' {
+            return Err(DnsError::EmbeddedDotInLabel);
+        }
+        out.push(b.to_ascii_lowercase())?;
+    }
+    Ok(())
 }
 
 /// One raw resource-record header as read from the wire: the consumed owner
