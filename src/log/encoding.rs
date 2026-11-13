@@ -798,14 +798,6 @@ pub(super) fn count_capture_batches(monitor: &Monitor) -> u32 {
 /// zero-suppressed scoped folds, but no per-ordinal `d<i>*` or per-capture
 /// `x<i>*` detail (those ride the best-effort detail batches). Sole commit
 /// point of the monitor family (alox9-01).
-#[expect(
-    clippy::too_many_lines,
-    reason = "long monitor record serializer emitting every indexed field into the fixed slot buffer"
-)]
-#[expect(
-    clippy::expect_used,
-    reason = "enumerated cause and unknown-reason indices stay below their small compile-time counts, fitting u32"
-)]
 pub(super) fn encode_monitor_summary(
     slot_buf: &mut [u8; SLOT_BYTES],
     secs: u64,
@@ -815,27 +807,31 @@ pub(super) fn encode_monitor_summary(
         buf: slot_buf,
         len: 0,
     };
-    if !write_header(&mut w, Level::Info, Kind::Monitor) {
+    if !write_header(&mut w, Level::Info, Kind::Monitor) || !push_u64(&mut w, b"secs", secs) {
         return None;
     }
-    if !push_u64(&mut w, b"secs", secs) {
+    let sections_written = write_monitor_globals(&mut w, monitor)
+        && write_monitor_scoped_folds(&mut w, monitor)
+        && write_monitor_indexed_folds(&mut w, monitor)
+        && write_monitor_loss_bitset(&mut w, monitor)
+        && w.push(b"\n");
+    if !sections_written {
         return None;
     }
-    let ofacts = monitor.facts_any_illegal_overflow()
-        || monitor.facts_early_data_overflow()
-        || monitor.facts_unknown_overflow()
-        || monitor.facts_resolver_degraded_overflow()
-        || monitor.facts_dns_anomaly_overflow()
-        || monitor.facts_downgrade_to_plain_overflow()
-        || monitor.facts_probe_relocations_overflow()
-        || monitor.facts_expired_pin_certs_overflow()
-        || monitor.facts_ja4_change_overflow()
-        || monitor.facts_ja4_seed_overflow();
+    Some(w.len)
+}
+
+/// Writes the `facts_total`…`ba` globals: the fixed, always-emitted core of
+/// the summary record, in grammar order.
+fn write_monitor_globals(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     let globals: [(&[u8], u64); 13] = [
         (&b"facts_total"[..], monitor.facts_total()),
         (&b"actions_total"[..], monitor.actions_total()),
         (&b"refusals_total"[..], monitor.refusals_total()),
-        (&b"ofacts"[..], u64::from(ofacts)),
+        (
+            &b"ofacts"[..],
+            u64::from(monitor_any_fact_overflow(monitor)),
+        ),
         (&b"oactions"[..], u64::from(monitor.actions_overflow())),
         (&b"orefusals"[..], u64::from(monitor.refusals_overflow())),
         (&b"report_drops"[..], u64::from(monitor.report_drops())),
@@ -858,80 +854,99 @@ pub(super) fn encode_monitor_summary(
         ),
         (&b"ba"[..], u64::from(monitor.actions_block_all())),
     ];
-    for (key, value) in globals {
-        if !push_u64(&mut w, key, value) {
-            return None;
-        }
-    }
-    let resolver_degraded = monitor.facts_resolver_degraded();
-    if resolver_degraded > 0 && !push_u64(&mut w, b"rd", u64::from(resolver_degraded)) {
-        return None;
-    }
-    if monitor.serving_stale() && !push_u64(&mut w, b"ss", 1) {
-        return None;
-    }
-    let sustained_negatives = monitor.sustained_negatives();
-    if sustained_negatives > 0 && !push_u64(&mut w, b"sn", u64::from(sustained_negatives)) {
-        return None;
-    }
-    let downgrade_to_plain = monitor.facts_downgrade_to_plain();
-    if downgrade_to_plain > 0 && !push_u64(&mut w, b"dp", u64::from(downgrade_to_plain)) {
-        return None;
-    }
-    let probe_relocations = monitor.facts_probe_relocations();
-    if probe_relocations > 0 && !push_u64(&mut w, b"pr", u64::from(probe_relocations)) {
-        return None;
-    }
-    let expired_pin_certs = monitor.facts_expired_pin_certs();
-    if expired_pin_certs > 0 && !push_u64(&mut w, b"ep", u64::from(expired_pin_certs)) {
-        return None;
-    }
-    let ja4_seed = monitor.facts_ja4_seed();
-    if ja4_seed > 0 && !push_u64(&mut w, b"js", u64::from(ja4_seed)) {
-        return None;
-    }
-    let bailiwick_violation = monitor.facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
-    if bailiwick_violation > 0 && !push_u64(&mut w, b"bv", u64::from(bailiwick_violation)) {
-        return None;
-    }
-    let resolver_peer_mismatch = monitor.facts_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
-    if resolver_peer_mismatch > 0 && !push_u64(&mut w, b"rpm", u64::from(resolver_peer_mismatch)) {
-        return None;
-    }
-    let extreme_ttl = monitor.facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
-    if extreme_ttl > 0 && !push_u64(&mut w, b"xttl", u64::from(extreme_ttl)) {
-        return None;
-    }
-    let corroboration_conflict = monitor.facts_dns_anomaly(DnsAnomalyKind::CorroborationConflict);
-    if corroboration_conflict > 0 && !push_u64(&mut w, b"cc", u64::from(corroboration_conflict)) {
-        return None;
-    }
+    globals.iter().all(|&(key, value)| push_u64(w, key, value))
+}
+
+/// Folds the ten per-fact overflow flags into the single `ofacts` bit,
+/// short-circuiting on the first set flag.
+fn monitor_any_fact_overflow(monitor: &Monitor) -> bool {
+    let overflows: [fn(&Monitor) -> bool; 10] = [
+        Monitor::facts_any_illegal_overflow,
+        Monitor::facts_early_data_overflow,
+        Monitor::facts_unknown_overflow,
+        Monitor::facts_resolver_degraded_overflow,
+        Monitor::facts_dns_anomaly_overflow,
+        Monitor::facts_downgrade_to_plain_overflow,
+        Monitor::facts_probe_relocations_overflow,
+        Monitor::facts_expired_pin_certs_overflow,
+        Monitor::facts_ja4_change_overflow,
+        Monitor::facts_ja4_seed_overflow,
+    ];
+    overflows.iter().any(|&overflow| overflow(monitor))
+}
+
+/// Writes the zero-suppressed scoped folds `rd`…`cc` in grammar order; a zero
+/// fold emits nothing, so an absent key is the only encoding of "never seen".
+fn write_monitor_scoped_folds(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
+    let folds: [(&[u8], u64); 11] = [
+        (&b"rd"[..], u64::from(monitor.facts_resolver_degraded())),
+        (&b"ss"[..], u64::from(monitor.serving_stale())),
+        (&b"sn"[..], u64::from(monitor.sustained_negatives())),
+        (&b"dp"[..], u64::from(monitor.facts_downgrade_to_plain())),
+        (&b"pr"[..], u64::from(monitor.facts_probe_relocations())),
+        (&b"ep"[..], u64::from(monitor.facts_expired_pin_certs())),
+        (&b"js"[..], u64::from(monitor.facts_ja4_seed())),
+        (
+            &b"bv"[..],
+            u64::from(monitor.facts_dns_anomaly(DnsAnomalyKind::BailiwickViolation)),
+        ),
+        (
+            &b"rpm"[..],
+            u64::from(monitor.facts_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch)),
+        ),
+        (
+            &b"xttl"[..],
+            u64::from(monitor.facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl)),
+        ),
+        (
+            &b"cc"[..],
+            u64::from(monitor.facts_dns_anomaly(DnsAnomalyKind::CorroborationConflict)),
+        ),
+    ];
+    folds
+        .iter()
+        .all(|&(key, value)| value == 0 || push_u64(w, key, value))
+}
+
+/// Writes the zero-suppressed per-index `c<i>` illegal-cause folds, then the
+/// `unk<i>` unknown-reason folds, each ascending by index.
+#[expect(
+    clippy::expect_used,
+    reason = "enumerated cause and unknown-reason indices stay below their small compile-time counts, fitting u32"
+)]
+fn write_monitor_indexed_folds(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     for index in 0..AnyIllegalCause::KIND_COUNT {
         let value = monitor.facts_any_illegal_by_index(index);
         if value > 0
             && !push_indexed_u64(
-                &mut w,
+                w,
                 b"c",
                 u32::try_from(index).expect("cause index fits u32"),
                 u64::from(value),
             )
         {
-            return None;
+            return false;
         }
     }
     for index in 0..UnknownReason::COUNT {
         let value = monitor.facts_unknown_by_index(index);
         if value > 0
             && !push_indexed_u64(
-                &mut w,
+                w,
                 b"unk",
                 u32::try_from(index).expect("unknown cause index fits u32"),
                 u64::from(value),
             )
         {
-            return None;
+            return false;
         }
     }
+    true
+}
+
+/// Writes the `dx` bitset of ordinals that saw a JA4 change loss, only when at
+/// least one ordinal is set.
+fn write_monitor_loss_bitset(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     let mut loss_bitset: u32 = 0;
     for index in 0..crate::config::ALLOWLIST_MAX {
         let Some(ordinal) = DomainOrdinal::from_index(index) else {
@@ -941,13 +956,7 @@ pub(super) fn encode_monitor_summary(
             loss_bitset |= 1u32 << index;
         }
     }
-    if loss_bitset != 0 && !push_u64_hex(&mut w, b"dx", u64::from(loss_bitset)) {
-        return None;
-    }
-    if !w.push(b"\n") {
-        return None;
-    }
-    Some(w.len)
+    loss_bitset == 0 || push_u64_hex(w, b"dx", u64::from(loss_bitset))
 }
 
 /// Encodes one best-effort `monitor_domain` batch: its own hardcoded header
