@@ -1172,6 +1172,46 @@ accordingly and is re-measured against the 8192-byte slot headroom (§Startup-fi
 folds into sub-mission 6 of this package, fulfilled by the alox7 F-12 increment; this
 amendment records the binding semantics.
 
+#### SP-015 — JA4 change selection from the second distinct fingerprint
+
+The per-ordinal first-seen set (SP-005) records a first-seen JA4 for every new in-capacity
+value, so a value in slots 2..16 is classified as a seeding event and the configured `ja4`
+action is selected only at capacity overflow (17th and later distinct value). That makes up
+to fifteen distinct fingerprints per ordinal action-free by construction, although the set
+exists for bounded detail retention, not for tolerance of unselected deviations.
+
+Resolution: seeding is exactly the **first** distinct fingerprint of an ordinal. Every
+subsequent distinct fingerprint is a change signal that selects the configured per-FQDN
+`ja4` action, whether or not the set has capacity for it. The set remains the immutable
+comparison reference and is never updated by overwrite; capacity overflow additionally
+suppresses the add, retains only the newest changed value, and latches the detail-loss flag
+(F-08). The recorded baseline outcome vocabulary is therefore: row empty → seed (recording,
+never an action, `ja4_seed`); value already in the row → unchanged (no signal, no seed); new
+value with capacity → change signal and insert; new value at capacity → change signal, no
+insert, loss latch. `ignore` continues to suppress the change signal only; the baseline is
+still recorded. JA4 continues to introduce no cipher-suite or ALPN policy and exerts no
+negotiation influence.
+
+Consequences: `ja4_seed` counts at most one event per ordinal per process (≤ 32); the
+per-ordinal change counter `d<j>j` now counts in-capacity deviations as well as overflow
+ones, with `d<j>v` and `d<j>p` carrying the triggering value and peer for each counted
+change. Storage is unchanged: 32 ordinals × 16 entries × 36 B = 18,432 B, boot-fixed, zero
+post-boot allocation, monitor grammar unchanged.
+
+This supersedes the T4 statement that the baseline is "per-ordinal+address" (§T4 — JA4
+action-selecting) and the corresponding JA4 section sentence: the baseline is per-ordinal,
+there is no per-(ordinal, address) element (as SP-013 already states). It also supersedes
+F-08's characterisation of overflow as *the* decision point: overflow now controls only
+detail suppression, never whether a deviation is decided.
+
+Tests: `ja4_first_fingerprint_seeds_without_action`,
+`ja4_second_distinct_fingerprint_selects_configured_action`,
+`ja4_unchanged_fingerprint_selects_nothing`,
+`ja4_in_capacity_change_updates_value_peer_and_change_counter`,
+`ja4_set_overflow_fires_decision_on_each_new_distinct_beyond_capacity` (retained, extended).
+
+(amendment: alumina-gzqn4.3, 2026-11-13)
+
 #### RT-005 — CNAME bailiwick parent-zone note
 
 Bailiwick enforcement grants authority at parent-zone granularity, so a parent-zone
@@ -1640,7 +1680,7 @@ same worst case with serving-stale latched (`src/log/tests.rs:1470`) and exactly
 3 domain and 3 capture batches each under the 2048 B cap (`src/log/tests.rs:1482`).
 
 Second, JA4 detail is sharded: per-ordinal `d<i>j` (change count), `d<i>v` (36-byte JA4
-value), and `d<i>p` (latest-overflow peer IP) ride the best-effort `monitor_domain` detail
+value), and `d<i>p` (latest-change peer IP) ride the best-effort `monitor_domain` detail
 batches (`src/log/encoding.rs:692-772`), packed `DOMAIN_BATCH=11` ordinals per batch so 32
 ordinals span 3 batches, never the fixed core. The counters live in
 `FactCounters` (`src/enforcement/monitor.rs:12-27`): `ja4_change`
@@ -1648,13 +1688,15 @@ ordinals span 3 batches, never the fixed core. The counters live in
 `[[u8; 36]; ALLOWLIST_MAX]`, `ja4_seed`, `ja4_peer_ip` `NumericAddr`, `ja4_peer_ordinal`
 `Option<DomainOrdinal>`. The serving path keeps a fixed 512-entry zero-heap
 `Ja4BaselineTable` (`src/runtime/reactor.rs:585-598`, `ALLOWLIST_MAX` × `MAX_ADDRESSES` = 32 × 16)
-with `BaselineOutcome { FirstSeen, Unchanged, Overflow }`; overflow counts as a change signal.
+with `BaselineOutcome { Seed, Changed, Unchanged, Overflow }`; a new in-capacity value and a
+capacity overflow both count as a change signal.
 
 Third, an explicit loss flag exists on detail suppression:
-`note_fact_ja4_change` (`src/enforcement/monitor.rs:272-284`) latches the per-ordinal
-`ja4_change_loss` flag on overflow — the deviation decision fires regardless of set
-capacity, but the overflowed value is not added to the set, so the operator sees detail was
-suppressed. The summary always encodes the `dx` hex bitset of loss flags when any is set
+`note_fact_ja4_change` (`src/enforcement/monitor.rs:272-284`) counts the change and retains
+the value and peer; the overflow path additionally latches the per-ordinal `ja4_change_loss`
+flag (`note_fact_ja4_change_loss`, `src/enforcement/monitor.rs`) — the deviation decision
+fires regardless of set capacity, but the overflowed value is not added to the set, so the
+operator sees detail was suppressed. The summary always encodes the `dx` hex bitset of loss flags when any is set
 (`src/log/encoding.rs:666-675`); the exact-grammar test
 `logging_monitor_summary_exact_grammar_and_zero_suppression` (`src/log/tests.rs:1116`) asserts the
 summary carries the fixed core and the `dx` bitset while the single nonzero domain block
