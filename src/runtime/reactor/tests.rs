@@ -9330,6 +9330,84 @@ mod ja4_baseline {
     }
 
     #[test]
+    fn ja4_ignore_suppresses_the_change_signal_but_keeps_the_baseline() {
+        let port = ephemeral_port();
+        let doc = format!(
+            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = \"ignore\"\ndns_assurance = \"resolver_trusted\"\n"
+        );
+        let cfg = crate::config::parse_config_document(&doc).expect("valid ja4 ignore config");
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&approved, 443)
+                .expect("ordinal");
+            let wire_a = hello_wire(b"sub.example.org", false);
+            let wire_b = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+            );
+            let wire_c = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x33])],
+            );
+
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            drive_hello(serving, &wire_a, "sub.example.org");
+
+            // In capacity: ignore suppresses the change signal, never the record.
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 2])));
+            drive_hello(serving, &wire_b, "sub.example.org");
+            let changed = serving.ja4_baseline.entries[ordinal.get()][1].ja4;
+            assert_ne!(changed, [0; 36], "the baseline is still recorded");
+            let counters = serving.storage().enforcement().counters();
+            assert_eq!(
+                counters.facts_ja4_change(ordinal),
+                0,
+                "ignore suppresses the in-capacity change signal"
+            );
+
+            // Fill the row, then overflow: the change signal and the loss latch
+            // both stay suppressed, and the set still holds every insert.
+            for i in 0..MAX_ADDRESSES - 2 {
+                let mut synthetic = [b'x'; 36];
+                synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
+                assert_eq!(
+                    serving.ja4_baseline.record(ordinal, synthetic),
+                    BaselineOutcome::Changed,
+                    "each fresh synthetic JA4 changes the set"
+                );
+            }
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 3])));
+            drive_hello(serving, &wire_c, "sub.example.org");
+
+            let counters = serving.storage().enforcement().counters();
+            assert_eq!(
+                counters.facts_ja4_seed(),
+                1,
+                "ignore still records the single seeding event"
+            );
+            assert_eq!(
+                counters.facts_ja4_change(ordinal),
+                0,
+                "ignore suppresses the overflow change signal too"
+            );
+            assert!(
+                !counters.facts_ja4_change_loss(ordinal),
+                "ignore suppresses the detail-loss latch"
+            );
+            assert!(
+                !serving.storage().enforcement().is_blocked(ordinal),
+                "ignore selects no action"
+            );
+        });
+    }
+
+    #[test]
     fn ja4_set_overflow_emits_monitor_dnj_record() {
         with_serving_stack(ephemeral_port(), |serving| {
             let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
