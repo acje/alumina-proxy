@@ -2,6 +2,7 @@ use super::{LogStore, ServeStorage, ServingMode, StartupDecision, StartupError, 
 use crate::config::{Config, ConfigError, parse_config_document};
 use crate::dns::cache::Family;
 
+#[allow(clippy::duplicate_mod)] // one physical owner shared by several test modules
 #[path = "../../../tests/support/temp_dir.rs"]
 mod temp_dir;
 
