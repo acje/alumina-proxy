@@ -287,10 +287,9 @@ impl Monitor {
         self.dirty = true;
     }
 
-    /// Counts one first-seen JA4 baseline seeding event: a JA4 added to an
-    /// ordinal's set. The global counter is an operator-visible fact so
-    /// re-seeding churn is distinguishable from attacker-driven re-seed
-    /// (SP-005).
+    /// Counts one JA4 baseline seeding event: the first distinct fingerprint
+    /// added to an ordinal's set, at most one per ordinal per process (SP-015).
+    /// The global counter is an operator-visible fact.
     pub(crate) const fn note_fact_ja4_seed(&mut self) {
         self.facts.ja4_seed.bump();
         self.dirty = true;

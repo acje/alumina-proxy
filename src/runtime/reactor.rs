@@ -618,15 +618,15 @@ impl CoalescedBatch {
     }
 }
 
-/// One first-seen JA4 baseline slot: the full 36-byte JA4 fingerprint. An
-/// empty slot carries `ja4 == [0; 36]` (JA4 fingerprints are ASCII and never
-/// all-zero), the empty-set sentinel.
+/// One JA4 baseline slot: the full 36-byte JA4 fingerprint. An empty slot
+/// carries `ja4 == [0; 36]` (JA4 fingerprints are ASCII and never all-zero),
+/// the empty-set sentinel.
 #[derive(Clone, Copy, Debug)]
 struct Ja4BaselineEntry {
     ja4: [u8; 36],
 }
 
-/// The outcome of a first-seen JA4 baseline record attempt.
+/// The outcome of a JA4 baseline record attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BaselineOutcome {
     /// The row was empty: this is the ordinal's first distinct fingerprint, a
@@ -641,11 +641,11 @@ enum BaselineOutcome {
     Overflow,
 }
 
-/// Fixed 512-entry first-seen JA4 baseline table: `ALLOWLIST_MAX` ordinals by
+/// Fixed 512-entry JA4 baseline table: `ALLOWLIST_MAX` ordinals by
 /// `MAX_ADDRESSES` set entries, allocated once at boot and never grown, so the
-/// whole baseline path is zero-heap. Each ordinal holds a set of up to 16
-/// distinct observed JA4 strings; the baseline is never updated after seeding
-/// and is reset on restart (the table is a boot-time value).
+/// whole baseline path is zero-heap. Each ordinal holds up to 16 distinct
+/// observed JA4 strings, filled in observation order and never overwritten;
+/// the table is reset on restart (a boot-time value).
 #[derive(Clone, Copy, Debug)]
 struct Ja4BaselineTable {
     entries: [[Ja4BaselineEntry; MAX_ADDRESSES]; ALLOWLIST_MAX],
@@ -755,7 +755,7 @@ struct SlotWorkspace {
     /// is keyed on this exact address, so the baseline can never record a
     /// wrong or missing IP.
     dest_ip: Option<NumericAddr>,
-    /// At-most-once latch: the first-seen JA4 baseline was recorded (or
+    /// At-most-once latch: the JA4 baseline record was attempted (or
     /// neutrally dropped) for this connection, so the change signal fires at
     /// most once per connection.
     ja4_seen: bool,
@@ -1086,9 +1086,9 @@ pub struct Serving {
     /// [`Self::poll_timeout`] folds only deadline-bearing slots. `is_empty`
     /// is the O(1) early-exit that skips the whole 512-slot scan.
     live_deadline: DeadlineSlots,
-    /// Boot-fixed 512-entry first-seen JA4 baseline table keyed by
-    /// `(DomainOrdinal, NumericAddr)`: a boot-time value that is never updated
-    /// after first-seen and is reset on restart.
+    /// Boot-fixed 512-entry JA4 baseline table keyed by `DomainOrdinal`: a
+    /// boot-time value whose rows fill in observation order and are never
+    /// overwritten, reset on restart.
     ja4_baseline: Ja4BaselineTable,
     /// Test-only high-water of `work_since_recheck` observed at a timer/DNS
     /// recheck boundary, so owner-turn fixtures assert the canonical ≤256
@@ -3044,7 +3044,7 @@ impl Serving {
         }
     }
 
-    /// Records the first-seen JA4 baseline for the slot's connection, or
+    /// Records the JA4 baseline for the slot's connection, or
     /// defers it when the dial has not yet established `dest_ip`. Called from
     /// [`Self::hello_complete`] (the pipelined-hello edge) and again from
     /// [`Self::dial`] on a successful connect when the hello completed first.
