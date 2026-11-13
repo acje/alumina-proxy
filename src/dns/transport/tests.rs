@@ -593,7 +593,7 @@ fn bindings_of(
                 .expect("the fixture cache holds the requested name ordinal"),
             family,
         )
-        .expect("the fixture published a binding for the requested name and family")
+        .expect("the fixture cache reads the entry for an admitted name ordinal")
         .bindings()
         .to_vec()
 }
@@ -637,7 +637,7 @@ fn run_exchange_expecting(
         .expect("the fixture cache holds name ordinal 0");
     let generation = cache
         .generations_before_query(name_index, Family::A)
-        .expect("the fixture cache reports the generations before a first query");
+        .expect("the fixture cache snapshots the generations before the query");
     transport
         .start_exchange(
             fqdn,
@@ -5384,7 +5384,7 @@ fn serving_window(ttl: u32, octets: [u8; 4]) -> ServingWindow {
         .expect("the fixture cache holds name ordinal 0");
     let pair = cache
         .generations_before_query(name, Family::A)
-        .expect("the fixture cache reports the generations before a first query");
+        .expect("the fixture cache snapshots the generations before the query");
     let fqdn = config
         .allowlist()
         .get(0)
