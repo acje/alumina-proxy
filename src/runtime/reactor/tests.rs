@@ -6996,8 +6996,8 @@ mod enforcement {
                 synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
                 assert_eq!(
                     serving.ja4_baseline.record(blocked, synthetic),
-                    BaselineOutcome::FirstSeen,
-                    "each fresh synthetic JA4 seeds the exact pair's set"
+                    BaselineOutcome::Changed,
+                    "each fresh synthetic JA4 changes the exact pair's set"
                 );
             }
 
@@ -8766,8 +8766,8 @@ mod ja4_baseline {
                 synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
                 assert_eq!(
                     serving.ja4_baseline.record(ordinal, synthetic),
-                    BaselineOutcome::FirstSeen,
-                    "each fresh synthetic JA4 seeds the set"
+                    BaselineOutcome::Changed,
+                    "each fresh synthetic JA4 changes the set"
                 );
             }
 
@@ -8881,8 +8881,8 @@ mod ja4_baseline {
                 synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
                 assert_eq!(
                     serving.ja4_baseline.record(ordinal, synthetic),
-                    BaselineOutcome::FirstSeen,
-                    "each fresh synthetic JA4 seeds the set"
+                    BaselineOutcome::Changed,
+                    "each fresh synthetic JA4 changes the set"
                 );
             }
 
@@ -9047,13 +9047,18 @@ mod ja4_baseline {
                 j
             };
             for i in 0..MAX_ADDRESSES {
+                let outcome = serving.ja4_baseline.record(
+                    ordinal,
+                    synthetic(u8::try_from(i).expect("addr index fits u8")),
+                );
+                let expected = if i == 0 {
+                    BaselineOutcome::Seed
+                } else {
+                    BaselineOutcome::Changed
+                };
                 assert_eq!(
-                    serving.ja4_baseline.record(
-                        ordinal,
-                        synthetic(u8::try_from(i).expect("addr index fits u8"))
-                    ),
-                    BaselineOutcome::FirstSeen,
-                    "each fresh distinct JA4 seeds the set"
+                    outcome, expected,
+                    "only the first distinct JA4 of an empty row seeds; each later one changes"
                 );
             }
             assert_eq!(
@@ -9105,6 +9110,221 @@ mod ja4_baseline {
                     .facts_ja4_change(ordinal),
                 0,
                 "a repeated JA4 from another IP never flares a change signal"
+            );
+        });
+    }
+
+    #[test]
+    fn ja4_first_fingerprint_seeds_without_action() {
+        let port = ephemeral_port();
+        let cfg = cfg_ja4_block(port, "fqdn");
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&approved, 443)
+                .expect("ordinal");
+            let wire = hello_wire(b"sub.example.org", false);
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            drive_hello(serving, &wire, "sub.example.org");
+
+            let seeded = serving.ja4_baseline.entries[ordinal.get()][0].ja4;
+            assert_ne!(seeded, [0; 36], "the empty row is seeded with the JA4");
+            let counters = serving.storage().enforcement().counters();
+            assert_eq!(
+                counters.facts_ja4_seed(),
+                1,
+                "the first distinct fingerprint records one seeding event"
+            );
+            assert_eq!(
+                counters.facts_ja4_change(ordinal),
+                0,
+                "a seed is a recording, never an action"
+            );
+            assert!(
+                !counters.facts_ja4_change_loss(ordinal),
+                "a seed suppresses no detail"
+            );
+            assert!(
+                !serving.storage().enforcement().is_blocked(ordinal),
+                "a seed never selects the configured block"
+            );
+        });
+    }
+
+    #[test]
+    fn ja4_second_distinct_fingerprint_selects_configured_action() {
+        let port = ephemeral_port();
+        let cfg = cfg_ja4_block(port, "fqdn");
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&approved, 443)
+                .expect("ordinal");
+            let wire_a = hello_wire(b"sub.example.org", false);
+            let wire_b = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+            );
+
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            drive_hello(serving, &wire_a, "sub.example.org");
+            let first = serving.ja4_baseline.entries[ordinal.get()][0].ja4;
+
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            drive_hello(serving, &wire_b, "sub.example.org");
+            let second = serving.ja4_baseline.entries[ordinal.get()][1].ja4;
+            assert_ne!(second, first, "the ALPN variant must be a distinct JA4");
+            assert_ne!(second, [0; 36], "the in-capacity value is inserted");
+
+            let counters = serving.storage().enforcement().counters();
+            assert_eq!(
+                counters.facts_ja4_seed(),
+                1,
+                "the second distinct fingerprint is not a seed"
+            );
+            assert_eq!(
+                counters.facts_ja4_change(ordinal),
+                1,
+                "the second distinct fingerprint selects the configured action"
+            );
+            assert_eq!(
+                counters.facts_ja4_value(ordinal),
+                second,
+                "the changed value is retained"
+            );
+            assert!(
+                !counters.facts_ja4_change_loss(ordinal),
+                "an in-capacity change suppresses no detail"
+            );
+            assert!(
+                serving.storage().enforcement().is_blocked(ordinal),
+                "the configured per-FQDN block is selected"
+            );
+        });
+    }
+
+    #[test]
+    fn ja4_unchanged_fingerprint_selects_nothing() {
+        let port = ephemeral_port();
+        let cfg = cfg_ja4_block(port, "fqdn");
+        with_serving_stack_cfg(port, cfg, move |serving| {
+            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&approved, 443)
+                .expect("ordinal");
+            let wire = hello_wire(b"sub.example.org", false);
+
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            drive_hello(serving, &wire, "sub.example.org");
+
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 2])));
+            drive_hello(serving, &wire, "sub.example.org");
+
+            let counters = serving.storage().enforcement().counters();
+            assert_eq!(
+                counters.facts_ja4_seed(),
+                1,
+                "a repeated fingerprint never re-seeds"
+            );
+            assert_eq!(
+                counters.facts_ja4_change(ordinal),
+                0,
+                "an unchanged fingerprint selects nothing"
+            );
+            assert!(
+                !counters.facts_ja4_change_loss(ordinal),
+                "an unchanged fingerprint suppresses no detail"
+            );
+            assert!(
+                !serving.storage().enforcement().is_blocked(ordinal),
+                "an unchanged fingerprint never selects the configured block"
+            );
+            assert_eq!(
+                serving.ja4_baseline.entries[ordinal.get()][1].ja4,
+                [0; 36],
+                "an unchanged fingerprint occupies no second slot"
+            );
+        });
+    }
+
+    #[test]
+    fn ja4_in_capacity_change_updates_value_peer_and_change_counter() {
+        with_serving_stack(ephemeral_port(), |serving| {
+            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let ordinal = serving
+                .storage()
+                .ordinal_for_pair(&approved, 443)
+                .expect("ordinal");
+            let wire_a = hello_wire(b"sub.example.org", false);
+            let wire_b = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x32])],
+            );
+            let wire_c = hello_wire_ext(
+                b"sub.example.org",
+                false,
+                &[(0x0010, &[0x00, 0x03, 0x02, 0x68, 0x33])],
+            );
+
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
+            drive_hello(serving, &wire_a, "sub.example.org");
+
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 2])));
+            drive_hello(serving, &wire_b, "sub.example.org");
+            let second = serving.ja4_baseline.entries[ordinal.get()][1].ja4;
+            let counters = serving.storage().enforcement().counters();
+            assert_eq!(
+                counters.facts_ja4_change(ordinal),
+                1,
+                "an in-capacity deviation counts one change"
+            );
+            assert_eq!(
+                counters.facts_ja4_value(ordinal),
+                second,
+                "the changed value is retained"
+            );
+            assert_eq!(
+                counters.ja4_peer_ip(),
+                NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 2])),
+                "the change carries its own triggering peer"
+            );
+
+            serving.slots[0].reset();
+            serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 3])));
+            drive_hello(serving, &wire_c, "sub.example.org");
+            let third = serving.ja4_baseline.entries[ordinal.get()][2].ja4;
+            let counters = serving.storage().enforcement().counters();
+            assert_eq!(
+                counters.facts_ja4_seed(),
+                1,
+                "ja4_seed counts at most one event per ordinal"
+            );
+            assert_eq!(
+                counters.facts_ja4_change(ordinal),
+                2,
+                "the change counter counts every in-capacity deviation"
+            );
+            assert_eq!(
+                counters.facts_ja4_value(ordinal),
+                third,
+                "the retained value follows the newest change"
+            );
+            assert_eq!(
+                counters.ja4_peer_ip(),
+                NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 3])),
+                "the peer follows the newest change"
+            );
+            assert!(
+                !counters.facts_ja4_change_loss(ordinal),
+                "in-capacity changes suppress no detail"
             );
         });
     }
@@ -9232,8 +9452,8 @@ mod ja4_baseline {
             synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
             assert_eq!(
                 serving.ja4_baseline.record(ordinal, synthetic),
-                BaselineOutcome::FirstSeen,
-                "each fresh synthetic JA4 seeds the set"
+                BaselineOutcome::Changed,
+                "each fresh synthetic JA4 changes the set"
             );
         }
     }

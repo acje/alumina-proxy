@@ -629,8 +629,11 @@ struct Ja4BaselineEntry {
 /// The outcome of a first-seen JA4 baseline record attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BaselineOutcome {
-    /// The JA4 was new to the ordinal's set: it is added as a seeding event.
-    FirstSeen,
+    /// The row was empty: this is the ordinal's first distinct fingerprint, a
+    /// seeding event.
+    Seed,
+    /// The value is new to a non-empty row and fits: a change signal.
+    Changed,
     /// The JA4 was already in the ordinal's set (any peer address).
     Unchanged,
     /// The ordinal's `MAX_ADDRESSES`-entry set is full; the add is suppressed
@@ -661,20 +664,28 @@ impl Ja4BaselineTable {
 
     /// Records an observed JA4 for an ordinal's set, returning the baseline
     /// outcome. A JA4 already in the set is `Unchanged` regardless of peer
-    /// address. A new JA4 occupies the first empty slot as `FirstSeen` (a
-    /// seeding event). A full set drops the add as `Overflow`; the fixed table
-    /// never grows.
+    /// address. A new JA4 in an empty row is that ordinal's single `Seed`; a
+    /// new JA4 in a non-empty row that still fits is `Changed`. A full set
+    /// drops the add as `Overflow`; the fixed table never grows.
     fn record(&mut self, ordinal: DomainOrdinal, ja4: [u8; 36]) -> BaselineOutcome {
         let row = &mut self.entries[ordinal.get()];
+        let mut empty = true;
         for entry in row.iter() {
             if entry.ja4 == ja4 {
                 return BaselineOutcome::Unchanged;
+            }
+            if entry.ja4 != [0; 36] {
+                empty = false;
             }
         }
         for entry in row.iter_mut() {
             if entry.ja4 == [0; 36] {
                 *entry = Ja4BaselineEntry { ja4 };
-                return BaselineOutcome::FirstSeen;
+                return if empty {
+                    BaselineOutcome::Seed
+                } else {
+                    BaselineOutcome::Changed
+                };
             }
         }
         BaselineOutcome::Overflow
@@ -3039,9 +3050,10 @@ impl Serving {
     /// [`Self::dial`] on a successful connect when the hello completed first.
     /// The `ja4_seen` latch bounds the record to at most once per connection;
     /// the record keys on the established `dest_ip`, so the baseline can never
-    /// hold a wrong or missing IP. A `FirstSeen` outcome records a seeding
-    /// event; an `Overflow` outcome emits the per-ordinal JA4-change signal to
-    /// the monitor, keyed to the triggering peer's destination IP. Returns
+    /// hold a wrong or missing IP. A `Seed` outcome (an empty row) records a
+    /// seeding event; `Changed` and `Overflow` emit the per-ordinal JA4-change
+    /// signal to the monitor, keyed to the triggering peer's destination IP,
+    /// and `Overflow` additionally latches the detail-loss flag. Returns
     /// `true` when the record selected a `Block` effect, so the caller can
     /// withhold the upstream bytes the block forbids.
     fn maybe_record_ja4_baseline(&mut self, index: usize) -> bool {
@@ -3066,11 +3078,11 @@ impl Serving {
         self.slots[index].ja4_seen = true;
         let outcome = self.ja4_baseline.record(ordinal, ja4);
         match outcome {
-            BaselineOutcome::FirstSeen => {
+            BaselineOutcome::Seed => {
                 self.storage.enforcement_mut().note_fact_ja4_seed();
                 false
             }
-            BaselineOutcome::Overflow => {
+            BaselineOutcome::Changed | BaselineOutcome::Overflow => {
                 let control = self.storage.enforcement().control().ja4(ordinal);
                 if control == Some(PerFqdnControl::Ignore) {
                     return false;
@@ -3078,9 +3090,11 @@ impl Serving {
                 self.storage
                     .enforcement_mut()
                     .note_fact_ja4_change(ordinal, ja4, dest_ip);
-                self.storage
-                    .enforcement_mut()
-                    .note_fact_ja4_change_loss(ordinal);
+                if outcome == BaselineOutcome::Overflow {
+                    self.storage
+                        .enforcement_mut()
+                        .note_fact_ja4_change_loss(ordinal);
+                }
                 matches!(
                     self.project_tripwire(index, Violation::Ja4Change { ordinal }),
                     Effect::Block { .. }
