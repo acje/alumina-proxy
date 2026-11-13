@@ -878,17 +878,18 @@ impl BailiwickZones {
                 let bytes = suffix.as_bytes();
                 let already = (0..suffix_len)
                     .any(|j| suffix_owner[j] == index && suffix_slots[j].eq_bytes(bytes));
-                if !already {
-                    if suffix_len >= ALLOWLIST_MAX {
-                        return Err(DnsError::BailiwickSuffixOverflow {
-                            got: suffix_len + 1,
-                            max: ALLOWLIST_MAX,
-                        });
-                    }
-                    suffix_slots[suffix_len] = DnsName::from_exact(bytes);
-                    suffix_owner[suffix_len] = index;
-                    suffix_len += 1;
+                if already {
+                    continue;
                 }
+                if suffix_len >= ALLOWLIST_MAX {
+                    return Err(DnsError::BailiwickSuffixOverflow {
+                        got: suffix_len + 1,
+                        max: ALLOWLIST_MAX,
+                    });
+                }
+                suffix_slots[suffix_len] = DnsName::from_exact(bytes);
+                suffix_owner[suffix_len] = index;
+                suffix_len += 1;
             }
         }
         Ok(BailiwickZones {
