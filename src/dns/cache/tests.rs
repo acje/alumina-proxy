@@ -1046,6 +1046,66 @@ fn grace_deadline_overflow_leaves_entry_unchanged() {
     assert_eq!(after.generation(), before.generation());
 }
 
+#[cfg(feature = "alloc-witness")]
+fn publish_positive_control(cache: &mut Cache) {
+    let name = cache.name_index(0).expect("name ordinal 0 is in range");
+    let aaaa = cache.name_index(31).expect("name ordinal 31 is in range");
+    publish_simple(
+        cache,
+        name,
+        Family::A,
+        Generation::INITIAL,
+        &[pub_addr(), v4([8, 8, 8, 8])],
+        1000,
+        30,
+    );
+    publish_simple(
+        cache,
+        aaaa,
+        Family::Aaaa,
+        Generation::INITIAL,
+        &[NumericAddr::V6(Ipv6Addr::from(
+            0x2606_4700_4700_0000_0000_0000_0000_1111_u128,
+        ))],
+        1000,
+        30,
+    );
+    let tag = current_gen(cache, name, Family::A);
+    publish_simple(
+        cache,
+        name,
+        Family::A,
+        tag,
+        &[priv_addr(), v4([8, 8, 8, 8])],
+        2000,
+        300,
+    );
+    cache.evict_nxdomain(aaaa).expect("published entry evicts");
+    cache
+        .evict_nodata(name, Family::A)
+        .expect("published entry evicts");
+    cache
+        .note_exchange_failure(name, Family::Aaaa)
+        .expect("published entry records its exchange failure");
+}
+
+#[cfg(feature = "alloc-witness")]
+fn entry_count_sink(cache: &Cache) -> u128 {
+    let mut sink = 0u128;
+    for i in 0..32 {
+        let now = 5000 + u64::from(u8::try_from(i).expect("name ordinal fits u8"));
+        let name = cache.name_index(i).expect("name ordinal 0..32 is in range");
+        for family in Family::ALL {
+            let entry = read(cache, name, family);
+            sink = sink
+                .wrapping_add(u128::from(entry.state(now) == EntryState::Fresh))
+                .wrapping_add(u128::from(entry.generation().0))
+                .wrapping_add(entry.bindings().len() as u128);
+        }
+    }
+    sink
+}
+
 #[test]
 #[cfg(feature = "alloc-witness")]
 fn cache_zero_heap_after_positive_control() {
@@ -1065,57 +1125,9 @@ fn cache_zero_heap_after_positive_control() {
         size_of::<Cache>()
     );
     let ((), counts) = alloc::run_phase(Phase::BackgroundRefresh, || {
-        let mut cache = Cache::new(32).unwrap();
-        let name = cache.name_index(0).unwrap();
-        let aaaa = cache.name_index(31).unwrap();
-        publish_simple(
-            &mut cache,
-            name,
-            Family::A,
-            Generation::INITIAL,
-            &[pub_addr(), v4([8, 8, 8, 8])],
-            1000,
-            30,
-        );
-        publish_simple(
-            &mut cache,
-            aaaa,
-            Family::Aaaa,
-            Generation::INITIAL,
-            &[NumericAddr::V6(Ipv6Addr::from(
-                0x2606_4700_4700_0000_0000_0000_0000_1111_u128,
-            ))],
-            1000,
-            30,
-        );
-        let tag = current_gen(&cache, name, Family::A);
-        publish_simple(
-            &mut cache,
-            name,
-            Family::A,
-            tag,
-            &[priv_addr(), v4([8, 8, 8, 8])],
-            2000,
-            300,
-        );
-        cache.evict_nxdomain(aaaa).unwrap();
-        cache.evict_nodata(name, Family::A).unwrap();
-        cache.note_exchange_failure(name, Family::Aaaa).unwrap();
-        let mut sink = 0u128;
-        for i in 0..32 {
-            let n = cache.name_index(i).unwrap();
-            for f in Family::ALL {
-                let entry = read(&cache, n, f);
-                sink = sink
-                    .wrapping_add(u128::from(
-                        entry.state(
-                            5000 + u64::from(u8::try_from(i).expect("name ordinal fits u8")),
-                        ) == EntryState::Fresh,
-                    ))
-                    .wrapping_add(u128::from(entry.generation().0))
-                    .wrapping_add(entry.bindings().len() as u128);
-            }
-        }
+        let mut cache = Cache::new(32).expect("32-name cache is valid");
+        publish_positive_control(&mut cache);
+        let sink = entry_count_sink(&cache);
         std::hint::black_box((cache, sink));
     });
     assert!(
