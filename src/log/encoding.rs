@@ -716,6 +716,27 @@ pub(super) fn encode_record_final(
     encode_record(slot_buf, level, kind, fields)
 }
 
+/// Writes the `reason<i>` field of a failed probe segment, and nothing otherwise.
+fn write_probe_reason(w: &mut Entry<'_>, index: u32, verdict: ProbeVerdict) -> bool {
+    match verdict {
+        ProbeVerdict::Failed(reason) => push_indexed_quoted(w, b"reason", index, reason.as_str()),
+        ProbeVerdict::Ok | ProbeVerdict::NotProbed => true,
+    }
+}
+
+/// Writes one probe segment in resolver index order: the address, the optional
+/// FQDN and pin presence, the verdict, and the failed-probe reason.
+fn write_probe_segment(w: &mut Entry<'_>, seg: &ResolverProbeSegment<'_>) -> bool {
+    let index = seg.index;
+    push_indexed_addr(w, b"resolver", index, seg.addr)
+        && seg
+            .fqdn
+            .is_none_or(|fqdn| push_indexed_quoted(w, b"fqdn", index, fqdn.as_str()))
+        && (!seg.pin || push_indexed_token(w, b"pin", index, "1"))
+        && push_indexed_token(w, b"verdict", index, seg.verdict.as_str())
+        && write_probe_reason(w, index, seg.verdict)
+}
+
 /// Encodes the single post-window probe record: the header fields plus, in
 /// resolver index order, one inline segment per resolver — `resolverN` (the
 /// address, with FQDN/pin presence), `verdictN`, and (for a failed probe)
@@ -731,38 +752,11 @@ pub(super) fn encode_record_probe(
         buf: slot_buf,
         len: 0,
     };
-    if !write_header(&mut w, Level::Info, Kind::ResolverProbe) {
-        return None;
-    }
-    if !push_u64(&mut w, b"secs", secs) {
-        return None;
-    }
-    for seg in segments {
-        let index = seg.index;
-        if !push_indexed_addr(&mut w, b"resolver", index, seg.addr) {
-            return None;
-        }
-        if let Some(fqdn) = seg.fqdn
-            && !push_indexed_quoted(&mut w, b"fqdn", index, fqdn.as_str())
-        {
-            return None;
-        }
-        if seg.pin && !push_indexed_token(&mut w, b"pin", index, "1") {
-            return None;
-        }
-        if !push_indexed_token(&mut w, b"verdict", index, seg.verdict.as_str()) {
-            return None;
-        }
-        if let ProbeVerdict::Failed(reason) = seg.verdict
-            && !push_indexed_quoted(&mut w, b"reason", index, reason.as_str())
-        {
-            return None;
-        }
-    }
-    if !w.push(b"\n") {
-        return None;
-    }
-    Some(w.len)
+    let fitted = write_header(&mut w, Level::Info, Kind::ResolverProbe)
+        && push_u64(&mut w, b"secs", secs)
+        && segments.iter().all(|seg| write_probe_segment(&mut w, seg))
+        && w.push(b"\n");
+    fitted.then_some(w.len)
 }
 
 /// True when a per-ordinal domain block carries at least one `d<i>*` field
