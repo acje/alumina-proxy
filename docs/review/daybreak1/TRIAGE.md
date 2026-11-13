@@ -79,8 +79,8 @@ release-assurance gates first, telemetry and test hygiene last.
 | D4 | Per-domain JA4 peer attribution collapses to one global pair | 1 | low | Confirmed | Fixed — `325034e` | P2 | M3 ✓ |
 | D5 | Bare-IP resolver uses plain DNS under default `resolver_trusted` | 1 | med | Confirmed-Conditional | Fixed — amendment G2 (`b48e320`) + G2a (`cbaecfa`) | P2 | G2 ✓ |
 | D6 | Unsafe-surface docs gate can certify production `unsafe` (symlink + second declaration) | 2 | med | Confirmed (1 sub-claim Refuted) | Fixed — `467e13c`…`56eb45d` | P1 | M2 ✓ |
-| D7 | E2E receipt omits untracked compiled build inputs | 2 | low | Confirmed | Fix | P2 | M5 |
-| D8 | Shutdown E2E no-admission witness can pass on a forgotten reachable probe | 1 | low | Confirmed | Fix | P2 | M5 |
+| D7 | E2E receipt omits untracked compiled build inputs | 2 | low | Confirmed | Fixed — `68e9af1`, `66df647`, `c1b54b8`, `94b9a28` | P2 | M5 ✓ |
+| D8 | Shutdown E2E no-admission witness can pass on a forgotten reachable probe | 1 | low | Confirmed | Fixed — `813cd43`, `e64876e` | P2 | M5 ✓ |
 | D9 | Expired connect/setup/idle deadline consumed or replaced at a transition | 1 | low | Confirmed-Conditional | Fixed — `c316ecf` | P2 | M4 ✓ |
 | D10 | Listener accept backoff has no pause guard and no poll wake | 1 | med | Confirmed | Fixed — `f86213d`, `22e63d7`, `e110da9` | P2 | M4 ✓ |
 | D11 | 32-bit slot token truncates the generation field | 1 | low | Confirmed-Conditional | Fixed — `ed7f97c` | P2 | M4 ✓ |
@@ -309,7 +309,7 @@ so the remedy is visible. No new dependency; fail-closed producer semantics pres
 
 Registry: `csf_a4bf4a95…`, `csf_f2b0f388…`.
 
-### D7 — E2E receipt omits untracked build inputs · Confirmed · Fix (M5)
+### D7 — E2E receipt omits untracked build inputs · Confirmed · Fixed (M5)
 
 Verification at HEAD: `scripts/verify.sh:1526-1546` builds the receipt from `HEAD`,
 `git diff HEAD`, and three explicit harness/shell hashes. Untracked files are absent
@@ -318,11 +318,20 @@ the separate untracked-file inventory gate. A checkout containing an untracked
 `build.rs` (or any Cargo-consumed input) can produce a different binary under the same
 source receipt; the binary hash is recorded, so the artifact is still distinguished.
 
-Fix: reject untracked files before E2E builds (explicit allowlist for known artifacts), or
-fold a deterministic build-input digest into the receipt. Registry: `csf_2ff93526…`,
-`csf_d31dd37c…`.
+**Fixed at `68e9af1`…`94b9a28`**: the E2E selectors now refuse untracked build inputs before
+the receipt is taken. Guard proof: an untracked root `build.rs` produced
+`E2E-shutdown-BLOCKED: untracked path(s) outside the explicit allowlist …: build.rs`; removing
+the plant restored `E2E-SHUTDOWN-OK` / `CORRESPONDENCE-OK`.
 
-### D8 — Shutdown E2E no-admission false green · Confirmed · Fix (M5)
+Review found two fail-opens the first fix introduced, both corrected: unpinned ignore sources
+(`--exclude-standard` honoured a local `.git/info/exclude`, giving a 0-path universe and a
+false pass — now `--exclude-per-directory=.gitignore` with one standing allowlist entry), and
+an incomplete observation (`git ls-files --others` exit 0 with a "could not open directory"
+warning certified a partial universe — now diagnosed and refused; a blanked diff via
+`GIT_EXTERNAL_DIFF` is likewise refused). Accepted residuals are recorded in
+`alumina-gzqn4.22`. Registry: `csf_2ff93526…`, `csf_d31dd37c…`.
+
+### D8 — Shutdown E2E no-admission false green · Confirmed · Fixed (M5)
 
 Verification at HEAD: `scripts/e2e_shutdown.py:226-239` `probe_refused_sampled` classifies
 each sample; on `("reachable", …)` it calls `sample_no_bind()`, which **probes a second
@@ -331,9 +340,19 @@ continues — the earlier reachable observation (the actual no-admission violati
 forgotten, and the case can pass.
 
 This is a false-green in the witness, not evidence that the proxy admits post-shutdown
-clients. Fix: make a reachable observation terminal failure for the sample; classify one
-probe per sample. Guard proof: a listener held open briefly past SIGTERM must FAIL.
-Registry: `csf_dc9dbfaf…`.
+clients.
+
+**Fixed at `813cd43` + `e64876e`**: exactly one probe is classified per sample, and the first
+reachable observation is terminal. Guard proof: the `reachable→refused` shape returned
+`WITNESS-RETURN: True` with `CALLS: 3` before the fix (a false green); after it, `CALLS: 1`
+and `SHUTDOWN-D8-WINDOW: FAIL listener bound at a sampled probe point`.
+
+One judgement worth recording: a sample fires microseconds after `os.kill`, while the owner
+observes `SIGTERM` on its next poll turn, so a kernel-backlog connect there is
+*pre-observation*, not an admission. `SIGNAL_SETTLE = 0.25 s` makes no connect and judges
+nothing during that window; the remainder of the interval to the deadline is sampled with
+terminal-per-observation judgement — strictly stronger than the old retry loop. The trade is
+a 0.25 s blind window at the start, recorded rather than hidden. Registry: `csf_dc9dbfaf…`.
 
 ### D9 — Expired deadline consumed/replaced at a transition · Confirmed-Conditional · Fixed (M4)
 
@@ -652,7 +671,7 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 | M2 | D6 | `scripts/verify.sh` (+`verify_test.py`) only | guard proofs for symlink + second-declaration shapes; `verify.sh docs` | adversarial | ✓ `56eb45d` |
 | M3 | D4, D13, D14, D15, D18 | monitor / log / dns-incident / reactor-readiness | exact-grammar tests; every record kind still ≤ **2048 B** slot (`monitor_domain` re-measured to 1,870 B / 178 B); per-ordinal peer size budget | adversarial | ✓ `9e1f95a` |
 | M4 | D9, D10, D11, D12 | reactor / tunnel; deadlines, admission | clock-stepped expiry tests; injected accept error; 32-bit assertion; pool quota test | adversarial | ✓ `e110da9` |
-| M5 | D7, D8 | `scripts/verify.sh` E2E receipt; `scripts/e2e_shutdown.py` | untracked-input rejection; held-open-listener case must FAIL | standard |
+| M5 | D7, D8 | `scripts/verify.sh` E2E receipt; `scripts/e2e_shutdown.py` | untracked-input rejection; held-open-listener case must FAIL | adversarial | ✓ `94b9a28` |
 | M6 | D16 | test-only helpers + bench/E2E temp paths | symlink plant test per site; no production path; no new runtime dep | standard |
 | M7 | D17 (+G4) | `docs/deployment.md` (non-canonical docs only) | `verify.sh docs`; no spec digest change | standard |
 | G1–G2 | D3, D5 | spec + digest pin + config/table + tests **in one increment**; independent source and governance review; explicit user authorisation of exact text | amendment dossier: options analysis, fixed-profile and size re-measurement, migration note for existing configs | governance |
@@ -676,7 +695,8 @@ D4 is likely rework. G2 is independent of every remaining row and can proceed in
 | D5 | Fixed (G2 + G2a) | `alumina-gzqn4.4`, `alumina-gzqn4.15` | closed — `cbaecfa`, digest `b9941f00…`, source + governance APPROVE |
 | D9–D12 | Fixed | `alumina-gzqn4.6` | closed — `e110da9`, boundary PASS, review r2 APPROVE |
 | D4, D13–D15, D18 | Fixed | `alumina-gzqn4.17` | closed — `9e1f95a`, boundary PASS, review r2 APPROVE |
-| D7, D8, D16, D17 | per §3 | `alumina-gzqn4.1` | registered (M5/M6/M7) |
+| D7, D8 | Fixed | `alumina-gzqn4.20` | closed — `94b9a28`, guard proofs, real e2e shutdown 10/10, review r3 APPROVE |
+| D16, D17 | per §3 | `alumina-gzqn4.1` | registered (M6/M7) |
 
 Epic: `alumina-gzqn4`. Ledger updates go to `alumina-gzqn4.1`; the register above is the
 durable narrative.
