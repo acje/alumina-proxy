@@ -2009,10 +2009,16 @@ mod assurance_bridge_tests {
             .unwrap();
     }
 
-    fn actual_owner_negative_case(nx: bool) {
-        use crate::dns::cache::Family;
+    struct NegativePublishArrange {
+        responder: crate::dns::transport::tests::BoundedResponder,
+        storage: ServeStorage,
+        reader: std::os::unix::net::UnixStream,
+        bytes: [u8; 16384],
+    }
+
+    fn arrange_negative_publish(nx: bool) -> NegativePublishArrange {
+        use crate::dns::transport::StartupReport;
         use crate::dns::transport::tests::{Step, spawn_bounded_responder};
-        use crate::dns::transport::{ExchangeClass, StartupReport, TurnResult};
         use std::io::Read;
         use std::net::SocketAddr;
         use std::os::unix::net::UnixStream;
@@ -2051,22 +2057,15 @@ mod assurance_bridge_tests {
                 .unwrap()
                 .contains("kind=")
         );
-        let deadline = Instant::now() + Duration::from_secs(5);
-        storage
-            .start_dns_exchange(0, Family::Aaaa, deadline, ExchangeClass::Serving)
-            .unwrap();
-        loop {
-            match storage.advance_dns_serving().unwrap() {
-                Some(TurnResult::Pending) => {
-                    storage.dns.wait_dns_readiness(deadline).unwrap();
-                }
-                Some(TurnResult::Published(_)) => break,
-                other => panic!("negative publication failed: {other:?}"),
-            }
+        NegativePublishArrange {
+            responder,
+            storage,
+            reader,
+            bytes,
         }
-        storage.logs.drain_sink();
-        let n = reader.read(&mut bytes).unwrap();
-        let text = std::str::from_utf8(&bytes[..n]).unwrap();
+    }
+
+    fn assert_negative_publish_frame(nx: bool, text: &str) {
         let frames: Vec<_> = text
             .lines()
             .filter(|line| line.contains("kind=dns_assurance "))
@@ -2096,6 +2095,35 @@ mod assurance_bridge_tests {
                 "{frame}"
             );
         }
+    }
+
+    fn actual_owner_negative_case(nx: bool) {
+        use crate::dns::cache::Family;
+        use crate::dns::transport::{ExchangeClass, TurnResult};
+        use std::io::Read;
+
+        let NegativePublishArrange {
+            responder,
+            mut storage,
+            mut reader,
+            mut bytes,
+        } = arrange_negative_publish(nx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        storage
+            .start_dns_exchange(0, Family::Aaaa, deadline, ExchangeClass::Serving)
+            .unwrap();
+        loop {
+            match storage.advance_dns_serving().unwrap() {
+                Some(TurnResult::Pending) => {
+                    storage.dns.wait_dns_readiness(deadline).unwrap();
+                }
+                Some(TurnResult::Published(_)) => break,
+                other => panic!("negative publication failed: {other:?}"),
+            }
+        }
+        storage.logs.drain_sink();
+        let n = reader.read(&mut bytes).unwrap();
+        assert_negative_publish_frame(nx, std::str::from_utf8(&bytes[..n]).unwrap());
         responder.finish().unwrap();
     }
 
