@@ -79,7 +79,10 @@ struct ResponderCancellation {
 
 impl BoundedResponder {
     pub(crate) fn port(&self) -> u16 {
-        self.responder.as_ref().unwrap().port()
+        self.responder
+            .as_ref()
+            .expect("a bounded responder reports its port until finish consumes it")
+            .port()
     }
 
     pub(crate) fn finish(mut self) -> thread::Result<()> {
@@ -337,11 +340,16 @@ fn arm_active_stream(state: &ResponderCancellation, sock: &mut TcpStream) -> boo
     if state.requested.load(Ordering::Acquire) {
         return false;
     }
-    sock.set_nonblocking(false).unwrap();
-    sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    sock.set_nonblocking(false)
+        .expect("an accepted loopback stream returns to blocking mode");
+    sock.set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("an accepted loopback stream takes the scripted read timeout");
     sock.set_write_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    *active = Some(sock.try_clone().unwrap());
+        .expect("an accepted loopback stream takes the scripted write timeout");
+    *active = Some(
+        sock.try_clone()
+            .expect("an accepted loopback stream clones so cancellation can shut it down"),
+    );
     true
 }
 
@@ -579,8 +587,13 @@ fn bindings_of(
     family: Family,
 ) -> Vec<crate::eligibility::NumericAddr> {
     cache
-        .entry(cache.name_index(ordinal).unwrap(), family)
-        .unwrap()
+        .entry(
+            cache
+                .name_index(ordinal)
+                .expect("the fixture cache holds the requested name ordinal"),
+            family,
+        )
+        .expect("the fixture published a binding for the requested name and family")
         .bindings()
         .to_vec()
 }
@@ -619,10 +632,12 @@ fn run_exchange_expecting(
     // A fresh deadline per exchange keeps every exchange dialing: the
     // responder scripts rely on one accepted connection per exchange.
     let deadline = Instant::now() + Duration::from_millis(200);
-    let name_index = cache.name_index(0).unwrap();
+    let name_index = cache
+        .name_index(0)
+        .expect("the fixture cache holds name ordinal 0");
     let generation = cache
         .generations_before_query(name_index, Family::A)
-        .unwrap();
+        .expect("the fixture cache reports the generations before a first query");
     transport
         .start_exchange(
             fqdn,
@@ -632,7 +647,7 @@ fn run_exchange_expecting(
             generation,
             ExchangeClass::Startup,
         )
-        .unwrap();
+        .expect("the fixture transport admits the startup exchange start");
     let terminal = run_exchange_to_terminal(transport, fqdn, cache, schedules, deadline);
     assert!(
         expect(&terminal),
