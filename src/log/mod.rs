@@ -295,10 +295,14 @@ impl Kind {
     /// The priority class (docs/alumina-proxy.md:1299-1301): latch/event
     /// records are reserved against normal overflow, so they displace the
     /// newest normal record under pressure instead of being dropped whole.
+    /// `ShutdownFinal` is the terminal verdict and belongs to the same class:
+    /// the owner emits it immediately before the forced final monitor summary,
+    /// so a normal-class verdict would be that summary's newest-normal victim
+    /// and the process would exit with no statement of its own outcome.
     const fn is_reserved(self) -> bool {
         matches!(
             self,
-            Kind::Monitor | Kind::StartupFinal | Kind::ResolverProbe
+            Kind::Monitor | Kind::StartupFinal | Kind::ShutdownFinal | Kind::ResolverProbe
         )
     }
 }
@@ -980,7 +984,10 @@ impl LogStore {
             Field::new("status", Val::Str(status.as_str())),
             Field::new("dropped", Val::U64(dropped)),
         ];
-        self.enqueue(Level::Info, Kind::ShutdownFinal, &fields);
+        self.enqueue_reserved(Kind::ShutdownFinal, |buf| {
+            encode_record(buf, Level::Info, Kind::ShutdownFinal, &fields)
+        });
+        self.note_queue_usage();
     }
 
     /// Emits the reserved monitor summary plus the best-effort detail batches.

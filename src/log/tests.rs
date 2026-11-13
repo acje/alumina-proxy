@@ -2122,14 +2122,14 @@ mod monitor_records {
     }
 
     #[test]
-    fn logging_monitor_summary_on_full_ring_displaces_newest_normal() {
+    fn logging_monitor_summary_on_full_ring_preserves_the_shutdown_verdict() {
         use crate::enforcement::monitor::Monitor;
         use crate::enforcement::policy::UnknownReason;
         let (mut store, mut file) = file_logstore();
-        let mut guard = 0;
-        while store.len() < QUEUE_SLOTS - 1 && guard < 8 * QUEUE_SLOTS {
+        let mut warnings = 0usize;
+        while store.len() < QUEUE_SLOTS - 1 && warnings < 8 * QUEUE_SLOTS {
             store.startup_warning_ctx(100, "sub.example.org", Family::A, "timeout", None);
-            guard += 1;
+            warnings += 1;
         }
         assert_eq!(store.len(), QUEUE_SLOTS - 1, "fill leaves one free slot");
         store.shutdown_final(101, ShutdownStatus::Drained, store.dropped());
@@ -2148,18 +2148,36 @@ mod monitor_records {
         assert_eq!(
             store.dropped(),
             dropped_before + 1,
-            "H2: the admitted summary displaces and counts the newest normal record"
+            "the displacement still counts its one whole-record victim (no silent loss)"
         );
         assert_eq!(store.len(), QUEUE_SLOTS, "the ring stays at capacity");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
-        assert!(
-            text.contains("kind=monitor"),
-            "the reserved monitor summary is emitted: {text}"
+        let summary_count = text.matches("kind=monitor ").count();
+        let verdict_count = text.matches("kind=shutdown_final ").count();
+        assert_eq!(
+            summary_count, 1,
+            "the reserved monitor summary is emitted (verdict records: {verdict_count})"
         );
+        assert_eq!(
+            verdict_count, 1,
+            "the forced reserved summary must not evict the terminal shutdown verdict \
+             (monitor summaries: {summary_count})"
+        );
+        assert_eq!(
+            text.matches("kind=startup_warning ").count(),
+            warnings - 1,
+            "the one displaced victim is a newest normal warning, not the verdict"
+        );
+        let verdict_ix = text
+            .find("kind=shutdown_final ")
+            .expect("a surviving shutdown verdict record");
+        let summary_ix = text
+            .find("kind=monitor ")
+            .expect("a monitor summary record");
         assert!(
-            !text.contains("kind=shutdown_final"),
-            "the newest normal record (shutdown_final) is the displaced victim: {text}"
+            verdict_ix < summary_ix,
+            "the verdict is emitted before the summary that could have evicted it"
         );
     }
 }
