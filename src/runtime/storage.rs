@@ -959,27 +959,32 @@ impl ServeStorage {
         self.drain_incident_notes();
         let secs = self.cache_secs(Instant::now());
         if let Some(family) = family {
-            match &result {
-                TurnResult::Failed(reason) => {
-                    let origin = self.dns.last_failure_origin(ordinal, family);
-                    self.incident_report.note_exchange_failure(
-                        ordinal,
-                        family,
-                        secs,
-                        reason.as_str(),
-                        origin,
-                    );
-                }
-                TurnResult::Published(PublishedKind::ResolvedPositive) => {
-                    self.incident_report.note_positive(ordinal, family, secs);
-                }
-                _ => {}
-            }
+            self.note_turn_incident(ordinal, family, secs, &result);
         }
         if !matches!(result, TurnResult::Pending) {
             self.active_exchange_family = None;
         }
         Ok(Some(result))
+    }
+
+    fn note_turn_incident(
+        &mut self,
+        ordinal: usize,
+        family: Family,
+        secs: u64,
+        result: &TurnResult,
+    ) {
+        match result {
+            TurnResult::Failed(reason) => {
+                let origin = self.dns.last_failure_origin(ordinal, family);
+                self.incident_report
+                    .note_exchange_failure(ordinal, family, secs, reason.as_str(), origin);
+            }
+            TurnResult::Published(PublishedKind::ResolvedPositive) => {
+                self.incident_report.note_positive(ordinal, family, secs);
+            }
+            _ => {}
+        }
     }
 
     /// One serving-loop DNS turn: captures the per-event actor identity and
