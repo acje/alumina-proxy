@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Focused tests for independent verification selectors; no real builds run."""
 
+import contextlib
 import hashlib
+import importlib.util
+import io
 import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -15,17 +19,18 @@ ROOT = Path(__file__).resolve().parent.parent
 GATE_NAMES = ("unsafe_surface_gate", "cfg_test_parentage_gate")
 
 
+def extract_function(name):
+    script = (ROOT / "scripts/verify.sh").read_text()
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}$", script, re.S | re.M)
+    assert match is not None, f"function not found in scripts/verify.sh: {name}"
+    return match.group(0)
+
+
 def extract_gates():
     """The real gate bodies, text-extracted from scripts/verify.sh (the same
     precedent as test_dirty_agents_content_drift_is_detected): the tests drive
     the shipped decision logic, never a Python re-implementation of it."""
-    script = (ROOT / "scripts/verify.sh").read_text()
-    bodies = []
-    for name in GATE_NAMES:
-        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}$", script, re.S | re.M)
-        assert match is not None, f"gate function not found in scripts/verify.sh: {name}"
-        bodies.append(match.group(0))
-    return "\n\n".join(bodies)
+    return "\n\n".join(extract_function(name) for name in GATE_NAMES)
 
 
 GATES = extract_gates()
@@ -579,6 +584,138 @@ class GateIntegrity(unittest.TestCase):
                 self.assertEqual(result.returncode, 0,
                                  declaration + result.stdout + result.stderr)
                 self.assertIn("CFG-TEST-PARENTAGE-OK", result.stdout)
+
+
+# --- D8: the shutdown no-admission witness ------------------------------------
+# The shipped scripts/e2e_shutdown.py reads E2E_TARGET at import; the value only
+# names an in-container binary path and no case is executed here.
+def load_shutdown_witness():
+    saved = os.environ.get("E2E_TARGET")
+    os.environ["E2E_TARGET"] = "witness-test-target"
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "e2e_shutdown_under_test", ROOT / "scripts/e2e_shutdown.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        if saved is None:
+            del os.environ["E2E_TARGET"]
+        else:
+            os.environ["E2E_TARGET"] = saved
+    return module
+
+
+class FakeChild:
+    """The reaped-child surface the witness touches (kill + wait only)."""
+
+    def __init__(self):
+        self.kills = 0
+        self.reaps = 0
+
+    def kill(self):
+        self.kills += 1
+
+    def wait(self, timeout=None):
+        self.reaps += 1
+        return -15
+
+
+class ShutdownWitness(unittest.TestCase):
+    """D8: a post-signal no-admission sample must classify exactly ONE probe,
+    and a reachable observation is TERMINAL for the sample. Re-probing after a
+    reachable connect lets a later refusal overwrite an observed admission and
+    greens a case that admitted a client after the signal.
+
+    The decision logic executed is the shipped module itself, never a Python
+    re-implementation."""
+
+    def setUp(self):
+        self.mod = load_shutdown_witness()
+        self.mod.FAILURES.clear()
+        self.probes = []
+
+    def probe_sequence(self, *observations):
+        """Serve the given classified observations, repeating the last one so a
+        pre-fix re-probe loop cannot starve (it must fail on the assertions)."""
+        sequence = list(observations)
+
+        def probe():
+            self.probes.append(1)
+            return sequence[min(len(self.probes), len(sequence)) - 1]
+
+        self.mod.connect_probe = probe
+
+    def sample(self, name="WITNESS"):
+        out = io.StringIO()
+        proc = FakeChild()
+        with contextlib.redirect_stdout(out):
+            ok = self.mod.probe_refused_sampled(name, proc)
+        return ok, proc, out.getvalue()
+
+    def sample_no_bind(self, name="WITNESS-SAMPLE"):
+        out = io.StringIO()
+        proc = FakeChild()
+        with contextlib.redirect_stdout(out):
+            ok = self.mod.sample_no_bind(name, proc)
+        return ok, proc, out.getvalue()
+
+    def test_a_reachable_observation_is_terminal_for_the_sample(self):
+        # The next probe would be an authoritative refusal: the pre-fix witness
+        # re-probes through sample_no_bind, forgets the admission and continues.
+        self.probe_sequence(("reachable", None), ("refused", None))
+        ok, proc, out = self.sample()
+        self.assertFalse(ok, out)
+        self.assertEqual(len(self.probes), 1,
+                         f"exactly one probe per sample; probes={len(self.probes)}")
+        self.assertIn("listener bound at a sampled probe point", out)
+        self.assertEqual(self.mod.FAILURES, ["WITNESS"])
+        self.assertGreaterEqual(proc.kills, 1, "the admitting child must be reaped")
+        self.assertGreaterEqual(proc.reaps, 1)
+
+    def test_a_single_authoritative_refusal_certifies_no_admission(self):
+        self.probe_sequence(("refused", None))
+        ok, proc, out = self.sample()
+        self.assertTrue(ok, out)
+        self.assertEqual(len(self.probes), 1)
+        self.assertEqual(self.mod.FAILURES, [])
+        self.assertEqual((proc.kills, proc.reaps), (0, 0))
+
+    def test_an_operational_error_is_terminal_and_indeterminate(self):
+        self.probe_sequence(("error", OSError(24, "Too many open files")),
+                            ("refused", None))
+        ok, proc, out = self.sample()
+        self.assertFalse(ok, out)
+        self.assertEqual(len(self.probes), 1)
+        self.assertIn("indeterminate, not absence", out)
+        self.assertEqual(self.mod.FAILURES, ["WITNESS"])
+
+    def test_one_sample_classifies_one_probe(self):
+        self.probe_sequence(("reachable", None), ("refused", None))
+        ok, proc, out = self.sample_no_bind()
+        self.assertFalse(ok, out)
+        self.assertEqual(len(self.probes), 1)
+        self.assertIn("listener bound at a sampled probe point", out)
+
+    def test_a_held_open_listener_fails_and_a_closed_port_certifies(self):
+        # Real-IO plant/revert pair: a listener held open is the violating
+        # shape; the identical witness must fail it and then certify the closed
+        # port after the plant is removed.
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(8)
+            self.mod.PROXY = ("127.0.0.1", listener.getsockname()[1])
+            ok, _, out = self.sample(name="WITNESS-PLANT")
+            self.assertFalse(ok, out)
+            self.assertIn("listener bound at a sampled probe point", out)
+            self.assertEqual(self.mod.FAILURES, ["WITNESS-PLANT"])
+        finally:
+            listener.close()
+        self.mod.FAILURES.clear()
+        ok, _, out = self.sample(name="WITNESS-REVERT")
+        self.assertTrue(ok, out)
+        self.assertEqual(self.mod.FAILURES, [])
 
 
 if __name__ == "__main__":

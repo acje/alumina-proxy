@@ -165,29 +165,38 @@ def connect_probe():
         return ("error", exc)
 
 
-def sample_no_bind(name, proc):
-    """One interval-wide no-bind sample. A reachable connect or an operational
-    probe error both FAIL with distinct details (reaping the binary); only an
-    authoritative refusal is the expected no-listener state. Returns True when
-    the sample observed refusal."""
-    kind, exc = connect_probe()
+def reap_child(proc):
+    """Kill and reap the case child so a failing sample never leaks a live
+    binary or fixture behind it."""
+    proc.kill()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def judge_no_bind(name, proc, kind, exc):
+    """Judge ONE classified connect observation against the interval-wide
+    no-bind claim. An authoritative refusal returns True. A reachable connect
+    (an admission) and an operational probe error are both TERMINAL failures
+    with distinct details, so a later observation can never overwrite them."""
+    if kind == "refused":
+        return True
+    reap_child(proc)
     if kind == "reachable":
-        proc.kill()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
         fail(name, "listener bound at a sampled probe point (interval-wide no-bind violated)")
-        return False
-    if kind == "error":
-        proc.kill()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
+    else:
         fail(name, f"operational connect error during no-bind sampling (indeterminate, not absence): {exc}")
-        return False
-    return True
+    return False
+
+
+def sample_no_bind(name, proc):
+    """One interval-wide no-bind sample: classify exactly ONE probe. Only an
+    authoritative refusal is the expected no-listener state; a reachable
+    connect or a probe error is a terminal failure (reaping the binary).
+    Returns True when the sample observed refusal."""
+    kind, exc = connect_probe()
+    return judge_no_bind(name, proc, kind, exc)
 
 
 def wait_reachable(deadline):
@@ -223,20 +232,18 @@ def require_reachable(name, proc, timeout=20.0):
     return False
 
 
-def probe_refused_sampled(deadline, name, proc):
-    """Post-signal no-listener witness: sample until the proxy port is
-    authoritatively REFUSED. A connect that succeeds (admission stayed open) or
-    an operational probe error both FAIL, so a broken observation boundary can
-    never green the no-bind claim. Returns True once refused."""
-    while time.monotonic() < deadline:
-        kind, exc = connect_probe()
-        if kind == "refused":
-            return True
-        if not sample_no_bind(name, proc):
-            return False
-        time.sleep(0.05)
-    fail(name, "listener never observed authoritatively refused across the sampled post-signal interval (admission stayed open or observation gap)")
-    return False
+def probe_refused_sampled(name, proc):
+    """Post-signal no-admission witness: classify exactly ONE probe, and let it
+    be terminal in BOTH directions. An authoritative refusal certifies the
+    sample; a reachable connect (an admission after the signal) or an
+    operational probe error FAILs at once with its own detail.
+
+    There is deliberately no retry: re-probing after a reachable observation
+    would let a later refusal overwrite the admission just observed. That is
+    the false green this witness must never produce — a gate that can pass
+    when it should fail is worse than no gate."""
+    kind, exc = connect_probe()
+    return judge_no_bind(name, proc, kind, exc)
 
 
 def wait_log_marker(name, marker, timeout=8.0):
@@ -1044,7 +1051,7 @@ def case_storm_during_drain(fixtures):
         for _ in range(8):
             os.kill(proc.pid, signal.SIGTERM)
             time.sleep(0.05)
-        if not probe_refused_sampled(t0 + 2.0, name, proc):
+        if not probe_refused_sampled(name, proc):
             return
         # live-before the first-deadline window: still draining at its edge
         hold_until = t0 + GRACE_LO - 0.3
@@ -1198,10 +1205,11 @@ def case_forced_repeat_noadmit(fixtures):
             proc.kill(); proc.wait(); fail(name, "no hello bytes observed upstream (relay not established)"); return
         t0 = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
-        # no admissions after the first signal: the listener must be dropped
-        # (error-aware sampling; an operational probe error never reads as
-        # absence, so it fails the case rather than greening a broken probe)
-        if not probe_refused_sampled(t0 + 2.0, name, proc):
+        # no admissions after the first signal: the listener must already be
+        # dropped. One classified sample decides — a reachable connect or an
+        # operational probe error fails the case rather than greening a broken
+        # probe, and no later refusal can overwrite an observed admission.
+        if not probe_refused_sampled(name, proc):
             return
         time.sleep(3.0)
         if proc.poll() is not None:
