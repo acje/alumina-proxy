@@ -640,6 +640,95 @@ fn run_exchange_expecting(
     );
 }
 
+/// The turn budget one scripted exchange is driven under: a scripted peer must
+/// conclude well inside it, so an exhausted budget is a test failure, not a
+/// tolerant pass.
+const EXCHANGE_DRIVE_TURNS: usize = 256;
+
+/// A startup case seated on a scripted responder that replays one positive-A
+/// reply per connection: the first allowlist name and a fresh deadline travel
+/// with the transport, cache and schedules the exchange drives.
+struct ScriptedPositive {
+    responder: Responder,
+    transport: StartupDns,
+    cache: Cache,
+    schedules: Schedules,
+    fqdn: Fqdn,
+    deadline: Instant,
+}
+
+fn scripted_positive(ttl: u32, octets: [u8; 4]) -> ScriptedPositive {
+    let responder = spawn_responder(vec![vec![
+        Step::PositiveA { ttl, octets },
+        Step::Close,
+    ]]);
+    let mut transport = StartupDns::new().unwrap();
+    transport.addr = ns(responder.port());
+    transport.now0 = 1_000_000;
+    ScriptedPositive {
+        responder,
+        transport,
+        cache: Cache::new(2).unwrap(),
+        schedules: Schedules::new(2).unwrap(),
+        fqdn: config().allowlist().get(0).unwrap().clone(),
+        deadline: Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS),
+    }
+}
+
+/// Starts the first exchange on `transport` for `fqdn` at the initial
+/// generation, under the caller's class.
+fn start_first_exchange(
+    transport: &mut StartupDns,
+    fqdn: &Fqdn,
+    deadline: Instant,
+    class: ExchangeClass,
+) {
+    transport
+        .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL, class)
+        .expect("first exchange starts");
+}
+
+/// Advances one exchange turn, returning the turn the transport reported so the
+/// caller keeps deciding what that turn must be.
+fn advance_turn(
+    transport: &mut StartupDns,
+    fqdn: &Fqdn,
+    cache: &mut Cache,
+    schedules: &mut Schedules,
+) -> TurnResult {
+    transport
+        .advance_exchange(fqdn, cache, schedules)
+        .expect("exchange turn")
+}
+
+/// Drives one exchange to its terminal turn under [`EXCHANGE_DRIVE_TURNS`],
+/// waiting for the owner-owned readiness the turn asked for unless the exchange
+/// deadline is already spent (waiting past it would block); `None` means the
+/// budget ran out with the exchange still pending.
+fn drive_exchange_to_terminal(
+    transport: &mut StartupDns,
+    fqdn: &Fqdn,
+    cache: &mut Cache,
+    schedules: &mut Schedules,
+    deadline: Instant,
+) -> Option<Result<TurnResult, StartupDnsError>> {
+    for _ in 0..EXCHANGE_DRIVE_TURNS {
+        match transport.advance_exchange(fqdn, cache, schedules) {
+            Ok(TurnResult::Pending) => {
+                if transport
+                    .exchange_deadline()
+                    .is_some_and(|d| Instant::now() >= d)
+                {
+                    continue;
+                }
+                let _ = transport.wait_dns_readiness(deadline).expect("dns wait");
+            }
+            terminal => return Some(terminal),
+        }
+    }
+    None
+}
+
 /// Builds a configured resolver set from numeric address strings for the pure
 /// failover/failback state-machine tests (loopback dialing is impossible:
 /// `Nameserver` fixes the port at 53, and the relay would reach a real host).
@@ -1508,54 +1597,25 @@ mod cooperative {
     }
     #[test]
     fn cooperative_exchange_publishes_on_valid_response() {
-        let cfg = config();
-        let responder = spawn_responder(vec![vec![
-            Step::PositiveA {
-                ttl: 120,
-                octets: [93, 184, 216, 34],
-            },
-            Step::Close,
-        ]]);
-        let mut cache = Cache::new(2).unwrap();
-        let mut schedules = Schedules::new(2).unwrap();
-        let mut transport = StartupDns::new().unwrap();
-        transport.addr = ns(responder.port());
-        transport.now0 = 1_000_000;
-        let fqdn = cfg.allowlist().get(0).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
-        transport
-            .start_exchange(
-                fqdn,
-                Family::A,
-                0,
-                deadline,
-                Generation::INITIAL,
-                ExchangeClass::Startup,
-            )
-            .unwrap();
-        let mut result = None;
-        for _ in 0..256 {
-            match transport
-                .advance_exchange(fqdn, &mut cache, &mut schedules)
-                .unwrap()
-            {
-                TurnResult::Pending => {
-                    if transport
-                        .exchange_deadline()
-                        .is_some_and(|d| Instant::now() >= d)
-                    {
-                        continue;
-                    }
-                    let _ = transport.wait_dns_readiness(deadline).unwrap();
-                }
-                term => {
-                    result = Some(term);
-                    break;
-                }
-            }
-        }
+        let ScriptedPositive {
+            responder,
+            mut transport,
+            mut cache,
+            mut schedules,
+            fqdn,
+            deadline,
+        } = scripted_positive(120, [93, 184, 216, 34]);
+        start_first_exchange(&mut transport, &fqdn, deadline, ExchangeClass::Startup);
+        let result = drive_exchange_to_terminal(
+            &mut transport,
+            &fqdn,
+            &mut cache,
+            &mut schedules,
+            deadline,
+        )
+        .expect("the exchange concludes");
         assert!(
-            matches!(result, Some(TurnResult::Published(_))),
+            matches!(result, Ok(TurnResult::Published(_))),
             "a valid response must publish at the primitive level, got {result:?}"
         );
         assert_eq!(
@@ -1617,40 +1677,22 @@ mod cooperative {
     }
     #[test]
     fn cooperative_send_wouldblock_makes_owner_wait_instead_of_busy_looping() {
-        let cfg = config();
-        let responder = spawn_responder(vec![vec![
-            Step::PositiveA {
-                ttl: 120,
-                octets: [93, 184, 216, 34],
-            },
-            Step::Close,
-        ]]);
-        let mut cache = Cache::new(2).unwrap();
-        let mut schedules = Schedules::new(2).unwrap();
-        let mut transport = StartupDns::new().unwrap();
-        transport.addr = ns(responder.port());
-        transport.now0 = 1_000_000;
-        let fqdn = cfg.allowlist().get(0).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        transport
-            .start_exchange(
-                fqdn,
-                Family::A,
-                0,
-                deadline,
-                Generation::INITIAL,
-                ExchangeClass::Startup,
-            )
-            .unwrap();
+        let ScriptedPositive {
+            responder,
+            mut transport,
+            mut cache,
+            mut schedules,
+            fqdn,
+            deadline,
+        } = scripted_positive(120, [93, 184, 216, 34]);
+        start_first_exchange(&mut transport, &fqdn, deadline, ExchangeClass::Startup);
         transport.arm_write(WriteForce::Partial(1));
         let mut guard = 0;
         loop {
             match transport.active_step() {
                 Some(ExchangeStep::Connecting) => {
                     assert!(matches!(
-                        transport
-                            .advance_exchange(fqdn, &mut cache, &mut schedules)
-                            .unwrap(),
+                        advance_turn(&mut transport, &fqdn, &mut cache, &mut schedules),
                         TurnResult::Pending
                     ));
                     let _ = transport.wait_dns_readiness(deadline).unwrap();
@@ -1662,9 +1704,7 @@ mod cooperative {
             assert!(guard < 16, "exchange did not reach the sending stage");
         }
         assert!(matches!(
-            transport
-                .advance_exchange(fqdn, &mut cache, &mut schedules)
-                .unwrap(),
+            advance_turn(&mut transport, &fqdn, &mut cache, &mut schedules),
             TurnResult::Pending
         ));
         let before = transport.poll_ticks;
@@ -1676,9 +1716,7 @@ mod cooperative {
         );
         transport.arm_write(WriteForce::WouldBlock);
         assert!(matches!(
-            transport
-                .advance_exchange(fqdn, &mut cache, &mut schedules)
-                .unwrap(),
+            advance_turn(&mut transport, &fqdn, &mut cache, &mut schedules),
             TurnResult::Pending
         ));
         let before = transport.poll_ticks;
@@ -1688,29 +1726,16 @@ mod cooperative {
             "after an actual sending WouldBlock the owner wait must perform a \
          real poll (awaiting-writable), not an instant-returning busy loop"
         );
-        let mut result = None;
-        for _ in 0..200 {
-            match transport
-                .advance_exchange(fqdn, &mut cache, &mut schedules)
-                .unwrap()
-            {
-                TurnResult::Pending => {
-                    if transport
-                        .exchange_deadline()
-                        .is_some_and(|d| Instant::now() >= d)
-                    {
-                        continue;
-                    }
-                    let _ = transport.wait_dns_readiness(deadline).unwrap();
-                }
-                term => {
-                    result = Some(term);
-                    break;
-                }
-            }
-        }
+        let result = drive_exchange_to_terminal(
+            &mut transport,
+            &fqdn,
+            &mut cache,
+            &mut schedules,
+            deadline,
+        )
+        .expect("the exchange concludes");
         assert!(
-            matches!(result, Some(TurnResult::Published(_))),
+            matches!(result, Ok(TurnResult::Published(_))),
             "a valid response must publish after an awaited would-block send, got {result:?}"
         );
         assert_ne!(bindings_of(&cache, 0, Family::A), []);
@@ -1867,27 +1892,20 @@ mod apply {
 
     #[test]
     fn stale_generation_is_refused_at_apply() {
-        let cfg = config();
-        let responder = spawn_responder(vec![vec![
-            Step::PositiveA {
-                ttl: 120,
-                octets: [1, 1, 1, 1],
-            },
-            Step::Close,
-        ]]);
-        let mut cache = Cache::new(2).unwrap();
-        let mut schedules = Schedules::new(2).unwrap();
-        let mut transport = StartupDns::new().unwrap();
-        transport.addr = ns(responder.port());
-        transport.now0 = 1_000_000;
-        let fqdn = cfg.allowlist().get(0).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+        let ScriptedPositive {
+            responder,
+            mut transport,
+            mut cache,
+            mut schedules,
+            fqdn,
+            deadline,
+        } = scripted_positive(120, [1, 1, 1, 1]);
         let name_index = cache.name_index(0).unwrap();
         let captured = cache.entry(name_index, Family::A).unwrap().generation();
         assert_eq!(captured, Generation::INITIAL);
         transport
             .start_exchange(
-                fqdn,
+                &fqdn,
                 Family::A,
                 0,
                 deadline,
@@ -1909,34 +1927,20 @@ mod apply {
         )
         .unwrap();
         cache.publish_positive(&staged).unwrap();
-        let mut result = None;
-        for _ in 0..256 {
-            match transport.advance_exchange(fqdn, &mut cache, &mut schedules) {
-                Ok(TurnResult::Pending) => {
-                    if transport
-                        .exchange_deadline()
-                        .is_some_and(|d| Instant::now() >= d)
-                    {
-                        continue;
-                    }
-                    let _ = transport.wait_dns_readiness(deadline).unwrap();
-                }
-                Ok(term) => {
-                    result = Some(Ok(term));
-                    break;
-                }
-                Err(err) => {
-                    result = Some(Err(err));
-                    break;
-                }
-            }
-        }
+        let result = drive_exchange_to_terminal(
+            &mut transport,
+            &fqdn,
+            &mut cache,
+            &mut schedules,
+            deadline,
+        )
+        .expect("the exchange concludes");
         assert!(
             matches!(
                 result,
-                Some(Err(StartupDnsError::Dns(DnsError::Cache(
+                Err(StartupDnsError::Dns(DnsError::Cache(
                     CacheError::StaleGeneration
-                ))))
+                )))
             ),
             "an obsolete captured generation must refuse apply, got {result:?}"
         );
