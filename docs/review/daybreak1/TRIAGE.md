@@ -75,7 +75,7 @@ release-assurance gates first, telemetry and test hygiene last.
 |---|---|---|---|---|---|---|---|
 | D1 | JA4 Block leaves the triggering tunnel active (no Connection branch; Domain excludes the offender) | 9 | med | Confirmed | Fixed — `681e81e`, `0205f69` | P1 | M1 ✓ |
 | D2 | JA4 block decided after the first upstream flush | 1 | med | Confirmed | Fixed — `c0885b3` | P1 | M1 ✓ |
-| D3 | JA4 baseline seeds 16 fingerprints; decision only on overflow | 1 | med | Spec-Intended | Governed amendment G1 | P1 | G1 |
+| D3 | JA4 baseline seeds 16 fingerprints; decision only on overflow | 1 | med | Spec-Intended | Fixed — amendment G1 (SP-015) `68c064c`, `c8336e1`, `48a90f5` | P1 | G1 ✓ |
 | D4 | Per-domain JA4 peer attribution collapses to one global pair | 1 | low | Confirmed | Fix | P2 | M3 |
 | D5 | Bare-IP resolver uses plain DNS under default `resolver_trusted` | 1 | med | Confirmed-Conditional | Fixed — amendment G2 (`b48e320`) + G2a (`cbaecfa`) | P2 | G2 ✓ |
 | D6 | Unsafe-surface docs gate can certify production `unsafe` (symlink + second declaration) | 2 | med | Confirmed (1 sub-claim Refuted) | Fixed — `467e13c`…`56eb45d` | P1 | M2 ✓ |
@@ -152,7 +152,7 @@ Distinct defect, same seam as D1, separate red test. Remediated in M1 as increme
 
 Registry: `csf_0ac80ddb…` (`ja4-block-late-enforcement`).
 
-### D3 — JA4 baseline seeds 16 fingerprints · Spec-Intended · Governance G1
+### D3 — JA4 baseline seeds 16 fingerprints · Spec-Intended · Fixed (G1)
 
 Verification at HEAD: `Ja4BaselineTable::record` (`src/runtime/reactor.rs:596-625`)
 returns `FirstSeen` for any value not already present, and
@@ -177,6 +177,23 @@ rather than record an acceptance. Draft only; adoption requires explicit user
 authorisation of the exact text plus the full governed increment (spec + digest pin +
 code + tests, independent source and governance review). Implementation is gated on that
 adoption.
+
+**Adopted at `48a90f5`**: SP-015 makes seeding exactly the ordinal's first distinct
+fingerprint; every later distinct value selects the configured action, in capacity or at
+overflow. Two in-place coherence corrections were authorised mid-increment: the P-F09 block
+(`:1683`, `:1690-1692`, `:1695-1699`) and the tag `BaselineOutcome { Seed, Changed,
+Unchanged, Overflow }`. The detail-loss latch was split out of `note_fact_ja4_change`
+(`0367b28`) so an in-capacity change cannot report suppressed detail. Two review repairs
+landed (`bc91d87` comment drift, `48a90f5` ignore parity). Digest `b9941f00…` → `d43d938f…`;
+boundary PASS on the repaired candidate (`ALT-COPY-OK`, binary `1259782f…`); both gates
+APPROVE (`alumina-gzqn4.3.3` source, `alumina-gzqn4.3.6` governance). Boundary attempt 1
+failed on the pre-existing `due_refresh::sigterm_stops_due_refresh_flow` ephemeral-port race
+(`alumina-t4vlg`), unrelated to JA4; attempt 2 passed.
+
+Open residuals from adoption (both need a scoped spec-text authorisation, not code):
+`alumina-039tz` — T4 `:951-958` still reads "first-seen establishes the baseline", which is
+imprecise for a value new to a non-empty row; `alumina-0iyh9` — authorised hunk C cites
+`monitor.rs:272-284`, which now straddles the split method at 269-280.
 
 Registry: `csf_bf60a65e…` (`ja4-change-detection-bypass`).
 
@@ -485,7 +502,7 @@ question that must be answered before a draft can exist.
 
 | ID | Question | Chosen (user, 2026-11-12) | Consequence |
 |---|---|---|---|
-| G1 | D3: what is the JA4 baseline/change contract? | **(b)** keep the K=16 set; the first distinct fingerprint seeds, **every** subsequent new fingerprint selects the configured action; overflow keeps F-08's detail-loss latch | Table unchanged (18,432 B), no per-address state, zero new allocation. `BaselineOutcome` must distinguish an empty row (seed) from a non-empty row gaining a new value (change). The T4 prose at `:700`/`:952` must be rewritten to the per-ordinal set — the amendment also removes the stale "per-ordinal+address" phrasing (G3 instance). Monitor grammar unchanged; `ja4_seed` becomes ≤ 32 per process |
+| G1 | D3: what is the JA4 baseline/change contract? | **(b)** keep the K=16 set; the first distinct fingerprint seeds, **every** subsequent new fingerprint selects the configured action; overflow keeps F-08's detail-loss latch. **Adopted** 2026-11-13 (SP-015, `48a90f5`): digest `d43d938f…`, both gates APPROVE | Table unchanged (18,432 B), no per-address state, zero new allocation. `BaselineOutcome` must distinguish an empty row (seed) from a non-empty row gaining a new value (change). The T4 prose at `:700`/`:952` must be rewritten to the per-ordinal set — the amendment also removes the stale "per-ordinal+address" phrasing (G3 instance). Monitor grammar unchanged; `ja4_seed` becomes ≤ 32 per process |
 | G2 | D5: what is the resolver assurance contract? | **(c)** require an explicit `resolver_trusted` per entry; the omission default disappears. **Adopted** 2026-11-13 (`b48e320`, `cbaecfa`): digest `b9941f00…`, both reviews APPROVE, spec + pin + parser + tests + 102 fixture lines migrated together | Bare-IP stays usable; silent defaulting ends. All four harness configs (`e2e_relay.sh:134`, `e2e_shutdown.sh:93`, `bench/run.sh:159`, `verify.sh:526`), the QA example and every cited non-canonical doc must state the class explicitly; missing key becomes `InvalidDnsAssurance` (exit 78) rather than a default |
 | G3 | Unverified intake observation: the spec "overstates stdout drop accounting and monitor-summary delivery" relative to `src/log/sink.rs` and `docs/monitoring.md` | open | Verify first, then reconcile as a documentation correction (or a spec amendment if the spec is the wrong side). **Verified instances to include:** the JA4 keying prose (G1) and the stale 8,192 B geometry in earlier amendment layers (`:1131`, `:1168`, `:1249`, `:1257`) against the binding 2048 B (spec `:878-903`, `:1309-1319`) |
 | G4 | Deployment-doc inconsistencies: spec names a Cloud Run worker pool while `docs/deployment.md` prescribes a dedicated VM; host-network appliance is said to bind `0.0.0.0:5353` while the shipped example binds `127.0.0.1:5353` | open | Verify against spec intent, then correct the non-canonical document |
@@ -644,7 +661,7 @@ D4 is likely rework. G2 is independent of every remaining row and can proceed in
 |---|---|---|---|
 | D1, D2 | Fixed | `alumina-gzqn4.2` | closed — `0205f69`, boundary PASS, review APPROVE |
 | D6 | Fixed | `alumina-gzqn4.5` | closed — `56eb45d`, guard proofs + boundary PASS, review r2 APPROVE |
-| D3 | Governed amendment G1 | `alumina-gzqn4.3` | semantics chosen: K=16 set, select on every new fingerprint after the first; exact text + governed increment outstanding |
+| D3 | Fixed (G1, SP-015) | `alumina-gzqn4.3` | closed — `48a90f5`, digest `d43d938f…`, source + governance APPROVE; 2 text residuals open |
 | D5 | Fixed (G2 + G2a) | `alumina-gzqn4.4`, `alumina-gzqn4.15` | closed — `cbaecfa`, digest `b9941f00…`, source + governance APPROVE |
 | D9–D12 | Fixed | `alumina-gzqn4.6` | closed — `e110da9`, boundary PASS, review r2 APPROVE |
 | D4, D7–D18 | per §3 | `alumina-gzqn4.1` | registered |
