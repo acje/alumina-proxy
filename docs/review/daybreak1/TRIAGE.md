@@ -4,7 +4,7 @@ Status: triage v1, 2026-11-12. Working register, not an acceptance record.
 Epic: `alumina-gzqn4` · Ledger: `alumina-gzqn4.1` · First mission: `alumina-gzqn4.2`
 
 Authority: `docs/alumina-proxy.md` is the sole byte-canonical governing specification
-(sha256 `416062eb…`, byte-frozen). This document records triage verdicts that arbitrate
+(sha256 `09f60d09…`, byte-frozen). This document records triage verdicts that arbitrate
 code-versus-spec deviations. It does not amend the specification, and it is not
 authoritative over `bd`: binding dispositions live in the ledger bead.
 
@@ -89,7 +89,7 @@ release-assurance gates first, telemetry and test hygiene last.
 | D14 | Reserved forced monitor summary displaces the queued `shutdown_final` verdict | 1 | low | Confirmed | Fixed — `ea48493` | P2 | M3 ✓ |
 | D15 | Reopened DNS incident inherits the other family's prior failure snapshot | 1 | low | Confirmed | Fixed — `e591abd` | P2 | M3 ✓ |
 | D16 | Predictable test/benchmark temp paths permit symlink clobber (4 sites) | 5 | low | Confirmed-Conditional | Fixed — `e6a25c9`…`9be04d6` | P3 | M6 ✓ |
-| D17 | Reference deployment admits the whole VPC subnet to the proxy | 1 | low | Confirmed | Correct-documentation | P3 | M7 |
+| D17 | Reference deployment admits the whole VPC subnet to the proxy | 1 | low | Confirmed | Documented — `1a95e29` | P3 | M7 ✓ |
 | D18 | Combined upstream error+readable readiness skips early-activity telemetry | 1 | low | Confirmed-Conditional | Fixed — `5b31ef2` | P2 | M3 ✓ |
 
 Sum check: 9+1+1+1+1+2+2+1+1+1+1+1+1+1+1+5+1+1 = **32**. Mediums: D1(9)+D2(1)+D3(1)+D5(1)+D6(1)+D10(1) = **14**; lows = **18**.
@@ -536,6 +536,16 @@ Disposition: documentation correction — narrow the rule to the workload's iden
 (subnet/instance tag) or state the subnet-trust assumption explicitly. No runtime change.
 Registry: `csf_b3172a74…`.
 
+**Disposition recorded (M7, `1a95e29`) — option (b), subnet scope retained with the trust
+assumption stated.** The diagram, the `iptables` example and a new §1 trust bullet in
+`docs/deployment.md` all read `<vpc-subnet-cidr>` and state that admission is
+subnet-scoped and unauthenticated, that any peer in the subnet inherits the allowlist and
+the bounded capacity limits, and that a shared subnet must be narrowed to the workload's
+own address range (or to a firewall identity the platform can express). The spec side is
+unchanged and was the correct side: `docs/alumina-proxy.md` §Deployment boundary already
+requires ingress restricted to the intended workloads. Zero code bytes;
+`sh scripts/verify.sh docs` → CANONICAL-DIGEST-OK (`09f60d09…`).
+
 ### D18 — Combined upstream error+readable skips early-activity telemetry · Confirmed-Conditional · Fixed (M3)
 
 Verification at HEAD: `src/runtime/reactor.rs:1575` and `1616` short-circuit on
@@ -565,7 +575,7 @@ question that must be answered before a draft can exist.
 | G1 | D3: what is the JA4 baseline/change contract? | **(b)** keep the K=16 set; the first distinct fingerprint seeds, **every** subsequent new fingerprint selects the configured action; overflow keeps F-08's detail-loss latch. **Adopted** 2026-11-13 (SP-015, `48a90f5`): digest `d43d938f…`, both gates APPROVE | Table unchanged (18,432 B), no per-address state, zero new allocation. `BaselineOutcome` must distinguish an empty row (seed) from a non-empty row gaining a new value (change). The T4 prose at `:700`/`:952` must be rewritten to the per-ordinal set — the amendment also removes the stale "per-ordinal+address" phrasing (G3 instance). Monitor grammar unchanged; `ja4_seed` becomes ≤ 32 per process |
 | G2 | D5: what is the resolver assurance contract? | **(c)** require an explicit `resolver_trusted` per entry; the omission default disappears. **Adopted** 2026-11-13 (`b48e320`, `cbaecfa`): digest `b9941f00…`, both reviews APPROVE, spec + pin + parser + tests + 102 fixture lines migrated together | Bare-IP stays usable; silent defaulting ends. All four harness configs (`e2e_relay.sh:134`, `e2e_shutdown.sh:93`, `bench/run.sh:159`, `verify.sh:526`), the QA example and every cited non-canonical doc must state the class explicitly; missing key becomes `InvalidDnsAssurance` (exit 78) rather than a default |
 | G3 | Spec/doc measurement consistency | **Adopted in part** 2026-11-13 (`5012527`, digest `416062eb…`): geometry table, tightest-record sentence, duplicate prose, stale JA4 storage row, citation | Verify first, then reconcile as a documentation correction (or a spec amendment if the spec is the wrong side). **Verified instances to include:** the JA4 keying prose (G1) and the stale 8,192 B geometry in earlier amendment layers (`:1131`, `:1168`, `:1249`, `:1257`) against the binding 2048 B (spec `:878-903`, `:1309-1319`) |
-| G4 | Deployment-doc inconsistencies: spec names a Cloud Run worker pool while `docs/deployment.md` prescribes a dedicated VM; host-network appliance is said to bind `0.0.0.0:5353` while the shipped example binds `127.0.0.1:5353` | open | Verify against spec intent, then correct the non-canonical document |
+| G4 | Deployment-doc inconsistencies: spec names a Cloud Run worker pool while `docs/deployment.md` prescribes a dedicated VM; host-network appliance is said to bind `0.0.0.0:5353` while the shipped example binds `127.0.0.1:5353` | **Verified and closed** (M7, `1a95e29`). **G4a: roles differ, and the deployment doc was also factually wrong.** Spec §Initial test target is the initial validation target (`docs/alumina-proxy.md:181` states it is "not a requirement of the deployment pattern"); the VM appliance is the production reference. But `docs/deployment.md:40-41` additionally claimed worker pools reject inbound TCP on Direct VPC IPs, which Google's Cloud Run Direct VPC and container-contract docs contradict (worker pools support ingress as well as egress, with inbound custom TCP to the private VPC IP) — corrected, evidence `alumina-gzqn4.23.1`. **G4b: not a conflict.** The shipped example binds `127.0.0.1:5353` for local testing and says so in its own header; the `--network host` appliance binds `0.0.0.0:5353`. Clarified in `docs/deployment.md` §2; `docs/qa-package/config.example.toml` bytes unchanged. | No runtime change. The spec needed no correction for either item; only the non-canonical deployment document changed |
 
 G1 and G2 must not be bundled with remediation missions: an amendment that changes
 enforcement semantics and a bug fix that conforms to current semantics are different
@@ -703,7 +713,7 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 | M4 | D9, D10, D11, D12 | reactor / tunnel; deadlines, admission | clock-stepped expiry tests; injected accept error; 32-bit assertion; pool quota test | adversarial | ✓ `e110da9` |
 | M5 | D7, D8 | `scripts/verify.sh` E2E receipt; `scripts/e2e_shutdown.py` | untracked-input rejection; held-open-listener case must FAIL | adversarial | ✓ `94b9a28` |
 | M6 | D16 | test-only helpers + bench/E2E temp paths | symlink plant test per site; no production path; no new runtime dep | standard | ✓ `9be04d6` |
-| M7 | D17 (+G4) | `docs/deployment.md` (non-canonical docs only) | `verify.sh docs`; no spec digest change | standard |
+| M7 | D17, G4, G3 R1/R3/R4 | `docs/deployment.md` + non-canonical docs; the one authorised spec sentence at `docs/alumina-proxy.md:360` + digest re-pin | `verify.sh docs` → CANONICAL-DIGEST-OK `09f60d09…`; one changed spec line; zero code bytes | standard | ✓ `1a95e29` |
 | G1–G2 | D3, D5 | spec + digest pin + config/table + tests **in one increment**; independent source and governance review; explicit user authorisation of exact text | amendment dossier: options analysis, fixed-profile and size re-measurement, migration note for existing configs | governance |
 | G3–G4 | — | non-canonical docs first; spec only if the spec is the wrong side | `verify.sh docs`; digest re-pin only if spec text changes | standard |
 
@@ -727,8 +737,8 @@ D4 is likely rework. G2 is independent of every remaining row and can proceed in
 | D4, D13–D15, D18 | Fixed | `alumina-gzqn4.17` | closed — `9e1f95a`, boundary PASS, review r2 APPROVE |
 | D7, D8 | Fixed | `alumina-gzqn4.20` | closed — `94b9a28`, guard proofs, real e2e shutdown 10/10, review r3 APPROVE |
 | D16 | Fixed | `alumina-gzqn4.24` | closed — `9be04d6`, boundary PASS on the final candidate, review APPROVE (`alumina-gzqn4.24.2`, `.ooda/review-1794578195.md`), residuals `alumina-gzqn4.25` |
-| D17 | per §3 | `alumina-gzqn4.1` | registered (M7) |
-| G3 | Adopted in part | `alumina-gzqn4.21` | closed — `5012527`, five hunks, governance APPROVE; residuals R1/R3/R4 open |
+| D17, G4 | Documented (subnet trust stated; G4a corrected, G4b clarified) | `alumina-gzqn4.23` | closed — `1a95e29`, digest `09f60d09…`, `verify.sh docs` CANONICAL-DIGEST-OK, zero code bytes |
+| G3 | Adopted in part | `alumina-gzqn4.21` | closed — `5012527`, five hunks, governance APPROVE; residuals R1/R3/R4 closed by M7 (`1a95e29`) |
 
 Epic: `alumina-gzqn4`. Ledger updates go to `alumina-gzqn4.1`; the register above is the
 durable narrative.
