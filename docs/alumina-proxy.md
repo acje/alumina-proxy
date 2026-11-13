@@ -712,10 +712,10 @@ The "Planned fixed control storage" table gains two rows:
 
 | Planned structure | Count | Unit size (bound) | Bound total |
 | --- | --- | --- | --- |
-| First-seen JA4 baseline table (36-char JA4 + 1-char present flag + 4-byte IP) | 512 | ~41 B | ~21 KiB |
+| First-seen JA4 baseline table (36-byte JA4 per entry; per-ordinal, no per-IP element) | 512 | 36 B | 18,432 B (18 KiB) |
 | ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions + `[u16; 64]` sigalgs in per-slot `ChInspector`) | 512 | ~16.5 KiB | ~8.2 MiB |
 
-The first-seen JA4 baseline table holds 512 fixed entries (32 ordinals × 16 addresses = `MAX_ADDRESSES`), each storing the full 36-character JA4 string plus a 1-character present flag plus the 4-byte IP address: ~41 B/entry × 512 ≈ 21 KiB total (design estimate ~21-27 KiB). The ClientHello JA4 retention is the fixed per-slot storage retained in `ClientHello` inside each `ChInspector` by the parser-retention increment: `[u16; 8192]` (16 KiB) + `[u8; 255]` (255 B) + `[u16; 64]` (128 B) + `[u16; 64]` sigalgs (128 B) = 16,895 B ≈ 16.5 KiB/slot; 512 × 16,895 B ≈ 8.2 MiB. Both figures are design estimates, not measured, consistent with the table header; exact sizes are fixed at implementation with `sizeof`-verified types.
+The first-seen JA4 baseline table holds 512 fixed entries (32 ordinals × 16 entries = `MAX_ADDRESSES`), each storing the full 36-byte JA4 string, with no per-IP element: 36 B/entry × 512 = 18,432 B (18 KiB) total, boot-fixed with zero post-boot allocation (amendment: alumina-gzqn4.19, 2026-11-13). The ClientHello JA4 retention is the fixed per-slot storage retained in `ClientHello` inside each `ChInspector` by the parser-retention increment: `[u16; 8192]` (16 KiB) + `[u8; 255]` (255 B) + `[u16; 64]` (128 B) + `[u16; 64]` sigalgs (128 B) = 16,895 B ≈ 16.5 KiB/slot; 512 × 16,895 B ≈ 8.2 MiB. The ClientHello figure is a design estimate, not measured, consistent with the table header; exact sizes are fixed at implementation with `sizeof`-verified types.
 
 #### Retained serving workspace reconciliation
 
@@ -895,15 +895,15 @@ the fixed 2048-byte slot:
 | `capacity_high` / `capacity_low` | 127 B / 125 B | 1921 B / 1923 B |
 | `queue_high` / `queue_low` | 124 B / 122 B | 1924 B / 1926 B |
 | `resolver_probe` | 1857 B | 191 B |
-| `monitor_summary` | 763 B | 1285 B |
-| `monitor_domain` | 1370 B | 678 B |
+| `monitor_summary` | 792 B | 1256 B |
+| `monitor_domain` | 1870 B | 178 B |
 | `monitor_capture` | 1237 B | 811 B |
 
 Both startup records fit with wide margins, so the encoded-entry requirement at §Verification requirements is met
-by measurement for every valid configuration. `resolver_probe` is now the tightest record in
-the vocabulary at 191 B of headroom against the 2048-byte slot; any future addition to any
-monitor-family record shape must re-measure against the 2048-byte slot before it is
-accepted.
+by measurement for every valid configuration. `monitor_domain` is now the tightest record in
+the vocabulary at 178 B of headroom against the 2048-byte slot, with `resolver_probe` next at
+191 B; any future addition to any monitor-family record shape must re-measure against the
+2048-byte slot before it is accepted.
 
 ## Per-control enforcement schema (T2/T3/T4/T6)
 
@@ -1345,18 +1345,18 @@ blocks the summary: `report_drops` counts each dropped `monitor_domain` batch on
 `capture_drops` counts capture-detail loss with mixed units — once per detail at capture time
 (a later detection relation on an already-captured connection is suppressed,
 `src/runtime/reactor.rs:2376-2391`, or a detail is evicted when the 64-detail window is full,
-`src/enforcement/monitor.rs:330`) and once per batch when a `monitor_capture` batch is
+`src/enforcement/monitor.rs:335-338`) and once per batch when a `monitor_capture` batch is
 dropped at report time (`src/log/tests.rs:828-882`, up to 22 details lost in one counted batch) — the
 per-batch/per-detail unit mixing is intentional and documented; both are saturating counters
 with overflow flags in the summary's fixed core.
 
 The worst-case encoded lengths re-measure against the fixed 2048-byte slot (widest legal
 configuration, 32 keyed FQDNs at the 253-byte maximum with `u64::MAX` counters, terminal
-newline framing included): `resolver_probe` is the tightest record at 1857 B / 191 B of
-headroom; the monitor family measures `monitor_summary` 763 B / 1285 B, `monitor_domain`
-1370 B / 678 B, and `monitor_capture` 1237 B / 811 B. Any future addition to any
-monitor-family record shape must re-measure against the 2048-byte slot before it is
-accepted.
+newline framing included): the monitor family measures `monitor_summary` 792 B / 1256 B,
+`monitor_domain` 1870 B / 178 B, and `monitor_capture` 1237 B / 811 B; `monitor_domain` is
+the tightest record at 178 B of headroom, ahead of `resolver_probe` at 1857 B / 191 B. Any
+future addition to any monitor-family record shape must re-measure against the 2048-byte slot
+before it is accepted.
 
 
 Deterministic tests prove the exact monitor grammar and the worst-case slot fit with margin
