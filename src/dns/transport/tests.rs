@@ -770,32 +770,29 @@ fn fixture_exchange(ordinal: usize, family: Family, class: ExchangeClass) -> Act
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "long two-arm serving-positive pipeline: the real advance loop and the open/relocation/recovery note assertions stay coherent across the configured and unconfigured arms"
-)]
-fn serving_positive_recovered_note_case(configured: bool) {
-    let cfg = config();
-    let responder = spawn_responder(vec![vec![
-        Step::PositiveA {
-            ttl: 120,
-            octets: [93, 184, 216, 34],
-        },
-        Step::Close,
-    ]]);
-    let mut cache = Cache::new(2).unwrap();
-    let mut schedules = Schedules::new(2).unwrap();
-    let mut transport = if configured {
+/// The transport a serving-positive case starts from: seated onto a configured
+/// two-resolver set with the primary active, or the unset transport that has no
+/// resolver to blame.
+fn serving_transport(configured: bool) -> StartupDns {
+    if configured {
         seeded_transport(resolver_set_of(&["1.1.1.1", "8.8.8.8"]))
     } else {
         StartupDns::new().unwrap()
-    };
-    let expected_open = configured.then_some(0);
-    let expected_actor = configured.then_some(1);
+    }
+}
+
+/// Opens a serving A incident and advances it to relocation, asserting the open
+/// note names the failing resolver and that the two relocation failures stay
+/// silent while the incident is open.
+fn advance_serving_incident_to_relocation(
+    transport: &mut StartupDns,
+    schedules: &mut Schedules,
+    configured: bool,
+) {
     transport
         .note_failure(
             &fixture_exchange(0, Family::A, ExchangeClass::Serving),
-            &mut schedules,
+            schedules,
             FailureReason::Connect,
         )
         .expect("open a serving A incident");
@@ -806,7 +803,7 @@ fn serving_positive_recovered_note_case(configured: bool) {
                 ordinal: 0,
                 family: Family::A,
                 reason: FailureReason::Connect,
-                resolver: expected_open,
+                resolver: configured.then_some(0),
             }),
             None,
         ],
@@ -816,7 +813,7 @@ fn serving_positive_recovered_note_case(configured: bool) {
         transport
             .note_failure(
                 &fixture_exchange(0, Family::A, ExchangeClass::Serving),
-                &mut schedules,
+                schedules,
                 FailureReason::Timeout,
             )
             .expect("advance the serving A incident toward degradation");
@@ -831,45 +828,16 @@ fn serving_positive_recovered_note_case(configured: bool) {
         [None, None],
         "the relocation failures stay silent while the incident is open"
     );
-    transport.addr = ns(responder.port());
-    let fqdn = cfg.allowlist().get(0).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
-    transport
-        .start_exchange(
-            fqdn,
-            Family::A,
-            0,
-            deadline,
-            Generation::INITIAL,
-            ExchangeClass::Serving,
-        )
-        .unwrap();
-    let mut result = None;
-    for _ in 0..256 {
-        match transport
-            .advance_exchange(fqdn, &mut cache, &mut schedules)
-            .unwrap()
-        {
-            TurnResult::Pending => {
-                if transport
-                    .exchange_deadline()
-                    .is_some_and(|d| Instant::now() >= d)
-                {
-                    continue;
-                }
-                let _ = transport.wait_dns_readiness(deadline).unwrap();
-            }
-            term => {
-                result = Some(term);
-                break;
-            }
-        }
-    }
-    assert!(
-        matches!(result, Some(TurnResult::Published(_))),
-        "a serving positive must publish, got {result:?}"
-    );
-    let notes = transport.take_incident_notes();
+}
+
+/// Asserts the recovery note names the resolver that served as actor, that no
+/// AAAA note is emitted, and that the latest-failure origin stays historical
+/// across the recovery.
+fn assert_serving_recovery_notes(
+    transport: &StartupDns,
+    notes: [Option<IncidentNote>; 2],
+    configured: bool,
+) {
     let Some(IncidentNote::Recovered {
         ordinal: 0,
         family: Family::A,
@@ -880,7 +848,8 @@ fn serving_positive_recovered_note_case(configured: bool) {
         panic!("the recovery must be a serving A note, got {notes:?}");
     };
     assert_eq!(
-        resolver, expected_actor,
+        resolver,
+        configured.then_some(1),
         "the recovery actor is the resolver that served, or None with no set"
     );
     assert_eq!(notes[1], None, "no AAAA note is emitted");
@@ -889,6 +858,33 @@ fn serving_positive_recovered_note_case(configured: bool) {
         configured.then_some(0),
         "the latest-failure origin is historical, survives recovery, and stays None with no set"
     );
+}
+
+fn serving_positive_recovered_note_case(configured: bool) {
+    let mut transport = serving_transport(configured);
+    let mut cache = Cache::new(2).unwrap();
+    let mut schedules = Schedules::new(2).unwrap();
+    advance_serving_incident_to_relocation(&mut transport, &mut schedules, configured);
+    let responder = spawn_responder(vec![vec![
+        Step::PositiveA {
+            ttl: 120,
+            octets: [93, 184, 216, 34],
+        },
+        Step::Close,
+    ]]);
+    transport.addr = ns(responder.port());
+    let fqdn = config().allowlist().get(0).unwrap().clone();
+    let deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+    start_first_exchange(&mut transport, &fqdn, deadline, ExchangeClass::Serving);
+    let result =
+        drive_exchange_to_terminal(&mut transport, &fqdn, &mut cache, &mut schedules, deadline)
+            .expect("the serving exchange concludes");
+    assert!(
+        matches!(result, Ok(TurnResult::Published(_))),
+        "a serving positive must publish, got {result:?}"
+    );
+    let notes = transport.take_incident_notes();
+    assert_serving_recovery_notes(&transport, notes, configured);
     drop(responder);
 }
 
