@@ -141,6 +141,34 @@ fn hello_wire_ext(sni: &[u8], ech_only: bool, extra_ext: &[(u16, &[u8])]) -> Vec
     body.push(0);
     body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
     body.extend_from_slice(&[0x01, 0x00]);
+    let ext = hello_ext_block(sni, ech_only, extra_ext);
+    body.extend_from_slice(
+        &u16::try_from(ext.len())
+            .expect("extensions length fits u16")
+            .to_be_bytes(),
+    );
+    body.extend_from_slice(&ext);
+
+    let mut hs = vec![0x01];
+    hs.extend_from_slice(
+        &u32::try_from(body.len())
+            .expect("client hello body fits u32")
+            .to_be_bytes()[1..],
+    );
+    hs.extend_from_slice(&body);
+
+    let mut record = Vec::new();
+    record.extend_from_slice(&[0x16, 0x03, 0x03]);
+    record.extend_from_slice(
+        &u16::try_from(hs.len())
+            .expect("handshake length fits u16")
+            .to_be_bytes(),
+    );
+    record.extend_from_slice(&hs);
+    record
+}
+
+fn hello_ext_block(sni: &[u8], ech_only: bool, extra_ext: &[(u16, &[u8])]) -> Vec<u8> {
     let mut ext = Vec::new();
     ext.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
     if ech_only {
@@ -176,30 +204,7 @@ fn hello_wire_ext(sni: &[u8], ech_only: bool, extra_ext: &[(u16, &[u8])]) -> Vec
         );
         ext.extend_from_slice(data);
     }
-    body.extend_from_slice(
-        &u16::try_from(ext.len())
-            .expect("extensions length fits u16")
-            .to_be_bytes(),
-    );
-    body.extend_from_slice(&ext);
-
-    let mut hs = vec![0x01];
-    hs.extend_from_slice(
-        &u32::try_from(body.len())
-            .expect("client hello body fits u32")
-            .to_be_bytes()[1..],
-    );
-    hs.extend_from_slice(&body);
-
-    let mut record = Vec::new();
-    record.extend_from_slice(&[0x16, 0x03, 0x03]);
-    record.extend_from_slice(
-        &u16::try_from(hs.len())
-            .expect("handshake length fits u16")
-            .to_be_bytes(),
-    );
-    record.extend_from_slice(&hs);
-    record
+    ext
 }
 
 fn hello_wire_no_sni() -> Vec<u8> {
@@ -2284,6 +2289,54 @@ mod generation_tokens {
         });
     }
 
+    fn dispatch_accept_first_reuse_batch(
+        serving: &mut Serving,
+        batch: &[(Token, Readiness)],
+        new_gen: u64,
+    ) {
+        for _ in 0..10_000 {
+            // Batch: [accept -> gen 2, stale(1), new(2)]. The stale token
+            // reaches the fold-time generation guard at 1376 (live gen already 2).
+            serving.batch_gen = serving.batch_gen.wrapping_add(1);
+            serving.in_batch = true;
+            serving
+                .dispatch_coalesced_batch(batch)
+                .expect("coalesced batch with accept-first mid-batch reuse");
+            assert!(!serving.in_batch);
+            if serving.slots[0].slot_gen == new_gen {
+                break;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    fn assert_stale_pre_reuse_token_inert(serving: &mut Serving, old_gen: u64, partial_len: usize) {
+        // The stale pre-reuse token, re-dispatched after the batch, is still
+        // inert (dirty work never resurrects the prior generation). The visit
+        // count is the strong witness: an unguarded dispatch would pass the
+        // generation guard, open a visit, and bump `visits` (src/serving.rs:1473
+        // before :1498) even while the socket read WouldBlocks.
+        let visits_before = serving.slots[0].visits;
+        serving
+            .dispatch_readiness(
+                client_token(old_gen, 0),
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("re-dispatch the stale pre-reuse token");
+        assert_eq!(
+            serving.slots[0].visits - visits_before,
+            0,
+            "the stale post-batch re-dispatch opens no visit (generation guard held)"
+        );
+        assert_eq!(
+            serving.slots[0].buf_len, partial_len,
+            "even after the batch the stale token cannot mutate the reused slot"
+        );
+    }
+
     #[test]
     /// G1.R3 — with the mid-batch reuse accepted FIRST in the batch
     /// (`accept_all` before the same-slot tokens), the stale pre-reuse generation
@@ -2328,20 +2381,7 @@ mod generation_tokens {
                     },
                 ),
             ];
-            for _ in 0..10_000 {
-                // Batch: [accept -> gen 2, stale(1), new(2)]. The stale token
-                // reaches the fold-time generation guard at 1376 (live gen already 2).
-                serving.batch_gen = serving.batch_gen.wrapping_add(1);
-                serving.in_batch = true;
-                serving
-                    .dispatch_coalesced_batch(&batch)
-                    .expect("coalesced batch with accept-first mid-batch reuse");
-                assert!(!serving.in_batch);
-                if serving.slots[0].slot_gen == new_gen {
-                    break;
-                }
-                std::thread::yield_now();
-            }
+            dispatch_accept_first_reuse_batch(serving, &batch, new_gen);
 
             assert_eq!(serving.slots[0].slot_gen, new_gen);
             assert_eq!(
@@ -2352,32 +2392,80 @@ mod generation_tokens {
             assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
             assert_eq!(serving.storage().occupied(), 1);
 
-            // The stale pre-reuse token, re-dispatched after the batch, is still
-            // inert (dirty work never resurrects the prior generation). The visit
-            // count is the strong witness: an unguarded dispatch would pass the
-            // generation guard, open a visit, and bump `visits` (src/serving.rs:1473
-            // before :1498) even while the socket read WouldBlocks.
-            let visits_before = serving.slots[0].visits;
-            serving
-                .dispatch_readiness(
-                    client_token(old_gen, 0),
-                    Readiness {
-                        readable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("re-dispatch the stale pre-reuse token");
-            assert_eq!(
-                serving.slots[0].visits - visits_before,
-                0,
-                "the stale post-batch re-dispatch opens no visit (generation guard held)"
-            );
-            assert_eq!(
-                serving.slots[0].buf_len,
-                PARTIAL.len(),
-                "even after the batch the stale token cannot mutate the reused slot"
-            );
+            assert_stale_pre_reuse_token_inert(serving, old_gen, PARTIAL.len());
         });
+    }
+
+    fn accept_wrapped_generation(serving: &mut Serving, port: u16) -> (TcpStream, TcpStream) {
+        serving.slots[0].slot_gen = u64::MAX;
+        let mut client = connect(port);
+        let reader = client.try_clone().expect("clone client socket");
+        client.write_all(b"\r\n\r\n").expect("write malformed head");
+        // Bounded accept retry (no timers): until the accept lands, accept_all
+        // WouldBlocks and the batch is a no-op, so re-running is idempotent.
+        let accept_batch = [(Token(0), Readiness::none())];
+        for _ in 0..10_000 {
+            serving.batch_gen = serving.batch_gen.wrapping_add(1);
+            serving.in_batch = true;
+            serving
+                .dispatch_coalesced_batch(&accept_batch)
+                .expect("accept the wrapped connection");
+            if serving.slots[0].slot_gen == 0 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            serving.slots[0].slot_gen, 0,
+            "the accepted slot wrapped to generation 0 via wrapping_add(1)"
+        );
+        (client, reader)
+    }
+
+    fn assert_pre_wrap_token_inert(serving: &mut Serving, pre_wrap: Token) {
+        assert_ne!(
+            (pre_wrap.0 >> GEN_SHIFT) as u64,
+            0,
+            "the pre-wrap token's saturated generation must not decode to the wrapped live generation"
+        );
+
+        // The pre-wrap stale token is dropped before any socket read.
+        serving
+            .dispatch_readiness(
+                pre_wrap,
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch pre-wrap stale token");
+        assert_eq!(serving.storage().occupied(), 1);
+        assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+        assert_eq!(
+            serving.slots[0].buf_len, 0,
+            "the pre-wrap stale token must not read from the wrapped connection"
+        );
+    }
+
+    fn dispatch_own_wrapped_token(serving: &mut Serving) {
+        // The wrapped connection's own token (generation 0, exactly what
+        // register_client encoded at admit) dispatches and drives the full
+        // read -> parse -> decision -> release path.
+        serving
+            .dispatch_readiness(
+                client_token(0, 0),
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch wrapped own token");
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the wrapped connection's own token dispatched — the malformed head was read, refused, and the seat released"
+        );
+        assert!(matches!(serving.slots[0].stage, Stage::Idle));
     }
 
     #[test]
@@ -2391,71 +2479,12 @@ mod generation_tokens {
     fn g1_r4_wrapped_generation_drops_pre_wrap_token_and_dispatches_own() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            serving.slots[0].slot_gen = u64::MAX;
-            let mut client = connect(port);
-            let mut reader = client.try_clone().expect("clone client socket");
-            client.write_all(b"\r\n\r\n").expect("write malformed head");
-            // Bounded accept retry (no timers): until the accept lands, accept_all
-            // WouldBlocks and the batch is a no-op, so re-running is idempotent.
-            let accept_batch = [(Token(0), Readiness::none())];
-            for _ in 0..10_000 {
-                serving.batch_gen = serving.batch_gen.wrapping_add(1);
-                serving.in_batch = true;
-                serving
-                    .dispatch_coalesced_batch(&accept_batch)
-                    .expect("accept the wrapped connection");
-                if serving.slots[0].slot_gen == 0 {
-                    break;
-                }
-                std::thread::yield_now();
-            }
-            assert_eq!(
-                serving.slots[0].slot_gen, 0,
-                "the accepted slot wrapped to generation 0 via wrapping_add(1)"
-            );
+            let (_client, mut reader) = accept_wrapped_generation(serving, port);
 
             let pre_wrap = client_token(u64::MAX, 0);
-            assert_ne!(
-                (pre_wrap.0 >> GEN_SHIFT) as u64,
-                0,
-                "the pre-wrap token's saturated generation must not decode to the wrapped live generation"
-            );
+            assert_pre_wrap_token_inert(serving, pre_wrap);
 
-            // The pre-wrap stale token is dropped before any socket read.
-            serving
-                .dispatch_readiness(
-                    pre_wrap,
-                    Readiness {
-                        readable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("dispatch pre-wrap stale token");
-            assert_eq!(serving.storage().occupied(), 1);
-            assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
-            assert_eq!(
-                serving.slots[0].buf_len, 0,
-                "the pre-wrap stale token must not read from the wrapped connection"
-            );
-
-            // The wrapped connection's own token (generation 0, exactly what
-            // register_client encoded at admit) dispatches and drives the full
-            // read -> parse -> decision -> release path.
-            serving
-                .dispatch_readiness(
-                    client_token(0, 0),
-                    Readiness {
-                        readable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("dispatch wrapped own token");
-            assert_eq!(
-                serving.storage().occupied(),
-                0,
-                "the wrapped connection's own token dispatched — the malformed head was read, refused, and the seat released"
-            );
-            assert!(matches!(serving.slots[0].stage, Stage::Idle));
+            dispatch_own_wrapped_token(serving);
             reader.set_nonblocking(true).expect("nonblocking reader");
             let mut body = [0u8; 64];
             let mut got = 0usize;
@@ -2487,6 +2516,66 @@ mod generation_tokens {
         });
     }
 
+    fn accept_field_ceiling_connection(
+        serving: &mut Serving,
+        port: u16,
+        field_ceiling: u64,
+    ) -> (TcpStream, TcpStream, u64) {
+        serving.slots[0].slot_gen = field_ceiling;
+        // Established client flow (mirrors malformed_head_gets_400): the
+        // blocking connect completes the handshake, the malformed head is
+        // written inbound to the server end, and the accept admits the server
+        // end so admit's single increment wraps the generation inside the field.
+        let mut client = connect(port);
+        let reader = client.try_clone().expect("clone client socket");
+        client.write_all(b"\r\n\r\n").expect("write malformed head");
+        // Bounded accept retry (no timers): until the accept lands, accept_all
+        // WouldBlocks and the batch is a no-op, so re-running is idempotent.
+        let accept_batch = [(Token(0), Readiness::none())];
+        for _ in 0..10_000 {
+            serving.batch_gen = serving.batch_gen.wrapping_add(1);
+            serving.in_batch = true;
+            serving
+                .dispatch_coalesced_batch(&accept_batch)
+                .expect("accept the field-boundary connection");
+            if serving.slots[0].slot_gen != field_ceiling {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let live = serving.slots[0].slot_gen;
+        (client, reader, live)
+    }
+
+    fn dispatch_field_ceiling_own_token(serving: &mut Serving, live: u64) {
+        let own = client_token(live, 0); // identical to what register_client encoded
+        assert_eq!(
+            own.0 & LOCAL_MASK,
+            1,
+            "the token must keep the client local id decodable (never a wrap into the local-id range)"
+        );
+
+        serving
+            .dispatch_readiness(
+                own,
+                Readiness {
+                    readable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("dispatch the field-boundary connection's own token");
+        assert_eq!(
+            serving.storage().occupied(),
+            0,
+            "the connection's own token must dispatch — the malformed head is read, refused, and the seat released"
+        );
+        assert!(matches!(serving.slots[0].stage, Stage::Idle));
+        assert_eq!(
+            live, 0,
+            "the field-ceiling generation wraps to 0 at the single canonical increment"
+        );
+    }
+
     #[test]
     /// G1.E1 (rewritten to the derived-field invariant) — the stored generation
     /// increments modulo the token's generation field, so the field boundary is a
@@ -2502,55 +2591,10 @@ mod generation_tokens {
         let field_ceiling = (1u64 << (usize::BITS - GEN_SHIFT)) - 1;
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            serving.slots[0].slot_gen = field_ceiling;
-            // Established client flow (mirrors malformed_head_gets_400): the
-            // blocking connect completes the handshake, the malformed head is
-            // written inbound to the server end, and the accept admits the server
-            // end so admit's single increment wraps the generation inside the field.
-            let mut client = connect(port);
-            let mut reader = client.try_clone().expect("clone client socket");
-            client.write_all(b"\r\n\r\n").expect("write malformed head");
-            // Bounded accept retry (no timers): until the accept lands, accept_all
-            // WouldBlocks and the batch is a no-op, so re-running is idempotent.
-            let accept_batch = [(Token(0), Readiness::none())];
-            for _ in 0..10_000 {
-                serving.batch_gen = serving.batch_gen.wrapping_add(1);
-                serving.in_batch = true;
-                serving
-                    .dispatch_coalesced_batch(&accept_batch)
-                    .expect("accept the field-boundary connection");
-                if serving.slots[0].slot_gen != field_ceiling {
-                    break;
-                }
-                std::thread::yield_now();
-            }
-            let live = serving.slots[0].slot_gen;
-            let own = client_token(live, 0); // identical to what register_client encoded
-            assert_eq!(
-                own.0 & LOCAL_MASK,
-                1,
-                "the token must keep the client local id decodable (never a wrap into the local-id range)"
-            );
+            let (_client, mut reader, live) =
+                accept_field_ceiling_connection(serving, port, field_ceiling);
 
-            serving
-                .dispatch_readiness(
-                    own,
-                    Readiness {
-                        readable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("dispatch the field-boundary connection's own token");
-            assert_eq!(
-                serving.storage().occupied(),
-                0,
-                "the connection's own token must dispatch — the malformed head is read, refused, and the seat released"
-            );
-            assert!(matches!(serving.slots[0].stage, Stage::Idle));
-            assert_eq!(
-                live, 0,
-                "the field-ceiling generation wraps to 0 at the single canonical increment"
-            );
+            dispatch_field_ceiling_own_token(serving, live);
             reader.set_nonblocking(true).expect("nonblocking reader");
             let mut body = [0u8; 64];
             let mut got = 0usize;
@@ -2742,35 +2786,43 @@ mod generation_tokens {
 mod dialing {
     use super::*;
 
+    fn arm_early_origin_data(
+        serving: &mut Serving,
+        port: u16,
+    ) -> (TcpStream, TcpStream, mio::net::TcpStream) {
+        let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
+        let origin_addr = origin.local_addr().expect("origin addr");
+        let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
+        let mut origin_stream = origin.accept().expect("accept origin side").0;
+
+        let client = connect(port);
+        pump(serving, 40);
+        assert_eq!(
+            serving.storage().occupied(),
+            1,
+            "the connecting client must be admitted"
+        );
+
+        let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
+        {
+            let ws = &mut serving.slots[0];
+            ws.approved = FixedHostname::normalize(b"sub.example.org");
+            ws.gate.on_connect_head(head_len);
+            ws.gate.on_authorized();
+            ws.stage = Stage::Dialing;
+        }
+        origin_stream
+            .write_all(b"X")
+            .expect("origin writes early data");
+        (client, origin_stream, up)
+    }
+
     #[test]
     fn dialing_combined_readable_writable_rejects_early_origin_data() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
-            let origin_addr = origin.local_addr().expect("origin addr");
-            let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
-            let mut origin_stream = origin.accept().expect("accept origin side").0;
-
-            let _client = connect(port);
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
-
+            let (_client, _origin_stream, up) = arm_early_origin_data(serving, port);
             let index = 0;
-            let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
-            {
-                let ws = &mut serving.slots[index];
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
-                ws.gate.on_connect_head(head_len);
-                ws.gate.on_authorized();
-                ws.stage = Stage::Dialing;
-            }
-            origin_stream
-                .write_all(b"X")
-                .expect("origin writes early data");
             let mut probe = [0u8; 1];
             let mut waits = 0;
             loop {
