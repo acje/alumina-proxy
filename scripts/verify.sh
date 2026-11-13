@@ -1615,11 +1615,16 @@ rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-
 #
 # The universe is pinned deliberately: `--exclude-per-directory=.gitignore`
 # reads only the per-directory .gitignore files (tracked, therefore
-# receipt-covered) and drops the unpinned sources `--exclude-standard` would
-# honour ($GIT_DIR/info/exclude and core.excludesFile). A local ignore entry
-# could otherwise hide a Cargo-consumed input from the receipt completely. The
-# producer exit is checked (an unreadable observation is BLOCKED, never clean),
-# its stderr is kept out of the observed path list, and --full-name keeps paths
+# receipt-covered as *rules*) and drops the unpinned sources
+# `--exclude-standard` would honour ($GIT_DIR/info/exclude and
+# core.excludesFile). A local ignore entry could otherwise hide a
+# Cargo-consumed input from the receipt completely. The residual is explicit: a
+# committed (or worktree-edited) ignore RULE that names a Cargo-consumed path
+# hides that input under the same receipt, and an ignored path is outside this
+# receipt - the rule change is a reviewed repo change, the input is not
+# covered. The producer exit is checked (an unreadable observation is BLOCKED,
+# never clean), an exit-0 diagnostic is treated as an incomplete universe, its
+# stderr is kept out of the observed path list, and --full-name keeps paths
 # repo-root-relative. Paths are compared in git's C-quoted form, so a path
 # containing a tab, backslash or non-ASCII byte cannot match an allowlist entry:
 # that is fail-closed, never an escape.
@@ -1637,6 +1642,9 @@ rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-
 # standing entry — a local semantic-index cache that developer machines exclude
 # through the unpinned .git/info/exclude and that is never a Cargo input; a
 # machine with a different local cache must name it here, which is the point.
+# An allowlisted prefix is outside the receipt by design: a future build input
+# placed under it would be invisible, so the entry set is pinned by a test and
+# every addition is a reviewed diff.
 E2E_UNTRACKED_ALLOW=".repowise/"
 e2e_untracked_input_guard() {
     _gate="$1"
@@ -1651,6 +1659,17 @@ e2e_untracked_input_guard() {
         if [ -s "$_ug_err" ]; then
             sed 's/^/  /' "$_ug_err" >&2
         fi
+        rm -f "$_ug_err"
+        exit 1
+    fi
+    # A diagnostic on an exit-0 producer means the universe is INCOMPLETE (git
+    # reports an unreadable directory or pattern file as a warning and then
+    # simply leaves its contents out), so it is a gap, never a clean
+    # observation. The stderr channel is kept separate so a real path list is
+    # never polluted by it, and it is never discarded.
+    if [ -s "$_ug_err" ]; then
+        echo "E2E-$_gate-BLOCKED: git ls-files --others produced diagnostics (untracked-input observation incomplete, not a receipt)" >&2
+        sed 's/^/  /' "$_ug_err" >&2
         rm -f "$_ug_err"
         exit 1
     fi
@@ -1692,7 +1711,12 @@ e2e_receipt_fields() {
     _harness_sh="$3"
     e2e_untracked_input_guard "$_gate"
     rcd=0
-    git diff HEAD >"$TGT/$_gate-diff.$$" 2>&1 || rcd=$?
+    # --no-ext-diff/--no-textconv: an external diff driver or a textconv
+    # attribute can make `git diff HEAD` emit a constant (or nothing) with exit
+    # 0, which would hide every tracked worktree edit from the receipt - and
+    # therefore from the pre/post-build stability comparison that exists to
+    # catch a mid-build source change.
+    git diff --no-ext-diff --no-textconv HEAD >"$TGT/$_gate-diff.$$" 2>&1 || rcd=$?
     [ "$rcd" -eq 0 ] || {
         echo "E2E-$_gate-BLOCKED: git diff HEAD exit $rcd (unreadable diff, not a receipt)" >&2
         exit 1

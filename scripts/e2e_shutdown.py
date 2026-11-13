@@ -118,9 +118,17 @@ GRACE_HI = 8.8
 # admission by the proxy, and it cannot be distinguished from an admission by
 # the probe itself. The settle is a DELAY, never a re-probe: no connect is made
 # or judged during it, so it can never excuse an observation the way the removed
-# double probe did. It is far above the observed delivery+poll latency
-# (microseconds) and far below the fixed 8 s grace, so the sampled interval that
-# follows still spans the whole drain.
+# double probe did.
+#
+# What it concedes is resolution below the settle, not soundness: the owner drops
+# the listener in the same poll turn that observes the signal
+# (src/runtime/reactor.rs on_sigterm -> stop_admission), so a sub-settle deferral
+# is excluded by construction rather than by this gate. The budget is generous by
+# design - the observed transition (first probe reachable, the next already
+# refused) closed well inside one probe interval - and it stays far below the
+# fixed 8 s grace, so the sampled interval that follows still spans the drain. A
+# settle larger than the sampling deadline would starve the samples, which is
+# why a lapsed deadline FAILS as a gap instead of passing.
 SIGNAL_SETTLE = 0.25
 
 
@@ -255,6 +263,7 @@ def probe_refused_sampled(deadline, name, proc):
         observed_refusal = True
         time.sleep(0.05)
     if not observed_refusal:
+        reap_child(proc)
         fail(name, "no post-signal instant could be sampled before the deadline (observation gap, not a pass)")
         return False
     return True
@@ -1065,7 +1074,9 @@ def case_storm_during_drain(fixtures):
         for _ in range(8):
             os.kill(proc.pid, signal.SIGTERM)
             time.sleep(0.05)
-        if not probe_refused_sampled(t0 + 2.0, name, proc):
+        # the storm loop consumed ~1.4 s of the window; the settle needs its own
+        # headroom, and 2.5 s is still far below the fixed grace edge.
+        if not probe_refused_sampled(t0 + 2.5, name, proc):
             return
         # live-before the first-deadline window: still draining at its edge
         hold_until = t0 + GRACE_LO - 0.3
@@ -1247,7 +1258,7 @@ def case_forced_repeat_noadmit(fixtures):
         elif elapsed > GRACE_HI:
             fail(name, f"repeat SIGTERM extended the fixed deadline: {elapsed:.2f}s (> {GRACE_HI:.1f}s first-deadline window; a reset at t0+5s would land ~13s)")
         else:
-            pass_(name, f"forced exit 70 on the fixed deadline in {elapsed:.2f}s within the first-deadline window; no admission after the signal; repeat SIGTERM did not extend")
+            pass_(name, f"forced exit 70 on the fixed deadline in {elapsed:.2f}s within the first-deadline window; no admission across the sampled post-signal interval (signal settle excluded); repeat SIGTERM did not extend")
     finally:
         if s is not None:
             try:

@@ -691,18 +691,21 @@ class ShutdownWitness(unittest.TestCase):
 
     def test_the_interval_is_sampled_until_the_deadline(self):
         self.probe_sequence(("refused", None))
-        ok, proc, out = self.sample(seconds=0.15)
+        ok, proc, out = self.sample(seconds=0.4)
         self.assertTrue(ok, out)
         self.assertGreaterEqual(len(self.probes), 2,
                                 "the post-signal interval, not one instant, must be sampled")
         self.assertEqual(self.mod.FAILURES, [])
         self.assertEqual((proc.kills, proc.reaps), (0, 0))
 
-    def test_the_settle_exists_and_is_bounded_by_the_grace(self):
+    def test_the_settle_exists_and_stays_inside_every_sampling_window(self):
         self.assertGreater(self.shipped_settle, 0.0,
                            "the settle must exist: SIGTERM observation is asynchronous")
-        self.assertLess(self.shipped_settle, self.mod.GRACE_LO,
-                        "the settle must not consume the shutdown grace window")
+        # The bound that matters is the sampling deadline at both call sites
+        # (t0+2.0 and t0+2.5), not the 8 s grace: a settle that ate the window
+        # would starve the samples and red a correct candidate.
+        self.assertLess(self.shipped_settle, 0.5,
+                        "the settle must leave the sampling window intact")
 
     def test_a_deadline_inside_the_settle_is_an_observation_gap(self):
         self.mod.SIGNAL_SETTLE = 0.2
@@ -753,10 +756,12 @@ def extract_untracked_allowlist_default():
 
 
 class E2EReceiptInputs(unittest.TestCase):
-    """D7: the E2E source receipt must cover everything the build consumes.
-    `git diff HEAD` cannot see untracked files, so a checkout carrying an
-    untracked Cargo input (a root `build.rs`, a `.cargo/config.toml`, a new
-    module) can build a different binary under the same receipt. The bodies
+    """D7: the E2E source receipt must bind the built binary to the candidate
+    it was built from. `git diff HEAD` cannot see untracked files, so a checkout
+    carrying an untracked Cargo input (a root `build.rs`, a `.cargo/config.toml`,
+    a new module) can build a different binary under the same receipt. The
+    receipt's untracked coverage is exactly what the pinned (tracked) .gitignore
+    rules admit: an ignored path is outside it by construction. The bodies
     executed are text-extracted from scripts/verify.sh (never a Python
     re-implementation), and each receipt field is still produced by the shipped
     sha256_digest owner."""
@@ -783,11 +788,16 @@ class E2EReceiptInputs(unittest.TestCase):
             ["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip()
 
     def git_env(self):
-        """Hermetic git: the developer's global/system config must not decide
-        what the guard observes (an inherited core.excludesFile could hide a
-        planted input and turn a real pin into a false red)."""
-        return {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        """Hermetic git: the developer's global/system config and any inherited
+        GIT_* repository override must not decide what the guard observes (an
+        inherited core.excludesFile or GIT_DIR could hide a planted input and
+        turn a real pin into a false red)."""
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                     "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES"):
+            env.pop(name, None)
+        return env
 
     def git(self, *args):
         subprocess.run(["git", *args], cwd=self.repo, check=True,
@@ -806,10 +816,10 @@ class E2EReceiptInputs(unittest.TestCase):
             "e2e_receipt_fields relay scripts/e2e_shutdown.py scripts/e2e_shutdown.sh\n")
         return driver
 
-    def run_receipt(self, cwd=None, allow=None):
+    def run_receipt(self, cwd=None, allow=None, extra_env=None):
         return subprocess.run(
             ["sh", str(self.receipt_script(allow))], cwd=cwd or self.repo,
-            text=True, capture_output=True, env=self.git_env())
+            text=True, capture_output=True, env={**self.git_env(), **(extra_env or {})})
 
     def test_the_shipped_allowlist_names_only_the_local_index_cache(self):
         self.assertEqual(extract_untracked_allowlist_default().group(1), ".repowise/",
@@ -877,6 +887,21 @@ class E2EReceiptInputs(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("generated-evil/build.rs", result.stderr)
 
+    def test_a_producer_diagnostic_on_exit_zero_is_a_blocked_observation(self):
+        # git reports an unreadable directory as a WARNING and leaves its
+        # contents out of the list, so an exit-0 diagnostic is an incomplete
+        # universe - never a clean observation (the pre-fix shape certified it).
+        opaque = self.repo / "opaque"
+        opaque.mkdir()
+        (opaque / "build.rs").write_text("fn main() {}\n")
+        opaque.chmod(0o000)
+        try:
+            result = self.run_receipt()
+        finally:
+            opaque.chmod(0o755)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("observation incomplete, not a receipt", result.stderr)
+
     def test_an_unobservable_untracked_universe_fails_closed(self):
         # no work tree: the producer fails, so the receipt must not certify
         plain = self.temp / "plain"
@@ -886,6 +911,16 @@ class E2EReceiptInputs(unittest.TestCase):
         result = self.run_receipt(cwd=plain)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("untracked-input observation failed", result.stderr)
+
+    def test_an_external_diff_driver_cannot_hide_a_tracked_edit(self):
+        clean = self.run_receipt().stdout.split()
+        (self.repo / "Cargo.toml").write_text('[package]\nname = "probe"\nversion = "0.9.9"\n')
+        silent = shutil.which("true")
+        self.assertIsNotNone(silent)
+        dirty = self.run_receipt(extra_env={"GIT_EXTERNAL_DIFF": silent}).stdout.split()
+        self.assertEqual(dirty[0], clean[0])
+        self.assertNotEqual(dirty[1], clean[1],
+                            "an external diff driver must not blank the receipt's diff field")
 
     def test_a_tracked_modification_still_changes_the_receipt(self):
         clean = self.run_receipt().stdout.split()
