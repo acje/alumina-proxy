@@ -12,6 +12,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -631,12 +632,17 @@ class ShutdownWitness(unittest.TestCase):
 
     def setUp(self):
         self.mod = load_shutdown_witness()
+        self.shipped_settle = self.mod.SIGNAL_SETTLE
+        # The settle is a real-time delay whose existence and bounds are pinned
+        # separately; the behavioural pins below run without it so they exercise
+        # the sampling decision, not the wall clock.
+        self.mod.SIGNAL_SETTLE = 0.0
         self.mod.FAILURES.clear()
         self.probes = []
 
     def probe_sequence(self, *observations):
         """Serve the given classified observations, repeating the last one so a
-        pre-fix re-probe loop cannot starve (it must fail on the assertions)."""
+        looping witness cannot starve on the sequence."""
         sequence = list(observations)
 
         def probe():
@@ -645,11 +651,12 @@ class ShutdownWitness(unittest.TestCase):
 
         self.mod.connect_probe = probe
 
-    def sample(self, name="WITNESS"):
+    def sample(self, name="WITNESS", seconds=1.0):
         out = io.StringIO()
         proc = FakeChild()
+        deadline = time.monotonic() + seconds
         with contextlib.redirect_stdout(out):
-            ok = self.mod.probe_refused_sampled(name, proc)
+            ok = self.mod.probe_refused_sampled(deadline, name, proc)
         return ok, proc, out.getvalue()
 
     def sample_no_bind(self, name="WITNESS-SAMPLE"):
@@ -661,35 +668,53 @@ class ShutdownWitness(unittest.TestCase):
 
     def test_a_reachable_observation_is_terminal_for_the_sample(self):
         # The next probe would be an authoritative refusal: the pre-fix witness
-        # re-probes through sample_no_bind, forgets the admission and continues.
+        # re-probed through sample_no_bind, forgot the admission and continued.
         self.probe_sequence(("reachable", None), ("refused", None))
         ok, proc, out = self.sample()
         self.assertFalse(ok, out)
         self.assertEqual(len(self.probes), 1,
-                         f"exactly one probe per sample; probes={len(self.probes)}")
+                         f"a reachable observation must never be re-probed; probes={len(self.probes)}")
         self.assertIn("listener bound at a sampled probe point", out)
         self.assertEqual(self.mod.FAILURES, ["WITNESS"])
         self.assertGreaterEqual(proc.kills, 1, "the admitting child must be reaped")
         self.assertGreaterEqual(proc.reaps, 1)
-
-    def test_a_single_authoritative_refusal_certifies_no_admission(self):
-        self.probe_sequence(("refused", None))
-        ok, proc, out = self.sample()
-        self.assertTrue(ok, out)
-        self.assertEqual(len(self.probes), 1)
-        self.assertEqual(self.mod.FAILURES, [])
-        self.assertEqual((proc.kills, proc.reaps), (0, 0))
 
     def test_an_operational_error_is_terminal_and_indeterminate(self):
         self.probe_sequence(("error", OSError(24, "Too many open files")),
                             ("refused", None))
         ok, proc, out = self.sample()
         self.assertFalse(ok, out)
-        self.assertEqual(len(self.probes), 1)
+        self.assertEqual(len(self.probes), 1,
+                         f"an operational error must never be re-probed; probes={len(self.probes)}")
         self.assertIn("indeterminate, not absence", out)
         self.assertEqual(self.mod.FAILURES, ["WITNESS"])
 
+    def test_the_interval_is_sampled_until_the_deadline(self):
+        self.probe_sequence(("refused", None))
+        ok, proc, out = self.sample(seconds=0.15)
+        self.assertTrue(ok, out)
+        self.assertGreaterEqual(len(self.probes), 2,
+                                "the post-signal interval, not one instant, must be sampled")
+        self.assertEqual(self.mod.FAILURES, [])
+        self.assertEqual((proc.kills, proc.reaps), (0, 0))
+
+    def test_the_settle_exists_and_is_bounded_by_the_grace(self):
+        self.assertGreater(self.shipped_settle, 0.0,
+                           "the settle must exist: SIGTERM observation is asynchronous")
+        self.assertLess(self.shipped_settle, self.mod.GRACE_LO,
+                        "the settle must not consume the shutdown grace window")
+
+    def test_a_deadline_inside_the_settle_is_an_observation_gap(self):
+        self.mod.SIGNAL_SETTLE = 0.2
+        self.probe_sequence(("refused", None))
+        ok, _, out = self.sample(seconds=0.01)
+        self.assertFalse(ok, out)
+        self.assertIn("observation gap, not a pass", out)
+        self.assertEqual(len(self.probes), 0, "the settle must not be a re-probe")
+
     def test_one_sample_classifies_one_probe(self):
+        # Property pin for the shared judgement owner (green pre- and post-fix):
+        # sample_no_bind never re-probes after a non-refusal.
         self.probe_sequence(("reachable", None), ("refused", None))
         ok, proc, out = self.sample_no_bind()
         self.assertFalse(ok, out)
@@ -713,7 +738,7 @@ class ShutdownWitness(unittest.TestCase):
         finally:
             listener.close()
         self.mod.FAILURES.clear()
-        ok, _, out = self.sample(name="WITNESS-REVERT")
+        ok, _, out = self.sample(name="WITNESS-REVERT", seconds=0.15)
         self.assertTrue(ok, out)
         self.assertEqual(self.mod.FAILURES, [])
 
