@@ -165,7 +165,7 @@ Measured worst cases (spec §Recorded worst-case encoded lengths, `docs/alumina-
 | `startup_name` | 380 B | 387 B | 1661 B |
 | `exchange_failed` | 341 B | 348 B (≈393 B with resolver attribution) | 1655 B |
 | `startup_warning` | 331 B | 352 B (gains `reason=`) | 1696 B |
-| `monitor_summary` | 763 B | ≈775 B (packed per-resolver counters) | ≈1273 B |
+| `monitor_summary` | 792 B | 792 B (measured; packed per-resolver counters) | 1256 B |
 
 Adding a per-segment observed-identity field (SPKI, 51 B framed) to `resolver_probe` would
 take it to **2147 B — over the 2048 B slot**. Not admissible. Observed identity therefore

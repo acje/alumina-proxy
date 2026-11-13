@@ -20,11 +20,17 @@ bypass `HTTPS_PROXY` via direct `connect(2)` syscalls or reset latched
    │
    ▼
 [Dedicated Alumina Appliance VM (tag: alumina-proxy, static internal IP, no public IP)]
-   ├── INGRESS: ALLOW tcp:5353 from VPC subnet CIDR only (+ host iptables INPUT rule)
+   ├── INGRESS: ALLOW tcp:5353 from <vpc-subnet-cidr> only — subnet-scoped, unauthenticated; see trust note
    ├── EGRESS:  ALLOW tcp:53,853 -> TCP-capable recursive resolver (via Cloud NAT or VPC resolver)
    ├── EGRESS:  ALLOW tcp:443  -> 0.0.0.0/0 via Cloud NAT (approved allowlist destinations)
    └── EGRESS:  DENY  all      -> 0.0.0.0/0 (all other ports and protocols denied)
 ```
+
+The Cloud Run worker pool named in spec §Initial test target is the **initial
+validation target** for behaviour and performance; the VM appliance in this
+document is the **production reference pattern**. They are different roles, not
+competing requirements — both must run under a network-policy and runtime
+identity separate from the protected workload (spec §Deployment boundary).
 
 - **Why a separate VPC appliance beats a same-pod sidecar under RCE:**
   - In serverless multi-container sidecar platforms (such as Cloud Run
@@ -36,11 +42,27 @@ bypass `HTTPS_PROXY` via direct `connect(2)` syscalls or reset latched
     crashing the application container respawns the pod and clears in-memory
     tripwire latches.
   - Standard serverless HTTP ingress proxies (such as GFE / Cloud Run Services)
-    terminate HTTP and reject raw `HTTP CONNECT` tunneling, and serverless
-    Worker Pools do not accept unsolicited inbound TCP `SYN` connections on
-    Direct VPC IPs. Hosting Alumina on a dedicated minimal VM appliance (e.g.
-    Container-Optimized OS `e2-micro` with a static internal VPC IP) provides
-    raw TCP `CONNECT` ingress and hard VPC firewall separation.
+    terminate HTTP and reject raw `HTTP CONNECT` tunneling. Cloud Run worker
+    pools have no load-balanced endpoint, but Direct VPC connectivity for
+    worker pools supports ingress as well as egress and documents inbound
+    custom TCP to the instance's private VPC IP — the deployment shape the spec
+    names as the initial test target. Hosting Alumina on a dedicated minimal VM
+    appliance (e.g. Container-Optimized OS `e2-micro` with a static internal VPC
+    IP) provides raw TCP `CONNECT` ingress and hard VPC firewall separation for
+    the production reference pattern.
+
+- **Ingress trust boundary — subnet-scoped, no client authentication.** The
+  ingress rule above and the host `iptables` rule in §3 scope admission to the
+  VPC subnet, not to the protected workload's identity. Alumina authenticates no
+  client at accept: admission is delegated entirely to the network boundary. Any
+  peer in that subnet that can reach the listener inherits the allowlist and the
+  bounded capacity limits (512 tunnel slots and their reused buffers). The spec
+  requires ingress restricted to the intended workloads (spec §Deployment
+  boundary → Typical deployment pattern); subnet scope satisfies that only when
+  the subnet contains the protected workload and no other untrusted peers. On a
+  shared subnet, narrow the source to the workload's own address range (or to a
+  firewall identity the platform can express) and keep the `iptables`
+  `-s <vpc-subnet-cidr>` source in step with it.
 
 ## 2. Minimal `FROM scratch` container image
 
@@ -70,7 +92,10 @@ ENTRYPOINT ["/alumina"]
 references the operator-supplied configuration, provided at image build time —
 it is **not tracked in this repository**; see
 [the example configuration](qa-package/config.example.toml), whose resolver pins
-are placeholders and must be replaced before use. Every allowlist entry must
+are placeholders and must be replaced before use. The tracked example also binds
+`listen = "127.0.0.1:5353"` for local testing; the appliance in §3 runs with
+`--network host` and must bind `0.0.0.0:5353` (or the appliance's own internal
+VPC address) so the VPC ingress rule reaches it. Every allowlist entry must
 declare its `dns_assurance` trust class explicitly; a missing key fails startup
 (exit 78).
 
