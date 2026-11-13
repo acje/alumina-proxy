@@ -3658,6 +3658,59 @@ mod dialing {
         });
     }
 
+    fn admit_member_client(
+        serving: &mut Serving,
+        port: u16,
+        member: crate::eligibility::NumericAddr,
+    ) -> TcpStream {
+        serving
+            .storage_mut()
+            .publish_test_addr(0, member, Family::A);
+        let client = connect(port);
+        pump(serving, 10);
+        assert!(
+            serving.slots[0].handle.is_some(),
+            "the connected client must be accepted into slot 0 before the manual state is set"
+        );
+        client
+    }
+
+    fn arm_denied_loopback_dial(
+        serving: &mut Serving,
+        dial_port: u16,
+        member: crate::eligibility::NumericAddr,
+    ) -> crate::eligibility::NumericAddr {
+        let head = format!("CONNECT sub.example.org:{dial_port} HTTP/1.1\r\n\r\n");
+        serving.slots[0]
+            .parser
+            .feed(head.as_bytes())
+            .expect("valid head");
+        serving.slots[0].approved =
+            Some(FixedHostname::normalize(b"sub.example.org").expect("norm"));
+        serving.slots[0].approved_port = dial_port;
+        serving.slots[0].stage = Stage::Dialing;
+        let req = serving.slots[0]
+            .parser
+            .result()
+            .copied()
+            .expect("parsed request")
+            .expect("valid connect");
+        let resolved = serving.storage().resolve_request(&req);
+        let loopback = crate::eligibility::NumericAddr::V4([127, 0, 0, 1].into());
+        let now = std::time::Instant::now();
+        assert_eq!(
+            resolved.dial_admits(member, now),
+            Ok(true),
+            "the eligible public binding must admit: the member context is present"
+        );
+        assert_eq!(
+            resolved.dial_admits(loopback, now),
+            Ok(false),
+            "the loopback target must be inadmissible"
+        );
+        loopback
+    }
+
     #[test]
     fn fresh_dial_admission_denies_loopback_before_any_upstream_socket() {
         let listener = StdListener::bind("127.0.0.1:0").expect("origin bind");
@@ -3665,46 +3718,9 @@ mod dialing {
         let port = ephemeral_port();
         let cfg = config_pair(port, dial_port);
         with_serving_stack_cfg(port, cfg, move |serving| {
-            serving.storage_mut().publish_test_addr(
-                0,
-                crate::eligibility::NumericAddr::V4([8, 8, 8, 8].into()),
-                crate::dns::cache::Family::A,
-            );
-            let mut client = connect(port);
-            pump(serving, 10);
-            assert!(
-                serving.slots[0].handle.is_some(),
-                "the connected client must be accepted into slot 0 before the manual state is set"
-            );
-            let head = format!("CONNECT sub.example.org:{dial_port} HTTP/1.1\r\n\r\n");
-            serving.slots[0]
-                .parser
-                .feed(head.as_bytes())
-                .expect("valid head");
-            serving.slots[0].approved =
-                Some(FixedHostname::normalize(b"sub.example.org").expect("norm"));
-            serving.slots[0].approved_port = dial_port;
-            serving.slots[0].stage = Stage::Dialing;
-            let req = serving.slots[0]
-                .parser
-                .result()
-                .copied()
-                .expect("parsed request")
-                .expect("valid connect");
-            let resolved = serving.storage().resolve_request(&req);
-            let public = crate::eligibility::NumericAddr::V4([8, 8, 8, 8].into());
-            let loopback = crate::eligibility::NumericAddr::V4([127, 0, 0, 1].into());
-            let now = std::time::Instant::now();
-            assert_eq!(
-                resolved.dial_admits(public, now),
-                Ok(true),
-                "the eligible public binding must admit: the member context is present"
-            );
-            assert_eq!(
-                resolved.dial_admits(loopback, now),
-                Ok(false),
-                "the loopback target must be inadmissible"
-            );
+            let member = crate::eligibility::NumericAddr::V4([8, 8, 8, 8].into());
+            let mut client = admit_member_client(serving, port, member);
+            let loopback = arm_denied_loopback_dial(serving, dial_port, member);
             serving.dial_checked(0, loopback).expect("checked dial");
             assert!(
                 serving.slots[0].upstream.is_none(),
@@ -4487,6 +4503,28 @@ mod dialing {
 mod relay {
     use super::*;
 
+    fn assert_expired_relay_writes_closed(serving: &Serving) {
+        let mut survived = Vec::new();
+        if serving.slots[0].stage == Stage::Relay {
+            survived.push("client->upstream");
+        }
+        if serving.slots[1].stage == Stage::Relay {
+            survived.push("upstream->client");
+        }
+        assert!(
+            survived.is_empty(),
+            "a relay write whose idle deadline already elapsed must close the slot instead of re-arming idle; survived: {survived:?}"
+        );
+        assert!(
+            serving.slots[0].client.is_none() && serving.slots[0].upstream.is_none(),
+            "the expired client->upstream write must close both ends"
+        );
+        assert!(
+            serving.slots[1].client.is_none() && serving.slots[1].upstream.is_none(),
+            "the expired upstream->client write must close both ends"
+        );
+    }
+
     #[test]
     /// An established relay write whose idle deadline already elapsed must close
     /// the slot instead of re-arming idle, in both directions: the idle bound is
@@ -4494,16 +4532,9 @@ mod relay {
     fn expired_idle_deadline_closes_on_relay_write_instead_of_rearming() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let sink_stream = sink.accept().expect("accept sink side").0;
+            let (sink_stream, up) = sink_pair();
             sink_stream.set_nonblocking(true).expect("sink nonblocking");
-
-            let peer = StdListener::bind("127.0.0.1:0").expect("peer bind");
-            let peer_addr = peer.local_addr().expect("peer addr");
-            let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-            let peer_stream = peer.accept().expect("accept peer side").0;
+            let (client, peer_stream) = relay_peer_pair();
             peer_stream.set_nonblocking(true).expect("peer nonblocking");
 
             let up_index = 0;
@@ -4546,27 +4577,7 @@ mod relay {
                 Some(Instant::now() - Duration::from_millis(1));
             serving.flush_down(down_index);
 
-            let mut survived = Vec::new();
-            if serving.slots[up_index].stage == Stage::Relay {
-                survived.push("client->upstream");
-            }
-            if serving.slots[down_index].stage == Stage::Relay {
-                survived.push("upstream->client");
-            }
-            assert!(
-                survived.is_empty(),
-                "a relay write whose idle deadline already elapsed must close the slot instead of re-arming idle; survived: {survived:?}"
-            );
-            assert!(
-                serving.slots[up_index].client.is_none()
-                    && serving.slots[up_index].upstream.is_none(),
-                "the expired client->upstream write must close both ends"
-            );
-            assert!(
-                serving.slots[down_index].client.is_none()
-                    && serving.slots[down_index].upstream.is_none(),
-                "the expired upstream->client write must close both ends"
-            );
+            assert_expired_relay_writes_closed(serving);
         });
     }
 
@@ -5211,44 +5222,42 @@ mod relay {
         });
     }
 
+    fn arm_stalled_reverse_buffer(serving: &mut Serving, client: mio::net::TcpStream) {
+        let payload = b"STALLED-REVERSE-PAYLOAD-0123456789";
+        {
+            let ws = &mut serving.slots[0];
+            ws.client = Some(client);
+            ws.stage = Stage::Relay;
+            ws.head_len = 4;
+            ws.buf_base = 0;
+            ws.directional.down = SideEof::Open;
+            ws.down[..payload.len()].copy_from_slice(payload);
+            ws.down_len = payload.len();
+            ws.down_off = 0;
+        }
+        open_relay(serving, 0);
+        serving.register_client(0).expect("register client");
+        serving.observe_down_eof(0);
+        assert!(
+            matches!(
+                serving.slots[0].directional.down,
+                SideEof::Eof { half_closed: false }
+            ),
+            "the reverse EOF must be recorded as half-close pending while bytes remain buffered"
+        );
+        assert!(
+            matches!(serving.slots[0].stage, Stage::Relay),
+            "a stalled reverse buffer must keep the tunnel open (no premature half-close/close)"
+        );
+    }
+
     #[test]
     fn stalled_reverse_fin_drains_exact_bytes_then_closes_once() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let client_peer_l = StdListener::bind("127.0.0.1:0").expect("client peer bind");
-            let client_peer_addr = client_peer_l.local_addr().expect("client peer addr");
-            let client = mio::net::TcpStream::connect(client_peer_addr).expect("client connect");
-            let mut client_peer = client_peer_l.accept().expect("accept client peer side").0;
+            let (client, mut client_peer) = relay_peer_pair();
             let _ = client_peer.set_read_timeout(Some(Duration::from_millis(20)));
-
-            let index = 0;
-            {
-                let ws = &mut serving.slots[index];
-                ws.client = Some(client);
-                ws.stage = Stage::Relay;
-                ws.head_len = 4;
-                ws.buf_base = 0;
-                ws.directional.down = SideEof::Open;
-                let payload = b"STALLED-REVERSE-PAYLOAD-0123456789";
-                ws.down[..payload.len()].copy_from_slice(payload);
-                ws.down_len = payload.len();
-                ws.down_off = 0;
-            }
-            open_relay(serving, index);
-            serving.register_client(index).expect("register client");
-
-            serving.observe_down_eof(index);
-            assert!(
-                matches!(
-                    serving.slots[index].directional.down,
-                    SideEof::Eof { half_closed: false }
-                ),
-                "the reverse EOF must be recorded as half-close pending while bytes remain buffered"
-            );
-            assert!(
-                matches!(serving.slots[index].stage, Stage::Relay),
-                "a stalled reverse buffer must keep the tunnel open (no premature half-close/close)"
-            );
+            arm_stalled_reverse_buffer(serving, client);
 
             let expected = b"STALLED-REVERSE-PAYLOAD-0123456789";
             let mut got = Vec::new();
@@ -5279,7 +5288,7 @@ mod relay {
                 .shutdown(std::net::Shutdown::Write)
                 .expect("client fin");
             let close_start = Instant::now();
-            while !matches!(serving.slots[index].stage, Stage::Idle) {
+            while !matches!(serving.slots[0].stage, Stage::Idle) {
                 assert!(
                     close_start.elapsed() < Duration::from_secs(5),
                     "the slot never closed once both directions drained"
@@ -6022,28 +6031,10 @@ mod visit_budget {
     fn retained_edge_reschedules_through_run_once_with_silent_peer() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let mut sink_stream = sink.accept().expect("accept sink side").0;
-
-            let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-            let peer_addr = peer_l.local_addr().expect("peer addr");
-            let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-            let mut peer_stream = peer_l.accept().expect("accept peer side").0;
-
+            let (mut sink_stream, up) = sink_pair();
+            let (client, mut peer_stream) = relay_peer_pair();
             let index = 0;
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.client = Some(client);
-                ws.stage = Stage::Relay;
-                ws.head_len = 4;
-                ws.buf_base = 0;
-            }
-            open_relay(serving, index);
-            serving.register_upstream(index).expect("register up");
-            serving.register_client(index).expect("register client");
+            stage_relay_slot(serving, up, client);
 
             let got = std::sync::Arc::new(std::sync::Mutex::new(0usize));
             let got_reader = std::sync::Arc::clone(&got);
@@ -6093,54 +6084,61 @@ mod visit_budget {
         });
     }
 
+    fn stage_pending_upstream_relay(serving: &mut Serving, pending: usize, seed: u32) -> TcpStream {
+        let (sink_stream, up) = sink_pair();
+        let _ = sink_stream.set_read_timeout(Some(Duration::from_millis(50)));
+        {
+            let ws = &mut serving.slots[0];
+            ws.upstream = Some(up);
+            ws.stage = Stage::Relay;
+            ws.head_len = 0;
+            ws.buf_base = 0;
+            ws.buf_len = pending;
+            ws.fwd = 0;
+            ws.buf[..pending].copy_from_slice(&test_offset_pattern(pending, seed));
+        }
+        open_relay(serving, 0);
+        serving.register_upstream(0).expect("register up");
+        sink_stream
+    }
+
+    fn assert_single_visit_forwards_within_budget(
+        serving: &mut Serving,
+        token: Token,
+        pending: usize,
+    ) -> usize {
+        serving
+            .dispatch_readiness(
+                token,
+                Readiness {
+                    writable: true,
+                    ..Readiness::none()
+                },
+            )
+            .expect("one writable relay visit");
+        let moved = serving.slots[0].buf_base + serving.slots[0].fwd;
+        assert!(
+            moved <= 64 * 1024,
+            "one connection visit must forward at most 64 KiB combined, forwarded {moved}"
+        );
+        assert!(
+            moved > 0 && serving.slots[0].buf_base + serving.slots[0].fwd < pending,
+            "128 KiB pending must span more than one visit"
+        );
+        moved
+    }
+
     #[test]
     fn one_relay_visit_never_exceeds_the_combined_io_budget() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let mut sink_stream = sink.accept().expect("accept sink side").0;
-            let _ = sink_stream.set_read_timeout(Some(Duration::from_millis(50)));
+            let pending = 128 * 1024;
+            let mut sink_stream = stage_pending_upstream_relay(serving, pending, 9);
+            let token = upstream_token(serving.slots[0].slot_gen, 0);
+            let mut total = assert_single_visit_forwards_within_budget(serving, token, pending);
 
-            let index = 0;
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.stage = Stage::Relay;
-                ws.head_len = 0;
-                ws.buf_base = 0;
-                ws.buf_len = 128 * 1024;
-                ws.fwd = 0;
-                ws.buf[..128 * 1024].copy_from_slice(&test_offset_pattern(128 * 1024, 9));
-            }
-            open_relay(serving, index);
-            serving.register_upstream(index).expect("register up");
-
-            let token = upstream_token(serving.slots[index].slot_gen, index);
-            serving
-                .dispatch_readiness(
-                    token,
-                    Readiness {
-                        writable: true,
-                        ..Readiness::none()
-                    },
-                )
-                .expect("one writable relay visit");
-
-            let moved = serving.slots[index].buf_base + serving.slots[index].fwd;
-            assert!(
-                moved <= 64 * 1024,
-                "one connection visit must forward at most 64 KiB combined, forwarded {moved}"
-            );
-            assert!(
-                moved > 0 && serving.slots[index].buf_base + serving.slots[index].fwd < 128 * 1024,
-                "128 KiB pending must span more than one visit"
-            );
-
-            let mut total = moved;
             let drain_start = Instant::now();
-            while serving.slots[index].buf_base + serving.slots[index].fwd < 128 * 1024 {
+            while serving.slots[0].buf_base + serving.slots[0].fwd < pending {
                 assert!(
                     drain_start.elapsed() < Duration::from_secs(3),
                     "the rescheduled relay visit never resumed the pending upload"
@@ -6154,7 +6152,7 @@ mod visit_budget {
                         },
                     )
                     .expect("resumed writable visit");
-                total = serving.slots[index].buf_base + serving.slots[index].fwd;
+                total = serving.slots[0].buf_base + serving.slots[0].fwd;
             }
 
             let mut got = 0usize;
@@ -6176,7 +6174,7 @@ mod visit_budget {
                 "bytes forwarded across budget-split visits must arrive once, unduplicated"
             );
             assert!(
-                serving.slots[index].stage == Stage::Relay,
+                serving.slots[0].stage == Stage::Relay,
                 "a budget-split relay visit must not advance or close the tunnel"
             );
         });
@@ -6328,70 +6326,69 @@ mod visit_budget {
         });
     }
 
+    fn stage_preloaded_hold(serving: &mut Serving, pattern: &[u8]) -> TcpStream {
+        let (sink_stream, up) = sink_pair();
+        let _ = sink_stream.set_nonblocking(true);
+        let hold = pattern.len();
+        {
+            let ws = &mut serving.slots[0];
+            ws.upstream = Some(up);
+            ws.stage = Stage::Relay;
+            ws.head_len = 4;
+            ws.buf_base = 0;
+            ws.fwd = 0;
+            ws.buf[..hold].copy_from_slice(pattern);
+            ws.buf_len = hold;
+        }
+        open_relay(serving, 0);
+        serving.register_upstream(0).expect("register up");
+        sink_stream
+    }
+
+    fn finish_consuming_drain(
+        reader: std::thread::JoinHandle<()>,
+        stop_reader: &std::sync::atomic::AtomicBool,
+        sink_got: &std::sync::Mutex<Vec<u8>>,
+        pattern: &[u8],
+    ) {
+        stop_reader.store(true, std::sync::atomic::Ordering::SeqCst);
+        reader.join().expect("sink reader");
+        let got = sink_got.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            pattern,
+            "the drained hold must reach the sink byte-exact (offset-distinguishing pattern): \
+         got {}B",
+            got.len()
+        );
+    }
+
     #[test]
-    #[expect(
-        clippy::large_stack_arrays,
-        reason = "test staging buffer, not runtime path"
-    )]
     fn preloaded_hold_drains_across_budget_splits_byte_exact_with_consuming_sink() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::AtomicBool;
         use std::sync::{Arc, Mutex};
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let mut sink_stream = sink.accept().expect("accept sink side").0;
-            let _ = sink_stream.set_nonblocking(true);
-
-            let index = 0;
             let hold = 96 * 1024;
             let pattern = test_offset_pattern(hold, 4);
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.stage = Stage::Relay;
-                ws.head_len = 4;
-                ws.buf_base = 0;
-                ws.fwd = 0;
-                ws.buf[..hold].copy_from_slice(&pattern);
-                ws.buf_len = hold;
-            }
-            open_relay(serving, index);
-            serving.register_upstream(index).expect("register up");
+            let sink_stream = stage_preloaded_hold(serving, &pattern);
 
             let stop_reader = Arc::new(AtomicBool::new(false));
             let sink_got = Arc::new(Mutex::new(Vec::new()));
-            let reader_stop = Arc::clone(&stop_reader);
-            let reader_got = Arc::clone(&sink_got);
-            let reader = std::thread::spawn(move || {
-                let mut tmp = [0u8; 65536];
-                loop {
-                    if reader_stop.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    match sink_stream.read(&mut tmp) {
-                        Ok(0) => break,
-                        Ok(n) => reader_got.lock().unwrap().extend_from_slice(&tmp[..n]),
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
+            let reader =
+                spawn_sink_collector(sink_stream, Arc::clone(&stop_reader), Arc::clone(&sink_got));
 
             let mut progress_polls = 0usize;
             let mut last_fwd = 0usize;
             let deadline = Instant::now() + Duration::from_secs(5);
-            while serving.slots[index].buf_base + serving.slots[index].fwd < hold
+            while serving.slots[0].buf_base + serving.slots[0].fwd < hold
                 || sink_got.lock().unwrap().len() < hold
             {
                 assert!(
                     Instant::now() < deadline,
                     "preloaded hold stalled mid-drain with the sink peer consuming: fwd {} / \
                  {}, sink got {} / {}",
-                    serving.slots[index].buf_base + serving.slots[index].fwd,
+                    serving.slots[0].buf_base + serving.slots[0].fwd,
                     hold,
                     sink_got.lock().unwrap().len(),
                     hold
@@ -6399,9 +6396,9 @@ mod visit_budget {
                 serving
                     .run_once(Some(Duration::from_millis(5)))
                     .expect("real poll drives the drained hold");
-                if serving.slots[index].buf_base + serving.slots[index].fwd > last_fwd {
+                if serving.slots[0].buf_base + serving.slots[0].fwd > last_fwd {
                     progress_polls += 1;
-                    last_fwd = serving.slots[index].buf_base + serving.slots[index].fwd;
+                    last_fwd = serving.slots[0].buf_base + serving.slots[0].fwd;
                 }
             }
             assert!(
@@ -6410,19 +6407,10 @@ mod visit_budget {
              {progress_polls}"
             );
             assert!(
-                serving.slots[index].stage == Stage::Relay,
+                serving.slots[0].stage == Stage::Relay,
                 "a budget-split drain must not advance or close the tunnel"
             );
-            stop_reader.store(true, Ordering::SeqCst);
-            reader.join().expect("sink reader");
-            let got = sink_got.lock().unwrap().clone();
-            assert_eq!(
-                got,
-                pattern,
-                "the drained hold must reach the sink byte-exact (offset-distinguishing pattern): \
-             got {}B",
-                got.len()
-            );
+            finish_consuming_drain(reader, &stop_reader, &sink_got, &pattern);
         });
     }
 
@@ -6622,75 +6610,72 @@ mod visit_budget {
         });
     }
 
-    #[test]
-    #[expect(
-        clippy::large_stack_arrays,
-        reason = "test staging buffer, not runtime path"
-    )]
-    fn four_mib_up_stream_survives_budget_split_visits_byte_conserved() {
-        let port = ephemeral_port();
-        with_serving_stack(port, move |serving| {
-            let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-            let sink_addr = sink.local_addr().expect("sink addr");
-            let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-            let mut sink_stream = sink.accept().expect("accept sink side").0;
+    #[derive(Clone, Copy, Debug)]
+    enum RelayBudgetDirection {
+        Upstream,
+        Downstream,
+    }
 
-            let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-            let peer_addr = peer_l.local_addr().expect("peer addr");
-            let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-            let mut peer_stream = peer_l.accept().expect("accept peer side").0;
+    struct RelayBurst {
+        writer: TcpStream,
+        reader: TcpStream,
+    }
 
-            let index = 0;
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.client = Some(client);
-                ws.stage = Stage::Relay;
-                ws.head_len = 4;
-                ws.buf_base = 0;
-            }
-            open_relay(serving, index);
-            serving.register_upstream(index).expect("register up");
-            serving.register_client(index).expect("register client");
+    struct FourMibBurst {
+        writer: std::thread::JoinHandle<()>,
+        reader: std::thread::JoinHandle<()>,
+        received: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
 
-            let got = std::sync::Arc::new(std::sync::Mutex::new(0usize));
-            let got_reader = std::sync::Arc::clone(&got);
-            let sink_reader = std::thread::spawn(move || {
-                let mut tmp = [0u8; 65536];
-                loop {
-                    match sink_stream.read(&mut tmp) {
-                        Ok(0) => break,
-                        Ok(n) => *got_reader.lock().unwrap() += n,
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
+    fn stage_four_mib_relay(serving: &mut Serving, direction: RelayBudgetDirection) -> RelayBurst {
+        let (upstream_peer, up) = sink_pair();
+        let (client, client_peer) = relay_peer_pair();
+        stage_relay_slot(serving, up, client);
+        match direction {
+            RelayBudgetDirection::Upstream => RelayBurst {
+                writer: client_peer,
+                reader: upstream_peer,
+            },
+            RelayBudgetDirection::Downstream => RelayBurst {
+                writer: upstream_peer,
+                reader: client_peer,
+            },
+        }
+    }
 
-            let payload = test_offset_pattern(4 * 1024 * 1024, 3);
-            let payload_len = payload.len();
-            let writer = std::thread::spawn(move || {
-                let payload_clone = payload.clone();
-                peer_stream.write_all(&payload_clone).expect("4 MiB burst");
-                peer_stream
-                    .shutdown(std::net::Shutdown::Write)
-                    .expect("client half-close");
-            });
+    fn spawn_four_mib_burst(burst: RelayBurst, payload: &[u8]) -> FourMibBurst {
+        let RelayBurst { writer, reader } = burst;
+        let mut burst_writer = writer;
+        let write_payload = payload.to_vec();
+        let writer = std::thread::spawn(move || {
+            burst_writer.write_all(&write_payload).expect("4 MiB burst");
+            burst_writer
+                .shutdown(std::net::Shutdown::Write)
+                .expect("peer half-close");
+        });
+        let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = spawn_sink_collector(
+            reader,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::clone(&received),
+        );
+        FourMibBurst {
+            writer,
+            reader,
+            received,
+        }
+    }
 
-            let client_token = client_token(serving.slots[index].slot_gen, index);
-            let up_token = upstream_token(serving.slots[index].slot_gen, index);
-            let start = Instant::now();
-            while *got.lock().unwrap() < payload_len {
-                assert!(
-                    start.elapsed() < Duration::from_secs(20),
-                    "4 MiB up relay never reached the sink: got {}",
-                    *got.lock().unwrap()
-                );
+    fn dispatch_direction_visits(
+        serving: &mut Serving,
+        direction: RelayBudgetDirection,
+        generation: u64,
+    ) {
+        match direction {
+            RelayBudgetDirection::Upstream => {
                 serving
                     .dispatch_readiness(
-                        client_token,
+                        client_token(generation, 0),
                         Readiness {
                             readable: true,
                             ..Readiness::none()
@@ -6699,97 +6684,18 @@ mod visit_budget {
                     .expect("client-readable visit");
                 serving
                     .dispatch_readiness(
-                        up_token,
+                        upstream_token(generation, 0),
                         Readiness {
                             writable: true,
                             ..Readiness::none()
                         },
                     )
                     .expect("upstream-writable visit");
-                if serving.slots[index].upstream.is_none() {
-                    break;
-                }
             }
-            writer.join().expect("peer writer");
-            serving.close_slot(index);
-            sink_reader.join().expect("sink reader");
-            let got_total = *got.lock().unwrap();
-            assert_eq!(
-                got_total, payload_len,
-                "bytes relayed across budget-split visits must be conserved end to end"
-            );
-        });
-    }
-
-    #[test]
-    #[expect(
-        clippy::large_stack_arrays,
-        reason = "test staging buffer, not runtime path"
-    )]
-    fn four_mib_down_stream_survives_budget_split_visits_byte_conserved() {
-        let port = ephemeral_port();
-        with_serving_stack(port, move |serving| {
-            let origin_l = StdListener::bind("127.0.0.1:0").expect("origin bind");
-            let origin_addr = origin_l.local_addr().expect("origin addr");
-            let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
-            let mut origin = origin_l.accept().expect("accept origin side").0;
-
-            let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-            let peer_addr = peer_l.local_addr().expect("peer addr");
-            let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-            let mut peer_stream = peer_l.accept().expect("accept peer side").0;
-
-            let index = 0;
-            {
-                let ws = &mut serving.slots[index];
-                ws.upstream = Some(up);
-                ws.client = Some(client);
-                ws.stage = Stage::Relay;
-                ws.head_len = 4;
-                ws.buf_base = 0;
-            }
-            open_relay(serving, index);
-            serving.register_upstream(index).expect("register up");
-            serving.register_client(index).expect("register client");
-
-            let payload = test_offset_pattern(4 * 1024 * 1024, 6);
-            let payload_len = payload.len();
-            let writer_payload = payload.clone();
-            let origin_writer = std::thread::spawn(move || {
-                origin.write_all(&writer_payload).expect("4 MiB down burst");
-                origin
-                    .shutdown(std::net::Shutdown::Write)
-                    .expect("origin FIN");
-            });
-
-            let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let got_reader = std::sync::Arc::clone(&got);
-            let client_reader = std::thread::spawn(move || {
-                let mut tmp = [0u8; 65536];
-                loop {
-                    match peer_stream.read(&mut tmp) {
-                        Ok(0) => break,
-                        Ok(n) => got_reader.lock().unwrap().extend_from_slice(&tmp[..n]),
-                        Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            let up_token = upstream_token(serving.slots[index].slot_gen, index);
-            let client_token2 = client_token(serving.slots[index].slot_gen, index);
-            let start = Instant::now();
-            while got.lock().unwrap().len() < payload_len {
-                assert!(
-                    start.elapsed() < Duration::from_secs(20),
-                    "4 MiB down relay never reached the client: got {}",
-                    got.lock().unwrap().len()
-                );
+            RelayBudgetDirection::Downstream => {
                 serving
                     .dispatch_readiness(
-                        up_token,
+                        upstream_token(generation, 0),
                         Readiness {
                             readable: true,
                             ..Readiness::none()
@@ -6798,23 +6704,79 @@ mod visit_budget {
                     .expect("upstream-readable visit");
                 serving
                     .dispatch_readiness(
-                        client_token2,
+                        client_token(generation, 0),
                         Readiness {
                             writable: true,
                             ..Readiness::none()
                         },
                     )
                     .expect("client-writable visit");
-                if serving.slots[index].client.is_none() {
+            }
+        }
+    }
+
+    #[test]
+    fn four_mib_up_stream_survives_budget_split_visits_byte_conserved() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let payload = test_offset_pattern(4 * 1024 * 1024, 3);
+            let burst = spawn_four_mib_burst(
+                stage_four_mib_relay(serving, RelayBudgetDirection::Upstream),
+                &payload,
+            );
+            let generation = serving.slots[0].slot_gen;
+            let start = Instant::now();
+            while burst.received.lock().unwrap().len() < payload.len() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "4 MiB up relay never reached the sink: got {}",
+                    burst.received.lock().unwrap().len()
+                );
+                dispatch_direction_visits(serving, RelayBudgetDirection::Upstream, generation);
+                if serving.slots[0].upstream.is_none() {
                     break;
                 }
             }
-            origin_writer.join().expect("origin writer");
-            serving.close_slot(index);
-            client_reader.join().expect("client reader");
-            let got_vec = got.lock().unwrap().clone();
+            burst.writer.join().expect("peer writer");
+            serving.close_slot(0);
+            burst.reader.join().expect("sink reader");
+            let got = burst.received.lock().unwrap().clone();
             assert_eq!(
-                got_vec, payload,
+                got.len(),
+                payload.len(),
+                "bytes relayed across budget-split visits must be conserved end to end"
+            );
+        });
+    }
+
+    #[test]
+    fn four_mib_down_stream_survives_budget_split_visits_byte_conserved() {
+        let port = ephemeral_port();
+        with_serving_stack(port, move |serving| {
+            let payload = test_offset_pattern(4 * 1024 * 1024, 6);
+            let burst = spawn_four_mib_burst(
+                stage_four_mib_relay(serving, RelayBudgetDirection::Downstream),
+                &payload,
+            );
+            let generation = serving.slots[0].slot_gen;
+            let start = Instant::now();
+            while burst.received.lock().unwrap().len() < payload.len() {
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "4 MiB down relay never reached the client: got {}",
+                    burst.received.lock().unwrap().len()
+                );
+                dispatch_direction_visits(serving, RelayBudgetDirection::Downstream, generation);
+                if serving.slots[0].client.is_none() {
+                    break;
+                }
+            }
+            burst.writer.join().expect("origin writer");
+            serving.close_slot(0);
+            burst.reader.join().expect("client reader");
+            let got = burst.received.lock().unwrap().clone();
+            assert_eq!(
+                got, payload,
                 "down bytes relayed across budget-split visits must arrive byte-exact"
             );
         });
@@ -7663,17 +7625,34 @@ mod enforcement {
         });
     }
 
+    fn trip_block_all_with_evil_connects(serving: &mut Serving, port: u16) {
+        for _ in 0..3 {
+            let mut evil = connect(port);
+            evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
+                .expect("evil head");
+            pump(serving, 30);
+        }
+    }
+
+    fn arm_latch_relay_slot(serving: &mut Serving, client: mio::net::TcpStream) {
+        let ws = &mut serving.slots[0];
+        ws.client = Some(client);
+        ws.down_off = 0;
+        ws.down[..16].copy_from_slice(b"DOWNSTRM00XXXXXX");
+        ws.down_len = 16;
+        ws.stage = Stage::Relay;
+        ws.gate.on_connect_head(4);
+        ws.gate.on_authorized();
+        ws.gate.on_upstream_connected();
+        ws.gate.on_response_ok();
+    }
+
     #[test]
     fn client_writable_latch_guard_closes_live_relay_without_draining() {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "all", "notify", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            for _ in 0..3 {
-                let mut evil = connect(port);
-                evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
-                    .expect("evil head");
-                pump(serving, 30);
-            }
+            trip_block_all_with_evil_connects(serving, port);
             assert!(serving.storage().enforcement().block_all());
             assert_eq!(
                 serving.storage().occupied(),
@@ -7681,22 +7660,8 @@ mod enforcement {
                 "the synchronous sweep closed every slot before the fault is injected"
             );
 
-            let peer = StdListener::bind("127.0.0.1:0").expect("peer bind");
-            let peer_addr = peer.local_addr().expect("peer addr");
-            let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-            let mut reader = peer.accept().expect("accept client").0;
-            {
-                let ws = &mut serving.slots[0];
-                ws.client = Some(client);
-                ws.down_off = 0;
-                ws.down[..16].copy_from_slice(b"DOWNSTRM00XXXXXX");
-                ws.down_len = 16;
-                ws.stage = Stage::Relay;
-                ws.gate.on_connect_head(4);
-                ws.gate.on_authorized();
-                ws.gate.on_upstream_connected();
-                ws.gate.on_response_ok();
-            }
+            let (client, mut reader) = relay_peer_pair();
+            arm_latch_relay_slot(serving, client);
             assert!(
                 serving.slots[0].client.is_some() && matches!(serving.slots[0].stage, Stage::Relay),
                 "the fault-injected relay slot is live after the sweep"
@@ -7741,12 +7706,7 @@ mod enforcement {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "all", "notify", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            for _ in 0..3 {
-                let mut evil = connect(port);
-                evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
-                    .expect("evil head");
-                pump(serving, 30);
-            }
+            trip_block_all_with_evil_connects(serving, port);
             assert!(serving.storage().enforcement().block_all());
             assert_eq!(
                 serving.storage().occupied(),
@@ -10379,13 +10339,13 @@ fn publish_idle_expiry_aaaa(storage: &mut ServeStorage) {
 }
 
 #[cfg(feature = "alloc-witness")]
-fn seeded_idle_expiry_case(dual_family: bool) -> IdleExpiryCase {
-    use crate::dns::transport::StartupReport;
+fn witnessed_idle_storage(
+    config: &crate::config::Config,
+) -> (ServeStorage, std::os::unix::net::UnixStream) {
     use std::os::unix::net::UnixStream;
 
-    let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
-    let mut storage = ServeStorage::boot(&config).expect("boot the idle expiry storage");
-    let (mut reader, writer) = UnixStream::pair().expect("unix log pair");
+    let mut storage = ServeStorage::boot(config).expect("boot the idle expiry storage");
+    let (reader, writer) = UnixStream::pair().expect("unix log pair");
     reader.set_nonblocking(true).expect("reader nonblocking");
     writer.set_nonblocking(true).expect("writer nonblocking");
     *storage.logs_mut() =
@@ -10399,6 +10359,15 @@ fn seeded_idle_expiry_case(dual_family: bool) -> IdleExpiryCase {
             Duration::ZERO,
         )
         .expect("open the idle expiry DNS window");
+    (storage, reader)
+}
+
+#[cfg(feature = "alloc-witness")]
+fn seeded_idle_expiry_case(dual_family: bool) -> IdleExpiryCase {
+    use crate::dns::transport::StartupReport;
+
+    let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+    let (mut storage, mut reader) = witnessed_idle_storage(&config);
     publish_idle_expiry_a(&mut storage);
     if dual_family {
         publish_idle_expiry_aaaa(&mut storage);
@@ -10872,41 +10841,64 @@ mod listener_backoff {
 mod refusals;
 
 #[cfg(feature = "alloc-witness")]
+fn seed_expired_negative_alongside_positive(storage: &mut ServeStorage, nx: bool) {
+    use crate::dns::cache::evidence::{Evidence, ResolverSource};
+    use crate::dns::cache::{Family, Generation, StagedPositive};
+    use crate::eligibility::NumericAddr;
+
+    let target = storage.cache().name_index(0).expect("the alpha name index");
+    let other = storage.cache().name_index(1).expect("the beta name index");
+    let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000)
+        .expect("the expiry proof evidence");
+    let other_positive = StagedPositive::stage(
+        other,
+        Family::A,
+        Generation::INITIAL,
+        &[NumericAddr::V4([8, 8, 8, 8].into())],
+        1000,
+        60,
+    )
+    .expect("stage the positive binding");
+    storage
+        .cache_mut()
+        .publish_positive(&other_positive)
+        .expect("publish the positive binding");
+    if nx {
+        storage
+            .cache_mut()
+            .evict_nxdomain_evidenced(target, proof)
+            .expect("evict the alpha name with NXDOMAIN evidence");
+    } else {
+        storage
+            .cache_mut()
+            .evict_nodata_evidenced(target, Family::A, proof)
+            .expect("evict the alpha name with NODATA evidence");
+    }
+    assert!(
+        storage
+            .cache()
+            .negative_projection(target, Family::A, 1000)
+            .expect("the alpha name must retain a negative projection")
+            .is_some()
+    );
+}
+
+#[cfg(feature = "alloc-witness")]
 #[test]
 fn idle_negative_expiry_does_not_revive_positive_bindings() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            use crate::dns::cache::evidence::{Evidence, ResolverSource};
-            use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::cache::Family;
             use crate::dns::transport::StartupReport;
-            use crate::eligibility::NumericAddr;
             use crate::runtime::storage::{ServingMode, StartupDecision};
-            use std::io::Write as _;
-            use std::os::unix::net::UnixStream;
 
             for nx in [false, true] {
                 let doc = "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\n";
                 let config = crate::config::parse_config_document(doc).unwrap().with_kernel_assigned_test_listener();
                 assert_eq!(config.allowlist().get(0).unwrap().as_str(), "alpha.example.org");
-                let mut storage = ServeStorage::boot(&config).unwrap();
-                let (mut reader, writer) = UnixStream::pair().unwrap();
-                reader.set_nonblocking(true).unwrap();
-                writer.set_nonblocking(true).unwrap();
-                *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
-                storage.dns_mut().begin_window(SocketAddr::from(([127, 0, 0, 1], 9)), *config.resolver_set(), 1000, Duration::ZERO).unwrap();
-                let target = storage.cache().name_index(0).unwrap();
-                let other = storage.cache().name_index(1).unwrap();
-                let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
-                let other_positive = StagedPositive::stage(other, Family::A, Generation::INITIAL,
-                    &[NumericAddr::V4([8, 8, 8, 8].into())], 1000, 60).unwrap();
-                storage.cache_mut().publish_positive(&other_positive).unwrap();
-                if nx {
-                    storage.cache_mut().evict_nxdomain_evidenced(target, proof).unwrap();
-                } else {
-                    storage.cache_mut().evict_nodata_evidenced(target, Family::A, proof).unwrap();
-                }
-                assert!(storage.cache().negative_projection(target, Family::A, 1000).unwrap().is_some());
+                let (mut storage, mut reader) = witnessed_idle_storage(&config);
+                seed_expired_negative_alongside_positive(&mut storage, nx);
                 let outcome = storage.settle_startup(1000, StartupReport::default(), 0, false).unwrap();
                 assert_eq!(outcome.decision(), StartupDecision::Serve(ServingMode::Degraded));
                 let listener = outcome.into_listener().unwrap();
@@ -10917,17 +10909,8 @@ fn idle_negative_expiry_does_not_revive_positive_bindings() {
                 let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
                 let mut serving = Serving::new(storage, listener, traffic).unwrap();
                 assert_eq!(serving.storage().dns().now_u64(), 1000);
-                let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
-                let (done, cancelled) = std::sync::mpsc::channel::<()>();
-                let guard = std::thread::spawn(move || {
-                    if cancelled.recv_timeout(Duration::from_secs(3)).is_err() {
-                        wake.write_all(&[1]).unwrap();
-                    }
-                });
-                let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || serving.run_once(None));
-                let _ = done.send(());
-                guard.join().unwrap();
-                result.unwrap();
+                let wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
+                let counts = watched_idle_turn(&mut serving, wake, Duration::from_secs(3));
                 assert!(counts.all_zero(), "idle negative expiry turn allocated: {counts:?}");
                 assert!(!serving.is_shutdown(), "expiry must precede watchdog signal");
                 let frame = std::str::from_utf8(serving.storage().logs().last_record_bytes().unwrap()).unwrap();
@@ -10939,6 +10922,7 @@ fn idle_negative_expiry_does_not_revive_positive_bindings() {
                     assert!(frame.contains("a_retained_kind=\"nodata\"") && frame.contains("aaaa_retained=\"none\""), "{frame}");
                 }
                 let now = serving.storage().cache_secs(Instant::now());
+                let target = serving.storage().cache().name_index(0).unwrap();
                 for family in Family::ALL {
                     assert_eq!(serving.storage().cache().entry(target, family).unwrap().bindings(), &[]);
                     assert!(serving.storage().cache().negative_projection(target, family, now).unwrap().is_none());
@@ -10952,37 +10936,71 @@ fn idle_negative_expiry_does_not_revive_positive_bindings() {
 }
 
 #[cfg(feature = "alloc-witness")]
+fn seed_strong_proof_names(storage: &mut ServeStorage) -> crate::eligibility::NumericAddr {
+    use crate::dns::cache::evidence::{Evidence, ResolverSource};
+    use crate::dns::cache::{Family, Generation, StagedPositive};
+    use crate::eligibility::NumericAddr;
+
+    let addr = NumericAddr::V4([8, 8, 8, 8].into());
+    for (ordinal, delegated) in [(0, false), (1, true)] {
+        let name = storage.cache().name_index(ordinal).expect("name index");
+        let proof = Evidence::new(
+            delegated,
+            true,
+            delegated,
+            ResolverSource::index(0).expect("the unknown resolver source"),
+            Some(1),
+            1000,
+        )
+        .expect("the proof evidence for the seeded name");
+        storage
+            .cache()
+            .check_publication_requirement(name, Some(proof), 1000)
+            .expect("the seeded name meets the publication requirement");
+        let staged = StagedPositive::stage_with_evidence(
+            name,
+            Family::A,
+            Generation::INITIAL,
+            &[addr],
+            1000,
+            1,
+            Some(proof),
+        )
+        .expect("stage the seeded positive binding");
+        storage
+            .cache_mut()
+            .publish_positive(&staged)
+            .expect("publish the seeded positive binding");
+        assert!(
+            storage
+                .cache()
+                .is_name_admissible(name, 1000)
+                .expect("the seeded name must be admissible")
+        );
+        assert!(
+            storage
+                .cache()
+                .is_peer_admissible(name, Family::A, addr, 1000)
+                .expect("the seeded peer must be admissible")
+        );
+    }
+    addr
+}
+
+#[cfg(feature = "alloc-witness")]
 #[test]
 fn idle_strong_proof_expiry_denies_new_peer_admission() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            use crate::dns::cache::evidence::{Evidence, ResolverSource};
-            use crate::dns::cache::{Family, Generation, StagedPositive};
+            use crate::dns::cache::Family;
             use crate::dns::transport::StartupReport;
-            use crate::eligibility::NumericAddr;
             use crate::runtime::storage::{ServingMode, StartupDecision};
-            use std::io::Write as _;
-            use std::os::unix::net::UnixStream;
 
             let doc = "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1#cloudflare-dns.com#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]\nrecursive_dnssec_policy = \"root_validating_no_stale\"\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_authenticated\"\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"delegated_dnssec\"\n";
             let config = crate::config::parse_config_document(doc).unwrap().with_kernel_assigned_test_listener();
-            let mut storage = ServeStorage::boot(&config).unwrap();
-            let (mut reader, writer) = UnixStream::pair().unwrap();
-            reader.set_nonblocking(true).unwrap();
-            writer.set_nonblocking(true).unwrap();
-            *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
-            storage.dns_mut().begin_window(SocketAddr::from(([127, 0, 0, 1], 9)), *config.resolver_set(), 1000, Duration::ZERO).unwrap();
-            let addr = NumericAddr::V4([8, 8, 8, 8].into());
-            for (ordinal, delegated) in [(0, false), (1, true)] {
-                let name = storage.cache().name_index(ordinal).unwrap();
-                let proof = Evidence::new(delegated, true, delegated, ResolverSource::index(0).unwrap(), Some(1), 1000).unwrap();
-                storage.cache().check_publication_requirement(name, Some(proof), 1000).unwrap();
-                let staged = StagedPositive::stage_with_evidence(name, Family::A, Generation::INITIAL, &[addr], 1000, 1, Some(proof)).unwrap();
-                storage.cache_mut().publish_positive(&staged).unwrap();
-                assert!(storage.cache().is_name_admissible(name, 1000).unwrap());
-                assert!(storage.cache().is_peer_admissible(name, Family::A, addr, 1000).unwrap());
-            }
+            let (mut storage, mut reader) = witnessed_idle_storage(&config);
+            let addr = seed_strong_proof_names(&mut storage);
             let outcome = storage.settle_startup(1000, StartupReport::default(), 0, false).unwrap();
             assert_eq!(outcome.decision(), StartupDecision::Serve(ServingMode::Full));
             let listener = outcome.into_listener().unwrap();
@@ -10993,17 +11011,8 @@ fn idle_strong_proof_expiry_denies_new_peer_admission() {
             let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
             let mut serving = Serving::new(storage, listener, traffic).unwrap();
             assert_eq!(serving.storage().dns().now_u64(), 1000);
-            let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
-            let (done, cancelled) = std::sync::mpsc::channel::<()>();
-            let guard = std::thread::spawn(move || {
-                if cancelled.recv_timeout(Duration::from_secs(3)).is_err() {
-                    wake.write_all(&[1]).unwrap();
-                }
-            });
-            let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || serving.run_once(None));
-            let _ = done.send(());
-            guard.join().unwrap();
-            result.unwrap();
+            let wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
+            let counts = watched_idle_turn(&mut serving, wake, Duration::from_secs(3));
             assert!(counts.all_zero(), "strong expiry turn allocated: {counts:?}");
             assert!(!serving.is_shutdown(), "expiry must precede watchdog signal");
             let now = serving.storage().cache_secs(Instant::now());
@@ -11165,63 +11174,26 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            use crate::dns::cache::evidence::{Evidence, ResolverSource};
-            use crate::dns::cache::{Family, Generation, StagedPositive};
             use crate::dns::transport::StartupReport;
-            use crate::eligibility::NumericAddr;
-            use std::os::unix::net::UnixStream;
 
             for full_queue in [false, true] {
                 let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
-                let mut storage = ServeStorage::boot(&config).unwrap();
-                let (mut reader, writer) = UnixStream::pair().unwrap();
-                reader.set_nonblocking(true).unwrap();
-                writer.set_nonblocking(true).unwrap();
-                *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).unwrap();
-                storage
-                    .dns_mut()
-                    .begin_window(
-                        SocketAddr::from(([127, 0, 0, 1], 9)),
-                        *config.resolver_set(),
-                        1000,
-                        Duration::ZERO,
-                    )
-                    .unwrap();
-                let name = storage.cache().name_index(0).unwrap();
-                let proof =
-                    Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000)
-                        .unwrap();
-                let staged = StagedPositive::stage_with_evidence(
-                    name,
-                    Family::A,
-                    Generation::INITIAL,
-                    &[NumericAddr::V4([8, 8, 8, 8].into())],
-                    1000,
-                    1,
-                    Some(proof),
-                )
-                .unwrap();
-                storage.cache_mut().publish_positive(&staged).unwrap();
-                let listener = storage
+                let (mut storage, mut reader) = witnessed_idle_storage(&config);
+                publish_idle_expiry_a(&mut storage);
+                let outcome = storage
                     .settle_startup(1000, StartupReport::default(), 0, false)
-                    .unwrap()
-                    .into_listener()
                     .unwrap();
+                let listener = outcome.into_listener().unwrap();
                 storage.logs_mut().drain_sink();
                 let mut boot = [0u8; 8192];
                 assert!(reader.read(&mut boot).unwrap() > 0);
                 let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
                 let mut serving = Serving::new(storage, listener, traffic).unwrap();
-                let sink = StdListener::bind("127.0.0.1:0").unwrap();
-                let up = mio::net::TcpStream::connect(sink.local_addr().unwrap()).unwrap();
-                let (mut sink_stream, _) = sink.accept().unwrap();
+                let (mut sink_stream, up) = sink_pair();
                 sink_stream
                     .set_read_timeout(Some(Duration::from_millis(40)))
                     .unwrap();
-                let peer_listener = StdListener::bind("127.0.0.1:0").unwrap();
-                let client =
-                    mio::net::TcpStream::connect(peer_listener.local_addr().unwrap()).unwrap();
-                let (mut peer, _) = peer_listener.accept().unwrap();
+                let (client, mut peer) = relay_peer_pair();
                 prime_expiry_relay(&mut serving, up, client);
                 if full_queue {
                     fill_relay_log_until_expiry(&mut serving);
