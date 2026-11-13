@@ -70,7 +70,9 @@ ENTRYPOINT ["/alumina"]
 references the operator-supplied configuration, provided at image build time —
 it is **not tracked in this repository**; see
 [the example configuration](qa-package/config.example.toml), whose resolver pins
-are placeholders and must be replaced before use.
+are placeholders and must be replaced before use. Every allowlist entry must
+declare its `dns_assurance` trust class explicitly; a missing key fails startup
+(exit 78).
 
 ## 3. Appliance runtime invocation and TCP DNS requirement
 

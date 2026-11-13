@@ -143,7 +143,8 @@ missing derived image as described below.
 `config.example.toml` (`[allowed_fqdn."<fqdn>:<port>"]` keyed tables —
 `api.github.com:443`, `example.com:443`, `www.example.net:443`, each carrying
 `early_data = { action = "notify", scope = "connection" }` and
-`ja4 = { action = "notify", scope = "connection" }` under `[any_illegal]` with
+`ja4 = { action = "notify", scope = "connection" }` plus a mandatory
+`dns_assurance = "resolver_trusted"` string key; `[any_illegal]` with
 the four per-control keys `connect_parse`, `host_not_allowlisted`, `tls_profile`,
 `ech`, and the three optional per-class SP-001 gate bars `[bad_handshake]`,
 `[illegal_fqdn]`, `[ja4]` (each `threshold = 1`, `window_secs = 900`,

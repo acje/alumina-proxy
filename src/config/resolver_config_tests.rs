@@ -450,6 +450,17 @@ fn dns_assurance_activate_ordinal_parity_matrix() {
 }
 
 #[test]
+fn dns_assurance_missing_key_rejects_78() {
+    let d = valid_doc("[\"1.1.1.1\"]").replacen("\ndns_assurance = \"resolver_trusted\"", "", 1);
+    let err = parse_config_document(&d).expect_err("omitted dns_assurance must be rejected");
+    assert!(
+        matches!(&err, ConfigError::InvalidDnsAssurance { key, .. } if key == "allowed_fqdn.a.example:443.dns_assurance"),
+        "expected InvalidDnsAssurance for the entry key, got {err:?}"
+    );
+    assert_eq!(err.exit_status(), 78, "missing dns_assurance must exit 78");
+}
+
+#[test]
 fn dns_assurance_unknown_token_and_wrong_type_reject_78() {
     let declared = policy_doc(
         "[\"1.1.1.1#cloudflare-dns.com#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]",

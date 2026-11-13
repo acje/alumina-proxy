@@ -198,7 +198,7 @@ impl ListenAddr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     allowlist: Allowlist,
-    entry_requirements: [AssuranceRequirement; ALLOWLIST_MAX],
+    entry_requirements: Vec<AssuranceRequirement>,
     listen: ListenAddr,
     startup_unresolved_allowance: u8,
     control: ControlTable,
@@ -230,7 +230,7 @@ impl Config {
 
     /// Per-allowlist assurance requirement at `index`, parallel to
     /// `allowlist()` order; only `0..allowlist().len()` is ever read.
-    pub(crate) const fn entry_requirement(&self, index: usize) -> AssuranceRequirement {
+    pub(crate) fn entry_requirement(&self, index: usize) -> AssuranceRequirement {
         self.entry_requirements[index]
     }
 
@@ -946,13 +946,17 @@ fn parse_entry_requirement(
     fqdn_key: &str,
 ) -> Result<AssuranceRequirement, ConfigError> {
     let toml::Value::Table(table) = value else {
-        return Ok(AssuranceRequirement::ResolverTrusted);
+        return Err(ConfigError::WrongType(format!(
+            "allowed_fqdn.{fqdn_key}: expected table"
+        )));
     };
-    table
+    let selector = table
         .get("dns_assurance")
-        .map_or(Ok(AssuranceRequirement::ResolverTrusted), |selector| {
-            parse_dns_assurance(selector, fqdn_key)
-        })
+        .ok_or_else(|| ConfigError::InvalidDnsAssurance {
+            key: format!("allowed_fqdn.{fqdn_key}.dns_assurance"),
+            reason: "dns_assurance is mandatory for every allowlist entry".to_owned(),
+        })?;
+    parse_dns_assurance(selector, fqdn_key)
 }
 
 fn parse_cname_bailiwick(value: &toml::Value, fqdn_key: &str) -> Result<Vec<String>, ConfigError> {
@@ -1101,7 +1105,7 @@ struct ParsedAllowlist {
     early_data: Vec<PerFqdnControl>,
     ja4: Vec<PerFqdnControl>,
     bailiwicks: Vec<Vec<String>>,
-    requirements: [AssuranceRequirement; ALLOWLIST_MAX],
+    requirements: Vec<AssuranceRequirement>,
 }
 
 fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> {
@@ -1126,7 +1130,7 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
     let mut early_data = Vec::with_capacity(entries.len());
     let mut ja4 = Vec::with_capacity(entries.len());
     let mut bailiwicks = Vec::with_capacity(entries.len());
-    let mut requirements = [AssuranceRequirement::ResolverTrusted; ALLOWLIST_MAX];
+    let mut requirements = Vec::with_capacity(entries.len());
     let mut total_suffixes = 0usize;
     for (key, value) in entries {
         let fqdn = Fqdn::parse(key).map_err(|reason| ConfigError::InvalidFqdn {
@@ -1142,7 +1146,7 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
             )));
         }
         let (early, j4, suffixes) = parse_allowed_fqdn_table(value, key)?;
-        requirements[allowlist.len()] = parse_entry_requirement(value, key)?;
+        requirements.push(parse_entry_requirement(value, key)?);
         // Same bare name on different ports collapses to the first entry's
         // suffix list at runtime (covers_for first-match position), so every
         // same-bare-name entry must declare byte-identical lists — any

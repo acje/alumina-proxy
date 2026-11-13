@@ -63,12 +63,13 @@ design.
 
 ## DNS assurance
 
-Each allowlisted `name:port` has an immutable minimum: omission defaults to
-`resolver_trusted` and preserves legacy bounded stale-serving; operators can
-select `resolver_authenticated` or `delegated_dnssec`. Both stronger settings
-require every configured resolver to be strict-pinned and the operator to
-declare `root_validating_no_stale`. Delegated DNSSEC additionally requires the
-resolver's AD verdict. The proxy does not independently validate DNSSEC or
+Each allowlisted `name:port` has an immutable minimum that must be declared
+explicitly: `dns_assurance` is mandatory, and a missing key fails startup with
+exit 78. `resolver_trusted` preserves legacy bounded stale-serving; operators
+can select `resolver_authenticated` or `delegated_dnssec`. Both stronger
+settings require every configured resolver to be strict-pinned and the operator
+to declare `root_validating_no_stale`. Delegated DNSSEC additionally requires
+the resolver's AD verdict. The proxy does not independently validate DNSSEC or
 establish the resolver's trust anchors, clock or no-stale behavior; those are
 deployment conditions, not consequences of the AD bit.
 

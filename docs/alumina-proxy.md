@@ -1722,12 +1722,16 @@ fixed log slot.
 
 Qualified admission is a fixed, config-owned per-entry capability. Each
 allowlist key — a same-hostname/different-port pair is two ordinals with
-independent requirements — carries the additional optional per-entry string
-key `dns_assurance`; per-entry omission is the one defaults exception and means
-legacy (`resolver_trusted`). Recognized values are:
+independent requirements — carries the mandatory per-entry string key
+`dns_assurance`. There is no omission default: a missing key is invalid
+configuration (typed `InvalidDnsAssurance`, EX_CONFIG 78), never a silent
+legacy admission. The operator must state the trust class for every entry,
+because `resolver_trusted` admits unauthenticated origin evidence and an
+omission is not a decision. Recognized values are:
 
-- `resolver_trusted` (explicit or omitted) — admitted under any valid current
-  proof class, including unauthenticated trust; legacy behaviour preserved.
+- `resolver_trusted` (explicit only) — admitted under any valid current proof
+  class, including unauthenticated trust; the legacy behaviour is preserved but
+  must be declared.
 - `resolver_authenticated` — must carry current authenticated-origin proof (an
   already-established strict-pin TLS identity fact), independent of
   qualification and of the AD bit, so AD=0 is valid and AD=1 is not required.
@@ -1747,13 +1751,19 @@ and uniform strict pinning is invalid configuration (typed
 
 This amendment supersedes the prior categorical scope for exactly these
 settings and nothing else in configuration validation: `dns_assurance` is the
-recognized additional optional per-entry key (per-entry omission the defaults
-exception), the recursion-policy declaration the recognized additional optional
-document key, and the earlier statements that the retained AD observation adds
-no cache-admission or minimum capability and that qualification remains false
-are scoped to the unactivated raw-AD-only legacy observation path. The true
-claim that the AD bit alone never authenticates is retained in full, as are the
-existing warning-field omission rules.
+recognized mandatory per-entry key (no omission default), the recursion-policy
+declaration the recognized additional optional document key, and the earlier
+statements that the retained AD observation adds no cache-admission or minimum
+capability and that qualification remains false are scoped to the unactivated
+raw-AD-only legacy observation path. The true claim that the AD bit alone never
+authenticates is retained in full, as are the existing warning-field omission
+rules.
+
+The remaining guarantees of this section are unchanged: the two strong tokens
+still require the top-level `recursive_dnssec_policy = "root_validating_no_stale"`
+declaration and uniformly strict-pinned resolvers, a resolver array remains
+trust-homogeneous, and the AD bit alone never authenticates a response
+(amendment: alumina-gzqn4.4, 2026-11-13).
 
 The root-validating trust model is an operator assertion, not an independently
 proven root DNSSEC validation: the proxy never requests DO and performs no

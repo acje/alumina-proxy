@@ -136,7 +136,8 @@ findings, verdicts, or issue records here).
   `mid full` remains a standalone gate-only selector.
 - **The root `--test boot` suite is the broad boot component/API integration
   target**: it exercises config load and strict-schema rejection (config
-  errors → exit 78), bare-IP resolver validation, synthetic preflight
+  errors → exit 78, including a missing per-entry `dns_assurance`), bare-IP
+  resolver validation, synthetic preflight
   privilege floors, and inventory/traffic-storage component APIs — not the
   assembled boot runner. The assembled boot path and resolver trust/pin
   preparation live in the boot unit suite `src/boot/tests.rs` (selected by
