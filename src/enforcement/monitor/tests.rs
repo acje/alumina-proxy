@@ -142,6 +142,11 @@ fn ja4_facts_fold_into_facts_total_and_saturate() {
     );
     assert_eq!(m.facts_ja4_change(ordinal), 1);
     assert!(
+        !m.facts_ja4_change_loss(ordinal),
+        "a change record alone never latches the detail-loss flag"
+    );
+    m.note_fact_ja4_change_loss(ordinal);
+    assert!(
         m.facts_ja4_change_loss(ordinal),
         "an overflowed baseline suppresses detail and latches the loss flag"
     );

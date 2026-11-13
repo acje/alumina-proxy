@@ -420,6 +420,10 @@ impl Enforcement {
         self.monitor.note_fact_ja4_change(ordinal, ja4, peer_ip);
     }
 
+    pub(crate) const fn note_fact_ja4_change_loss(&mut self, ordinal: DomainOrdinal) {
+        self.monitor.note_fact_ja4_change_loss(ordinal);
+    }
+
     pub(crate) const fn note_fact_ja4_seed(&mut self) {
         self.monitor.note_fact_ja4_seed();
     }

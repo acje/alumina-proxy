@@ -3078,6 +3078,9 @@ impl Serving {
                 self.storage
                     .enforcement_mut()
                     .note_fact_ja4_change(ordinal, ja4, dest_ip);
+                self.storage
+                    .enforcement_mut()
+                    .note_fact_ja4_change_loss(ordinal);
                 matches!(
                     self.project_tripwire(index, Violation::Ja4Change { ordinal }),
                     Effect::Block { .. }

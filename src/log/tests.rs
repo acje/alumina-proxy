@@ -1571,6 +1571,7 @@ mod monitor_records {
             *b"t13d1516h2_8daaf6152771_02713d6af862",
             NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])),
         );
+        m.note_fact_ja4_change_loss(ordinal);
         m.note_action_first_slot_block(Scope::Connection);
         m.note_action_domain_block(ordinal);
         m.note_action_notify(ordinal);

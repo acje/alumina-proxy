@@ -260,15 +260,12 @@ impl Monitor {
         self.dirty = true;
     }
 
-    /// Counts one first-seen JA4 baseline overflow for an ordinal: the serving
-    /// path records a JA4 that does not fit the ordinal's set (the set holds
-    /// up to `MAX_ADDRESSES` distinct strings). The per-ordinal counter is an
-    /// event fold, emitted by the monitor record's JA4-change surface; the
-    /// 36-byte value is retained as the latest overflowed JA4 for the ordinal,
-    /// keyed to the triggering peer's destination IP (SP-013). The overflow
-    /// also latches the per-ordinal detail-loss flag (`d<j>x`): the deviation
-    /// decision fires regardless of set capacity, but the overflowed value is
-    /// not added to the set, so the operator sees that detail was suppressed.
+    /// Counts one JA4 change for an ordinal: the serving path records a JA4
+    /// that is not already in the ordinal's set (the set holds up to
+    /// `MAX_ADDRESSES` distinct strings). The per-ordinal counter is an event
+    /// fold, emitted by the monitor record's JA4-change surface; the 36-byte
+    /// value is retained as the latest changed JA4 for the ordinal, keyed to
+    /// the triggering peer's destination IP (SP-013).
     pub(crate) const fn note_fact_ja4_change(
         &mut self,
         ordinal: DomainOrdinal,
@@ -276,10 +273,17 @@ impl Monitor {
         peer_ip: NumericAddr,
     ) {
         self.facts.ja4_change[ordinal.get()].bump();
-        self.facts.ja4_change_loss[ordinal.get()] = true;
         self.facts.ja4_value[ordinal.get()] = ja4;
         self.facts.ja4_peer_ip = peer_ip;
         self.facts.ja4_peer_ordinal = Some(ordinal);
+        self.dirty = true;
+    }
+
+    /// Latches an ordinal's JA4-change detail-loss flag (`d<j>x`): a full set
+    /// suppressed the add, so the operator sees that detail was suppressed
+    /// (F-08). The deviation decision is unaffected; only the detail is lost.
+    pub(crate) const fn note_fact_ja4_change_loss(&mut self, ordinal: DomainOrdinal) {
+        self.facts.ja4_change_loss[ordinal.get()] = true;
         self.dirty = true;
     }
 
