@@ -386,7 +386,6 @@ fn write_qname(buf: &mut [u8], mut pos: usize, name: &str) -> Result<usize, DnsE
     Ok(pos + 1)
 }
 
-/// Writes one length-prefixed label at `pos`, returning the cursor past it.
 #[expect(
     clippy::expect_used,
     reason = "label length is checked to be <= 63 before encoding, fitting u8"
@@ -514,8 +513,6 @@ fn read_name(msg: &[u8], at: usize, strict: bool) -> Result<(DnsName, usize), Dn
     }
 }
 
-/// Decode cursor for one name: the encoded-field offset, the decode offset, the
-/// accumulated name length, and the bounded pointer count.
 struct NameCursor {
     field: usize,
     decode: usize,
@@ -535,8 +532,6 @@ impl NameCursor {
         }
     }
 
-    /// Consumes one label, returning the encoded-field cursor once the root
-    /// label closes the name.
     fn read_label(
         &mut self,
         msg: &[u8],
@@ -571,7 +566,6 @@ impl NameCursor {
         Ok(None)
     }
 
-    /// Consumes the root label, returning the cursor just past the encoded name.
     const fn read_root(&mut self) -> Result<usize, DnsError> {
         self.total += 1;
         if self.total > MAX_NAME_BYTES {
@@ -584,7 +578,6 @@ impl NameCursor {
         }
     }
 
-    /// Follows one backward compression pointer, bounding the visited count.
     fn follow_pointer(&mut self, msg: &[u8], byte: u8) -> Result<(), DnsError> {
         let hi = usize::from(byte & 0x3f);
         let lo = usize::from(
@@ -609,8 +602,6 @@ impl NameCursor {
     }
 }
 
-/// Appends one label's bytes in lowercase, rejecting an embedded dot under
-/// strict decoding.
 fn push_label_bytes(out: &mut DnsName, bytes: &[u8], strict: bool) -> Result<(), DnsError> {
     for &b in bytes {
         if strict && b == b'.' {
@@ -1303,7 +1294,6 @@ pub fn parse_response(
     finish_response(ws, zones, fqdn, family, header.rcode)
 }
 
-/// The fixed reply header plus the section counts a response declares.
 struct ReplyHeader {
     rcode: u8,
     answer_count: usize,
@@ -1311,7 +1301,6 @@ struct ReplyHeader {
     additional_count: usize,
 }
 
-/// Reads the reply header, validating its flags and count bounds in wire order.
 fn read_reply_header(reader: &mut Reader<'_>, tid: u16) -> Result<ReplyHeader, DnsError> {
     let got_tid = reader.u16()?;
     if got_tid != tid {
@@ -1356,7 +1345,6 @@ fn read_reply_header(reader: &mut Reader<'_>, tid: u16) -> Result<ReplyHeader, D
     })
 }
 
-/// Reads the single question and matches it against the outstanding query.
 fn read_question(
     msg: &[u8],
     reader: &mut Reader<'_>,
@@ -1376,7 +1364,6 @@ fn read_question(
     Ok(())
 }
 
-/// Applies one answer-section record and advances the reader past its rdata.
 fn apply_answer_rr(
     ws: &mut ResponseWorkspace,
     msg: &[u8],
@@ -1401,8 +1388,6 @@ fn apply_answer_rr(
     reader.skip(rr.rdlen)
 }
 
-/// Applies one parsed answer rdata to the workspace, silently discarding an
-/// address record of the other family.
 fn apply_rdata(
     ws: &mut ResponseWorkspace,
     rdata: &Rdata,
@@ -1412,8 +1397,6 @@ fn apply_rdata(
     match rdata {
         Rdata::A(ip) => {
             if family != Family::A {
-                // Wrong-family record: discarded silently, with no anomaly or
-                // telemetry (docs/alumina-proxy.md:476).
                 return Ok(());
             }
             let idx = ensure_owner(ws, &rr.owner)?;
@@ -1421,8 +1404,6 @@ fn apply_rdata(
         }
         Rdata::Aaaa(ip) => {
             if family != Family::Aaaa {
-                // Wrong-family record: discarded silently, with no anomaly or
-                // telemetry (docs/alumina-proxy.md:476).
                 return Ok(());
             }
             let idx = ensure_owner(ws, &rr.owner)?;
@@ -1436,7 +1417,6 @@ fn apply_rdata(
     }
 }
 
-/// Roots the CNAME chain, collects terminal bindings, and classifies the rcode.
 fn finish_response(
     ws: &mut ResponseWorkspace,
     zones: &BailiwickZones,
@@ -1454,14 +1434,12 @@ fn finish_response(
     }
 }
 
-/// The conservative negative TTL cap: the chain, SOA, and SOA MINIMUM floor.
 fn negative_cap(ws: &ResponseWorkspace, chain_ttl: u64) -> Option<u32> {
     ws.soa.as_ref().map(|(_owner, ttl, minimum)| {
         wire_ttl_floor(chain_ttl.min(u64::from(*ttl)).min(u64::from(*minimum)))
     })
 }
 
-/// Assembles the positive or NODATA outcome for a NOERROR reply.
 fn noerror_outcome(
     ws: &mut ResponseWorkspace,
     family: Family,
@@ -1498,7 +1476,6 @@ fn noerror_outcome(
     })
 }
 
-/// Assembles the NXDOMAIN outcome, rejecting terminal address data.
 fn nxdomain_outcome(
     ws: &mut ResponseWorkspace,
     terminal: &[u8],
