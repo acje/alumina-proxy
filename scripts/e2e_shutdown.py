@@ -135,11 +135,7 @@ def bounded_wait(proc, deadline, name):
         rc = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         return rc
     except subprocess.TimeoutExpired:
-        proc.kill()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
+        reap_child(proc)
         fail(name, f"case binary did not exit before its deadline; killed")
         return None
 
@@ -220,11 +216,7 @@ def require_reachable(name, proc, timeout=20.0):
     kind, exc = wait_reachable(time.monotonic() + timeout)
     if kind == "reachable":
         return True
-    proc.kill()
-    try:
-        proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        pass
+    reap_child(proc)
     if kind == "error":
         fail(name, f"operational connect error while waiting for the listener (indeterminate, not absence): {exc}")
     else:
