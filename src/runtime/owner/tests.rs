@@ -321,22 +321,269 @@ fn exchange_failed_body() {
     );
 }
 
-#[cfg(all(test, feature = "alloc-witness"))]
-#[expect(
-    clippy::too_many_lines,
-    reason = "long alloc-witness hot-relay multi-slot composition body"
-)]
+#[cfg(feature = "alloc-witness")]
+const HOT_SLOTS: usize = 17;
+#[cfg(feature = "alloc-witness")]
+const FIRST_HOT_INDEX: usize = 30;
+#[cfg(feature = "alloc-witness")]
+const EXPIRED_INDEX: usize = 47;
+
+#[cfg(feature = "alloc-witness")]
+struct HotLane {
+    got: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    reader: thread::JoinHandle<()>,
+}
+
+#[cfg(feature = "alloc-witness")]
+#[derive(Default)]
+struct ServingFacts {
+    expired_closed: bool,
+    backlog_admitted: bool,
+    lanes_complete: bool,
+}
+
+#[cfg(feature = "alloc-witness")]
+#[derive(Default)]
+struct HotProgress {
+    turns: i32,
+    dns_receiving: bool,
+    dns_advanced_any: bool,
+    serving: ServingFacts,
+    second_visit_turn: [i32; HOT_SLOTS],
+}
+
+#[cfg(feature = "alloc-witness")]
+impl HotProgress {
+    fn observe(&mut self, runtime: &Runtime, lanes: &[HotLane], per_slot: usize, backlog: usize) {
+        self.turns += 1;
+        let advances = runtime.dns_advances_last_turn;
+        assert!(
+            advances <= DNS_ADVANCE_BOUND,
+            "one owner turn must advance the stalled DNS exchange at most eight steps, \
+             observed {advances}"
+        );
+        self.dns_advanced_any |= advances >= 1;
+        self.serving.expired_closed |= runtime.serving.test_slot_closed(EXPIRED_INDEX);
+        self.serving.backlog_admitted |= runtime.serving.storage().occupied() >= backlog;
+        self.serving.lanes_complete = true;
+        for (index, lane) in lanes.iter().enumerate() {
+            let visits = runtime.serving.test_slot_visits(FIRST_HOT_INDEX + index);
+            if visits >= 2 && self.second_visit_turn[index] == 0 {
+                self.second_visit_turn[index] = self.turns;
+            }
+            if lane.got.lock().expect("hot lane lock").len() < per_slot {
+                self.serving.lanes_complete = false;
+            }
+        }
+        self.dns_receiving |= matches!(
+            runtime.serving.storage().dns().exchange_step(),
+            Some(crate::dns::transport::ExchangeStep::Receiving)
+        );
+    }
+
+    fn complete(&self) -> bool {
+        self.dns_receiving
+            && self.serving.lanes_complete
+            && self.serving.expired_closed
+            && self.serving.backlog_admitted
+    }
+}
+
+#[cfg(feature = "alloc-witness")]
 #[expect(
     clippy::large_stack_arrays,
     reason = "test staging buffer, not runtime path"
 )]
-fn hot_relay_many_slots_body() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+fn install_hot_relay(
+    runtime: &mut Runtime,
+    slot: usize,
+    per_slot: usize,
+    stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> (HotLane, TcpStream) {
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
-    const HOT_SLOTS: usize = 17;
-    const FIRST_HOT_INDEX: usize = 30;
-    const EXPIRED_INDEX: usize = 47;
+    let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+    let sink_addr = sink.local_addr().expect("sink addr");
+    let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+    let mut sink_stream = sink.accept().expect("accept sink side").0;
+    sink_stream.set_nonblocking(true).expect("sink nonblocking");
+
+    let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
+    let peer_addr = peer_l.local_addr().expect("peer addr");
+    let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
+    let mut peer_stream = peer_l.accept().expect("accept peer side").0;
+
+    runtime
+        .serving_mut()
+        .test_setup_relay(slot, up, client)
+        .expect("install relay");
+
+    let pattern = crate::runtime::reactor::test_offset_pattern(
+        per_slot,
+        u32::try_from(slot).expect("hot-slot index fits u32"),
+    );
+    peer_stream.write_all(&pattern).expect("preload pattern");
+
+    let lane_got = Arc::new(Mutex::new(Vec::new()));
+    let got = Arc::clone(&lane_got);
+    let lane_stop = Arc::clone(stop);
+    let reader = std::thread::spawn(move || {
+        let mut tmp = [0u8; 65536];
+        loop {
+            if lane_stop.load(Ordering::SeqCst) {
+                break;
+            }
+            match sink_stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => lane_got
+                    .lock()
+                    .expect("hot lane lock")
+                    .extend_from_slice(&tmp[..n]),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (HotLane { got, reader }, peer_stream)
+}
+
+#[cfg(feature = "alloc-witness")]
+fn install_expired_relay(runtime: &mut Runtime, slot: usize) -> TcpStream {
+    let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
+    let sink_addr = sink.local_addr().expect("sink addr");
+    let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
+    let sink_stream = sink.accept().expect("accept sink side").0;
+    let _ = sink_stream;
+    let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
+    let peer_addr = peer_l.local_addr().expect("peer addr");
+    let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
+    let mut peer_stream = peer_l.accept().expect("accept peer side").0;
+    runtime
+        .serving_mut()
+        .test_setup_relay(slot, up, client)
+        .expect("install expired-timer relay");
+    peer_stream
+        .write_all(&crate::runtime::reactor::test_offset_pattern(4096, 99))
+        .expect("preload expired-timer relay");
+    runtime.serving_mut().test_mark_idle_expired(slot);
+    peer_stream
+}
+
+#[cfg(feature = "alloc-witness")]
+fn install_hot_lanes(
+    runtime: &mut Runtime,
+    per_slot: usize,
+    stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> (Vec<HotLane>, Vec<TcpStream>) {
+    let mut lanes = Vec::new();
+    let mut holds = Vec::new();
+    for lane_index in 0..HOT_SLOTS {
+        let (lane, hold) = install_hot_relay(runtime, FIRST_HOT_INDEX + lane_index, per_slot, stop);
+        lanes.push(lane);
+        holds.push(hold);
+    }
+    holds.push(install_expired_relay(runtime, EXPIRED_INDEX));
+    (lanes, holds)
+}
+
+#[cfg(feature = "alloc-witness")]
+fn finish_hot_lanes(
+    lanes: &mut Vec<HotLane>,
+    stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Vec<Vec<u8>> {
+    use std::sync::atomic::Ordering;
+
+    stop.store(true, Ordering::SeqCst);
+    let tails: Vec<Vec<u8>> = lanes
+        .iter()
+        .map(|lane| lane.got.lock().expect("hot lane lock").clone())
+        .collect();
+    for lane in lanes.drain(..) {
+        lane.reader.join().expect("sink reader");
+    }
+    tails
+}
+
+#[cfg(feature = "alloc-witness")]
+fn drive_hot_turns(
+    runtime: &mut Runtime,
+    lanes: &[HotLane],
+    per_slot: usize,
+    backlog: usize,
+) -> HotProgress {
+    let mut progress = HotProgress::default();
+    while progress.turns < 900 {
+        runtime
+            .turn(Some(Duration::from_millis(2)))
+            .expect("owner turn");
+        progress.observe(runtime, lanes, per_slot, backlog);
+        if progress.complete() {
+            break;
+        }
+    }
+    progress
+}
+
+#[cfg(feature = "alloc-witness")]
+fn assert_hot_relay_stalled_dns(progress: &HotProgress, high_water: u16) {
+    assert!(
+        progress.dns_receiving,
+        "while {HOT_SLOTS} hot relays keep the owner busy, the stalled DNS exchange must              advance through the same turns (query fully written -> Receiving)"
+    );
+    assert!(
+        progress.dns_advanced_any,
+        "the stalled exchange must actually be advanced by the per-turn counter, never zero"
+    );
+    assert!(
+        progress.serving.expired_closed,
+        "the expired-timer slot must be swept closed on an owner turn while the hot slots              stay busy"
+    );
+    assert!(
+        progress.serving.backlog_admitted,
+        "a pending accept backlog must be admitted while hot relays and DNS busy the owner"
+    );
+    assert!(
+        (200..=256).contains(&high_water),
+        "the timer/DNS recheck must fire mid-batch under {HOT_SLOTS} hot slots, high-water \
+         {high_water} outside [200, 256]"
+    );
+}
+
+#[cfg(feature = "alloc-witness")]
+fn assert_hot_relay_lanes(progress: &HotProgress, tails: &[Vec<u8>], per_slot: usize) {
+    let per_slot_kib = per_slot / 1024;
+    let visits_per_slot = per_slot.div_ceil(64 * 1024);
+    for (i, tail) in tails.iter().enumerate() {
+        assert!(
+            (1..=i32::try_from(HOT_SLOTS).expect("HOT_SLOTS fits i32"))
+                .contains(&progress.second_visit_turn[i]),
+            "hot slot {i} must reach its second owner visit within one full round-robin pass \
+             of the competing hot slots ({HOT_SLOTS} batches; one visit per slot per batch, \
+             and {per_slot_kib}KiB needs {visits_per_slot} visits under the 64KiB cap), so \
+             deferring the second visit past a full pass is starvation; observed on turn {turn}",
+            turn = progress.second_visit_turn[i]
+        );
+        assert_eq!(
+            tail.len(),
+            per_slot,
+            "hot relay {i} must complete under DNS + backlog load"
+        );
+        let pattern = crate::runtime::reactor::test_offset_pattern(
+            per_slot,
+            u32::try_from(FIRST_HOT_INDEX + i).expect("hot-slot index fits u32"),
+        );
+        assert_eq!(&tail[..], &pattern[..], "hot relay {i} bytes byte-exact");
+    }
+}
+
+#[cfg(all(test, feature = "alloc-witness"))]
+fn hot_relay_many_slots_body() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
     let listener =
@@ -358,186 +605,33 @@ fn hot_relay_many_slots_body() {
         .expect("start exchange");
 
     let per_slot: usize = 160 * 1024;
-    let per_slot_kib = per_slot / 1024;
-    let visits_per_slot = per_slot.div_ceil(64 * 1024);
     let stop = Arc::new(AtomicBool::new(false));
-    let mut readers = Vec::new();
-    let mut holds = Vec::new();
-    let mut got: Vec<Arc<Mutex<Vec<u8>>>> = Vec::new();
-    for i in 0..HOT_SLOTS {
-        let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-        let sink_addr = sink.local_addr().expect("sink addr");
-        let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-        let mut sink_stream = sink.accept().expect("accept sink side").0;
-        sink_stream.set_nonblocking(true).expect("sink nonblocking");
-
-        let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-        let peer_addr = peer_l.local_addr().expect("peer addr");
-        let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-        let mut peer_stream = peer_l.accept().expect("accept peer side").0;
-
-        runtime
-            .serving_mut()
-            .test_setup_relay(FIRST_HOT_INDEX + i, up, client)
-            .expect("install relay");
-
-        let pattern = crate::runtime::reactor::test_offset_pattern(
-            per_slot,
-            30 + u32::try_from(i).expect("hot-slot index fits u32"),
-        );
-        peer_stream.write_all(&pattern).expect("preload pattern");
-        holds.push(peer_stream);
-
-        let lane_got = Arc::new(Mutex::new(Vec::new()));
-        got.push(Arc::clone(&lane_got));
-        let lane_stop = Arc::clone(&stop);
-        readers.push(std::thread::spawn(move || {
-            let mut tmp = [0u8; 65536];
-            loop {
-                if lane_stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                match sink_stream.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => lane_got.lock().unwrap().extend_from_slice(&tmp[..n]),
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    Err(_) => break,
-                }
-            }
-        }));
-    }
-
-    let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
-    let sink_addr = sink.local_addr().expect("sink addr");
-    let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
-    let sink_stream = sink.accept().expect("accept sink side").0;
-    let _ = sink_stream;
-    let peer_l = StdListener::bind("127.0.0.1:0").expect("peer bind");
-    let peer_addr = peer_l.local_addr().expect("peer addr");
-    let client = mio::net::TcpStream::connect(peer_addr).expect("client connect");
-    let mut peer_stream = peer_l.accept().expect("accept peer side").0;
-    runtime
-        .serving_mut()
-        .test_setup_relay(EXPIRED_INDEX, up, client)
-        .expect("install expired-timer relay");
-    peer_stream
-        .write_all(&crate::runtime::reactor::test_offset_pattern(4096, 99))
-        .expect("preload expired-timer relay");
-    holds.push(peer_stream);
-    runtime.serving_mut().test_mark_idle_expired(EXPIRED_INDEX);
+    let (mut lanes, holds) = install_hot_lanes(&mut runtime, per_slot, &stop);
 
     let mut accept_backlog = Vec::new();
     for _ in 0..4 {
         accept_backlog.push(connect(port));
     }
 
-    let mut turns = 0;
-    let mut dns_receiving = false;
-    let mut dns_advanced_any = false;
-    let mut expired_closed = false;
-    let mut backlog_admitted = false;
-    let mut second_visit_turn = [0i32; HOT_SLOTS];
-    for lane in &got {
-        drop(lane.lock().unwrap());
+    for lane in &lanes {
+        drop(lane.got.lock().unwrap());
     }
+    let mut progress = HotProgress::default();
     let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
-        while turns < 900 {
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("owner turn");
-            turns += 1;
-            let advances = runtime.dns_advances_last_turn;
-            assert!(
-                advances <= DNS_ADVANCE_BOUND,
-                "one owner turn must advance the stalled DNS exchange at most eight steps,                  observed {advances}"
-            );
-            dns_advanced_any |= advances >= 1;
-            expired_closed |= runtime.serving.test_slot_closed(EXPIRED_INDEX);
-            backlog_admitted |= runtime.serving.storage().occupied() >= accept_backlog.len();
-            let mut all_complete = true;
-            for i in 0..HOT_SLOTS {
-                let visits = runtime.serving.test_slot_visits(FIRST_HOT_INDEX + i);
-                if visits >= 2 && second_visit_turn[i] == 0 {
-                    second_visit_turn[i] = turns;
-                }
-                if got[i].lock().unwrap().len() < per_slot {
-                    all_complete = false;
-                }
-            }
-            dns_receiving |= matches!(
-                runtime.serving.storage().dns().exchange_step(),
-                Some(crate::dns::transport::ExchangeStep::Receiving)
-            );
-            if dns_receiving && all_complete && expired_closed && backlog_admitted {
-                break;
-            }
-        }
+        progress = drive_hot_turns(&mut runtime, &lanes, per_slot, accept_backlog.len());
     });
     assert!(
         counts.all_zero(),
         "the composed serving owner loop must allocate/deallocate nothing: {counts:?}"
     );
-    stop.store(true, Ordering::SeqCst);
-    let tails: Vec<Vec<u8>> = got
-        .iter()
-        .map(|lane| lane.lock().unwrap().clone())
-        .collect();
-    for reader in readers {
-        reader.join().expect("sink reader");
-    }
+    let tails = finish_hot_lanes(&mut lanes, &stop);
     drop(holds);
     drop(accept_backlog);
     drop(responder);
 
     let high_water = runtime.serving.max_work_since_recheck;
-    assert!(
-        dns_receiving,
-        "while {HOT_SLOTS} hot relays keep the owner busy, the stalled DNS exchange must              advance through the same turns (query fully written -> Receiving)"
-    );
-    assert!(
-        dns_advanced_any,
-        "the stalled exchange must actually be advanced by the per-turn counter, never zero"
-    );
-    assert!(
-        expired_closed,
-        "the expired-timer slot must be swept closed on an owner turn while the hot slots              stay busy"
-    );
-    assert!(
-        backlog_admitted,
-        "a pending accept backlog must be admitted while hot relays and DNS busy the owner"
-    );
-    assert!(
-        (200..=256).contains(&high_water),
-        "the timer/DNS recheck must fire mid-batch under {HOT_SLOTS} hot slots, high-water \
-         {high_water} outside [200, 256]"
-    );
-    for i in 0..HOT_SLOTS {
-        assert!(
-            (1..=i32::try_from(HOT_SLOTS).expect("HOT_SLOTS fits i32"))
-                .contains(&second_visit_turn[i]),
-            "hot slot {i} must reach its second owner visit within one full round-robin pass \
-             of the competing hot slots ({HOT_SLOTS} batches; one visit per slot per batch, \
-             and {per_slot_kib}KiB needs {visits_per_slot} visits under the 64KiB cap), so \
-             deferring the second visit past a full pass is starvation; observed on turn {turn}",
-            turn = second_visit_turn[i]
-        );
-        assert_eq!(
-            tails[i].len(),
-            per_slot,
-            "hot relay {i} must complete under DNS + backlog load"
-        );
-        let pattern = crate::runtime::reactor::test_offset_pattern(
-            per_slot,
-            30 + u32::try_from(i).expect("hot-slot index fits u32"),
-        );
-        assert_eq!(
-            &tails[i][..],
-            &pattern[..],
-            "hot relay {i} bytes byte-exact"
-        );
-    }
+    assert_hot_relay_stalled_dns(&progress, high_water);
+    assert_hot_relay_lanes(&progress, &tails, per_slot);
 }
 
 fn due_refresh_is_deferred_while_probe_sweep_owns_the_transport_body() {
