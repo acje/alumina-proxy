@@ -76,7 +76,7 @@ release-assurance gates first, telemetry and test hygiene last.
 | D1 | JA4 Block leaves the triggering tunnel active (no Connection branch; Domain excludes the offender) | 9 | med | Confirmed | Fixed — `681e81e`, `0205f69` | P1 | M1 ✓ |
 | D2 | JA4 block decided after the first upstream flush | 1 | med | Confirmed | Fixed — `c0885b3` | P1 | M1 ✓ |
 | D3 | JA4 baseline seeds 16 fingerprints; decision only on overflow | 1 | med | Spec-Intended | Fixed — amendment G1 (SP-015) `68c064c`, `c8336e1`, `48a90f5` | P1 | G1 ✓ |
-| D4 | Per-domain JA4 peer attribution collapses to one global pair | 1 | low | Confirmed | Fix | P2 | M3 |
+| D4 | Per-domain JA4 peer attribution collapses to one global pair | 1 | low | Confirmed | Fixed — `325034e` | P2 | M3 ✓ |
 | D5 | Bare-IP resolver uses plain DNS under default `resolver_trusted` | 1 | med | Confirmed-Conditional | Fixed — amendment G2 (`b48e320`) + G2a (`cbaecfa`) | P2 | G2 ✓ |
 | D6 | Unsafe-surface docs gate can certify production `unsafe` (symlink + second declaration) | 2 | med | Confirmed (1 sub-claim Refuted) | Fixed — `467e13c`…`56eb45d` | P1 | M2 ✓ |
 | D7 | E2E receipt omits untracked compiled build inputs | 2 | low | Confirmed | Fix | P2 | M5 |
@@ -85,12 +85,12 @@ release-assurance gates first, telemetry and test hygiene last.
 | D10 | Listener accept backoff has no pause guard and no poll wake | 1 | med | Confirmed | Fixed — `f86213d`, `22e63d7`, `e110da9` | P2 | M4 ✓ |
 | D11 | 32-bit slot token truncates the generation field | 1 | low | Confirmed-Conditional | Fixed — `ed7f97c` | P2 | M4 ✓ |
 | D12 | Pending setup pool has no per-peer fairness; 128 incomplete heads deny new clients | 1 | low | Confirmed-Conditional | Fixed — `1d7e1e0` (+`00beb19`) | P2 | M4 ✓ |
-| D13 | Report-time drop accounting mutates after the summary is encoded, then clears | 1 | low | Confirmed | Fix | P2 | M3 |
-| D14 | Reserved forced monitor summary displaces the queued `shutdown_final` verdict | 1 | low | Confirmed | Fix | P2 | M3 |
-| D15 | Reopened DNS incident inherits the other family's prior failure snapshot | 1 | low | Confirmed | Fix | P2 | M3 |
+| D13 | Report-time drop accounting mutates after the summary is encoded, then clears | 1 | low | Confirmed | Fixed — `f24d401` | P2 | M3 ✓ |
+| D14 | Reserved forced monitor summary displaces the queued `shutdown_final` verdict | 1 | low | Confirmed | Fixed — `ea48493` | P2 | M3 ✓ |
+| D15 | Reopened DNS incident inherits the other family's prior failure snapshot | 1 | low | Confirmed | Fixed — `e591abd` | P2 | M3 ✓ |
 | D16 | Predictable test/benchmark temp paths permit symlink clobber (4 sites) | 5 | low | Confirmed-Conditional | Fix | P3 | M6 |
 | D17 | Reference deployment admits the whole VPC subnet to the proxy | 1 | low | Confirmed | Correct-documentation | P3 | M7 |
-| D18 | Combined upstream error+readable readiness skips early-activity telemetry | 1 | low | Confirmed-Conditional | Fix | P2 | M3 |
+| D18 | Combined upstream error+readable readiness skips early-activity telemetry | 1 | low | Confirmed-Conditional | Fixed — `5b31ef2` | P2 | M3 ✓ |
 
 Sum check: 9+1+1+1+1+2+2+1+1+1+1+1+1+1+1+5+1+1 = **32**. Mediums: D1(9)+D2(1)+D3(1)+D5(1)+D6(1)+D10(1) = **14**; lows = **18**.
 
@@ -201,7 +201,7 @@ stale `monitor.rs` line citation). Both are citation/precision drift, not false 
 
 Registry: `csf_bf60a65e…` (`ja4-change-detection-bypass`).
 
-### D4 — Per-domain JA4 peer attribution · Confirmed · Fix (M3)
+### D4 — Per-domain JA4 peer attribution · Confirmed · Fixed (M3)
 
 Verification at HEAD: `src/enforcement/monitor.rs:281-282` stores a single global
 `ja4_peer_ip` plus `ja4_peer_ordinal`; `src/log/encoding.rs:1014-1019` emits `d<j>p` only
@@ -212,17 +212,17 @@ Arbitration: F-08 (`docs/alumina-proxy.md:1233`) specifies per-domain
 `d<j>p` = "triggering peer"; SP-013 (`:1160-1181`) makes the triggering peer part of the
 record. **Code violates the spec.**
 
-Fix: per-ordinal peer storage (boot-fixed, zero-heap) or fold peer into the existing
-per-ordinal JA4 record. **Size budget (corrected after evidence bead `alumina-gzqn4.7`):**
-the log slot is **2048 B** (`SLOT_BYTES`, `MONITOR_RECORD_MAX`, `src/log/mod.rs:54-59`),
-not 8,192 B. Current measured worst cases against that slot: `monitor_summary` 763 B
-(1,285 B headroom), `monitor_domain` 1,370 B (678 B), `monitor_capture` 1,237 B (811 B);
-`resolver_probe` 1,857 B (191 B) is the tightest record in the whole vocabulary.
-`d<j>p` renders inside the per-domain batch (`src/log/encoding.rs:1014-1024`), so this fix
-bites `monitor_domain`: at most 11 domains per batch, up to 44 B per address line, so the
-fabricated worst case rises by roughly 484 B to ~1,854 B — it probably fits, but that is an
-estimate, not a measurement, and M3 must pin the re-measured value in the record-geometry
-test. A per-ordinal peer table also adds boot-fixed state and must be accounted.
+**Fixed at `325034e`**: per-ordinal peer storage (boot-fixed, 544 B, zero heap) with one
+`d<j>p` per changed ordinal inside its own domain block. Red evidence: `d0j`/`d0v` rendered
+with **no `d0p`** and only the last ordinal's peer appeared.
+
+**Geometry re-measured, and my estimate was wrong.** Measured `monitor_domain` worst case is
+**1,870 B / 178 B headroom**, not the ~1,854 B I fabricated. The first pin (1,800 B) was also
+wrong: the batch under-filled with 10 single-digit plus 1 two-digit block; the maximal
+eleven two-digit-index batch (11 × 164 B + 66 B framing) is now pinned (`a4fe926`). At 178 B
+`monitor_domain` is now the **tightest record** in the vocabulary, ahead of `resolver_probe`
+(191 B) — which makes the spec's "resolver_probe is the tightest" sentence false and is
+routed to G3 (`alumina-gzqn4.19`).
 
 Test: two domains overflow in one interval; both `d<j>p` present and correct, plus the
 record-geometry test re-measured against 2048 B.
@@ -414,7 +414,7 @@ refused, peer B admitted), `per_peer_cap_frees_only_its_own_peer_seat`,
 `worker_admits_up_to_128_pending_setups_and_rejects_the_129th`,
 `per_peer_pending_capacity_refuses_with_503`. Registry: `csf_0eb83a4a…`.
 
-### D13 — Monitor report-drop count clears before report · Confirmed · Fix (M3)
+### D13 — Monitor report-drop count clears before report · Confirmed · Fixed (M3)
 
 Verification at HEAD: `src/log/mod.rs:986-1017` encodes and commits the **reserved**
 summary first, then enqueues detail batches, mutating `Monitor` via `note_report_drop()`
@@ -423,10 +423,12 @@ state is treated as already reported and the loss count never reaches a summary.
 Spec `docs/alumina-proxy.md:343` makes the summary authoritative and requires
 `report_drops` to count each dropped batch.
 
-Fix: account all report-time losses before encoding the summary, or carry the count
-forward. Registry: `csf_f853ca26…`.
+**Fixed at `f24d401`**: report-time losses are projected before the summary bytes are
+encoded, so the causing summary reports them (`report_drops=1` where it previously showed 0
+while the ring dropped a batch). Rejected: carrying the count to the next summary (defers
+the fact and needs a dirty-carry flag). Registry: `csf_f853ca26…`.
 
-### D14 — Shutdown verdict displaced by reserved summary · Confirmed · Fix (M3)
+### D14 — Shutdown verdict displaced by reserved summary · Confirmed · Fixed (M3)
 
 Verification at HEAD: `src/runtime/owner.rs:30-40` enqueues `shutdown_final` as a normal
 record, then forces `report_monitor_if_due(now, true)`; the forced summary is reserved, and
@@ -434,11 +436,14 @@ record, then forces `report_monitor_if_due(now, true)`; the forced summary is re
 verdict. `src/log/tests.rs:1890-1927` already asserts this displacement.
 
 Spec: the shutdown verdict is the terminal stdout status
-(`docs/alumina-proxy.md` §Lifecycle; priority classes at `1136-1138`). Fix: give
-`shutdown_final` a reserved/highest-priority enqueue, or emit the forced summary before the
-verdict. Registry: `csf_4c8a71c0…`.
+(`docs/alumina-proxy.md` §Lifecycle; priority classes at `1136-1138`).
 
-### D15 — DNS incident inherits prior family snapshot · Confirmed · Fix (M3)
+**Fixed at `ea48493`**: the verdict takes the existing reserved priority class, so it
+survives the forced summary; the only victim left is the spec-sanctioned all-reserved case,
+still counted as loss. Rejected: emit the summary first (detail batches could still push the
+verdict out). Registry: `csf_4c8a71c0…`.
+
+### D15 — DNS incident inherits prior family snapshot · Confirmed · Fixed (M3)
 
 Verification at HEAD: `src/dns/incident_report.rs:321-342` `note_incident_open` overwrites a
 family snapshot only when the incoming `Option` is `Some`; `467-481` `close_window` clears
@@ -446,8 +451,9 @@ family snapshot only when the incoming `Option` is `Some`; `467-481` `close_wind
 full recovery, a later one-family incident therefore reports the other family's earlier
 failure. Telemetry-only; no effect on cache admission or routing.
 
-Fix: clear per-family snapshots on full-recovery window close. Test: recover → reopen one
-family → assert the other family is absent. Registry: `csf_3480bec0…`.
+**Fixed at `e591abd`**: a full-recovery close clears per-family snapshots, so a later
+one-family incident reports only its own family; the within-window stickiness property is
+guarded by its own test. Registry: `csf_3480bec0…`.
 
 ### D16 — Predictable test/bench temp paths · Confirmed-Conditional · Fix (M6)
 
@@ -481,7 +487,7 @@ Disposition: documentation correction — narrow the rule to the workload's iden
 (subnet/instance tag) or state the subnet-trust assumption explicitly. No runtime change.
 Registry: `csf_b3172a74…`.
 
-### D18 — Combined upstream error+readable skips early-activity telemetry · Confirmed-Conditional · Fix (M3)
+### D18 — Combined upstream error+readable skips early-activity telemetry · Confirmed-Conditional · Fixed (M3)
 
 Verification at HEAD: `src/runtime/reactor.rs:1575` and `1616` short-circuit on
 `ready.error` before the pre-gate upstream read path, its tripwire projection (`2749`) and
@@ -489,8 +495,9 @@ its log sink (`2766`). When a single readiness event carries both error and read
 the early-activity fact is never reported. Forwarding remains blocked and the slot closes;
 impact is missed detection/notification for a constrained event combination.
 
-Fix: run the early-read path before the error short-circuit (or emit the error fact
-alongside). Registry: `csf_f165dde7…`.
+**Fixed at `5b31ef2`**: the pre-gate read path runs before the error short-circuit, gated to
+pre-gate upstream only. Zero bytes forwarded, gate cannot open, slot closes; the fact and
+its tripwire projection are recorded. Registry: `csf_f165dde7…`.
 
 ---
 
@@ -643,7 +650,7 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 |---|---|---|---|---|
 | M1 | D1, D2 | `src/runtime/reactor.rs` (+tests) only; no config surface | 3 red tests (Connection/Domain/All with pre-flush bytes); MID runtime; zero-alloc preserved | adversarial | ✓ `0205f69` |
 | M2 | D6 | `scripts/verify.sh` (+`verify_test.py`) only | guard proofs for symlink + second-declaration shapes; `verify.sh docs` | adversarial | ✓ `56eb45d` |
-| M3 | D4, D13, D14, D15, D18 | monitor / log / dns-incident / reactor-readiness | exact-grammar tests; every record kind still ≤ **2048 B** slot (`monitor_domain` headroom 678 B re-measured); per-ordinal peer size budget | standard+ |
+| M3 | D4, D13, D14, D15, D18 | monitor / log / dns-incident / reactor-readiness | exact-grammar tests; every record kind still ≤ **2048 B** slot (`monitor_domain` re-measured to 1,870 B / 178 B); per-ordinal peer size budget | adversarial | ✓ `9e1f95a` |
 | M4 | D9, D10, D11, D12 | reactor / tunnel; deadlines, admission | clock-stepped expiry tests; injected accept error; 32-bit assertion; pool quota test | adversarial | ✓ `e110da9` |
 | M5 | D7, D8 | `scripts/verify.sh` E2E receipt; `scripts/e2e_shutdown.py` | untracked-input rejection; held-open-listener case must FAIL | standard |
 | M6 | D16 | test-only helpers + bench/E2E temp paths | symlink plant test per site; no production path; no new runtime dep | standard |
@@ -668,7 +675,8 @@ D4 is likely rework. G2 is independent of every remaining row and can proceed in
 | D3 | Fixed (G1, SP-015) | `alumina-gzqn4.3` | closed — `48a90f5`, digest `d43d938f…`, source + governance APPROVE; 2 text residuals open |
 | D5 | Fixed (G2 + G2a) | `alumina-gzqn4.4`, `alumina-gzqn4.15` | closed — `cbaecfa`, digest `b9941f00…`, source + governance APPROVE |
 | D9–D12 | Fixed | `alumina-gzqn4.6` | closed — `e110da9`, boundary PASS, review r2 APPROVE |
-| D4, D7–D18 | per §3 | `alumina-gzqn4.1` | registered |
+| D4, D13–D15, D18 | Fixed | `alumina-gzqn4.17` | closed — `9e1f95a`, boundary PASS, review r2 APPROVE |
+| D7, D8, D16, D17 | per §3 | `alumina-gzqn4.1` | registered (M5/M6/M7) |
 
 Epic: `alumina-gzqn4`. Ledger updates go to `alumina-gzqn4.1`; the register above is the
 durable narrative.
@@ -681,6 +689,7 @@ Errors found in this register after publication, corrected forward (never silent
 
 | Date | Row | Correction | Source |
 |---|---|---|---|
+| 2026-11-13 | D4 | `monitor_domain` re-measured after D4: **1,870 B / 178 B headroom**, and it is now the tightest record ahead of `resolver_probe` (191 B). My pre-fix estimate (~1,854 B) was close but fabricated; the first pin (1,800 B) was wrong because the batch under-filled. Spec table still states 1,370 B/678 B — routed to G3 (`alumina-gzqn4.19`). | `alumina-gzqn4.17`, `a4fe926`; `src/log/tests.rs` |
 | 2026-11-12 | D4, §5 G1, §9 M3 | The log slot is **2048 B** (`SLOT_BYTES`, `MONITOR_RECORD_MAX`), not 8,192 B. The 8,170/8,192 figure came from a superseded spec layer (`docs/alumina-proxy.md:1249`) and was carried into v1 of this register. Current measured worst cases: `monitor_summary` 763 B, `monitor_domain` 1,370 B, `monitor_capture` 1,237 B, `resolver_probe` 1,857 B. | `alumina-gzqn4.7` (evidence); `src/log/mod.rs:54-59`; spec `:878-903`, `:1309-1319` |
 
 The same evidence bead recorded that the spec still contains both JA4 keying phrasings
