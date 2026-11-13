@@ -1210,10 +1210,6 @@ impl<'a> ObservedReply<'a> {
 /// # Errors
 ///
 /// Returns every refusal in `DnsError` without any cache mutation.
-#[expect(
-    clippy::too_many_lines,
-    reason = "multi-phase DNS response parser with bounded fixed-buffer parsing"
-)]
 pub fn parse_response(
     ws: &mut ResponseWorkspace,
     zones: &BailiwickZones,
@@ -1230,6 +1226,32 @@ pub fn parse_response(
     ws.extreme_ttl = false;
     ws.supporting_ttl_cap = None;
     let mut reader = Reader::new(msg);
+    let header = read_reply_header(&mut reader, tid)?;
+    read_question(msg, &mut reader, fqdn, family)?;
+    for _ in 0..header.answer_count {
+        let rr = read_rr(msg, &mut reader)?;
+        apply_answer_rr(ws, msg, &mut reader, &rr, family)?;
+    }
+    parse_authority_section(ws, msg, &mut reader, header.authority_count)?;
+    parse_additional_section(msg, &mut reader, header.additional_count)?;
+
+    if reader.remaining() > 0 {
+        return Err(DnsError::TrailingBytes);
+    }
+
+    finish_response(ws, zones, fqdn, family, header.rcode)
+}
+
+/// The fixed reply header plus the section counts a response declares.
+struct ReplyHeader {
+    rcode: u8,
+    answer_count: usize,
+    authority_count: usize,
+    additional_count: usize,
+}
+
+/// Reads the reply header, validating its flags and count bounds in wire order.
+fn read_reply_header(reader: &mut Reader<'_>, tid: u16) -> Result<ReplyHeader, DnsError> {
     let got_tid = reader.u16()?;
     if got_tid != tid {
         return Err(DnsError::BadTid {
@@ -1265,6 +1287,21 @@ pub fn parse_response(
             limit: MAX_TOTAL_RR,
         });
     }
+    Ok(ReplyHeader {
+        rcode,
+        answer_count,
+        authority_count,
+        additional_count,
+    })
+}
+
+/// Reads the single question and matches it against the outstanding query.
+fn read_question(
+    msg: &[u8],
+    reader: &mut Reader<'_>,
+    fqdn: &Fqdn,
+    family: Family,
+) -> Result<(), DnsError> {
     let (qname, after_q) = read_name(msg, reader.pos, true)?;
     reader.pos = after_q;
     let qtype = reader.u16()?;
@@ -1275,116 +1312,148 @@ pub fn parse_response(
     {
         return Err(DnsError::QuestionMismatch);
     }
+    Ok(())
+}
 
-    for _ in 0..answer_count {
-        let rr = read_rr(msg, &mut reader)?;
-        if rr.class != CLASS_IN {
-            return Err(DnsError::BadClass { got: rr.class });
+/// Applies one answer-section record and advances the reader past its rdata.
+fn apply_answer_rr(
+    ws: &mut ResponseWorkspace,
+    msg: &[u8],
+    reader: &mut Reader<'_>,
+    rr: &RawRr,
+    family: Family,
+) -> Result<(), DnsError> {
+    if rr.class != CLASS_IN {
+        return Err(DnsError::BadClass { got: rr.class });
+    }
+    if matches!(rr.ty, TYPE_A | TYPE_AAAA | TYPE_CNAME) && rr.ttl > EXTREME_TTL_THRESHOLD {
+        ws.extreme_ttl = true;
+    }
+    match rr.ty {
+        TYPE_A | TYPE_AAAA | TYPE_CNAME | TYPE_SOA => {
+            let rdata = parse_rdata(msg, rr.rd_start, rr.rdlen, rr.ty)?;
+            apply_rdata(ws, rdata, rr, family)?;
         }
-        if matches!(rr.ty, TYPE_A | TYPE_AAAA | TYPE_CNAME) && rr.ttl > EXTREME_TTL_THRESHOLD {
-            ws.extreme_ttl = true;
-        }
-        match rr.ty {
-            TYPE_A | TYPE_AAAA | TYPE_CNAME | TYPE_SOA => {
-                let rdata = parse_rdata(msg, rr.rd_start, rr.rdlen, rr.ty)?;
-                match rdata {
-                    Rdata::A(ip) => {
-                        if family != Family::A {
-                            // Wrong-family record: discarded silently — no
-                            // address data, no CNAME interaction, and no
-                            // anomaly/telemetry emitted (docs/alumina-proxy.md
-                            // :476; DnsAnomalyKind has no variant for this).
-                            reader.skip(rr.rdlen)?;
-                            continue;
-                        }
-                        let idx = ensure_owner(ws, &rr.owner)?;
-                        ws.owners[idx].push_address(NumericAddr::V4(ip), rr.ttl)?;
-                    }
-                    Rdata::Aaaa(ip) => {
-                        if family != Family::Aaaa {
-                            // Wrong-family record: discarded silently — no
-                            // address data, no CNAME interaction, and no
-                            // anomaly/telemetry emitted (docs/alumina-proxy.md
-                            // :476; DnsAnomalyKind has no variant for this).
-                            reader.skip(rr.rdlen)?;
-                            continue;
-                        }
-                        let idx = ensure_owner(ws, &rr.owner)?;
-                        ws.owners[idx].push_address(NumericAddr::V6(ip), rr.ttl)?;
-                    }
-                    Rdata::Cname(target) => {
-                        let idx = ensure_owner(ws, &rr.owner)?;
-                        ws.owners[idx].push_cname(target, rr.ttl)?;
-                    }
-                    Rdata::Soa { .. } => {}
-                }
+        TYPE_DNAME => return Err(DnsError::DnameUnsupported),
+        _ => {}
+    }
+    reader.skip(rr.rdlen)
+}
+
+/// Applies one parsed answer rdata to the workspace, silently discarding an
+/// address record of the other family.
+fn apply_rdata(
+    ws: &mut ResponseWorkspace,
+    rdata: Rdata,
+    rr: &RawRr,
+    family: Family,
+) -> Result<(), DnsError> {
+    match rdata {
+        Rdata::A(ip) => {
+            if family != Family::A {
+                // Wrong-family record: discarded silently, with no anomaly or
+                // telemetry (docs/alumina-proxy.md:476).
+                return Ok(());
             }
-            TYPE_DNAME => return Err(DnsError::DnameUnsupported),
-            _ => {}
+            let idx = ensure_owner(ws, &rr.owner)?;
+            ws.owners[idx].push_address(NumericAddr::V4(ip), rr.ttl)
         }
-        reader.skip(rr.rdlen)?;
+        Rdata::Aaaa(ip) => {
+            if family != Family::Aaaa {
+                // Wrong-family record: discarded silently, with no anomaly or
+                // telemetry (docs/alumina-proxy.md:476).
+                return Ok(());
+            }
+            let idx = ensure_owner(ws, &rr.owner)?;
+            ws.owners[idx].push_address(NumericAddr::V6(ip), rr.ttl)
+        }
+        Rdata::Cname(target) => {
+            let idx = ensure_owner(ws, &rr.owner)?;
+            ws.owners[idx].push_cname(target, rr.ttl)
+        }
+        Rdata::Soa { .. } => Ok(()),
     }
+}
 
-    parse_authority_section(ws, msg, &mut reader, authority_count)?;
-    parse_additional_section(msg, &mut reader, additional_count)?;
-
-    if reader.remaining() > 0 {
-        return Err(DnsError::TrailingBytes);
-    }
-
+/// Roots the CNAME chain, collects terminal bindings, and classifies the rcode.
+fn finish_response(
+    ws: &mut ResponseWorkspace,
+    zones: &BailiwickZones,
+    fqdn: &Fqdn,
+    family: Family,
+    rcode: u8,
+) -> Result<Outcome, DnsError> {
     let root = DnsName::from_exact(fqdn.as_str().as_bytes());
     let (chain, chain_ttl) = root_chain(&root, zones, ws)?;
     let terminal = chain.terminal.as_slice();
-    let negative_cap = ws.soa.as_ref().map(|(_owner, ttl, minimum)| {
-        wire_ttl_floor(chain_ttl.min(u64::from(*ttl)).min(u64::from(*minimum)))
-    });
-
-    let mut bindings = BindingList::default();
-    let terminal_owner = ws.owners[..ws.owner_len]
-        .iter()
-        .find(|o| o.name.eq_bytes(terminal));
-    if let Some(owner) = terminal_owner {
-        for (addr, _) in &owner.addrs[..usize::from(owner.addr_len)] {
-            bindings.push(*addr)?;
-        }
-    }
-
     match rcode {
-        RCODE_NOERROR => {
-            if !bindings.is_empty() {
-                let mut earliest = chain_ttl;
-                if let Some(owner) = terminal_owner {
-                    for (_, addr_ttl) in &owner.addrs[..usize::from(owner.addr_len)] {
-                        earliest = earliest.min(u64::from(*addr_ttl));
-                    }
-                }
-                ws.supporting_ttl_cap = Some(wire_ttl_floor(earliest));
-                return Ok(Outcome::Positive {
-                    family,
-                    bindings,
-                    ttl: earliest,
-                });
-            }
-            let soa = classify_soa(terminal, ws.soa.as_ref())?;
-            soa.map_or(Err(DnsError::EmptyNoerrorWithoutSoa), |soa| {
-                ws.supporting_ttl_cap = negative_cap;
-                Ok(Outcome::NoData {
-                    family,
-                    soa: Some(soa),
-                })
-            })
-        }
-        RCODE_NXDOMAIN => {
-            let soa = classify_soa(terminal, ws.soa.as_ref())?;
-            let terminal_data = terminal_owner.is_some_and(|o| o.has_addr_data);
-            if terminal_data {
-                return Err(DnsError::TerminalWithoutData);
-            }
-            ws.supporting_ttl_cap = negative_cap;
-            Ok(Outcome::NxDomain { soa })
-        }
+        RCODE_NOERROR => noerror_outcome(ws, family, terminal, chain_ttl),
+        RCODE_NXDOMAIN => nxdomain_outcome(ws, terminal, chain_ttl),
         code => Err(DnsError::BadRcode { code }),
     }
+}
+
+/// The conservative negative TTL cap: the chain, SOA, and SOA MINIMUM floor.
+fn negative_cap(ws: &ResponseWorkspace, chain_ttl: u64) -> Option<u32> {
+    ws.soa.as_ref().map(|(_owner, ttl, minimum)| {
+        wire_ttl_floor(chain_ttl.min(u64::from(*ttl)).min(u64::from(*minimum)))
+    })
+}
+
+/// Assembles the positive or NODATA outcome for a NOERROR reply.
+fn noerror_outcome(
+    ws: &mut ResponseWorkspace,
+    family: Family,
+    terminal: &[u8],
+    chain_ttl: u64,
+) -> Result<Outcome, DnsError> {
+    let mut bindings = BindingList::default();
+    let mut earliest = chain_ttl;
+    if let Some(owner) = ws.owners[..ws.owner_len]
+        .iter()
+        .find(|o| o.name.eq_bytes(terminal))
+    {
+        for (addr, addr_ttl) in &owner.addrs[..usize::from(owner.addr_len)] {
+            bindings.push(*addr)?;
+            earliest = earliest.min(u64::from(*addr_ttl));
+        }
+    }
+    if !bindings.is_empty() {
+        ws.supporting_ttl_cap = Some(wire_ttl_floor(earliest));
+        return Ok(Outcome::Positive {
+            family,
+            bindings,
+            ttl: earliest,
+        });
+    }
+    let Some(soa) = classify_soa(terminal, ws.soa.as_ref())? else {
+        return Err(DnsError::EmptyNoerrorWithoutSoa);
+    };
+    let cap = negative_cap(ws, chain_ttl);
+    ws.supporting_ttl_cap = cap;
+    Ok(Outcome::NoData {
+        family,
+        soa: Some(soa),
+    })
+}
+
+/// Assembles the NXDOMAIN outcome, rejecting terminal address data.
+fn nxdomain_outcome(
+    ws: &mut ResponseWorkspace,
+    terminal: &[u8],
+    chain_ttl: u64,
+) -> Result<Outcome, DnsError> {
+    let soa = classify_soa(terminal, ws.soa.as_ref())?;
+    let terminal_data = ws.owners[..ws.owner_len]
+        .iter()
+        .find(|o| o.name.eq_bytes(terminal))
+        .is_some_and(|o| o.has_addr_data);
+    if terminal_data {
+        return Err(DnsError::TerminalWithoutData);
+    }
+    let cap = negative_cap(ws, chain_ttl);
+    ws.supporting_ttl_cap = cap;
+    Ok(Outcome::NxDomain { soa })
 }
 
 fn parse_authority_section(
