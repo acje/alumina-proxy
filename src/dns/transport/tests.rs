@@ -643,7 +643,7 @@ fn run_exchange_expecting(
 /// The turn budget one scripted exchange is driven under: a scripted peer must
 /// conclude well inside it, so an exhausted budget is a test failure, not a
 /// tolerant pass.
-const EXCHANGE_DRIVE_TURNS: usize = 256;
+const EXCHANGE_DRIVE_TURNS: usize = 200;
 
 /// A startup case seated on a scripted responder that replays one positive-A
 /// reply per connection: the first allowlist name and a fresh deadline travel
