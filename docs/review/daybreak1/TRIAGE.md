@@ -4,7 +4,7 @@ Status: triage v1, 2026-11-12. Working register, not an acceptance record.
 Epic: `alumina-gzqn4` · Ledger: `alumina-gzqn4.1` · First mission: `alumina-gzqn4.2`
 
 Authority: `docs/alumina-proxy.md` is the sole byte-canonical governing specification
-(sha256 `d43d938f…`, byte-frozen). This document records triage verdicts that arbitrate
+(sha256 `73bd18be…`, byte-frozen). This document records triage verdicts that arbitrate
 code-versus-spec deviations. It does not amend the specification, and it is not
 authoritative over `bd`: binding dispositions live in the ledger bead.
 

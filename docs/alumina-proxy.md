@@ -951,9 +951,10 @@ opt-out. Expression syntax: inline table `{ action, scope }` for `notify`/`block
 ### T4 — JA4 action-selecting
 
 The JA4 action vocabulary is the FULL per-FQDN set: `ignore` | `notify` | `block` (+
-`tarpit` reserved when it ships). The trigger is CHANGE-ONLY: a delta from the
-per-ordinal+address baseline. First-seen establishes the baseline (recording, never an
-action); `ignore` suppresses the change signal only — the baseline is still recorded. The
+`tarpit` reserved when it ships). The trigger is CHANGE-ONLY: a delta from the per-ordinal
+baseline. The ordinal's first distinct fingerprint establishes the baseline (recording,
+never an action); every later distinct fingerprint is a change signal (SP-015); `ignore`
+suppresses the change signal only — the baseline is still recorded. The
 prior "never action-selecting" clause (§Reconciliation with the cipher/ALPN policy ban) is
 REVERSED; the "no cipher-suite/ALPN policy" and "no negotiation influence" guarantees are
 preserved — JA4 still introduces no cipher/ALPN policy and exerts no negotiation influence;
@@ -1692,7 +1693,7 @@ with `BaselineOutcome { Seed, Changed, Unchanged, Overflow }`; a new in-capacity
 capacity overflow both count as a change signal.
 
 Third, an explicit loss flag exists on detail suppression:
-`note_fact_ja4_change` (`src/enforcement/monitor.rs:272-284`) counts the change and retains
+`note_fact_ja4_change` (`src/enforcement/monitor.rs:269-280`) counts the change and retains
 the value and peer; the overflow path additionally latches the per-ordinal `ja4_change_loss`
 flag (`note_fact_ja4_change_loss`, `src/enforcement/monitor.rs`) — the deviation decision
 fires regardless of set capacity, but the overflowed value is not added to the set, so the
