@@ -164,7 +164,8 @@ case "$PROXY" in
             'ech = { action = "notify", scope = "connection" }' \
             '[allowed_fqdn."example.com:443"]' \
             'early_data = { action = "notify", scope = "connection" }' \
-            'ja4 = { action = "notify", scope = "connection" }' > /work/config.toml
+            'ja4 = { action = "notify", scope = "connection" }' \
+            'dns_assurance = "resolver_trusted"' > /work/config.toml
         setpriv --reuid 65534 --regid 65534 --clear-groups \
             /bin/sh -c "cd /work && exec /work/alumina" >/tmp/proxy.log 2>&1 &
         ALU=$!

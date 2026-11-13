@@ -9,7 +9,7 @@ const RETAINED_OFFSET: usize = 137;
 
 fn config(port: u16) -> crate::config::Config {
     let doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
     );
     crate::config::parse_config_document(&doc).expect("valid test config")
 }
@@ -583,7 +583,7 @@ fn serve_on_cfg(port: u16, cfg: &crate::config::Config) -> Serving {
 
 fn cfg_doc1(port: u16, any_scope: &str, kind: &str, action_scope: &str) -> crate::config::Config {
     let doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"{any_scope}\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"{any_scope}\" }}\ntls_profile = {{ action = \"block\", scope = \"{any_scope}\" }}\nech = {{ action = \"block\", scope = \"{any_scope}\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"{any_scope}\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"{any_scope}\" }}\ntls_profile = {{ action = \"block\", scope = \"{any_scope}\" }}\nech = {{ action = \"block\", scope = \"{any_scope}\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\ndns_assurance = \"resolver_trusted\"\n"
     );
     crate::config::parse_config_document(&doc).expect("valid enforcement test config")
 }
@@ -593,7 +593,7 @@ fn cfg_doc1(port: u16, any_scope: &str, kind: &str, action_scope: &str) -> crate
 /// (H1, alumina-qwzns).
 fn cfg_two_ports(port: u16, kind: &str, action_scope: &str) -> crate::config::Config {
     let doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\ndns_assurance = \"resolver_trusted\"\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\ndns_assurance = \"resolver_trusted\"\n"
     );
     crate::config::parse_config_document(&doc).expect("valid two-port enforcement test config")
 }
@@ -800,7 +800,7 @@ fn wait_readable(stream: &mio::net::TcpStream, label: &str) {
 /// controllable (possibly closed) upstream port.
 fn config_pair(port: u16, upstream_port: u16) -> crate::config::Config {
     let doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:{upstream_port}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:{upstream_port}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
     );
     crate::config::parse_config_document(&doc).expect("valid retry test config")
 }
@@ -3129,7 +3129,7 @@ mod dialing {
             "the loopback listener port must be non-443 for this regression"
         );
         let cfg_doc = format!(
-            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:{dial_port}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:{dial_port}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
         );
         let cfg = crate::config::parse_config_document(&cfg_doc).expect("valid non-443 config");
         with_serving_stack_cfg(port, cfg, move |serving| {
@@ -6963,7 +6963,7 @@ mod enforcement {
         use crate::inspection::connect::Feed;
         let port = ephemeral_port();
         let doc = format!(
-            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\n"
+            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\ndns_assurance = \"resolver_trusted\"\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\ndns_assurance = \"resolver_trusted\"\n"
         );
         let cfg =
             crate::config::parse_config_document(&doc).expect("valid two-port ja4-block config");
@@ -9219,7 +9219,7 @@ mod ja4_baseline {
 
     fn cfg_ja4_block(port: u16, scope: &str) -> crate::config::Config {
         let doc = format!(
-            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"connection\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"{scope}\" }}\n"
+            "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"connection\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[bad_handshake]\nthreshold = 3\nwindow_secs = 60\n[illegal_fqdn]\nthreshold = 3\nwindow_secs = 60\n[ja4]\nthreshold = 3\nwindow_secs = 60\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"{scope}\" }}\ndns_assurance = \"resolver_trusted\"\n"
         );
         crate::config::parse_config_document(&doc).expect("valid ja4 block test config")
     }
@@ -9932,7 +9932,7 @@ fn idle_negative_expiry_does_not_revive_positive_bindings() {
             use std::os::unix::net::UnixStream;
 
             for nx in [false, true] {
-                let doc = "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n";
+                let doc = "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 1\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\n[allowed_fqdn.\"beta.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\n";
                 let config = crate::config::parse_config_document(doc).unwrap().with_kernel_assigned_test_listener();
                 assert_eq!(config.allowlist().get(0).unwrap().as_str(), "alpha.example.org");
                 let mut storage = ServeStorage::boot(&config).unwrap();

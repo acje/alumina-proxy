@@ -32,7 +32,7 @@ fn any_illegal_default() -> String {
 
 /// A per-FQDN entry with raw `early_data`/`ja4` value spellings.
 fn entry(key: &str, early: &str, ja4: &str) -> String {
-    format!("[allowed_fqdn.\"{key}\"]\nearly_data = {early}\nja4 = {ja4}\n")
+    format!("[allowed_fqdn.\"{key}\"]\nearly_data = {early}\nja4 = {ja4}\ndns_assurance = \"resolver_trusted\"\n")
 }
 
 /// A per-FQDN entry with table-form controls.
@@ -507,7 +507,7 @@ fn rejects_any_illegal_unknown_action() {
 #[test]
 fn rejects_missing_early_data() {
     let doc = format!(
-        "{}{}[allowed_fqdn.\"a.example:443\"]\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n",
+        "{}{}[allowed_fqdn.\"a.example:443\"]\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n",
         base(),
         any_illegal_default()
     );
@@ -763,7 +763,7 @@ fn rejects_more_than_32_tables() {
     for i in 0..33 {
         let _ = write!(
             doc,
-            "[allowed_fqdn.\"n{i:02}.example:443\"]\nearly_data = {{ action = \"block\", scope = \"fqdn\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\n"
+            "[allowed_fqdn.\"n{i:02}.example:443\"]\nearly_data = {{ action = \"block\", scope = \"fqdn\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\ndns_assurance = \"resolver_trusted\"\n"
         );
     }
     let err = parse_config_document(&doc).unwrap_err();
@@ -826,7 +826,7 @@ fn keyed_document(count: usize, action: &str, scope: &str) -> String {
     for i in 0..count {
         let _ = write!(
             doc,
-            "[allowed_fqdn.\"{}\"]\nearly_data = {{ action = \"{action}\", scope = \"{scope}\" }}\nja4 = {{ action = \"{action}\", scope = \"{scope}\" }}\n",
+            "[allowed_fqdn.\"{}\"]\nearly_data = {{ action = \"{action}\", scope = \"{scope}\" }}\nja4 = {{ action = \"{action}\", scope = \"{scope}\" }}\ndns_assurance = \"resolver_trusted\"\n",
             hundred_byte_name(i)
         );
     }

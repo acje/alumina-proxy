@@ -16,13 +16,13 @@ fn group(entries: &str) -> String {
 
 fn entry(key: &str) -> String {
     format!(
-        "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+        "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
     )
 }
 
 fn entry_with_bailiwick(key: &str, suffixes: &str) -> String {
     format!(
-        "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ncname_bailiwick = {suffixes}\n"
+        "[allowed_fqdn.\"{key}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\ncname_bailiwick = {suffixes}\n"
     )
 }
 
@@ -97,7 +97,7 @@ fn early_data_only_configs_parse_identically() {
 #[test]
 fn rejects_unknown_key_besides_early_data_ja4_and_cname_bailiwick() {
     let doc = group(
-        "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ncname_bailiwick = [\"example.com\"]\nbogus = \"x\"\n",
+        "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\ncname_bailiwick = [\"example.com\"]\nbogus = \"x\"\n",
     );
     let err = parse_config_document(&doc).unwrap_err();
     assert!(
@@ -236,7 +236,7 @@ fn rejects_overlong_labels_and_names() {
 #[test]
 fn rejects_wrong_type_for_cname_bailiwick() {
     let doc = group(
-        "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ncname_bailiwick = \"example.com\"\n",
+        "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\ncname_bailiwick = \"example.com\"\n",
     );
     let err = parse_config_document(&doc).unwrap_err();
     assert!(
@@ -248,7 +248,7 @@ fn rejects_wrong_type_for_cname_bailiwick() {
 #[test]
 fn rejects_non_string_suffix_element() {
     let doc = group(
-        "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ncname_bailiwick = [\"example.com\", 42]\n",
+        "[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\ncname_bailiwick = [\"example.com\", 42]\n",
     );
     let err = parse_config_document(&doc).unwrap_err();
     assert!(

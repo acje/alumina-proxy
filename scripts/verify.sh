@@ -523,7 +523,7 @@ boot_fixtures() {
             'python3 /app/scripts/fixture_metadata_probe.py /fixture-alumina "$1" >/dev/null' \
             'setpriv --reuid 65534 --regid 65534 --clear-groups /bin/sh -c "test -x /fixture-alumina" || { echo "FIXTURE-BLOCKED: variant not executable by uid 65534" >&2; exit 1; }' \
             'mkdir -p /work' \
-            "printf '%s\\n' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' 'resolver = [\"127.0.0.1\"]' '[any_illegal]' 'connect_parse = { action = \"notify\", scope = \"connection\" }' 'host_not_allowlisted = { action = \"notify\", scope = \"connection\" }' 'tls_profile = { action = \"notify\", scope = \"connection\" }' 'ech = { action = \"notify\", scope = \"connection\" }' '[allowed_fqdn.\"example.com:443\"]' 'early_data = { action = \"notify\", scope = \"connection\" }' 'ja4 = { action = \"notify\", scope = \"connection\" }' > /work/config.toml" \
+            "printf '%s\\n' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' 'resolver = [\"127.0.0.1\"]' '[any_illegal]' 'connect_parse = { action = \"notify\", scope = \"connection\" }' 'host_not_allowlisted = { action = \"notify\", scope = \"connection\" }' 'tls_profile = { action = \"notify\", scope = \"connection\" }' 'ech = { action = \"notify\", scope = \"connection\" }' '[allowed_fqdn.\"example.com:443\"]' 'early_data = { action = \"notify\", scope = \"connection\" }' 'ja4 = { action = \"notify\", scope = \"connection\" }' 'dns_assurance = \"resolver_trusted\"' > /work/config.toml" \
             'chown -R 65534:65534 /work'
         true
     }

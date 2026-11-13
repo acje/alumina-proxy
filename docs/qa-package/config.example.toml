@@ -36,8 +36,9 @@ resolver = ["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 # (action "notify"|"block"; scope "connection"|"all").
 # Every [allowed_fqdn] table carries the mandatory early_data and ja4 inline
 # tables, each { action = "notify"|"block", scope = "connection"|"fqdn"|"all" }
-# or the bare "ignore" opt-out; every key is mandatory, a missing/extra/unknown
-# key or table is exit 78.
+# or the bare "ignore" opt-out, plus the mandatory dns_assurance string key
+# (resolver_trusted | resolver_authenticated | delegated_dnssec); every key is
+# mandatory, a missing/extra/unknown key or table is exit 78.
 [any_illegal]
 connect_parse = { action = "notify", scope = "connection" }
 host_not_allowlisted = { action = "notify", scope = "connection" }
@@ -63,9 +64,12 @@ window_secs = 900
 [allowed_fqdn."api.github.com:443"]
 early_data = { action = "notify", scope = "connection" }
 ja4 = { action = "notify", scope = "connection" }
+dns_assurance = "resolver_trusted"
 [allowed_fqdn."example.com:443"]
 early_data = { action = "notify", scope = "connection" }
 ja4 = { action = "notify", scope = "connection" }
+dns_assurance = "resolver_trusted"
 [allowed_fqdn."www.example.net:443"]
 early_data = { action = "notify", scope = "connection" }
 ja4 = { action = "notify", scope = "connection" }
+dns_assurance = "resolver_trusted"

@@ -198,7 +198,7 @@ fn build_positive(query: &[u8]) -> Option<Vec<u8>> {
 /// loopback responder can resolve it.
 fn config_doc(listen_port: u16) -> String {
     format!(
-        "listen = \"127.0.0.1:{listen_port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"127.0.0.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"notify\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+        "listen = \"127.0.0.1:{listen_port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"127.0.0.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"notify\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
     )
 }
 

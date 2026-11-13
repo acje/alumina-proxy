@@ -99,9 +99,11 @@ printf '%s\n' \
     '[allowed_fqdn."drain.example.org:443"]' \
     'early_data = { action = "notify", scope = "connection" }' \
     'ja4 = { action = "notify", scope = "connection" }' \
+    'dns_assurance = "resolver_trusted"' \
     '[allowed_fqdn."force.example.org:443"]' \
     'early_data = { action = "notify", scope = "connection" }' \
-    'ja4 = { action = "notify", scope = "connection" }' > /work/config.toml
+    'ja4 = { action = "notify", scope = "connection" }' \
+    'dns_assurance = "resolver_trusted"' > /work/config.toml
 chown -R 65534:65534 /work
 SNIP
 )

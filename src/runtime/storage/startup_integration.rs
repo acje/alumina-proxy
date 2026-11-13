@@ -16,7 +16,7 @@ fn config_with(names: &str, allowance: u8, listen_port: u16) -> Config {
         let name = name.trim_matches('"');
         let _ = write!(
             doc,
-            "[allowed_fqdn.\"{name}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+            "[allowed_fqdn.\"{name}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
         );
     }
     parse_config_document(&doc).expect("valid test config")
@@ -460,10 +460,10 @@ fn normally_configured_occupied_listen_addr_is_a_bind_error_after_ready() {
         other => panic!("unexpected startup error: {other:?}"),
     }
     let zero_parse = parse_config_document(
-        "listen = \"127.0.0.1:0\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
+        "listen = \"127.0.0.1:0\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\n",
     );
     parse_config_document(
-        "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\n",
+        "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"alpha.example.org:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\n",
     )
     .expect("the identical document at a legal port must stay valid");
     match zero_parse {
@@ -541,7 +541,7 @@ fn widest_allowlist_config() -> Config {
         assert_eq!(name.len(), FQDN_MAX_LEN, "the widest legal FQDN");
         let _ = write!(
             doc,
-            "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+            "[allowed_fqdn.\"{name}:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
         );
     }
     assert!(
@@ -862,6 +862,7 @@ fn cross_suffix_startup_doc(bailiwick_target: Option<&str>) -> String {
          [allowed_fqdn.\"alpha.example.org:443\"]\n\
          {bailiwick_clause}\
          early_data = {{ action = \"notify\", scope = \"connection\" }}\n\
-         ja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
+         ja4 = {{ action = \"notify\", scope = \"connection\" }}\n\
+         dns_assurance = \"resolver_trusted\"\n"
     )
 }
