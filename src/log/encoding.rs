@@ -10,6 +10,7 @@ use crate::dns::cache::evidence::{AssuranceRequirement, ProofClass};
 use crate::dns::cache::grade_key::{FamilySnapshot, Outcome, RetainedKind};
 #[cfg(test)]
 use crate::dns::cache::{Cache, CacheError, NameIndex};
+use crate::enforcement::monitor::ConsumedCapture;
 use crate::runtime::storage::{AssuranceBoot, AssuranceSnapshot};
 
 /// A single encoded field. `OptVar` variants emit nothing when the value is
@@ -430,7 +431,7 @@ fn write_header(w: &mut Entry<'_>, level: Level, kind: Kind) -> bool {
 
 /// True when a field value is present; an absent optional value emits nothing,
 /// so a caller never supplies an empty quoted value.
-fn val_present(val: Val<'_>) -> bool {
+const fn val_present(val: Val<'_>) -> bool {
     !matches!(
         val,
         Val::OptStr(None) | Val::OptAddr(None) | Val::OptU64(None)
@@ -1068,13 +1069,46 @@ pub(super) fn encode_monitor_domain_batch(
     fitted.then_some(w.len)
 }
 
-/// Encodes one best-effort `monitor_capture` batch: its own hardcoded header,
-/// `secs`, `part=n/total`, then up to [`CAPTURE_BATCH`] capture details scanned
-/// ascending from `start`, advancing `start` past every examined detail.
+/// Writes one `x<i>*` capture detail: its slot, generation, fact, and effect.
+fn write_capture_detail(w: &mut Entry<'_>, capture: ConsumedCapture, index: u32) -> bool {
+    push_indexed_key_u64(w, b"x", index, b"s", capture.slot as u64)
+        && push_indexed_key_u64(w, b"x", index, b"g", capture.generation)
+        && push_indexed_token_prefix(w, b"x", index, b"t")
+        && push_fact_token(w, capture.detail.fact)
+        && push_indexed_token_prefix(w, b"x", index, b"a")
+        && push_effect_token(w, capture.detail.effect)
+}
+
+/// Scans capture details ascending from `start`, writing up to [`CAPTURE_BATCH`]
+/// of them, and records the next unexamined detail in `start` only on success.
 #[expect(
     clippy::expect_used,
     reason = "capture detail index is bounded by CAPTURE_DETAIL_LEN=64, which fits u32"
 )]
+fn write_capture_details(w: &mut Entry<'_>, monitor: &Monitor, start: &mut usize) -> bool {
+    let mut packed = 0usize;
+    let mut index = *start;
+    while index < monitor.capture_detail_len() {
+        let Some(capture) = monitor.capture_detail(index) else {
+            break;
+        };
+        let index32 = u32::try_from(index).expect("capture detail index fits u32");
+        if !write_capture_detail(w, capture, index32) {
+            return false;
+        }
+        packed += 1;
+        index += 1;
+        if packed == CAPTURE_BATCH {
+            break;
+        }
+    }
+    *start = index;
+    true
+}
+
+/// Encodes one best-effort `monitor_capture` batch: its own hardcoded header,
+/// `secs`, `part=n/total`, then up to [`CAPTURE_BATCH`] capture details scanned
+/// ascending from `start`, advancing `start` past every examined detail.
 pub(super) fn encode_monitor_capture_batch(
     slot_buf: &mut [u8; SLOT_BYTES],
     secs: u64,
@@ -1087,50 +1121,10 @@ pub(super) fn encode_monitor_capture_batch(
         buf: slot_buf,
         len: 0,
     };
-    if !w.push(b"level=info kind=monitor_capture") {
-        return None;
-    }
-    if !push_u64(&mut w, b"secs", secs) {
-        return None;
-    }
-    if !w.push(b" part=") || fmt::Write::write_fmt(&mut w, format_args!("{part}/{total}")).is_err()
-    {
-        return None;
-    }
-    let mut packed = 0usize;
-    let mut index = *start;
-    while index < monitor.capture_detail_len() {
-        let Some(cap) = monitor.capture_detail(index) else {
-            break;
-        };
-        let index32 = u32::try_from(index).expect("capture detail index fits u32");
-        if !push_indexed_key_u64(&mut w, b"x", index32, b"s", cap.slot as u64) {
-            return None;
-        }
-        if !push_indexed_key_u64(&mut w, b"x", index32, b"g", cap.generation) {
-            return None;
-        }
-        if !push_indexed_token_prefix(&mut w, b"x", index32, b"t")
-            || !push_fact_token(&mut w, cap.detail.fact)
-        {
-            return None;
-        }
-        if !push_indexed_token_prefix(&mut w, b"x", index32, b"a")
-            || !push_effect_token(&mut w, cap.detail.effect)
-        {
-            return None;
-        }
-        packed += 1;
-        index += 1;
-        if packed == CAPTURE_BATCH {
-            break;
-        }
-    }
-    *start = index;
-    if !w.push(b"\n") {
-        return None;
-    }
-    Some(w.len)
+    let fitted = write_batch_head(&mut w, b"monitor_capture", secs, part, total)
+        && write_capture_details(&mut w, monitor, start)
+        && w.push(b"\n");
+    fitted.then_some(w.len)
 }
 
 fn push_u64(w: &mut Entry<'_>, key: &[u8], value: u64) -> bool {
