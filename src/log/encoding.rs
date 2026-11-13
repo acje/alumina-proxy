@@ -428,42 +428,45 @@ fn write_header(w: &mut Entry<'_>, level: Level, kind: Kind) -> bool {
         && w.push(kind.as_str().as_bytes())
 }
 
+/// True when a field value is present; an absent optional value emits nothing,
+/// so a caller never supplies an empty quoted value.
+fn val_present(val: Val<'_>) -> bool {
+    !matches!(
+        val,
+        Val::OptStr(None) | Val::OptAddr(None) | Val::OptU64(None)
+    )
+}
+
+/// Writes the value half of one field: quoted text, decimal integer, quoted
+/// address, or family debug token.
+fn write_val(w: &mut Entry<'_>, val: Val<'_>) -> bool {
+    match val {
+        Val::Str(s) | Val::OptStr(Some(s)) => w.push(b"\"") && push_escaped(w, s) && w.push(b"\""),
+        Val::U64(value) | Val::OptU64(Some(value)) => {
+            fmt::Write::write_fmt(w, format_args!("{value}")).is_ok()
+        }
+        Val::OptAddr(Some(addr)) => {
+            w.push(b"\"")
+                && fmt::Write::write_fmt(w, format_args!("{addr}")).is_ok()
+                && w.push(b"\"")
+        }
+        Val::Family(family) => fmt::Write::write_fmt(w, format_args!("{family:?}")).is_ok(),
+        Val::OptStr(None) | Val::OptAddr(None) | Val::OptU64(None) => true,
+    }
+}
+
+/// Writes one ` key=value` field, or nothing when its value is absent.
+fn write_field(w: &mut Entry<'_>, field: &Field<'_>) -> bool {
+    if !val_present(field.val) {
+        return true;
+    }
+    w.push(b" ") && w.push(field.key.as_bytes()) && w.push(b"=") && write_val(w, field.val)
+}
+
 fn write_fields(w: &mut Entry<'_>, fields: &[Field<'_>]) -> bool {
     for field in fields {
-        if let Val::OptStr(None) | Val::OptAddr(None) | Val::OptU64(None) = field.val {
-            continue;
-        }
-        if !w.push(b" ") || !w.push(field.key.as_bytes()) || !w.push(b"=") {
+        if !write_field(w, field) {
             return false;
-        }
-        match field.val {
-            Val::Str(s) | Val::OptStr(Some(s)) => {
-                if !w.push(b"\"") || !push_escaped(w, s) || !w.push(b"\"") {
-                    return false;
-                }
-            }
-            Val::U64(value) | Val::OptU64(Some(value)) => {
-                if fmt::Write::write_fmt(w, format_args!("{value}")).is_err() {
-                    return false;
-                }
-            }
-            Val::OptAddr(Some(addr)) => {
-                if !w.push(b"\"") {
-                    return false;
-                }
-                if fmt::Write::write_fmt(w, format_args!("{addr}")).is_err() {
-                    return false;
-                }
-                if !w.push(b"\"") {
-                    return false;
-                }
-            }
-            Val::Family(family) => {
-                if fmt::Write::write_fmt(w, format_args!("{family:?}")).is_err() {
-                    return false;
-                }
-            }
-            Val::OptStr(None) | Val::OptAddr(None) | Val::OptU64(None) => {}
         }
     }
     true
