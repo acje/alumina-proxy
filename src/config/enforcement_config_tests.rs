@@ -523,7 +523,7 @@ fn rejects_missing_early_data() {
 #[test]
 fn rejects_missing_ja4() {
     let doc = format!(
-        "{}{}[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\n",
+        "{}{}[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n",
         base(),
         any_illegal_default()
     );
