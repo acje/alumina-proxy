@@ -291,7 +291,6 @@ pub(super) fn encode_entry_frame(
     Ok(Some(w.len))
 }
 
-/// Writes the test-only `entry_frame` header and the caller's name and port.
 #[cfg(test)]
 fn write_entry_frame_open(w: &mut Entry<'_>, fqdn: &Fqdn) -> bool {
     w.push(b"level=info kind=entry_frame name=\"")
@@ -354,7 +353,6 @@ pub(super) fn encode_dns_assurance(
     Some(w.len)
 }
 
-/// Writes the caller's `seq=` and `phase=` identity fields.
 fn write_assurance_identity(w: &mut Entry<'_>, seq: u64, phase: AssurancePhase) -> bool {
     w.push(b" seq=")
         && fmt::Write::write_fmt(w, format_args!("{seq}")).is_ok()
@@ -362,7 +360,6 @@ fn write_assurance_identity(w: &mut Entry<'_>, seq: u64, phase: AssurancePhase) 
         && w.push(phase.as_str().as_bytes())
 }
 
-/// Writes the canonical `level=`/`kind=`/`name=`/`port=`/`secs=` prefix.
 fn write_assurance_preamble(w: &mut Entry<'_>, kind: Kind, fqdn: &Fqdn, secs: u64) -> bool {
     write_header(w, Level::Info, kind)
         && w.push(b" name=\"")
@@ -416,7 +413,6 @@ pub(super) fn encode_dns_assurance_unknown(
     fitted.then_some(w.len)
 }
 
-/// Writes the unknown-snapshot boot facts and the closing marker.
 fn write_assurance_unknown_tail(w: &mut Entry<'_>, boot: AssuranceBoot) -> bool {
     w.push(b" seq=0 phase=boot")
         && append_assurance_boot(w, boot)
@@ -429,8 +425,6 @@ fn write_header(w: &mut Entry<'_>, level: Level, kind: Kind) -> bool {
         && w.push(kind.as_str().as_bytes())
 }
 
-/// True when a field value is present; an absent optional value emits nothing,
-/// so a caller never supplies an empty quoted value.
 const fn val_present(val: Val<'_>) -> bool {
     !matches!(
         val,
@@ -438,8 +432,6 @@ const fn val_present(val: Val<'_>) -> bool {
     )
 }
 
-/// Writes the value half of one field: quoted text, decimal integer, quoted
-/// address, or family debug token.
 fn write_val(w: &mut Entry<'_>, val: Val<'_>) -> bool {
     match val {
         Val::Str(s) | Val::OptStr(Some(s)) => w.push(b"\"") && push_escaped(w, s) && w.push(b"\""),
@@ -456,7 +448,6 @@ fn write_val(w: &mut Entry<'_>, val: Val<'_>) -> bool {
     }
 }
 
-/// Writes one ` key=value` field, or nothing when its value is absent.
 fn write_field(w: &mut Entry<'_>, field: &Field<'_>) -> bool {
     if !val_present(field.val) {
         return true;
@@ -717,7 +708,6 @@ pub(super) fn encode_record_final(
     encode_record(slot_buf, level, kind, fields)
 }
 
-/// Writes the `reason<i>` field of a failed probe segment, and nothing otherwise.
 fn write_probe_reason(w: &mut Entry<'_>, index: u32, verdict: ProbeVerdict) -> bool {
     match verdict {
         ProbeVerdict::Failed(reason) => push_indexed_quoted(w, b"reason", index, reason.as_str()),
@@ -725,8 +715,6 @@ fn write_probe_reason(w: &mut Entry<'_>, index: u32, verdict: ProbeVerdict) -> b
     }
 }
 
-/// Writes one probe segment in resolver index order: the address, the optional
-/// FQDN and pin presence, the verdict, and the failed-probe reason.
 fn write_probe_segment(w: &mut Entry<'_>, seg: &ResolverProbeSegment<'_>) -> bool {
     let index = seg.index;
     push_indexed_addr(w, b"resolver", index, seg.addr)
@@ -827,8 +815,6 @@ pub(super) fn encode_monitor_summary(
     Some(w.len)
 }
 
-/// Writes the `facts_total`…`ba` globals: the fixed, always-emitted core of
-/// the summary record, in grammar order.
 fn write_monitor_globals(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     let globals: [(&[u8], u64); 13] = [
         (&b"facts_total"[..], monitor.facts_total()),
@@ -863,8 +849,6 @@ fn write_monitor_globals(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     globals.iter().all(|&(key, value)| push_u64(w, key, value))
 }
 
-/// Folds the ten per-fact overflow flags into the single `ofacts` bit,
-/// short-circuiting on the first set flag.
 fn monitor_any_fact_overflow(monitor: &Monitor) -> bool {
     let overflows: [fn(&Monitor) -> bool; 10] = [
         Monitor::facts_any_illegal_overflow,
@@ -881,8 +865,6 @@ fn monitor_any_fact_overflow(monitor: &Monitor) -> bool {
     overflows.iter().any(|&overflow| overflow(monitor))
 }
 
-/// Writes the zero-suppressed scoped folds `rd`…`cc` in grammar order; a zero
-/// fold emits nothing, so an absent key is the only encoding of "never seen".
 fn write_monitor_scoped_folds(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     let folds: [(&[u8], u64); 11] = [
         (&b"rd"[..], u64::from(monitor.facts_resolver_degraded())),
@@ -914,8 +896,6 @@ fn write_monitor_scoped_folds(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
         .all(|&(key, value)| value == 0 || push_u64(w, key, value))
 }
 
-/// Writes the zero-suppressed per-index `c<i>` illegal-cause folds, then the
-/// `unk<i>` unknown-reason folds, each ascending by index.
 #[expect(
     clippy::expect_used,
     reason = "enumerated cause and unknown-reason indices stay below their small compile-time counts, fitting u32"
@@ -950,8 +930,6 @@ fn write_monitor_indexed_folds(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     true
 }
 
-/// Writes the `dx` bitset of ordinals that saw a JA4 change loss, only when at
-/// least one ordinal is set.
 fn write_monitor_loss_bitset(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     let mut loss_bitset: u32 = 0;
     for index in 0..crate::config::ALLOWLIST_MAX {
@@ -965,9 +943,6 @@ fn write_monitor_loss_bitset(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     loss_bitset == 0 || push_u64_hex(w, b"dx", u64::from(loss_bitset))
 }
 
-/// Writes the shared detail-batch header: the batch's own hardcoded `kind`
-/// label (no `Kind` variant exists for detail batches), `secs`, and
-/// `part=n/total`.
 fn write_batch_head(w: &mut Entry<'_>, kind: &[u8], secs: u64, part: u32, total: u32) -> bool {
     w.push(b"level=info kind=")
         && w.push(kind)
@@ -976,13 +951,10 @@ fn write_batch_head(w: &mut Entry<'_>, kind: &[u8], secs: u64, part: u32, total:
         && fmt::Write::write_fmt(w, format_args!("{part}/{total}")).is_ok()
 }
 
-/// Writes one `d<i><suffix>=<value>` fold only when `value` is nonzero.
 fn push_domain_count(w: &mut Entry<'_>, index: u32, suffix: &[u8], value: u32) -> bool {
     value == 0 || push_indexed_key_u64(w, b"d", index, suffix, u64::from(value))
 }
 
-/// Writes the JA4-change triple `d<i>j`, `d<i>v`, `d<i>p` when the ordinal saw a
-/// change; the quoted value and peer address are the evidence for the counter.
 #[expect(
     clippy::expect_used,
     reason = "monitor JA4 values are stored as ASCII bytes, so UTF-8 decode cannot fail"
@@ -1004,7 +976,6 @@ fn write_domain_ja4(
         && push_indexed_key_addr(w, b"d", index, monitor.ja4_peer_ip(ordinal).to_ip_addr())
 }
 
-/// Writes the five counter folds of one nonzero ordinal, then its JA4 evidence.
 fn write_domain_block(
     w: &mut Entry<'_>,
     monitor: &Monitor,
@@ -1018,8 +989,6 @@ fn write_domain_block(
         && write_domain_ja4(w, monitor, ordinal, index)
 }
 
-/// Scans ordinals ascending from `start`, writing up to [`DOMAIN_BATCH`] nonzero
-/// blocks, and records the next unexamined ordinal in `start` only on success.
 #[expect(
     clippy::expect_used,
     reason = "allowlist index is below ALLOWLIST_MAX=32, so it fits u32"
@@ -1069,7 +1038,6 @@ pub(super) fn encode_monitor_domain_batch(
     fitted.then_some(w.len)
 }
 
-/// Writes one `x<i>*` capture detail: its slot, generation, fact, and effect.
 fn write_capture_detail(w: &mut Entry<'_>, capture: ConsumedCapture, index: u32) -> bool {
     push_indexed_key_u64(w, b"x", index, b"s", capture.slot as u64)
         && push_indexed_key_u64(w, b"x", index, b"g", capture.generation)
@@ -1079,8 +1047,6 @@ fn write_capture_detail(w: &mut Entry<'_>, capture: ConsumedCapture, index: u32)
         && push_effect_token(w, capture.detail.effect)
 }
 
-/// Scans capture details ascending from `start`, writing up to [`CAPTURE_BATCH`]
-/// of them, and records the next unexamined detail in `start` only on success.
 #[expect(
     clippy::expect_used,
     reason = "capture detail index is bounded by CAPTURE_DETAIL_LEN=64, which fits u32"
