@@ -965,38 +965,42 @@ fn active_at(len: usize, index: usize) -> ActiveResolver {
         .expect("in-range fixture")
 }
 
-/// Asserts every derived route over a `len`-resolver set keeps `index < len`:
-/// the primary seat, every in-range selection, and the two refusals at the set
-/// length and at `usize::MAX`.
-fn assert_derived_routes_cover(len: usize, set: &ResolverSet) {
+/// The candidate each in-range index of a `len`-resolver set derives, or the
+/// first index that derives none.
+fn selected_routes(len: usize, set: &ResolverSet) -> Result<Vec<ActiveResolver>, usize> {
+    let primary = ActiveResolver::primary_of(set);
+    (0..len)
+        .map(|index| primary.with_index(index).ok_or(index))
+        .collect()
+}
+
+/// Asserts the fixed singleton seat and the last configured backup route, whose
+/// `to_primary` returns the first seat of the same set.
+fn assert_singleton_and_last_backup_route() {
     assert_eq!(
-        ActiveResolver::primary_of(set),
+        ActiveResolver::singleton(),
         ActiveResolver {
             index: 0,
-            set_len: len
+            set_len: 1
         }
     );
-    for index in 0..len {
-        let Some(active) = ActiveResolver::primary_of(set).with_index(index) else {
-            panic!("in-range index {index} of a {len}-resolver set must be a candidate");
-        };
-        assert_eq!(
-            active,
-            ActiveResolver {
-                index,
-                set_len: len
-            }
-        );
-    }
+    let last_backup =
+        ActiveResolver::primary_of(&resolver_set_of(&["1.1.1.1", "2.2.2.2", "3.3.3.3"]))
+            .with_index(2)
+            .expect("the last configured resolver is a valid backup");
     assert_eq!(
-        ActiveResolver::primary_of(set).with_index(len),
-        None,
-        "index equal to the set length is out of range"
+        last_backup,
+        ActiveResolver {
+            index: 2,
+            set_len: 3
+        }
     );
     assert_eq!(
-        ActiveResolver::primary_of(set).with_index(usize::MAX),
-        None,
-        "an out-of-range selected index is no candidate"
+        last_backup.to_primary(),
+        ActiveResolver {
+            index: 0,
+            set_len: 3
+        }
     );
 }
 
@@ -4882,33 +4886,41 @@ mod turn_result {
             resolver_set_of(&["1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4", "5.5.5.5"]),
         ];
         for (len, set) in sets.into_iter().enumerate().map(|(i, s)| (i + 1, s)) {
-            assert_derived_routes_cover(len, &set);
+            assert_eq!(
+                ActiveResolver::primary_of(&set),
+                ActiveResolver {
+                    index: 0,
+                    set_len: len
+                }
+            );
+            match selected_routes(len, &set) {
+                Ok(selected) => {
+                    for (index, active) in selected.into_iter().enumerate() {
+                        assert_eq!(
+                            active,
+                            ActiveResolver {
+                                index,
+                                set_len: len
+                            }
+                        );
+                    }
+                }
+                Err(index) => {
+                    panic!("in-range index {index} of a {len}-resolver set must be a candidate");
+                }
+            }
+            assert_eq!(
+                ActiveResolver::primary_of(&set).with_index(len),
+                None,
+                "index equal to the set length is out of range"
+            );
+            assert_eq!(
+                ActiveResolver::primary_of(&set).with_index(usize::MAX),
+                None,
+                "an out-of-range selected index is no candidate"
+            );
         }
-        assert_eq!(
-            ActiveResolver::singleton(),
-            ActiveResolver {
-                index: 0,
-                set_len: 1
-            }
-        );
-        let last_backup =
-            ActiveResolver::primary_of(&resolver_set_of(&["1.1.1.1", "2.2.2.2", "3.3.3.3"]))
-                .with_index(2)
-                .expect("the last configured resolver is a valid backup");
-        assert_eq!(
-            last_backup,
-            ActiveResolver {
-                index: 2,
-                set_len: 3
-            }
-        );
-        assert_eq!(
-            last_backup.to_primary(),
-            ActiveResolver {
-                index: 0,
-                set_len: 3
-            }
-        );
+        assert_singleton_and_last_backup_route();
     }
 }
 
