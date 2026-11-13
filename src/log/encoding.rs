@@ -967,14 +967,92 @@ fn write_monitor_loss_bitset(w: &mut Entry<'_>, monitor: &Monitor) -> bool {
     loss_bitset == 0 || push_u64_hex(w, b"dx", u64::from(loss_bitset))
 }
 
-/// Encodes one best-effort `monitor_domain` batch: its own hardcoded header
-/// (no `Kind` variant exists for detail batches), `secs`, `part=n/total`, then
-/// up to [`DOMAIN_BATCH`] nonzero domain blocks scanned ascending from `start`,
-/// advancing `start` past every examined ordinal.
+/// Writes the shared detail-batch header: the batch's own hardcoded `kind`
+/// label (no `Kind` variant exists for detail batches), `secs`, and
+/// `part=n/total`.
+fn write_batch_head(w: &mut Entry<'_>, kind: &[u8], secs: u64, part: u32, total: u32) -> bool {
+    w.push(b"level=info kind=")
+        && w.push(kind)
+        && push_u64(w, b"secs", secs)
+        && w.push(b" part=")
+        && fmt::Write::write_fmt(w, format_args!("{part}/{total}")).is_ok()
+}
+
+/// Writes one `d<i><suffix>=<value>` fold only when `value` is nonzero.
+fn push_domain_count(w: &mut Entry<'_>, index: u32, suffix: &[u8], value: u32) -> bool {
+    value == 0 || push_indexed_key_u64(w, b"d", index, suffix, u64::from(value))
+}
+
+/// Writes the JA4-change triple `d<i>j`, `d<i>v`, `d<i>p` when the ordinal saw a
+/// change; the quoted value and peer address are the evidence for the counter.
 #[expect(
     clippy::expect_used,
-    reason = "allowlist index is below ALLOWLIST_MAX=32 (fits u32) and monitor JA4 values are stored as ASCII bytes (UTF-8 decode cannot fail)"
+    reason = "monitor JA4 values are stored as ASCII bytes, so UTF-8 decode cannot fail"
 )]
+fn write_domain_ja4(
+    w: &mut Entry<'_>,
+    monitor: &Monitor,
+    ordinal: DomainOrdinal,
+    index: u32,
+) -> bool {
+    let changes = monitor.facts_ja4_change(ordinal);
+    if changes == 0 {
+        return true;
+    }
+    let ja4 = monitor.facts_ja4_value(ordinal);
+    let ja4 = std::str::from_utf8(&ja4).expect("ja4 is ASCII");
+    push_indexed_key_u64(w, b"d", index, b"j", u64::from(changes))
+        && push_indexed_key_quoted(w, b"d", index, b"v", ja4)
+        && push_indexed_key_addr(w, b"d", index, monitor.ja4_peer_ip(ordinal).to_ip_addr())
+}
+
+/// Writes the five counter folds of one nonzero ordinal, then its JA4 evidence.
+fn write_domain_block(
+    w: &mut Entry<'_>,
+    monitor: &Monitor,
+    ordinal: DomainOrdinal,
+    index: u32,
+) -> bool {
+    push_domain_count(w, index, b"f", monitor.facts_early_data(ordinal))
+        && push_domain_count(w, index, b"b", monitor.actions_domain_block(ordinal))
+        && push_domain_count(w, index, b"n", monitor.actions_notify(ordinal))
+        && push_domain_count(w, index, b"r", monitor.refusals_blocked_domain(ordinal))
+        && write_domain_ja4(w, monitor, ordinal, index)
+}
+
+/// Scans ordinals ascending from `start`, writing up to [`DOMAIN_BATCH`] nonzero
+/// blocks, and records the next unexamined ordinal in `start` only on success.
+#[expect(
+    clippy::expect_used,
+    reason = "allowlist index is below ALLOWLIST_MAX=32, so it fits u32"
+)]
+fn write_domain_blocks(w: &mut Entry<'_>, monitor: &Monitor, start: &mut usize) -> bool {
+    let mut packed = 0usize;
+    let mut index = *start;
+    while index < crate::config::ALLOWLIST_MAX {
+        let Some(ordinal) = DomainOrdinal::from_index(index) else {
+            break;
+        };
+        if domain_block_nonzero(monitor, ordinal) {
+            let index32 = u32::try_from(index).expect("allowlist index fits u32");
+            if !write_domain_block(w, monitor, ordinal, index32) {
+                return false;
+            }
+            packed += 1;
+        }
+        index += 1;
+        if packed == DOMAIN_BATCH {
+            break;
+        }
+    }
+    *start = index;
+    true
+}
+
+/// Encodes one best-effort `monitor_domain` batch: its own hardcoded header,
+/// `secs`, `part=n/total`, then up to [`DOMAIN_BATCH`] nonzero domain blocks
+/// scanned ascending from `start`, advancing `start` past every examined
+/// ordinal.
 pub(super) fn encode_monitor_domain_batch(
     slot_buf: &mut [u8; SLOT_BYTES],
     secs: u64,
@@ -987,75 +1065,10 @@ pub(super) fn encode_monitor_domain_batch(
         buf: slot_buf,
         len: 0,
     };
-    if !w.push(b"level=info kind=monitor_domain") {
-        return None;
-    }
-    if !push_u64(&mut w, b"secs", secs) {
-        return None;
-    }
-    if !w.push(b" part=") || fmt::Write::write_fmt(&mut w, format_args!("{part}/{total}")).is_err()
-    {
-        return None;
-    }
-    let mut packed = 0usize;
-    let mut index = *start;
-    while index < crate::config::ALLOWLIST_MAX {
-        let Some(ordinal) = DomainOrdinal::from_index(index) else {
-            break;
-        };
-        if domain_block_nonzero(monitor, ordinal) {
-            let index32 = u32::try_from(index).expect("allowlist ordinal fits u32");
-            let facts = monitor.facts_early_data(ordinal);
-            let blocks = monitor.actions_domain_block(ordinal);
-            let notifies = monitor.actions_notify(ordinal);
-            let refusals = monitor.refusals_blocked_domain(ordinal);
-            if facts > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"f", u64::from(facts)) {
-                return None;
-            }
-            if blocks > 0 && !push_indexed_key_u64(&mut w, b"d", index32, b"b", u64::from(blocks)) {
-                return None;
-            }
-            if notifies > 0
-                && !push_indexed_key_u64(&mut w, b"d", index32, b"n", u64::from(notifies))
-            {
-                return None;
-            }
-            if refusals > 0
-                && !push_indexed_key_u64(&mut w, b"d", index32, b"r", u64::from(refusals))
-            {
-                return None;
-            }
-            let ja4_changes = monitor.facts_ja4_change(ordinal);
-            if ja4_changes > 0 {
-                if !push_indexed_key_u64(&mut w, b"d", index32, b"j", u64::from(ja4_changes)) {
-                    return None;
-                }
-                let ja4 = monitor.facts_ja4_value(ordinal);
-                let ja4 = std::str::from_utf8(&ja4).expect("ja4 is ASCII");
-                if !push_indexed_key_quoted(&mut w, b"d", index32, b"v", ja4) {
-                    return None;
-                }
-                if !push_indexed_key_addr(
-                    &mut w,
-                    b"d",
-                    index32,
-                    monitor.ja4_peer_ip(ordinal).to_ip_addr(),
-                ) {
-                    return None;
-                }
-            }
-            packed += 1;
-        }
-        index += 1;
-        if packed == DOMAIN_BATCH {
-            break;
-        }
-    }
-    *start = index;
-    if !w.push(b"\n") {
-        return None;
-    }
-    Some(w.len)
+    let fitted = write_batch_head(&mut w, b"monitor_domain", secs, part, total)
+        && write_domain_blocks(&mut w, monitor, start)
+        && w.push(b"\n");
+    fitted.then_some(w.len)
 }
 
 /// Encodes one best-effort `monitor_capture` batch: its own hardcoded header,
