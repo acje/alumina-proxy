@@ -2324,6 +2324,43 @@ fn drain_silently(sock: &mut TcpStream, stop: &std::sync::atomic::AtomicBool) {
     }
 }
 
+fn answer_until_silent(
+    sock: &mut TcpStream,
+    answer: &mut dyn FnMut(Vec<u8>) -> Option<Vec<u8>>,
+    stop: &std::sync::atomic::AtomicBool,
+) -> bool {
+    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        let Some(query) = read_query_interruptible(sock, stop) else {
+            return false;
+        };
+        let Some(reply) = answer(query) else {
+            return true;
+        };
+        if write_response_interruptible(sock, &reply, stop).is_err() {
+            return false;
+        }
+    }
+    false
+}
+
+fn run_session_gate(sock: &mut TcpStream, gate: SessionGate, stop: &std::sync::atomic::AtomicBool) {
+    match gate {
+        SessionGate::Answer(mut answer) => {
+            sock.set_nonblocking(true)
+                .expect("answer session nonblocking");
+            answer_until_silent(sock, &mut *answer, stop);
+        }
+        SessionGate::AnswerThenSilent(mut answer) => {
+            sock.set_nonblocking(true)
+                .expect("answer-then-silent session nonblocking");
+            if answer_until_silent(sock, &mut *answer, stop) {
+                drain_silently(sock, stop);
+            }
+        }
+        SessionGate::Silent => drain_silently(sock, stop),
+    }
+}
+
 fn spawn_supervised_responder(
     on_session: impl FnMut(usize) -> SessionGate + Send + 'static,
 ) -> (
@@ -2346,51 +2383,7 @@ fn spawn_supervised_responder(
             if stop_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
-            let gate = on_session(session);
-            match gate {
-                SessionGate::Answer(mut answer) => {
-                    sock.set_nonblocking(true)
-                        .expect("answer session nonblocking");
-                    while !stop_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
-                        let Some(query) = read_query_interruptible(&mut sock, &stop_for_thread)
-                        else {
-                            break;
-                        };
-                        let Some(reply) = answer(query) else {
-                            break;
-                        };
-                        if write_response_interruptible(&mut sock, &reply, &stop_for_thread)
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-                SessionGate::AnswerThenSilent(mut answer) => {
-                    sock.set_nonblocking(true)
-                        .expect("answer-then-silent session nonblocking");
-                    let mut went_silent = false;
-                    while !stop_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
-                        let Some(query) = read_query_interruptible(&mut sock, &stop_for_thread)
-                        else {
-                            break;
-                        };
-                        let Some(reply) = answer(query) else {
-                            went_silent = true;
-                            break;
-                        };
-                        if write_response_interruptible(&mut sock, &reply, &stop_for_thread)
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    if went_silent {
-                        drain_silently(&mut sock, &stop_for_thread);
-                    }
-                }
-                SessionGate::Silent => drain_silently(&mut sock, &stop_for_thread),
-            }
+            run_session_gate(&mut sock, on_session(session), &stop_for_thread);
         }
     });
     (addr, stop, handle)
