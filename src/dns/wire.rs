@@ -361,10 +361,6 @@ fn write_header(buf: &mut [u8], tid: u16) -> Result<(), DnsError> {
     Ok(())
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "label and tail lengths are checked to be <= 63 before encoding, fitting u8"
-)]
 fn write_qname(buf: &mut [u8], mut pos: usize, name: &str) -> Result<usize, DnsError> {
     let bytes = name.as_bytes();
     let mut label_start = 0usize;
@@ -576,7 +572,7 @@ impl NameCursor {
     }
 
     /// Consumes the root label, returning the cursor just past the encoded name.
-    fn read_root(&mut self) -> Result<usize, DnsError> {
+    const fn read_root(&mut self) -> Result<usize, DnsError> {
         self.total += 1;
         if self.total > MAX_NAME_BYTES {
             return Err(DnsError::NameTooLong);
@@ -1397,7 +1393,7 @@ fn apply_answer_rr(
     match rr.ty {
         TYPE_A | TYPE_AAAA | TYPE_CNAME | TYPE_SOA => {
             let rdata = parse_rdata(msg, rr.rd_start, rr.rdlen, rr.ty)?;
-            apply_rdata(ws, rdata, rr, family)?;
+            apply_rdata(ws, &rdata, rr, family)?;
         }
         TYPE_DNAME => return Err(DnsError::DnameUnsupported),
         _ => {}
@@ -1409,7 +1405,7 @@ fn apply_answer_rr(
 /// address record of the other family.
 fn apply_rdata(
     ws: &mut ResponseWorkspace,
-    rdata: Rdata,
+    rdata: &Rdata,
     rr: &RawRr,
     family: Family,
 ) -> Result<(), DnsError> {
@@ -1421,7 +1417,7 @@ fn apply_rdata(
                 return Ok(());
             }
             let idx = ensure_owner(ws, &rr.owner)?;
-            ws.owners[idx].push_address(NumericAddr::V4(ip), rr.ttl)
+            ws.owners[idx].push_address(NumericAddr::V4(*ip), rr.ttl)
         }
         Rdata::Aaaa(ip) => {
             if family != Family::Aaaa {
@@ -1430,11 +1426,11 @@ fn apply_rdata(
                 return Ok(());
             }
             let idx = ensure_owner(ws, &rr.owner)?;
-            ws.owners[idx].push_address(NumericAddr::V6(ip), rr.ttl)
+            ws.owners[idx].push_address(NumericAddr::V6(*ip), rr.ttl)
         }
         Rdata::Cname(target) => {
             let idx = ensure_owner(ws, &rr.owner)?;
-            ws.owners[idx].push_cname(target, rr.ttl)
+            ws.owners[idx].push_cname(*target, rr.ttl)
         }
         Rdata::Soa { .. } => Ok(()),
     }
