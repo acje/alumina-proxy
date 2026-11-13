@@ -329,14 +329,15 @@ ech                  = { action = "notify" | "block", scope = "connection" | "al
 [allowed_fqdn."<fqdn>:<port>"]
 early_data = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
 ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
+dns_assurance = "resolver_trusted" | "resolver_authenticated" | "delegated_dnssec"
 ```
 
 - `[any_illegal]` has exactly the four mandatory keys `connect_parse`, `host_not_allowlisted`, `tls_profile`, `ech`, each an inline `{ action, scope }` table; a missing or unknown key is invalid configuration (exit 78). `action` is `notify` or `block`; `tarpit` is the reserved deferred keyword rejected with its explicit reserved-keyword diagnostic (exit 78), and `ignore` is invalid on the `any_illegal` surface — the suspicious class is always observable, so there is no silent denial. `scope` is `connection` or `all` only; a per-FQDN scope literal (`fqdn`/`domain`) is invalid configuration (exit 78) because an unattributable violation cannot mark a configured domain.
-- `[allowed_fqdn."<fqdn>:<port>"]` carries the mandatory `early_data` and `ja4` keys (plus the optional `cname_bailiwick`, unchanged); a missing or unknown key is invalid configuration (exit 78). Each per-FQDN control is either an inline `{ action, scope }` table (`action` `notify`|`block`, `tarpit` reserved → exit 78; `scope` `connection`|`fqdn`|`all`) or the bare `"ignore"` shorthand — the explicit per-FQDN opt-out: no action, no notification; the JA4 baseline is still recorded and the change signal is suppressed.
+- `[allowed_fqdn."<fqdn>:<port>"]` carries the mandatory `early_data`, `ja4` and `dns_assurance` keys (plus the optional `cname_bailiwick`, unchanged); a missing or unknown key is invalid configuration (exit 78). Each per-FQDN control is either an inline `{ action, scope }` table (`action` `notify`|`block`, `tarpit` reserved → exit 78; `scope` `connection`|`fqdn`|`all`) or the bare `"ignore"` shorthand — the explicit per-FQDN opt-out: no action, no notification; the JA4 baseline is still recorded and the change signal is suppressed.
 - The action vocabulary is `notify` | `block` (T3). `notify` is the renamed `flare_only`: a notification and aggregation context only — it never authorizes forwarding, never delays baseline denial, and never widens scope; implicit Notify for an applied Block inherits that Block's scope. `block` is a scoped Block with the §Block and Notify semantics above. `tarpit` is reserved for a future action and is not configurable.
 - **Breaking change:** the pre-per-control grammar is removed. The old `[any_illegal] scope = "..."` single-key form, the positional `[actions]` `kind`/`scope` arrays, and the `flare_only` literal are gone; a document using them fails startup with exit 78. The old `flare_only`/`connection` semantics are reproduced by `action = "notify", scope = "connection"`. The `ja4` control is new and mandatory on every allowlist entry.
 - Every control key is mandatory with no defaults and no environment or command-line override; unknown keys or tables fail startup with exit 78 (EX_CONFIG) exactly as before. Configuration validation timing and procedure are unchanged.
-- Capacity: the enforcement group counts toward the 16 KiB document bound (CONFIG_DOC_LIMIT, §Keyed configuration schema). Measured with the exact document serializer the parser reads (pinned by parser-real assertions in `src/config/mod.rs`), the 32-entry × 100-byte `<fqdn>:<port>` worst case with the full per-control group fits under 16 KiB in both the `block`/`connection` and `notify`/`connection` spellings, with and without a realistic `IP#fqdn`/pinned resolver entry (`compact_32_names_with_group_fit_16kib`, `notify_32_hundred_byte_names_fit_and_parse`, `compact_32_hundred_byte_names_with_ip_fqdn_resolver_fit_16kib`, `compact_32_hundred_byte_names_with_pinned_resolver_fit_16kib`). Each total is serialization- and layout-dependent; neither a cap expansion, an alias, a silent compact migration, nor a change to the legal literal set is implied.
+- Capacity: the enforcement group counts toward the 16 KiB document bound (CONFIG_DOC_LIMIT, §Keyed configuration schema). Measured with the exact document serializer the parser reads (pinned by parser-real assertions in `src/config/mod.rs`), the 32-entry × 100-byte `<fqdn>:<port>` worst case with the full per-control group — including the mandatory per-entry `dns_assurance` key — fits under 16 KiB in both the `block`/`connection` and `notify`/`connection` spellings, with and without a realistic `IP#fqdn`/pinned resolver entry (`compact_32_names_with_group_fit_16kib`, `notify_32_hundred_byte_names_fit_and_parse`, `compact_32_hundred_byte_names_with_ip_fqdn_resolver_fit_16kib`, `compact_32_hundred_byte_names_with_pinned_resolver_fit_16kib`). Each total is serialization- and layout-dependent; neither a cap expansion, an alias, a silent compact migration, nor a change to the legal literal set is implied.
 
 ### Monitoring
 
@@ -774,6 +775,7 @@ window_secs = 900  # integer >= 1; whole-second window within which the facts mu
 [allowed_fqdn."<fqdn>:<port>"]
 early_data = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
 ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all" } | "ignore"
+dns_assurance = "resolver_trusted" | "resolver_authenticated" | "delegated_dnssec"
 ```
 
 - The allowlist is the set of `[allowed_fqdn."..."]` table keys, 1 through 32 tables; empty
@@ -789,8 +791,9 @@ ja4        = { action = "notify" | "block", scope = "connection" | "fqdn" | "all
   ordinal numbering carried in logs matches that same 0-based numbering. The allowlist and
   its controls are built from the same table, so enforcement pairing is unaffected by the
   ordering.
-- Every `[allowed_fqdn."..."]` table contains the mandatory `early_data` and `ja4` keys and
-  an optional `cname_bailiwick` key; every other key remains invalid configuration (exit 78).
+- Every `[allowed_fqdn."..."]` table contains the mandatory `early_data`, `ja4` and
+  `dns_assurance` keys and an optional `cname_bailiwick` key; every other key remains invalid
+  configuration (exit 78).
   Each per-FQDN control is an inline `{ action, scope }` table or the bare `"ignore"`
   shorthand; missing `early_data`/`ja4` or an unknown key is invalid configuration (exit 78);
   no defaults are supplied, consistent with the all-keys-mandatory doctrine. The `early_data`
@@ -1345,8 +1348,9 @@ Configuration validation: `cname_bailiwick` is optional; when present it is an a
 validated bare names — no port, no wildcard, no IP literal, at least two labels — and the
 total declared suffixes across all entries is at most `ALLOWLIST_MAX` (32), else invalid
 configuration (exit 78). This refines the cfgk exactly-one-key rule at §Keyed allowlist tables: an
-`[allowed_fqdn."..."]` table now contains the mandatory `early_data` key and an optional
-`cname_bailiwick` key; every other key remains invalid configuration (exit 78).
+`[allowed_fqdn."..."]` table now contains the mandatory `early_data`, `ja4` and
+`dns_assurance` keys and an optional `cname_bailiwick` key; every other key remains invalid
+configuration (exit 78).
 
 This **supersedes and refines RT-005** (§SP-013 — Latest-change value keyed per-ordinal with triggering peer source address): the parent-zone granularity note is replaced
 by the explicit self-default + declared-suffix model. The residual RT-005 acknowledged (a
