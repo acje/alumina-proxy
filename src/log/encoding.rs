@@ -401,20 +401,16 @@ pub(super) fn encode_dns_assurance_unknown(
         buf: slot_buf,
         len: 0,
     };
-    if !write_header(&mut w, Level::Info, Kind::DnsAssurance)
-        || !w.push(b" name=\"")
-        || !push_escaped(&mut w, fqdn.as_str())
-        || !w.push(b"\" port=")
-        || fmt::Write::write_fmt(&mut w, format_args!("{}", fqdn.port())).is_err()
-        || !w.push(b" secs=")
-        || fmt::Write::write_fmt(&mut w, format_args!("{secs}")).is_err()
-        || !w.push(b" seq=0 phase=boot")
-        || !append_assurance_boot(&mut w, boot)
-        || !w.push(b" cache_snapshot=unknown\n")
-    {
-        return None;
-    }
-    Some(w.len)
+    let fitted = write_assurance_preamble(&mut w, Kind::DnsAssurance, fqdn, secs)
+        && write_assurance_unknown_tail(&mut w, boot);
+    fitted.then_some(w.len)
+}
+
+/// Writes the unknown-snapshot boot facts and the closing marker.
+fn write_assurance_unknown_tail(w: &mut Entry<'_>, boot: AssuranceBoot) -> bool {
+    w.push(b" seq=0 phase=boot")
+        && append_assurance_boot(w, boot)
+        && w.push(b" cache_snapshot=unknown\n")
 }
 fn write_header(w: &mut Entry<'_>, level: Level, kind: Kind) -> bool {
     w.push(b"level=")
