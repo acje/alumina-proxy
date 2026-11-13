@@ -1,6 +1,10 @@
 use super::{LogStore, ServeStorage, ServingMode, StartupDecision, StartupError, StartupReport};
 use crate::config::{Config, ConfigError, parse_config_document};
 use crate::dns::cache::Family;
+
+#[path = "../../../tests/support/temp_dir.rs"]
+mod temp_dir;
+
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -583,21 +587,7 @@ fn all_unresolved_report() -> StartupReport {
 /// path, so the drain is observed as bytes on a descriptor rather than
 /// through the test-only `flush_all` loop.
 fn temp_sink_file() -> std::fs::File {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-        "alumina-serve-log-{}-{}.log",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)
-        .expect("temp sink file")
+    temp_dir::TempDir::private_sink_file("alumina-serve-log")
 }
 
 /// A socketpair whose writer is already full, so every write is a real
