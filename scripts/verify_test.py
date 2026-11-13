@@ -718,5 +718,122 @@ class ShutdownWitness(unittest.TestCase):
         self.assertEqual(self.mod.FAILURES, [])
 
 
+def extract_untracked_allowlist_default():
+    """The shipped allowlist line, so the tests exercise the real default and
+    can supply a non-empty list for the glob-semantics pin."""
+    match = re.search(r'^E2E_UNTRACKED_ALLOW="([^"]*)"$',
+                      (ROOT / "scripts/verify.sh").read_text(), re.M)
+    assert match is not None, "E2E_UNTRACKED_ALLOW default not found in scripts/verify.sh"
+    return match
+
+
+class E2EReceiptInputs(unittest.TestCase):
+    """D7: the E2E source receipt must cover everything the build consumes.
+    `git diff HEAD` cannot see untracked files, so a checkout carrying an
+    untracked Cargo input (a root `build.rs`, a `.cargo/config.toml`, a new
+    module) can build a different binary under the same receipt. The bodies
+    executed are text-extracted from scripts/verify.sh (never a Python
+    re-implementation), and each receipt field is still produced by the shipped
+    sha256_digest owner."""
+
+    RECEIPT_BODIES = ("sha256_digest", "e2e_untracked_input_guard",
+                      "e2e_receipt_fields")
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.temp = Path(self._temp.name)
+        self.repo = self.temp / "repo"
+        (self.repo / "scripts").mkdir(parents=True)
+        shutil.copyfile(ROOT / "scripts/verify.sh", self.repo / "scripts/verify.sh")
+        (self.repo / ".gitignore").write_text("target/\n")
+        (self.repo / "Cargo.toml").write_text('[package]\nname = "probe"\n')
+        (self.repo / "scripts/e2e_shutdown.py").write_text("# harness\n")
+        (self.repo / "scripts/e2e_shutdown.sh").write_text("# harness\n")
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("-c", "user.email=probe@example.invalid", "-c", "user.name=probe",
+                 "commit", "-qm", "base")
+        self.head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip()
+
+    def git(self, *args):
+        subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+
+    def receipt_script(self, allow=None):
+        allow_line = (extract_untracked_allowlist_default().group(0) if allow is None
+                      else f'E2E_UNTRACKED_ALLOW="{allow}"')
+        bodies = "\n\n".join(extract_function(name)
+                             for name in self.RECEIPT_BODIES)
+        driver = self.temp / "receipt.sh"
+        driver.write_text(
+            bodies + "\n\n" + allow_line + '\nTGT="$PWD/target"\nmkdir -p "$TGT"\n'
+            "e2e_receipt_fields relay scripts/e2e_shutdown.py scripts/e2e_shutdown.sh\n")
+        return driver
+
+    def run_receipt(self, cwd=None, allow=None):
+        return subprocess.run(
+            ["sh", str(self.receipt_script(allow))], cwd=cwd or self.repo,
+            text=True, capture_output=True)
+
+    def test_the_shipped_allowlist_is_empty(self):
+        self.assertEqual(extract_untracked_allowlist_default().group(1), "",
+                         "an allowlist entry is a visible reviewed bypass, never a default")
+
+    def test_a_clean_tree_is_certified(self):
+        result = self.run_receipt()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        fields = result.stdout.split()
+        self.assertEqual(len(fields), 5, result.stdout)
+        self.assertEqual(fields[0], self.head, "the receipt must still bind HEAD")
+        self.assertNotIn("BLOCKED", result.stderr)
+
+    def test_an_untracked_build_input_is_refused(self):
+        (self.repo / "build.rs").write_text("fn main() {\n    println!(\"cargo:rerun-if-changed=src\");\n}\n")
+        result = self.run_receipt()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("E2E-relay-BLOCKED", result.stderr)
+        self.assertIn("build.rs", result.stderr)
+        # revert the plant: the same receipt certifies the clean checkout again
+        (self.repo / "build.rs").unlink()
+        again = self.run_receipt()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+
+    def test_gitignored_build_artifacts_do_not_refuse_the_receipt(self):
+        (self.repo / "target").mkdir()
+        (self.repo / "target/artifact").write_text("generated\n")
+        result = self.run_receipt()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_the_allowlist_excuses_only_the_named_generated_artifact(self):
+        (self.repo / "generated").mkdir()
+        (self.repo / "generated/facts.txt").write_text("generated\n")
+        allowed = self.run_receipt(allow="generated/*.txt")
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+        (self.repo / "build.rs").write_text("fn main() {}\n")
+        refused = self.run_receipt(allow="generated/*.txt")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("build.rs", refused.stderr)
+        self.assertNotIn("generated/facts.txt", refused.stderr)
+
+    def test_an_unobservable_untracked_universe_fails_closed(self):
+        # no work tree: the producer fails, so the receipt must not certify
+        plain = self.temp / "plain"
+        (plain / "scripts").mkdir(parents=True)
+        (plain / "scripts/e2e_shutdown.py").write_text("# harness\n")
+        (plain / "scripts/e2e_shutdown.sh").write_text("# harness\n")
+        result = self.run_receipt(cwd=plain)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("untracked-input observation failed", result.stderr)
+
+    def test_a_tracked_modification_still_changes_the_receipt(self):
+        clean = self.run_receipt().stdout.split()
+        (self.repo / "Cargo.toml").write_text('[package]\nname = "probe"\nversion = "0.2.0"\n')
+        dirty = self.run_receipt().stdout.split()
+        self.assertEqual(dirty[0], clean[0], "HEAD is unchanged by a worktree edit")
+        self.assertNotEqual(dirty[1], clean[1],
+                            "the tracked dirty diff must still be receipt-carried")
+
+
 if __name__ == "__main__":
     unittest.main()

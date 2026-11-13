@@ -1607,14 +1607,68 @@ rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-
 # never a framework), and prints the identity line; each standalone selector
 # (e2e/relay, e2e/shutdown) stays independently dispatchable and runs only its
 # own harness after the shared receipt.
+# D7: `git diff HEAD` cannot see untracked files, so without this guard the
+# receipt would certify a checkout whose build consumed an input it never
+# covered (a root `build.rs`, a `.cargo/config.toml`, a new module). Every
+# untracked, non-ignored path in the checkout refuses the receipt BEFORE the
+# build. The observation is the producer's own (git ls-files exit checked, never
+# a masked pipeline: an unreadable observation is BLOCKED, never clean), and
+# each path is classified by exact glob match against this explicit allowlist:
+#
+#   E2E_UNTRACKED_ALLOW  space-separated glob patterns, relative to the repo root
+#
+# Empty by default, and it stays empty unless a NON-ignored generated artifact
+# genuinely must exist before the build: the known generated artifacts
+# (target/, .ooda/, node_modules/, .beads/, *.db) are gitignored, so they never
+# appear in the observation at all. An entry is a deliberately visible,
+# reviewed bypass — add it with its rationale in the same commit, never from
+# the environment.
+E2E_UNTRACKED_ALLOW=""
+e2e_untracked_input_guard() {
+    _gate="$1"
+    _ug_rc=0
+    _ug_list=$(git ls-files --others --exclude-standard 2>&1) || _ug_rc=$?
+    if [ "$_ug_rc" -ne 0 ]; then
+        echo "E2E-$_gate-BLOCKED: git ls-files --others exit $_ug_rc (untracked-input observation failed, not a receipt)" >&2
+        printf '  %s\n' "$_ug_list" >&2
+        exit 1
+    fi
+    [ -n "$_ug_list" ] || return 0
+    _ug_bad=""
+    while IFS= read -r _ug_path; do
+        [ -n "$_ug_path" ] || continue
+        _ug_allowed=0
+        # The expansion is intentionally unquoted: the allowlist is a fixed,
+        # space-separated pattern set and word-splitting is the list separator.
+        # shellcheck disable=SC2086
+        for _ug_pattern in $E2E_UNTRACKED_ALLOW; do
+            case "$_ug_path" in
+                $_ug_pattern) _ug_allowed=1 ;;
+            esac
+        done
+        [ "$_ug_allowed" -eq 1 ] || _ug_bad="$_ug_bad
+  $_ug_path"
+    done <<EOF
+$_ug_list
+EOF
+    if [ -z "$_ug_bad" ]; then
+        return 0
+    fi
+    echo "E2E-$_gate-BLOCKED: untracked path(s) outside the explicit allowlist (git diff HEAD cannot cover them, so the receipt would not bind the built binary):$_ug_bad" >&2
+    echo "E2E-$_gate-BLOCKED: commit the path(s), remove them, or add a named E2E_UNTRACKED_ALLOW entry with its rationale in the same commit" >&2
+    exit 1
+}
+
 # Exact-candidate input digest record (pre/post-build and after the executed
-# harness): HEAD + dirty diff + untracked harness py/sh + gate script. The diff
+# harness): HEAD + dirty diff + untracked harness py/sh + gate script, over a
+# checkout with NO untracked path outside the explicit allowlist above. The diff
 # producer exit is checked SEPARATELY (never a masked pipeline); the untracked
 # harness scripts are hashed explicitly (git diff excludes them). Requires $TGT.
 e2e_receipt_fields() {
     _gate="$1"
     _harness_py="$2"
     _harness_sh="$3"
+    e2e_untracked_input_guard "$_gate"
     rcd=0
     git diff HEAD >"$TGT/$_gate-diff.$$" 2>&1 || rcd=$?
     [ "$rcd" -eq 0 ] || {
