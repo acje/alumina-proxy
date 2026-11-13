@@ -23,18 +23,22 @@ fn publish_simple(
     receipt: u64,
     ttl: u64,
 ) {
-    let staged = StagedPositive::stage(name, family, tag, addrs, receipt, ttl).unwrap();
+    let staged = StagedPositive::stage(name, family, tag, addrs, receipt, ttl)
+        .expect("staged positive is valid");
     cache
         .publish_positive(&staged)
-        .unwrap_or_else(|e| panic!("publish failed: {e:?}"));
+        .expect("staged positive publishes");
 }
 
 fn current_gen(cache: &Cache, name: NameIndex, family: Family) -> Generation {
-    cache.entry(name, family).unwrap().generation()
+    cache
+        .entry(name, family)
+        .expect("published entry exists")
+        .generation()
 }
 
 fn read(cache: &Cache, name: NameIndex, family: Family) -> Entry {
-    cache.entry(name, family).unwrap()
+    cache.entry(name, family).expect("published entry exists")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1489,11 +1493,11 @@ mod evidence_value {
             ad,
             origin,
             qualified,
-            ResolverSource::index(0).unwrap(),
+            ResolverSource::index(0).expect("resolver index 0 is valid"),
             ttl,
             start,
         )
-        .unwrap()
+        .expect("evidence tagged with resolver index 0 is valid")
     }
 
     #[test]
@@ -1714,11 +1718,11 @@ mod cache_evidence_integration {
             ad,
             origin,
             qualified,
-            ResolverSource::index(0).unwrap(),
+            ResolverSource::index(0).expect("resolver index 0 is valid"),
             ttl,
             start,
         )
-        .unwrap()
+        .expect("evidence tagged with resolver index 0 is valid")
     }
 
     fn publish_ev(
@@ -1732,7 +1736,7 @@ mod cache_evidence_integration {
     ) -> Result<(), CacheError> {
         let staged =
             StagedPositive::stage_with_evidence(name, Family::A, tag, addrs, receipt, ttl, ev)
-                .unwrap();
+                .expect("staged positive with evidence is valid");
         cache.publish_positive(&staged)
     }
 
