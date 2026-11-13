@@ -375,3 +375,45 @@ fn closed_window_keeps_paired_origin_through_reason_update_and_rotation() {
         "the closed record is already taken, never rewritten"
     );
 }
+
+#[test]
+fn reopened_incident_reports_only_the_family_that_is_actually_failing() {
+    let mut rep = IncidentReport::new();
+    // A two-family incident runs to full recovery: both families are recorded
+    // and the closing summary carries both.
+    rep.note_incident_open(
+        0,
+        1000,
+        [
+            Some((1000, "connect", Some(0))),
+            Some((1010, "timeout", Some(1))),
+        ],
+    );
+    let recovered = rep.close_window(0, 5000).expect("full recovery close");
+    assert_eq!(recovered.incident[0], Some((1000, "connect", Some(0))));
+    assert_eq!(recovered.incident[1], Some((1010, "timeout", Some(1))));
+
+    // A later one-family incident on the same name: only family A fails. Its
+    // summary is the operator's attribution record, so it must not re-report
+    // family B's closed incident from the previous window.
+    rep.note_incident_open(0, 6000, [Some((6000, "connect", Some(2))), None]);
+    let reopened = rep.close_window(0, 6100).expect("reopened close");
+    assert_eq!(reopened.incident[0], Some((6000, "connect", Some(2))));
+    assert_eq!(
+        reopened.incident[1], None,
+        "a family with no incident in this window is absent from its summary"
+    );
+}
+
+#[test]
+fn recorded_family_stays_recorded_while_the_window_is_open() {
+    let mut rep = IncidentReport::new();
+    rep.note_incident_open(0, 1000, [Some((1000, "connect", Some(0))), None]);
+    // Family A recovers mid-window while family B enters its own incident: the
+    // window stays open and A's recorded incident is not cleared by B's
+    // arrival or by A's recovery.
+    rep.note_incident_open(0, 2000, [None, Some((2000, "timeout", Some(1)))]);
+    let closed = rep.close_window(0, 2500).expect("closed");
+    assert_eq!(closed.incident[0], Some((1000, "connect", Some(0))));
+    assert_eq!(closed.incident[1], Some((2000, "timeout", Some(1))));
+}

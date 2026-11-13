@@ -155,7 +155,8 @@ struct NameReport {
     last_positive: [Option<u64>; 2],
     /// The per-family incident snapshot observed during the current window:
     /// set from the schedule when the window opens and on every exchange
-    /// failure, sticky within the window, reset at rotation.
+    /// failure, sticky within the window, reset at rotation and when the
+    /// window closes.
     incident: [IncidentSnapshot; 2],
     had_eligible: Option<bool>,
 }
@@ -469,14 +470,20 @@ impl IncidentReport {
 
     /// Closes the open window for `name` at `now` (a full hostname incident
     /// recovery) and returns the partial-window snapshot, or `None` when no
-    /// window is open (docs/alumina-proxy.md:80).
+    /// window is open (docs/alumina-proxy.md:80). The snapshot is captured
+    /// before the per-family incident state is cleared, so the closing summary
+    /// keeps the window's incident activity while a window opened later starts
+    /// with no recorded family: a later incident reports only the families
+    /// that fail in it.
     pub(crate) fn close_window(&mut self, name: usize, now: u64) -> Option<ClosedWindow> {
         let nr = &mut self.names[name];
         if !nr.window_open {
             return None;
         }
         nr.window_open = false;
-        Some(nr.capture(nr.window_start, now, 0))
+        let closed = nr.capture(nr.window_start, now, 0);
+        nr.incident = [None, None];
+        Some(closed)
     }
 }
 
