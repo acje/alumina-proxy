@@ -126,9 +126,8 @@ GRACE_HI = 8.8
 # is excluded by construction rather than by this gate. The budget is generous by
 # design - the observed transition (first probe reachable, the next already
 # refused) closed well inside one probe interval - and it stays far below the
-# fixed 8 s grace, so the sampled interval that follows still spans the drain. A
-# settle larger than the sampling deadline would starve the samples, which is
-# why a lapsed deadline FAILS as a gap instead of passing.
+# fixed 8 s grace, so the sampled interval that follows still spans the whole
+# sampling window (and a lapsed deadline FAILS as a gap instead of passing).
 SIGNAL_SETTLE = 0.25
 
 

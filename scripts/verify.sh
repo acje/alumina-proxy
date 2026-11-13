@@ -1621,8 +1621,9 @@ rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-
 # Cargo-consumed input from the receipt completely. The residual is explicit: a
 # committed (or worktree-edited) ignore RULE that names a Cargo-consumed path
 # hides that input under the same receipt, and an ignored path is outside this
-# receipt - the rule change is a reviewed repo change, the input is not
-# covered. The producer exit is checked (an unreadable observation is BLOCKED,
+# receipt: a committed rule is a reviewed repo change, a worktree-edited rule is
+# diff-covered, and an untracked .gitignore is itself refused unless it ignores
+# itself (the one shape this cannot see). The producer exit is checked (an unreadable observation is BLOCKED,
 # never clean), an exit-0 diagnostic is treated as an incomplete universe, its
 # stderr is kept out of the observed path list, and --full-name keeps paths
 # repo-root-relative. Paths are compared in git's C-quoted form, so a path
@@ -1715,12 +1716,30 @@ e2e_receipt_fields() {
     # attribute can make `git diff HEAD` emit a constant (or nothing) with exit
     # 0, which would hide every tracked worktree edit from the receipt - and
     # therefore from the pre/post-build stability comparison that exists to
-    # catch a mid-build source change.
-    git diff --no-ext-diff --no-textconv HEAD >"$TGT/$_gate-diff.$$" 2>&1 || rcd=$?
-    [ "$rcd" -eq 0 ] || {
-        echo "E2E-$_gate-BLOCKED: git diff HEAD exit $rcd (unreadable diff, not a receipt)" >&2
+    # catch a mid-build source change. --binary keeps a binary-attributed edit
+    # content-visible instead of collapsing it to "Binary files differ". The
+    # producer's stderr is kept out of the hashed bytes and an exit-0 diagnostic
+    # is an incomplete diff, i.e. BLOCKED, exactly like the untracked universe.
+    _df_err=$(mktemp) || {
+        echo "E2E-$_gate-BLOCKED: mktemp failed (source-diff observation impossible, not a receipt)" >&2
         exit 1
     }
+    git diff --no-ext-diff --no-textconv --binary HEAD >"$TGT/$_gate-diff.$$" 2>"$_df_err" || rcd=$?
+    if [ "$rcd" -ne 0 ]; then
+        echo "E2E-$_gate-BLOCKED: git diff HEAD exit $rcd (unreadable diff, not a receipt)" >&2
+        if [ -s "$_df_err" ]; then
+            sed 's/^/  /' "$_df_err" >&2
+        fi
+        rm -f "$_df_err"
+        exit 1
+    fi
+    if [ -s "$_df_err" ]; then
+        echo "E2E-$_gate-BLOCKED: git diff HEAD produced diagnostics (source-diff observation incomplete, not a receipt)" >&2
+        sed 's/^/  /' "$_df_err" >&2
+        rm -f "$_df_err"
+        exit 1
+    fi
+    rm -f "$_df_err"
     rgh=0
     head=$(git rev-parse --verify HEAD 2>&1) || rgh=$?
     [ "$rgh" -eq 0 ] && [ -n "$head" ] || {

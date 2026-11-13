@@ -797,6 +797,10 @@ class E2EReceiptInputs(unittest.TestCase):
         for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                      "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES"):
             env.pop(name, None)
+        env.pop("GIT_CONFIG_COUNT", None)
+        for name in [k for k in env
+                     if k.startswith("GIT_CONFIG_KEY_") or k.startswith("GIT_CONFIG_VALUE_")]:
+            env.pop(name, None)
         return env
 
     def git(self, *args):
@@ -887,6 +891,8 @@ class E2EReceiptInputs(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("generated-evil/build.rs", result.stderr)
 
+    @unittest.skipIf(os.geteuid() == 0,
+                     "root can read a mode-000 directory; the diagnostic shape is unavailable")
     def test_a_producer_diagnostic_on_exit_zero_is_a_blocked_observation(self):
         # git reports an unreadable directory as a WARNING and leaves its
         # contents out of the list, so an exit-0 diagnostic is an incomplete
