@@ -1699,33 +1699,15 @@ impl Serving {
             return Ok(());
         }
 
-        let first = self.slots[index].batch_seen != self.batch_gen;
-        self.slots[index].batch_seen = self.batch_gen;
-        if first {
-            if let VisitState::Live { ops, .. } = self.visit {
-                self.note_visit(ops);
-            }
-            self.visit = VisitState::live(index);
-            #[cfg(test)]
-            {
-                self.slots[index].visits = self.slots[index].visits.saturating_add(1);
-            }
-        } else {
-            let live_here = matches!(
-                self.visit,
-                VisitState::Live { slot, .. } if slot == index
-            );
-            if !live_here || self.visit.exhausted() {
-                self.reschedule(
-                    index,
-                    if upstream {
-                        RescheduleArm::Upstream
-                    } else {
-                        RescheduleArm::Client
-                    },
-                );
-                return Ok(());
-            }
+        if !self.enter_visit(
+            index,
+            if upstream {
+                RescheduleArm::Upstream
+            } else {
+                RescheduleArm::Client
+            },
+        ) {
+            return Ok(());
         }
         if upstream {
             if ready.readable || ready.read_closed || ready.write_closed {
@@ -1743,6 +1725,36 @@ impl Serving {
             }
         }
         Ok(())
+    }
+
+    /// Opens (or joins) `index`'s complete-visit budget for the current poll
+    /// batch: stamps the slot's batch generation, seals and counts the previous
+    /// slot's visit, and installs a fresh budget. Returns `false` after
+    /// re-arming `index` when this batch's visit was already sealed by another
+    /// slot or its budget is spent, so the caller returns without dispatching.
+    fn enter_visit(&mut self, index: usize, arm: RescheduleArm) -> bool {
+        let first = self.slots[index].batch_seen != self.batch_gen;
+        self.slots[index].batch_seen = self.batch_gen;
+        if first {
+            if let VisitState::Live { ops, .. } = self.visit {
+                self.note_visit(ops);
+            }
+            self.visit = VisitState::live(index);
+            #[cfg(test)]
+            {
+                self.slots[index].visits = self.slots[index].visits.saturating_add(1);
+            }
+            return true;
+        }
+        let live_here = matches!(
+            self.visit,
+            VisitState::Live { slot, .. } if slot == index
+        );
+        if live_here && !self.visit.exhausted() {
+            return true;
+        }
+        self.reschedule(index, arm);
+        false
     }
 
     /// Processes one SIGTERM observation: drains the retained self-pipe
