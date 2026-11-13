@@ -88,7 +88,7 @@ release-assurance gates first, telemetry and test hygiene last.
 | D13 | Report-time drop accounting mutates after the summary is encoded, then clears | 1 | low | Confirmed | Fixed — `f24d401` | P2 | M3 ✓ |
 | D14 | Reserved forced monitor summary displaces the queued `shutdown_final` verdict | 1 | low | Confirmed | Fixed — `ea48493` | P2 | M3 ✓ |
 | D15 | Reopened DNS incident inherits the other family's prior failure snapshot | 1 | low | Confirmed | Fixed — `e591abd` | P2 | M3 ✓ |
-| D16 | Predictable test/benchmark temp paths permit symlink clobber (4 sites) | 5 | low | Confirmed-Conditional | Fix | P3 | M6 |
+| D16 | Predictable test/benchmark temp paths permit symlink clobber (4 sites) | 5 | low | Confirmed-Conditional | Fixed — `e6a25c9`…`9be04d6` | P3 | M6 ✓ |
 | D17 | Reference deployment admits the whole VPC subnet to the proxy | 1 | low | Confirmed | Correct-documentation | P3 | M7 |
 | D18 | Combined upstream error+readable readiness skips early-activity telemetry | 1 | low | Confirmed-Conditional | Fixed — `5b31ef2` | P2 | M3 ✓ |
 
@@ -474,7 +474,7 @@ failure. Telemetry-only; no effect on cache admission or routing.
 one-family incident reports only its own family; the within-window stickiness property is
 guarded by its own test. Registry: `csf_3480bec0…`.
 
-### D16 — Predictable test/bench temp paths · Confirmed-Conditional · Fix (M6)
+### D16 — Predictable test/bench temp paths · Confirmed-Conditional · Fixed (M6)
 
 Verification at HEAD:
 - `src/log/tests.rs:21-35` — `%TMPDIR%/alumina-log-<pid>-<counter>.log`, `create(true).truncate(true)`;
@@ -491,6 +491,36 @@ Fix: one shared test-only helper — atomically created private directory with a
 `create_new` semantics, and rejection of pre-existing paths/symlinks. No new runtime
 dependency; no production code touched. Registry: `csf_7a1d1b85…`, `csf_71878c86…`,
 `csf_ebf1e194…`, `csf_a72f99bc…`, `csf_f653b18d…`.
+
+**Fixed at `e6a25c9`…`9be04d6`**: one test-only owner, `tests/support/temp_dir.rs`, holds
+the whole mechanism — an unpredictable name (`alumina-<tag>-<pid>-<32 hex>`) drawn from
+`/dev/urandom`, created with `fs::create_dir` (never `create_dir_all`) so a pre-existing
+path or symlink is refused by `EEXIST` whatever it points at, with no `lstat` and no TOCTOU
+window, then set to `0o700`; writes are `O_EXCL` `create_new`, and the log and startup sinks
+take a read+write seekable descriptor on an unlinked inode from a private directory created
+and removed around it — pathless, so there is nothing to preplant. The two clobber opens
+(`src/log/tests.rs`, `src/runtime/storage/startup_integration.rs`) and the boot fixture
+(`tests/boot.rs`, `src/boot/tests.rs`) now go through it. `scripts/e2e_shutdown.py` writes
+case logs only inside a private per-run `mkdtemp` workspace (`O_EXCL`, 0700, `atexit`
+cleanup, no `/tmp` glob), and `scripts/bench_workload.py`'s selftest workspace and its B8/F4
+embedded-shell probes live inside one (`--selftest-tmp` override kept).
+
+Guard proof is per site — old follows the plant, new refuses, clean — from a scratch probe
+whose bodies are extracted byte-for-byte from `git show 699879c:<file>`: the old helper wrote
+`victim/config.toml` through a planted directory symlink and both sink opens truncated a
+victim to 0 bytes; the new owner refused every plant with the target intact, the sink
+descriptors round-tripped seekably with no path left, and both scripts left regular-file and
+symlink plants untouched with no `/tmp` residue. 8 permanent guard tests in `tests/boot.rs`;
+`--lib` 1145 before and after, `--test boot` 28→36. `sh scripts/verify.sh docs` green.
+Boundary `host-mid union` PASS on the final candidate, with the `ALT-COPY-OK` release binary
+sha256 `685898ee…` identical to M3/M5 — the strongest proof that no production path changed.
+Standard-tier review APPROVE (`alumina-gzqn4.24.2`) plus script review APPROVE
+(`.ooda/review-1794578195.md`).
+
+Residuals are recorded rather than dropped (`alumina-gzqn4.25`): `scripts/e2e_relay.sh` keeps
+fixed `/tmp` names but runs inside a fresh `--network none` container whose namespace is
+destroyed with it, and the `owner`/`transport` test sinks are already exclusive (a plant fails
+that run loudly) though still predictable. The class is not left silently half-covered.
 
 ### D17 — Reference ingress admits the whole VPC subnet · Confirmed · Correct-documentation (M7)
 
@@ -672,7 +702,7 @@ release-assurance defects, and M2 protects the gates that later missions rely on
 | M3 | D4, D13, D14, D15, D18 | monitor / log / dns-incident / reactor-readiness | exact-grammar tests; every record kind still ≤ **2048 B** slot (`monitor_domain` re-measured to 1,870 B / 178 B); per-ordinal peer size budget | adversarial | ✓ `9e1f95a` |
 | M4 | D9, D10, D11, D12 | reactor / tunnel; deadlines, admission | clock-stepped expiry tests; injected accept error; 32-bit assertion; pool quota test | adversarial | ✓ `e110da9` |
 | M5 | D7, D8 | `scripts/verify.sh` E2E receipt; `scripts/e2e_shutdown.py` | untracked-input rejection; held-open-listener case must FAIL | adversarial | ✓ `94b9a28` |
-| M6 | D16 | test-only helpers + bench/E2E temp paths | symlink plant test per site; no production path; no new runtime dep | standard |
+| M6 | D16 | test-only helpers + bench/E2E temp paths | symlink plant test per site; no production path; no new runtime dep | standard | ✓ `9be04d6` |
 | M7 | D17 (+G4) | `docs/deployment.md` (non-canonical docs only) | `verify.sh docs`; no spec digest change | standard |
 | G1–G2 | D3, D5 | spec + digest pin + config/table + tests **in one increment**; independent source and governance review; explicit user authorisation of exact text | amendment dossier: options analysis, fixed-profile and size re-measurement, migration note for existing configs | governance |
 | G3–G4 | — | non-canonical docs first; spec only if the spec is the wrong side | `verify.sh docs`; digest re-pin only if spec text changes | standard |
@@ -696,7 +726,8 @@ D4 is likely rework. G2 is independent of every remaining row and can proceed in
 | D9–D12 | Fixed | `alumina-gzqn4.6` | closed — `e110da9`, boundary PASS, review r2 APPROVE |
 | D4, D13–D15, D18 | Fixed | `alumina-gzqn4.17` | closed — `9e1f95a`, boundary PASS, review r2 APPROVE |
 | D7, D8 | Fixed | `alumina-gzqn4.20` | closed — `94b9a28`, guard proofs, real e2e shutdown 10/10, review r3 APPROVE |
-| D16, D17 | per §3 | `alumina-gzqn4.1` | registered (M6/M7) |
+| D16 | Fixed | `alumina-gzqn4.24` | closed — `9be04d6`, boundary PASS on the final candidate, review APPROVE (`alumina-gzqn4.24.2`, `.ooda/review-1794578195.md`), residuals `alumina-gzqn4.25` |
+| D17 | per §3 | `alumina-gzqn4.1` | registered (M7) |
 | G3 | Adopted in part | `alumina-gzqn4.21` | closed — `5012527`, five hunks, governance APPROVE; residuals R1/R3/R4 open |
 
 Epic: `alumina-gzqn4`. Ledger updates go to `alumina-gzqn4.1`; the register above is the
