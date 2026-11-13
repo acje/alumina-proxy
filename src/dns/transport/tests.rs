@@ -296,95 +296,132 @@ pub(crate) fn spawn_bounded_responder(conn_scripts: Vec<Vec<Step>>) -> BoundedRe
     }
 }
 
-fn spawn_responder_impl(
-    conn_scripts: Vec<Vec<Step>>,
-    cancel: Option<Arc<ResponderCancellation>>,
-) -> Responder {
+/// Binds the loopback listener the scripted responder accepts on, nonblocking
+/// when a cancellation token must be observed between accepts.
+fn bind_responder_listener(cancellable: bool) -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind responder");
-    if cancel.is_some() {
+    if cancellable {
         listener
             .set_nonblocking(true)
             .expect("nonblocking responder");
     }
     let addr = listener.local_addr().expect("responder addr");
+    (listener, addr)
+}
+
+/// Accepts the next scripted connection, or `None` once cancellation is
+/// requested or the listener reports a non-transient failure.
+fn accept_scripted_connection(
+    listener: &TcpListener,
+    cancel: Option<&ResponderCancellation>,
+) -> Option<(TcpStream, SocketAddr)> {
+    loop {
+        match listener.accept() {
+            Ok(pair) => return Some(pair),
+            Err(err) if cancel.is_some() && err.kind() == io::ErrorKind::WouldBlock => {
+                if cancel.is_some_and(|state| state.requested.load(Ordering::Acquire)) {
+                    return None;
+                }
+                thread::park_timeout(Duration::from_millis(50));
+            }
+            Err(err) if cancel.is_some() => panic!("responder accept failed: {err}"),
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Arms the accepted stream for scripted serving and records it as the stream
+/// the cancellation token shuts down; `false` when cancellation won the race.
+fn arm_active_stream(state: &ResponderCancellation, sock: &mut TcpStream) -> bool {
+    let mut active = state.active.lock().unwrap();
+    if state.requested.load(Ordering::Acquire) {
+        return false;
+    }
+    sock.set_nonblocking(false).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    sock.set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    *active = Some(sock.try_clone().unwrap());
+    true
+}
+
+/// Replays one scripted step on `sock`, reporting whether the connection may
+/// take the next step.
+fn run_scripted_step(
+    sock: &mut TcpStream,
+    step: &Step,
+    cancel: Option<&ResponderCancellation>,
+    closed_after_prefix: &AtomicUsize,
+) -> bool {
+    match step {
+        Step::Stall(duration) => {
+            wait_script_duration(*duration, cancel);
+            true
+        }
+        Step::Close => false,
+        Step::Malformed(bytes) => send_malformed(sock, bytes),
+        Step::LengthPrefixOnly { len } => probe_length_prefix(sock, *len, closed_after_prefix),
+        Step::FragmentedPositive {
+            ttl,
+            octets,
+            chunk,
+            gap,
+        } => send_fragmented(sock, *ttl, *octets, *chunk, *gap, cancel),
+        step => send_scripted_reply(sock, step),
+    }
+}
+
+/// Replays one connection's script, stopping at the script end, at a step that
+/// closes the connection, or when cancellation is requested.
+fn serve_scripted_connection(
+    sock: &mut TcpStream,
+    steps: Vec<Step>,
+    cancel: Option<&ResponderCancellation>,
+    closed_after_prefix: &AtomicUsize,
+) {
+    for step in steps {
+        if cancel.is_some_and(|state| state.requested.load(Ordering::Acquire)) {
+            break;
+        }
+        if !run_scripted_step(sock, &step, cancel, closed_after_prefix) {
+            break;
+        }
+    }
+}
+
+fn spawn_responder_impl(
+    conn_scripts: Vec<Vec<Step>>,
+    cancel: Option<Arc<ResponderCancellation>>,
+) -> Responder {
+    let (listener, addr) = bind_responder_listener(cancel.is_some());
     let connections = Arc::new(AtomicUsize::new(0));
     let connections_thread = Arc::clone(&connections);
     let closed_after_prefix = Arc::new(AtomicUsize::new(0));
     let closed_after_prefix_thread = Arc::clone(&closed_after_prefix);
     let handle = thread::spawn(move || {
-        let scripts = conn_scripts.into_iter();
-        for conn_steps in scripts {
+        for conn_steps in conn_scripts {
             if cancel
                 .as_ref()
                 .is_some_and(|state| state.requested.load(Ordering::Acquire))
             {
                 break;
             }
-            let accepted = loop {
-                match listener.accept() {
-                    Ok(pair) => break Some(pair),
-                    Err(err) if cancel.is_some() && err.kind() == io::ErrorKind::WouldBlock => {
-                        if cancel.as_ref().unwrap().requested.load(Ordering::Acquire) {
-                            break None;
-                        }
-                        thread::park_timeout(Duration::from_millis(50));
-                    }
-                    Err(err) if cancel.is_some() => panic!("responder accept failed: {err}"),
-                    Err(_) => break None,
-                }
-            };
-            let Some((mut sock, _)) = accepted else {
+            let Some((mut sock, _)) = accept_scripted_connection(&listener, cancel.as_deref())
+            else {
                 break;
             };
-            if let Some(state) = &cancel {
-                let mut active = state.active.lock().unwrap();
-                if state.requested.load(Ordering::Acquire) {
-                    break;
-                }
-                sock.set_nonblocking(false).unwrap();
-                sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-                sock.set_write_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                *active = Some(sock.try_clone().unwrap());
+            if let Some(state) = &cancel
+                && !arm_active_stream(state, &mut sock)
+            {
+                break;
             }
             connections_thread.fetch_add(1, Ordering::Relaxed);
-            for step in conn_steps {
-                if cancel
-                    .as_ref()
-                    .is_some_and(|state| state.requested.load(Ordering::Acquire))
-                {
-                    break;
-                }
-                match step {
-                    Step::Stall(d) => wait_script_duration(d, cancel.as_deref()),
-                    Step::Close => break,
-                    Step::Malformed(bytes) => {
-                        if !send_malformed(&mut sock, &bytes) {
-                            break;
-                        }
-                    }
-                    Step::LengthPrefixOnly { len } => {
-                        if !probe_length_prefix(&mut sock, len, &closed_after_prefix_thread) {
-                            break;
-                        }
-                    }
-                    Step::FragmentedPositive {
-                        ttl,
-                        octets,
-                        chunk,
-                        gap,
-                    } => {
-                        if !send_fragmented(&mut sock, ttl, octets, chunk, gap, cancel.as_deref()) {
-                            break;
-                        }
-                    }
-                    step => {
-                        if !send_scripted_reply(&mut sock, &step) {
-                            break;
-                        }
-                    }
-                }
-            }
+            serve_scripted_connection(
+                &mut sock,
+                conn_steps,
+                cancel.as_deref(),
+                &closed_after_prefix_thread,
+            );
             if let Some(state) = &cancel {
                 *state.active.lock().unwrap() = None;
             }
