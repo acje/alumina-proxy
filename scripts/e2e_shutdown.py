@@ -77,12 +77,15 @@ summary distinguishes scoped green from full-suite green; a filter matching
 zero cases is rejected (nonzero, never an unqualified ALL-PASS).
 """
 
+import atexit
 import fcntl
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -129,6 +132,24 @@ GRACE_HI = 8.8
 # fixed 8 s grace, so the sampled interval that follows still spans the whole
 # sampling window (and a lapsed deadline FAILS as a gap instead of passing).
 SIGNAL_SETTLE = 0.25
+
+# Per-run private workspace: case logs are opened exclusively (O_EXCL) inside a
+# mkdtemp directory only this process knows, so a co-tenant cannot preplant a
+# log name or a symlink that redirects the child's stdout.
+WORKSPACE = None
+
+
+def workspace():
+    global WORKSPACE
+    if WORKSPACE is None:
+        WORKSPACE = tempfile.mkdtemp(prefix="alumina-e2e-shutdown-")
+        os.chmod(WORKSPACE, 0o700)
+        atexit.register(shutil.rmtree, WORKSPACE, ignore_errors=True)
+    return WORKSPACE
+
+
+def case_log_path(name, suffix=".log"):
+    return os.path.join(workspace(), f"{name}{suffix}")
 
 
 def in_first_deadline_window(elapsed):
@@ -272,7 +293,7 @@ def wait_log_marker(name, marker, timeout=8.0):
     """Poll the case's captured stdout file until the binary has actually
     emitted `marker` (a real phase receipt from the child's log output), so a
     schedule phase is observed rather than assumed by a fixed sleep."""
-    path = f"/tmp/shutdown-{name}.log"
+    path = case_log_path(name)
     logfd = None
     try:
         logfd = os.open(path, os.O_RDONLY)
@@ -835,20 +856,23 @@ def run_case(name, body):
                 return
 
 
-def open_case_log(name):
-    return open(f"/tmp/shutdown-{name}.log", "wb")
+def open_case_log(name, suffix=".log"):
+    path = case_log_path(name, suffix)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    return os.fdopen(fd, "wb")
 
 
 def dump_case_logs(name):
     """On FAIL, surface the binary's captured output: bounded tail so a signal
-    storm or busy loop cannot balloon the record. Scans /tmp/shutdown-*.log
-    written in the last 180s (the case's display name differs from its case-_
-    function name, which is the run_case key). Returns the tail or None."""
+    storm or busy loop cannot balloon the record. Scans the run's private
+    workspace for *.log written in the last 180s (the case's display name
+    differs from its case-function name, which is the run_case key). Returns
+    the tail or None."""
     import glob
 
     now = time.time()
     parts = []
-    for path in glob.glob("/tmp/shutdown-*.log"):
+    for path in glob.glob(os.path.join(workspace(), "*.log")):
         try:
             if now - os.path.getmtime(path) > 180:
                 continue
@@ -1282,7 +1306,7 @@ def case_stalled_stdout(fixtures):
     fixtures.append(dns)
     silent = SilentUpstream(("208.67.222.220", 443)).start()
     fixtures.append(silent)
-    errlog = open(f"/tmp/shutdown-{name}.stderr.log", "wb")
+    errlog = open_case_log(name, ".stderr.log")
     r = w = w_probe = None
     s = None
     try:
