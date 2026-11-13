@@ -3019,28 +3019,29 @@ mod assurance_bridge_tests {
         );
     }
 
-    #[test]
-    fn widest_boot_frame_including_retained_proofs_fits_slot() {
-        use crate::dns::cache::Family;
-        use crate::dns::cache::evidence::{Evidence, ResolverSource};
-        use crate::dns::cache::{Generation, StagedPositive};
-        use crate::dns::transport::FailureReason;
-        use crate::eligibility::NumericAddr;
-        use std::net::{Ipv4Addr, Ipv6Addr};
-        let name = format!(
+    fn widest_boot_name() -> String {
+        format!(
             "{}.{}.{}.{}",
             "a".repeat(63),
             "b".repeat(63),
             "c".repeat(63),
             "d".repeat(61)
-        );
-        let doc = format!(
+        )
+    }
+
+    fn widest_boot_document(name: &str) -> String {
+        format!(
             "listen = \"127.0.0.1:9\"\nstartup_unresolved_allowance = 0\nrecursive_dnssec_policy = \"root_validating_no_stale\"\nresolver = [\"1.1.1.1#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"8.8.8.8#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"9.9.9.9#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"8.8.4.4#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\", \"1.0.0.1#r.example.org#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"{name}:65535\"]\ndns_assurance = \"resolver_authenticated\"\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\n"
-        );
-        let config = crate::config::parse_config_document(&doc).unwrap();
-        let mut storage = ServeStorage::boot(&config).unwrap();
-        assert_eq!(name.len(), crate::names::hostname::FQDN_MAX_LEN);
-        let start = u64::MAX - 300_000;
+        )
+    }
+
+    fn publish_widest_boot_proofs(storage: &mut ServeStorage, start: u64) {
+        use crate::dns::cache::Family;
+        use crate::dns::cache::evidence::{Evidence, ResolverSource};
+        use crate::dns::cache::{Generation, StagedPositive};
+        use crate::eligibility::NumericAddr;
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
         let evidence = Evidence::new(
             false,
             true,
@@ -3079,19 +3080,9 @@ mod assurance_bridge_tests {
             .unwrap();
             storage.cache.publish_positive(&staged).unwrap();
         }
-        let mut snapshot = storage.capture_assurance_secs(0, start + 5).unwrap();
-        snapshot.boot = Some(super::AssuranceBoot {
-            status: crate::log::StartupStatus::Degraded,
-            attempted: [true; 2],
-            results: [Some(Err(FailureReason::InsufficientAssurance)); 2],
-        });
-        storage.logs.saturate_dropped_for_test();
-        assert!(
-            storage
-                .logs
-                .enqueue_assurance(&snapshot, u64::MAX, AssurancePhase::Boot)
-        );
-        assert_eq!(storage.logs.dropped(), u64::MAX);
+    }
+
+    fn assert_widest_boot_frame(storage: &ServeStorage, name: &str, start: u64) {
         let frame = storage.logs().last_record_bytes().unwrap();
         let text = std::str::from_utf8(frame).unwrap();
         assert!(
@@ -3112,9 +3103,36 @@ mod assurance_bridge_tests {
             text.contains("seq=18446744073709551615")
                 && text.contains(&format!("secs={}", start + 5))
         );
-        assert!(text.contains(&name) && text.contains("port=65535") && text.ends_with('\n'));
+        assert!(text.contains(name) && text.contains("port=65535") && text.ends_with('\n'));
         assert!(frame.len() <= crate::log::SLOT_BYTES);
         println!("widest_boot_frame_bytes={}", frame.len());
+    }
+
+    #[test]
+    fn widest_boot_frame_including_retained_proofs_fits_slot() {
+        use crate::dns::transport::FailureReason;
+
+        let name = widest_boot_name();
+        let doc = widest_boot_document(&name);
+        let config = crate::config::parse_config_document(&doc).unwrap();
+        let mut storage = ServeStorage::boot(&config).unwrap();
+        assert_eq!(name.len(), crate::names::hostname::FQDN_MAX_LEN);
+        let start = u64::MAX - 300_000;
+        publish_widest_boot_proofs(&mut storage, start);
+        let mut snapshot = storage.capture_assurance_secs(0, start + 5).unwrap();
+        snapshot.boot = Some(super::AssuranceBoot {
+            status: crate::log::StartupStatus::Degraded,
+            attempted: [true; 2],
+            results: [Some(Err(FailureReason::InsufficientAssurance)); 2],
+        });
+        storage.logs.saturate_dropped_for_test();
+        assert!(
+            storage
+                .logs
+                .enqueue_assurance(&snapshot, u64::MAX, AssurancePhase::Boot)
+        );
+        assert_eq!(storage.logs.dropped(), u64::MAX);
+        assert_widest_boot_frame(&storage, &name, start);
     }
 
     #[test]
