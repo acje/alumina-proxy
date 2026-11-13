@@ -369,38 +369,42 @@ fn write_qname(buf: &mut [u8], mut pos: usize, name: &str) -> Result<usize, DnsE
     let bytes = name.as_bytes();
     let mut label_start = 0usize;
     for (i, &b) in bytes.iter().enumerate() {
-        if b == b'.' {
-            let label_len = i - label_start;
-            if label_len == 0 || label_len > 63 {
-                return Err(DnsError::QueryTooLong);
-            }
-            if pos + 1 + label_len > buf.len() {
-                return Err(DnsError::BufferExhausted);
-            }
-            buf[pos] = u8::try_from(label_len).expect("dns label at most 63 bytes");
-            buf[pos + 1..pos + 1 + label_len]
-                .copy_from_slice(&bytes[label_start..label_start + label_len]);
-            pos += 1 + label_len;
-            label_start = i + 1;
+        if b != b'.' {
+            continue;
         }
-    }
-    let tail = bytes.len() - label_start;
-    if tail > 0 {
-        if tail > 63 {
+        let label_len = i - label_start;
+        if label_len == 0 {
             return Err(DnsError::QueryTooLong);
         }
-        if pos + 1 + tail > buf.len() {
-            return Err(DnsError::BufferExhausted);
-        }
-        buf[pos] = u8::try_from(tail).expect("dns label at most 63 bytes");
-        buf[pos + 1..pos + 1 + tail].copy_from_slice(&bytes[label_start..]);
-        pos += 1 + tail;
+        pos = write_label(buf, pos, &bytes[label_start..label_start + label_len])?;
+        label_start = i + 1;
+    }
+    let tail = &bytes[label_start..];
+    if !tail.is_empty() {
+        pos = write_label(buf, pos, tail)?;
     }
     if pos >= buf.len() {
         return Err(DnsError::BufferExhausted);
     }
     buf[pos] = 0;
     Ok(pos + 1)
+}
+
+/// Writes one length-prefixed label at `pos`, returning the cursor past it.
+#[expect(
+    clippy::expect_used,
+    reason = "label length is checked to be <= 63 before encoding, fitting u8"
+)]
+fn write_label(buf: &mut [u8], pos: usize, label: &[u8]) -> Result<usize, DnsError> {
+    if label.len() > 63 {
+        return Err(DnsError::QueryTooLong);
+    }
+    if pos + 1 + label.len() > buf.len() {
+        return Err(DnsError::BufferExhausted);
+    }
+    buf[pos] = u8::try_from(label.len()).expect("dns label at most 63 bytes");
+    buf[pos + 1..pos + 1 + label.len()].copy_from_slice(label);
+    Ok(pos + 1 + label.len())
 }
 
 /// Builds a single-question IN DNS query for the exact allowlisted `name` and
