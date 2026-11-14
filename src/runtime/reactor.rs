@@ -51,12 +51,14 @@ use crate::enforcement::action::{DomainOrdinal, FirstSlot, PerFqdnControl, Scope
 use crate::enforcement::monitor::{CapturedDetail, CapturedFact, SlotCapture};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason, Violation};
 use crate::inspection::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
-use crate::inspection::connect::{ConnectHeadReason, ConnectParser, Feed};
+use crate::inspection::connect::{ConnectHeadReason, ConnectParser, ConnectRequest, Feed};
 use crate::log::{ActivityKind, RejectReason};
 use crate::names::hostname::FixedHostname;
 use crate::runtime::gate::{Activity, TunnelGate, UpstreamWrite, ValidatedHello};
 use crate::runtime::storage::ServeStorage;
-use crate::runtime::tunnel::{ConnectPhase, Deadline, MAX_TUNNELS, SlotIndex, TunnelIndex};
+use crate::runtime::tunnel::{
+    ConnectPhase, Deadline, DecideError, MAX_TUNNELS, SlotIndex, TunnelIndex,
+};
 
 mod policy;
 mod reject;
@@ -1413,7 +1415,7 @@ enum DrainEnd {
     IdleExpired,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum RelayRead {
     Bytes(usize),
     Stop,
@@ -1551,6 +1553,15 @@ fn flush_down_drained(serving: &mut Serving, index: usize) {
         ws.down_len = 0;
         ws.down_off = 0;
     }
+}
+
+#[derive(Clone, Copy)]
+struct DecisionState {
+    ordinal: Option<DomainOrdinal>,
+    now: Instant,
+    approved: FixedHostname,
+    approved_port: u16,
+    observed: Option<EntryState>,
 }
 
 impl Serving {
@@ -2986,24 +2997,8 @@ impl Serving {
     }
 
     fn run_decision(&mut self, index: usize) -> Result<(), ServeError> {
-        let Some(slot) = self.slots[index].handle.as_ref() else {
+        let Some(request) = self.decision_request(index) else {
             return Ok(());
-        };
-        let request = match self.slots[index].parser.result().copied() {
-            Some(Ok(request)) => request,
-            Some(Err(err)) => {
-                self.any_illegal(
-                    index,
-                    AnyIllegalCause::ConnectParse(ConnectHeadReason::from_connect_error(&err)),
-                );
-                self.refuse(index, Refusal::BadRequest);
-                return Ok(());
-            }
-            None => {
-                self.project_tripwire(index, Violation::MissingParseResult);
-                self.close_slot(index);
-                return Ok(());
-            }
         };
         let resolved = self.storage.resolve_request(&request);
         let approved = *resolved.request().fixed_hostname();
@@ -3014,49 +3009,100 @@ impl Serving {
         if let Some(ordinal) = ordinal
             && self.storage.enforcement().is_blocked(ordinal)
         {
-            self.storage.enforcement_mut().note_domain_block(ordinal);
-            self.refuse_with_hostname(index, Refusal::Forbidden, approved);
+            self.refuse_blocked(index, ordinal, approved);
             return Ok(());
         }
         let now = Instant::now();
+        let Some(slot) = self.slots[index].handle.as_ref() else {
+            return Ok(());
+        };
         let phase = self.storage.decide(slot, &resolved, now);
+        let observed = match &phase {
+            Ok(ConnectPhase::Peer { family, .. }) => {
+                ordinal.and_then(|_| resolved.peer_state(*family, now))
+            }
+            _ => None,
+        };
+        self.apply_decision(
+            index,
+            &phase,
+            DecisionState {
+                ordinal,
+                now,
+                approved,
+                approved_port,
+                observed,
+            },
+        )
+    }
+
+    fn decision_request(&mut self, index: usize) -> Option<ConnectRequest> {
+        self.slots[index].handle.as_ref()?;
+        match self.slots[index].parser.result().copied() {
+            Some(Ok(request)) => Some(request),
+            Some(Err(err)) => {
+                self.any_illegal(
+                    index,
+                    AnyIllegalCause::ConnectParse(ConnectHeadReason::from_connect_error(&err)),
+                );
+                self.refuse(index, Refusal::BadRequest);
+                None
+            }
+            None => {
+                self.project_tripwire(index, Violation::MissingParseResult);
+                self.close_slot(index);
+                None
+            }
+        }
+    }
+
+    fn refuse_blocked(&mut self, index: usize, ordinal: DomainOrdinal, approved: FixedHostname) {
+        self.storage.enforcement_mut().note_domain_block(ordinal);
+        self.refuse_with_hostname(index, Refusal::Forbidden, approved);
+    }
+
+    fn apply_decision(
+        &mut self,
+        index: usize,
+        phase: &Result<ConnectPhase, DecideError>,
+        state: DecisionState,
+    ) -> Result<(), ServeError> {
         match phase {
             Err(_) | Ok(ConnectPhase::CandidatesExhausted) => {
-                self.refuse_with_hostname(index, Refusal::DialFailed, approved);
+                self.refuse_with_hostname(index, Refusal::DialFailed, state.approved);
                 Ok(())
             }
             Ok(ConnectPhase::Forbidden) => {
                 self.any_illegal(index, AnyIllegalCause::HostNotAllowlisted);
-                self.refuse_with_hostname(index, Refusal::Forbidden, approved);
+                self.refuse_with_hostname(index, Refusal::Forbidden, state.approved);
                 Ok(())
             }
             Ok(ConnectPhase::NoBinding) => {
-                self.refuse_with_hostname(index, Refusal::NoResolvedAddresses, approved);
+                self.refuse_with_hostname(index, Refusal::NoResolvedAddresses, state.approved);
                 Ok(())
             }
             Ok(ConnectPhase::DeadlineExhausted) => {
-                self.refuse_with_hostname(index, Refusal::SetupTimeout, approved);
+                self.refuse_with_hostname(index, Refusal::SetupTimeout, state.approved);
                 Ok(())
             }
             Ok(ConnectPhase::Peer {
                 addr,
-                family,
                 connect_deadline,
+                ..
             }) => {
-                let observed = ordinal.and_then(|_| resolved.peer_state(family, now));
-                self.note_peer_freshness(observed, ordinal, now, index);
+                self.note_peer_freshness(state.observed, state.ordinal, state.now, index);
                 {
                     let slot = &mut self.slots[index];
-                    slot.report_name = ordinal.map(DomainOrdinal::get);
-                    slot.approved = Some(approved);
-                    slot.approved_port = approved_port;
+                    slot.report_name = state.ordinal.map(DomainOrdinal::get);
+                    slot.approved = Some(state.approved);
+                    slot.approved_port = state.approved_port;
                     slot.gate.on_authorized();
                     slot.stage = Stage::Dialing;
                 }
                 self.apply_slot_deadline(index, |ws| {
-                    ws.connect_deadline = Some(connect_deadline);
+                    ws.connect_deadline = Some(*connect_deadline);
                 });
-                self.dial_checked(index, addr)
+                self.dial_checked(index, *addr)
             }
         }
     }
