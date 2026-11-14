@@ -119,7 +119,7 @@ fn dispatch_startup(mut owner: Preallocated, nameserver: std::net::SocketAddr) -
     }
 }
 
-fn dispatch_outcome(owner: Preallocated, state: StartupState) -> ! {
+fn dispatch_outcome(mut owner: Preallocated, state: StartupState) -> ! {
     match state {
         StartupState::Serve { listener, .. } => {
             let runtime = match owner.attach(listener) {
@@ -130,7 +130,6 @@ fn dispatch_outcome(owner: Preallocated, state: StartupState) -> ! {
         }
         StartupState::Exit75 { .. } => std::process::exit(EX_TEMPFAIL),
         StartupState::Terminated => {
-            let mut owner = owner;
             owner.emit_shutdown_and_drain();
             std::process::exit(0);
         }
