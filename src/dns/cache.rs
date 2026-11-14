@@ -277,6 +277,22 @@ pub struct StagedPositive {
     evidence: Option<evidence::Evidence>,
 }
 
+/// The absolute deadlines a plotted entry carries, derived once from the
+/// staged receipt and TTL so publication never recomputes them.
+#[derive(Clone, Copy)]
+struct Deadlines {
+    freshness: u64,
+    retirement: u64,
+}
+
+/// The deduplicated eligible addresses a staged positive publishes, with their
+/// count kept alongside the fixed-capacity slots they occupy.
+#[derive(Clone, Copy)]
+struct EligibleBindings {
+    addrs: [NumericAddr; MAX_ADDRESSES],
+    len: usize,
+}
+
 impl StagedPositive {
     /// Stages validated numeric candidate addresses for one name and family.
     ///
@@ -349,6 +365,83 @@ impl StagedPositive {
             ttl,
             evidence,
         })
+    }
+}
+
+fn staged_deadlines(staged: &StagedPositive) -> Result<Deadlines, CacheError> {
+    let ttl = staged.ttl.clamp(1, TTL_CAP);
+    let freshness = staged
+        .receipt
+        .checked_add(ttl)
+        .ok_or(CacheError::DeadlineOverflow)?;
+    let retirement = freshness
+        .checked_add(STALE_GRACE)
+        .ok_or(CacheError::DeadlineOverflow)?;
+    Ok(Deadlines {
+        freshness,
+        retirement,
+    })
+}
+
+fn validate_staged_evidence(staged: &StagedPositive, freshness: u64) -> Result<(), CacheError> {
+    let Some(evidence) = staged.evidence else {
+        return Ok(());
+    };
+    if evidence.evidential_start() > staged.receipt {
+        return Err(CacheError::EvidenceInconsistent);
+    }
+    let supporting = evidence
+        .raw_supporting_ttl()
+        .ok_or(CacheError::EvidenceInconsistent)?;
+    if u64::from(supporting) != staged.ttl {
+        return Err(CacheError::EvidenceInconsistent);
+    }
+    if let Some(deadline) = evidence.evidential_deadline()
+        && deadline > freshness
+    {
+        return Err(CacheError::EvidenceInconsistent);
+    }
+    Ok(())
+}
+
+fn eligible_bindings(staged: &StagedPositive) -> EligibleBindings {
+    let mut addrs = [UNUSED_SLOT; MAX_ADDRESSES];
+    let mut len = 0usize;
+    for &addr in &staged.bindings[..usize::from(staged.binding_len)] {
+        if addr.is_eligible() && !addrs[..len].contains(&addr) {
+            addrs[len] = addr;
+            len += 1;
+        }
+    }
+    EligibleBindings { addrs, len }
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "eligible count cannot exceed MAX_ADDRESSES=16 after the staged-filter, fitting u8"
+)]
+fn published_entry(
+    staged: &StagedPositive,
+    next_generation: Generation,
+    deadlines: Deadlines,
+    bindings: EligibleBindings,
+) -> Entry {
+    if bindings.len == 0 {
+        return Entry {
+            generation: next_generation,
+            evidence: staged.evidence,
+            ..Entry::EMPTY
+        };
+    }
+    Entry {
+        generation: next_generation,
+        freshness_deadline: Some(deadlines.freshness),
+        retirement_deadline: Some(deadlines.retirement),
+        bindings: bindings.addrs,
+        binding_len: u8::try_from(bindings.len).expect("eligible count bounded by MAX_ADDRESSES"),
+        stale_allowed: staged.ttl != 0,
+        evidence: staged.evidence,
+        negative: None,
     }
 }
 
@@ -550,10 +643,6 @@ impl Cache {
     /// This function does not panic. Names not admitted by this cache are
     /// rejected by `admit` with `Err(NameOutOfRange)` (listed in `# Errors`)
     /// before any fixed-size entry indexing occurs.
-    #[expect(
-        clippy::expect_used,
-        reason = "eligible count cannot exceed MAX_ADDRESSES=16 after the staged-filter, fitting u8"
-    )]
     pub fn publish_positive(&mut self, staged: &StagedPositive) -> Result<(), CacheError> {
         self.admit(staged.name)?;
         let entry = self.entry_mut(staged.name, staged.family);
@@ -564,58 +653,14 @@ impl Cache {
             .generation
             .checked_next()
             .ok_or(CacheError::GenerationExhausted)?;
-        let ttl = staged.ttl.clamp(1, TTL_CAP);
-        let freshness = staged
-            .receipt
-            .checked_add(ttl)
-            .ok_or(CacheError::DeadlineOverflow)?;
-        let retirement = freshness
-            .checked_add(STALE_GRACE)
-            .ok_or(CacheError::DeadlineOverflow)?;
-        if let Some(evidence) = staged.evidence {
-            if evidence.evidential_start() > staged.receipt {
-                return Err(CacheError::EvidenceInconsistent);
-            }
-            let supporting = evidence
-                .raw_supporting_ttl()
-                .ok_or(CacheError::EvidenceInconsistent)?;
-            if u64::from(supporting) != staged.ttl {
-                return Err(CacheError::EvidenceInconsistent);
-            }
-            if let Some(deadline) = evidence.evidential_deadline()
-                && deadline > freshness
-            {
-                return Err(CacheError::EvidenceInconsistent);
-            }
-        }
-        let mut eligible = [UNUSED_SLOT; MAX_ADDRESSES];
-        let mut eligible_len = 0usize;
-        for &addr in &staged.bindings[..usize::from(staged.binding_len)] {
-            if addr.is_eligible() && !eligible[..eligible_len].contains(&addr) {
-                eligible[eligible_len] = addr;
-                eligible_len += 1;
-            }
-        }
-        let new_entry = if eligible_len == 0 {
-            Entry {
-                generation: next_generation,
-                evidence: staged.evidence,
-                ..Entry::EMPTY
-            }
-        } else {
-            Entry {
-                generation: next_generation,
-                freshness_deadline: Some(freshness),
-                retirement_deadline: Some(retirement),
-                bindings: eligible,
-                binding_len: u8::try_from(eligible_len)
-                    .expect("eligible count bounded by MAX_ADDRESSES"),
-                stale_allowed: staged.ttl != 0,
-                evidence: staged.evidence,
-                negative: None,
-            }
-        };
-        *entry = new_entry;
+        let deadlines = staged_deadlines(staged)?;
+        validate_staged_evidence(staged, deadlines.freshness)?;
+        *entry = published_entry(
+            staged,
+            next_generation,
+            deadlines,
+            eligible_bindings(staged),
+        );
         Ok(())
     }
 
