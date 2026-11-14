@@ -1054,11 +1054,7 @@ class ClientRun:
             # new-write dispatch boundary: never-attempted frames are not
             # transmitted after the window (no catch-up). Classification as
             # untouched offered-unsent, not as an interrupted write.
-            self.counts["offered_unsent"][f.phase] += 1
-            self.outstanding = max(0, self.outstanding - 1)
-            conn.cur = None
-            conn.pending = None
-            conn.want = None
+            self._drop_untouched(conn, f)
             return
         f.sent_attempt = True
         try:
@@ -1077,6 +1073,16 @@ class ClientRun:
         post = _mono()          # completion observation: AFTER successful send
         if n <= 0:
             return
+        self._complete_send(conn, f, post, n)
+
+    def _drop_untouched(self, conn, f):
+        self.counts["offered_unsent"][f.phase] += 1
+        self.outstanding = max(0, self.outstanding - 1)
+        conn.cur = None
+        conn.pending = None
+        conn.want = None
+
+    def _complete_send(self, conn, f, post, n):
         conn.last_progress = post
         f.off += n
         if f.off >= len(f.buf):
@@ -1108,19 +1114,10 @@ class ClientRun:
             try:
                 chunk = conn.tls.recv(1 << 16)
             except ssl.SSLWantReadError:
-                conn.want = "r"
-                conn.pending = "recv"
-                conn.needs_local_recv = False
-                if conn.cur is not None:
-                    # read side quiesced (needs network data) with a frame
-                    # admitted: hand the slot to the send.
-                    conn.pending = "send"
-                    conn.want = "w"
+                self._recv_defer(conn, "r")
                 return
             except ssl.SSLWantWriteError:
-                conn.want = "w"
-                conn.pending = "recv"
-                conn.needs_local_recv = False
+                self._recv_defer(conn, "w")
                 return
             except (ssl.SSLError, OSError) as exc:
                 self._conn_fail(conn, "operational-error", "recv failed: %s" % exc, now)
@@ -1135,16 +1132,34 @@ class ClientRun:
                     self._terminalize(conn, post)
                 return
             visited += 1
-            try:
-                frames = conn.asm.feed(chunk)
-            except ValueError as exc:
-                self.failures["protocol"] = True
-                self.counts["protocol"][self._now_phase(post)] += 1
-                conn.pending = None
+            if not self._recv_chunks(conn, chunk, post):
                 return
-            # multiple frames from one chunk share this post-recv completion
-            for _plen, seq, payload in frames:
-                self._handle_echo(conn, seq, payload, post)
+        self._recv_visit_end(conn, visited)
+
+    def _recv_defer(self, conn, want):
+        conn.want = want
+        conn.pending = "recv"
+        conn.needs_local_recv = False
+        if want == "r" and conn.cur is not None:
+            # read side quiesced (needs network data) with a frame
+            # admitted: hand the slot to the send.
+            conn.pending = "send"
+            conn.want = "w"
+
+    def _recv_chunks(self, conn, chunk, post):
+        try:
+            frames = conn.asm.feed(chunk)
+        except ValueError as exc:
+            self.failures["protocol"] = True
+            self.counts["protocol"][self._now_phase(post)] += 1
+            conn.pending = None
+            return False
+        # multiple frames from one chunk share this post-recv completion
+        for _plen, seq, payload in frames:
+            self._handle_echo(conn, seq, payload, post)
+        return True
+
+    def _recv_visit_end(self, conn, visited):
         if visited >= RECV_VISIT:
             # C2: buffered plaintext may remain with no fresh kernel event
             conn.needs_local_recv = True
