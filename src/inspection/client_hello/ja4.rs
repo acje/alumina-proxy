@@ -145,6 +145,33 @@ fn feed_u16_hex(ctx: &mut ring::digest::Context, value: u16) {
     ctx.update(&buf);
 }
 
+fn feed_hex_list(ctx: &mut ring::digest::Context, values: impl Iterator<Item = u16>) {
+    for (i, value) in values.enumerate() {
+        if i > 0 {
+            ctx.update(b",");
+        }
+        feed_u16_hex(ctx, value);
+    }
+}
+
+fn retained_extensions(
+    extensions: &[u16],
+    out: &mut [u16; MAX_EXTENSIONS],
+) -> Result<usize, Ja4Error> {
+    let mut n = 0usize;
+    for &e in extensions {
+        if is_grease(e) || e == SERVER_NAME || e == ALPN {
+            continue;
+        }
+        if n == MAX_EXTENSIONS {
+            return Err(Ja4Error::TooManyExtensions);
+        }
+        out[n] = e;
+        n += 1;
+    }
+    Ok(n)
+}
+
 fn hash12_finish(ctx: ring::digest::Context) -> [u8; 12] {
     let digest = ctx.finish();
     let bytes = digest.as_ref();
@@ -174,56 +201,23 @@ fn cipher_hash12(ciphers: &[u16]) -> Result<[u8; 12], Ja4Error> {
     }
     sorted[..n].sort_unstable();
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut first = true;
-    for &c in &sorted[..n] {
-        if !first {
-            ctx.update(b",");
-        }
-        first = false;
-        feed_u16_hex(&mut ctx, c);
-    }
+    feed_hex_list(&mut ctx, sorted[..n].iter().copied());
     Ok(hash12_finish(ctx))
 }
 
 fn ehash12(extensions: &[u16], sigalgs: &[u16]) -> Result<[u8; 12], Ja4Error> {
     let mut sorted = [0u16; MAX_EXTENSIONS];
-    let mut n = 0usize;
-    for &e in extensions {
-        if !is_grease(e) && e != SERVER_NAME && e != ALPN {
-            if n == MAX_EXTENSIONS {
-                return Err(Ja4Error::TooManyExtensions);
-            }
-            sorted[n] = e;
-            n += 1;
-        }
-    }
+    let n = retained_extensions(extensions, &mut sorted)?;
     if n == 0 {
         return Ok([b'0'; 12]);
     }
     sorted[..n].sort_unstable();
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut first = true;
-    for &e in &sorted[..n] {
-        if !first {
-            ctx.update(b",");
-        }
-        first = false;
-        feed_u16_hex(&mut ctx, e);
-    }
+    feed_hex_list(&mut ctx, sorted[..n].iter().copied());
     if sigalgs.iter().any(|&s| !is_grease(s)) {
         ctx.update(b"_");
     }
-    first = true;
-    for &s in sigalgs {
-        if is_grease(s) {
-            continue;
-        }
-        if !first {
-            ctx.update(b",");
-        }
-        first = false;
-        feed_u16_hex(&mut ctx, s);
-    }
+    feed_hex_list(&mut ctx, sigalgs.iter().copied().filter(|&s| !is_grease(s)));
     Ok(hash12_finish(ctx))
 }
 
