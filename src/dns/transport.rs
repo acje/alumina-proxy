@@ -1308,6 +1308,11 @@ struct WindowRun<'a> {
     ledger: WindowLedger,
 }
 
+struct WaitWindow {
+    deadline: Instant,
+    until: Instant,
+}
+
 impl StartupDns {
     /// Constructs the transport and its registration backing.
     ///
@@ -1968,34 +1973,19 @@ impl StartupDns {
         {
             self.poll_ticks += 1;
         }
-        let deadline = self.exchange_deadline().unwrap_or(until);
+        let window = WaitWindow {
+            deadline: self.exchange_deadline().unwrap_or(until),
+            until,
+        };
+        self.poll_until_ready(&window)?;
+        Ok(self.events.iter().any(|event| event.token() == self.watch))
+    }
+
+    fn poll_until_ready(&mut self, window: &WaitWindow) -> Result<(), StartupDnsError> {
         let mut attempts = 0usize;
         loop {
             attempts += 1;
-            let now = Instant::now();
-            let timeout = if now >= deadline || now >= until {
-                Duration::ZERO
-            } else {
-                deadline.min(until).saturating_duration_since(now)
-            };
-            #[cfg(test)]
-            let storm = {
-                if self.poll_interrupted_remaining > 0 {
-                    self.poll_interrupted_remaining -= 1;
-                    self.poll_attempts += 1;
-                    true
-                } else {
-                    false
-                }
-            };
-            #[cfg(not(test))]
-            let storm = false;
-            let outcome = if storm {
-                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
-            } else {
-                self.poll.poll(&mut self.events, Some(timeout))
-            };
-            match outcome {
+            match self.poll_once(window) {
                 Ok(()) => break,
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
                     if attempts >= Self::POLL_INTERRUPTED_ALLOWANCE {
@@ -2011,7 +2001,35 @@ impl StartupDns {
                 }
             }
         }
-        Ok(self.events.iter().any(|event| event.token() == self.watch))
+        Ok(())
+    }
+
+    fn poll_once(&mut self, window: &WaitWindow) -> io::Result<()> {
+        let now = Instant::now();
+        let timeout = if now >= window.deadline || now >= window.until {
+            Duration::ZERO
+        } else {
+            window
+                .deadline
+                .min(window.until)
+                .saturating_duration_since(now)
+        };
+        #[cfg(test)]
+        let storm = {
+            if self.poll_interrupted_remaining > 0 {
+                self.poll_interrupted_remaining -= 1;
+                self.poll_attempts += 1;
+                true
+            } else {
+                false
+            }
+        };
+        #[cfg(not(test))]
+        let storm = false;
+        if storm {
+            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        }
+        self.poll.poll(&mut self.events, Some(timeout))
     }
 
     /// One nonblocking connect step. The socket is deemed connected only once
@@ -2695,60 +2713,85 @@ impl StartupDns {
     /// connections read the raw socket, `DoT` connections feed `read_tls` through
     /// `process_new_packets` and drain the decrypted plaintext via the reader.
     fn try_recv(&mut self) -> RecvTry {
-        match &mut self.conn {
+        match &self.conn {
             None => RecvTry::Failure,
-            Some(DnsConn::Plain { stream, .. }) => {
-                let filled_before = self.filled;
-                match stream.read(&mut self.recv_buf[self.filled..]) {
-                    Ok(0) => RecvTry::Failure,
-                    Ok(n) => {
-                        self.filled += n;
-                        if self.filled > filled_before {
-                            RecvTry::Progress
-                        } else {
-                            RecvTry::Wait
-                        }
-                    }
-                    Err(e)
-                        if e.kind() == io::ErrorKind::WouldBlock
-                            || e.kind() == io::ErrorKind::Interrupted =>
-                    {
-                        RecvTry::Wait
-                    }
-                    Err(_) => RecvTry::Failure,
-                }
-            }
-            Some(DnsConn::Tls(conn)) => {
-                let filled_before = self.filled;
-                match conn.tls.read_tls(&mut conn.tcp) {
-                    Ok(0) => return RecvTry::Failure,
-                    Ok(_) => {
-                        if conn.tls.process_new_packets().is_err() {
-                            return RecvTry::Failure;
-                        }
-                    }
-                    Err(e)
-                        if e.kind() == io::ErrorKind::WouldBlock
-                            || e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => return RecvTry::Failure,
-                }
-                for _ in 0..TLS_SEND_TRIES {
-                    match conn.tls.reader().read(&mut self.recv_buf[self.filled..]) {
-                        Ok(0) => break,
-                        Ok(n) => self.filled += n,
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(_) => return RecvTry::Failure,
-                    }
-                    break;
-                }
+            Some(DnsConn::Plain { .. }) => self.recv_plain(),
+            Some(DnsConn::Tls(_)) => self.recv_tls(),
+        }
+    }
+
+    fn recv_plain(&mut self) -> RecvTry {
+        let Some(DnsConn::Plain { stream, .. }) = &mut self.conn else {
+            return RecvTry::Failure;
+        };
+        let filled_before = self.filled;
+        match stream.read(&mut self.recv_buf[self.filled..]) {
+            Ok(0) => RecvTry::Failure,
+            Ok(n) => {
+                self.filled += n;
                 if self.filled > filled_before {
                     RecvTry::Progress
                 } else {
                     RecvTry::Wait
                 }
             }
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::Interrupted =>
+            {
+                RecvTry::Wait
+            }
+            Err(_) => RecvTry::Failure,
         }
+    }
+
+    fn recv_tls(&mut self) -> RecvTry {
+        let filled_before = self.filled;
+        if !self.read_tls_frame() {
+            return RecvTry::Failure;
+        }
+        if !self.drain_tls_plaintext() {
+            return RecvTry::Failure;
+        }
+        if self.filled > filled_before {
+            RecvTry::Progress
+        } else {
+            RecvTry::Wait
+        }
+    }
+
+    fn read_tls_frame(&mut self) -> bool {
+        let Some(DnsConn::Tls(conn)) = &mut self.conn else {
+            return false;
+        };
+        match conn.tls.read_tls(&mut conn.tcp) {
+            Ok(0) => false,
+            Ok(_) => conn.tls.process_new_packets().is_ok(),
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::Interrupted =>
+            {
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn drain_tls_plaintext(&mut self) -> bool {
+        let Some(DnsConn::Tls(conn)) = &mut self.conn else {
+            return false;
+        };
+        for _ in 0..TLS_SEND_TRIES {
+            match conn.tls.reader().read(&mut self.recv_buf[self.filled..]) {
+                Ok(0) => break,
+                Ok(n) => self.filled += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => return false,
+            }
+            break;
+        }
+        true
     }
 
     /// Single-pass test-support resolution: visits each admitted name and
