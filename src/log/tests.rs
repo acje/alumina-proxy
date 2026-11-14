@@ -1845,7 +1845,6 @@ mod monitor_records {
     use super::*;
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn logging_monitor_summary_exact_grammar_and_zero_suppression() {
         use crate::eligibility::NumericAddr;
         use crate::enforcement::action::{DomainOrdinal, Scope};
@@ -1875,6 +1874,15 @@ mod monitor_records {
         assert!(store.monitor_summary(7, &mut m), "summary committed");
         flush_all(&mut store);
         let text = String::from_utf8(read_all(&mut file)).unwrap();
+        assert_exact_monitor_summary_grammar(&text);
+        assert_resolver_and_expired_pin_folds(&text);
+        assert_fold_order_and_silent_anomalies(&text);
+        assert_cause_and_unknown_folds(&text);
+        assert_domain_block_folds(&text);
+    }
+
+    #[track_caller]
+    fn assert_exact_monitor_summary_grammar(text: &str) {
         assert_eq!(
             text,
             "level=info kind=monitor secs=7 facts_total=9 actions_total=3 refusals_total=0 \
@@ -1885,6 +1893,10 @@ mod monitor_records {
              d0v=\"t13d1516h2_8daaf6152771_02713d6af862\" d0p=\"cb007101\"\n",
             "exact monitor grammar: the summary carries the fixed core and dx bitset, the single nonzero domain block rides its monitor_domain batch"
         );
+    }
+
+    #[track_caller]
+    fn assert_resolver_and_expired_pin_folds(text: &str) {
         assert!(
             text.contains(" rd=1"),
             "the resolver-degraded fact key carries its fold: {text}"
@@ -1901,6 +1913,10 @@ mod monitor_records {
             !text.contains("ep=0"),
             "a zero expired-pin-cert fold stays suppressed: {text}"
         );
+    }
+
+    #[track_caller]
+    fn assert_fold_order_and_silent_anomalies(text: &str) {
         assert!(
             text.contains(" rd=1 ep=1 js=1 bv=1"),
             "the expired-pin fold and ja4-seed fold follow the resolver-degraded fold, then the dns-anomaly `bv` key: {text}"
@@ -1921,6 +1937,10 @@ mod monitor_records {
             !text.contains("xttl="),
             "a zero ExtremeTtl fold stays suppressed: {text}"
         );
+    }
+
+    #[track_caller]
+    fn assert_cause_and_unknown_folds(text: &str) {
         assert!(
             text.contains(" c15=2"),
             "the AnyIllegal cause index 15 (HostNotAllowlisted) carries its fold: {text}"
@@ -1938,6 +1958,10 @@ mod monitor_records {
             !text.contains(" r=1"),
             "M4: per-field zero-suppression drops the zero refusal field"
         );
+    }
+
+    #[track_caller]
+    fn assert_domain_block_folds(text: &str) {
         assert!(
             text.contains(" d0j=1"),
             "the per-ordinal ja4-change fold carries its key: {text}"
