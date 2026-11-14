@@ -1338,26 +1338,7 @@ class ClientRun:
     # --- report ---
 
     def report(self):
-        for p in ("warmup", "measure"):
-            planned = self.planned_warmup if p == "warmup" else self.planned_measure
-            split = self.counts["admitted"][p] + self.counts["backpressure"][p] \
-                + self.counts["missed_end"][p]
-            if split != planned:
-                self.failures["accounting"] = True
-            if self.counts["admitted"][p] != (
-                    self.counts["sent"][p] + self.counts["send_failed"][p]
-                    + self.counts["offered_unsent"][p]):
-                self.failures["accounting"] = True
-            if self.counts["sent"][p] != (
-                    self.counts["echoed"][p] + self.counts["unechoed"][p]):
-                self.failures["accounting"] = True
-        clean_counts = all(self.counts[k]["measure"] == 0 for k in
-                           ("backpressure", "missed_end", "offered_unsent",
-                            "send_failed", "unechoed", "timeout", "conn_errors",
-                            "protocol"))
-        fulfilled = clean_counts and not self.failures
-        window_dt = (self.window_end - self.warmup_end
-                     if self.window_end and self.warmup_end else 0.0)
+        fulfilled = _client_accounting(self)
         report = {
             "tool": TOOL_NAME,
             "tool_version": TOOL_VERSION,
@@ -1368,93 +1349,15 @@ class ClientRun:
             "workload_fulfilled": fulfilled,
             "reasons": sorted(str(k) for k in self.failures),
             "identity": _identity_block(),
-            "params": {
-                "workload": self.args.workload,
-                "conns": self.args.conns,
-                "frame_payload": FRAME_PAYLOAD,
-                "frame_header": FRAME_HDR_LEN,
-                "target_mbps": self.args.target_mbps,
-                "target_bytes_per_s": self.target_bps,
-                "warmup_s": self.args.warmup,
-                "measure_s": self.args.seconds,
-                "interval_s": self.interval,
-                "planned_warmup_frames": self.planned_warmup,
-                "planned_measure_frames": self.planned_measure,
-                "measure_remainder_bytes": self.remainder_bytes["measure"],
-                "outstanding_cap_frames": self.outstanding_cap_frames,
-                "outstanding_cap_bytes": self.outstanding_cap_frames * FRAME_PAYLOAD,
-                "setup_deadline_s": SETUP_DEADLINE,
-                "drain_deadline_s": DRAIN_DEADLINE,
-            },
-            "phases": {
-                p: {
-                    "planned_frames": self.planned_warmup if p == "warmup"
-                                      else self.planned_measure,
-                    "planned_payload_bytes": (self.planned_warmup if p == "warmup"
-                                              else self.planned_measure) * FRAME_PAYLOAD
-                                             + self.remainder_bytes[p],
-                    "admitted": self.counts["admitted"][p],
-                    "backpressure_unsent": self.counts["backpressure"][p],
-                    "missed_at_end": self.counts["missed_end"][p],
-                    "offered_unsent": self.counts["offered_unsent"][p],
-                    "sent": self.counts["sent"][p],
-                    "send_failed": self.counts["send_failed"][p],
-                    "echoed": self.counts["echoed"][p],
-                    "unechoed": self.counts["unechoed"][p],
-                    "conn_errors": self.counts["conn_errors"][p],
-                    "protocol": self.counts["protocol"][p],
-                    "timeout": self.counts["timeout"][p],
-                    "accepted_frame_bytes": self.counts["sent"][p] * FRAME_SIZE
-                                            + self.partial_accepted_frame[p],
-                    "accepted_payload_bytes": self.counts["sent"][p] * FRAME_PAYLOAD
-                                              + self.partial_accepted_payload[p],
-                    "partial_accepted_frame_bytes": self.partial_accepted_frame[p],
-                    "partial_accepted_payload_bytes": self.partial_accepted_payload[p],
-                    "echoed_frame_bytes": self.counts["echoed"][p] * FRAME_SIZE,
-                    "echoed_payload_bytes": self.counts["echoed"][p] * FRAME_PAYLOAD,
-                }
-                for p in ("warmup", "measure")
-            },
-            "interval_vs_cohort": {
-                "measurement_window_s": window_dt,
-                "achieved_client_payload_mbps": (
-                    (self.timing["in_window_sent_payload_bytes"] / window_dt)
-                    * 8.0 / 1_000_000.0 if window_dt > 0 else None),
-                "in_window_sent_frames": self.timing["in_window_sent_frames"],
-                "in_window_sent_payload_bytes": self.timing["in_window_sent_payload_bytes"],
-                "in_window_echoed_frames": self.timing["in_window_echoed_frames"],
-                "in_window_echoed_payload_bytes": self.timing["in_window_echoed_payload_bytes"],
-                "drain_sent_frames": self.timing["drain_sent_frames"],
-                "drain_sent_payload_bytes": self.timing["drain_sent_payload_bytes"],
-                "drain_echoed_frames": self.timing["drain_echoed_frames"],
-                "drain_echoed_payload_bytes": self.timing["drain_echoed_payload_bytes"],
-            },
+            "params": _client_report_params(self),
+            "phases": _client_report_phases(self),
+            "interval_vs_cohort": _client_report_interval(self),
             "latency": self._latency_report(),
-            "sampling": {label: self.sampler.window_summary(
-                             label, self.warmup_end, self.window_end)
-                         for label, _pid in self.sampler.labels},
-            "window": {
-                "origin_monotonic": self.origin,
-                "warmup_end": self.warmup_end,
-                "window_end": self.window_end,
-                "drain_end": self.drain_end,
-            },
-            "measurement_notes": (
-                "latency histograms contain only measurement-cohort echoes that "
-                "completed in-window; completion timestamps are captured after "
-                "the successful send/recv return; frames returned in one recv "
-                "chunk share that single post-recv completion time; sampling "
-                "aggregates are bounded by the observed measurement aperture "
-                "(explicit start/end boundary tick observations, observed "
-                "timestamps and boundary lag disclosed; not exact scheduled-"
-                "window isolation), VmHWM is the process lifetime high-water "
-                "mark; no invented latency threshold is applied."
-                + (_e2micro_model_note()
-                   if os.environ.get("BENCH_WORKLOAD") in E2MICRO_LABELS else "")),
+            "sampling": _report_sampling(self),
+            "window": _report_window(self),
+            "measurement_notes": _client_measurement_notes(),
         }
-        if os.environ.get("BENCH_WORKLOAD") in E2MICRO_LABELS:
-            report["e2micro_model"] = e2micro_model_block()
-        return report
+        return _with_e2micro_model(report)
 
     def _latency_report(self):
         out = {}
@@ -1498,6 +1401,137 @@ def e2micro_model_block():
         "modeled_vcpu": "2 shared",
         "modeled_mem_gib": 1,
     }
+
+
+def _report_window(run):
+    return {
+        "origin_monotonic": run.origin,
+        "warmup_end": run.warmup_end,
+        "window_end": run.window_end,
+        "drain_end": run.drain_end,
+    }
+
+
+def _report_sampling(run):
+    return {label: run.sampler.window_summary(label, run.warmup_end, run.window_end)
+            for label, _pid in run.sampler.labels}
+
+
+def _measurement_notes(note):
+    return note + (_e2micro_model_note()
+                   if os.environ.get("BENCH_WORKLOAD") in E2MICRO_LABELS else "")
+
+
+def _with_e2micro_model(report):
+    if os.environ.get("BENCH_WORKLOAD") in E2MICRO_LABELS:
+        report["e2micro_model"] = e2micro_model_block()
+    return report
+
+
+def _client_accounting(run):
+    for p in ("warmup", "measure"):
+        planned = run.planned_warmup if p == "warmup" else run.planned_measure
+        split = run.counts["admitted"][p] + run.counts["backpressure"][p] \
+            + run.counts["missed_end"][p]
+        if split != planned:
+            run.failures["accounting"] = True
+        if run.counts["admitted"][p] != (
+                run.counts["sent"][p] + run.counts["send_failed"][p]
+                + run.counts["offered_unsent"][p]):
+            run.failures["accounting"] = True
+        if run.counts["sent"][p] != (
+                run.counts["echoed"][p] + run.counts["unechoed"][p]):
+            run.failures["accounting"] = True
+    clean_counts = all(run.counts[k]["measure"] == 0 for k in
+                       ("backpressure", "missed_end", "offered_unsent",
+                        "send_failed", "unechoed", "timeout", "conn_errors",
+                        "protocol"))
+    return clean_counts and not run.failures
+
+
+def _client_report_params(run):
+    return {
+        "workload": run.args.workload,
+        "conns": run.args.conns,
+        "frame_payload": FRAME_PAYLOAD,
+        "frame_header": FRAME_HDR_LEN,
+        "target_mbps": run.args.target_mbps,
+        "target_bytes_per_s": run.target_bps,
+        "warmup_s": run.args.warmup,
+        "measure_s": run.args.seconds,
+        "interval_s": run.interval,
+        "planned_warmup_frames": run.planned_warmup,
+        "planned_measure_frames": run.planned_measure,
+        "measure_remainder_bytes": run.remainder_bytes["measure"],
+        "outstanding_cap_frames": run.outstanding_cap_frames,
+        "outstanding_cap_bytes": run.outstanding_cap_frames * FRAME_PAYLOAD,
+        "setup_deadline_s": SETUP_DEADLINE,
+        "drain_deadline_s": DRAIN_DEADLINE,
+    }
+
+
+def _client_report_phases(run):
+    return {
+        p: {
+            "planned_frames": run.planned_warmup if p == "warmup"
+                              else run.planned_measure,
+            "planned_payload_bytes": (run.planned_warmup if p == "warmup"
+                                      else run.planned_measure) * FRAME_PAYLOAD
+                                     + run.remainder_bytes[p],
+            "admitted": run.counts["admitted"][p],
+            "backpressure_unsent": run.counts["backpressure"][p],
+            "missed_at_end": run.counts["missed_end"][p],
+            "offered_unsent": run.counts["offered_unsent"][p],
+            "sent": run.counts["sent"][p],
+            "send_failed": run.counts["send_failed"][p],
+            "echoed": run.counts["echoed"][p],
+            "unechoed": run.counts["unechoed"][p],
+            "conn_errors": run.counts["conn_errors"][p],
+            "protocol": run.counts["protocol"][p],
+            "timeout": run.counts["timeout"][p],
+            "accepted_frame_bytes": run.counts["sent"][p] * FRAME_SIZE
+                                    + run.partial_accepted_frame[p],
+            "accepted_payload_bytes": run.counts["sent"][p] * FRAME_PAYLOAD
+                                      + run.partial_accepted_payload[p],
+            "partial_accepted_frame_bytes": run.partial_accepted_frame[p],
+            "partial_accepted_payload_bytes": run.partial_accepted_payload[p],
+            "echoed_frame_bytes": run.counts["echoed"][p] * FRAME_SIZE,
+            "echoed_payload_bytes": run.counts["echoed"][p] * FRAME_PAYLOAD,
+        }
+        for p in ("warmup", "measure")
+    }
+
+
+def _client_report_interval(run):
+    window_dt = (run.window_end - run.warmup_end
+                 if run.window_end and run.warmup_end else 0.0)
+    return {
+        "measurement_window_s": window_dt,
+        "achieved_client_payload_mbps": (
+            (run.timing["in_window_sent_payload_bytes"] / window_dt)
+            * 8.0 / 1_000_000.0 if window_dt > 0 else None),
+        "in_window_sent_frames": run.timing["in_window_sent_frames"],
+        "in_window_sent_payload_bytes": run.timing["in_window_sent_payload_bytes"],
+        "in_window_echoed_frames": run.timing["in_window_echoed_frames"],
+        "in_window_echoed_payload_bytes": run.timing["in_window_echoed_payload_bytes"],
+        "drain_sent_frames": run.timing["drain_sent_frames"],
+        "drain_sent_payload_bytes": run.timing["drain_sent_payload_bytes"],
+        "drain_echoed_frames": run.timing["drain_echoed_frames"],
+        "drain_echoed_payload_bytes": run.timing["drain_echoed_payload_bytes"],
+    }
+
+
+def _client_measurement_notes():
+    return _measurement_notes(
+        "latency histograms contain only measurement-cohort echoes that "
+        "completed in-window; completion timestamps are captured after "
+        "the successful send/recv return; frames returned in one recv "
+        "chunk share that single post-recv completion time; sampling "
+        "aggregates are bounded by the observed measurement aperture "
+        "(explicit start/end boundary tick observations, observed "
+        "timestamps and boundary lag disclosed; not exact scheduled-"
+        "window isolation), VmHWM is the process lifetime high-water "
+        "mark; no invented latency threshold is applied.")
 
 
 # --------------------------------------------------------------------------
@@ -1938,20 +1972,7 @@ class StormRun:
         self._apply_cpu_verdict()
 
     def report(self):
-        attempted = self.established + sum(self.setup_failures.values())
-        planned = self.planned_arrivals
-        valid = not bool(self.failures)
-        # accounting identity: established + deferred + failed + unaccounted
-        # ==== arrivals_planned. deferred = cap-blocked arrivals never started;
-        # unaccounted = started dials that never resolved. Both computed from
-        # counters, never from a per-tick estimate, so pool pressure cannot
-        # inflate deferred or deflate unaccounted.
-        started = self.started_arrivals
-        deferred = max(0, planned - started)
-        resolved = self.established + sum(self.setup_failures.values())
-        unaccounted = max(0, started - resolved)
-        fulfilled = (planned > 0 and self.established == planned and
-                     not self.session_errors and not self.failures)
+        attempted, deferred, unaccounted, fulfilled = _storm_accounting(self)
         report = {
             "tool": TOOL_NAME,
             "tool_version": TOOL_VERSION,
@@ -1959,72 +1980,19 @@ class StormRun:
             "mode": self.args.mode,
             "workload": "storm",
             "verdict": "invalid" if self.failures else "valid",
-            "valid": valid,
+            "valid": not bool(self.failures),
             "workload_fulfilled": fulfilled,
             "reasons": sorted(str(k) for k in self.failures),
             "identity": _identity_block(),
-            "params": {
-                "workload": "storm",
-                "arrival_rate_per_s": self.args.arrival_rate,
-                "session_frames_min": self.args.session_frames_min,
-                "session_frames_max": self.args.session_frames_max,
-                "peak_conns_guard": self.args.peak_conns,
-                "conns": self.args.conns,
-                "target_mbps": self.args.target_mbps,
-                "warmup_s": self.args.warmup,
-                "measure_s": self.args.seconds,
-                "setup_deadline_s": SETUP_DEADLINE,
-                "drain_deadline_s": DRAIN_DEADLINE,
-            },
-            "storm": {
-                "arrivals_planned": planned,
-                "connections_established": self.established,
-                "arrivals_attempted": attempted,
-                "setup_failures": dict(sorted(self.setup_failures.items())),
-                "deferred_unstarted": deferred,
-                "unaccounted": unaccounted,
-                "sessions_completed": self.sessions_completed,
-                "session_errors": self.session_errors,
-                "send_failed_sessions": self.send_failed_sessions,
-                "frames_sent": self.frames_sent,
-                "frames_echoed": self.frames_echoed,
-                "protocol_errors": self.protocol_errors,
-                "missing_bytes_errors": self.missing_bytes_errors,
-                "peak_live": self.peaks["live"],
-                "peak_dialing": self.peaks["dialing"],
-            },
-            "interval_vs_cohort": {
-                "in_window_sent_frames": self.timing["in_window_sent_frames"],
-                "in_window_echoed_frames": self.timing["in_window_echoed_frames"],
-                "data_echo_observe_window_s": (
-                    self.window_end - self.warmup_end
-                    if self.window_end and self.warmup_end else None),
-            },
+            "params": _storm_report_params(self),
+            "storm": _storm_report_block(self, attempted, deferred, unaccounted),
+            "interval_vs_cohort": _storm_report_interval(self),
             "latency": self._latency_report(),
-            "sampling": {label: self.sampler.window_summary(
-                             label, self.warmup_end, self.window_end)
-                         for label, _pid in self.sampler.labels},
-            "window": {
-                "origin_monotonic": self.origin,
-                "warmup_end": self.warmup_end,
-                "window_end": self.window_end,
-                "drain_end": self.drain_end,
-            },
-            "measurement_notes": (
-                "storm: connections arrive asynchronously at --arrival-rate; each "
-                "runs HTTP CONNECT through the proxy then a TLS1.3 handshake to "
-                "the backend (setup_latency = CONNECT start -> handshake complete, "
-                "in-window sessions only); bounded-burst echo after establishment; "
-                "teardown on completion. Setup failures/timeouts under churn are "
-                "measured facts reported in storm.setup_failures, not a verdict "
-                "invalidator. data echo latency (actual_send_to_echo) comes from "
-                "the existing histogram definition for frames echoed in-window."
-                + (_e2micro_model_note()
-                   if os.environ.get("BENCH_WORKLOAD") in E2MICRO_LABELS else "")),
+            "sampling": _report_sampling(self),
+            "window": _report_window(self),
+            "measurement_notes": _storm_measurement_notes(),
         }
-        if os.environ.get("BENCH_WORKLOAD") in E2MICRO_LABELS:
-            report["e2micro_model"] = e2micro_model_block()
-        return report
+        return _with_e2micro_model(report)
 
     def _latency_report(self):
         out = {}
@@ -2039,6 +2007,80 @@ class StormRun:
                 "bin_us": h.bin_us,
             }
         return out
+
+
+def _storm_accounting(run):
+    # accounting identity: established + deferred + failed + unaccounted
+    # ==== arrivals_planned. deferred = cap-blocked arrivals never started;
+    # unaccounted = started dials that never resolved. Both computed from
+    # counters, never from a per-tick estimate, so pool pressure cannot
+    # inflate deferred or deflate unaccounted.
+    planned = run.planned_arrivals
+    started = run.started_arrivals
+    deferred = max(0, planned - started)
+    resolved = run.established + sum(run.setup_failures.values())
+    unaccounted = max(0, started - resolved)
+    fulfilled = (planned > 0 and run.established == planned and
+                 not run.session_errors and not run.failures)
+    return resolved, deferred, unaccounted, fulfilled
+
+
+def _storm_report_params(run):
+    return {
+        "workload": "storm",
+        "arrival_rate_per_s": run.args.arrival_rate,
+        "session_frames_min": run.args.session_frames_min,
+        "session_frames_max": run.args.session_frames_max,
+        "peak_conns_guard": run.args.peak_conns,
+        "conns": run.args.conns,
+        "target_mbps": run.args.target_mbps,
+        "warmup_s": run.args.warmup,
+        "measure_s": run.args.seconds,
+        "setup_deadline_s": SETUP_DEADLINE,
+        "drain_deadline_s": DRAIN_DEADLINE,
+    }
+
+
+def _storm_report_block(run, attempted, deferred, unaccounted):
+    return {
+        "arrivals_planned": run.planned_arrivals,
+        "connections_established": run.established,
+        "arrivals_attempted": attempted,
+        "setup_failures": dict(sorted(run.setup_failures.items())),
+        "deferred_unstarted": deferred,
+        "unaccounted": unaccounted,
+        "sessions_completed": run.sessions_completed,
+        "session_errors": run.session_errors,
+        "send_failed_sessions": run.send_failed_sessions,
+        "frames_sent": run.frames_sent,
+        "frames_echoed": run.frames_echoed,
+        "protocol_errors": run.protocol_errors,
+        "missing_bytes_errors": run.missing_bytes_errors,
+        "peak_live": run.peaks["live"],
+        "peak_dialing": run.peaks["dialing"],
+    }
+
+
+def _storm_report_interval(run):
+    return {
+        "in_window_sent_frames": run.timing["in_window_sent_frames"],
+        "in_window_echoed_frames": run.timing["in_window_echoed_frames"],
+        "data_echo_observe_window_s": (
+            run.window_end - run.warmup_end
+            if run.window_end and run.warmup_end else None),
+    }
+
+
+def _storm_measurement_notes():
+    return _measurement_notes(
+        "storm: connections arrive asynchronously at --arrival-rate; each "
+        "runs HTTP CONNECT through the proxy then a TLS1.3 handshake to "
+        "the backend (setup_latency = CONNECT start -> handshake complete, "
+        "in-window sessions only); bounded-burst echo after establishment; "
+        "teardown on completion. Setup failures/timeouts under churn are "
+        "measured facts reported in storm.setup_failures, not a verdict "
+        "invalidator. data echo latency (actual_send_to_echo) comes from "
+        "the existing histogram definition for frames echoed in-window.")
 
 
 # --------------------------------------------------------------------------
