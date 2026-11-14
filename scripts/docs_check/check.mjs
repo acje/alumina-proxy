@@ -28,11 +28,10 @@ function schemeOf(url) {
   return !m ? 'local' : EXTERNAL.has(url.slice(0, m[0].length)) ? 'external' : 'unsupported'
 }
 
-function buildIndex(tree) {
+function buildDefinitionIndex(tree) {
   const slugger = new GithubSlugger()
   const defs = new Map()
   const slugs = new Set()
-  const links = []
   let html = false
   walk(tree, (node) => {
     if (node.type === 'heading') {
@@ -44,6 +43,11 @@ function buildIndex(tree) {
     }
     return false
   })
+  return { slugs, defs, html }
+}
+
+function collectLinks(tree, defs) {
+  const links = []
   walk(tree, (node) => {
     if (node.type === 'linkReference' || node.type === 'imageReference') {
       if (defs.has(node.identifier)) links.push(defs.get(node.identifier))
@@ -52,7 +56,12 @@ function buildIndex(tree) {
     }
     return false
   })
-  return { slugs, links, html }
+  return links
+}
+
+function buildIndex(tree) {
+  const { slugs, defs, html } = buildDefinitionIndex(tree)
+  return { slugs, links: collectLinks(tree, defs), html }
 }
 
 async function load(abs) {
