@@ -1419,6 +1419,13 @@ enum RelayRead {
     Stop,
 }
 
+enum AcceptStep {
+    Idle,
+    Admitted(TcpStream, SocketAddr),
+    WouldBlock,
+    Failed(io::ErrorKind),
+}
+
 fn arm_tunnel_idle(ws: &mut SlotWorkspace) -> bool {
     if !ws.gate.is_open() {
         return false;
@@ -2427,51 +2434,81 @@ impl Serving {
     }
 
     fn accept_all(&mut self) -> Result<(), ServeError> {
+        if self.accept_paused() {
+            return Ok(());
+        }
+        loop {
+            if self.accept_hold()? {
+                return Ok(());
+            }
+            if self.accept_once()? {
+                return Ok(());
+            }
+        }
+    }
+
+    fn accept_paused(&self) -> bool {
         // A paused accept stays paused: no readiness edge may admit a client
         // before `resume_listener` clears the backoff.
         if let ListenerArm::Paused { at } = self.listener_arm
             && Instant::now() < at
         {
-            return Ok(());
+            return true;
         }
-        loop {
-            if self.block_all_latched() {
+        false
+    }
+
+    fn accept_hold(&mut self) -> Result<bool, ServeError> {
+        if self.block_all_latched() {
+            self.progress.accrue(1);
+            return Ok(true);
+        }
+        if self.recheck_due() {
+            self.reregister_listener()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn accept_once(&mut self) -> Result<bool, ServeError> {
+        match self.accept_step() {
+            AcceptStep::Idle => return Ok(true),
+            AcceptStep::Admitted(stream, addr) => {
                 self.progress.accrue(1);
-                return Ok(());
+                self.admit(stream, addr.ip());
             }
-            if self.recheck_due() {
-                self.reregister_listener()?;
-                return Ok(());
+            AcceptStep::WouldBlock => {
+                self.progress.accrue(1);
+                return Ok(true);
             }
-            #[cfg(test)]
-            let injected = self.take_injected_accept_fault();
-            #[cfg(not(test))]
-            let injected: Option<io::ErrorKind> = None;
-            let accepted = if let Some(kind) = injected {
-                Err(io::Error::from(kind))
-            } else {
-                let Some(listener) = &self.listener else {
-                    return Ok(());
-                };
-                listener.accept()
+            AcceptStep::Failed(kind) => {
+                self.progress.accrue(1);
+                if accept_fault(kind) == AcceptFault::Pause {
+                    self.pause_listener(Instant::now())?;
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn accept_step(&mut self) -> AcceptStep {
+        #[cfg(test)]
+        let injected = self.take_injected_accept_fault();
+        #[cfg(not(test))]
+        let injected: Option<io::ErrorKind> = None;
+        let accepted = if let Some(kind) = injected {
+            Err(io::Error::from(kind))
+        } else {
+            let Some(listener) = &self.listener else {
+                return AcceptStep::Idle;
             };
-            match accepted {
-                Ok((stream, addr)) => {
-                    self.progress.accrue(1);
-                    self.admit(stream, addr.ip());
-                }
-                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    self.progress.accrue(1);
-                    return Ok(());
-                }
-                Err(ref err) => {
-                    self.progress.accrue(1);
-                    if accept_fault(err.kind()) == AcceptFault::Pause {
-                        self.pause_listener(Instant::now())?;
-                        return Ok(());
-                    }
-                }
-            }
+            listener.accept()
+        };
+        match accepted {
+            Ok((stream, addr)) => AcceptStep::Admitted(stream, addr),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => AcceptStep::WouldBlock,
+            Err(ref err) => AcceptStep::Failed(err.kind()),
         }
     }
 
@@ -3715,16 +3752,7 @@ impl Serving {
     }
 
     fn poll_timeout(&mut self) -> Option<Duration> {
-        let mut earliest: Option<Instant> = None;
-        if !self.live_deadline.is_empty() {
-            for i in self.live_deadline.iter_live() {
-                if let Some(c) = self.slots[i].applicable_deadline()
-                    && earliest.is_none_or(|e| c < e)
-                {
-                    earliest = Some(c);
-                }
-            }
-        }
+        let mut earliest = self.slot_earliest_deadline();
         self.next_expiry = earliest;
         if let Some(dns) = self.storage.dns().exchange_deadline()
             && earliest.is_none_or(|e| dns < e)
@@ -3737,6 +3765,29 @@ impl Serving {
             earliest = Some(deadline);
         }
         let now = Instant::now();
+        let deadline = self.fold_now_wakes(now, earliest)?;
+        if deadline <= now {
+            Some(Duration::ZERO)
+        } else {
+            Some(deadline - now)
+        }
+    }
+
+    fn slot_earliest_deadline(&self) -> Option<Instant> {
+        let mut earliest: Option<Instant> = None;
+        if !self.live_deadline.is_empty() {
+            for i in self.live_deadline.iter_live() {
+                if let Some(c) = self.slots[i].applicable_deadline()
+                    && earliest.is_none_or(|e| c < e)
+                {
+                    earliest = Some(c);
+                }
+            }
+        }
+        earliest
+    }
+
+    fn fold_now_wakes(&self, now: Instant, mut earliest: Option<Instant>) -> Option<Instant> {
         if let ListenerArm::Paused { at } = self.listener_arm
             && earliest.is_none_or(|e| at < e)
         {
@@ -3750,12 +3801,7 @@ impl Serving {
         if let Some(wake) = self.storage.refresh_wake(now, self.is_shutdown()) {
             earliest = Some(earliest.map_or(wake, |e| e.min(wake)));
         }
-        let deadline = earliest?;
-        if deadline <= now {
-            Some(Duration::ZERO)
-        } else {
-            Some(deadline - now)
-        }
+        earliest
     }
 
     /// Expire the in-flight upstream dial when its per-attempt connect
