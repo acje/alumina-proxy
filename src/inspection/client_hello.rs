@@ -638,10 +638,104 @@ fn parse_cipher_list(body: &[u8], at: usize) -> Result<(usize, [u16; MAX_CIPHERS
     Ok((cs_count, ciphers))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "single cohesive ClientHello body parser; splitting would harm readability"
-)]
+struct ExtensionScan {
+    versions: [u16; MAX_VERSIONS],
+    versions_len: usize,
+    sv_present: bool,
+    sni: [u8; FQDN_MAX_LEN],
+    sni_len: usize,
+    sni_entries: u8,
+    has_ech: bool,
+    alpn: [u8; MAX_ALPN_VALUE],
+    alpn_len: usize,
+    sigalgs: [u16; MAX_SIGALGS],
+    sigalgs_len: usize,
+    seen: [u16; MAX_EXTENSIONS],
+    seen_count: usize,
+}
+
+impl ExtensionScan {
+    const fn new() -> Self {
+        ExtensionScan {
+            versions: [0u16; MAX_VERSIONS],
+            versions_len: 0,
+            sv_present: false,
+            sni: [0u8; FQDN_MAX_LEN],
+            sni_len: 0,
+            sni_entries: 0,
+            has_ech: false,
+            alpn: [0u8; MAX_ALPN_VALUE],
+            alpn_len: 0,
+            sigalgs: [0u16; MAX_SIGALGS],
+            sigalgs_len: 0,
+            seen: [0u16; MAX_EXTENSIONS],
+            seen_count: 0,
+        }
+    }
+}
+
+fn scan_extensions(
+    body: &[u8],
+    mut pos: usize,
+    ext_end: usize,
+    state: &mut ExtensionScan,
+) -> Result<(), ChError> {
+    while pos < ext_end {
+        let ext_type = u16_at(body, pos)?;
+        if state.seen[..state.seen_count].contains(&ext_type) {
+            return Err(ChError::DuplicateExtension { ext: ext_type });
+        }
+        if state.seen_count == state.seen.len() {
+            return Err(ChError::TooManyExtensions);
+        }
+        state.seen[state.seen_count] = ext_type;
+        state.seen_count += 1;
+        let ext_len = usize::from(u16_at(body, pos + 2)?);
+        let ext_start = pos + 4;
+        let ext_end_i = ext_start + ext_len;
+        if ext_end_i > body.len() {
+            return Err(ChError::MalformedExtension { ext: ext_type });
+        }
+        apply_extension(state, ext_type, &body[ext_start..ext_end_i])?;
+        pos = ext_end_i;
+    }
+    Ok(())
+}
+
+fn apply_extension(
+    state: &mut ExtensionScan,
+    ext_type: u16,
+    ext_data: &[u8],
+) -> Result<(), ChError> {
+    match ext_type {
+        SUPPORTED_VERSIONS => {
+            let versions_len = parse_supported_versions(ext_data, &mut state.versions)?;
+            state.versions_len = versions_len;
+            state.sv_present = true;
+        }
+        SERVER_NAME => {
+            parse_server_names(
+                ext_data,
+                &mut state.sni,
+                &mut state.sni_len,
+                &mut state.sni_entries,
+            )?;
+        }
+        ENCRYPTED_CLIENT_HELLO | ENCRYPTED_SERVER_NAME => {
+            state.has_ech = true;
+        }
+        ALPN => {
+            parse_alpn_first_value(ext_data, &mut state.alpn, &mut state.alpn_len);
+        }
+        SIGNATURE_ALGORITHMS => {
+            let sigalgs_len = parse_sig_algs(ext_data, &mut state.sigalgs)?;
+            state.sigalgs_len = sigalgs_len;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn parse_body(body: &[u8], record_version: u16) -> Result<ClientHello, ChError> {
     let legacy = u16_at(body, 0)?;
     if legacy != TLS12 {
@@ -672,77 +766,28 @@ fn parse_body(body: &[u8], record_version: u16) -> Result<ClientHello, ChError> 
             detail: "extensions do not fill the ClientHello body",
         });
     }
-    let mut versions = [0u16; MAX_VERSIONS];
-    let mut versions_len = 0usize;
-    let mut sv_present = false;
-    let mut sni = [0u8; FQDN_MAX_LEN];
-    let mut sni_len = 0usize;
-    let mut sni_entries = 0u8;
-    let mut has_ech = false;
-    let mut alpn = [0u8; MAX_ALPN_VALUE];
-    let mut alpn_len = 0usize;
-    let mut sigalgs = [0u16; MAX_SIGALGS];
-    let mut sigalgs_len = 0usize;
-    let mut seen = [0u16; MAX_EXTENSIONS];
-    let mut seen_count = 0usize;
-    while pos < ext_end {
-        let ext_type = u16_at(body, pos)?;
-        if seen[..seen_count].contains(&ext_type) {
-            return Err(ChError::DuplicateExtension { ext: ext_type });
-        }
-        if seen_count == seen.len() {
-            return Err(ChError::TooManyExtensions);
-        }
-        seen[seen_count] = ext_type;
-        seen_count += 1;
-        let ext_len = usize::from(u16_at(body, pos + 2)?);
-        let ext_start = pos + 4;
-        let ext_end_i = ext_start + ext_len;
-        if ext_end_i > body.len() {
-            return Err(ChError::MalformedExtension { ext: ext_type });
-        }
-        let ext_data = &body[ext_start..ext_end_i];
-        match ext_type {
-            SUPPORTED_VERSIONS => {
-                versions_len = parse_supported_versions(ext_data, &mut versions)?;
-                sv_present = true;
-            }
-            SERVER_NAME => {
-                parse_server_names(ext_data, &mut sni, &mut sni_len, &mut sni_entries)?;
-            }
-            ENCRYPTED_CLIENT_HELLO | ENCRYPTED_SERVER_NAME => {
-                has_ech = true;
-            }
-            ALPN => {
-                parse_alpn_first_value(ext_data, &mut alpn, &mut alpn_len);
-            }
-            SIGNATURE_ALGORITHMS => {
-                sigalgs_len = parse_sig_algs(ext_data, &mut sigalgs)?;
-            }
-            _ => {}
-        }
-        pos = ext_end_i;
-    }
-    if !sv_present {
+    let mut state = ExtensionScan::new();
+    scan_extensions(body, pos, ext_end, &mut state)?;
+    if !state.sv_present {
         return Err(ChError::MissingSupportedVersions);
     }
-    validate_versions(&versions[..versions_len])?;
+    validate_versions(&state.versions[..state.versions_len])?;
     Ok(ClientHello {
-        versions,
-        versions_len,
+        versions: state.versions,
+        versions_len: state.versions_len,
         record_version,
-        sni,
-        sni_len,
-        sni_entries,
-        has_ech,
+        sni: state.sni,
+        sni_len: state.sni_len,
+        sni_entries: state.sni_entries,
+        has_ech: state.has_ech,
         ciphers,
         ciphers_len: cs_count,
-        extensions: seen,
-        extensions_len: seen_count,
-        alpn,
-        alpn_len,
-        sigalgs,
-        sigalgs_len,
+        extensions: state.seen,
+        extensions_len: state.seen_count,
+        alpn: state.alpn,
+        alpn_len: state.alpn_len,
+        sigalgs: state.sigalgs,
+        sigalgs_len: state.sigalgs_len,
     })
 }
 
