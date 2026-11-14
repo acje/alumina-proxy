@@ -841,9 +841,8 @@ fn configured_cross_suffix_cname_resolves_identically_on_shared_and_legacy_start
 }
 
 fn cross_suffix_startup_doc(bailiwick_target: Option<&str>) -> String {
-    let bailiwick_clause = bailiwick_target
-        .map(|host| format!("cname_bailiwick = [\"{host}\"]\n"))
-        .unwrap_or_default();
+    let bailiwick_clause =
+        bailiwick_target.map_or_default(|host| format!("cname_bailiwick = [\"{host}\"]\n"));
     format!(
         "listen = \"127.0.0.1:9\"\n\
          startup_unresolved_allowance = 0\n\

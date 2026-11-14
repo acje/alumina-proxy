@@ -71,7 +71,7 @@ restatement) — two files in the root filesystem (`/alumina`, `/config.toml`),
 zero shell or OS utilities:
 
 ```dockerfile
-FROM --platform=linux/amd64 rust:1.99.0-alpine AS builder
+FROM --platform=linux/amd64 rust:1.100.0-alpine AS builder
 WORKDIR /build
 RUN apk add --no-cache musl-dev && rustup target add x86_64-unknown-linux-musl
 COPY Cargo.toml Cargo.lock ./

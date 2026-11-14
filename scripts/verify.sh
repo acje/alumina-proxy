@@ -61,7 +61,8 @@ usage() {
 [ -n "$SCOPE" ] || [ "$TIER" = "docs" ] || usage
 FOCUS="${3:-}"
 
-TOOLCHAIN="1.99.0"
+# There is no toolchain pin: host commands resolve the host's default toolchain
+# and container dispatches resolve the base image's default toolchain.
 
 # --- ALT cost-structure knobs (I1-I4) ----------------------------------------
 # Named podman volumes keep the container's Cargo caches on VM-native disk,
@@ -84,9 +85,9 @@ ALT_AW_TARGET_DIR="${ALT_AW_TARGET_DIR:-target/aw}"
 # persisting CARGO_HOME in a volume removes three repeated network costs from the
 # measured path. The base digest is quoted in the generated Containerfile and
 # every dispatch records the derived image ID.
-ALT_IMAGE="${ALT_IMAGE:-localhost/alumina-verify:20261029}"
+ALT_IMAGE="${ALT_IMAGE:-localhost/alumina-verify:20261114}"
 FIXTURE_IMAGE="${FIXTURE_IMAGE:-$ALT_IMAGE}"
-FIXTURE_BASE_IMAGE="docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a"
+FIXTURE_BASE_IMAGE="docker.io/library/rust@sha256:18b6dc7bc111bde4e2fccf6c4ec95cc4a3486b41e4b090e9b0202eba9540023e"
 
 # --- I0: timing instrumentation ---------------------------------------------
 # Millisecond timestamps from python3 (an already-required boundary prerequisite,
@@ -106,7 +107,7 @@ phase_mark() {
     printf 'PHASE1-TIMING: %s %s\n' "$1" "$2"
 }
 
-INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/qa/mod.rs src/qa/fault.rs src/qa/fuzz.rs src/config/fqdn_tests.rs src/config/mod.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/dns/resolver.rs src/dns/resolver/tests.rs src/boot/preflight.rs src/inventory.rs src/boot/mod.rs src/boot/tests.rs src/dns/cache.rs src/dns/cache/grade_key.rs src/dns/cache/grade_key/tests.rs src/dns/cache/tests.rs src/inspection/mod.rs src/inspection/connect.rs src/inspection/connect/tests.rs src/inspection/client_hello.rs src/inspection/client_hello/ja4.rs src/inspection/client_hello/tests.rs src/dns/mod.rs src/dns/outcome.rs src/dns/publication.rs src/dns/wire.rs src/dns/wire/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/dns/incident_report.rs src/dns/incident_report/tests.rs src/names/mod.rs src/names/hostname.rs src/names/hostname/tests.rs src/names/rules.rs src/log/mod.rs src/log/queue.rs src/log/sink.rs src/log/encoding.rs src/log/tests.rs src/runtime/gate.rs src/runtime/mod.rs src/runtime/owner.rs src/runtime/owner/tests.rs src/runtime/reactor.rs src/runtime/reactor/policy.rs src/runtime/reactor/reject.rs src/runtime/reactor/startup.rs src/runtime/reactor/tests.rs src/runtime/reactor/tests/refusals.rs src/runtime/storage.rs src/runtime/storage/startup_integration.rs src/runtime/storage/tests.rs src/runtime/tunnel.rs src/runtime/tunnel/tests.rs src/dns/schedule.rs src/dns/schedule/tests.rs src/dns/transport.rs src/dns/transport/registration.rs src/dns/transport/tests.rs src/dns/transport/tests/shared_armed_cache.rs src/dns/transport/dot_tests.rs tests/foundations.rs tests/boot.rs tests/support/temp_dir.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
+INTENDED="Cargo.toml Cargo.lock deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/qa/mod.rs src/qa/fault.rs src/qa/fuzz.rs src/config/fqdn_tests.rs src/config/mod.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/dns/resolver.rs src/dns/resolver/tests.rs src/boot/preflight.rs src/inventory.rs src/boot/mod.rs src/boot/tests.rs src/dns/cache.rs src/dns/cache/grade_key.rs src/dns/cache/grade_key/tests.rs src/dns/cache/tests.rs src/inspection/mod.rs src/inspection/connect.rs src/inspection/connect/tests.rs src/inspection/client_hello.rs src/inspection/client_hello/ja4.rs src/inspection/client_hello/tests.rs src/dns/mod.rs src/dns/outcome.rs src/dns/publication.rs src/dns/wire.rs src/dns/wire/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/dns/incident_report.rs src/dns/incident_report/tests.rs src/names/mod.rs src/names/hostname.rs src/names/hostname/tests.rs src/names/rules.rs src/log/mod.rs src/log/queue.rs src/log/sink.rs src/log/encoding.rs src/log/tests.rs src/runtime/gate.rs src/runtime/mod.rs src/runtime/owner.rs src/runtime/owner/tests.rs src/runtime/reactor.rs src/runtime/reactor/policy.rs src/runtime/reactor/reject.rs src/runtime/reactor/startup.rs src/runtime/reactor/tests.rs src/runtime/reactor/tests/refusals.rs src/runtime/storage.rs src/runtime/storage/startup_integration.rs src/runtime/storage/tests.rs src/runtime/tunnel.rs src/runtime/tunnel/tests.rs src/dns/schedule.rs src/dns/schedule/tests.rs src/dns/transport.rs src/dns/transport/registration.rs src/dns/transport/tests.rs src/dns/transport/tests/shared_armed_cache.rs src/dns/transport/dot_tests.rs tests/foundations.rs tests/boot.rs tests/support/temp_dir.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
 
 # docslink gate roots: the exact nonempty argv docslink_check consumes. Shared
 # with the identity snapshot so the boundary content identity covers precisely
@@ -114,7 +115,7 @@ INTENDED="Cargo.toml Cargo.lock rust-toolchain.toml deny.toml scripts/verify.sh 
 DOCSLINK_ROOTS="docs/alumina-proxy.md docs/trust-telemetry-design.md docs/trust-chain-design.md docs/deployment.md docs/monitoring.md docs/verification.md docs/qa-package/README.md README.md"
 
 # B1: every relevant before/after identity input consumed by the boundary run:
-# source/config/lock/toolchain/deny plus the docs and .gitignore that
+# source/config/lock/deny plus the docs and .gitignore that
 # docslink_check and the working-tree view consume. Changing build outputs (the
 # compiled artifact) are intentionally excluded from this stability set and are
 # recorded separately at executed output. README.md is already covered by
@@ -272,11 +273,11 @@ mid_foundations() {
         exit 1
     }
     echo "WITNESS-TESTS (--features alloc-witness):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness --test foundations
+    cargo atest -p alumina --locked --features alloc-witness --test foundations
     echo "WITNESS-OFF-TESTS (F2/F4 subset):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --test foundations
+    cargo atest -p alumina --locked --test foundations
     echo "FMT:"
-    cargo +${TOOLCHAIN} fmt --check
+    cargo fmt --check
     whitespace_gate
     echo "FOUNDATIONS-MID-OK"
 }
@@ -287,13 +288,13 @@ mid_boot() {
         exit 1
     }
     echo "BOOT-TESTS (strict parser + validated types + storage inventory):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --test boot
+    cargo atest -p alumina --locked --test boot
     echo "BOOT-TESTS-WITNESS (alloc retention bound):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness --test boot
+    cargo atest -p alumina --locked --features alloc-witness --test boot
     echo "FOUNDATIONS-REGRESSION:"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --test foundations
+    cargo atest -p alumina --locked --test foundations
     echo "FMT:"
-    cargo +${TOOLCHAIN} fmt --check
+    cargo fmt --check
     whitespace_gate
     echo "BOOT-MID-OK"
 }
@@ -349,21 +350,21 @@ mid_union() {
     }
     closure_metadata
     echo "PRODUCTION-RELEASE-BUILD (boundary union, no alloc-witness):"
-    cargo +${TOOLCHAIN} build --locked --release
+    cargo build --locked --release
     static_gate "target/release/alumina"
     echo "FMT:"
-    cargo +${TOOLCHAIN} fmt --check
+    cargo fmt --check
     echo "COMBINED-SUITE-WITNESS-OFF (lib units + foundations + boot + gate-only binaries):"
     # shellcheck disable=SC2086
-    cargo +${TOOLCHAIN} atest -p alumina --locked --lib $ALT_TEST_TARGETS
+    cargo atest -p alumina --locked --lib $ALT_TEST_TARGETS
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
     echo "CLIPPY (production, no alloc-witness):"
-    cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets -- -D warnings
+    cargo aclippy -p alumina --locked --all-targets -- -D warnings
     echo "CLIPPY (test-harness with alloc-witness; target dir ${ALT_AW_TARGET_DIR}):"
-    cargo +${TOOLCHAIN} aclippy -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --all-targets --features alloc-witness -- -D warnings
+    cargo aclippy -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --all-targets --features alloc-witness -- -D warnings
     echo "COMBINED-SUITE-WITNESS-ON (lib units + foundations + boot + gate-only binaries, alloc-witness):"
     # shellcheck disable=SC2086
-    cargo +${TOOLCHAIN} atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $ALT_TEST_TARGETS
+    cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $ALT_TEST_TARGETS
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"
     whitespace_gate
@@ -382,11 +383,11 @@ mid_clippy() {
         exit 1
     }
     echo "WITNESS-TESTS (--features alloc-witness, aw lib last build):"
-    cargo +${TOOLCHAIN} atest -p alumina --locked --features alloc-witness --test foundations
+    cargo atest -p alumina --locked --features alloc-witness --test foundations
     echo "CLIPPY (production, no alloc-witness):"
-    cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets -- -D warnings
+    cargo aclippy -p alumina --locked --all-targets -- -D warnings
     echo "CLIPPY (test-harness with alloc-witness):"
-    cargo +${TOOLCHAIN} aclippy -p alumina --locked --all-targets --features alloc-witness -- -D warnings
+    cargo aclippy -p alumina --locked --all-targets --features alloc-witness -- -D warnings
     echo "CLIPPY-MID-OK"
 }
 
@@ -417,11 +418,11 @@ mid_full() {
     }
     echo "GATE-ONLY-SUITE (lib units + gate-only binaries, witness-off):"
     # shellcheck disable=SC2086
-    cargo +${TOOLCHAIN} atest -p alumina --locked --lib $GATE_ONLY_TESTS
+    cargo atest -p alumina --locked --lib $GATE_ONLY_TESTS
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
     echo "GATE-ONLY-SUITE-WITNESS (lib units + gate-only binaries incl. mio_matrix + eligibility witness, alloc-witness):"
     # shellcheck disable=SC2086
-    cargo +${TOOLCHAIN} atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $GATE_ONLY_TESTS
+    cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $GATE_ONLY_TESTS
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"
 }
@@ -586,7 +587,7 @@ boot_fixtures_guard() {
 # privileges, so a missing image or an unreachable rootful connection is a
 # BLOCKER, never a silent SKIP->0.
 boot_fixtures_builder_image() {
-    IMAGE="docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a"
+    IMAGE="docker.io/library/rust@sha256:18b6dc7bc111bde4e2fccf6c4ec95cc4a3486b41e4b090e9b0202eba9540023e"
     podman --connection "$CONN" image exists "$IMAGE" || {
         echo "BOOT-FIXTURES-BLOCKED: builder image absent on $CONN; pull required" >&2
         exit 1
@@ -634,7 +635,7 @@ boot_fixtures_binary() {
 boot_fixtures_build_variant() {
     echo "BUILD fixture-facts variant (proof-only feature; separate target dir; production artifact untouched):"
     _bf_t0=$(now_ms)
-    linux_dispatch 'cargo +${TOOLCHAIN} build --release --locked --features fixture-facts --target-dir target/fixture-facts'
+    linux_dispatch 'cargo build --release --locked --features fixture-facts --target-dir target/fixture-facts'
     # Copy the built variant out of the rootless volume and bind the file itself
     # on both connections; uid 65534 need not traverse the host target tree.
     copy_out_artifact "fixture-facts/release/alumina" "target/fixture-facts/release/alumina" || exit 1
@@ -1348,10 +1349,22 @@ identity_snapshot_env() {
     } >"$dir/env"
 }
 
-# The declared build environment the snapshot pins verbatim: toolchain, hasher,
-# Cargo/rustc knobs and the effective Cargo home.
+# The declared build environment the snapshot pins verbatim: the resolved
+# compiler identity, hasher, Cargo/rustc knobs and the effective Cargo home.
+#
+# No toolchain pin exists in this repository, so the compiler identity is
+# OBSERVED from the host that runs the build. An unobservable compiler is
+# recorded as <unreadable>: never an empty or guessed value (a pin removal must
+# not turn into a silently unrecorded compiler).
 identity_snapshot_env_declared() {
-    printf 'toolchain=%s\n' "$TOOLCHAIN"
+    _tc_release=""
+    if _tc=$(rustc -vV 2>&1); then
+        _tc_release=$(printf '%s\n' "$_tc" | sed -n 's/^release: //p')
+    fi
+    case "$_tc_release" in
+        "" | *[!A-Za-z0-9._-]*) printf 'toolchain_resolved=<unreadable>\n' ;;
+        *) printf 'toolchain_resolved=%s\n' "$_tc_release" ;;
+    esac
     printf 'hasher=%s\n' "${IDENTITY_HASHER:-<none>}"
     printf 'cargo_home=%s\n' "${CARGO_HOME:-<unset>}"
     printf 'cargo_target_dir=%s\n' "${CARGO_TARGET_DIR:-<unset>}"
@@ -1553,10 +1566,10 @@ audit_deny_pins() {
 # Both hard gates; each producer exit is checked, never folded into PASS.
 audit_deny_run() {
     ar=0
-    cargo +${TOOLCHAIN} audit --no-fetch || ar=$?
+    cargo audit --no-fetch || ar=$?
     [ "$ar" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo audit exit $ar" >&2; exit 1; }
     dr=0
-    cargo +${TOOLCHAIN} deny check || dr=$?
+    cargo deny check || dr=$?
     [ "$dr" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo deny exit $dr" >&2; exit 1; }
 }
 
@@ -1721,7 +1734,6 @@ linux_dispatch_bind() {
         -e CARGO_HOME=/cargo-home \
         -e CARGO_INCREMENTAL=0 \
         -e CARGO_TERM_PROGRESS_WHEN=never \
-        -e TOOLCHAIN="$TOOLCHAIN" \
         -e RUST_MIN_STACK=16777216 \
         -w /app \
         "$IMAGE" sh -c "$DISPATCH_PROVISION$inner" || drc=$?
@@ -1740,7 +1752,6 @@ linux_dispatch_volume() {
         -e CARGO_HOME=/cargo-home \
         -e CARGO_INCREMENTAL=0 \
         -e CARGO_TERM_PROGRESS_WHEN=never \
-        -e TOOLCHAIN="$TOOLCHAIN" \
         -e RUST_MIN_STACK=16777216 \
         -w /app \
         "$IMAGE" sh -c "$DISPATCH_PROVISION$inner" || drc=$?
@@ -2010,11 +2021,11 @@ e2e_build_owner() {
         : "${PODMAN_CONNECTION:?PODMAN_CONNECTION must be set to your rootless podman connection}"
     fi
     if [ "$(uname -s)" = "Linux" ]; then
-        _probe_buf=$(observe_build_target rustc +${TOOLCHAIN} -vV) || exit 1
+        _probe_buf=$(observe_build_target rustc -vV) || exit 1
     else
         _probe_buf=$(observe_build_target \
             podman --connection "${PODMAN_CONNECTION}" run --rm --pull=never \
-            docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a \
+            docker.io/library/rust@sha256:18b6dc7bc111bde4e2fccf6c4ec95cc4a3486b41e4b090e9b0202eba9540023e \
             sh -c 'rustc -vV') || exit 1
     fi
     # parse only from the successfully captured buffer (producer exit already 0)
@@ -2040,10 +2051,10 @@ e2e_build_sources() {
     before=$(e2e_receipt_fields "$_gate" "$_harness_py" "$_harness_sh") || exit 1
     if [ "$(uname -s)" = "Linux" ]; then
         echo "PRODUCTION-RELEASE-BUILD (native Linux, exact current source, target=${E2E_TARGET}):"
-        cargo +${TOOLCHAIN} build --locked --release --target "$E2E_TARGET" --target-dir "$TGT"
+        cargo build --locked --release --target "$E2E_TARGET" --target-dir "$TGT"
     else
         echo "PRODUCTION-RELEASE-BUILD (native Linux via container dispatch; host $(uname -s), target=${E2E_TARGET}):"
-        linux_dispatch "cargo +${TOOLCHAIN} build --locked --release --target ${E2E_TARGET} --target-dir /app/target"
+        linux_dispatch "cargo build --locked --release --target ${E2E_TARGET} --target-dir /app/target"
         # I4: the build volume is VM-native, so the executed binary must be
         # copied out (two-sided digest asserted) before the receipt is taken.
         copy_out_artifact "${E2E_TARGET}/release/alumina" "${BIN}" || exit 1
@@ -2099,7 +2110,7 @@ e2e_receipt_print() {
         "$head" "$E2E_TARGET" "$(printf '%s' "$after" | cut -d' ' -f2)" \
         "$(printf '%s' "$after" | cut -d' ' -f3)" "$(printf '%s' "$after" | cut -d' ' -f4)" "$binhash"
     printf '  builder=%s builder-image=%s harness-image=%s harness-image-id=%s harness-conn=%s\n' \
-        "$_builder" "docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a" \
+        "$_builder" "docker.io/library/rust@sha256:18b6dc7bc111bde4e2fccf6c4ec95cc4a3486b41e4b090e9b0202eba9540023e" \
         "$E2E_IMAGE" "$harness_id" "$E2E_ROOT_CONN"
 }
 
@@ -2140,10 +2151,10 @@ e2e_shutdown() {
 # guard): the crate compiles off-Linux (preflight carries a
 # cfg(not(target_os="linux")) fallback). For a raw-cargo single-test-target
 # check (sub-mission C's per-test selector), use:
-#   cargo +$TOOLCHAIN atest -p alumina --locked --test <target>
+#   cargo atest -p alumina --locked --test <target>
 inner_check() {
     echo "INNER-CHECK (cargo check, no clippy/fmt/whitespace/release):"
-    cargo +${TOOLCHAIN} check --locked -p alumina --all-targets
+    cargo check --locked -p alumina --all-targets
     echo "INNER-CHECK-OK"
 }
 
@@ -2164,7 +2175,7 @@ alt_image() {
 
 alt_smoke() {
     echo "ALT-SMOKE: plumbing proof only (volume-mounted target, read-only source, two-sided copy-out digest); backs no claim"
-    linux_dispatch 'cargo +${TOOLCHAIN} build --locked -p alumina --bin alumina'
+    linux_dispatch 'cargo build --locked -p alumina --bin alumina'
     copy_out_artifact "debug/alumina" "target/alt-smoke/alumina" || exit 1
     echo "ALT-SMOKE-OK"
 }
@@ -2190,7 +2201,7 @@ inner_test() {
             ;;
     esac
     echo "INNER-NO-CLAIM: host-native run of --test $_target backs no done-claim (MID/BOUNDARY own that)"
-    if cargo +${TOOLCHAIN} atest -p alumina --locked --test "$_target"; then
+    if cargo atest -p alumina --locked --test "$_target"; then
         echo "INNER-TEST-OK: $_target"
     else
         _itr=$?

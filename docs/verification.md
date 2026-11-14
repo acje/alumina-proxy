@@ -11,13 +11,15 @@ by this file — the verification **instruction / command-set** authority
 ## Command set
 
 Host-run selectors and gates (all `sh scripts/verify.sh …` selectors and host
-Cargo commands):
+Cargo commands). The repository ships no toolchain pin: host commands resolve
+the host's default toolchain, and container-dispatched gates resolve the pinned
+base image's default toolchain.
 
 ```
-cargo +1.99.0 atest -p alumina --locked --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, witness-off; also covered by mid union
-cargo +1.99.0 atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, alloc-witness — a manual reference (runs inside `mid union`)
-cargo +1.99.0 fmt --check
-cargo +1.99.0 aclippy -p alumina --locked --all-targets -- -D warnings
+cargo atest -p alumina --locked --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, witness-off; also covered by mid union
+cargo atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, alloc-witness — a manual reference (runs inside `mid union`)
+cargo fmt --check
+cargo aclippy -p alumina --locked --all-targets -- -D warnings
 sh scripts/verify.sh inner check                # INNER tier: cargo check only; host-runnable (compiles on macOS)
 sh scripts/verify.sh mid foundations            # MID tier (Linux-only, fail closed off-Linux): behavior-proof + fmt/whitespace (fast loop)
 sh scripts/verify.sh mid boot                   # MID tier (Linux-only): behavior-proof + fmt/whitespace (fast loop)

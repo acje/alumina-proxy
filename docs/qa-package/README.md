@@ -93,7 +93,7 @@ missing derived image as described below.
 - `host-mid foundations|boot|clippy|union|full` — host Podman dispatch of the
   corresponding Linux `mid` selector, including on macOS. Requires `podman`, a
   reachable rootless `PODMAN_CONNECTION` and the derived `ALT_IMAGE` (default
-  `localhost/alumina-verify:20261029`). If missing, the script attempts to
+  `localhost/alumina-verify:20261114`). If missing, the script attempts to
   build it from the pinned Rust base, including networked package/component
   installation. It uses named target and Cargo-home volumes by default and
   creates missing volumes; `ALT_NO_VOLUME=1` uses host target bind-mounts.
@@ -109,7 +109,8 @@ missing derived image as described below.
   Darwin)**; each rebuilds the exact-source production target in-run (no
   prebuilt artifact needed) and runs **host Cargo metadata** plus git/SHA
   identity receipts. Build route depends on host: on Linux the native build
-  uses host `rustc +1.99.0`; on Darwin the target probe and rebuild run
+  uses the host's default `rustc` (this repository ships no toolchain pin); on
+  Darwin the target probe and rebuild run
   `podman --connection "$PODMAN_CONNECTION" run --rm --pull=never
   <pinned rust image>` — `PODMAN_CONNECTION` is **required** (fail-closed) and
   both the probe and the build dispatch resolve the **same** connection, so a
@@ -120,9 +121,10 @@ missing derived image as described below.
   resolved on that rootful connection, recorded in the receipt, and the
   consumers re-verify the tag resolves to it and run the ID itself.
 - `supply-chain audit-deny` — independent host check requiring `cargo-audit`
-  0.22.1, `cargo-deny` 0.19.4 and Cargo toolchain 1.99.0. It runs audit with
-  `--no-fetch` against the local advisory DB, then `cargo deny check`; missing
-  tools, version mismatch or a failing check is nonzero.
+  0.22.1 and `cargo-deny` 0.19.4 (the host's default Cargo toolchain; this
+  repository ships no toolchain pin). It runs audit with `--no-fetch` against
+  the local advisory DB, then `cargo deny check`; missing tools, version
+  mismatch or a failing check is nonzero.
 - `identity snapshot <directory>` / `identity compare <before> <after>` —
   independent source/environment stability receipts. Snapshots require git,
   SHA256, Python 3 and Node with `NODE_OPTIONS`/`NODE_PATH` unset; they record

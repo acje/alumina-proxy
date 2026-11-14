@@ -628,8 +628,8 @@ receipt to `.ooda/benchmarks/3f587e9-bench-<subject>-<profile>-<kind>-*`
 
 **Alumina binary note.** `HEAD_CANDIDATE_SHA` must name the sha of the §10.2
 candidate build of alumina. **The sole build owner is `scripts/verify.sh mid
-union`** (`cargo +1.99.0 build --locked --release` — toolchain 1.99.0 per
-`rust-toolchain.toml`, **no `--target`, no `--target-dir`**) → `target/release/
+union`** (`cargo build --locked --release` — the dispatcher's default toolchain,
+no toolchain pin, **no `--target`, no `--target-dir`**) → `target/release/
 alumina`. The harness labels the artifact `aarch64-unknown-linux-musl`
 (`bench_run.sh` `BENCH_RUST_TARGET`) and requires a statically-linked aarch64
 ELF, but the **build command itself is Host-kind** — do **not** pass `--target`.
@@ -644,8 +644,8 @@ different digest):
 podman --connection "$BENCH_PODMAN_CONNECTION" run --rm --pull=never \
   -v "$PWD:/app:ro,Z" -v "$PWD/target:/app/target:Z" --user 0:0 \
   -e CARGO_HOME=/cargo-home -e CARGO_INCREMENTAL=0 -w /app \
-  docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a \
-  sh -c 'cargo +1.99.0 build --locked --release'
+  docker.io/library/rust@sha256:18b6dc7bc111bde4e2fccf6c4ec95cc4a3486b41e4b090e9b0202eba9540023e \
+  sh -c 'cargo build --locked --release'
 # stage the statically-linked artifact where bench_run.sh mounts it
 # (host `.ooda/…` -> container `/ooda/…` -> `/work/alumina`, run.sh):
 install -m 0755 target/release/alumina .ooda/alumina-head/baseline/alumina-musl
@@ -658,7 +658,9 @@ to the E2 receipts; **measured in the pinned image**: this Host-kind build
 under `CARGO_HOME=/cargo-home` reproduces `c869192e…`, while adding
 `--target aarch64-unknown-linux-musl` yields `e10c7d9a…`/`ac37ff18…`, and a
 default `CARGO_HOME` yields `47ce3f54…` — all ≠, so this recipe is the only
-documented one that lands the pin). **The file now staged at
+documented one that lands the pin; it was measured under the prior base digest,
+and a rebuild from the current base must re-establish it before the pin is cited
+as reproduced). **The file now staged at
 `.ooda/alumina-head/baseline/alumina-musl` is the old `85b7769` build
 (`1e173c13…ce82`)** — running the candidate `HEAD_CANDIDATE_SHA` against it
 fails closed (`BENCH-BLOCKED: alumina binary identity mismatch`,

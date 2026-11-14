@@ -243,7 +243,9 @@ root = pathlib.Path.cwd(); variant = root / "target/fixture-facts/release/alumin
 if cmd[:2] == ["image", "inspect"]: print("sha256:mock"); sys.exit(0)
 if cmd[0] != "run": sys.exit(0)
 script = cmd[cmd.index("-c") + 1]
-if 'cargo +' in script:
+# The variant build is identified by its dispatch content (the repo carries no
+# toolchain pin, so no selector is available as the discriminator).
+if '--features fixture-facts' in script and '--target-dir target/fixture-facts' in script:
     if os.environ.get("ALT_NO_VOLUME") == "1":
         variant.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(base / "rootless/fixture-facts/release/alumina", variant)
     sys.exit(0)

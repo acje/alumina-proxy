@@ -4,7 +4,11 @@ set -u
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT" || { echo "QA-PACKAGE-ERROR: cannot cd to repo root" >&2; exit 1; }
-echo "QA-PACKAGE-VALIDATE start: $(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(uname -s)/$(uname -m) toolchain=1.99.0"
+# No toolchain pin exists: record the compiler this host actually resolves. A
+# failed or empty probe is recorded as <unreadable>, never a stale constant.
+RUSTC_VERSION=$(rustc --version 2>&1) || RUSTC_VERSION="<unreadable>"
+[ -n "$RUSTC_VERSION" ] || RUSTC_VERSION="<unreadable>"
+echo "QA-PACKAGE-VALIDATE start: $(date -u +%Y-%m-%dT%H:%M:%SZ) host=$(uname -s)/$(uname -m) toolchain=${RUSTC_VERSION:-<unreadable>}"
 
 prereq_fail() {
     echo "$1" >&2

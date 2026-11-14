@@ -20,14 +20,14 @@ if [ -f .ooda/podman-connections.env ]; then
 fi
 
 ROOT="$(pwd)"
-BASE="docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a"
-BASE_ID="ad70ceb90f563e9fe2ef7064b92dc1347aeaeb71e5369ba8b242498ba030a6f8"
+BASE="docker.io/library/rust@sha256:18b6dc7bc111bde4e2fccf6c4ec95cc4a3486b41e4b090e9b0202eba9540023e"
+BASE_ID="bf99d57d5849fd556734962fa0b62a46d1c3c23d9be5d20e52a9e3a8691d906e"
 E2E_IMAGE="${E2E_IMAGE:-localhost/alumina-e2e:e2e-20261011}"
 CONN="${PODMAN_ROOT_CONNECTION:?PODMAN_ROOT_CONNECTION must be set to your rootful podman connection}"
 
 if [ -z "${E2E_TARGET:-}" ]; then
     _probe_buf=$(podman --connection "$CONN" run --rm --pull=never \
-        docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a \
+        docker.io/library/rust@sha256:18b6dc7bc111bde4e2fccf6c4ec95cc4a3486b41e4b090e9b0202eba9540023e \
         sh -c 'rustc -vV' 2>&1) || _probe_rc=$?
     if [ "${_probe_rc:-0}" -ne 0 ]; then
         echo "E2E-SHUTDOWN-BLOCKED: build target probe failed (exit ${_probe_rc:-0})" >&2
