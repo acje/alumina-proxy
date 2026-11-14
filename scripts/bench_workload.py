@@ -69,6 +69,7 @@ reasons; exit 1 = harness/operational failure.
 
 import argparse
 import collections
+import contextlib
 import hashlib
 import json
 import math
@@ -267,10 +268,8 @@ def connect_tunnel(proxy_addr, peer_host, peer_port, end_deadline):
         if http_status_code(head) != 200:
             raise RuntimeError("CONNECT refused: %r" % head[:80])
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             s.close()
-        except OSError:
-            pass
         raise
     return s
 
@@ -385,35 +384,30 @@ class DnsResponder:
 
     def _serve_tcp(self, conn):
         try:
-            conn.settimeout(5.0)
-            length = conn.recv(2)
-            if len(length) != 2:
-                return
-            (n,) = struct.unpack(">H", length)
-            msg = b""
-            while len(msg) < n:
-                chunk = conn.recv(n - len(msg))
-                if not chunk:
+            with contextlib.suppress(OSError, ValueError):
+                conn.settimeout(5.0)
+                length = conn.recv(2)
+                if len(length) != 2:
                     return
-                msg += chunk
-            resp = self._answer(msg)
-            if resp is not None:
-                conn.sendall(len(resp).to_bytes(2, "big") + resp)
-        except (OSError, ValueError):
-            pass
+                (n,) = struct.unpack(">H", length)
+                msg = b""
+                while len(msg) < n:
+                    chunk = conn.recv(n - len(msg))
+                    if not chunk:
+                        return
+                    msg += chunk
+                resp = self._answer(msg)
+                if resp is not None:
+                    conn.sendall(len(resp).to_bytes(2, "big") + resp)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 conn.close()
-            except OSError:
-                pass
 
     def _serve_udp(self, data, peer):
-        try:
+        with contextlib.suppress(OSError):
             resp = self._answer(data)
             if resp is not None:
                 self.udpsock.sendto(resp, peer)
-        except OSError:
-            pass
 
     def _reply(self, tid, question, rcode, rr, ancount, nscount=0):
         flags = 0x8000 | 0x0100 | (rcode & 0x0F)
@@ -522,7 +516,7 @@ class ProcSampler:
                 ticks = proc_stat_ticks(pid)
                 rss = proc_vmrss_kb(pid)
                 hwm = proc_vmhwm_kb(pid)
-            except Exception as exc:  # a failed probe is typed unknown
+            except (OSError, ValueError, IndexError) as exc:  # a failed probe is typed unknown
                 self.unknown.setdefault(label, "%s" % exc)
                 continue
             prev = self._last_ticks.get(label)
@@ -656,10 +650,8 @@ class EchoBackend:
 
     def stop(self):
         self._stop = True
-        try:
+        with contextlib.suppress(OSError):
             self.sock.close()
-        except OSError:
-            pass
 
     def join(self, timeout=None):
         t = self.thread
@@ -688,10 +680,8 @@ class EchoBackend:
             with self._lock:
                 if len(self._workers) >= self.max_workers:
                     self.rejected += 1
-                    try:
+                    with contextlib.suppress(OSError):
                         raw.close()
-                    except OSError:
-                        pass
                     continue
                 self.conns += 1
                 t = threading.Thread(target=self._serve, args=(raw,),
@@ -750,15 +740,11 @@ class EchoBackend:
             with self._lock:
                 self.errors += 1
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 if tls is not None:
                     tls.close()
-            except OSError:
-                pass
-            try:
+            with contextlib.suppress(OSError):
                 raw.close()
-            except OSError:
-                pass
             with self._lock:
                 self._workers.discard(threading.current_thread())
 
@@ -929,15 +915,11 @@ class ClientRun:
                 self.sel.register(tls, selectors.EVENT_READ, conn)
         except Exception:
             for s in opened:
-                try:
+                with contextlib.suppress(OSError):
                     s.close()
-                except OSError:
-                    pass
             for conn in self.conns:
-                try:
+                with contextlib.suppress(OSError):
                     conn.tls.close()
-                except OSError:
-                    pass
             raise
         self.origin = _mono()
         self.warmup_end = self.origin + self.args.warmup
@@ -1019,10 +1001,8 @@ class ClientRun:
         for conn in self.conns:
             if conn.closed:
                 continue
-            try:
+            with contextlib.suppress(KeyError, ValueError, OSError):
                 self.sel.modify(conn.tls, self._interest(conn), conn)
-            except (KeyError, ValueError, OSError):
-                pass
 
     # --- per-event IO dispatch ---
 
@@ -1212,14 +1192,10 @@ class ClientRun:
             self.failures.setdefault("missing-bytes", True)
         conn.sent_ts.clear()
         conn.sent_queue.clear()
-        try:
+        with contextlib.suppress(OSError):
             conn.tls.close()
-        except OSError:
-            pass
-        try:
+        with contextlib.suppress(KeyError, ValueError):
             self.sel.unregister(conn.tls)
-        except (KeyError, ValueError):
-            pass
 
     # --- window-end / drain (C1) ---
 
@@ -1350,10 +1326,8 @@ class ClientRun:
                 self.failures["unknown-cpu"] = True
 
     def _finalize(self):
-        try:
+        with contextlib.suppress(OSError, ValueError, IndexError):
             self.sampler.sample()
-        except Exception:
-            pass
         if not self.terminated:
             return
         for conn in list(self.conns):
@@ -1838,14 +1812,10 @@ class StormRun:
         return True
 
     def _session_done(self, sess):
-        try:
+        with contextlib.suppress(KeyError, ValueError):
             self.sel.unregister(sess.tls)
-        except (KeyError, ValueError):
-            pass
-        try:
+        with contextlib.suppress(OSError):
             sess.tls.close()
-        except OSError:
-            pass
         if sess in self.sessions:
             self.sessions.remove(sess)
         complete = (sess.error is None and sess.framed_sent == sess.nframes and
@@ -1943,10 +1913,8 @@ class StormRun:
                 mask = selectors.EVENT_WRITE if sess.want == "w" else selectors.EVENT_READ
             else:
                 mask = selectors.EVENT_READ if sess.want == "r" else selectors.EVENT_WRITE
-            try:
+            with contextlib.suppress(KeyError, ValueError, OSError):
                 self.sel.modify(sess.tls, mask, sess)
-            except (KeyError, ValueError, OSError):
-                pass
 
     def _apply_cpu_verdict(self):
         wc = self.sampler.window_summary("client", self.warmup_end, self.window_end)
@@ -1960,10 +1928,8 @@ class StormRun:
                 self.failures["unknown-cpu"] = True
 
     def _finalize(self):
-        try:
+        with contextlib.suppress(OSError, ValueError, IndexError):
             self.sampler.sample()
-        except Exception:  # noqa: BLE001
-            pass
         for sess in list(self.sessions):
             if not sess.closed:
                 sess.closed = True
@@ -2750,11 +2716,9 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     proc8 = subprocess.run(["/bin/sh", "-c", shell8], capture_output=True,
                            text=True, timeout=20)
     out8 = ""
-    try:
+    with contextlib.suppress(OSError):
         with open(out8_path) as fh:
             out8 = fh.read()
-    except OSError:
-        pass
     check("b8-shell-init-stop-waits-classifies",
           proc8.returncode == 0 and "term:" in out8 and
           "abn:" not in out8 and "leak" not in out8,
@@ -3228,10 +3192,8 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
               "events=%r" % mw)
     finally:
         pb.close()
-        try:
+        with contextlib.suppress(KeyError, ValueError):
             srw.sel.unregister(pa)
-        except (KeyError, ValueError):
-            pass
         pa.close()
     # accounting identity: established + deferred + failed + unaccounted ====
     # arrivals_planned, where deferred = cap-blocked arrivals never started and
@@ -3294,11 +3256,9 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
                   int.from_bytes(tcp_pt[8:10], "big") >= 1,
                   "resp-len=%r" % (len(tcp_pt) if tcp_pt is not None else None))
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 dns.sock.close()
                 dns.udpsock.close()
-            except Exception:  # noqa: BLE001
-                pass
             dns_thread.join(timeout=2.0)
 
     ok = all(v != "FAIL" for _, v, _ in checks)
@@ -3472,18 +3432,18 @@ def main(argv):
             args.backend_addr, args.backend_port)
         try:
             args.ctx = _build_client_ctx(args.cafile)
-        except Exception as exc:
+        except (OSError, ssl.SSLError) as exc:
             print("bench-err: cafile invalid: %s" % exc, file=sys.stderr)
             return 3
         run = StormRun(args) if args.workload == "storm" else ClientRun(args)
         try:
             run.setup()
-        except Exception as exc:
+        except (OSError, ssl.SSLError, RuntimeError) as exc:
             print("bench-err: setup failed: %s" % exc, file=sys.stderr)
             return 3
         try:
             run.run()
-        except Exception as exc:
+        except (OSError, ssl.SSLError, RuntimeError) as exc:
             print("bench-err: owner loop failed: %s" % exc, file=sys.stderr)
             return 3
         rep = run.report()
