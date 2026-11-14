@@ -347,18 +347,21 @@ class DnsResponder:
             except OSError:
                 break
             for r in readable:
-                if r is self.sock:
-                    try:
-                        conn, _ = r.accept()
-                    except OSError:
-                        continue
-                    self._serve_tcp(conn)
-                else:
-                    try:
-                        data, peer = r.recvfrom(4096)
-                    except OSError:
-                        continue
-                    self._serve_udp(data, peer)
+                self._serve_readable(r)
+
+    def _serve_readable(self, r):
+        if r is self.sock:
+            try:
+                conn, _ = r.accept()
+            except OSError:
+                return
+            self._serve_tcp(conn)
+        else:
+            try:
+                data, peer = r.recvfrom(4096)
+            except OSError:
+                return
+            self._serve_udp(data, peer)
 
     def _answer(self, msg):
         """Shared query parse + reply builder for both transports. Returns the
@@ -1207,37 +1210,53 @@ class ClientRun:
         for conn in self.conns:
             if conn.closed:
                 continue
-            f = conn.cur
-            if f is not None:
-                if f.off > 0 or f.sent_attempt:
-                    pass  # in-progress pre-cutoff write may finish under drain (C1)
-                else:
-                    self.counts["offered_unsent"][f.phase] += 1
-                    self.outstanding = max(0, self.outstanding - 1)
-                    conn.cur = None
-                    if conn.pending == "send" and conn.want == "w":
-                        # the discarded never-attempted frame held the send
-                        # slot: free it to the drain echo receive.
-                        conn.pending = "recv"
-                        conn.want = "r"
-                    # else: an interrupted operation still occupies the slot;
-                    # discarding the frame touches only the frame, never the
-                    # interrupted receive or its required direction.
+            self._discard_unsent_frame(conn)
             if conn.pending is None and conn.cur is None:
-                # no operation occupies the slot: start the drain echo receive
-                conn.pending = "recv"
-                conn.want = "r"
+                self._arm_drain_recv(conn)
+
+    def _discard_unsent_frame(self, conn):
+        f = conn.cur
+        if f is not None:
+            if f.off > 0 or f.sent_attempt:
+                pass  # in-progress pre-cutoff write may finish under drain (C1)
+            else:
+                self.counts["offered_unsent"][f.phase] += 1
+                self.outstanding = max(0, self.outstanding - 1)
+                conn.cur = None
+                if conn.pending == "send" and conn.want == "w":
+                    # the discarded never-attempted frame held the send
+                    # slot: free it to the drain echo receive.
+                    conn.pending = "recv"
+                    conn.want = "r"
+                # else: an interrupted operation still occupies the slot;
+                # discarding the frame touches only the frame, never the
+                # interrupted receive or its required direction.
+
+    def _arm_drain_recv(self, conn):
+        # no operation occupies the slot: start the drain echo receive
+        conn.pending = "recv"
+        conn.want = "r"
 
     # --- stall / timeout ---
+
+    def _conn_has_work(self, conn):
+        if conn.closed:
+            return False
+        return conn.cur is not None or bool(conn.sent_ts) \
+            or bool(conn.needs_local_recv)
+
+    def _conn_stalled(self, conn, now):
+        if conn.last_progress is None:
+            return False
+        return now - conn.last_progress > STALL_LIMIT
 
     def _check_stalls(self, now):
         if now >= self.window_end:
             return
         for conn in self.conns:
-            if conn.closed or (conn.cur is None and not conn.sent_ts
-                               and not conn.needs_local_recv):
+            if not self._conn_has_work(conn):
                 continue
-            if conn.last_progress is not None and now - conn.last_progress > STALL_LIMIT:
+            if self._conn_stalled(conn, now):
                 self.counts["timeout"][self._now_phase(now)] += 1
                 self.failures.setdefault("timeout", True)
                 self._conn_fail(conn, "timeout", "no progress for %.1fs" % STALL_LIMIT, now)
@@ -1872,6 +1891,38 @@ class StormRun:
                 self.failures.setdefault("timeout", True)
                 self._session_done(sess)
 
+    def _arrivals_exhausted(self):
+        if self.next_arrival < self.planned_arrivals:
+            return False
+        if self.sessions or self._ready_q:
+            return False
+        return self._live_dials <= 0
+
+    def _window_complete(self, now):
+        return now >= self.window_end and self._arrivals_exhausted()
+
+    def _session_complete(self, sess):
+        if sess.framed_sent < sess.nframes or sess.sent_queue:
+            return False
+        return sess.echoed >= sess.nframes
+
+    def _service_event(self, sess, mask):
+        if sess.closed:
+            return
+        if not self._storm_ready(sess, mask):
+            return
+        if sess.pending == "send":
+            if not self._session_try_send(sess, _mono()):
+                self._session_done(sess)
+                return
+        else:
+            self._session_try_recv(sess, _mono())
+        if sess.closed:
+            self._session_done(sess)
+            return
+        if self._session_complete(sess):
+            self._session_done(sess)
+
     def run(self):
         while not self.done:
             now = _mono()
@@ -1885,9 +1936,7 @@ class StormRun:
                 self.sampler.sample(boundary="end")
                 self._end_sampled = True
             self._check_stalls(now)
-            if now >= self.window_end and not self.sessions and \
-                    self.next_arrival >= self.planned_arrivals and not self._ready_q \
-                    and self._live_dials <= 0:
+            if self._window_complete(now):
                 self.terminated = True
                 self.done = True
                 break
@@ -1897,8 +1946,7 @@ class StormRun:
                 self.terminated = True
                 self.done = True
                 break
-            if self.next_arrival >= self.planned_arrivals and not self.sessions \
-                    and not self._ready_q and self._live_dials <= 0:
+            if self._arrivals_exhausted():
                 self.terminated = True
                 self.done = True
                 break
@@ -1909,23 +1957,7 @@ class StormRun:
             except OSError:
                 events = []
             for key, mask in events:
-                sess = key.data
-                if sess.closed:
-                    continue
-                if not self._storm_ready(sess, mask):
-                    continue
-                if sess.pending == "send":
-                    if not self._session_try_send(sess, _mono()):
-                        self._session_done(sess)
-                        continue
-                else:
-                    self._session_try_recv(sess, _mono())
-                if sess.closed:
-                    self._session_done(sess)
-                    continue
-                if sess.framed_sent >= sess.nframes and not sess.sent_queue \
-                        and sess.echoed >= sess.nframes:
-                    self._session_done(sess)
+                self._service_event(key.data, mask)
             now = _mono()
             if now - self._last_sample >= SAMPLE_PERIOD:
                 self.sampler.sample()
