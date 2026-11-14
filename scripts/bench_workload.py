@@ -3197,15 +3197,18 @@ def _selftest_direct_proxy(check, skip, tmpdir, f3ctx):
 
 def _selftest_f4_strict_supervision(check, skip, tmpdir):
     # --- F4 (alumina-45g9): strict supervision fails the session on a forced
-    # SIGKILL for every required child label. Exercises the ACTUAL stop()
-    # body extracted from scripts/bench/run.sh (the in-container supervisor
-    # body driven by bench_run.sh), not a copy. ---
+    # SIGKILL for every required child label. Exercises the ACTUAL supervisor
+    # block (stop() and its reap owners) extracted from scripts/bench/run.sh
+    # (the in-container supervisor body driven by bench_run.sh), not a copy. ---
     seamsh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench", "run.sh")
     with open(seamsh, "rb") as fh:
         f4_lines = fh.read().splitlines()
-    f4_start = next(i for i, l in enumerate(f4_lines) if l.startswith(b"stop() {"))
-    f4_end = next(i for i in range(f4_start + 1, len(f4_lines))
-                  if f4_lines[i].strip() == b"}")
+    # The block runs from the first reap owner to the line before cleanup(), so
+    # every body stop() delegates to travels with it.
+    f4_start = next(i for i, l in enumerate(f4_lines)
+                    if l.startswith(b"stop_exited() {"))
+    f4_end = next(i for i in range(f4_start, len(f4_lines))
+                  if f4_lines[i].startswith(b"cleanup() {")) - 1
     f4_stop = b"\n".join(f4_lines[f4_start:f4_end + 1]).decode()
     f4_out_dir = shlex.quote(os.path.join(tmpdir, ""))
     f4_probe = (

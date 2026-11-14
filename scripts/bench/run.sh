@@ -38,37 +38,47 @@ ALU=0
 SRV=0
 DNSPID=0
 CLEANED=0
-stop() {
+# One owner per reap decision. These four functions are the supervisor block
+# bench_workload.py's f4 selftest extracts and executes verbatim, so the block
+# runs from stop_exited to the line before cleanup and holds nothing else.
+stop_exited() {
     pid="$1"
     label="$2"
     strict="$3"
-    [ "${pid:-0}" -gt 0 ] 2>/dev/null || return 0
-    if ! kill -0 "$pid" 2>/dev/null; then
-        wait "$pid" 2>/dev/null; w=$?
-        if [ "$strict" -eq 1 ]; then
-            echo "  BENCH-REAP-FAIL: $label pid $pid exited before reap (status $w) -- unexpected death" >&2
-            return 1
-        fi
-        echo "  BENCH-CLEANUP: $label pid $pid already exited (status $w)" >&2
-        return 0
+    w="$4"
+    if [ "$strict" -eq 1 ]; then
+        echo "  BENCH-REAP-FAIL: $label pid $pid exited before reap (status $w) -- unexpected death" >&2
+        return 1
     fi
-    kill -TERM "$pid" 2>/dev/null || true
+    echo "  BENCH-CLEANUP: $label pid $pid already exited (status $w)" >&2
+    return 0
+}
+# stop_grace <pid>: TERM, then one SIGKILL after a 30-tick grace. Returns 0 for
+# an exit on TERM, 1 for a needed SIGKILL, 2 for still alive at tick 50.
+stop_grace() {
+    pid="$1"
     waited=0
-    killed=0
+    forced=0
     while kill -0 "$pid" 2>/dev/null; do
         if [ "$waited" -ge 30 ]; then
             kill -9 "$pid" 2>/dev/null || true
-            killed=1
+            forced=1
         fi
         if [ "$waited" -ge 50 ]; then
-            echo "  BENCH-REAP-FAIL: $label pid $pid leaked after TERM+SIGKILL grace" >&2
-            return 1
+            return 2
         fi
         sleep 0.1
         waited=$((waited + 1))
     done
-    wait "$pid" 2>/dev/null; w=$?
-    if [ "$killed" -eq 1 ]; then
+    return "$forced"
+}
+stop_reaped() {
+    pid="$1"
+    label="$2"
+    strict="$3"
+    forced="$4"
+    w="$5"
+    if [ "$forced" -eq 1 ]; then
         echo "  BENCH-REAP: $label pid $pid forced SIGKILL after TERM grace (status $w)" >&2
         if [ "$strict" -eq 1 ]; then
             # a required child that needed SIGKILL is not a clean supervised
@@ -88,6 +98,26 @@ stop() {
         return 1
     fi
     return 0
+}
+stop() {
+    pid="$1"
+    label="$2"
+    strict="$3"
+    [ "${pid:-0}" -gt 0 ] 2>/dev/null || return 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" 2>/dev/null; w=$?
+        stop_exited "$pid" "$label" "$strict" "$w"
+        return $?
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    grace=0
+    stop_grace "$pid" || grace=$?
+    if [ "$grace" -eq 2 ]; then
+        echo "  BENCH-REAP-FAIL: $label pid $pid leaked after TERM+SIGKILL grace" >&2
+        return 1
+    fi
+    wait "$pid" 2>/dev/null; w=$?
+    stop_reaped "$pid" "$label" "$strict" "$grace" "$w"
 }
 cleanup() {
     [ "$CLEANED" -eq 1 ] && return 0
