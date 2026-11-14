@@ -165,7 +165,9 @@ static_gate() {
     echo "STATIC-ELF-CHECKS-OK"
 }
 
-whitespace_gate() {
+# The repository proof: native git must answer, see the actual checkout and
+# report no whitespace error in the tracked diff. Sets `head` for the marker.
+whitespace_gate_git() {
     command -v git >/dev/null 2>&1 || {
         echo "WHITESPACE-GATE-BLOCKED: git required and absent (no host proof receipt consumed)" >&2
         exit 1
@@ -185,14 +187,20 @@ whitespace_gate() {
         echo "whitespace FAIL: tracked diff contains whitespace errors" >&2
         exit 1
     }
-    # Missing-file fail-closed check FIRST (identical to the prior per-file
-    # loop): every intended file must exist before any content scan.
+}
+
+# Missing-file fail-closed check FIRST (identical to the prior per-file loop):
+# every intended file must exist before any content scan.
+whitespace_gate_intended_present() {
     for f in $INTENDED; do
         [ -f "$f" ] || {
             echo "whitespace FAIL: intended file missing: $f" >&2
             exit 1
         }
     done
+}
+
+whitespace_gate_scan() {
     # ONE awk pass over ALL intended files, checking every line (tracked and
     # untracked alike) for exactly what `git diff --no-index --check /dev/null
     # <file>` reports under the default core.whitespace: (a) trailing
@@ -241,6 +249,13 @@ whitespace_gate() {
         echo "whitespace FAIL: intended files contain whitespace errors" >&2
         exit 1
     fi
+}
+
+# The whitespace gate: git proof, intended-file presence, then the content scan.
+whitespace_gate() {
+    whitespace_gate_git
+    whitespace_gate_intended_present
+    whitespace_gate_scan
     echo "WHITESPACE-GATE-OK (native git, HEAD=$head)"
 }
 
@@ -990,19 +1005,28 @@ unsafe_surface_gate() {
 # enumerated symlink that does not resolve to a regular file fails closed, and
 # directory symlinks are not traversed. Producer find failure fails closed and
 # can never read as a PASS on an empty offender list.
-intended_coverage_gate() {
+# The physical enumeration: find over both roots, producer exit captured.
+intended_coverage_scan() {
     prc=0
     covered_rs="$(find src tests \( -type f -o -type l \) -name '*.rs' 2>&1)" || prc=$?
     [ "$prc" -eq 0 ] || {
         echo "INTENDED-COVERAGE-FAIL: find exit $prc (tooling error, not PASS)" >&2
         exit 1
     }
+}
+
+# An enumerated .rs symlink must resolve to a regular file (never a silent drop).
+intended_coverage_symlinks() {
     for f in $covered_rs; do
         if [ -L "$f" ] && [ ! -f "$f" ]; then
             echo "INTENDED-COVERAGE-FAIL: .rs symlink does not resolve to a regular file: $f" >&2
             exit 1
         fi
     done
+}
+
+# Every enumerated path must carry an INTENDED admission token.
+intended_coverage_missing() {
     missing=""
     for f in $covered_rs; do
         case " $INTENDED " in
@@ -1014,6 +1038,12 @@ intended_coverage_gate() {
         echo "INTENDED-COVERAGE-FAIL: physical src/tests .rs absent from INTENDED (drifts outside every identity snapshot):$missing" >&2
         exit 1
     fi
+}
+
+intended_coverage_gate() {
+    intended_coverage_scan
+    intended_coverage_symlinks
+    intended_coverage_missing
     echo "INTENDED-COVERAGE-OK: every physical src/tests .rs (find, untracked included, deleted-indexed excluded) is listed in INTENDED"
 }
 
@@ -1159,16 +1189,18 @@ sha256_digest() {
     out=""
     if command -v sha256sum >/dev/null 2>&1; then
         IDENTITY_HASHER="sha256sum"
-        if [ "$mode" = "file" ]; then out=$(sha256sum "$path" 2>&1) || r=$?
-        else out=$(sha256sum 2>&1) || r=$?; fi
+        set -- sha256sum
     elif command -v shasum >/dev/null 2>&1; then
         IDENTITY_HASHER="shasum"
-        if [ "$mode" = "file" ]; then out=$(shasum -a 256 "$path" 2>&1) || r=$?
-        else out=$(shasum -a 256 2>&1) || r=$?; fi
+        set -- shasum -a 256
     else
         echo "SOURCE-IDENTITY FAIL: neither sha256sum nor shasum present (identity impossible, not PASS)" >&2
         return 1
     fi
+    case "$mode" in
+        file) set -- "$@" "$path" ;;
+    esac
+    out=$("$@" 2>&1) || r=$?
     [ "$r" -eq 0 ] || {
         echo "SOURCE-IDENTITY FAIL: hash producer exit $r for ${path:-stdin} (read failure, not PASS)" >&2
         printf '%s\n' "$out" >&2
@@ -1496,27 +1528,36 @@ identity_compare() {
     echo "SOURCE-IDENTITY-STABLE-OK (HEAD, status, inputs and env identical before/after)"
 }
 
+# G8-C22: pin supply-chain tool versions; a drift from the accepted versions
+# fails closed (a different audit/deny version can change the gate verdict, so
+# the intake gate must be host-reproducible).
+audit_deny_pins() {
+    AUDIT_VERSION="0.22.1"
+    DENY_VERSION="0.19.4"
+    av=$(cargo-audit --version 2>&1) || av="<unreadable>"
+    [ "${av##* }" = "$AUDIT_VERSION" ] || { echo "AUDIT-DENY FAIL: cargo-audit version '$av' != pinned $AUDIT_VERSION" >&2; exit 1; }
+    dv=$(cargo-deny --version 2>&1) || dv="<unreadable>"
+    [ "${dv##* }" = "$DENY_VERSION" ] || { echo "AUDIT-DENY FAIL: cargo-deny version '$dv' != pinned $DENY_VERSION" >&2; exit 1; }
+}
+
+# Both hard gates; each producer exit is checked, never folded into PASS.
+audit_deny_run() {
+    ar=0
+    cargo +${TOOLCHAIN} audit --no-fetch || ar=$?
+    [ "$ar" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo audit exit $ar" >&2; exit 1; }
+    dr=0
+    cargo +${TOOLCHAIN} deny check || dr=$?
+    [ "$dr" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo deny exit $dr" >&2; exit 1; }
+}
+
 audit_deny_owner() {
     have=1
     command -v cargo-audit >/dev/null 2>&1 || have=0
     command -v cargo-deny >/dev/null 2>&1 || have=0
     if [ "$have" -eq 1 ]; then
         echo "AUDIT-DENY (hard gate, boundary host):"
-        # G8-C22: pin supply-chain tool versions; a drift from the accepted
-        # versions fails closed (a different audit/deny version can change the
-        # gate verdict, so the intake gate must be host-reproducible).
-        AUDIT_VERSION="0.22.1"
-        DENY_VERSION="0.19.4"
-        av=$(cargo-audit --version 2>&1) || av="<unreadable>"
-        [ "${av##* }" = "$AUDIT_VERSION" ] || { echo "AUDIT-DENY FAIL: cargo-audit version '$av' != pinned $AUDIT_VERSION" >&2; exit 1; }
-        dv=$(cargo-deny --version 2>&1) || dv="<unreadable>"
-        [ "${dv##* }" = "$DENY_VERSION" ] || { echo "AUDIT-DENY FAIL: cargo-deny version '$dv' != pinned $DENY_VERSION" >&2; exit 1; }
-        ar=0
-        cargo +${TOOLCHAIN} audit --no-fetch || ar=$?
-        [ "$ar" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo audit exit $ar" >&2; exit 1; }
-        dr=0
-        cargo +${TOOLCHAIN} deny check || dr=$?
-        [ "$dr" -eq 0 ] || { echo "AUDIT-DENY FAIL: cargo deny exit $dr" >&2; exit 1; }
+        audit_deny_pins
+        audit_deny_run
         echo "AUDIT-DENY-OK (audit $AUDIT_VERSION exit $ar; deny $DENY_VERSION exit $dr)"
     else
         echo "AUDIT-DENY-BLOCKED: cargo audit or cargo deny absent on this host" >&2
