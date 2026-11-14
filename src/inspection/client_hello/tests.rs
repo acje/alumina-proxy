@@ -4,13 +4,16 @@ fn hello_msg(legacy: u16, versions: &[u16], snis: &[&str], ech: bool) -> Vec<u8>
     hello_msg_comp(legacy, versions, snis, ech, 0)
 }
 
-fn hello_msg_comp(legacy: u16, versions: &[u16], snis: &[&str], ech: bool, comp: u8) -> Vec<u8> {
+fn versions_extension_data(versions: &[u16]) -> Vec<u8> {
     let mut versions_data =
         vec![u8::try_from(versions.len() * 2).expect("versions data length fits u8")];
     for v in versions {
         versions_data.extend_from_slice(&v.to_be_bytes());
     }
-    let mut snis_data = Vec::new();
+    versions_data
+}
+
+fn sni_extension_data(snis: &[&str]) -> Vec<u8> {
     let mut names_data = Vec::new();
     for name in snis {
         names_data.push(0u8);
@@ -21,13 +24,17 @@ fn hello_msg_comp(legacy: u16, versions: &[u16], snis: &[&str], ech: bool, comp:
         );
         names_data.extend_from_slice(name.as_bytes());
     }
+    let mut snis_data = Vec::new();
     snis_data.extend_from_slice(
         &u16::try_from(names_data.len())
             .expect("sni names block fits u16")
             .to_be_bytes(),
     );
     snis_data.extend_from_slice(&names_data);
+    snis_data
+}
 
+fn hello_extensions(versions_data: &[u8], snis_data: &[u8], ech: bool) -> Vec<u8> {
     let mut exts = Vec::new();
     exts.extend_from_slice(&SUPPORTED_VERSIONS.to_be_bytes());
     exts.extend_from_slice(
@@ -35,19 +42,25 @@ fn hello_msg_comp(legacy: u16, versions: &[u16], snis: &[&str], ech: bool, comp:
             .expect("versions data fits u16")
             .to_be_bytes(),
     );
-    exts.extend_from_slice(&versions_data);
+    exts.extend_from_slice(versions_data);
     exts.extend_from_slice(&SERVER_NAME.to_be_bytes());
     exts.extend_from_slice(
         &u16::try_from(snis_data.len())
             .expect("sni data fits u16")
             .to_be_bytes(),
     );
-    exts.extend_from_slice(&snis_data);
+    exts.extend_from_slice(snis_data);
     if ech {
         exts.extend_from_slice(&ENCRYPTED_CLIENT_HELLO.to_be_bytes());
         exts.extend_from_slice(&0u16.to_be_bytes());
     }
+    exts
+}
 
+fn hello_msg_comp(legacy: u16, versions: &[u16], snis: &[&str], ech: bool, comp: u8) -> Vec<u8> {
+    let versions_data = versions_extension_data(versions);
+    let snis_data = sni_extension_data(snis);
+    let exts = hello_extensions(&versions_data, &snis_data, ech);
     let mut body = Vec::new();
     body.extend_from_slice(&legacy.to_be_bytes());
     body.extend_from_slice(&[0u8; RANDOM_LEN]);
@@ -62,7 +75,6 @@ fn hello_msg_comp(legacy: u16, versions: &[u16], snis: &[&str], ech: bool, comp:
             .to_be_bytes(),
     );
     body.extend_from_slice(&exts);
-
     let mut handshake = vec![HANDSHAKE_CLIENT_HELLO];
     let hl = u32::try_from(body.len()).expect("client hello body fits u32");
     handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
@@ -1097,9 +1109,15 @@ fn sigalgs_over_max_rejects_as_profile() {
 }
 
 #[cfg(feature = "alloc-witness")]
-#[test]
-fn ja4_path_is_allocation_free() {
-    use crate::alloc::{self, Phase};
+struct Ja4Fixture {
+    ciphers: [u16; 15],
+    sigalgs: [u16; 8],
+    full_exts: [u16; 16],
+    wire: Vec<u8>,
+}
+
+#[cfg(feature = "alloc-witness")]
+fn ja4_fixture() -> Ja4Fixture {
     let ciphers = [
         0x002f, 0x0035, 0x009c, 0x009d, 0x1301, 0x1302, 0x1303, 0xc013, 0xc014, 0xc02b, 0xc02c,
         0xc02f, 0xc030, 0xcca8, 0xcca9,
@@ -1128,7 +1146,6 @@ fn ja4_path_is_allocation_free() {
     exts.push((SERVER_NAME, &sni));
     exts.push((ALPN, &alpn));
     let wire = hello_with_ciphers_and_extensions(&ciphers, &exts);
-    let ch = parse_one(&wire).expect("parse");
     let full_exts = [
         0x0005,
         0x000a,
@@ -1147,7 +1164,25 @@ fn ja4_path_is_allocation_free() {
         SERVER_NAME,
         ALPN,
     ];
+    Ja4Fixture {
+        ciphers,
+        sigalgs,
+        full_exts,
+        wire,
+    }
+}
 
+#[cfg(feature = "alloc-witness")]
+#[test]
+fn ja4_path_is_allocation_free() {
+    use crate::alloc::{self, Phase};
+    let Ja4Fixture {
+        ciphers,
+        sigalgs,
+        full_exts,
+        wire,
+    } = ja4_fixture();
+    let ch = parse_one(&wire).expect("parse");
     let (out, counts) = alloc::run_phase(Phase::Serving, || {
         let pure = ja4_fingerprint(0x0304, &ciphers, &full_exts, b"h2", &sigalgs)
             .expect("test JA4 input fits fixed capacities");
