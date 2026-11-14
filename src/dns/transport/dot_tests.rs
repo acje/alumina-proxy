@@ -184,6 +184,78 @@ fn dot_config_declared(resolver_line: &str) -> Config {
     parse_config_document(&doc).expect("valid declared pinned-dot config")
 }
 
+struct DotExchange {
+    transport: StartupDns,
+    cache: Cache,
+    schedules: Schedules,
+}
+
+impl DotExchange {
+    fn new(cfg: &Config, port: u16) -> Self {
+        let mut transport = StartupDns::new().expect("startup dns transport");
+        transport.addr = ns(port);
+        transport.now0 = 1_000_000;
+        transport.resolvers = Some(*cfg.resolver_set());
+        transport.active_resolver = ActiveResolver::primary_of(cfg.resolver_set());
+        transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
+            fqdn: *fqdn,
+            pin: cfg.resolver_set().primary().pin().copied(),
+        });
+        Self {
+            transport,
+            cache: Cache::new(2).expect("two-name test cache"),
+            schedules: Schedules::new(2).expect("two-name test schedules"),
+        }
+    }
+
+    fn start_family_a(&mut self, fqdn: &Fqdn, ordinal: usize, deadline: Instant) {
+        self.transport
+            .start_exchange(
+                fqdn,
+                Family::A,
+                ordinal,
+                deadline,
+                Generation::INITIAL,
+                ExchangeClass::Startup,
+            )
+            .expect("a live loopback DoT exchange starts without a fatal error");
+    }
+
+    fn drive_observed(
+        &mut self,
+        fqdn: &Fqdn,
+        deadline: Instant,
+        mut observe: impl FnMut(&StartupDns, ExchangeStep),
+    ) -> Option<TurnResult> {
+        for _ in 0..256 {
+            if let Some(step) = self.transport.exchange_step() {
+                observe(&self.transport, step);
+            }
+            match self
+                .transport
+                .advance_exchange(fqdn, &mut self.cache, &mut self.schedules)
+                .expect("a live loopback DoT exchange advances without a fatal error")
+            {
+                TurnResult::Pending => {
+                    if self
+                        .transport
+                        .exchange_deadline()
+                        .is_some_and(|d| Instant::now() >= d)
+                    {
+                        continue;
+                    }
+                    let _ = self
+                        .transport
+                        .wait_dns_readiness(deadline)
+                        .expect("the loopback peer answers within the exchange deadline");
+                }
+                terminal => return Some(terminal),
+            }
+        }
+        None
+    }
+}
+
 fn bindings_of(
     cache: &Cache,
     ordinal: usize,
@@ -899,70 +971,30 @@ fn dot_mangled_reply_fails_closed_over_tls() {
 fn dot_exchange_traverses_handshake_before_send_and_receive() {
     let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
     let cfg = dot_config(&pinned_resolver());
-    let mut cache = Cache::new(2).unwrap();
-    let mut schedules = Schedules::new(2).unwrap();
-    let mut transport = StartupDns::new().unwrap();
-    transport.addr = ns(responder.port());
-    transport.now0 = 1_000_000;
-    transport.resolvers = Some(*cfg.resolver_set());
-    transport.active_resolver = ActiveResolver::primary_of(cfg.resolver_set());
-    transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
-        fqdn: *fqdn,
-        pin: cfg.resolver_set().primary().pin().copied(),
-    });
+    let mut dot = DotExchange::new(&cfg, responder.port());
     let fqdn = cfg.allowlist().get(0).unwrap();
     let deadline = Instant::now() + Duration::from_millis(1500);
-    transport
-        .start_exchange(
-            fqdn,
-            Family::A,
-            0,
-            deadline,
-            Generation::INITIAL,
-            ExchangeClass::Startup,
-        )
-        .unwrap();
+    dot.start_family_a(fqdn, 0, deadline);
     let mut seen: Vec<ExchangeStep> = Vec::new();
     let mut handshake_seen: Option<usize> = None;
-    let mut terminal = None;
-    for _ in 0..256 {
-        if let Some(step) = transport.exchange_step() {
-            if step == ExchangeStep::TlsHandshake && handshake_seen.is_none() {
-                handshake_seen = Some(seen.len());
-            }
-            if matches!(step, ExchangeStep::SendReady | ExchangeStep::Receiving) {
-                let is_tls = matches!(&transport.conn, Some(DnsConn::Tls(_)));
-                let is_handshaking = matches!(
-                    &transport.conn,
-                    Some(DnsConn::Tls(conn)) if conn.tls.is_handshaking()
-                );
-                assert!(
-                    is_tls && !is_handshaking,
-                    "DoT crypto must be fully verified before the query is sent or a response is received: step={step:?} at boundary index {}, seen={seen:?}, conn_is_tls={is_tls}, is_handshaking={is_handshaking}",
-                    seen.len()
-                );
-            }
-            seen.push(step);
+    let terminal = dot.drive_observed(fqdn, deadline, |transport, step| {
+        if step == ExchangeStep::TlsHandshake && handshake_seen.is_none() {
+            handshake_seen = Some(seen.len());
         }
-        match transport
-            .advance_exchange(fqdn, &mut cache, &mut schedules)
-            .unwrap()
-        {
-            TurnResult::Pending => {
-                if transport
-                    .exchange_deadline()
-                    .is_some_and(|d| Instant::now() >= d)
-                {
-                    continue;
-                }
-                let _ = transport.wait_dns_readiness(deadline).unwrap();
-            }
-            other => {
-                terminal = Some(other);
-                break;
-            }
+        if matches!(step, ExchangeStep::SendReady | ExchangeStep::Receiving) {
+            let is_tls = matches!(&transport.conn, Some(DnsConn::Tls(_)));
+            let is_handshaking = matches!(
+                &transport.conn,
+                Some(DnsConn::Tls(conn)) if conn.tls.is_handshaking()
+            );
+            assert!(
+                is_tls && !is_handshaking,
+                "DoT crypto must be fully verified before the query is sent or a response is received: step={step:?} at boundary index {}, seen={seen:?}, conn_is_tls={is_tls}, is_handshaking={is_handshaking}",
+                seen.len()
+            );
         }
-    }
+        seen.push(step);
+    });
     assert!(
         matches!(terminal, Some(TurnResult::Published(_))),
         "a pin-matching DoT exchange must publish at the primitive level, got {terminal:?}"
@@ -981,12 +1013,12 @@ fn dot_exchange_traverses_handshake_before_send_and_receive() {
         );
     }
     assert_eq!(
-        bindings_of(&cache, 0, Family::A),
+        bindings_of(&dot.cache, 0, Family::A),
         vec![crate::eligibility::NumericAddr::V4(
             std::net::Ipv4Addr::new(93, 184, 216, 34)
         )]
     );
-    transport.close_connection().unwrap();
+    dot.transport.close_connection().unwrap();
     drop(responder);
 }
 
