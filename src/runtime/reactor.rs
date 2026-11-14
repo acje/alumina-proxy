@@ -1413,6 +1413,12 @@ enum DrainEnd {
     IdleExpired,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelayRead {
+    Bytes(usize),
+    Stop,
+}
+
 fn arm_tunnel_idle(ws: &mut SlotWorkspace) -> bool {
     if !ws.gate.is_open() {
         return false;
@@ -3450,48 +3456,56 @@ impl Serving {
         }
         let was_open = self.slots[index].gate.is_open();
         if written == 0 || was_open {
-            self.slots[index].relay_cursor_reset();
-            if self.visit_exhausted(index) {
-                self.reschedule(index, RescheduleArm::Upstream);
-            }
+            self.flush_client_tail(index);
             return;
         }
-        let outcome = self.slots[index].gate.upstream_write(written);
-        if matches!(
-            outcome,
-            UpstreamWrite::GateOpened { .. } | UpstreamWrite::Open
-        ) {
-            if deadline_passed(self.slots[index].setup_deadline, Instant::now()) {
-                self.flush_down(index);
-                self.close_slot(index);
-                return;
-            }
-            if self.slots[index].tunnel.is_none() {
-                let slot = self.slots[index].handle.take();
-                if let Some(slot) = slot {
-                    let tunnel = self.storage.finish_setup(slot);
-                    self.slots[index].tunnel = Some(tunnel);
-                    self.note_occupancy(Instant::now());
-                }
-            }
-            self.apply_slot_deadline(index, |ws| {
-                ws.setup_deadline = None;
-                ws.idle_deadline = Some(Instant::now() + IDLE_SECS);
-                ws.stage = Stage::Relay;
-            });
-            let (written2, failed2) = self.drain_to_upstream(index);
-            if failed2 {
-                self.close_slot(index);
-                return;
-            }
-            if written2 > 0 {
-                self.slots[index].gate.upstream_write(written2);
-            }
+        if self.flush_client_open_gate(index, written) {
+            self.flush_client_tail(index);
         }
+    }
+
+    fn flush_client_tail(&mut self, index: usize) {
         self.slots[index].relay_cursor_reset();
         if self.visit_exhausted(index) {
             self.reschedule(index, RescheduleArm::Upstream);
         }
+    }
+
+    fn flush_client_open_gate(&mut self, index: usize, written: usize) -> bool {
+        let outcome = self.slots[index].gate.upstream_write(written);
+        if !matches!(
+            outcome,
+            UpstreamWrite::GateOpened { .. } | UpstreamWrite::Open
+        ) {
+            return true;
+        }
+        if deadline_passed(self.slots[index].setup_deadline, Instant::now()) {
+            self.flush_down(index);
+            self.close_slot(index);
+            return false;
+        }
+        if self.slots[index].tunnel.is_none() {
+            let slot = self.slots[index].handle.take();
+            if let Some(slot) = slot {
+                let tunnel = self.storage.finish_setup(slot);
+                self.slots[index].tunnel = Some(tunnel);
+                self.note_occupancy(Instant::now());
+            }
+        }
+        self.apply_slot_deadline(index, |ws| {
+            ws.setup_deadline = None;
+            ws.idle_deadline = Some(Instant::now() + IDLE_SECS);
+            ws.stage = Stage::Relay;
+        });
+        let (written2, failed2) = self.drain_to_upstream(index);
+        if failed2 {
+            self.close_slot(index);
+            return false;
+        }
+        if written2 > 0 {
+            self.slots[index].gate.upstream_write(written2);
+        }
+        true
     }
 
     fn flush_down(&mut self, index: usize) {
@@ -3517,29 +3531,8 @@ impl Serving {
                 self.reschedule(index, RescheduleArm::Upstream);
                 return Ok(());
             }
-            let result = {
-                let ws = &mut self.slots[index];
-                let Some(up) = ws.upstream.as_mut() else {
-                    return Ok(());
-                };
-                up.read(&mut ws.down[ws.down_len..ws.down_len + room])
-            };
-            let n = match result {
-                Ok(0) => {
-                    self.note_op(index, 0);
-                    self.observe_down_eof(index);
-                    return Ok(());
-                }
-                Ok(n) => n,
-                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    self.note_op(index, 0);
-                    return Ok(());
-                }
-                Err(_) => {
-                    self.note_op(index, 0);
-                    self.close_slot(index);
-                    return Ok(());
-                }
+            let RelayRead::Bytes(n) = self.relay_read_upstream(index, room) else {
+                return Ok(());
             };
             self.note_op(index, n);
             self.slots[index].down_len += n;
@@ -3550,6 +3543,33 @@ impl Serving {
             }
             if self.slots[index].down_len > 0 {
                 return Ok(());
+            }
+        }
+    }
+
+    fn relay_read_upstream(&mut self, index: usize, room: usize) -> RelayRead {
+        let result = {
+            let ws = &mut self.slots[index];
+            let Some(up) = ws.upstream.as_mut() else {
+                return RelayRead::Stop;
+            };
+            up.read(&mut ws.down[ws.down_len..ws.down_len + room])
+        };
+        match result {
+            Ok(0) => {
+                self.note_op(index, 0);
+                self.observe_down_eof(index);
+                RelayRead::Stop
+            }
+            Ok(n) => RelayRead::Bytes(n),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+                self.note_op(index, 0);
+                RelayRead::Stop
+            }
+            Err(_) => {
+                self.note_op(index, 0);
+                self.close_slot(index);
+                RelayRead::Stop
             }
         }
     }
