@@ -177,7 +177,9 @@ fn count_windows(haystack: &[u8], needle: &[u8]) -> usize {
         .count()
 }
 
-fn assert_reserved_eviction_preserves_partial_record(n: usize, cursor_past_successor: bool) {
+/// Reference records for the partial-eviction cases: the full canonical
+/// warning record plus the shorter reserved successor that displaces it.
+fn partial_eviction_reference(n: usize, cursor_past_successor: bool) -> (Vec<u8>, Vec<u8>) {
     let name = widest_name(0);
     assert_eq!(
         name.len(),
@@ -218,12 +220,22 @@ fn assert_reserved_eviction_preserves_partial_record(n: usize, cursor_past_succe
             "a cursor inside the successor record ({successor_len} > {n})"
         );
     }
+    (a_record, successor_record)
+}
 
+/// A ring filled to capacity behind a scripted sink whose first write lands
+/// exactly at byte `n` of the first record: the partial drain must leave the
+/// cursor at `n` without displacing anything.
+fn partial_eviction_subject(n: usize) -> (LogStore, Monitor, u64) {
+    assert!(
+        n > 0,
+        "a partial first write leaves a positive cursor offset"
+    );
     let mut subject = LogStore::with_scripted_sink(ScriptedFirst::Partial(
-        std::num::NonZeroUsize::new(n).unwrap(),
+        std::num::NonZeroUsize::new(n).expect("the partial cursor offset is nonzero"),
     ))
     .expect("scripted sink store");
-    subject.startup_warning_ctx(1, &name, Family::A, "timeout", None);
+    subject.startup_warning_ctx(1, &widest_name(0), Family::A, "timeout", None);
     let mut fill_monitor = Monitor::new();
     let mut secs = 10_000u64;
     while subject.len() < QUEUE_SLOTS {
@@ -247,6 +259,12 @@ fn assert_reserved_eviction_preserves_partial_record(n: usize, cursor_past_succe
         Some(n),
         "the partial first write leaves the actual cursor at {n}"
     );
+    (subject, fill_monitor, secs)
+}
+
+fn assert_reserved_eviction_preserves_partial_record(n: usize, cursor_past_successor: bool) {
+    let (a_record, successor_record) = partial_eviction_reference(n, cursor_past_successor);
+    let (mut subject, mut fill_monitor, secs) = partial_eviction_subject(n);
 
     subject.monitor_summary(secs, &mut fill_monitor);
     subject.monitor_summary(secs + 1, &mut fill_monitor);
@@ -280,7 +298,6 @@ fn assert_reserved_eviction_preserves_partial_record(n: usize, cursor_past_succe
         "the surviving reserved successor is emitted exactly once after the protected front record"
     );
 }
-
 mod record_encoding {
     use super::*;
 
@@ -1486,31 +1503,50 @@ mod monitor_queue {
             .collect()
     }
 
-    #[test]
-    fn logging_monitor_summary_carries_the_domain_loss_it_causes() {
-        let (mut store, mut file) = file_logstore();
+    /// A file-backed store with `spare` free slots, filled with warned names;
+    /// the guard bounds the fill so a full ring can never spin forever.
+    fn store_with_spare_slots(spare: usize) -> (LogStore, std::fs::File) {
+        let (mut store, file) = file_logstore();
         let mut guard = 0usize;
-        while store.len() < QUEUE_SLOTS - 2 && guard < 8 * QUEUE_SLOTS {
+        while store.len() < QUEUE_SLOTS - spare && guard < 8 * QUEUE_SLOTS {
             store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
             guard += 1;
         }
-        assert_eq!(
-            store.len(),
-            QUEUE_SLOTS - 2,
-            "two free slots: one for the reserved summary, one for a single detail batch"
-        );
-        let mut m = Monitor::new();
-        for index in 0..=DOMAIN_BATCH {
-            m.note_fact_early_data(DomainOrdinal::from_index(index).expect("ordinal in range"));
+        (store, file)
+    }
+
+    /// One saturated capture batch: `count` distinct slots all carrying the
+    /// same any-illegal cause and blocking effect.
+    fn note_captures(m: &mut Monitor, count: usize) {
+        use crate::enforcement::monitor::{CapturedDetail, SlotCapture};
+        let cause = AnyIllegalCause::HostNotAllowlisted;
+        let effect = Effect::Block {
+            scope: Scope::Connection,
+        };
+        for i in 0..count {
+            m.note_consumed_capture(SlotCapture {
+                slot: i,
+                generation: 1,
+                detail: Some(CapturedDetail {
+                    fact: CapturedFact::AnyIllegal(cause),
+                    effect,
+                }),
+            });
         }
-        assert_eq!(
-            count_domain_batches(&m),
-            2,
-            "DOMAIN_BATCH+1 nonzero ordinals need two monitor_domain batches"
-        );
+    }
+
+    /// The first loss window on a ring with two free slots: the committed
+    /// summary and the single admitted domain batch fill the ring, while the
+    /// refused batch is accounted once as a whole-record drop. Returns the
+    /// emitted length and the running drop count the follow-up window reads.
+    fn assert_domain_loss_window(
+        store: &mut LogStore,
+        file: &mut std::fs::File,
+        m: &mut Monitor,
+    ) -> (usize, u64) {
         let dropped_before = store.dropped();
         assert!(
-            store.monitor_summary(9, &mut m),
+            store.monitor_summary(9, m),
             "the reserved summary commits into a free slot without displacing"
         );
         assert_eq!(
@@ -1528,8 +1564,8 @@ mod monitor_queue {
             dropped_before + 1,
             "the refused batch is still a whole-record drop"
         );
-        flush_all(&mut store);
-        let text = String::from_utf8(read_all(&mut file)).expect("utf8 records");
+        flush_all(store);
+        let text = String::from_utf8(read_all(file)).expect("utf8 records");
         let summary = records_of_kind(&text, "monitor");
         assert_eq!(summary.len(), 1, "exactly one summary in this window");
         assert!(
@@ -1548,15 +1584,35 @@ mod monitor_queue {
             "the admitted batch keeps its position in the full batch set: {}",
             admitted[0]
         );
+        (text.len(), dropped_before + 1)
+    }
 
-        let first_len = text.len();
+    #[test]
+    fn logging_monitor_summary_carries_the_domain_loss_it_causes() {
+        let (mut store, mut file) = store_with_spare_slots(2);
+        assert_eq!(
+            store.len(),
+            QUEUE_SLOTS - 2,
+            "two free slots: one for the reserved summary, one for a single detail batch"
+        );
+        let mut m = Monitor::new();
+        for index in 0..=DOMAIN_BATCH {
+            m.note_fact_early_data(DomainOrdinal::from_index(index).expect("ordinal in range"));
+        }
+        assert_eq!(
+            count_domain_batches(&m),
+            2,
+            "DOMAIN_BATCH+1 nonzero ordinals need two monitor_domain batches"
+        );
+        let (first_len, dropped) = assert_domain_loss_window(&mut store, &mut file, &mut m);
+
         assert!(
             store.monitor_summary(10, &mut m),
             "the follow-up summary commits into the drained ring"
         );
         assert_eq!(
             store.dropped(),
-            dropped_before + 1,
+            dropped,
             "a summary that loses nothing drops nothing"
         );
         assert_eq!(
@@ -1590,29 +1646,10 @@ mod monitor_queue {
 
     #[test]
     fn logging_monitor_summary_carries_the_capture_loss_it_causes() {
-        use crate::enforcement::monitor::{CapturedDetail, SlotCapture};
-        let (mut store, mut file) = file_logstore();
-        let mut guard = 0usize;
-        while store.len() < QUEUE_SLOTS - 2 && guard < 8 * QUEUE_SLOTS {
-            store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
-            guard += 1;
-        }
+        let (mut store, mut file) = store_with_spare_slots(2);
         assert_eq!(store.len(), QUEUE_SLOTS - 2, "one spare detail slot");
         let mut m = Monitor::new();
-        let cause = AnyIllegalCause::HostNotAllowlisted;
-        let effect = Effect::Block {
-            scope: Scope::Connection,
-        };
-        for i in 0..=CAPTURE_BATCH {
-            m.note_consumed_capture(SlotCapture {
-                slot: i,
-                generation: 1,
-                detail: Some(CapturedDetail {
-                    fact: CapturedFact::AnyIllegal(cause),
-                    effect,
-                }),
-            });
-        }
+        note_captures(&mut m, CAPTURE_BATCH + 1);
         assert_eq!(
             count_capture_batches(&m),
             2,
