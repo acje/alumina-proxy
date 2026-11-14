@@ -3221,68 +3221,100 @@ impl StartupDns {
         let Some(mut ex) = self.active.take() else {
             return Err(StartupDnsError::ExchangeInactive);
         };
-        let next_step = match ex.step {
-            ExchangeStep::Connecting => match self.step_connect(&mut ex, schedules)? {
-                ConnectStep::Waiting => None,
-                ConnectStep::Transition { next } => Some(next),
-                ConnectStep::Failed(reason) => {
-                    self.active = None;
-                    return Ok(TurnResult::Failed(reason));
-                }
-            },
+        let advance = match ex.step {
+            ExchangeStep::Connecting => self.advance_connect(&mut ex, schedules)?,
             ExchangeStep::TlsHandshake | ExchangeStep::HandshakeContinue => {
-                match self.step_handshake(&mut ex, schedules)? {
-                    HandshakeStep::Waiting => Some(ExchangeStep::TlsHandshake),
-                    HandshakeStep::Continue => Some(ExchangeStep::HandshakeContinue),
-                    HandshakeStep::Transition => Some(ExchangeStep::SendReady),
-                    HandshakeStep::Failed(reason) => {
-                        self.active = None;
-                        return Ok(TurnResult::Failed(reason));
-                    }
-                }
+                self.advance_handshake(&mut ex, schedules)?
             }
-            ExchangeStep::SendReady => match self.step_send(&mut ex, schedules)? {
-                SendStep::Waiting => None,
-                SendStep::Blocked => Some(ExchangeStep::AwaitWritable),
-                SendStep::Transition => Some(ExchangeStep::Receiving),
-                SendStep::Failed(reason) => {
-                    self.active = None;
-                    return Ok(TurnResult::Failed(reason));
-                }
-            },
-            ExchangeStep::AwaitWritable => match self.step_send(&mut ex, schedules)? {
-                SendStep::Waiting => Some(ExchangeStep::SendReady),
-                SendStep::Blocked => None,
-                SendStep::Transition => Some(ExchangeStep::Receiving),
-                SendStep::Failed(reason) => {
-                    self.active = None;
-                    return Ok(TurnResult::Failed(reason));
-                }
-            },
+            ExchangeStep::SendReady => self.advance_send_ready(&mut ex, schedules)?,
+            ExchangeStep::AwaitWritable => self.advance_send_await(&mut ex, schedules)?,
             ExchangeStep::Receiving => {
-                match self.step_recv_observed(&mut ex, fqdn, cache, schedules, observer)? {
-                    RecvStep::Waiting => None,
-                    RecvStep::Failed(reason) => {
-                        self.active = None;
-                        return Ok(TurnResult::Failed(reason));
-                    }
-                    RecvStep::Published(kind) => {
-                        self.active = None;
-                        self.on_exchange_succeeded()?;
-                        return Ok(TurnResult::Published(kind));
-                    }
-                    RecvStep::Superseded => {
-                        self.active = None;
-                        return Ok(TurnResult::Superseded);
-                    }
-                }
+                let step = self.step_recv_observed(&mut ex, fqdn, cache, schedules, observer)?;
+                self.advance_receiving(&step)?
             }
         };
-        if let Some(step) = next_step {
-            ex.step = step;
+        match advance {
+            AdvanceStep::Proceed(step) => {
+                if let Some(step) = step {
+                    ex.step = step;
+                }
+                self.active = Some(ex);
+                Ok(TurnResult::Pending)
+            }
+            AdvanceStep::Concluded(result) => Ok(result),
         }
-        self.active = Some(ex);
-        Ok(TurnResult::Pending)
+    }
+
+    fn advance_connect(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<AdvanceStep, StartupDnsError> {
+        Ok(match self.step_connect(ex, schedules)? {
+            ConnectStep::Waiting => AdvanceStep::Proceed(None),
+            ConnectStep::Transition { next } => AdvanceStep::Proceed(Some(next)),
+            ConnectStep::Failed(reason) => self.conclude_failed(reason),
+        })
+    }
+
+    fn advance_handshake(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<AdvanceStep, StartupDnsError> {
+        Ok(match self.step_handshake(ex, schedules)? {
+            HandshakeStep::Waiting => AdvanceStep::Proceed(Some(ExchangeStep::TlsHandshake)),
+            HandshakeStep::Continue => AdvanceStep::Proceed(Some(ExchangeStep::HandshakeContinue)),
+            HandshakeStep::Transition => AdvanceStep::Proceed(Some(ExchangeStep::SendReady)),
+            HandshakeStep::Failed(reason) => self.conclude_failed(reason),
+        })
+    }
+
+    fn advance_send_ready(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<AdvanceStep, StartupDnsError> {
+        Ok(match self.step_send(ex, schedules)? {
+            SendStep::Waiting => AdvanceStep::Proceed(None),
+            SendStep::Blocked => AdvanceStep::Proceed(Some(ExchangeStep::AwaitWritable)),
+            SendStep::Transition => AdvanceStep::Proceed(Some(ExchangeStep::Receiving)),
+            SendStep::Failed(reason) => self.conclude_failed(reason),
+        })
+    }
+
+    fn advance_send_await(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<AdvanceStep, StartupDnsError> {
+        Ok(match self.step_send(ex, schedules)? {
+            SendStep::Waiting => AdvanceStep::Proceed(Some(ExchangeStep::SendReady)),
+            SendStep::Blocked => AdvanceStep::Proceed(None),
+            SendStep::Transition => AdvanceStep::Proceed(Some(ExchangeStep::Receiving)),
+            SendStep::Failed(reason) => self.conclude_failed(reason),
+        })
+    }
+
+    fn advance_receiving(&mut self, step: &RecvStep) -> Result<AdvanceStep, StartupDnsError> {
+        Ok(match step {
+            RecvStep::Waiting => AdvanceStep::Proceed(None),
+            RecvStep::Failed(reason) => self.conclude_failed(*reason),
+            RecvStep::Published(kind) => {
+                self.active = None;
+                self.on_exchange_succeeded()?;
+                AdvanceStep::Concluded(TurnResult::Published(*kind))
+            }
+            RecvStep::Superseded => {
+                self.active = None;
+                AdvanceStep::Concluded(TurnResult::Superseded)
+            }
+        })
+    }
+
+    const fn conclude_failed(&mut self, reason: FailureReason) -> AdvanceStep {
+        self.active = None;
+        AdvanceStep::Concluded(TurnResult::Failed(reason))
     }
 
     /// The startup-only blocking driver (nonserving): it starts the exchange
@@ -4049,6 +4081,11 @@ enum RecvTry {
 enum FrameGate {
     Ready(usize),
     Stopped(RecvStep),
+}
+
+enum AdvanceStep {
+    Proceed(Option<ExchangeStep>),
+    Concluded(TurnResult),
 }
 
 enum PublicationSettled {
