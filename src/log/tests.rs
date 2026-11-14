@@ -533,6 +533,22 @@ mod startup_records {
             self.measured.push((label, bytes));
             bytes
         }
+
+        /// Measures through `encode_record_final`, the encoder production uses
+        /// for this record kind, so a divergence between the two encoders
+        /// cannot silently leave the kind's bound measured by the other one.
+        fn record_final(
+            &mut self,
+            label: &'static str,
+            level: Level,
+            kind: Kind,
+            fields: &[Field<'_>],
+        ) -> usize {
+            let bytes = encode_record_final(&mut *self.slot, level, kind, fields)
+                .expect("worst-case record fits the slot");
+            self.measured.push((label, bytes));
+            bytes
+        }
     }
 
     /// The measured length under `label`; every label asserted by the table is
@@ -607,7 +623,7 @@ mod startup_records {
             Field::new("dropped", Val::U64(u64::MAX)),
             Field::new("names_dropped", Val::U64(u64::MAX)),
         ];
-        case.record("startup_final", Level::Info, Kind::StartupFinal, &summary);
+        case.record_final("startup_final", Level::Info, Kind::StartupFinal, &summary);
     }
 
     /// The terminal, rejection, and early-activity records: the widest peer
@@ -883,9 +899,10 @@ mod startup_records {
             178,
             "the per-ordinal peer table leaves monitor_domain 178 B of the 2048 B bound"
         );
+        let probe_len = measured(&worst, "resolver_probe");
         assert!(
-            measured(&worst, "resolver_probe") <= RESOLVER_PROBE_MAX,
-            "measured resolver_probe worst case within the const bound {RESOLVER_PROBE_MAX}"
+            probe_len <= RESOLVER_PROBE_MAX,
+            "measured resolver_probe worst case {probe_len} within the const bound {RESOLVER_PROBE_MAX}"
         );
         let summary_len = measured(&worst, "incident_summary");
         assert!(
