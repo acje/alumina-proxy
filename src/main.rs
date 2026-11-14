@@ -14,7 +14,8 @@
 //! with a diagnostic naming the field/source.
 
 use alumina::boot::{BootReport, EX_CONFIG, run_boot};
-use alumina::runtime::{Preallocated, ServeStorage, StartupState};
+use alumina::inventory::TrafficStorage;
+use alumina::runtime::{Preallocated, Runtime, ServeStorage, StartupState};
 
 /// Fixed documented input path, relative to the working directory. No CLI
 /// arguments or environment variables are read as policy (see README).
@@ -30,87 +31,116 @@ fn main() {
     emit_kernel_facts();
     match run_boot(CONFIG_PATH) {
         Ok(report) => {
-            println!(
-                "inventory named fixed buffers (lower bound): {} (traffic {} + serving workspace {} + dns named buffers {})",
-                report.inventory.named_fixed_buffer_bytes(),
-                report.inventory.traffic_storage_bytes(),
-                report.inventory.serving_workspace_bytes(),
-                report.inventory.dns_named_buffer_bytes(),
-            );
-            println!(
-                "inventory transient scratch (config doc buffer, not retained): {}",
-                report.inventory.transient_scratch_bytes()
-            );
-            println!(
-                "inventory reserved-future: boot-owned best-effort log queue (256 records x 2 KiB), reserved and initialized once by the log store at boot and retained for the process lifetime: {}",
-                report.inventory.reserved_future_bytes()
-            );
-            println!(
-                "resolver first nameserver: {} port {}",
-                report.config.resolver_set().primary().addr(),
-                report.config.resolver_set().primary().port()
-            );
-            print_resolver_warnings(&report);
-            println!(
-                "allowlist entries: {} allowance: {} listen: {}:{}",
-                report.config.allowlist().len(),
-                report.config.startup_unresolved_allowance(),
-                report.config.listen().ip(),
-                report.config.listen().port()
-            );
-            let storage = match ServeStorage::boot(&report.config) {
-                Ok(storage) => storage,
-                Err(err) => {
-                    write_stderr(format_args!("alumina: serving storage: {err}\n"));
-                    std::process::exit(EX_CONFIG);
-                }
-            };
-            let mut owner = match Preallocated::preallocate(storage, report.storage) {
-                Ok(owner) => owner,
-                Err(err) => {
-                    write_stderr(format_args!("alumina: serving workspace: {err}\n"));
-                    std::process::exit(EX_CONFIG);
-                }
-            };
-            if owner.prepare_stdout_log_sink().is_err() {
-                write_stderr(format_args!(
-                    "alumina: cannot prepare the stdout log sink\n"
-                ));
-                std::process::exit(EX_CONFIG);
-            }
-            let nameserver = std::net::SocketAddr::new(
-                report.config.resolver_set().primary().addr(),
-                report.config.resolver_set().primary().port(),
-            );
-            match owner.run_startup(nameserver, PROCESS_EPOCH_SECS) {
-                Ok(outcome) => match outcome.state {
-                    StartupState::Serve { listener, .. } => {
-                        let mut runtime = match owner.attach(listener) {
-                            Ok(runtime) => runtime,
-                            Err(_failure) => std::process::exit(EX_SOFTWARE),
-                        };
-                        match runtime.serve() {
-                            Err(_) => std::process::exit(EX_SOFTWARE),
-                            Ok(never) => match never {},
-                        }
-                    }
-                    StartupState::Exit75 { .. } => std::process::exit(EX_TEMPFAIL),
-                    StartupState::Terminated => {
-                        owner.emit_shutdown_and_drain();
-                        std::process::exit(0);
-                    }
-                },
-                Err(err) => {
-                    owner.emit_fatal_and_drain(format_args!("alumina: startup: {err}"));
-                    std::process::exit(EX_CONFIG);
-                }
-            }
+            report_boot(&report);
+            continue_serving(report);
         }
         Err(err) => {
             write_stderr(format_args!("alumina: {err}\n"));
             std::process::exit(EX_CONFIG);
         }
     }
+}
+
+fn report_boot(report: &BootReport) {
+    println!(
+        "inventory named fixed buffers (lower bound): {} (traffic {} + serving workspace {} + dns named buffers {})",
+        report.inventory.named_fixed_buffer_bytes(),
+        report.inventory.traffic_storage_bytes(),
+        report.inventory.serving_workspace_bytes(),
+        report.inventory.dns_named_buffer_bytes(),
+    );
+    println!(
+        "inventory transient scratch (config doc buffer, not retained): {}",
+        report.inventory.transient_scratch_bytes()
+    );
+    println!(
+        "inventory reserved-future: boot-owned best-effort log queue (256 records x 2 KiB), reserved and initialized once by the log store at boot and retained for the process lifetime: {}",
+        report.inventory.reserved_future_bytes()
+    );
+    println!(
+        "resolver first nameserver: {} port {}",
+        report.config.resolver_set().primary().addr(),
+        report.config.resolver_set().primary().port()
+    );
+    print_resolver_warnings(report);
+    println!(
+        "allowlist entries: {} allowance: {} listen: {}:{}",
+        report.config.allowlist().len(),
+        report.config.startup_unresolved_allowance(),
+        report.config.listen().ip(),
+        report.config.listen().port()
+    );
+}
+
+fn continue_serving(report: BootReport) -> ! {
+    let storage = boot_serving_storage(&report);
+    let owner = preallocate_owner(storage, report.storage);
+    let nameserver = std::net::SocketAddr::new(
+        report.config.resolver_set().primary().addr(),
+        report.config.resolver_set().primary().port(),
+    );
+    dispatch_startup(owner, nameserver)
+}
+
+fn boot_serving_storage(report: &BootReport) -> ServeStorage {
+    match ServeStorage::boot(&report.config) {
+        Ok(storage) => storage,
+        Err(err) => {
+            write_stderr(format_args!("alumina: serving storage: {err}\n"));
+            std::process::exit(EX_CONFIG);
+        }
+    }
+}
+
+fn preallocate_owner(storage: ServeStorage, traffic: TrafficStorage) -> Preallocated {
+    let mut owner = match Preallocated::preallocate(storage, traffic) {
+        Ok(owner) => owner,
+        Err(err) => {
+            write_stderr(format_args!("alumina: serving workspace: {err}\n"));
+            std::process::exit(EX_CONFIG);
+        }
+    };
+    if owner.prepare_stdout_log_sink().is_err() {
+        write_stderr(format_args!(
+            "alumina: cannot prepare the stdout log sink\n"
+        ));
+        std::process::exit(EX_CONFIG);
+    }
+    owner
+}
+
+fn dispatch_startup(mut owner: Preallocated, nameserver: std::net::SocketAddr) -> ! {
+    match owner.run_startup(nameserver, PROCESS_EPOCH_SECS) {
+        Ok(outcome) => dispatch_outcome(owner, outcome.state),
+        Err(err) => {
+            owner.emit_fatal_and_drain(format_args!("alumina: startup: {err}"));
+            std::process::exit(EX_CONFIG);
+        }
+    }
+}
+
+fn dispatch_outcome(owner: Preallocated, state: StartupState) -> ! {
+    match state {
+        StartupState::Serve { listener, .. } => {
+            let runtime = match owner.attach(listener) {
+                Ok(runtime) => runtime,
+                Err(_failure) => std::process::exit(EX_SOFTWARE),
+            };
+            serve_runtime(runtime)
+        }
+        StartupState::Exit75 { .. } => std::process::exit(EX_TEMPFAIL),
+        StartupState::Terminated => {
+            let mut owner = owner;
+            owner.emit_shutdown_and_drain();
+            std::process::exit(0);
+        }
+    }
+}
+
+fn serve_runtime(mut runtime: Runtime) -> ! {
+    runtime
+        .serve()
+        .map_or_else(|_| std::process::exit(EX_SOFTWARE), |never| match never {})
 }
 
 /// Prints one stderr startup warning line per resolver entry whose trust form
