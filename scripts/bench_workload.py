@@ -2744,41 +2744,7 @@ def _selftest_b5_warmup(check, skip, tmpdir, tls13):
             check("b5-warmup-windowed", False, "%r" % exc)
 
 
-def run_selftest(tmpdir):
-    if not os.path.isdir(tmpdir):
-        os.makedirs(tmpdir, exist_ok=True)
-    checks = []
-
-    def check(name, cond, detail=""):
-        checks.append((name, "PASS" if cond else "FAIL", detail))
-
-    def skip(name, detail=""):
-        checks.append((name, "SKIP", detail))
-
-    # TLS-1.3-load-bearing sections need a TLS1.3-capable ssl backend. On hosts
-    # without it (e.g. macOS system Python / LibreSSL) they are reported SKIP
-    # with the capability reason and run fully inside the OpenSSL3 bench
-    # container; a SKIP is never disguised as a PASS and never counts as FAIL.
-    tls13_ok = bool(getattr(ssl, "HAS_TLSv1_3", False))
-    tls13_reason = "host ssl %s lacks TLS 1.3 support; runs in bench container" % (
-        ssl.OPENSSL_VERSION)
-    tls13 = (tls13_ok, tls13_reason)
-
-    _selftest_clean(check, skip, tmpdir, tls13)
-    _selftest_preamble(check, skip, tmpdir, tls13)
-    _selftest_corruption(check, skip, tmpdir, tls13)
-    _selftest_swallow(check, skip, tmpdir, tls13)
-    _selftest_histogram(check, skip, tmpdir)
-    _selftest_b1_readiness(check, skip, tmpdir)
-    _selftest_b1_admission(check, skip, tmpdir)
-    _selftest_b2_dispatch_cutoff(check, skip, tmpdir)
-    _selftest_b2_window_end(check, skip, tmpdir)
-    _selftest_b3_echo_eligibility(check, skip, tmpdir)
-    _selftest_b3_partial_terminal(check, skip, tmpdir)
-    _selftest_b4_send_ts(check, skip, tmpdir)
-    _selftest_b4_recv_completion(check, skip, tmpdir)
-    _selftest_b5_warmup(check, skip, tmpdir, tls13)
-
+def _selftest_b6_cpu_unknown(check, skip, tmpdir):
     # --- B6: CPU sampling Unknown never becomes clean ---
     s = ProcSampler([("missing", 2 ** 31 - 1)])
     s.sample()
@@ -2794,6 +2760,8 @@ def run_selftest(tmpdir):
           r11.failures.get("unknown-cpu") is True,
           "failures=%r" % r11.failures)
 
+
+def _selftest_b7_setup_deadline(check, skip, tmpdir):
     # --- B7: absolute setup deadline is not renewed ---
     import socket as _socket
     pa, pb = _socket.socketpair()
@@ -2808,6 +2776,8 @@ def run_selftest(tmpdir):
         pa.close()
         pb.close()
 
+
+def _selftest_b8_shell_supervision(check, skip, tmpdir):
     # --- B8: shell supervision init-before-traps; stop waits + classifies ---
     out8_path = os.path.join(tmpdir, "seam_shell8.out")
     shell8 = r'''
@@ -2856,6 +2826,8 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
           "abn:" not in out8 and "leak" not in out8,
           "rc=%d out=%r err=%r" % (proc8.returncode, out8, proc8.stderr))
 
+
+def _selftest_f1_cutoff_direction(check, skip, tmpdir):
     # --- F1 (alumina-45g9): cutoff preserves interrupted recv direction and
     # the single IO slot. A recv/WANT_WRITE at cutoff must keep want=w; a
     # READ-only event must not dispatch; WRITE must resume the exact receive;
@@ -2887,6 +2859,9 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     check("f1-read-only-no-dispatch",
           cfb.tls.recv_calls == 0 and cfb.pending == "recv" and cfb.want == "w",
           "recv_calls=%d pending=%r want=%r" % (cfb.tls.recv_calls, cfb.pending, cfb.want))
+
+
+def _selftest_f1_discard_frame(check, skip, tmpdir):
     rfc, cfc = _mk_run()          # F1-C: discard frame, keep interrupted recv
     cfc.pending = "recv"
     cfc.want = "w"
@@ -2902,6 +2877,17 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
               cfc.cur, cfc.pending, cfc.want,
               rfc.counts["offered_unsent"]["measure"], rfc.outstanding))
 
+
+def _f2_attempted_zero_invalid(rf2a, eq2a):
+    return (rf2a.counts["send_failed"]["measure"] == 1 and
+            rf2a.counts["offered_unsent"]["measure"] == 0 and
+            rf2a.partial_accepted_frame["measure"] == 0 and
+            rf2a.partial_accepted_payload["measure"] == 0 and
+            rf2a.failures.get("operational-error") and
+            rf2a.outstanding == 0 and eq2a)
+
+
+def _selftest_f2_terminal_classification(check, skip, tmpdir):
     # --- F2 (alumina-45g9): terminalize separates an attempted TLS write
     # with zero accepted bytes (send_failed + operational-error, 0 accepted
     # bytes, accounting conserved) from a never-attempted untouched frame
@@ -2919,12 +2905,7 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
             rf2a.counts["sent"]["measure"] + rf2a.counts["send_failed"]["measure"] +
             rf2a.counts["offered_unsent"]["measure"])
     check("f2-attempted-zero-terminal-invalid",
-          rf2a.counts["send_failed"]["measure"] == 1 and
-          rf2a.counts["offered_unsent"]["measure"] == 0 and
-          rf2a.partial_accepted_frame["measure"] == 0 and
-          rf2a.partial_accepted_payload["measure"] == 0 and
-          rf2a.failures.get("operational-error") and
-          rf2a.outstanding == 0 and eq2a,
+          _f2_attempted_zero_invalid(rf2a, eq2a),
           "failed=%d unsent=%d acc=%d payload=%d outstanding=%d eq=%s" % (
               rf2a.counts["send_failed"]["measure"],
               rf2a.counts["offered_unsent"]["measure"],
@@ -2949,6 +2930,9 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
               rf2b.counts["offered_unsent"]["measure"],
               rf2b.counts["send_failed"]["measure"],
               rf2b.outstanding, rf2b.failures.get("operational-error")))
+
+
+def _selftest_f2_trysend_drain(check, skip, tmpdir):
     rf2c, cf2c = _mk_run()        # actual _try_send WANT path, then drain death
     fc2 = _Frame(0, 0, "measure")
     cf2c.cur = fc2
@@ -2970,6 +2954,15 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
               rf2c.partial_accepted_payload["measure"],
               rf2c.outstanding, rf2c.failures.get("operational-error")))
 
+
+def _f3_lag_ok(lag3):
+    return (isinstance(lag3, dict) and lag3.get("start") is not None and
+            lag3.get("end") is not None and
+            abs(lag3["start"] - 0.010) < 1e-9 and
+            abs(lag3["end"] - 0.020) < 1e-9)
+
+
+def _selftest_f3_aperture(check, skip, tmpdir):
     # --- F3 (alumina-45g9): observed-aperture CPU selection with explicit
     # start/end boundary baselines, observed timestamps, disclosed boundary
     # lag and typed Unknown; warmup/drain deltas never counted, the terminal
@@ -2994,10 +2987,7 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     w3 = sf3.window_summary("subject", 5.0, 65.0)
     exp3 = (1_060_000 - 1_010_000) / CLK_TCK / (te3 - tb3)
     lag3 = w3.get("boundary_lag_s")
-    lag_ok = (isinstance(lag3, dict) and lag3.get("start") is not None and
-              lag3.get("end") is not None and
-              abs(lag3["start"] - 0.010) < 1e-9 and
-              abs(lag3["end"] - 0.020) < 1e-9)
+    lag_ok = _f3_lag_ok(lag3)
     check("f3-mean-observed-aperture",
           not w3.get("unknown") and w3.get("sampled_from") == tb3 and
           w3.get("sampled_to") == te3 and lag_ok and
@@ -3014,6 +3004,11 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
           abs(w3["cores_mean"] * (te3 - tb3) -
               (1_060_000 - 1_010_000) / CLK_TCK) < 1e-9,
           "mean=%r" % w3.get("cores_mean"))
+    return tb3, te3, _f3rec
+
+
+def _selftest_f3_unknown(check, skip, tmpdir, f3ctx):
+    tb3, te3, _f3rec = f3ctx
     sf3z = ProcSampler([("subject", 1)])
     sf3z.samples["subject"] = [_f3rec(tb3, 10, boundary="start"),
                                _f3rec(te3, 90, boundary="end")]
@@ -3045,6 +3040,9 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     check("f3-failed-probe-unknown",
           w3p["unknown"], "unknown=%r reason=%r" % (w3p["unknown"], w3p["reason"]))
 
+
+def _selftest_direct_proxy(check, skip, tmpdir, f3ctx):
+    _, _, _f3rec = f3ctx
     # --- direct-proxy: opaque-proxy route sampling. The
     # route carries direct TLS to the proxy (no CONNECT handshake) yet the proxy
     # remains a required CPU subject, reported under a neutral label distinct
@@ -3088,6 +3086,8 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
           not w13.get("unknown") and w13.get("cores_mean") is not None,
           "summary=%r" % w13)
 
+
+def _selftest_f4_strict_supervision(check, skip, tmpdir):
     # --- F4 (alumina-45g9): strict supervision fails the session on a forced
     # SIGKILL for every required child label. Exercises the ACTUAL stop()
     # body extracted from scripts/bench/run.sh (the in-container supervisor
@@ -3143,6 +3143,16 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
     check("f4-already-dead-strict-fails",
           _f4rc("rcC=", f4_out) == "1", "out=%r" % f4_out)
 
+
+def _identity_controls_match(blk):
+    return (blk["source_head"] == "deadbeef" and
+            blk["image_id"] == "img1" and
+            blk["rust_target"] == "aarch64-unknown-linux-musl" and
+            blk["retained_binary_sha256"] == "b1" and
+            blk["config_sha256"] == "c1")
+
+
+def _selftest_b9_identity(check, skip, tmpdir):
     # --- B9: identity receipt block carries tool hash + controls ---
     blk9 = _identity_block()
     check("b9-identity-tool-sha",
@@ -3156,12 +3166,7 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
         os.environ[k] = v
     try:
         blk9b = _identity_block()
-        check("b9-identity-controls",
-              blk9b["source_head"] == "deadbeef" and
-              blk9b["image_id"] == "img1" and
-              blk9b["rust_target"] == "aarch64-unknown-linux-musl" and
-              blk9b["retained_binary_sha256"] == "b1" and
-              blk9b["config_sha256"] == "c1",
+        check("b9-identity-controls", _identity_controls_match(blk9b),
               "source_head=%r image_id=%r rust=%r bin=%r cfg=%r" % (
                   blk9b["source_head"], blk9b["image_id"],
                   blk9b["rust_target"], blk9b["retained_binary_sha256"],
@@ -3172,6 +3177,54 @@ stop "$ALU" 1 >> "$O8" 2>&1 || rc=$?
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def run_selftest(tmpdir):
+    if not os.path.isdir(tmpdir):
+        os.makedirs(tmpdir, exist_ok=True)
+    checks = []
+
+    def check(name, cond, detail=""):
+        checks.append((name, "PASS" if cond else "FAIL", detail))
+
+    def skip(name, detail=""):
+        checks.append((name, "SKIP", detail))
+
+    # TLS-1.3-load-bearing sections need a TLS1.3-capable ssl backend. On hosts
+    # without it (e.g. macOS system Python / LibreSSL) they are reported SKIP
+    # with the capability reason and run fully inside the OpenSSL3 bench
+    # container; a SKIP is never disguised as a PASS and never counts as FAIL.
+    tls13_ok = bool(getattr(ssl, "HAS_TLSv1_3", False))
+    tls13_reason = "host ssl %s lacks TLS 1.3 support; runs in bench container" % (
+        ssl.OPENSSL_VERSION)
+    tls13 = (tls13_ok, tls13_reason)
+
+    _selftest_clean(check, skip, tmpdir, tls13)
+    _selftest_preamble(check, skip, tmpdir, tls13)
+    _selftest_corruption(check, skip, tmpdir, tls13)
+    _selftest_swallow(check, skip, tmpdir, tls13)
+    _selftest_histogram(check, skip, tmpdir)
+    _selftest_b1_readiness(check, skip, tmpdir)
+    _selftest_b1_admission(check, skip, tmpdir)
+    _selftest_b2_dispatch_cutoff(check, skip, tmpdir)
+    _selftest_b2_window_end(check, skip, tmpdir)
+    _selftest_b3_echo_eligibility(check, skip, tmpdir)
+    _selftest_b3_partial_terminal(check, skip, tmpdir)
+    _selftest_b4_send_ts(check, skip, tmpdir)
+    _selftest_b4_recv_completion(check, skip, tmpdir)
+    _selftest_b5_warmup(check, skip, tmpdir, tls13)
+    _selftest_b6_cpu_unknown(check, skip, tmpdir)
+    _selftest_b7_setup_deadline(check, skip, tmpdir)
+    _selftest_b8_shell_supervision(check, skip, tmpdir)
+    _selftest_f1_cutoff_direction(check, skip, tmpdir)
+    _selftest_f1_discard_frame(check, skip, tmpdir)
+    _selftest_f2_terminal_classification(check, skip, tmpdir)
+    _selftest_f2_trysend_drain(check, skip, tmpdir)
+    f3ctx = _selftest_f3_aperture(check, skip, tmpdir)
+    _selftest_f3_unknown(check, skip, tmpdir, f3ctx)
+    _selftest_direct_proxy(check, skip, tmpdir, f3ctx)
+    _selftest_f4_strict_supervision(check, skip, tmpdir)
+    _selftest_b9_identity(check, skip, tmpdir)
 
     # ---- W (alumina-eryh): e2-micro steady/storm workload surface ----
     # VM-dependent coverage: the storm and 1gbps END-TO-END paths (real proxy
