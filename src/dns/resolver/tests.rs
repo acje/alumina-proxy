@@ -1,5 +1,16 @@
 use super::*;
 
+/// A 253-byte four-label FQDN: the maximum total length both parsers accept.
+fn max_length_fqdn() -> String {
+    format!(
+        "{}.{}.{}.{}",
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61)
+    )
+}
+
 #[test]
 fn select_accepts_numeric_unicast_v4_and_v6_at_port53() {
     let v4 = select("1.1.1.1").expect("unicast v4");
@@ -223,13 +234,7 @@ fn select_enforces_fqdn_label_and_total_length() {
         select(&format!("8.8.8.8#{over_label}.com")),
         Err(ResolverError::InvalidFqdn { .. })
     ));
-    let max_total = format!(
-        "{}.{}.{}.{}",
-        "a".repeat(63),
-        "b".repeat(63),
-        "c".repeat(63),
-        "d".repeat(61)
-    );
+    let max_total = max_length_fqdn();
     assert_eq!(max_total.len(), 253);
     assert!(
         select(&format!("8.8.8.8#{max_total}")).is_ok(),
@@ -243,7 +248,7 @@ fn select_enforces_fqdn_label_and_total_length() {
 }
 
 #[test]
-fn resolver_fqdn_stays_strict_where_hostname_normalize_is_lenient() {
+fn resolver_and_normalize_accept_the_canonical_and_max_length_fqdn() {
     use crate::names::hostname::FixedHostname;
 
     let canon = "dns.quad9.net";
@@ -262,19 +267,27 @@ fn resolver_fqdn_stays_strict_where_hostname_normalize_is_lenient() {
         canon
     );
 
-    let max_total = format!(
-        "{}.{}.{}.{}",
-        "a".repeat(63),
-        "b".repeat(63),
-        "c".repeat(63),
-        "d".repeat(61)
-    );
+    let max_total = max_length_fqdn();
     assert_eq!(max_total.len(), 253);
     assert!(
         select(&format!("8.8.8.8#{max_total}")).is_ok(),
         "both accept a 253-char canonical fqdn"
     );
     assert!(FixedHostname::normalize(max_total.as_bytes()).is_some());
+
+    let dot_254 = format!("{max_total}.");
+    assert_eq!(dot_254.len(), 254);
+    assert_eq!(
+        FixedHostname::normalize(dot_254.as_bytes())
+            .expect("normalize accepts 253 bytes plus a trailing dot")
+            .as_str(),
+        max_total
+    );
+}
+
+#[test]
+fn resolver_rejects_strict_violations_where_normalize_is_lenient() {
+    use crate::names::hostname::FixedHostname;
 
     let strict_rows = ["ExAmPLe.Com", "dns.quad9.net.", "DNS.QUAD9.NET."];
     for token in strict_rows {
@@ -286,6 +299,7 @@ fn resolver_fqdn_stays_strict_where_hostname_normalize_is_lenient() {
             "resolver must reject strict-violation {token:?}"
         );
     }
+    let max_total = max_length_fqdn();
     let dot_254 = format!("{max_total}.");
     assert_eq!(dot_254.len(), 254);
     assert!(
@@ -313,6 +327,11 @@ fn resolver_fqdn_stays_strict_where_hostname_normalize_is_lenient() {
             .as_str(),
         max_total
     );
+}
+
+#[test]
+fn resolver_and_normalize_agree_on_rejected_shapes() {
+    use crate::names::hostname::FixedHostname;
 
     for token in ["*.example.com", "bücher.example", "1.2.3.4"] {
         assert!(
