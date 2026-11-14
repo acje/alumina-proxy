@@ -1,3 +1,7 @@
+#[path = "support/process_harness.rs"]
+mod process_harness;
+use process_harness::{current_exe, wait_for_exit};
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -26,14 +30,6 @@ fn main() {
     }
 }
 
-/// The path to this test binary: the parent spawns the same executable in one
-/// of the `--child-*` modes with a piped stdout whose read end it then closes,
-/// so the child's first nonblocking sink write must fail with EPIPE and latch
-/// the sink failed.
-fn current_exe() -> std::path::PathBuf {
-    std::env::current_exe().expect("current executable path")
-}
-
 /// Spawns the child with a piped stdout whose read end is closed in this
 /// parent, so the child's sink permanently fails. Returns the child plus its
 /// stderr pipe when requested (used to read the serving port).
@@ -50,29 +46,6 @@ fn spawn_closed(child_args: &[&str], capture_stderr: bool) -> Child {
         .expect("spawn child with a piped, then-closed stdout");
     drop(child.stdout.take());
     child
-}
-
-/// Waits for the child to exit with exactly `expected` within a bounded
-/// timeout, killing and reaping the child on timeout. A leaked child that
-/// keeps running past the latch (a regression) fails the assertion.
-fn wait_for_exit(child: &mut Child, expected: i32, timeout: Duration, what: &str) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait().expect("try_wait child") {
-            assert_eq!(
-                status.code(),
-                Some(expected),
-                "child ({what}) must exit {expected}, got {status}"
-            );
-            return;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("child ({what}) did not exit {expected} within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 /// Parses the first `PORT <n>` line the child prints on stderr.

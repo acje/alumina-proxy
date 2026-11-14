@@ -1,6 +1,10 @@
+#[path = "support/process_harness.rs"]
+mod process_harness;
+use process_harness::{capture_stdout, current_exe, serving_config_document, wait_for_success};
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use mio::net::TcpListener as MioListener;
@@ -23,26 +27,6 @@ fn main() {
     }
 }
 
-fn current_exe() -> std::path::PathBuf {
-    std::env::current_exe().expect("current executable path")
-}
-
-fn wait_for_success(child: &mut Child, timeout: Duration, what: &str) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait().expect("try_wait child") {
-            assert!(status.success(), "child ({what}) must exit 0, got {status}");
-            return;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("child ({what}) did not exit within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
 fn spawn_piped_child() -> Child {
     Command::new(current_exe())
         .arg("--child")
@@ -50,20 +34,6 @@ fn spawn_piped_child() -> Child {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("spawn child with a piped stdout")
-}
-
-fn capture_stdout(mut stdout: ChildStdout) -> Vec<u8> {
-    let mut captured = Vec::new();
-    let mut scratch = [0u8; 4096];
-    loop {
-        match stdout.read(&mut scratch) {
-            Ok(0) => break,
-            Ok(n) => captured.extend_from_slice(&scratch[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => panic!("read child stdout: {e}"),
-        }
-    }
-    captured
 }
 
 struct MonitorRecords<'a> {
@@ -182,17 +152,11 @@ fn parent_main() {
     );
 }
 
-fn child_config_document(port: u16) -> String {
-    format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"notify\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
-    )
-}
-
 fn boot_serving_runtime() -> (u16, Runtime) {
     let bind = "127.0.0.1:0".parse().expect("valid bind address");
     let listener = MioListener::bind(bind).expect("bind serving listener");
     let port = listener.local_addr().expect("listener local addr").port();
-    let config = parse_config_document(&child_config_document(port)).expect("valid config");
+    let config = parse_config_document(&serving_config_document(port)).expect("valid config");
     let mut storage = ServeStorage::boot(&config).expect("boot storage");
     storage
         .prepare_stdout_log_sink()

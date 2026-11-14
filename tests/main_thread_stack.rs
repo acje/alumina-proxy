@@ -1,3 +1,7 @@
+#[path = "support/process_harness.rs"]
+mod process_harness;
+use process_harness::serving_config_document;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -33,9 +37,7 @@ fn main() {
     let bind = "127.0.0.1:0".parse().expect("valid bind address");
     let listener = MioListener::bind(bind).expect("bind serving listener");
     let port = listener.local_addr().expect("listener local addr").port();
-    let doc = format!(
-        "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"notify\", scope = \"connection\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:443\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
-    );
+    let doc = serving_config_document(port);
     let config = parse_config_document(&doc).expect("valid config");
     #[cfg(feature = "alloc-witness")]
     actual_attach_registration_failure_on_main(&config);
