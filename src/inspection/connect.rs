@@ -271,18 +271,44 @@ impl ConnectParser {
     }
 }
 
+/// One classified header line. The classifier owns per-line syntax and value
+/// validation; the header-section loop owns line count, duplicate rejection and
+/// ordering across lines.
+enum HeaderLine {
+    Empty,
+    ContentLength(u64),
+    TransferEncoding,
+    Other,
+}
+
 fn parse_request(head: &[u8]) -> Result<ConnectRequest, ConnectError> {
+    reject_bare_line_endings(head)?;
+    let mut lines = Lines::new(head);
+    let request_line = lines.next().ok_or(ConnectError::MalformedRequestLine {
+        detail: "empty head",
+    })?;
+    let request = parse_request_line(request_line)?;
+    match parse_header_section(&mut lines)? {
+        Some(len) if len != 0 => Err(ConnectError::NonzeroContentLength { got: len }),
+        _ => Ok(request),
+    }
+}
+
+/// Rejects malformed line endings in request order: a bare line feed is
+/// reported before a bare carriage return.
+fn reject_bare_line_endings(head: &[u8]) -> Result<(), ConnectError> {
     if bare_line_feed(head).is_some() {
         return Err(ConnectError::BareLineFeed);
     }
     if bare_carriage_return(head).is_some() {
         return Err(ConnectError::BareCarriageReturn);
     }
-    let mut lines = Lines::new(head);
-    let request_line = lines.next().ok_or(ConnectError::MalformedRequestLine {
-        detail: "empty head",
-    })?;
-    let request = parse_request_line(request_line)?;
+    Ok(())
+}
+
+/// Consumes every header line within the line bound, returning the single
+/// declared Content-Length once the whole header section is accepted.
+fn parse_header_section(lines: &mut Lines<'_>) -> Result<Option<u64>, ConnectError> {
     let mut content_length: Option<u64> = None;
     let mut header_lines = 0usize;
     while let Some(line) = lines.next() {
@@ -290,41 +316,59 @@ fn parse_request(head: &[u8]) -> Result<ConnectRequest, ConnectError> {
         if header_lines > MAX_HEADER_LINES {
             return Err(ConnectError::TooManyHeaderLines);
         }
-        if line.is_empty() {
-            continue;
-        }
-        if line[0] == b' ' || line[0] == b'\t' {
-            return Err(ConnectError::ObsFold);
-        }
-        let colon =
-            line.iter()
-                .position(|&b| b == b':')
-                .ok_or(ConnectError::MalformedRequestLine {
-                    detail: "header without colon",
-                })?;
-        let name = &line[..colon];
-        if name.is_empty() || !is_tchar_header_name(name) {
-            return Err(ConnectError::MalformedRequestLine {
-                detail: "header name contains whitespace or non-tchar",
-            });
-        }
-        let value = trim_ascii(&line[colon + 1..]);
-        if name.eq_ignore_ascii_case(b"content-length") {
-            let parsed = parse_content_length(value).ok_or(ConnectError::MalformedRequestLine {
-                detail: "invalid Content-Length",
-            })?;
-            match content_length {
-                Some(_) => return Err(ConnectError::DuplicateContentLength),
-                None => content_length = Some(parsed),
-            }
-        } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
-            return Err(ConnectError::TransferEncoding);
+        match classify_header_line(line)? {
+            HeaderLine::ContentLength(len) => record_content_length(&mut content_length, len)?,
+            HeaderLine::TransferEncoding => return Err(ConnectError::TransferEncoding),
+            HeaderLine::Empty | HeaderLine::Other => {}
         }
     }
-    if let Some(len) = content_length.filter(|&len| len != 0) {
-        return Err(ConnectError::NonzeroContentLength { got: len });
+    Ok(content_length)
+}
+
+const fn record_content_length(
+    content_length: &mut Option<u64>,
+    len: u64,
+) -> Result<(), ConnectError> {
+    if content_length.is_some() {
+        return Err(ConnectError::DuplicateContentLength);
     }
-    Ok(request)
+    *content_length = Some(len);
+    Ok(())
+}
+
+/// Classifies one header line, validating it in rejection order: obs-fold before
+/// the colon, header name before value, Content-Length value before anything
+/// else that line carries.
+fn classify_header_line(line: &[u8]) -> Result<HeaderLine, ConnectError> {
+    if line.is_empty() {
+        return Ok(HeaderLine::Empty);
+    }
+    if line[0] == b' ' || line[0] == b'\t' {
+        return Err(ConnectError::ObsFold);
+    }
+    let colon = line
+        .iter()
+        .position(|&b| b == b':')
+        .ok_or(ConnectError::MalformedRequestLine {
+            detail: "header without colon",
+        })?;
+    let name = &line[..colon];
+    if name.is_empty() || !is_tchar_header_name(name) {
+        return Err(ConnectError::MalformedRequestLine {
+            detail: "header name contains whitespace or non-tchar",
+        });
+    }
+    let value = trim_ascii(&line[colon + 1..]);
+    if name.eq_ignore_ascii_case(b"content-length") {
+        let parsed = parse_content_length(value).ok_or(ConnectError::MalformedRequestLine {
+            detail: "invalid Content-Length",
+        })?;
+        return Ok(HeaderLine::ContentLength(parsed));
+    }
+    if name.eq_ignore_ascii_case(b"transfer-encoding") {
+        return Ok(HeaderLine::TransferEncoding);
+    }
+    Ok(HeaderLine::Other)
 }
 
 /// Returns the index of the first bare line feed, or `None` when every line
@@ -442,6 +486,13 @@ fn parse_content_length(value: &[u8]) -> Option<u64> {
 }
 
 fn parse_target(target: &[u8]) -> Result<ConnectRequest, ConnectError> {
+    let (host, port) = split_authority(target)?;
+    let port = parse_port(port)?;
+    let hostname = parse_host(host)?;
+    Ok(ConnectRequest { hostname, port })
+}
+
+fn split_authority(target: &[u8]) -> Result<(&[u8], &[u8]), ConnectError> {
     if target.starts_with(b"/")
         || target.starts_with(b"*")
         || target.windows(3).any(|w| w == b"://")
@@ -451,8 +502,10 @@ fn parse_target(target: &[u8]) -> Result<ConnectRequest, ConnectError> {
     let Some(colon) = target.iter().rposition(|&b| b == b':') else {
         return Err(ConnectError::TargetNotAuthorityForm);
     };
-    let host = &target[..colon];
-    let port = &target[colon + 1..];
+    Ok((&target[..colon], &target[colon + 1..]))
+}
+
+fn parse_port(port: &[u8]) -> Result<u16, ConnectError> {
     if port.is_empty() || !port.iter().all(u8::is_ascii_digit) {
         return Err(ConnectError::MalformedRequestLine {
             detail: "port is not numeric",
@@ -472,8 +525,10 @@ fn parse_target(target: &[u8]) -> Result<ConnectRequest, ConnectError> {
     if port_u32 == 0 {
         return Err(ConnectError::WrongPort { got: 0 });
     }
-    let port =
-        u16::try_from(port_u32).map_err(|_| ConnectError::PortOutOfRange { got: port_u32 })?;
+    u16::try_from(port_u32).map_err(|_| ConnectError::PortOutOfRange { got: port_u32 })
+}
+
+fn parse_host(host: &[u8]) -> Result<FixedHostname, ConnectError> {
     if host.contains(&b':') && !host.starts_with(b"[") {
         return Err(ConnectError::InvalidHostname {
             detail: "IPv6 literal rejected",
@@ -484,12 +539,8 @@ fn parse_target(target: &[u8]) -> Result<ConnectRequest, ConnectError> {
             detail: "address literal rejected",
         });
     }
-    let normalized = FixedHostname::normalize(host).ok_or(ConnectError::InvalidHostname {
+    FixedHostname::normalize(host).ok_or(ConnectError::InvalidHostname {
         detail: "hostname is not a lowercase ASCII FQDN",
-    })?;
-    Ok(ConnectRequest {
-        hostname: normalized,
-        port,
     })
 }
 
