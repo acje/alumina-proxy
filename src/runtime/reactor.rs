@@ -1265,6 +1265,147 @@ fn dispatch_ready_arm(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClientStep {
+    Continue,
+    Return,
+}
+
+fn client_can_progress(serving: &Serving, index: usize) -> bool {
+    match serving.slots[index].stage {
+        Stage::ReadingConnect | Stage::ValidatingHello => true,
+        Stage::Relay => !matches!(serving.slots[index].directional.up, SideEof::Eof { .. }),
+        _ => false,
+    }
+}
+
+fn refuse_no_room(serving: &mut Serving, index: usize) {
+    match serving.slots[index].stage {
+        Stage::ReadingConnect => {
+            serving.any_illegal(
+                index,
+                AnyIllegalCause::ConnectParse(ConnectHeadReason::TooLong),
+            );
+            serving.refuse(index, Refusal::BadRequest);
+        }
+        Stage::ValidatingHello => serving.reject_hello(index, HelloRejectReason::Profile),
+        _ => {}
+    }
+}
+
+fn flush_relay_backlog(serving: &mut Serving, index: usize) -> bool {
+    if serving.slots[index].stage != Stage::Relay
+        || serving.slots[index].fwd >= serving.slots[index].buf_len
+    {
+        return false;
+    }
+    serving.flush_client_upstream(index);
+    if serving.slots[index].fwd < serving.slots[index].buf_len {
+        if serving.visit_exhausted(index) {
+            serving.reschedule(index, RescheduleArm::Client);
+        }
+        return true;
+    }
+    if serving.visit_exhausted(index) {
+        serving.reschedule(index, RescheduleArm::Client);
+        return true;
+    }
+    false
+}
+
+fn client_prepare_read(serving: &mut Serving, index: usize) -> Option<usize> {
+    if serving.buf_room(index) < MIN_BUF_ROOM {
+        refuse_no_room(serving, index);
+        return None;
+    }
+    if flush_relay_backlog(serving, index) {
+        return None;
+    }
+    let room = serving.read_room(index, HOLD_CAP, serving.slots[index].buf_len);
+    if room == 0 {
+        serving.reschedule(index, RescheduleArm::Client);
+        return None;
+    }
+    Some(room)
+}
+
+fn read_client_bytes(serving: &mut Serving, index: usize, room: usize) -> Option<usize> {
+    let result = {
+        let ws = &mut serving.slots[index];
+        let client = ws.client.as_mut()?;
+        client.read(&mut ws.buf[ws.buf_len..ws.buf_len + room])
+    };
+    match result {
+        Ok(0) => {
+            serving.note_op(index, 0);
+            if serving.slots[index].stage == Stage::Relay {
+                serving.observe_up_eof(index);
+            } else {
+                serving.close_slot(index);
+            }
+            None
+        }
+        Ok(n) => Some(n),
+        Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
+            serving.note_op(index, 0);
+            None
+        }
+        Err(_) => {
+            serving.note_op(index, 0);
+            serving.close_slot(index);
+            None
+        }
+    }
+}
+
+fn advance_client_stage(serving: &mut Serving, index: usize) -> Result<bool, ServeError> {
+    match serving.slots[index].stage {
+        Stage::ReadingConnect => serving.buffer_and_parse(index, &[])?,
+        Stage::ValidatingHello => serving.buffer_and_validate(index, &[]),
+        Stage::Relay => serving.flush_client_upstream(index),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn client_post_read_continue(serving: &Serving, index: usize) -> bool {
+    match serving.slots[index].stage {
+        Stage::ReadingConnect | Stage::ValidatingHello => true,
+        Stage::Relay => serving.slots[index].fwd >= serving.slots[index].buf_len,
+        _ => false,
+    }
+}
+
+fn client_readable_step(serving: &mut Serving, index: usize) -> Result<ClientStep, ServeError> {
+    if serving.visit_exhausted(index) {
+        serving.reschedule(index, serving.client_visit_reschedule_arm(index));
+        return Ok(ClientStep::Return);
+    }
+    if !client_can_progress(serving, index) {
+        return Ok(ClientStep::Return);
+    }
+    let Some(room) = client_prepare_read(serving, index) else {
+        return Ok(ClientStep::Return);
+    };
+    let Some(n) = read_client_bytes(serving, index, room) else {
+        return Ok(ClientStep::Return);
+    };
+    serving.note_op(index, n);
+    serving.slots[index].buf_len += n;
+    if !advance_client_stage(serving, index)? {
+        return Ok(ClientStep::Return);
+    }
+    if serving.visit_exhausted(index) {
+        serving.reschedule(index, serving.client_visit_reschedule_arm(index));
+        return Ok(ClientStep::Return);
+    }
+    if client_post_read_continue(serving, index) {
+        Ok(ClientStep::Continue)
+    } else {
+        Ok(ClientStep::Return)
+    }
+}
+
 impl Serving {
     /// Builds the loop's retained serving workspaces over boot-completed
     /// storage and the boot-owned traffic store, moving the retained per-slot
@@ -2441,114 +2582,12 @@ impl Serving {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "long per-client readable path orchestrating DNS-trigger and relay steps"
-    )]
     fn client_readable(&mut self, index: usize) -> Result<(), ServeError> {
         if self.clamp_on_latch(index) {
             return Ok(());
         }
         loop {
-            if self.visit_exhausted(index) {
-                self.reschedule(index, self.client_visit_reschedule_arm(index));
-                return Ok(());
-            }
-            let stage = self.slots[index].stage;
-            if !matches!(
-                stage,
-                Stage::ReadingConnect | Stage::ValidatingHello | Stage::Relay
-            ) {
-                return Ok(());
-            }
-            if stage == Stage::Relay
-                && matches!(self.slots[index].directional.up, SideEof::Eof { .. })
-            {
-                return Ok(());
-            }
-            if self.buf_room(index) < MIN_BUF_ROOM {
-                match self.slots[index].stage {
-                    Stage::ReadingConnect => {
-                        self.any_illegal(
-                            index,
-                            AnyIllegalCause::ConnectParse(ConnectHeadReason::TooLong),
-                        );
-                        self.refuse(index, Refusal::BadRequest);
-                    }
-                    Stage::ValidatingHello => {
-                        self.reject_hello(index, HelloRejectReason::Profile);
-                    }
-                    _ => {}
-                }
-                return Ok(());
-            }
-            if stage == Stage::Relay && self.slots[index].fwd < self.slots[index].buf_len {
-                self.flush_client_upstream(index);
-                if self.slots[index].fwd < self.slots[index].buf_len {
-                    if self.visit_exhausted(index) {
-                        self.reschedule(index, RescheduleArm::Client);
-                    }
-                    return Ok(());
-                }
-                if self.visit_exhausted(index) {
-                    self.reschedule(index, RescheduleArm::Client);
-                    return Ok(());
-                }
-            }
-            let room = self.read_room(index, HOLD_CAP, self.slots[index].buf_len);
-            if room == 0 {
-                self.reschedule(index, RescheduleArm::Client);
-                return Ok(());
-            }
-            let result = {
-                let ws = &mut self.slots[index];
-                let Some(client) = ws.client.as_mut() else {
-                    return Ok(());
-                };
-                client.read(&mut ws.buf[ws.buf_len..ws.buf_len + room])
-            };
-            let n = match result {
-                Ok(0) => {
-                    self.note_op(index, 0);
-                    if self.slots[index].stage == Stage::Relay {
-                        self.observe_up_eof(index);
-                        return Ok(());
-                    }
-                    self.close_slot(index);
-                    return Ok(());
-                }
-                Ok(n) => n,
-                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    self.note_op(index, 0);
-                    return Ok(());
-                }
-                Err(_) => {
-                    self.note_op(index, 0);
-                    self.close_slot(index);
-                    return Ok(());
-                }
-            };
-            self.note_op(index, n);
-            self.slots[index].buf_len += n;
-            match self.slots[index].stage {
-                Stage::ReadingConnect => self.buffer_and_parse(index, &[])?,
-                Stage::ValidatingHello => self.buffer_and_validate(index, &[]),
-                Stage::Relay => self.flush_client_upstream(index),
-                _ => return Ok(()),
-            }
-            if self.visit_exhausted(index) {
-                self.reschedule(index, self.client_visit_reschedule_arm(index));
-                return Ok(());
-            }
-            if !matches!(
-                self.slots[index].stage,
-                Stage::ReadingConnect | Stage::ValidatingHello | Stage::Relay
-            ) {
-                return Ok(());
-            }
-            if self.slots[index].stage == Stage::Relay
-                && self.slots[index].fwd < self.slots[index].buf_len
-            {
+            if client_readable_step(self, index)? == ClientStep::Return {
                 return Ok(());
             }
         }
