@@ -883,7 +883,7 @@ def spawn_binary(stdout_target=None, stderr_target=None, preexec_dup2=None):
 
 
 def setup_dns(answers, delay_first=0.0, silent_after_served_aaaa=False, silent_always=False,
-              hold_final=False):
+              *, hold_final=False):
     dns = DnsResponder(("127.0.0.1", 53), answers, delay_first,
                        silent_after_served_aaaa, silent_always, hold_final).start()
     return dns
@@ -1365,7 +1365,8 @@ def forced_closure_outcome(name, proc, t0):
         return None
     time.sleep(3.0)
     if proc.poll() is not None:
-        fail(name, f"process exited before the forced deadline ({proc.returncode}); stale listener admission or early closure")
+        rc_pre = proc.returncode
+        fail(name, f"process exited before the forced deadline ({rc_pre}); stale listener admission or early closure")
         return None
     time.sleep(2.0)  # t0+5s: a second (repeat) SIGTERM must not extend
     os.kill(proc.pid, signal.SIGTERM)
@@ -1549,6 +1550,51 @@ def case_stalled_stdout(fixtures):
         errlog.close()
 
 
+def require_serving_dns_witnesses(name, proc, dns):
+    """Both fixture premises the silent-DNS case asserts before it signals:
+    the first due-refresh AAAA answer was actually TRANSMITTED (the event is
+    published only after sendall returns, so it can never be a merely admitted
+    or assembled answer), and some next-due serving query was genuinely
+    accepted, read and left unanswered in the silent zone -- a dead-resolver
+    serving negative, not an unreachable branch."""
+    if not dns.aaaa_refresh_sent.wait(10.0):
+        proc.kill(); proc.wait()
+        fail(name, "current AAAA refresh answer never transmitted on a serving connection (fixture premise of a real refresh violated)")
+        return False
+    if not dns.silent_accept.wait(10.0):
+        proc.kill(); proc.wait()
+        fail(name, "next due serving DNS query was never accepted/queried-and-left-unanswered in the silent-zone segment (second serving AAAA) before the signal (dead-resolver serving negative premise violated)")
+        return False
+    return True
+
+
+def silent_dns_stage(name, log, silent, dns):
+    """Stalled relay established and both serving-DNS witnesses observed before
+    the signal. Session numbering never discriminates: the retained transport
+    (docs/alumina-proxy.md:603) brings the serving refresh over the startup
+    connection, so any served qtype=28 is the current refresh."""
+    staged = stalled_relay_stage(name, log, silent, STALLED_RELAY_DETAILS)
+    if staged is None:
+        return None
+    proc, s = staged
+    if require_serving_dns_witnesses(name, proc, dns):
+        return proc, s
+    close_relay(s)
+    return None
+
+
+def dns_closure_outcome(name, proc, t0, dns):
+    """Bounded wait for the forced closure, then the responder's observed
+    counters (sessions, accept timeline, queries) for the pass detail."""
+    rc = bounded_wait(proc, t0 + 12.5, name)
+    if rc is None:
+        return None
+    elapsed = time.monotonic() - t0
+    with dns._lock:
+        observation = (dns.sessions, list(dns.session_times), dns.queries)
+    return rc, elapsed, observation
+
+
 def case_silent_dns(fixtures):
     """Stalled relay + the REAL current DNS refresh profile, honestly scoped.
     Startup resolves both A families on session 1 and never attempts AAAA (their
@@ -1585,45 +1631,16 @@ def case_silent_dns(fixtures):
     log = open_case_log(name)
     s = None
     try:
-        proc = spawn_binary(stdout_target=log, stderr_target=log)
-        if not require_reachable(name, proc):
+        staged = silent_dns_stage(name, log, silent, dns)
+        if staged is None:
             return
-        s = establish_relay("force.example.org")
-        if s is None:
-            proc.kill(); proc.wait(); fail(name, "could not establish stalled relay"); return
-        time.sleep(0.3)
-        if silent.bytes_received() == 0:
-            proc.kill(); proc.wait(); fail(name, "no hello bytes upstream (relay not established)"); return
-        # Current-refresh transmission witness: the first due-refresh AAAA answer
-        # must actually be SENT (event published only after sendall returns), not
-        # merely admitted or assembled. Session numbering is not the
-        # discriminator: the retained transport (docs/alumina-proxy.md:603)
-        # brings the serving refresh over the same startup connection, so any
-        # served qtype=28 is it.
-        if not dns.aaaa_refresh_sent.wait(10.0):
-            proc.kill(); proc.wait()
-            fail(name, "current AAAA refresh answer never transmitted on a serving connection (fixture premise of a real refresh violated)")
-            return
-        # Dead-resolver serving negative: some next-due serving DNS query must be
-        # genuinely accepted, its query read, and left unanswered in a silent
-        # zone BEFORE the signal -- a responder-observed accepted/read/
-        # unanswered serving query (the sibling AAAA-family refresh by fixed
-        # inputs; asserts neither qtype nor continued owner activity), not an
-        # unreachable branch.
-        if not dns.silent_accept.wait(10.0):
-            proc.kill(); proc.wait()
-            fail(name, "next due serving DNS query was never accepted/queried-and-left-unanswered in the silent-zone segment (second serving AAAA) before the signal (dead-resolver serving negative premise violated)")
-            return
+        proc, s = staged
         t0 = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
-        rc = bounded_wait(proc, t0 + 12.5, name)
-        if rc is None:
+        outcome = dns_closure_outcome(name, proc, t0, dns)
+        if outcome is None:
             return
-        elapsed = time.monotonic() - t0
-        with dns._lock:
-            sess_exit = dns.sessions
-            timeline = list(dns.session_times)
-            queries = dns.queries
+        rc, elapsed, (sess_exit, timeline, queries) = outcome
         if rc != 70:
             fail(name, f"silent-DNS forced closure must exit 70, got {rc} after {elapsed:.2f}s")
         elif elapsed < GRACE_LO:
@@ -1707,25 +1724,33 @@ CASES = [
 ]
 
 
-def main():
+def binary_present():
+    """The release binary from the exact candidate must be mounted; its absence
+    is a BLOCKED run, never an unqualified green."""
     if not os.path.exists(BINPATH):
         print(f"SHUTDOWN-BLOCKED: release binary missing: {BINPATH}", file=sys.stderr, flush=True)
-        return 3
+        return False
     st = os.stat(BINPATH)
     print(f"SHUTDOWN-BIN: {BINPATH} size={st.st_size}", flush=True)
-    case_filter = os.environ.get("CASE_FILTER", "")
+    return True
+
+
+def select_cases(case_filter):
+    """CASE_FILTER selects a non-empty subset; a filter matching zero cases is
+    rejected rather than reported as an unqualified ALL-PASS."""
     selected = [case for case in CASES if not case_filter or case_filter in case.__name__]
-    if not selected:
-        print(
-            f"SHUTDOWN-NO-SELECTION: CASE_FILTER={case_filter!r} matched zero of {len(CASES)} cases; refusing unqualified green",
-            flush=True,
-        )
-        return 2
+    if selected:
+        return selected
     print(
-        f"SHUTDOWN-SELECTED: {len(selected)}/{len(CASES)} cases by CASE_FILTER={case_filter!r}: "
-        + ", ".join(case.__name__ for case in selected),
+        f"SHUTDOWN-NO-SELECTION: CASE_FILTER={case_filter!r} matched zero of {len(CASES)} cases; refusing unqualified green",
         flush=True,
     )
+    return None
+
+
+def run_selected(selected):
+    """Run every selected case in CASES order, surfacing the bounded log tail of
+    any case that failed; returns the names that completed green."""
     completed = []
     for case in selected:
         before = set(FAILURES)
@@ -1736,6 +1761,12 @@ def main():
                 print(f"SHUTDOWN-{disp}: LOG-TAIL {tail}", flush=True)
         if not (set(FAILURES) - before):
             completed.append(case.__name__)
+    return completed
+
+
+def summary_exit(completed, selected, case_filter):
+    """Print the completed/failures/summary lines and return the runner exit
+    code: a scoped pass is distinguishable from full-suite green."""
     print(f"SHUTDOWN-COMPLETED: {len(completed)}/{len(selected)} selected cases", flush=True)
     if FAILURES:
         print(f"SHUTDOWN-FAILURES: {sorted(set(FAILURES))}", flush=True)
@@ -1745,6 +1776,21 @@ def main():
     else:
         print(f"SHUTDOWN-ALL-PASS: {len(completed)}/{len(selected)} cases passed", flush=True)
     return 0
+
+
+def main():
+    if not binary_present():
+        return 3
+    case_filter = os.environ.get("CASE_FILTER", "")
+    selected = select_cases(case_filter)
+    if selected is None:
+        return 2
+    print(
+        f"SHUTDOWN-SELECTED: {len(selected)}/{len(CASES)} cases by CASE_FILTER={case_filter!r}: "
+        + ", ".join(case.__name__ for case in selected),
+        flush=True,
+    )
+    return summary_exit(run_selected(selected), selected, case_filter)
 
 
 if __name__ == "__main__":
