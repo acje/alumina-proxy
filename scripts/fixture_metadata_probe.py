@@ -53,45 +53,86 @@ def _missing_xattr(err):
     return err in _MISSING_XATTR_ERRNOS
 
 
-def main():
-    if len(sys.argv) not in (2, 3):
-        return classify_error("usage", "expected path [expected_sha256]", 2)
-    path = sys.argv[1]
-    expected = sys.argv[2] if len(sys.argv) == 3 else None
+def _parse_arguments(argv):
+    # Argument shape is one owner: a malformed contract is a usage exit, never
+    # a partially resolved path.
+    if len(argv) not in (2, 3):
+        return (classify_error("usage", "expected path [expected_sha256]", 2), None)
+    return (None, (argv[1], argv[2] if len(argv) == 3 else None))
+
+
+def _admit_file(path):
+    # Ownership and material admission, each rejection keeping its own owner:
+    # an unreadable path, a non-regular file and a setid mode never share a code.
     try:
         st = os.stat(path)
     except OSError as exc:
-        return classify_error("stat-error", "%s: %s" % (path, exc), 2)
+        return (classify_error("stat-error", "%s: %s" % (path, exc), 2), None)
     if not stat.S_ISREG(st.st_mode):
-        return classify_error("nonregular", "not a regular file: %s" % path, 2)
+        return (classify_error("nonregular", "not a regular file: %s" % path, 2), None)
     # The ordinary-nonsetid applicability proof is void for a setid executable,
     # so a setuid/setgid mode bit is rejected here (unr B4), never merely
     # reported alongside a passed probe.
     if st.st_mode & (stat.S_ISUID | stat.S_ISGID):
-        return classify_error(
-            "setid", "setid mode rejected (not ordinary non-setid): %s mode=%s" % (path, oct(stat.S_IMODE(st.st_mode))), 5
+        return (
+            classify_error(
+                "setid", "setid mode rejected (not ordinary non-setid): %s mode=%s" % (path, oct(stat.S_IMODE(st.st_mode))), 5
+            ),
+            None,
         )
-    present = False
-    has_xattr_api = False
+    return (None, st)
+
+
+def _capability_state(path):
+    # A probe API failure is classified, never folded into an absence; only the
+    # platform's missing-attribute errnos mean absent.
     try:
-        present = named_xattr_state(path)[0] == "present"
-        has_xattr_api = True
+        return (None, named_xattr_state(path)[0] == "present", True)
     except OSError as exc:
         if not _missing_xattr(exc.errno):
-            return classify_error("xattr-api-error", "%s: %s" % (path, exc), 3)
-        has_xattr_api = True
-        present = False
-    mode = oct(stat.S_IMODE(st.st_mode))
+            return (classify_error("xattr-api-error", "%s: %s" % (path, exc), 3), False, False)
+        return (None, False, True)
+
+
+def _content_digest(path, expected):
     with open(path, "rb") as handle:
         digest = hashlib.sha256(handle.read()).hexdigest()
     if expected is not None and digest != expected:
-        return classify_error("digest-mismatch", "%s: %s != expected %s" % (path, digest, expected), 4)
-    state = "present" if present else "absent"
+        return (classify_error("digest-mismatch", "%s: %s != expected %s" % (path, digest, expected), 4), None)
+    return (None, digest)
+
+
+def _report(path, st, present, has_xattr_api, digest):
+    # The single report owner: the metadata line's fields and the
+    # present/absent verdict code stay together.
     sys.stdout.write(
         "metadata: path=%s mode=%s security.capability=%s xattr_api=%s sha256=%s\n"
-        % (path, mode, state, "ok" if has_xattr_api else "unavailable", digest)
+        % (
+            path,
+            oct(stat.S_IMODE(st.st_mode)),
+            "present" if present else "absent",
+            "ok" if has_xattr_api else "unavailable",
+            digest,
+        )
     )
     return 0 if not present else 1
+
+
+def main():
+    code, arguments = _parse_arguments(sys.argv)
+    if code is not None:
+        return code
+    path, expected = arguments
+    code, st = _admit_file(path)
+    if code is not None:
+        return code
+    code, present, has_xattr_api = _capability_state(path)
+    if code is not None:
+        return code
+    code, digest = _content_digest(path, expected)
+    if code is not None:
+        return code
+    return _report(path, st, present, has_xattr_api, digest)
 
 
 if __name__ == "__main__":
