@@ -6,6 +6,7 @@ import hashlib
 import os
 import stat
 import sys
+from typing import NamedTuple
 
 IS_LINUX = sys.platform.startswith("linux")
 
@@ -102,20 +103,30 @@ def _content_digest(path, expected):
     return (None, digest)
 
 
-def _report(path, st, present, has_xattr_api, digest):
+class _Metadata(NamedTuple):
+    # The metadata line's fields, assembled once by main so the report never
+    # takes two interchangeable bools positionally.
+    path: str
+    mode: str
+    present: bool
+    xattr_api: bool
+    digest: str
+
+
+def _report(metadata):
     # The single report owner: the metadata line's fields and the
     # present/absent verdict code stay together.
     sys.stdout.write(
         "metadata: path=%s mode=%s security.capability=%s xattr_api=%s sha256=%s\n"
         % (
-            path,
-            oct(stat.S_IMODE(st.st_mode)),
-            "present" if present else "absent",
-            "ok" if has_xattr_api else "unavailable",
-            digest,
+            metadata.path,
+            metadata.mode,
+            "present" if metadata.present else "absent",
+            "ok" if metadata.xattr_api else "unavailable",
+            metadata.digest,
         )
     )
-    return 0 if not present else 1
+    return 0 if not metadata.present else 1
 
 
 def main():
@@ -132,7 +143,15 @@ def main():
     code, digest = _content_digest(path, expected)
     if code is not None:
         return code
-    return _report(path, st, present, has_xattr_api, digest)
+    return _report(
+        _Metadata(
+            path=path,
+            mode=oct(stat.S_IMODE(st.st_mode)),
+            present=present,
+            xattr_api=has_xattr_api,
+            digest=digest,
+        )
+    )
 
 
 if __name__ == "__main__":
