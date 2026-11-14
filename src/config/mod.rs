@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -593,6 +594,38 @@ pub fn parse_config_document(doc: &str) -> Result<Config, ConfigError> {
 fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
     let listen = require_string(table, "listen")?;
     let allowance = require_integer(table, "startup_unresolved_allowance")?;
+    reject_unknown_keys(table)?;
+    let any_illegal = table
+        .get("any_illegal")
+        .ok_or_else(|| ConfigError::MissingField("any_illegal".to_owned()))?;
+    let parsed = build_allowlist(table)?;
+    let listen = parse_listen(&listen)?;
+    let allowance = u8::try_from(allowance)
+        .map_err(|_| ConfigError::AllowanceOutOfRange { value: allowance })?;
+    if allowance as usize >= parsed.allowlist.len() {
+        return Err(ConfigError::AllowanceOutOfRange {
+            value: allowance.into(),
+        });
+    }
+    let any_controls = parse_any_illegal(any_illegal)?;
+    let control = ControlTable::new(any_controls, &parsed.early_data, &parsed.ja4)
+        .expect("build_allowlist validated 1..=32 entries, so ControlTable::new cannot fail");
+    let resolver = build_resolver_set(table)?;
+    check_declared_root(resolver.recursion_policy(), &parsed)?;
+    let gates = build_gates(table)?;
+    Ok(Config {
+        allowlist: parsed.allowlist,
+        entry_requirements: parsed.requirements,
+        listen,
+        startup_unresolved_allowance: allowance,
+        control,
+        resolver,
+        cname_bailiwick: parsed.bailiwicks,
+        gates,
+    })
+}
+
+fn reject_unknown_keys(table: &toml::Table) -> Result<(), ConfigError> {
     for (key, value) in table {
         if !matches!(
             key.as_str(),
@@ -613,55 +646,37 @@ fn from_table(table: &toml::Table) -> Result<Config, ConfigError> {
             });
         }
     }
-    let any_illegal = table
-        .get("any_illegal")
-        .ok_or_else(|| ConfigError::MissingField("any_illegal".to_owned()))?;
-    let parsed = build_allowlist(table)?;
-    let listen = parse_listen(&listen)?;
-    let allowance = u8::try_from(allowance)
-        .map_err(|_| ConfigError::AllowanceOutOfRange { value: allowance })?;
-    if allowance as usize >= parsed.allowlist.len() {
-        return Err(ConfigError::AllowanceOutOfRange {
-            value: allowance.into(),
-        });
+    Ok(())
+}
+
+fn check_declared_root(
+    policy: resolver::RecursionPolicy,
+    parsed: &ParsedAllowlist,
+) -> Result<(), ConfigError> {
+    if policy == resolver::RecursionPolicy::RootValidatingNoStale {
+        return Ok(());
     }
-    let any_controls = parse_any_illegal(any_illegal)?;
-    let control = ControlTable::new(any_controls, &parsed.early_data, &parsed.ja4)
-        .expect("build_allowlist validated 1..=32 entries, so ControlTable::new cannot fail");
-    let resolver = build_resolver_set(table)?;
-    let declared_root_validating =
-        resolver.recursion_policy() == resolver::RecursionPolicy::RootValidatingNoStale;
     for (index, fqdn) in parsed.allowlist.iter().enumerate() {
-        if parsed.requirements[index] != AssuranceRequirement::ResolverTrusted
-            && !declared_root_validating
-        {
+        if parsed.requirements[index] != AssuranceRequirement::ResolverTrusted {
             return Err(ConfigError::InvalidDnsAssurance {
                 key: format!("{}:{}", fqdn.as_str(), fqdn.port()),
                 reason: "requires recursive_dnssec_policy = \"root_validating_no_stale\" and every resolver strict".to_owned(),
             });
         }
     }
-    let gates = {
-        if table.get("early_data").is_some() {
-            return Err(ConfigError::EarlyDataGateRejected);
-        }
-        GateSet::new(
-            parse_gate_section(table, "bad_handshake")?,
-            parse_gate_section(table, "illegal_fqdn")?,
-            AllScopeGate::default(),
-            parse_gate_section(table, "ja4")?,
-        )
-    };
-    Ok(Config {
-        allowlist: parsed.allowlist,
-        entry_requirements: parsed.requirements,
-        listen,
-        startup_unresolved_allowance: allowance,
-        control,
-        resolver,
-        cname_bailiwick: parsed.bailiwicks,
-        gates,
-    })
+    Ok(())
+}
+
+fn build_gates(table: &toml::Table) -> Result<GateSet, ConfigError> {
+    if table.get("early_data").is_some() {
+        return Err(ConfigError::EarlyDataGateRejected);
+    }
+    Ok(GateSet::new(
+        parse_gate_section(table, "bad_handshake")?,
+        parse_gate_section(table, "illegal_fqdn")?,
+        AllScopeGate::default(),
+        parse_gate_section(table, "ja4")?,
+    ))
 }
 
 fn build_resolver_set(table: &toml::Table) -> Result<ResolverSet, ConfigError> {
@@ -1123,22 +1138,45 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
     if entries.len() > ALLOWLIST_MAX {
         return Err(ConfigError::AllowlistTooMany { got: entries.len() });
     }
-    let mut seen = std::collections::HashSet::new();
-    let mut bailiwick_by_name: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-    let mut allowlist = Vec::with_capacity(entries.len());
-    let mut early_data = Vec::with_capacity(entries.len());
-    let mut ja4 = Vec::with_capacity(entries.len());
-    let mut bailiwicks = Vec::with_capacity(entries.len());
-    let mut requirements = Vec::with_capacity(entries.len());
-    let mut total_suffixes = 0usize;
+    let mut scan = AllowlistScan::new(entries.len());
     for (key, value) in entries {
+        scan.push(key, value)?;
+    }
+    Ok(scan.finish())
+}
+
+struct AllowlistScan {
+    seen: HashSet<(String, u16)>,
+    bailiwick_by_name: HashMap<String, Vec<String>>,
+    allowlist: Vec<Fqdn>,
+    early_data: Vec<PerFqdnControl>,
+    ja4: Vec<PerFqdnControl>,
+    bailiwicks: Vec<Vec<String>>,
+    requirements: Vec<AssuranceRequirement>,
+    total_suffixes: usize,
+}
+
+impl AllowlistScan {
+    fn new(capacity: usize) -> AllowlistScan {
+        AllowlistScan {
+            seen: HashSet::new(),
+            bailiwick_by_name: HashMap::new(),
+            allowlist: Vec::with_capacity(capacity),
+            early_data: Vec::with_capacity(capacity),
+            ja4: Vec::with_capacity(capacity),
+            bailiwicks: Vec::with_capacity(capacity),
+            requirements: Vec::with_capacity(capacity),
+            total_suffixes: 0,
+        }
+    }
+
+    fn push(&mut self, key: &str, value: &toml::Value) -> Result<(), ConfigError> {
         let fqdn = Fqdn::parse(key).map_err(|reason| ConfigError::InvalidFqdn {
-            name: key.clone(),
+            name: key.to_owned(),
             reason,
         })?;
         let dedup = (fqdn.as_str().to_owned(), fqdn.port());
-        if !seen.insert(dedup) {
+        if !self.seen.insert(dedup) {
             return Err(ConfigError::DuplicateAllowlistName(format!(
                 "{}:{}",
                 fqdn.as_str(),
@@ -1146,43 +1184,54 @@ fn build_allowlist(table: &toml::Table) -> Result<ParsedAllowlist, ConfigError> 
             )));
         }
         let (early, j4, suffixes) = parse_allowed_fqdn_table(value, key)?;
-        requirements.push(parse_entry_requirement(value, key)?);
+        let requirement = parse_entry_requirement(value, key)?;
+        self.note_bailiwick(&fqdn, &suffixes)?;
+        self.total_suffixes += suffixes.len();
+        if self.total_suffixes > ALLOWLIST_MAX {
+            return Err(ConfigError::CnameBailiwickTooMany {
+                got: self.total_suffixes,
+            });
+        }
+        self.allowlist.push(fqdn);
+        self.early_data.push(early);
+        self.ja4.push(j4);
+        self.bailiwicks.push(suffixes);
+        self.requirements.push(requirement);
+        Ok(())
+    }
+
+    fn note_bailiwick(&mut self, fqdn: &Fqdn, suffixes: &[String]) -> Result<(), ConfigError> {
         // Same bare name on different ports collapses to the first entry's
         // suffix list at runtime (covers_for first-match position), so every
         // same-bare-name entry must declare byte-identical lists — any
         // divergence would silently narrow or widen the effective bailiwick.
-        if let Some(prior) = bailiwick_by_name.get(fqdn.as_str()) {
-            if prior != &suffixes {
-                return Err(ConfigError::DivergentCnameBailiwick {
-                    name: fqdn.as_str().to_owned(),
-                    reason: format!(
-                        "{}:{} declares cname_bailiwick {suffixes:?} but the first same-bare-name entry declares {prior:?}",
-                        fqdn.as_str(),
-                        fqdn.port()
-                    ),
-                });
-            }
-        } else {
-            bailiwick_by_name.insert(fqdn.as_str().to_owned(), suffixes.clone());
-        }
-        total_suffixes += suffixes.len();
-        if total_suffixes > ALLOWLIST_MAX {
-            return Err(ConfigError::CnameBailiwickTooMany {
-                got: total_suffixes,
+        let Some(prior) = self.bailiwick_by_name.get(fqdn.as_str()) else {
+            self.bailiwick_by_name
+                .insert(fqdn.as_str().to_owned(), suffixes.to_vec());
+            return Ok(());
+        };
+        if prior != suffixes {
+            return Err(ConfigError::DivergentCnameBailiwick {
+                name: fqdn.as_str().to_owned(),
+                reason: format!(
+                    "{}:{} declares cname_bailiwick {suffixes:?} but the first same-bare-name entry declares {prior:?}",
+                    fqdn.as_str(),
+                    fqdn.port()
+                ),
             });
         }
-        allowlist.push(fqdn);
-        early_data.push(early);
-        ja4.push(j4);
-        bailiwicks.push(suffixes);
+        Ok(())
     }
-    Ok(ParsedAllowlist {
-        allowlist: Allowlist(allowlist),
-        early_data,
-        ja4,
-        bailiwicks,
-        requirements,
-    })
+
+    fn finish(self) -> ParsedAllowlist {
+        ParsedAllowlist {
+            allowlist: Allowlist(self.allowlist),
+            early_data: self.early_data,
+            ja4: self.ja4,
+            bailiwicks: self.bailiwicks,
+            requirements: self.requirements,
+        }
+    }
 }
 
 fn parse_listen(listen: &str) -> Result<ListenAddr, ConfigError> {
