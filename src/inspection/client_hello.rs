@@ -194,21 +194,43 @@ impl fmt::Debug for ClientHello {
 
 impl PartialEq for ClientHello {
     fn eq(&self, other: &Self) -> bool {
-        self.offered_versions() == other.offered_versions()
-            && self.versions_len == other.versions_len
-            && self.record_version == other.record_version
-            && self.server_name() == other.server_name()
-            && self.sni_len == other.sni_len
-            && self.sni_entries == other.sni_entries
-            && self.has_ech == other.has_ech
-            && self.ciphers() == other.ciphers()
-            && self.ciphers_len == other.ciphers_len
-            && self.extensions() == other.extensions()
-            && self.extensions_len == other.extensions_len
-            && self.alpn_first_value() == other.alpn_first_value()
-            && self.alpn_len == other.alpn_len
-            && self.sigalgs() == other.sigalgs()
-            && self.sigalgs_len == other.sigalgs_len
+        let scalars = (
+            self.versions_len,
+            self.record_version,
+            self.sni_len,
+            self.sni_entries,
+            self.has_ech,
+            self.ciphers_len,
+            self.extensions_len,
+            self.alpn_len,
+            self.sigalgs_len,
+        ) == (
+            other.versions_len,
+            other.record_version,
+            other.sni_len,
+            other.sni_entries,
+            other.has_ech,
+            other.ciphers_len,
+            other.extensions_len,
+            other.alpn_len,
+            other.sigalgs_len,
+        );
+        let slices = (
+            self.offered_versions(),
+            self.server_name(),
+            self.ciphers(),
+            self.extensions(),
+            self.alpn_first_value(),
+            self.sigalgs(),
+        ) == (
+            other.offered_versions(),
+            other.server_name(),
+            other.ciphers(),
+            other.extensions(),
+            other.alpn_first_value(),
+            other.sigalgs(),
+        );
+        scalars && slices
     }
 }
 
