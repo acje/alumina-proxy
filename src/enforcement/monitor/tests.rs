@@ -28,6 +28,21 @@ fn table(
     ControlTable::new(any, &early, &ja4).expect("in-bound test table")
 }
 
+/// A consumed-capture arrangement: one slot identity carrying the
+/// `AnyIllegal(HostNotAllowlisted)` fact and its Block-Connection effect.
+fn capture(slot: usize, generation: u64) -> SlotCapture {
+    SlotCapture {
+        slot,
+        generation,
+        detail: Some(CapturedDetail {
+            fact: CapturedFact::AnyIllegal(AnyIllegalCause::HostNotAllowlisted),
+            effect: Effect::Block {
+                scope: Scope::Connection,
+            },
+        }),
+    }
+}
+
 #[test]
 fn committed_emission_clears_dirty_and_a_new_event_re_dirtes() {
     let mut m = Monitor::new();
@@ -280,20 +295,9 @@ fn two_saturated_counters_total_exactly_2x_u32_max_without_panic_or_wrap() {
 #[test]
 fn consumed_capture_is_correlated_with_slot_generation_fact_and_effect() {
     let cause = AnyIllegalCause::HostNotAllowlisted;
-    let effect = Effect::Block {
-        scope: Scope::Connection,
-    };
-    let cap = |slot, generation| SlotCapture {
-        slot,
-        generation,
-        detail: Some(CapturedDetail {
-            fact: CapturedFact::AnyIllegal(cause),
-            effect,
-        }),
-    };
     let mut m = Monitor::new();
-    m.note_consumed_capture(cap(0, 42));
-    m.note_consumed_capture(cap(1, 7));
+    m.note_consumed_capture(capture(0, 42));
+    m.note_consumed_capture(capture(1, 7));
     assert_eq!(
         m.capture_detail_len(),
         2,
@@ -318,21 +322,9 @@ fn consumed_capture_is_correlated_with_slot_generation_fact_and_effect() {
 
 #[test]
 fn two_slots_at_equal_generation_are_distinct_identities_and_reuse_bumps_generation() {
-    let cause = AnyIllegalCause::HostNotAllowlisted;
-    let effect = Effect::Block {
-        scope: Scope::Connection,
-    };
-    let cap = |slot, generation| SlotCapture {
-        slot,
-        generation,
-        detail: Some(CapturedDetail {
-            fact: CapturedFact::AnyIllegal(cause),
-            effect,
-        }),
-    };
     let mut m = Monitor::new();
-    m.note_consumed_capture(cap(0, 1));
-    m.note_consumed_capture(cap(1, 1));
+    m.note_consumed_capture(capture(0, 1));
+    m.note_consumed_capture(capture(1, 1));
     let first = m.capture_detail(0).expect("slot 0 capture");
     let second = m.capture_detail(1).expect("slot 1 capture");
     assert_eq!((first.slot, first.generation), (0, 1));
@@ -341,7 +333,7 @@ fn two_slots_at_equal_generation_are_distinct_identities_and_reuse_bumps_generat
         first, second,
         "H1': equal per-slot generations on different slots are distinct connection identities"
     );
-    m.note_consumed_capture(cap(0, 2));
+    m.note_consumed_capture(capture(0, 2));
     let reused = m.capture_detail(2).expect("reused slot capture");
     assert_eq!((reused.slot, reused.generation), (0, 2));
     assert_ne!(
@@ -352,20 +344,8 @@ fn two_slots_at_equal_generation_are_distinct_identities_and_reuse_bumps_generat
 
 #[test]
 fn mark_reported_always_consumes_the_detail_window_and_suppression_counts_once() {
-    let cause = AnyIllegalCause::HostNotAllowlisted;
-    let effect = Effect::Block {
-        scope: Scope::Connection,
-    };
-    let cap = |slot| SlotCapture {
-        slot,
-        generation: 1,
-        detail: Some(CapturedDetail {
-            fact: CapturedFact::AnyIllegal(cause),
-            effect,
-        }),
-    };
     let mut m = Monitor::new();
-    m.note_consumed_capture(cap(0));
+    m.note_consumed_capture(capture(0, 1));
     assert_eq!(
         m.capture_detail_len(),
         1,
@@ -378,7 +358,7 @@ fn mark_reported_always_consumes_the_detail_window_and_suppression_counts_once()
         "M2': mark_reported always consumes its detail window"
     );
     assert!(!m.report_due(5), "the emission leaves a clean aggregate");
-    m.note_consumed_capture(cap(0));
+    m.note_consumed_capture(capture(0, 1));
     m.note_suppressed_detail();
     assert_eq!(
         m.capture_detail_len(),
@@ -409,22 +389,10 @@ fn mark_reported_always_consumes_the_detail_window_and_suppression_counts_once()
 
 #[test]
 fn capture_ring_overflow_keeps_latest_and_counts_the_drops() {
-    let cause = AnyIllegalCause::HostNotAllowlisted;
-    let effect = Effect::Block {
-        scope: Scope::Connection,
-    };
-    let cap = |slot, generation| SlotCapture {
-        slot,
-        generation,
-        detail: Some(CapturedDetail {
-            fact: CapturedFact::AnyIllegal(cause),
-            effect,
-        }),
-    };
     let mut m = Monitor::new();
     let overflow = 5u64;
     for generation in 0..(CAPTURE_DETAIL_LEN as u64 + overflow) {
-        m.note_consumed_capture(cap(0, generation));
+        m.note_consumed_capture(capture(0, generation));
     }
     assert_eq!(
         m.capture_detail_len(),
