@@ -7,7 +7,7 @@ use crate::config::ALLOWLIST_MAX;
 )]
 #[path = "../../../tests/support/enforcement_tables.rs"]
 mod enforcement_tables;
-use enforcement_tables::{any_controls, table};
+use enforcement_tables::{any_controls, block_all_table, block_connection_table, table};
 
 fn any(cause: AnyIllegalCause) -> Violation {
     Violation::AnyIllegal { cause }
@@ -15,11 +15,7 @@ fn any(cause: AnyIllegalCause) -> Violation {
 
 #[test]
 fn first_any_illegal_fires_its_control_action_once() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_all_table();
     let mut latch = FirstSlot::new();
     assert_eq!(
         decide(&t, &mut latch, any(AnyIllegalCause::HostNotAllowlisted)),
@@ -38,11 +34,7 @@ fn first_any_illegal_fires_its_control_action_once() {
 
 #[test]
 fn first_any_illegal_scoped_connection_yields_block_connection() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_connection_table();
     let mut latch = FirstSlot::new();
     assert_eq!(
         decide(
@@ -113,11 +105,7 @@ fn any_illegal_cause_selects_its_own_control() {
 
 #[test]
 fn latched_connection_cannot_fire_twice() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_all_table();
     let mut latch = FirstSlot::new();
     assert_eq!(
         decide(
@@ -298,11 +286,7 @@ fn early_data_unbound_ordinal_is_unknown_not_baseline() {
     }
     let big = table(any_controls(ActionKind::Block, Scope::All), &many, &many);
     let unbound = big.ordinal(5).expect("index 5 configured in a full table");
-    let small = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let small = block_all_table();
     let mut latch = FirstSlot::new();
     assert_eq!(
         decide(
@@ -393,11 +377,7 @@ fn missing_parse_result_is_unknown_never_an_action() {
 
 #[test]
 fn finite_cause_discriminants_stay_distinct_through_latch() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_connection_table();
     let mut latch = FirstSlot::new();
     let first = decide(
         &t,

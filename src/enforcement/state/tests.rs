@@ -11,7 +11,7 @@ use crate::inspection::connect::ConnectHeadReason;
 )]
 #[path = "../../../tests/support/enforcement_tables.rs"]
 mod enforcement_tables;
-use enforcement_tables::{any_controls, table};
+use enforcement_tables::{any_controls, block_all_table, block_connection_table, table};
 
 fn gate(threshold: u32, window: u64) -> AllScopeGate {
     AllScopeGate::new(
@@ -34,22 +34,6 @@ fn gates_illegal_fqdn(threshold: u32, window: u64) -> GateSet {
         gate(threshold, window),
         AllScopeGate::default(),
         AllScopeGate::default(),
-    )
-}
-
-fn block_connection_table() -> ControlTable {
-    table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    )
-}
-
-fn block_all_table() -> ControlTable {
-    table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
     )
 }
 

@@ -28,3 +28,23 @@ pub(super) fn table(
 ) -> ControlTable {
     ControlTable::new(any, &per_fqdn(early), &per_fqdn(ja4)).expect("in-bound test table")
 }
+
+/// The all-scope Block table with the Notify-Connection per-FQDN controls both
+/// decision paths read.
+pub(super) fn block_all_table() -> ControlTable {
+    table(
+        any_controls(ActionKind::Block, Scope::All),
+        &[(ActionKind::Notify, Scope::Connection)],
+        &[(ActionKind::Notify, Scope::Connection)],
+    )
+}
+
+/// The connection-scope Block table with the Notify-Connection per-FQDN
+/// controls both decision paths read.
+pub(super) fn block_connection_table() -> ControlTable {
+    table(
+        any_controls(ActionKind::Block, Scope::Connection),
+        &[(ActionKind::Notify, Scope::Connection)],
+        &[(ActionKind::Notify, Scope::Connection)],
+    )
+}
