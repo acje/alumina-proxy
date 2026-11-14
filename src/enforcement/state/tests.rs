@@ -48,6 +48,91 @@ fn gates_illegal_fqdn(threshold: u32, window: u64) -> GateSet {
     )
 }
 
+fn block_connection_table() -> ControlTable {
+    table(
+        any_controls(ActionKind::Block, Scope::Connection),
+        &[(ActionKind::Notify, Scope::Connection)],
+        &[(ActionKind::Notify, Scope::Connection)],
+    )
+}
+
+fn block_all_table() -> ControlTable {
+    table(
+        any_controls(ActionKind::Block, Scope::All),
+        &[(ActionKind::Notify, Scope::Connection)],
+        &[(ActionKind::Notify, Scope::Connection)],
+    )
+}
+
+fn all_actions_table() -> ControlTable {
+    table(
+        any_controls(ActionKind::Block, Scope::All),
+        &[(ActionKind::Block, Scope::All)],
+        &[(ActionKind::Block, Scope::All)],
+    )
+}
+
+fn domain_actions_table() -> ControlTable {
+    table(
+        any_controls(ActionKind::Block, Scope::Connection),
+        &[(ActionKind::Block, Scope::Domain)],
+        &[(ActionKind::Block, Scope::Domain)],
+    )
+}
+
+fn notify_connection_table() -> ControlTable {
+    table(
+        any_controls(ActionKind::Notify, Scope::Connection),
+        &[(ActionKind::Notify, Scope::Connection)],
+        &[(ActionKind::Notify, Scope::Connection)],
+    )
+}
+
+fn decide_at(en: &mut Enforcement, violation: Violation, secs: u64) -> Effect {
+    en.decide(&mut FirstSlot::new(), violation, secs)
+}
+
+fn isolated_gate_arrangement(
+    early_data: AllScopeGate,
+    ja4: AllScopeGate,
+) -> (ControlTable, Enforcement) {
+    let t = all_actions_table();
+    let en = en_gated(
+        t,
+        GateSet::new(
+            AllScopeGate::default(),
+            AllScopeGate::default(),
+            early_data,
+            ja4,
+        ),
+    );
+    (t, en)
+}
+
+fn count_only_arrangement() -> (ControlTable, Enforcement) {
+    let t = table(
+        any_controls(ActionKind::Block, Scope::All),
+        &[
+            (ActionKind::Notify, Scope::Connection),
+            (ActionKind::Block, Scope::All),
+        ],
+        &[
+            (ActionKind::Notify, Scope::Connection),
+            (ActionKind::Block, Scope::All),
+        ],
+    );
+    let en = en_gated(
+        t,
+        GateSet::new(
+            AllScopeGate::default(),
+            AllScopeGate::default(),
+            gate(3, 60),
+            gate(3, 60),
+        ),
+    );
+    (t, en)
+}
+
 #[test]
 fn all_scope_gate_zero_is_unrepresentable_at_the_type_boundary() {
     assert!(
@@ -85,11 +170,7 @@ fn saturating_counter_reports_wrapped_value_and_overflow() {
 
 #[test]
 fn note_fact_dns_anomaly_passes_through_to_the_monitor() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_connection_table();
     let mut en = en(t);
     en.note_fact_dns_anomaly(DnsAnomalyKind::ResolverPeerMismatch);
     assert_eq!(
@@ -106,11 +187,7 @@ fn note_fact_dns_anomaly_passes_through_to_the_monitor() {
 
 #[test]
 fn note_fact_downgrade_to_plain_passes_through_to_the_monitor() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_connection_table();
     let mut en = en(t);
     en.note_fact_downgrade_to_plain();
     assert_eq!(en.counters().facts_downgrade_to_plain(), 1);
@@ -123,11 +200,7 @@ fn note_fact_downgrade_to_plain_passes_through_to_the_monitor() {
 
 #[test]
 fn note_fact_probe_relocation_passes_through_to_the_monitor() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_connection_table();
     let mut en = en(t);
     en.note_fact_probe_relocation();
     en.note_fact_probe_relocation();
@@ -141,11 +214,7 @@ fn note_fact_probe_relocation_passes_through_to_the_monitor() {
 
 #[test]
 fn note_fact_expired_pin_cert_passes_through_to_the_monitor() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_connection_table();
     let mut en = en(t);
     en.note_fact_expired_pin_cert();
     assert_eq!(en.counters().facts_expired_pin_certs(), 1);
@@ -156,17 +225,9 @@ fn note_fact_expired_pin_cert_passes_through_to_the_monitor() {
     );
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "long per-class fold + latch-once assertion spanning five decide calls"
-)]
 #[test]
 fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_all_table();
     let mut en = en_gated(
         t,
         GateSet::new(
@@ -267,11 +328,7 @@ fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
 
 #[test]
 fn wrong_port_and_transfer_encoding_fold_into_distinct_cause_counters() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_all_table();
     let mut en = en(t);
     let mut latch = FirstSlot::new();
     en.decide(
@@ -307,11 +364,7 @@ fn wrong_port_and_transfer_encoding_fold_into_distinct_cause_counters() {
 
 #[test]
 fn early_data_block_domain_sets_bitset_and_counts() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Block, Scope::Domain)],
-        &[(ActionKind::Block, Scope::Domain)],
-    );
+    let t = domain_actions_table();
     let mut en = en(t);
     let ordinal = t.ordinal(0).expect("ordinal");
     let effect = en.decide(
@@ -333,11 +386,7 @@ fn early_data_block_domain_sets_bitset_and_counts() {
 
 #[test]
 fn early_data_notify_counts_per_ordinal() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_connection_table();
     let mut en = en(t);
     let mut latch = FirstSlot::new();
     let ordinal = t.ordinal(0).expect("ordinal");
@@ -353,11 +402,7 @@ fn early_data_notify_counts_per_ordinal() {
 
 #[test]
 fn all_transition_is_a_derived_latch_count_not_a_duplicate_action_total() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = block_all_table();
     let mut en = en_gated(t, gates_illegal_fqdn(3, 60));
     for i in 0..3u64 {
         en.decide(
@@ -437,11 +482,7 @@ fn block_all_latch_counts_the_transition_once_not_every_all_application() {
 
 #[test]
 fn early_data_unknown_outcome_is_one_detection_fact_not_two() {
-    let small = table(
-        any_controls(ActionKind::Block, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let small = block_connection_table();
     let mut en = en(small);
     let mut latch = FirstSlot::new();
     let big = table(
@@ -475,11 +516,7 @@ fn early_data_unknown_outcome_is_one_detection_fact_not_two() {
 
 #[test]
 fn unbound_and_insufficient_evidence_fold_unknown_by_reason_not_baseline() {
-    let small = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let small = block_all_table();
     let mut en = en(small);
     let mut latch = FirstSlot::new();
     let big = table(
@@ -526,11 +563,7 @@ fn unbound_and_insufficient_evidence_fold_unknown_by_reason_not_baseline() {
 
 #[test]
 fn missing_result_and_unattributed_fold_distinct_unknown_never_block() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Block, Scope::All)],
-        &[(ActionKind::Block, Scope::All)],
-    );
+    let t = all_actions_table();
     let mut en = en(t);
     let mut latch = FirstSlot::new();
     let effect = en.decide(&mut latch, Violation::MissingParseResult, 0);
@@ -616,11 +649,7 @@ fn windowed_counter_uses_configured_window() {
 
 #[test]
 fn single_any_illegal_below_threshold_never_latches_all() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Block, Scope::All)],
-        &[(ActionKind::Block, Scope::All)],
-    );
+    let t = all_actions_table();
     let mut en = en_gated(t, gates_illegal_fqdn(3, 60));
     let effect = en.decide(
         &mut FirstSlot::new(),
@@ -641,11 +670,7 @@ fn single_any_illegal_below_threshold_never_latches_all() {
 
 #[test]
 fn three_any_illegal_facts_within_the_window_latch_all() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Block, Scope::All)],
-        &[(ActionKind::Block, Scope::All)],
-    );
+    let t = all_actions_table();
     let mut en = en_gated(t, gates_illegal_fqdn(3, 60));
     assert_eq!(
         en.decide(
@@ -683,11 +708,7 @@ fn three_any_illegal_facts_within_the_window_latch_all() {
 
 #[test]
 fn single_any_illegal_arms_all_scope_at_default_threshold() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Block, Scope::All)],
-        &[(ActionKind::Block, Scope::All)],
-    );
+    let t = all_actions_table();
     let mut en = en(t);
     let effect = en.decide(
         &mut FirstSlot::new(),
@@ -707,11 +728,7 @@ fn single_any_illegal_arms_all_scope_at_default_threshold() {
 
 #[test]
 fn per_control_any_illegal_notify_is_recorded_as_first_slot_action() {
-    let t = table(
-        any_controls(ActionKind::Notify, Scope::Connection),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Notify, Scope::Connection)],
-    );
+    let t = notify_connection_table();
     let mut en = en(t);
     let effect = en.decide(
         &mut FirstSlot::new(),
@@ -737,11 +754,7 @@ fn per_control_any_illegal_notify_is_recorded_as_first_slot_action() {
 
 #[test]
 fn per_fqdn_all_scope_block_is_gated_by_sp001() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Block, Scope::All)],
-        &[(ActionKind::Block, Scope::All)],
-    );
+    let t = all_actions_table();
     let mut en = en_gated(
         t,
         GateSet::new(
@@ -858,11 +871,7 @@ fn ja4_change_ignore_is_baseline_only() {
 
 #[test]
 fn bad_handshake_facts_never_arm_the_illegal_fqdn_gate() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Block, Scope::All)],
-        &[(ActionKind::Block, Scope::All)],
-    );
+    let t = all_actions_table();
     let mut en = en_gated(
         t,
         GateSet::new(
@@ -907,11 +916,7 @@ fn bad_handshake_facts_never_arm_the_illegal_fqdn_gate() {
 
 #[test]
 fn illegal_fqdn_facts_never_arm_the_bad_handshake_gate() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Block, Scope::All)],
-        &[(ActionKind::Block, Scope::All)],
-    );
+    let t = all_actions_table();
     let mut en = en_gated(
         t,
         GateSet::new(
@@ -956,21 +961,8 @@ fn illegal_fqdn_facts_never_arm_the_bad_handshake_gate() {
 
 #[test]
 fn early_data_and_ja4_gates_are_isolated() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Block, Scope::All)],
-        &[(ActionKind::Block, Scope::All)],
-    );
+    let (t, mut en) = isolated_gate_arrangement(gate(3, 60), gate(10, 60));
     let ordinal = t.ordinal(0).expect("ordinal");
-    let mut en = en_gated(
-        t,
-        GateSet::new(
-            AllScopeGate::default(),
-            AllScopeGate::default(),
-            gate(3, 60),
-            gate(10, 60),
-        ),
-    );
     for i in 0..3u64 {
         let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, i);
         assert_eq!(
@@ -980,32 +972,16 @@ fn early_data_and_ja4_gates_are_isolated() {
         );
     }
     assert!(!en.block_all(), "ja4 facts never arm the early_data gate");
-    let effect = en.decide(
-        &mut FirstSlot::new(),
-        Violation::EarlyUpstreamData { ordinal },
-        3,
-    );
+    let effect = decide_at(&mut en, Violation::EarlyUpstreamData { ordinal }, 3);
     assert_eq!(
         effect,
         Effect::BaselineOnly,
         "a single EarlyUpstreamData Block-All is below early_data 3/60: ja4 facts did not count toward early_data"
     );
     assert!(!en.block_all());
-    let mut en = en_gated(
-        t,
-        GateSet::new(
-            AllScopeGate::default(),
-            AllScopeGate::default(),
-            gate(10, 60),
-            gate(3, 60),
-        ),
-    );
+    let (_, mut en) = isolated_gate_arrangement(gate(10, 60), gate(3, 60));
     for i in 0..3u64 {
-        let effect = en.decide(
-            &mut FirstSlot::new(),
-            Violation::EarlyUpstreamData { ordinal },
-            i,
-        );
+        let effect = decide_at(&mut en, Violation::EarlyUpstreamData { ordinal }, i);
         assert_eq!(
             effect,
             Effect::BaselineOnly,
@@ -1013,7 +989,7 @@ fn early_data_and_ja4_gates_are_isolated() {
         );
     }
     assert!(!en.block_all(), "early_data facts never arm the ja4 gate");
-    let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, 3);
+    let effect = decide_at(&mut en, Violation::Ja4Change { ordinal }, 3);
     assert_eq!(
         effect,
         Effect::BaselineOnly,
@@ -1024,11 +1000,7 @@ fn early_data_and_ja4_gates_are_isolated() {
 
 #[test]
 fn single_bad_handshake_fact_arms_bad_handshake_not_illegal_fqdn() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Block, Scope::All)],
-        &[(ActionKind::Block, Scope::All)],
-    );
+    let t = all_actions_table();
     let mut en = en_gated(
         t,
         GateSet::new(
@@ -1121,36 +1093,23 @@ fn any_illegal_notify_still_counts_its_class_facts() {
 
 #[test]
 fn early_data_and_ja4_count_only_on_block_all() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[
-            (ActionKind::Notify, Scope::Connection),
-            (ActionKind::Block, Scope::All),
-        ],
-        &[
-            (ActionKind::Notify, Scope::Connection),
-            (ActionKind::Block, Scope::All),
-        ],
-    );
+    let (t, mut en) = count_only_arrangement();
     let notify_ordinal = t.ordinal(0).expect("ordinal");
     let block_ordinal = t.ordinal(1).expect("ordinal");
-    let mut en = en_gated(
-        t,
-        GateSet::new(
-            AllScopeGate::default(),
-            AllScopeGate::default(),
-            gate(3, 60),
-            gate(3, 60),
-        ),
-    );
+    let notify_early = Violation::EarlyUpstreamData {
+        ordinal: notify_ordinal,
+    };
+    let block_early = Violation::EarlyUpstreamData {
+        ordinal: block_ordinal,
+    };
+    let notify_ja4 = Violation::Ja4Change {
+        ordinal: notify_ordinal,
+    };
+    let block_ja4 = Violation::Ja4Change {
+        ordinal: block_ordinal,
+    };
     for i in 0..3u64 {
-        let effect = en.decide(
-            &mut FirstSlot::new(),
-            Violation::EarlyUpstreamData {
-                ordinal: notify_ordinal,
-            },
-            i,
-        );
+        let effect = decide_at(&mut en, notify_early, i);
         assert_eq!(
             effect,
             Effect::Notify {
@@ -1159,13 +1118,7 @@ fn early_data_and_ja4_count_only_on_block_all() {
             "notify-configured early_data fires Notify"
         );
     }
-    let effect = en.decide(
-        &mut FirstSlot::new(),
-        Violation::EarlyUpstreamData {
-            ordinal: block_ordinal,
-        },
-        3,
-    );
+    let effect = decide_at(&mut en, block_early, 3);
     assert_eq!(
         effect,
         Effect::BaselineOnly,
@@ -1173,13 +1126,7 @@ fn early_data_and_ja4_count_only_on_block_all() {
     );
     assert!(!en.block_all());
     for i in 0..3u64 {
-        let effect = en.decide(
-            &mut FirstSlot::new(),
-            Violation::Ja4Change {
-                ordinal: notify_ordinal,
-            },
-            i,
-        );
+        let effect = decide_at(&mut en, notify_ja4, i);
         assert_eq!(
             effect,
             Effect::Notify {
@@ -1188,13 +1135,7 @@ fn early_data_and_ja4_count_only_on_block_all() {
             "notify-configured ja4 fires Notify"
         );
     }
-    let effect = en.decide(
-        &mut FirstSlot::new(),
-        Violation::Ja4Change {
-            ordinal: block_ordinal,
-        },
-        3,
-    );
+    let effect = decide_at(&mut en, block_ja4, 3);
     assert_eq!(
         effect,
         Effect::BaselineOnly,
