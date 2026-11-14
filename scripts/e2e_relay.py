@@ -145,21 +145,6 @@ def client_hello(sni, ech=False, versions=(TLS13,), legacy=TLS12):
     return tls_records(hs)
 
 
-def read_exact(sock, n):
-    """Read exactly n bytes, raising EOFError on a short/empty stream.
-
-    TCP has no message boundaries, so a length-prefixed frame (DNS-over-TCP,
-    TLS record header) must be assembled across repeated recv calls; a single
-    recv(2) may legally return fewer bytes than requested."""
-    out = b""
-    while len(out) < n:
-        chunk = sock.recv(n - len(out))
-        if not chunk:
-            raise EOFError(f"short read: wanted {n} got {len(out)}")
-        out += chunk
-    return out
-
-
 def recv_http_response(sock, timeout=5.0):
     """Read a full HTTP response head. Returns (head_bytes, remainder_bytes,
     complete).
