@@ -2493,138 +2493,119 @@ impl StartupDns {
             }
             self.msglen = Some(len);
         }
-        if let Some(len) = self.msglen
-            && self.filled >= len + 2
-        {
-            let message = &self.recv_buf[2..2 + len];
-            let reply = wire::ParsedReply::parse_reply(
-                &mut self.workspace,
-                &self.bailiwick,
-                fqdn,
-                ex.family,
-                ex.tid,
-                message,
-            );
-            self.msglen = None;
-            self.filled = 0;
-            match reply {
-                Ok(reply) => {
-                    if Instant::now() >= ex.deadline {
-                        self.close_connection()?;
-                        let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
-                        return Ok(RecvStep::Failed(reason));
-                    }
-                    let parsed = reply.observe();
-                    if ex.class == ExchangeClass::Probe {
-                        let (kind, extreme, _raw_ad_fact) = parsed.probe_facts();
-                        if extreme {
-                            self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
-                        }
-                        if self.corroboration.is_some() {
-                            self.corroboration_outcome = Some(kind);
-                        }
-                        return Ok(RecvStep::Published(kind));
-                    }
-                    let receipt = self.now_u64();
-                    let (source, origin_authenticated) = self.delivering_origin();
-                    let origin_policy = self
-                        .resolvers
-                        .as_ref()
-                        .map_or(RecursionPolicy::Undeclared, |set| {
-                            set.policy_of(source.get())
-                        });
-                    let obsolete_negative =
-                        matches!(parsed.probe_facts().0, PublishedKind::Negative);
-                    let publication_at = Instant::now();
-                    let context = crate::dns::publication::ApplyContext {
-                        index: ex.ordinal,
-                        generation: ex.generation,
-                        query_family: Some(ex.family),
-                        other_generation: Some(ex.other_generation),
-                        receipt,
-                        now: self.now0.saturating_add(
-                            publication_at
-                                .saturating_duration_since(self.start)
-                                .as_secs(),
-                        ),
-                    };
-                    let origin = wire::ApplyOrigin {
-                        source,
-                        query_floor: ex.query_floor,
-                        origin_authenticated,
-                        origin_policy,
-                    };
-                    let publication = if ex.class == ExchangeClass::Serving {
-                        let mut forward = |phase, cache: &Cache, name, secs| {
-                            observer(phase, cache, name, secs, publication_at);
-                        };
-                        parsed.apply_observed(cache, schedules, context, origin, &mut forward)
-                    } else {
-                        parsed.apply(cache, schedules, context, origin)
-                    };
-                    let (kind, extreme, incidents) = match publication {
-                        Ok(published) => published,
-                        Err(DnsError::Cache(CacheError::StaleGeneration)) if obsolete_negative => {
-                            schedules.release_selection(ex.ordinal, ex.family)?;
-                            return Ok(RecvStep::Superseded);
-                        }
-                        Err(DnsError::Cache(CacheError::InsufficientAssurance)) => {
-                            self.close_connection()?;
-                            let reason = self.note_failure(
-                                ex,
-                                schedules,
-                                FailureReason::InsufficientAssurance,
-                            )?;
-                            return Ok(RecvStep::Failed(reason));
-                        }
-                        Err(err) => return Err(err.into()),
-                    };
-                    match incidents.sustained {
-                        crate::dns::schedule::IncidentTransition::Opened => {
-                            self.incident_opens += 1;
-                            self.latch_corroboration(ex.ordinal, ex.family);
-                        }
-                        crate::dns::schedule::IncidentTransition::Closed => {
-                            self.incident_closes += 1;
-                        }
-                        crate::dns::schedule::IncidentTransition::None => {}
-                    }
-                    if ex.class == ExchangeClass::Serving {
-                        for (family, transition) in [Family::A, Family::Aaaa]
-                            .into_iter()
-                            .zip(incidents.per_type)
-                        {
-                            if let PerTypeTransition::Recovered { duration } = transition {
-                                self.note_incident(IncidentNote::Recovered {
-                                    ordinal: ex.ordinal,
-                                    family,
-                                    duration,
-                                    resolver: self.current_resolver_index(),
-                                });
-                            }
-                        }
-                    }
-                    if extreme {
-                        self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
-                    }
-                    return Ok(RecvStep::Published(kind));
-                }
-                Err(err) => {
-                    if matches!(err, DnsError::BailiwickViolation) {
-                        self.note_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
-                    }
-                    self.close_connection()?;
-                    let reason = self.note_failure(ex, schedules, FailureReason::Receive)?;
-                    return Ok(RecvStep::Failed(reason));
-                }
+        let Some(len) = self.msglen.filter(|len| self.filled >= len + 2) else {
+            if Instant::now() >= ex.deadline {
+                self.close_connection()?;
+                let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
+                return Ok(RecvStep::Failed(reason));
             }
-        }
+            return Ok(RecvStep::Waiting);
+        };
+        let message = &self.recv_buf[2..2 + len];
+        let reply = wire::ParsedReply::parse_reply(
+            &mut self.workspace,
+            &self.bailiwick,
+            fqdn,
+            ex.family,
+            ex.tid,
+            message,
+        );
+        self.msglen = None;
+        self.filled = 0;
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(err) => {
+                if matches!(err, DnsError::BailiwickViolation) {
+                    self.note_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
+                }
+                self.close_connection()?;
+                let reason = self.note_failure(ex, schedules, FailureReason::Receive)?;
+                return Ok(RecvStep::Failed(reason));
+            }
+        };
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
             let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
             return Ok(RecvStep::Failed(reason));
         }
-        Ok(RecvStep::Waiting)
+        let parsed = reply.observe();
+        if ex.class == ExchangeClass::Probe {
+            let (kind, extreme, _raw_ad_fact) = parsed.probe_facts();
+            if extreme {
+                self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+            }
+            if self.corroboration.is_some() {
+                self.corroboration_outcome = Some(kind);
+            }
+            return Ok(RecvStep::Published(kind));
+        }
+        let receipt = self.now_u64();
+        let (source, origin_authenticated) = self.delivering_origin();
+        let origin_policy = self
+            .resolvers
+            .as_ref()
+            .map_or(RecursionPolicy::Undeclared, |set| {
+                set.policy_of(source.get())
+            });
+        let obsolete_negative = matches!(parsed.probe_facts().0, PublishedKind::Negative);
+        let publication_at = Instant::now();
+        let context = crate::dns::publication::ApplyContext {
+            index: ex.ordinal,
+            generation: ex.generation,
+            query_family: Some(ex.family),
+            other_generation: Some(ex.other_generation),
+            receipt,
+            now: self.now0.saturating_add(
+                publication_at
+                    .saturating_duration_since(self.start)
+                    .as_secs(),
+            ),
+        };
+        let origin = wire::ApplyOrigin {
+            source,
+            query_floor: ex.query_floor,
+            origin_authenticated,
+            origin_policy,
+        };
+        let publication = if ex.class == ExchangeClass::Serving {
+            let mut forward = |phase, cache: &Cache, name, secs| {
+                observer(phase, cache, name, secs, publication_at);
+            };
+            parsed.apply_observed(cache, schedules, context, origin, &mut forward)
+        } else {
+            parsed.apply(cache, schedules, context, origin)
+        };
+        let (kind, extreme, incidents) = match publication {
+            Ok(published) => published,
+            Err(DnsError::Cache(CacheError::StaleGeneration)) if obsolete_negative => {
+                schedules.release_selection(ex.ordinal, ex.family)?;
+                return Ok(RecvStep::Superseded);
+            }
+            Err(DnsError::Cache(CacheError::InsufficientAssurance)) => {
+                self.close_connection()?;
+                let reason =
+                    self.note_failure(ex, schedules, FailureReason::InsufficientAssurance)?;
+                return Ok(RecvStep::Failed(reason));
+            }
+            Err(err) => return Err(err.into()),
+        };
+        match incidents.sustained {
+            crate::dns::schedule::IncidentTransition::Opened => {
+                self.incident_opens += 1;
+                self.latch_corroboration(ex.ordinal, ex.family);
+            }
+            crate::dns::schedule::IncidentTransition::Closed => {
+                self.incident_closes += 1;
+            }
+            crate::dns::schedule::IncidentTransition::None => {}
+        }
+        if ex.class == ExchangeClass::Serving {
+            note_recovered_incidents(self, ex, incidents.per_type);
+        }
+        if extreme {
+            self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+        }
+        Ok(RecvStep::Published(kind))
     }
 
     /// Fills the fixed receive buffer from the connected transport: plain
@@ -3764,6 +3745,23 @@ impl StartupDns {
             }
         }
         Ok(reason)
+    }
+}
+
+fn note_recovered_incidents(
+    transport: &mut StartupDns,
+    ex: &ActiveExchange,
+    per_type: [PerTypeTransition; 2],
+) {
+    for (family, transition) in [Family::A, Family::Aaaa].into_iter().zip(per_type) {
+        if let PerTypeTransition::Recovered { duration } = transition {
+            transport.note_incident(IncidentNote::Recovered {
+                ordinal: ex.ordinal,
+                family,
+                duration,
+                resolver: transport.current_resolver_index(),
+            });
+        }
     }
 }
 
