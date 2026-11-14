@@ -1135,6 +1135,67 @@ def case_retry_backoff_storm(fixtures):
         log.close()
 
 
+# Premise-failure details for stalled_relay_stage(), kept verbatim per case so a
+# FAIL line reads exactly as it did when each case carried its own spawn.
+STALLED_RELAY_DETAILS = (
+    "could not establish stalled relay",
+    "no hello bytes upstream (relay not established)",
+)
+FORCED_RELAY_DETAILS = (
+    "could not establish stalled relay to silent upstream",
+    "no hello bytes observed upstream (relay not established)",
+)
+
+
+def stalled_relay_stage(name, log, silent, details):
+    """Spawn the binary, require the serving listener, then establish the stalled
+    relay whose hello bytes must reach the silent upstream -- the establishment
+    witness for a relay that never replies. `details` carries the relay and
+    hello failure text; a failed premise is reaped before it is reported."""
+    proc = spawn_binary(stdout_target=log, stderr_target=log)
+    if not require_reachable(name, proc):
+        return None
+    s = establish_relay("force.example.org")
+    if s is None:
+        proc.kill(); proc.wait()
+        fail(name, details[0])
+        return None
+    time.sleep(0.3)  # let the hello bytes reach the upstream -> Relay stage
+    if silent.bytes_received() == 0:
+        proc.kill(); proc.wait()
+        fail(name, details[1])
+        close_relay(s)
+        return None
+    return proc, s
+
+
+def repeat_sigterm(proc, count, gap):
+    """`count` repeat SIGTERMs `gap` apart: a storm that must not move the fixed
+    deadline."""
+    for _ in range(count):
+        os.kill(proc.pid, signal.SIGTERM)
+        time.sleep(gap)
+
+
+def drain_to_first_deadline(name, proc, t0):
+    """Post-storm no-admission sampling through the settle window, then hold the
+    drain live to just before the first-deadline window (no early drop), and
+    return the closure (rc, elapsed) at the fixed deadline or None."""
+    if not probe_refused_sampled(t0 + 2.5, name, proc):
+        return None
+    hold_until = t0 + GRACE_LO - 0.3
+    now = time.monotonic()
+    if now < hold_until:
+        time.sleep(hold_until - now)
+    if proc.poll() is not None:
+        fail(name, f"process exited before the first-deadline window (early drop, rc {proc.returncode})")
+        return None
+    rc = bounded_wait(proc, t0 + 12.5, name)
+    if rc is None:
+        return None
+    return rc, time.monotonic() - t0
+
+
 def case_storm_during_drain(fixtures):
     """Established stalled relay + a SIGTERM STORM right after the first
     signal: the fixed 8s deadline must not be extended by later signals. The
@@ -1151,38 +1212,21 @@ def case_storm_during_drain(fixtures):
     log = open_case_log(name)
     s = None
     try:
-        proc = spawn_binary(stdout_target=log, stderr_target=log)
-        if not require_reachable(name, proc):
+        staged = stalled_relay_stage(name, log, silent, STALLED_RELAY_DETAILS)
+        if staged is None:
             return
-        s = establish_relay("force.example.org")
-        if s is None:
-            proc.kill(); proc.wait(); fail(name, "could not establish stalled relay"); return
-        time.sleep(0.3)
-        if silent.bytes_received() == 0:
-            proc.kill(); proc.wait(); fail(name, "no hello bytes upstream (relay not established)"); return
+        proc, s = staged
         t0 = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
         # storm of repeat signals during the drain: none may move the deadline
         time.sleep(1.0)
-        for _ in range(8):
-            os.kill(proc.pid, signal.SIGTERM)
-            time.sleep(0.05)
+        repeat_sigterm(proc, 8, 0.05)
         # the storm loop consumed ~1.4 s of the window; the settle needs its own
         # headroom, and 2.5 s is still far below the fixed grace edge.
-        if not probe_refused_sampled(t0 + 2.5, name, proc):
+        outcome = drain_to_first_deadline(name, proc, t0)
+        if outcome is None:
             return
-        # live-before the first-deadline window: still draining at its edge
-        hold_until = t0 + GRACE_LO - 0.3
-        now = time.monotonic()
-        if now < hold_until:
-            time.sleep(hold_until - now)
-        if proc.poll() is not None:
-            fail(name, f"process exited before the first-deadline window (early drop, rc {proc.returncode})")
-            return
-        rc = bounded_wait(proc, t0 + 12.5, name)
-        if rc is None:
-            return
-        elapsed = time.monotonic() - t0
+        rc, elapsed = outcome
         if rc != 70:
             fail(name, f"storm drain must exit 70, got {rc} after {elapsed:.2f}s")
         elif elapsed < GRACE_LO:
@@ -1313,6 +1357,24 @@ def case_early_drain(fixtures):
         log.close()
 
 
+def forced_closure_outcome(name, proc, t0):
+    """No admissions across the post-signal settle window, a mid-drain live
+    check, then the t0+5s repeat SIGTERM that must not extend the deadline, and
+    the closure (rc, elapsed) measured from t0 with disjoint windows."""
+    if not probe_refused_sampled(t0 + 2.0, name, proc):
+        return None
+    time.sleep(3.0)
+    if proc.poll() is not None:
+        fail(name, f"process exited before the forced deadline ({proc.returncode}); stale listener admission or early closure")
+        return None
+    time.sleep(2.0)  # t0+5s: a second (repeat) SIGTERM must not extend
+    os.kill(proc.pid, signal.SIGTERM)
+    rc = bounded_wait(proc, t0 + 12.5, name)
+    if rc is None:
+        return None
+    return rc, time.monotonic() - t0
+
+
 def case_forced_repeat_noadmit(fixtures):
     """Stalled established relay (silent upstream): deadline-forced closure is
     FAILURE (exit 70), the deadline is monotonic (repeat SIGTERM never extends),
@@ -1326,15 +1388,10 @@ def case_forced_repeat_noadmit(fixtures):
     log = open_case_log(name)
     s = None
     try:
-        proc = spawn_binary(stdout_target=log, stderr_target=log)
-        if not require_reachable(name, proc):
+        staged = stalled_relay_stage(name, log, silent, FORCED_RELAY_DETAILS)
+        if staged is None:
             return
-        s = establish_relay("force.example.org")
-        if s is None:
-            proc.kill(); proc.wait(); fail(name, "could not establish stalled relay to silent upstream"); return
-        time.sleep(0.3)  # let the hello bytes reach the upstream -> Relay stage
-        if silent.bytes_received() == 0:
-            proc.kill(); proc.wait(); fail(name, "no hello bytes observed upstream (relay not established)"); return
+        proc, s = staged
         t0 = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
         # no admissions after the first signal: from the signal-observation
@@ -1342,22 +1399,10 @@ def case_forced_repeat_noadmit(fixtures):
         # authoritatively refused. A reachable connect or an operational probe
         # error fails the case at that instant and is never retried, so no later
         # refusal can overwrite an observed admission.
-        if not probe_refused_sampled(t0 + 2.0, name, proc):
+        outcome = forced_closure_outcome(name, proc, t0)
+        if outcome is None:
             return
-        time.sleep(3.0)
-        if proc.poll() is not None:
-            rc_pre = proc.returncode
-            fail(name, f"process exited before the forced deadline ({rc_pre}); stale listener admission or early closure")
-            return
-        time.sleep(2.0)  # t0+5s: a second (repeat) SIGTERM must not extend
-        os.kill(proc.pid, signal.SIGTERM)
-        # deadline measured from t0 (the first observation) with disjoint
-        # windows: a repeat signal that extended the grace to ~13s fails the
-        # first-deadline window.
-        rc = bounded_wait(proc, t0 + 12.5, name)
-        if rc is None:
-            return
-        elapsed = time.monotonic() - t0
+        rc, elapsed = outcome
         if rc != 70:
             fail(name, f"deadline-forced closure must exit 70, got {rc} after {elapsed:.2f}s")
         elif elapsed < GRACE_LO:
