@@ -3027,9 +3027,13 @@ mod production_apply_route {
         use crate::dns::cache::StagedPositive;
         use crate::dns::transport::FailureReason;
 
-        let mut cache = Cache::new(1).unwrap();
-        let mut schedules = Schedules::new(1).unwrap();
-        let name: NameIndex = cache.name_index(0).unwrap();
+        let mut cache =
+            Cache::new(1).expect("a single-name test cache admits the minimum capacity");
+        let mut schedules =
+            Schedules::new(1).expect("a single-name schedule table admits the minimum capacity");
+        let name: NameIndex = cache
+            .name_index(0)
+            .expect("the single-name test cache admits allowlist ordinal zero");
         for (family, addr) in [
             (Family::A, NumericAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
             (
@@ -3039,11 +3043,13 @@ mod production_apply_route {
         ] {
             let staged =
                 StagedPositive::stage(name, family, Generation::INITIAL, &[addr], 4900, 600)
-                    .unwrap();
-            cache.publish_positive(&staged).unwrap();
+                    .expect("a fresh positive stages against the INITIAL generation");
+            cache
+                .publish_positive(&staged)
+                .expect("a staged positive publishes while its generation is current");
             schedules
                 .note_exchange_failure(0, family, 4980, FailureReason::Connect)
-                .unwrap();
+                .expect("a recorded failure targets a name and family the table holds");
         }
         (cache, schedules, name)
     }
@@ -3057,29 +3063,57 @@ mod production_apply_route {
         msg
     }
 
+    fn capture_observation(
+        events: &mut [Option<CapturedObservation>; 2],
+        count: &mut usize,
+        phase: ObservationPhase,
+        cache: &Cache,
+        name: NameIndex,
+        now: u64,
+    ) {
+        events[*count] = Some((
+            phase,
+            now,
+            cache
+                .family_snapshot(name, Family::A, now)
+                .expect("the observer sees the queried family at the report time"),
+            cache
+                .family_snapshot(name, Family::Aaaa, now)
+                .expect("the observer sees the non-queried family at the report time"),
+            cache
+                .entry(name, Family::A)
+                .expect("the observed name keeps its queried-family entry")
+                .generation(),
+            cache
+                .entry(name, Family::Aaaa)
+                .expect("the observed name keeps its non-queried-family entry")
+                .generation(),
+        ));
+        *count += 1;
+    }
+
     fn observed_negative_matrix(nxdomain: bool) {
         use crate::dns::cache::NameIndex;
         use crate::dns::cache::grade_key::Outcome as FamilyOutcome;
 
         let mut ws = ResponseWorkspace::default();
         let msg = observed_negative_message(nxdomain);
-        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4300, &msg).unwrap();
+        let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4300, &msg)
+            .expect("the authored negative reply parses against its own query");
         let (mut cache, mut schedules, name) = seed_observed_negative_cache();
-        let generation = cache.entry(name, Family::A).unwrap().generation();
-        let other_generation = cache.entry(name, Family::Aaaa).unwrap().generation();
+        let generation = cache
+            .entry(name, Family::A)
+            .expect("the seeded cache holds the queried family")
+            .generation();
+        let other_generation = cache
+            .entry(name, Family::Aaaa)
+            .expect("the seeded cache holds the non-queried family")
+            .generation();
         let mut events: [Option<CapturedObservation>; 2] = [None; 2];
         let mut count = 0;
         let result = {
             let mut observer = |phase, cache: &Cache, name: NameIndex, now| {
-                events[count] = Some((
-                    phase,
-                    now,
-                    cache.family_snapshot(name, Family::A, now).unwrap(),
-                    cache.family_snapshot(name, Family::Aaaa, now).unwrap(),
-                    cache.entry(name, Family::A).unwrap().generation(),
-                    cache.entry(name, Family::Aaaa).unwrap().generation(),
-                ));
-                count += 1;
+                capture_observation(&mut events, &mut count, phase, cache, name, now);
             };
             reply
                 .observe()
@@ -3095,20 +3129,21 @@ mod production_apply_route {
                         other_generation: Some(other_generation),
                     },
                     ApplyOrigin {
-                        source: ResolverSource::index(0).unwrap(),
+                        source: ResolverSource::index(0)
+                            .expect("the single configured resolver admits ordinal zero"),
                         query_floor: 5000,
                         origin_authenticated: false,
                         origin_policy: RecursionPolicy::Undeclared,
                     },
                     &mut observer,
                 )
-                .unwrap()
+                .expect("a seeded negative observation applies without a typed rejection")
         };
         assert_eq!(count, 2);
         let (pre, pre_time, pre_a, pre_aaaa, pre_a_generation, pre_aaaa_generation) =
-            events[0].unwrap();
+            events[0].expect("the before-commit observation fired");
         let (post, post_time, post_a, post_aaaa, post_a_generation, post_aaaa_generation) =
-            events[1].unwrap();
+            events[1].expect("the after-commit observation fired");
         assert_eq!(
             (pre, post, pre_time, post_time),
             (
