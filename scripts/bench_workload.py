@@ -3179,53 +3179,7 @@ def _selftest_b9_identity(check, skip, tmpdir):
                 os.environ[k] = v
 
 
-def run_selftest(tmpdir):
-    if not os.path.isdir(tmpdir):
-        os.makedirs(tmpdir, exist_ok=True)
-    checks = []
-
-    def check(name, cond, detail=""):
-        checks.append((name, "PASS" if cond else "FAIL", detail))
-
-    def skip(name, detail=""):
-        checks.append((name, "SKIP", detail))
-
-    # TLS-1.3-load-bearing sections need a TLS1.3-capable ssl backend. On hosts
-    # without it (e.g. macOS system Python / LibreSSL) they are reported SKIP
-    # with the capability reason and run fully inside the OpenSSL3 bench
-    # container; a SKIP is never disguised as a PASS and never counts as FAIL.
-    tls13_ok = bool(getattr(ssl, "HAS_TLSv1_3", False))
-    tls13_reason = "host ssl %s lacks TLS 1.3 support; runs in bench container" % (
-        ssl.OPENSSL_VERSION)
-    tls13 = (tls13_ok, tls13_reason)
-
-    _selftest_clean(check, skip, tmpdir, tls13)
-    _selftest_preamble(check, skip, tmpdir, tls13)
-    _selftest_corruption(check, skip, tmpdir, tls13)
-    _selftest_swallow(check, skip, tmpdir, tls13)
-    _selftest_histogram(check, skip, tmpdir)
-    _selftest_b1_readiness(check, skip, tmpdir)
-    _selftest_b1_admission(check, skip, tmpdir)
-    _selftest_b2_dispatch_cutoff(check, skip, tmpdir)
-    _selftest_b2_window_end(check, skip, tmpdir)
-    _selftest_b3_echo_eligibility(check, skip, tmpdir)
-    _selftest_b3_partial_terminal(check, skip, tmpdir)
-    _selftest_b4_send_ts(check, skip, tmpdir)
-    _selftest_b4_recv_completion(check, skip, tmpdir)
-    _selftest_b5_warmup(check, skip, tmpdir, tls13)
-    _selftest_b6_cpu_unknown(check, skip, tmpdir)
-    _selftest_b7_setup_deadline(check, skip, tmpdir)
-    _selftest_b8_shell_supervision(check, skip, tmpdir)
-    _selftest_f1_cutoff_direction(check, skip, tmpdir)
-    _selftest_f1_discard_frame(check, skip, tmpdir)
-    _selftest_f2_terminal_classification(check, skip, tmpdir)
-    _selftest_f2_trysend_drain(check, skip, tmpdir)
-    f3ctx = _selftest_f3_aperture(check, skip, tmpdir)
-    _selftest_f3_unknown(check, skip, tmpdir, f3ctx)
-    _selftest_direct_proxy(check, skip, tmpdir, f3ctx)
-    _selftest_f4_strict_supervision(check, skip, tmpdir)
-    _selftest_b9_identity(check, skip, tmpdir)
-
+def _selftest_workload_args(check, skip, tmpdir):
     # ---- W (alumina-eryh): e2-micro steady/storm workload surface ----
     # VM-dependent coverage: the storm and 1gbps END-TO-END paths (real proxy
     # CONNECT/admit/DNS/teardown inside the harness container) are excluded from
@@ -3271,6 +3225,8 @@ def run_selftest(tmpdir):
           "validate=%r" % (_workload_validate(ns2),))
     ns2.session_frames_min, ns2.session_frames_max = 4, 16
 
+
+def _selftest_workload_cap(check, skip, tmpdir):
     # outstanding-cap override flows into the steady engine and its report
     mk = _mk_run()
     a_ov = mk[0].args
@@ -3304,6 +3260,8 @@ def run_selftest(tmpdir):
               r_cap.counts["admitted"]["measure"], r_cap.outstanding,
               r_cap.counts["backpressure"]["measure"]))
 
+
+def _selftest_storm(check, skip, tmpdir):
     # storm scheduling anchored to warmup_end at arrival_rate
     sw = argparse.Namespace(
         workload="storm", mode="via-proxy", target_addr=("127.0.0.1", 8080),
@@ -3351,7 +3309,10 @@ def run_selftest(tmpdir):
     check("w-storm-session-frame-bounds",
           sess.nframes == nframes and len(sess.to_send) == nframes * FRAME_SIZE,
           "nframes=%d sent_bytes=%d" % (sess.nframes, len(sess.to_send)))
+    return sw
 
+
+def _selftest_storm_interest(check, skip, tmpdir, sw):
     # RETRO REGRESSION (review WS-B): a session in recv+want==w MUST get WRITE
     # interest registered by _sync_interest so a TLS write-wait under recv
     # cannot stall to session_errors/timeout. Mirrors the steady _interest
@@ -3380,6 +3341,9 @@ def run_selftest(tmpdir):
         with contextlib.suppress(KeyError, ValueError):
             srw.sel.unregister(pa)
         pa.close()
+
+
+def _selftest_storm_accounting(check, skip, tmpdir, sw):
     # accounting identity: established + deferred + failed + unaccounted ====
     # arrivals_planned, where deferred = cap-blocked arrivals never started and
     # unaccounted = started-but-never-resolved. 200 started / 100 cap-deferred;
@@ -3403,6 +3367,14 @@ def run_selftest(tmpdir):
               sa_report["storm"]["unaccounted"],
               sa_report["storm"]["setup_failures"]))
 
+
+def _e6_tcp_soa_ok(tcp_pt):
+    return (tcp_pt is not None and len(tcp_pt) >= 12 and
+            int.from_bytes(tcp_pt[6:8], "big") == 0 and
+            int.from_bytes(tcp_pt[8:10], "big") >= 1)
+
+
+def _selftest_e6_dns(check, skip, tmpdir):
     # --- E6 (bench-suite-20261027): DNS responder serves UDP (glibc
     # getaddrinfo used by Envoy/HAProxy forward proxying) AND TCP (alumina's
     # own resolver) on the same port. TDD: the .port + UDP assertions are the
@@ -3435,16 +3407,67 @@ def run_selftest(tmpdir):
             check("e6-dns-tcp-answer", _dns_a_answer_ips(tcp_a) == ["8.8.8.8"],
                   "resp=%r addrs=%r" % (tcp_a, _dns_a_answer_ips(tcp_a)))
             tcp_pt = _dns_tcp_query(("127.0.0.1", port), qname_literal(b"example.com"), qtype=16)
-            check("e6-dns-tcp-covering-soa",
-                  tcp_pt is not None and len(tcp_pt) >= 12 and
-                  int.from_bytes(tcp_pt[6:8], "big") == 0 and
-                  int.from_bytes(tcp_pt[8:10], "big") >= 1,
+            check("e6-dns-tcp-covering-soa", _e6_tcp_soa_ok(tcp_pt),
                   "resp-len=%r" % (len(tcp_pt) if tcp_pt is not None else None))
         finally:
             with contextlib.suppress(OSError):
                 dns.sock.close()
                 dns.udpsock.close()
             dns_thread.join(timeout=2.0)
+
+
+def run_selftest(tmpdir):
+    if not os.path.isdir(tmpdir):
+        os.makedirs(tmpdir, exist_ok=True)
+    checks = []
+
+    def check(name, cond, detail=""):
+        checks.append((name, "PASS" if cond else "FAIL", detail))
+
+    def skip(name, detail=""):
+        checks.append((name, "SKIP", detail))
+
+    # TLS-1.3-load-bearing sections need a TLS1.3-capable ssl backend. On hosts
+    # without it (e.g. macOS system Python / LibreSSL) they are reported SKIP
+    # with the capability reason and run fully inside the OpenSSL3 bench
+    # container; a SKIP is never disguised as a PASS and never counts as FAIL.
+    tls13_ok = bool(getattr(ssl, "HAS_TLSv1_3", False))
+    tls13_reason = "host ssl %s lacks TLS 1.3 support; runs in bench container" % (
+        ssl.OPENSSL_VERSION)
+    tls13 = (tls13_ok, tls13_reason)
+
+    _selftest_clean(check, skip, tmpdir, tls13)
+    _selftest_preamble(check, skip, tmpdir, tls13)
+    _selftest_corruption(check, skip, tmpdir, tls13)
+    _selftest_swallow(check, skip, tmpdir, tls13)
+    _selftest_histogram(check, skip, tmpdir)
+    _selftest_b1_readiness(check, skip, tmpdir)
+    _selftest_b1_admission(check, skip, tmpdir)
+    _selftest_b2_dispatch_cutoff(check, skip, tmpdir)
+    _selftest_b2_window_end(check, skip, tmpdir)
+    _selftest_b3_echo_eligibility(check, skip, tmpdir)
+    _selftest_b3_partial_terminal(check, skip, tmpdir)
+    _selftest_b4_send_ts(check, skip, tmpdir)
+    _selftest_b4_recv_completion(check, skip, tmpdir)
+    _selftest_b5_warmup(check, skip, tmpdir, tls13)
+    _selftest_b6_cpu_unknown(check, skip, tmpdir)
+    _selftest_b7_setup_deadline(check, skip, tmpdir)
+    _selftest_b8_shell_supervision(check, skip, tmpdir)
+    _selftest_f1_cutoff_direction(check, skip, tmpdir)
+    _selftest_f1_discard_frame(check, skip, tmpdir)
+    _selftest_f2_terminal_classification(check, skip, tmpdir)
+    _selftest_f2_trysend_drain(check, skip, tmpdir)
+    f3ctx = _selftest_f3_aperture(check, skip, tmpdir)
+    _selftest_f3_unknown(check, skip, tmpdir, f3ctx)
+    _selftest_direct_proxy(check, skip, tmpdir, f3ctx)
+    _selftest_f4_strict_supervision(check, skip, tmpdir)
+    _selftest_b9_identity(check, skip, tmpdir)
+    _selftest_workload_args(check, skip, tmpdir)
+    _selftest_workload_cap(check, skip, tmpdir)
+    sw = _selftest_storm(check, skip, tmpdir)
+    _selftest_storm_interest(check, skip, tmpdir, sw)
+    _selftest_storm_accounting(check, skip, tmpdir, sw)
+    _selftest_e6_dns(check, skip, tmpdir)
 
     ok = all(v != "FAIL" for _, v, _ in checks)
     for name, verdict, detail in checks:
