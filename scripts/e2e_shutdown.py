@@ -449,6 +449,138 @@ class DnsResponder:
             pos += 1 + ln
         return b".".join(labels), pos
 
+    @staticmethod
+    def _read_frame(conn):
+        hdr = conn.recv(2)
+        if len(hdr) != 2:
+            return None
+        qlen = int.from_bytes(hdr, "big")
+        if qlen == 0 or qlen > 65535:
+            return None
+        msg = b""
+        while len(msg) < qlen:
+            chunk = conn.recv(qlen - len(msg))
+            if not chunk:
+                return None
+            msg += chunk
+        return msg
+
+    def _read_query(self, conn):
+        msg = self._read_frame(conn)
+        if msg is None:
+            return None
+        if len(msg) < 12:
+            return None
+        tid = msg[0:2]
+        qdcount = int.from_bytes(msg[4:6], "big")
+        if qdcount != 1:
+            return None
+        qname, qpos = self._read_name(msg, 12)
+        if qname is None:
+            return None
+        qtype = int.from_bytes(msg[qpos:qpos + 2], "big")
+        return tid, qname, qpos, qtype, msg
+
+    def _take_delay(self, session):
+        with self._lock:
+            self.queries += 1
+            if session == 1 and self.delay_first > 0:
+                delay = self.delay_first
+                self.delay_first = 0.0
+            else:
+                delay = 0.0
+        return delay
+
+    def _silent_here(self, silent, qtype, aaaa_served):
+        # Effective per-query silent status. `silent_after_served_aaaa`
+        # serves the startup A exchanges and the FIRST serving AAAA
+        # due-refresh, then accepts+reads but never answers from the
+        # SECOND qtype=28 on -- that sibling is the next-due serving
+        # refresh. Because the retained transport shares session 1 for
+        # every exchange (docs/alumina-proxy.md:603), the switch is
+        # sequence-based here, never a session threshold.
+        if self.silent_after_served_aaaa:
+            return qtype == 28 and aaaa_served
+        return silent
+
+    def _query_gets_no_answer(self, qname, qtype):
+        print(f"DNS-TRACE: query {qname!r} qtype={qtype} t={time.monotonic():.3f} -> SILENT (no answer)", flush=True)
+        # never answer; keep the connection open (a stalled resolver).
+        # The query was read in a silent-zone segment: published as
+        # accepted/queried-and-unanswered DNS. Observation scope only:
+        # any query in the silent-zone segment sets the event (no
+        # per-query qtype/qname assertion); the due-family
+        # expectation comes from the fixture's fixed inputs, not
+        # from this event.
+        self.silent_accept.set()
+        time.sleep(1.0)
+
+    def _note_answered(self, qname):
+        with self._lock:
+            self._answered.add(qname.lower())
+            if not all(k in self._answered for k in self.answers):
+                return False
+            self.completed.set()
+            if self.hold_final and not self._final_held:
+                self._final_held = True
+                return True
+            return False
+
+    def _answer(self, qname, qtype):
+        ip = self.answers.get(qname.lower())
+        if ip is None:
+            # unknown NAME -> NXDOMAIN for any type (whole-name
+            # nonexistence, the runtime's name-wide eviction), never a
+            # fake positive
+            return (b"", 0, 0, b"", 3), False
+        if qtype == 1:
+            rr = qname_literal(qname) + b"\x00\x01\x00\x01"
+            rr += (120).to_bytes(4, "big")
+            rr += (4).to_bytes(2, "big")
+            rr += ip
+            if self._note_answered(qname):
+                self._withhold_final_answer()
+            return (rr, 1, 0, b"", 0), False
+        # existing name, non-A type (the serving AAAA due-refresh:
+        # startup never attempts AAAA, its slot stays due and the
+        # owner's due-refresh re-queries it right after the
+        # listener binds) -- served on the RETAINED startup
+        # connection (docs/alumina-proxy.md:603: the DoT connection
+        # established during the startup window is retained across
+        # serving refreshes and reused -- no rebuild), not on a fresh
+        # serving session. Type-specific absence: NOERROR with zero
+        # answers plus a covering SOA (RFC 2308), so only the
+        # queried family is treated absent and A survives -- never a
+        # whole-name NXDOMAIN. Any served qtype=28 is, by the
+        # fixture's fixed inputs, the post-bind serving due-refresh;
+        # session numbering never discriminates a served refresh
+        # (the retained transport reuses session 1, which is why the
+        # pre-fix `session >= 2` guard could never fire). The
+        # transmitted AAAA answer is the real current-refresh
+        # witness; the event is published below only after sendall
+        # returns (B1).
+        return (b"", 0, 1, soa_record(qname, 300, 60), 0), qtype == 28
+
+    def _withhold_final_answer(self):
+        # Withhold the final answer until the case has delivered a
+        # SIGTERM, so the startup window is provably still resolving
+        # when the signal lands and the settlement recheck must turn
+        # a would-be Full decision into Terminated (no bind).
+        print("DNS-TRACE: holding final answer until released", flush=True)
+        self.final_query_received.set()
+        self.release_final.wait(timeout=10.0)
+
+    @staticmethod
+    def _response(tid, question, answer):
+        rr, ancount, nscount, ns_rr, rcode = answer
+        flags = (0x8000 | 0x0100 | (rcode & 0x0F))
+        hdrw = tid + flags.to_bytes(2, "big")
+        hdrw += (1).to_bytes(2, "big")
+        hdrw += (ancount).to_bytes(2, "big")
+        hdrw += (nscount).to_bytes(2, "big")
+        hdrw += (0).to_bytes(2, "big")
+        return hdrw + question + rr + ns_rr
+
     def _serve(self, conn, session, silent):
         # Per-connection state for `silent_after_served_aaaa`: the FIRST serving
         # AAAA refresh on a serving connection is served (transmission witness
@@ -460,128 +592,20 @@ class DnsResponder:
         try:
             conn.settimeout(5.0)
             while not self._stop:
-                hdr = conn.recv(2)
-                if len(hdr) != 2:
+                query = self._read_query(conn)
+                if query is None:
                     return
-                qlen = int.from_bytes(hdr, "big")
-                if qlen == 0 or qlen > 65535:
-                    return
-                msg = b""
-                while len(msg) < qlen:
-                    chunk = conn.recv(qlen - len(msg))
-                    if not chunk:
-                        return
-                    msg += chunk
-                if len(msg) < 12:
-                    return
-                tid = msg[0:2]
-                qdcount = int.from_bytes(msg[4:6], "big")
-                if qdcount != 1:
-                    return
-                qname, qpos = self._read_name(msg, 12)
-                if qname is None:
-                    return
-                qtype = int.from_bytes(msg[qpos:qpos + 2], "big")
-                with self._lock:
-                    self.queries += 1
-                    if session == 1 and self.delay_first > 0:
-                        delay = self.delay_first
-                        self.delay_first = 0.0
-                    else:
-                        delay = 0.0
-                # Effective per-query silent status. `silent_after_served_aaaa`
-                # serves the startup A exchanges and the FIRST serving AAAA
-                # due-refresh, then accepts+reads but never answers from the
-                # SECOND qtype=28 on -- that sibling is the next-due serving
-                # refresh. Because the retained transport shares session 1 for
-                # every exchange (docs/alumina-proxy.md:603), the switch is
-                # sequence-based here, never a session threshold.
-                silent_here = silent
-                if self.silent_after_served_aaaa:
-                    silent_here = qtype == 28 and aaaa_served
+                tid, qname, qpos, qtype, msg = query
+                delay = self._take_delay(session)
+                silent_here = self._silent_here(silent, qtype, aaaa_served)
                 if delay:
                     time.sleep(delay)
                 if silent_here:
-                    print(f"DNS-TRACE: query {qname!r} qtype={qtype} t={time.monotonic():.3f} -> SILENT (no answer)", flush=True)
-                    # never answer; keep the connection open (a stalled resolver).
-                    # The query was read in a silent-zone segment: published as
-                    # accepted/queried-and-unanswered DNS. Observation scope only:
-                    # any query in the silent-zone segment sets the event (no
-                    # per-query qtype/qname assertion); the due-family
-                    # expectation comes from the fixture's fixed inputs, not
-                    # from this event.
-                    self.silent_accept.set()
-                    time.sleep(1.0)
+                    self._query_gets_no_answer(qname, qtype)
                     continue
                 question = msg[12:qpos + 4]
-                ip = self.answers.get(qname.lower())
-                final_answer = False
-                transmitted_refresh = False
-                if ip is None:
-                    # unknown NAME -> NXDOMAIN for any type (whole-name
-                    # nonexistence, the runtime's name-wide eviction), never a
-                    # fake positive
-                    rr = b""
-                    ancount = 0
-                    nscount = 0
-                    ns_rr = b""
-                    rcode = 3
-                elif qtype == 1:
-                    rr = qname_literal(qname) + b"\x00\x01\x00\x01"
-                    rr += (120).to_bytes(4, "big")
-                    rr += (4).to_bytes(2, "big")
-                    rr += ip
-                    ancount = 1
-                    rcode = 0
-                    nscount = 0
-                    ns_rr = b""
-                    with self._lock:
-                        self._answered.add(qname.lower())
-                        if all(k in self._answered for k in self.answers):
-                            self.completed.set()
-                            if self.hold_final and not self._final_held:
-                                self._final_held = True
-                                final_answer = True
-                else:
-                    # existing name, non-A type (the serving AAAA due-refresh:
-                    # startup never attempts AAAA, its slot stays due and the
-                    # owner's due-refresh re-queries it right after the
-                    # listener binds) -- served on the RETAINED startup
-                    # connection (docs/alumina-proxy.md:603: the DoT connection
-                    # established during the startup window is retained across
-                    # serving refreshes and reused -- no rebuild), not on a fresh
-                    # serving session. Type-specific absence: NOERROR with zero
-                    # answers plus a covering SOA (RFC 2308), so only the
-                    # queried family is treated absent and A survives -- never a
-                    # whole-name NXDOMAIN. Any served qtype=28 is, by the
-                    # fixture's fixed inputs, the post-bind serving due-refresh;
-                    # session numbering never discriminates a served refresh
-                    # (the retained transport reuses session 1, which is why the
-                    # pre-fix `session >= 2` guard could never fire). The
-                    # transmitted AAAA answer is the real current-refresh
-                    # witness; the event is published below only after sendall
-                    # returns (B1).
-                    rr = b""
-                    ancount = 0
-                    rcode = 0
-                    nscount = 1
-                    ns_rr = soa_record(qname, 300, 60)
-                    transmitted_refresh = qtype == 28
-                if final_answer:
-                    # Withhold the final answer until the case has delivered a
-                    # SIGTERM, so the startup window is provably still resolving
-                    # when the signal lands and the settlement recheck must turn
-                    # a would-be Full decision into Terminated (no bind).
-                    print("DNS-TRACE: holding final answer until released", flush=True)
-                    self.final_query_received.set()
-                    self.release_final.wait(timeout=10.0)
-                flags = (0x8000 | 0x0100 | (rcode & 0x0F))
-                hdrw = tid + flags.to_bytes(2, "big")
-                hdrw += (1).to_bytes(2, "big")
-                hdrw += (ancount).to_bytes(2, "big")
-                hdrw += (nscount).to_bytes(2, "big")
-                hdrw += (0).to_bytes(2, "big")
-                resp = hdrw + question + rr + ns_rr
+                answer, transmitted_refresh = self._answer(qname, qtype)
+                resp = self._response(tid, question, answer)
                 print(f"DNS-TRACE: query {qname!r} qtype={qtype} t={time.monotonic():.3f} -> TX {resp.hex()}", flush=True)
                 conn.sendall(len(resp).to_bytes(2, "big") + resp)
                 if transmitted_refresh:
@@ -1149,6 +1173,50 @@ def establish_relay(host, timeout=8.0):
         return None
 
 
+def close_relay(s):
+    if s is not None:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def open_relay_tunnel(proc, name, host, stream):
+    s = None
+    try:
+        s = socket.create_connection(PROXY, timeout=6.0)
+        send_connect(s, host)
+        ok, head = recv_head_exact_200(s)
+        if not ok:
+            s.close()
+            proc.kill(); proc.wait()
+            fail(name, "early-drain relay never got CONNECT 200")
+            return None, b""
+        seed = b""
+        if b"\r\n\r\n" in head:
+            seed = head.split(b"\r\n\r\n", 1)[1]
+        s.sendall(stream)
+        return s, seed
+    except OSError as exc:
+        close_relay(s)
+        proc.kill(); proc.wait()
+        fail(name, f"early-drain relay CONNECT/send failed: {exc}")
+        return None, b""
+
+
+def early_drain_stage(name, log):
+    proc = spawn_binary(stdout_target=log, stderr_target=log)
+    if not require_reachable(name, proc):
+        return None
+    full = client_hello("drain.example.org")
+    payload = bytes((i * 7) % 256 for i in range(512))
+    full += payload
+    s, seed = open_relay_tunnel(proc, name, "drain.example.org", full)
+    if s is None:
+        return None
+    return proc, s, seed, full
+
+
 def case_early_drain(fixtures):
     """One established relay carrying a byte-exact hello+payload stream through
     EOF. A CONNECT 200 is confirmed, then the full hello+payload tunnel stream
@@ -1168,36 +1236,10 @@ def case_early_drain(fixtures):
     log = open_case_log(name)
     s = None
     try:
-        proc = spawn_binary(stdout_target=log, stderr_target=log)
-        if not require_reachable(name, proc):
+        staged = early_drain_stage(name, log)
+        if staged is None:
             return
-        full = client_hello("drain.example.org")
-        payload = bytes((i * 7) % 256 for i in range(512))
-        full += payload
-        seed = b""
-        try:
-            s = socket.create_connection(PROXY, timeout=6.0)
-            send_connect(s, "drain.example.org")
-            ok, head = recv_head_exact_200(s)
-            if not ok:
-                s.close()
-                s = None
-                proc.kill(); proc.wait()
-                fail(name, "early-drain relay never got CONNECT 200")
-                return
-            if b"\r\n\r\n" in head:
-                seed = head.split(b"\r\n\r\n", 1)[1]
-            s.sendall(full)
-        except OSError as exc:
-            if s is not None:
-                try:
-                    s.close()
-                except OSError:
-                    pass
-                s = None
-            proc.kill(); proc.wait()
-            fail(name, f"early-drain relay CONNECT/send failed: {exc}")
-            return
+        proc, s, seed, full = staged
         t0 = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
         # client half-close right after the signal: the relay drains and closes
@@ -1221,11 +1263,7 @@ def case_early_drain(fixtures):
         else:
             pass_(name, f"real relay stream (upstream echo of the full stream through a Relay-stage tunnel) drained byte-exact through EOF after SIGTERM -> exit 0 in {elapsed:.2f}s")
     finally:
-        if s is not None:
-            try:
-                s.close()
-            except OSError:
-                pass
+        close_relay(s)
         log.close()
 
 
@@ -1291,6 +1329,91 @@ def case_forced_repeat_noadmit(fixtures):
         log.close()
 
 
+def prefill_stalled_pipe(name):
+    r, w = os.pipe()
+    fcntl.fcntl(w, fcntl.F_SETPIPE_SZ, 4096)
+    cap = fcntl.fcntl(w, fcntl.F_GETPIPE_SZ)
+    if PRESWITCH_BYTES >= cap:
+        os.close(w)
+        os.close(r)
+        fail(name, f"SHUTDOWN_PRESWITCH_BYTES={PRESWITCH_BYTES} >= pipe capacity {cap}: headroom would make the prefill empty, refusing an ambiguous stall")
+        return None
+    prefill = max(0, cap - PRESWITCH_BYTES)
+    os.write(w, b"x" * prefill)
+    # reserve a probe write end: after startup this supervised nonblocking
+    # writer fills the pipe to genuine full occupancy (EAGAIN), so the
+    # retained pipe stays full for the whole shutdown interval.
+    w_probe = os.dup(w)
+    fcntl.fcntl(w_probe, fcntl.F_SETFL, os.O_NONBLOCK)
+    return r, w, w_probe, cap
+
+
+def fill_pipe_to_full(name, proc, w_probe, cap):
+    # fill the retained pipe to EXACT full occupancy: a 4096-byte
+    # nonblocking write EAGAINs whenever fewer than 4096 bytes are free
+    # (a partial pipe still accepting a small record), so the 4096-fill
+    # alone only proves a headroom below 4096. Prove no single-byte
+    # headroom remains by draining free space with nonblocking one-byte
+    # writes to EAGAIN - the only authoritative exact-capacity signal.
+    saw_eagain = False
+    filled = 0
+    for _ in range(128):
+        try:
+            filled += os.write(w_probe, b"x" * 4096)
+        except BlockingIOError:
+            saw_eagain = True
+            break
+    if not saw_eagain:
+        proc.kill(); proc.wait()
+        fail(name, f"retained pipe never reached the 4096-fill EAGAIN (capacity {cap}); stall not genuine ({filled} probe bytes accepted)")
+        return None
+    one_filled = 0
+    for _ in range(PRESWITCH_BYTES + 2):
+        try:
+            os.write(w_probe, b"x")
+            one_filled += 1
+        except BlockingIOError:
+            return filled, one_filled
+    proc.kill(); proc.wait()
+    fail(name, f"retained pipe not at exact full occupancy: a single-byte nonblocking write still succeeded after the 4096-fill EAGAIN ({filled}+{one_filled} bytes against capacity {cap}); stall not genuine")
+    return None
+
+
+def close_pipe_ends(*fds):
+    for fd in fds:
+        if fd is not None:
+            os.close(fd)
+
+
+def stalled_stdout_stage(name, silent, errlog):
+    prefilled = prefill_stalled_pipe(name)
+    if prefilled is None:
+        return None
+    r, w, w_probe, cap = prefilled
+    proc = spawn_binary(stdout_target=w, stderr_target=errlog)
+    os.close(w)
+    if not require_reachable(name, proc):
+        close_pipe_ends(w_probe, r)
+        return None
+    s = establish_relay("force.example.org")
+    if s is None:
+        proc.kill(); proc.wait(); fail(name, "could not establish stalled relay")
+        close_pipe_ends(w_probe, r)
+        return None
+    time.sleep(0.3)
+    if silent.bytes_received() == 0:
+        proc.kill(); proc.wait(); fail(name, "no hello bytes upstream (relay not established)")
+        close_relay(s)
+        close_pipe_ends(w_probe, r)
+        return None
+    occupancy = fill_pipe_to_full(name, proc, w_probe, cap)
+    if occupancy is None:
+        close_relay(s)
+        close_pipe_ends(w_probe, r)
+        return None
+    return s, proc, w_probe, r, cap, occupancy
+
+
 def case_stalled_stdout(fixtures):
     """Stalled relay + stdout backed into a GENUINELY FULL 4 KiB pipe (the
     driver never reads it): after startup a supervised nonblocking writer fills
@@ -1307,63 +1430,14 @@ def case_stalled_stdout(fixtures):
     silent = SilentUpstream(("208.67.222.220", 443)).start()
     fixtures.append(silent)
     errlog = open_case_log(name, ".stderr.log")
-    r = w = w_probe = None
+    r = w_probe = None
     s = None
     try:
-        r, w = os.pipe()
-        fcntl.fcntl(w, fcntl.F_SETPIPE_SZ, 4096)
-        cap = fcntl.fcntl(w, fcntl.F_GETPIPE_SZ)
-        if PRESWITCH_BYTES >= cap:
-            fail(name, f"SHUTDOWN_PRESWITCH_BYTES={PRESWITCH_BYTES} >= pipe capacity {cap}: headroom would make the prefill empty, refusing an ambiguous stall")
+        staged = stalled_stdout_stage(name, silent, errlog)
+        if staged is None:
             return
-        prefill = max(0, cap - PRESWITCH_BYTES)
-        os.write(w, b"x" * prefill)
-        # reserve a probe write end: after startup this supervised nonblocking
-        # writer fills the pipe to genuine full occupancy (EAGAIN), so the
-        # retained pipe stays full for the whole shutdown interval.
-        w_probe = os.dup(w)
-        fcntl.fcntl(w_probe, fcntl.F_SETFL, os.O_NONBLOCK)
-        proc = spawn_binary(stdout_target=w, stderr_target=errlog)
-        os.close(w); w = None
-        if not require_reachable(name, proc):
-            return
-        s = establish_relay("force.example.org")
-        if s is None:
-            proc.kill(); proc.wait(); fail(name, "could not establish stalled relay"); return
-        time.sleep(0.3)
-        if silent.bytes_received() == 0:
-            proc.kill(); proc.wait(); fail(name, "no hello bytes upstream (relay not established)"); return
-        # fill the retained pipe to EXACT full occupancy: a 4096-byte
-        # nonblocking write EAGAINs whenever fewer than 4096 bytes are free
-        # (a partial pipe still accepting a small record), so the 4096-fill
-        # alone only proves a headroom below 4096. Prove no single-byte
-        # headroom remains by draining free space with nonblocking one-byte
-        # writes to EAGAIN - the only authoritative exact-capacity signal.
-        saw_eagain = False
-        filled = 0
-        for _ in range(128):
-            try:
-                filled += os.write(w_probe, b"x" * 4096)
-            except BlockingIOError:
-                saw_eagain = True
-                break
-        if not saw_eagain:
-            proc.kill(); proc.wait()
-            fail(name, f"retained pipe never reached the 4096-fill EAGAIN (capacity {cap}); stall not genuine ({filled} probe bytes accepted)")
-            return
-        one_eagain = False
-        one_filled = 0
-        for _ in range(PRESWITCH_BYTES + 2):
-            try:
-                os.write(w_probe, b"x")
-                one_filled += 1
-            except BlockingIOError:
-                one_eagain = True
-                break
-        if not one_eagain:
-            proc.kill(); proc.wait()
-            fail(name, f"retained pipe not at exact full occupancy: a single-byte nonblocking write still succeeded after the 4096-fill EAGAIN ({filled}+{one_filled} bytes against capacity {cap}); stall not genuine")
-            return
+        s, proc, w_probe, r, cap, occupancy = staged
+        filled, one_filled = occupancy
         t0 = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
         rc = bounded_wait(proc, t0 + 12.5, name)
@@ -1379,17 +1453,8 @@ def case_stalled_stdout(fixtures):
         else:
             pass_(name, f"exactly full stdout pipe (nonblocking single-byte write EAGAIN after {filled}+{one_filled} probe bytes against capacity {cap}) did not delay shutdown: forced exit 70 in {elapsed:.2f}s within the first-deadline window")
     finally:
-        if s is not None:
-            try:
-                s.close()
-            except OSError:
-                pass
-        if w is not None:
-            os.close(w)
-        if w_probe is not None:
-            os.close(w_probe)
-        if r is not None:
-            os.close(r)
+        close_relay(s)
+        close_pipe_ends(w_probe, r)
         errlog.close()
 
 
