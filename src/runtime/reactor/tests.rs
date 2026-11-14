@@ -141,6 +141,47 @@ fn read_until(stream: &mut TcpStream, marker: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Reads the last log record as the reject record for `reason`, asserting the
+/// record kind and reason, and returns the record text so the caller can pin
+/// the fields it owns (requested hostname, ordinals, and so on).
+fn last_reject_record(serving: &Serving, reason: &str) -> String {
+    let record = serving
+        .storage()
+        .logs()
+        .last_record_bytes()
+        .expect("reject record");
+    let text = String::from_utf8_lossy(record).into_owned();
+    let needle = format!("reason=\"{reason}\"");
+    assert!(
+        text.contains("kind=reject") && text.contains(&needle),
+        "the {reason} refusal must emit a reject record: {text}"
+    );
+    text
+}
+
+/// Connects one client, pumps `times` owner turns, and asserts it holds exactly
+/// one admitted setup seat; returns the client for the caller's exchange.
+fn admitted_client(serving: &mut Serving, port: u16, times: usize) -> TcpStream {
+    let client = connect(port);
+    pump(serving, times);
+    assert_eq!(
+        serving.storage().occupied(),
+        1,
+        "the connecting client must be admitted"
+    );
+    client
+}
+
+/// Feeds one complete CONNECT head into `slot`'s parser, asserting the head
+/// parses to completion.
+fn feed_connect_head(serving: &mut Serving, slot: usize, head: &[u8]) {
+    use crate::inspection::connect::Feed;
+    match serving.slots[slot].parser.feed(head).expect("head feed") {
+        Feed::Complete { .. } => {}
+        Feed::Incomplete => panic!("head should parse to completion"),
+    }
+}
+
 /// Puts the slot into an open-gate relay with a typed head/hello boundary,
 /// so focused relay tests can drive real sockets through the actual owner.
 fn open_relay(serving: &mut Serving, index: usize) {
@@ -7435,16 +7476,7 @@ mod enforcement {
     }
 
     fn assert_forbidden_refusal_record(serving: &Serving, blocked: DomainOrdinal) {
-        let record = serving
-            .storage()
-            .logs()
-            .last_record_bytes()
-            .expect("Forbidden reject record");
-        let text = String::from_utf8_lossy(record);
-        assert!(
-            text.contains("kind=reject") && text.contains("reason=\"forbidden\""),
-            "the Forbidden refusal must emit a reject record: {text}"
-        );
+        let text = last_reject_record(serving, "forbidden");
         assert!(
             text.contains("hostname=\"a.example\""),
             "the Forbidden reject record must carry the requested hostname: {text}"
