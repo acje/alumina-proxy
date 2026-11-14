@@ -1139,6 +1139,132 @@ enum RescheduleArm {
     Both,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DialProbe {
+    Skipped,
+    Pending,
+    Failed,
+    Connected,
+}
+
+fn dial_probe(serving: &Serving, index: usize) -> DialProbe {
+    if serving.slots[index].stage != Stage::Dialing {
+        return DialProbe::Skipped;
+    }
+    match serving.upstream_connectedness(index) {
+        ConnectState::Pending => DialProbe::Pending,
+        ConnectState::Failed => DialProbe::Failed,
+        ConnectState::Connected => DialProbe::Connected,
+    }
+}
+
+fn live_slot_token(serving: &Serving, raw: usize, local: usize) -> Option<(usize, bool)> {
+    let upstream = local >= UPSTREAM_BASE;
+    let index = if upstream {
+        local - UPSTREAM_BASE
+    } else {
+        local - 1
+    };
+    if index >= serving.slots.len() {
+        return None;
+    }
+    if decode_generation(raw, GEN_BITS) != serving.slots[index].slot_gen {
+        return None;
+    }
+    Some((index, upstream))
+}
+
+fn upstream_error_read(
+    serving: &mut Serving,
+    index: usize,
+    ready: Readiness,
+) -> Result<bool, ServeError> {
+    if !ready.readable || serving.slots[index].gate.is_open() {
+        return Ok(true);
+    }
+    if !serving.enter_visit(index, RescheduleArm::Upstream) {
+        return Ok(false);
+    }
+    serving.upstream_readable(index)?;
+    Ok(serving.slots[index].stage != Stage::Idle && !serving.visit.exhausted())
+}
+
+fn dispatch_error_arm(
+    serving: &mut Serving,
+    index: usize,
+    upstream: bool,
+    ready: Readiness,
+) -> Result<(), ServeError> {
+    if !upstream {
+        serving.close_slot(index);
+        return Ok(());
+    }
+    let probe = dial_probe(serving, index);
+    if probe == DialProbe::Pending {
+        return Ok(());
+    }
+    if probe == DialProbe::Failed {
+        return serving.fail_current_attempt(index);
+    }
+    if !upstream_error_read(serving, index, ready)? {
+        return Ok(());
+    }
+    if probe == DialProbe::Connected {
+        return serving.upstream_writable(index);
+    }
+    serving.close_slot(index);
+    Ok(())
+}
+
+fn dispatch_upstream_ready(
+    serving: &mut Serving,
+    index: usize,
+    ready: Readiness,
+) -> Result<(), ServeError> {
+    if ready.readable || ready.read_closed || ready.write_closed {
+        serving.upstream_readable(index)?;
+    }
+    if ready.writable {
+        serving.upstream_writable(index)?;
+    }
+    Ok(())
+}
+
+fn dispatch_client_ready(
+    serving: &mut Serving,
+    index: usize,
+    ready: Readiness,
+) -> Result<(), ServeError> {
+    if ready.readable || ready.read_closed {
+        serving.client_readable(index)?;
+    }
+    if ready.writable {
+        serving.client_writable(index)?;
+    }
+    Ok(())
+}
+
+fn dispatch_ready_arm(
+    serving: &mut Serving,
+    index: usize,
+    upstream: bool,
+    ready: Readiness,
+) -> Result<(), ServeError> {
+    let arm = if upstream {
+        RescheduleArm::Upstream
+    } else {
+        RescheduleArm::Client
+    };
+    if !serving.enter_visit(index, arm) {
+        return Ok(());
+    }
+    if upstream {
+        dispatch_upstream_ready(serving, index, ready)
+    } else {
+        dispatch_client_ready(serving, index, ready)
+    }
+}
+
 impl Serving {
     /// Builds the loop's retained serving workspaces over boot-completed
     /// storage and the boot-owned traffic store, moving the retained per-slot
@@ -1673,71 +1799,13 @@ impl Serving {
         if local == SIGNAL_LOCAL {
             return self.on_sigterm();
         }
-        let event_gen = decode_generation(raw, GEN_BITS);
-        let upstream = local >= UPSTREAM_BASE;
-        let index = if upstream {
-            local - UPSTREAM_BASE
-        } else {
-            local - 1
+        let Some((index, upstream)) = live_slot_token(self, raw, local) else {
+            return Ok(());
         };
-        if index >= self.slots.len() {
-            return Ok(());
-        }
-        if event_gen != self.slots[index].slot_gen {
-            return Ok(());
-        }
         if ready.error {
-            let dial_connected = if upstream && self.slots[index].stage == Stage::Dialing {
-                match self.upstream_connectedness(index) {
-                    ConnectState::Pending => return Ok(()),
-                    ConnectState::Failed => return self.fail_current_attempt(index),
-                    ConnectState::Connected => true,
-                }
-            } else {
-                false
-            };
-            if upstream && ready.readable && !self.slots[index].gate.is_open() {
-                if !self.enter_visit(index, RescheduleArm::Upstream) {
-                    return Ok(());
-                }
-                self.upstream_readable(index)?;
-                if self.slots[index].stage == Stage::Idle || self.visit.exhausted() {
-                    return Ok(());
-                }
-            }
-            if dial_connected {
-                return self.upstream_writable(index);
-            }
-            self.close_slot(index);
-            return Ok(());
+            return dispatch_error_arm(self, index, upstream, ready);
         }
-
-        if !self.enter_visit(
-            index,
-            if upstream {
-                RescheduleArm::Upstream
-            } else {
-                RescheduleArm::Client
-            },
-        ) {
-            return Ok(());
-        }
-        if upstream {
-            if ready.readable || ready.read_closed || ready.write_closed {
-                self.upstream_readable(index)?;
-            }
-            if ready.writable {
-                self.upstream_writable(index)?;
-            }
-        } else {
-            if ready.readable || ready.read_closed {
-                self.client_readable(index)?;
-            }
-            if ready.writable {
-                self.client_writable(index)?;
-            }
-        }
-        Ok(())
+        dispatch_ready_arm(self, index, upstream, ready)
     }
 
     /// Opens (or joins) `index`'s complete-visit budget for the current poll
