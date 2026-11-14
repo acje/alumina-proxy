@@ -1,24 +1,13 @@
 use super::*;
 use crate::config::ALLOWLIST_MAX;
 
-fn any_controls(kind: ActionKind, scope: Scope) -> [Control; AnyIllegalControl::COUNT] {
-    [Control::new(kind, scope); AnyIllegalControl::COUNT]
-}
-
-fn per_fqdn(actions: &[(ActionKind, Scope)]) -> Vec<PerFqdnControl> {
-    actions
-        .iter()
-        .map(|&(kind, scope)| PerFqdnControl::control(kind, scope))
-        .collect()
-}
-
-fn table(
-    any: [Control; AnyIllegalControl::COUNT],
-    early: &[(ActionKind, Scope)],
-    ja4: &[(ActionKind, Scope)],
-) -> ControlTable {
-    ControlTable::new(any, &per_fqdn(early), &per_fqdn(ja4)).expect("in-bound test table")
-}
+#[expect(
+    clippy::duplicate_mod,
+    reason = "one physical owner is included by several test modules in this crate"
+)]
+#[path = "../../../tests/support/enforcement_tables.rs"]
+mod enforcement_tables;
+use enforcement_tables::{any_controls, table};
 
 fn any(cause: AnyIllegalCause) -> Violation {
     Violation::AnyIllegal { cause }
