@@ -551,8 +551,12 @@ fn assert_hot_relay_stalled_dns(progress: &HotProgress, high_water: u16) {
 fn assert_hot_relay_lanes(progress: &HotProgress, tails: &[Vec<u8>], per_slot: usize) {
     let per_slot_kib = per_slot / 1024;
     let visits_per_slot = per_slot.div_ceil(64 * 1024);
-    for i in 0..HOT_SLOTS {
-        let tail = &tails[i];
+    assert_eq!(
+        tails.len(),
+        HOT_SLOTS,
+        "the witness must carry one tail per hot slot, so every hot lane is actually checked"
+    );
+    for (i, tail) in tails.iter().enumerate() {
         assert!(
             (1..=i32::try_from(HOT_SLOTS).expect("HOT_SLOTS fits i32"))
                 .contains(&progress.second_visit_turn[i]),
@@ -3107,7 +3111,8 @@ mod startup_warning {
             .expect("boot-status config parses")
             .with_kernel_assigned_test_listener();
         let mut storage = ServeStorage::boot(&config).expect("boot storage");
-        for ordinal in 0..1 + usize::from(mode == ServingMode::Full) {
+        let count = 1 + usize::from(mode == ServingMode::Full);
+        for ordinal in 0..count {
             let name = storage.cache().name_index(ordinal).expect("ordinal");
             let staged = StagedPositive::stage(
                 name,
@@ -3126,7 +3131,21 @@ mod startup_warning {
         writer.set_nonblocking(true).expect("nonblocking writer");
         *storage.logs_mut() = crate::log::LogStore::with_fd(&writer).expect("log sink");
         let addr = SocketAddr::from(([127, 0, 0, 1], 9));
-        let outcome = if cooperative {
+        let outcome = run_startup_observing_assurance(cooperative, storage, addr);
+        assert_eq!(outcome.decision(), StartupDecision::Serve(mode));
+        assert_boot_status_frames(&mut reader, mode);
+    }
+
+    /// Runs the startup decision over `storage` — through the preallocated owner
+    /// on the cooperative path — and confirms every configured assurance slot
+    /// observes the decision as unchanged.
+    #[cfg(feature = "alloc-witness")]
+    fn run_startup_observing_assurance(
+        cooperative: bool,
+        mut storage: ServeStorage,
+        addr: SocketAddr,
+    ) -> StartupOutcome {
+        if cooperative {
             let traffic = crate::inventory::TrafficStorage::allocate().expect("traffic");
             let mut owner = Preallocated::preallocate(storage, traffic).expect("owner");
             let outcome = owner
@@ -3155,9 +3174,7 @@ mod startup_warning {
                 );
             }
             outcome
-        };
-        assert_eq!(outcome.decision(), StartupDecision::Serve(mode));
-        assert_boot_status_frames(&mut reader, mode);
+        }
     }
 
     #[cfg(feature = "alloc-witness")]
