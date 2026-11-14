@@ -416,17 +416,11 @@ mod record_encoding {
 mod startup_records {
     use super::*;
 
-    #[test]
-    fn logging_startup_split_records_fit_widest_legal_config() {
-        use crate::config::{ALLOWLIST_MAX, CONFIG_DOC_LIMIT};
+    /// Enqueue one `startup_name` record per allowlist entry, assert none is
+    /// dropped, commit the split summary, and return the flushed sink bytes.
+    fn widest_startup_output(config: &crate::config::Config) -> Vec<u8> {
+        use crate::config::ALLOWLIST_MAX;
         use crate::dns::outcome::{NameOutcome, NotAttemptedReason};
-        let (config, doc) = widest_legal_config();
-        assert!(
-            doc.len() <= CONFIG_DOC_LIMIT,
-            "widest legal config fits the documented 16384-byte bound: {}",
-            doc.len()
-        );
-        assert_eq!(config.allowlist().len(), ALLOWLIST_MAX);
         let (mut store, mut file) = file_logstore();
         for (ordinal, name) in config.allowlist().iter().enumerate() {
             assert!(
@@ -457,17 +451,13 @@ mod startup_records {
             "no size-drop for the widest legal configuration"
         );
         flush_all(&mut store);
-        let out = read_all(&mut file);
-        let records: Vec<&[u8]> = out
-            .split(|&b| b == b'\n')
-            .filter(|s| !s.is_empty())
-            .collect();
-        assert_eq!(
-            records.len(),
-            ALLOWLIST_MAX + 1,
-            "one startup_name record per unresolved name, then the summary"
-        );
-        for (ordinal, record) in records.iter().enumerate().take(ALLOWLIST_MAX) {
+        read_all(&mut file)
+    }
+
+    /// Each per-name record is its own bounded `startup_name` record carrying
+    /// the untruncated FQDN.
+    fn assert_startup_name_records(records: &[&[u8]], config: &crate::config::Config) {
+        for (ordinal, record) in records.iter().enumerate() {
             assert!(
                 record.len() < SLOT_BYTES,
                 "per-name record {ordinal} incl framing fits the 2 KiB entry: {}",
@@ -483,6 +473,29 @@ mod startup_records {
                 "the full 253-byte FQDN is carried untruncated: {text}"
             );
         }
+    }
+
+    #[test]
+    fn logging_startup_split_records_fit_widest_legal_config() {
+        use crate::config::{ALLOWLIST_MAX, CONFIG_DOC_LIMIT};
+        let (config, doc) = widest_legal_config();
+        assert!(
+            doc.len() <= CONFIG_DOC_LIMIT,
+            "widest legal config fits the documented 16384-byte bound: {}",
+            doc.len()
+        );
+        assert_eq!(config.allowlist().len(), ALLOWLIST_MAX);
+        let out = widest_startup_output(&config);
+        let records: Vec<&[u8]> = out
+            .split(|&b| b == b'\n')
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(
+            records.len(),
+            ALLOWLIST_MAX + 1,
+            "one startup_name record per unresolved name, then the summary"
+        );
+        assert_startup_name_records(&records[..ALLOWLIST_MAX], &config);
         let summary = records[ALLOWLIST_MAX];
         assert!(
             summary.starts_with(b"level=info kind=startup_final "),
@@ -2066,6 +2079,26 @@ mod monitor_records {
         );
     }
 
+    /// The `part=n/total` markers of every record of `kind`, sorted so the
+    /// assertion does not depend on emission order.
+    fn sorted_part_markers<'a>(lines: &[&'a str], kind: &str) -> Vec<&'a str> {
+        let header = format!("level=info kind={kind} ");
+        let mut parts: Vec<&str> = lines
+            .iter()
+            .filter(|line| line.starts_with(&header))
+            .map(|line| {
+                line.split(" part=")
+                    .nth(1)
+                    .expect("part field")
+                    .split(' ')
+                    .next()
+                    .expect("part token")
+            })
+            .collect();
+        parts.sort_unstable();
+        parts
+    }
+
     #[test]
     fn logging_monitor_family_each_record_fits_monitor_record_max() {
         use crate::enforcement::monitor::Monitor;
@@ -2107,37 +2140,13 @@ mod monitor_records {
             captures, 3,
             "64 saturated details pack into 3 capture batches"
         );
-        let mut parts: Vec<&str> = lines
-            .iter()
-            .filter(|l| l.starts_with("level=info kind=monitor_domain "))
-            .map(|l| {
-                l.split(" part=")
-                    .nth(1)
-                    .expect("part field")
-                    .split(' ')
-                    .next()
-                    .expect("part token")
-            })
-            .collect();
-        parts.sort_unstable();
+        let parts = sorted_part_markers(&lines, "monitor_domain");
         assert_eq!(
             parts,
             vec!["1/3", "2/3", "3/3"],
             "domain batches carry sequential part=n/total markers"
         );
-        let mut capture_parts: Vec<&str> = lines
-            .iter()
-            .filter(|l| l.starts_with("level=info kind=monitor_capture "))
-            .map(|l| {
-                l.split(" part=")
-                    .nth(1)
-                    .expect("part field")
-                    .split(' ')
-                    .next()
-                    .expect("part token")
-            })
-            .collect();
-        capture_parts.sort_unstable();
+        let capture_parts = sorted_part_markers(&lines, "monitor_capture");
         assert_eq!(
             capture_parts,
             vec!["1/3", "2/3", "3/3"],
@@ -2591,61 +2600,96 @@ mod writev_progress {
     }
 
     #[cfg(feature = "alloc-witness")]
+    struct AllocWitnessInput {
+        v4: SocketAddr,
+        v6: SocketAddr,
+        long: String,
+        unresolved: [StartupUnresolved<'static>; 2],
+    }
+
+    /// Drives every logging path that must stay allocation-free after boot:
+    /// enqueue, oversize drop, ring-overflow drop, and both sink drains.
+    #[cfg(feature = "alloc-witness")]
+    fn drive_alloc_witness_paths(
+        store: &mut LogStore,
+        stdout_store: &mut LogStore,
+        input: &AllocWitnessInput,
+    ) {
+        store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
+        for &un in &input.unresolved {
+            store.startup_name(2, un);
+        }
+        store.startup_final(2, StartupStatus::Failed, FinalCounts::default());
+        store.early_activity(
+            3,
+            Some("sub.example.org"),
+            Some(input.v4),
+            ActivityKind::Data,
+        );
+        store.reject(
+            4,
+            RejectReason::Capacity,
+            Some(input.v4),
+            Some("sub.example.org"),
+        );
+        store.reject(
+            5,
+            RejectReason::DialFailed,
+            Some(input.v6),
+            Some("sub.example.org"),
+        );
+        store.reject(6, RejectReason::TlsValidation, None, None);
+        store.note_capacity(7, 410, 0);
+        store.note_capacity(8, 410, 103);
+        for _ in 0..20 {
+            store.startup_warning_ctx(9, &input.long, Family::A, "timeout", None);
+        }
+        for _ in 0..(QUEUE_SLOTS + 4) {
+            store.startup_warning_ctx(10, "sub.example.org", Family::A, "timeout", None);
+        }
+        for _ in 0..(SINK_MAX_OPS + 4) {
+            store.drain_sink();
+        }
+        for _ in 0..(QUEUE_SLOTS + 4) {
+            stdout_store.startup_warning_ctx(11, "sub.example.org", Family::A, "timeout", None);
+        }
+        for _ in 0..(SINK_MAX_OPS + 4) {
+            stdout_store.drain_sink();
+        }
+    }
+
+    #[cfg(feature = "alloc-witness")]
     #[test]
     fn logging_enqueue_drop_drain_paths_spend_zero_allocations() {
         use crate::alloc::{Phase, run_phase};
         use crate::dns::outcome::{FailureReason, NameOutcome};
-        let v4: SocketAddr = "192.0.2.10:40000".parse().unwrap();
-        let v6: SocketAddr = "[2001:db8::1]:40000".parse().unwrap();
-        let long = "z".repeat(SLOT_BYTES * 2);
-        let unresolved = [
-            StartupUnresolved {
-                ordinal: 0,
-                name: "sub.example.org",
-                outcome: NameOutcome::Failed(FailureReason::Receive),
-            },
-            StartupUnresolved {
-                ordinal: 1,
-                name: "sub.example.org",
-                outcome: NameOutcome::Negative,
-            },
-        ];
+        let input = AllocWitnessInput {
+            v4: "192.0.2.10:40000"
+                .parse()
+                .expect("IPv4 socket address literal"),
+            v6: "[2001:db8::1]:40000"
+                .parse()
+                .expect("IPv6 socket address literal"),
+            long: "z".repeat(SLOT_BYTES * 2),
+            unresolved: [
+                StartupUnresolved {
+                    ordinal: 0,
+                    name: "sub.example.org",
+                    outcome: NameOutcome::Failed(FailureReason::Receive),
+                },
+                StartupUnresolved {
+                    ordinal: 1,
+                    name: "sub.example.org",
+                    outcome: NameOutcome::Negative,
+                },
+            ],
+        };
         let (_, control) = run_phase(Phase::Logging, || 0usize);
         assert!(control.all_zero(), "baseline should be quiet: {control:?}");
         let (mut store, _file) = file_logstore();
         let mut stdout_store = LogStore::new().expect("stdout sink store");
         let ((), counts) = run_phase(Phase::Logging, || {
-            store.startup_warning_ctx(1, "sub.example.org", Family::A, "timeout", None);
-            for un in unresolved {
-                store.startup_name(2, un);
-            }
-            store.startup_final(2, StartupStatus::Failed, FinalCounts::default());
-            store.early_activity(3, Some("sub.example.org"), Some(v4), ActivityKind::Data);
-            store.reject(4, RejectReason::Capacity, Some(v4), Some("sub.example.org"));
-            store.reject(
-                5,
-                RejectReason::DialFailed,
-                Some(v6),
-                Some("sub.example.org"),
-            );
-            store.reject(6, RejectReason::TlsValidation, None, None);
-            store.note_capacity(7, 410, 0);
-            store.note_capacity(8, 410, 103);
-            for _ in 0..20 {
-                store.startup_warning_ctx(9, &long, Family::A, "timeout", None);
-            }
-            for _ in 0..(QUEUE_SLOTS + 4) {
-                store.startup_warning_ctx(10, "sub.example.org", Family::A, "timeout", None);
-            }
-            for _ in 0..(SINK_MAX_OPS + 4) {
-                store.drain_sink();
-            }
-            for _ in 0..(QUEUE_SLOTS + 4) {
-                stdout_store.startup_warning_ctx(11, "sub.example.org", Family::A, "timeout", None);
-            }
-            for _ in 0..(SINK_MAX_OPS + 4) {
-                stdout_store.drain_sink();
-            }
+            drive_alloc_witness_paths(&mut store, &mut stdout_store, &input);
         });
         assert!(
             counts.all_zero(),
