@@ -25,11 +25,11 @@ fn delegated(receipt: u64, ttl: u32) -> Evidence {
         true,
         true,
         true,
-        ResolverSource::index(0).unwrap(),
+        ResolverSource::index(0).expect("resolver source 0 is in bounds"),
         Some(ttl),
         receipt,
     )
-    .unwrap()
+    .expect("a delegated resolver triple is representable evidence")
 }
 
 fn trusted(receipt: u64, ttl: u32) -> Evidence {
@@ -41,7 +41,7 @@ fn trusted(receipt: u64, ttl: u32) -> Evidence {
         Some(ttl),
         receipt,
     )
-    .unwrap()
+    .expect("a trust-first resolver triple is representable evidence")
 }
 
 #[derive(Clone, Copy)]
@@ -73,12 +73,21 @@ fn publish(
         u64::from(ttl),
         evidence,
     )
-    .unwrap();
-    cache.publish_positive(&staged).unwrap();
+    .expect("an in-bounds positive stages against a fresh generation");
+    cache
+        .publish_positive(&staged)
+        .expect("a staged in-bounds positive publishes");
 }
 
 fn a_key(cache: &Cache, now: u64) -> EntryGradeKey {
-    cache.grade_key(cache.name_index(0).unwrap(), now).unwrap()
+    cache
+        .grade_key(
+            cache
+                .name_index(0)
+                .expect("name ordinal 0 exists in the cache"),
+            now,
+        )
+        .expect("a published entry has a grade key")
 }
 
 fn material(before: EntryGradeKey, after: EntryGradeKey) -> bool {
@@ -914,7 +923,10 @@ fn assert_recovery_after_expired_absence(
     marker: &mut EntryGradeMarker,
     expired: EntryGradeKey,
 ) {
-    let generation = cache.entry(name, Family::A).unwrap().generation();
+    let generation = cache
+        .entry(name, Family::A)
+        .expect("the retained A entry exists while its proof expires")
+        .generation();
     publish(
         cache,
         name,
@@ -930,7 +942,10 @@ fn assert_recovery_after_expired_absence(
         "expired proof disappearing is not a fabricated recovery"
     );
     assert!(!marker.observe(expired_then_absent));
-    let generation = cache.entry(name, Family::A).unwrap().generation();
+    let generation = cache
+        .entry(name, Family::A)
+        .expect("the retained A entry survives the expired proof's absence")
+        .generation();
     publish(
         cache,
         name,
