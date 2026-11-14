@@ -2357,25 +2357,15 @@ def _dns_a_answer_ips(resp):
         return []
 
 
-def run_selftest(tmpdir):
-    if not os.path.isdir(tmpdir):
-        os.makedirs(tmpdir, exist_ok=True)
-    checks = []
+def _in_window_echoed_aligned(ivc, m, hist_count):
+    return (ivc["in_window_echoed_frames"] + ivc["drain_echoed_frames"]
+            == m["echoed"] and
+            ivc["in_window_echoed_frames"] == hist_count and
+            ivc["in_window_sent_frames"] == m["sent"])
 
-    def check(name, cond, detail=""):
-        checks.append((name, "PASS" if cond else "FAIL", detail))
 
-    def skip(name, detail=""):
-        checks.append((name, "SKIP", detail))
-
-    # TLS-1.3-load-bearing sections need a TLS1.3-capable ssl backend. On hosts
-    # without it (e.g. macOS system Python / LibreSSL) they are reported SKIP
-    # with the capability reason and run fully inside the OpenSSL3 bench
-    # container; a SKIP is never disguised as a PASS and never counts as FAIL.
-    tls13_ok = bool(getattr(ssl, "HAS_TLSv1_3", False))
-    tls13_reason = "host ssl %s lacks TLS 1.3 support; runs in bench container" % (
-        ssl.OPENSSL_VERSION)
-
+def _selftest_clean(check, skip, tmpdir, tls13):
+    tls13_ok, tls13_reason = tls13
     # 1) clean proxyless byte-exact run: valid, fulfilled, conserved
     if not tls13_ok:
         skip("run-clean", tls13_reason)
@@ -2408,11 +2398,8 @@ def run_selftest(tmpdir):
         check("tls13-latency", rep["latency"]["sched_to_echo"]["count"] > 0)
         ivc = rep["interval_vs_cohort"]
         check("in-window-echoed",
-              ivc["in_window_echoed_frames"] + ivc["drain_echoed_frames"]
-              == m["echoed"] and
-              ivc["in_window_echoed_frames"] ==
-              rep["latency"]["sched_to_echo"]["count"] and
-              ivc["in_window_sent_frames"] == m["sent"],
+              _in_window_echoed_aligned(
+                  ivc, m, rep["latency"]["sched_to_echo"]["count"]),
               "inwin=%d drain=%d echoed=%d hist=%d sent=%d" % (
                   ivc["in_window_echoed_frames"], ivc["drain_echoed_frames"],
                   m["echoed"], rep["latency"]["sched_to_echo"]["count"],
@@ -2422,6 +2409,38 @@ def run_selftest(tmpdir):
               len(rep["identity"]["tool_sha256"]) == 64,
               "tool_sha256=%r" % rep["identity"]["tool_sha256"])
 
+
+def _preamble_probe(be, ctxc):
+    preamble_fail = noeat_fail = None
+    r1 = socket.create_connection(("127.0.0.1", be.port()), timeout=5)
+    r1.settimeout(5)
+    r1.sendall(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+    head = b""
+    while b"\r\n\r\n" not in head:
+        chunk = r1.recv(4096)
+        if not chunk:
+            break
+        head += chunk
+    if head != b"HTTP/1.1 200 Connection Established\r\n\r\n":
+        preamble_fail = "head %r" % head[:80]
+    else:
+        t1 = ctxc.wrap_socket(r1, server_hostname="example.com")
+        t1.sendall(b"ABA")
+        if t1.recv(4096) != b"ABA":
+            preamble_fail = "echo after preamble failed"
+        t1.close()
+    r2 = socket.create_connection(("127.0.0.1", be.port()), timeout=5)
+    r2.settimeout(5)
+    t2 = ctxc.wrap_socket(r2, server_hostname="example.com")
+    t2.sendall(b"BEE")
+    if t2.recv(4096) != b"BEE":
+        noeat_fail = "plain ClientHello echo failed"
+    t2.close()
+    return preamble_fail, noeat_fail
+
+
+def _selftest_preamble(check, skip, tmpdir, tls13):
+    tls13_ok, tls13_reason = tls13
     # 1b) backend CONNECT-preamble acceptance (relay-model CONNECT forward
     #     proxies such as Envoy proxy_connect and HAProxy http-mode CONNECT
     #     relay the client's request line to the origin before any TLS byte;
@@ -2441,31 +2460,7 @@ def run_selftest(tmpdir):
         ctxc = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctxc.minimum_version = ssl.TLSVersion.TLSv1_3
         ctxc.load_verify_locations(cafile=ca_pem)
-        preamble_fail = noeat_fail = None
-        r1 = socket.create_connection(("127.0.0.1", be.port()), timeout=5)
-        r1.settimeout(5)
-        r1.sendall(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
-        head = b""
-        while b"\r\n\r\n" not in head:
-            chunk = r1.recv(4096)
-            if not chunk:
-                break
-            head += chunk
-        if head != b"HTTP/1.1 200 Connection Established\r\n\r\n":
-            preamble_fail = "head %r" % head[:80]
-        else:
-            t1 = ctxc.wrap_socket(r1, server_hostname="example.com")
-            t1.sendall(b"ABA")
-            if t1.recv(4096) != b"ABA":
-                preamble_fail = "echo after preamble failed"
-            t1.close()
-        r2 = socket.create_connection(("127.0.0.1", be.port()), timeout=5)
-        r2.settimeout(5)
-        t2 = ctxc.wrap_socket(r2, server_hostname="example.com")
-        t2.sendall(b"BEE")
-        if t2.recv(4096) != b"BEE":
-            noeat_fail = "plain ClientHello echo failed"
-        t2.close()
+        preamble_fail, noeat_fail = _preamble_probe(be, ctxc)
         check("preamble-conn", preamble_fail is None, preamble_fail or "")
         check("preamble-noeat", noeat_fail is None,
               "noeat_fail=%r" % (noeat_fail or ""))
@@ -2474,6 +2469,9 @@ def run_selftest(tmpdir):
         be.stop()
         be.join(timeout=5.0)
 
+
+def _selftest_corruption(check, skip, tmpdir, tls13):
+    tls13_ok, tls13_reason = tls13
     # 2) corruption injection -> invalid corruption
     if not tls13_ok:
         skip("corruption-invalid", tls13_reason)
@@ -2487,6 +2485,9 @@ def run_selftest(tmpdir):
         except Exception as exc:  # noqa: BLE001
             check("corruption-invalid", False, "%r" % exc)
 
+
+def _selftest_swallow(check, skip, tmpdir, tls13):
+    tls13_ok, tls13_reason = tls13
     # 3) swallow after seq -> invalid missing-bytes
     if not tls13_ok:
         skip("swallow-invalid", tls13_reason)
@@ -2500,6 +2501,8 @@ def run_selftest(tmpdir):
         except Exception as exc:  # noqa: BLE001
             check("swallow-invalid", False, "%r" % exc)
 
+
+def _selftest_histogram(check, skip, tmpdir):
     # 4) histogram overflow truthfulness (C6)
     h = Histogram()
     h.add(LIN_MAX_US - 1)
@@ -2511,6 +2514,8 @@ def run_selftest(tmpdir):
     check("hist-q99-overflow-bound", q99 is not None and q99["overflow"],
           "q99=%r" % q99)
 
+
+def _selftest_b1_readiness(check, skip, tmpdir):
     # --- B1: readiness matrix + per-state interest (pure decision checks) ---
     r0, c0 = _mk_run()
     cases = [
@@ -2542,6 +2547,8 @@ def run_selftest(tmpdir):
               "pending=%r want=%r -> %d (want %d)" % (
                   pending, want, r0._interest(r0.conns[0]), exp_int))
 
+
+def _selftest_b1_admission(check, skip, tmpdir):
     # --- B1: admission must never overwrite an interrupted recv ---
     r1, c1 = _mk_run()
     c1.pending = "recv"
@@ -2557,6 +2564,8 @@ def run_selftest(tmpdir):
           c1.pending == "send" and c1.want == "w",
           "pending=%r want=%r" % (c1.pending, c1.want))
 
+
+def _selftest_b2_dispatch_cutoff(check, skip, tmpdir):
     # --- B2: dispatch-cutoff never starts post-window work; interrupted keeps ---
     r2, c2 = _mk_run()
     f = _Frame(0, 0, "measure")
@@ -2590,6 +2599,8 @@ def run_selftest(tmpdir):
               c2.cur, c2.pending, c2.want, c2.tls.send_calls,
               r2.counts["offered_unsent"]["measure"]))
 
+
+def _selftest_b2_window_end(check, skip, tmpdir):
     # --- B2: window-end classification uses attempt flag, not off==0 ---
     r3, c3 = _mk_run()
     fa = _Frame(0, 0, "measure")
@@ -2614,6 +2625,8 @@ def run_selftest(tmpdir):
           rb.counts["offered_unsent"]["measure"] == 1,
           "cur=%r unsent=%d" % (cb.cur, rb.counts["offered_unsent"]["measure"]))
 
+
+def _selftest_b3_echo_eligibility(check, skip, tmpdir):
     # --- B3: echo eligibility by ordered sent population ---
     r4, c4 = _mk_run()
     c4.sent_queue.append(8)
@@ -2635,6 +2648,8 @@ def run_selftest(tmpdir):
           r6.failures.get("protocol") and c6.echoed_count == 0,
           "failures=%r echoed=%d" % (r6.failures, c6.echoed_count))
 
+
+def _selftest_b3_partial_terminal(check, skip, tmpdir):
     # --- B3: partial send at terminal is operational-invalid ---
     r7, c7 = _mk_run()
     fp = _Frame(0, 0, "measure")
@@ -2649,6 +2664,8 @@ def run_selftest(tmpdir):
           "failures=%r send_failed=%d" % (r7.failures,
                                           r7.counts["send_failed"]["measure"]))
 
+
+def _selftest_b4_send_ts(check, skip, tmpdir):
     # --- B4: ts_send captured AFTER the successful send return ---
     r8, _ = _mk_run()
     dt8 = _DelayTls(send_n=FRAME_SIZE, delay=0.04)
@@ -2666,6 +2683,8 @@ def run_selftest(tmpdir):
           (post_obs - pre) >= 0.03,
           "post-prev=%r" % (post_obs - pre if post_obs is not None else None))
 
+
+def _selftest_b4_recv_completion(check, skip, tmpdir):
     # --- B4: recv completion time after the recv return ---
     r9, _ = _mk_run()
     chunk9 = build_frame(0, 0)
@@ -2683,6 +2702,9 @@ def run_selftest(tmpdir):
               c9.echoed_count,
               c9.last_progress - pre9 if c9.last_progress is not None else None))
 
+
+def _selftest_b5_warmup(check, skip, tmpdir, tls13):
+    tls13_ok, tls13_reason = tls13
     # --- B5: schedule anchors measurement at warmup_end; hist is measure-only ---
     r10a, _ = _mk_run()
     check("b5-measure-anchor",
@@ -2720,6 +2742,42 @@ def run_selftest(tmpdir):
         except Exception as exc:  # noqa: BLE001
             check("b5-warmup-not-in-hist", False, "%r" % exc)
             check("b5-warmup-windowed", False, "%r" % exc)
+
+
+def run_selftest(tmpdir):
+    if not os.path.isdir(tmpdir):
+        os.makedirs(tmpdir, exist_ok=True)
+    checks = []
+
+    def check(name, cond, detail=""):
+        checks.append((name, "PASS" if cond else "FAIL", detail))
+
+    def skip(name, detail=""):
+        checks.append((name, "SKIP", detail))
+
+    # TLS-1.3-load-bearing sections need a TLS1.3-capable ssl backend. On hosts
+    # without it (e.g. macOS system Python / LibreSSL) they are reported SKIP
+    # with the capability reason and run fully inside the OpenSSL3 bench
+    # container; a SKIP is never disguised as a PASS and never counts as FAIL.
+    tls13_ok = bool(getattr(ssl, "HAS_TLSv1_3", False))
+    tls13_reason = "host ssl %s lacks TLS 1.3 support; runs in bench container" % (
+        ssl.OPENSSL_VERSION)
+    tls13 = (tls13_ok, tls13_reason)
+
+    _selftest_clean(check, skip, tmpdir, tls13)
+    _selftest_preamble(check, skip, tmpdir, tls13)
+    _selftest_corruption(check, skip, tmpdir, tls13)
+    _selftest_swallow(check, skip, tmpdir, tls13)
+    _selftest_histogram(check, skip, tmpdir)
+    _selftest_b1_readiness(check, skip, tmpdir)
+    _selftest_b1_admission(check, skip, tmpdir)
+    _selftest_b2_dispatch_cutoff(check, skip, tmpdir)
+    _selftest_b2_window_end(check, skip, tmpdir)
+    _selftest_b3_echo_eligibility(check, skip, tmpdir)
+    _selftest_b3_partial_terminal(check, skip, tmpdir)
+    _selftest_b4_send_ts(check, skip, tmpdir)
+    _selftest_b4_recv_completion(check, skip, tmpdir)
+    _selftest_b5_warmup(check, skip, tmpdir, tls13)
 
     # --- B6: CPU sampling Unknown never becomes clean ---
     s = ProcSampler([("missing", 2 ** 31 - 1)])
