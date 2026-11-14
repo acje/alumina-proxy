@@ -43,7 +43,7 @@ use crate::dns::cache::{Cache, CacheError, Family, Generation, Generations};
 use crate::dns::resolver::{
     Fqdn as ResolverFqdn, MAX_RESOLVERS, RecursionPolicy, ResolverSet, SpiPin,
 };
-use crate::dns::schedule::{PerTypeTransition, ScheduleError, Schedules};
+use crate::dns::schedule::{OutcomeIncidents, PerTypeTransition, ScheduleError, Schedules};
 use crate::dns::wire::{self, BailiwickZones, DNS_MSG_LIMIT, DnsError, ResponseWorkspace};
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::log;
@@ -2387,10 +2387,6 @@ impl StartupDns {
     /// One nonblocking response-read step: at most one read, then a complete
     /// validated message is published; an API/EOF/deadline failure settles the
     /// counted failure and closes the connection exactly once.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "faithful response-read step threading the counted reason through every failure arm plus the probe/name publish gate"
-    )]
     fn step_recv_observed<F>(
         &mut self,
         ex: &mut ActiveExchange,
@@ -2408,33 +2404,9 @@ impl StartupDns {
             Instant,
         ),
     {
-        let want = self.msglen.map_or(2, |len| len + 2);
-        if self.filled < want {
-            match self.try_recv() {
-                RecvTry::Failure => {
-                    self.close_connection()?;
-                    let reason = self.note_failure(ex, schedules, FailureReason::Receive)?;
-                    return Ok(RecvStep::Failed(reason));
-                }
-                RecvTry::Wait | RecvTry::Progress => {}
-            }
-        }
-        if self.msglen.is_none() && self.filled >= 2 {
-            let len = usize::from(u16::from_be_bytes([self.recv_buf[0], self.recv_buf[1]]));
-            if len == 0 || len > DNS_MSG_LIMIT {
-                self.close_connection()?;
-                let reason = self.note_failure(ex, schedules, FailureReason::Receive)?;
-                return Ok(RecvStep::Failed(reason));
-            }
-            self.msglen = Some(len);
-        }
-        let Some(len) = self.msglen.filter(|len| self.filled >= len + 2) else {
-            if Instant::now() >= ex.deadline {
-                self.close_connection()?;
-                let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
-                return Ok(RecvStep::Failed(reason));
-            }
-            return Ok(RecvStep::Waiting);
+        let len = match self.recv_frame(ex, schedules)? {
+            FrameGate::Ready(len) => len,
+            FrameGate::Stopped(step) => return Ok(step),
         };
         let message = &self.recv_buf[2..2 + len];
         let reply = wire::ParsedReply::parse_reply(
@@ -2453,27 +2425,94 @@ impl StartupDns {
                 if matches!(err, DnsError::BailiwickViolation) {
                     self.note_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
                 }
-                self.close_connection()?;
-                let reason = self.note_failure(ex, schedules, FailureReason::Receive)?;
-                return Ok(RecvStep::Failed(reason));
+                return self.fail_recv(ex, schedules, FailureReason::Receive);
             }
         };
         if Instant::now() >= ex.deadline {
-            self.close_connection()?;
-            let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
-            return Ok(RecvStep::Failed(reason));
+            return self.fail_recv(ex, schedules, FailureReason::Timeout);
         }
         let parsed = reply.observe();
-        if ex.class == ExchangeClass::Probe {
-            let (kind, extreme, _raw_ad_fact) = parsed.probe_facts();
-            if extreme {
-                self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
-            }
-            if self.corroboration.is_some() {
-                self.corroboration_outcome = Some(kind);
-            }
-            return Ok(RecvStep::Published(kind));
+        if let Some(step) = self.probe_reply(ex, &parsed) {
+            return Ok(step);
         }
+        self.publish_reply(ex, parsed, cache, schedules, observer)
+    }
+
+    fn recv_frame(
+        &mut self,
+        ex: &ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<FrameGate, StartupDnsError> {
+        let want = self.msglen.map_or(2, |len| len + 2);
+        if self.filled < want {
+            match self.try_recv() {
+                RecvTry::Failure => {
+                    return self
+                        .fail_recv(ex, schedules, FailureReason::Receive)
+                        .map(FrameGate::Stopped);
+                }
+                RecvTry::Wait | RecvTry::Progress => {}
+            }
+        }
+        if self.msglen.is_none() && self.filled >= 2 {
+            let len = usize::from(u16::from_be_bytes([self.recv_buf[0], self.recv_buf[1]]));
+            if len == 0 || len > DNS_MSG_LIMIT {
+                return self
+                    .fail_recv(ex, schedules, FailureReason::Receive)
+                    .map(FrameGate::Stopped);
+            }
+            self.msglen = Some(len);
+        }
+        let Some(len) = self.msglen.filter(|len| self.filled >= len + 2) else {
+            if Instant::now() >= ex.deadline {
+                return self
+                    .fail_recv(ex, schedules, FailureReason::Timeout)
+                    .map(FrameGate::Stopped);
+            }
+            return Ok(FrameGate::Stopped(RecvStep::Waiting));
+        };
+        Ok(FrameGate::Ready(len))
+    }
+
+    fn fail_recv(
+        &mut self,
+        ex: &ActiveExchange,
+        schedules: &mut Schedules,
+        reason: FailureReason,
+    ) -> Result<RecvStep, StartupDnsError> {
+        self.close_connection()?;
+        let reason = self.note_failure(ex, schedules, reason)?;
+        Ok(RecvStep::Failed(reason))
+    }
+
+    fn probe_reply(
+        &mut self,
+        ex: &ActiveExchange,
+        parsed: &wire::ObservedReply<'_>,
+    ) -> Option<RecvStep> {
+        if ex.class != ExchangeClass::Probe {
+            return None;
+        }
+        let (kind, extreme, _raw_ad_fact) = parsed.probe_facts();
+        if extreme {
+            self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
+        }
+        if self.corroboration.is_some() {
+            self.corroboration_outcome = Some(kind);
+        }
+        Some(RecvStep::Published(kind))
+    }
+
+    fn publication_inputs(
+        &self,
+        ex: &ActiveExchange,
+        parsed: &wire::ObservedReply<'_>,
+    ) -> (
+        Instant,
+        crate::dns::publication::ApplyContext,
+        wire::ApplyOrigin,
+        bool,
+    ) {
         let receipt = self.now_u64();
         let (source, origin_authenticated) = self.delivering_origin();
         let origin_policy = self
@@ -2502,6 +2541,28 @@ impl StartupDns {
             origin_authenticated,
             origin_policy,
         };
+        (publication_at, context, origin, obsolete_negative)
+    }
+
+    fn publish_reply<F>(
+        &mut self,
+        ex: &ActiveExchange,
+        parsed: wire::ObservedReply<'_>,
+        cache: &mut Cache,
+        schedules: &mut Schedules,
+        observer: &mut F,
+    ) -> Result<RecvStep, StartupDnsError>
+    where
+        F: FnMut(
+            crate::dns::publication::ObservationPhase,
+            &Cache,
+            crate::dns::cache::NameIndex,
+            u64,
+            Instant,
+        ),
+    {
+        let (publication_at, context, origin, obsolete_negative) =
+            self.publication_inputs(ex, &parsed);
         let publication = if ex.class == ExchangeClass::Serving {
             let mut forward = |phase, cache: &Cache, name, secs| {
                 observer(phase, cache, name, secs, publication_at);
@@ -2510,20 +2571,53 @@ impl StartupDns {
         } else {
             parsed.apply(cache, schedules, context, origin)
         };
-        let (kind, extreme, incidents) = match publication {
-            Ok(published) => published,
+        let (kind, extreme, incidents) =
+            match self.settle_publication(ex, schedules, publication, obsolete_negative)? {
+                PublicationSettled::Applied {
+                    kind,
+                    extreme,
+                    incidents,
+                } => (kind, extreme, incidents),
+                PublicationSettled::Stopped(step) => return Ok(step),
+            };
+        self.note_publication_incidents(ex, &incidents, extreme);
+        Ok(RecvStep::Published(kind))
+    }
+
+    fn settle_publication(
+        &mut self,
+        ex: &ActiveExchange,
+        schedules: &mut Schedules,
+        publication: Result<(PublishedKind, bool, OutcomeIncidents), DnsError>,
+        obsolete_negative: bool,
+    ) -> Result<PublicationSettled, StartupDnsError> {
+        match publication {
+            Ok((kind, extreme, incidents)) => Ok(PublicationSettled::Applied {
+                kind,
+                extreme,
+                incidents,
+            }),
             Err(DnsError::Cache(CacheError::StaleGeneration)) if obsolete_negative => {
                 schedules.release_selection(ex.ordinal, ex.family)?;
-                return Ok(RecvStep::Superseded);
+                Ok(PublicationSettled::Stopped(RecvStep::Superseded))
             }
             Err(DnsError::Cache(CacheError::InsufficientAssurance)) => {
-                self.close_connection()?;
-                let reason =
-                    self.note_failure(ex, schedules, FailureReason::InsufficientAssurance)?;
-                return Ok(RecvStep::Failed(reason));
+                Ok(PublicationSettled::Stopped(self.fail_recv(
+                    ex,
+                    schedules,
+                    FailureReason::InsufficientAssurance,
+                )?))
             }
-            Err(err) => return Err(err.into()),
-        };
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn note_publication_incidents(
+        &mut self,
+        ex: &ActiveExchange,
+        incidents: &OutcomeIncidents,
+        extreme: bool,
+    ) {
         match incidents.sustained {
             crate::dns::schedule::IncidentTransition::Opened => {
                 self.incident_opens += 1;
@@ -2540,7 +2634,6 @@ impl StartupDns {
         if extreme {
             self.note_dns_anomaly(DnsAnomalyKind::ExtremeTtl);
         }
-        Ok(RecvStep::Published(kind))
     }
 
     /// Fills the fixed receive buffer from the connected transport: plain
@@ -3801,6 +3894,20 @@ enum RecvTry {
     Wait,
     Progress,
     Failure,
+}
+
+enum FrameGate {
+    Ready(usize),
+    Stopped(RecvStep),
+}
+
+enum PublicationSettled {
+    Applied {
+        kind: PublishedKind,
+        extreme: bool,
+        incidents: OutcomeIncidents,
+    },
+    Stopped(RecvStep),
 }
 
 /// Fixed bound on first-party socket attempts in one cooperative advance, in
