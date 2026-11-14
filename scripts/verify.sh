@@ -1174,7 +1174,10 @@ config_observe() {
     printf '%s\n' "$status"
 }
 
-identity_snapshot() {
+# Record HEAD and the working-tree status: the two boundary-scope observations
+# the before/after compare pins first. A producer failure names its exit and is
+# never PASS; the snapshot directory is created only once HEAD is readable.
+identity_snapshot_head() {
     dir="$1"
     rc=0
     head=$(git rev-parse --verify HEAD 2>&1) || rc=$?
@@ -1188,12 +1191,11 @@ identity_snapshot() {
         echo "SOURCE-IDENTITY FAIL: git status exit $? (dirty scope unreadable, not PASS)" >&2
         exit 1
     }
-    # Record which hasher the batch uses, then hash ALL identity inputs in ONE
-    # producer invocation (single exec over ~49 files) instead of one
-    # subprocess per file. The hasher is selected in this same shell, so the
-    # global propagates to the env record below. Missing inputs fail closed
-    # BEFORE any hashing; the batch's own exit code and stderr are checked
-    # (never masked), and the temp stderr file is always removed.
+}
+
+# Record which hasher the batch uses. The selection is made in this same shell,
+# so the global propagates to the env record below.
+identity_snapshot_hasher() {
     IDENTITY_HASHER=""
     if command -v sha256sum >/dev/null 2>&1; then IDENTITY_HASHER="sha256sum"
     elif command -v shasum >/dev/null 2>&1; then IDENTITY_HASHER="shasum"; fi
@@ -1201,22 +1203,35 @@ identity_snapshot() {
         echo "SOURCE-IDENTITY FAIL: neither sha256sum nor shasum present (identity impossible, not PASS)" >&2
         exit 1
     }
+}
+
+# Missing inputs fail closed BEFORE any hashing: an absent identity input must
+# never be hashed as a silently empty line.
+identity_snapshot_inputs_present() {
     for f in $IDENTITY_FILES; do
         [ -f "$f" ] || {
             echo "SOURCE-IDENTITY FAIL: identity input missing: $f" >&2
             exit 1
         }
     done
+}
+
+# Hash ALL identity inputs in ONE producer invocation (single exec over ~49
+# files) instead of one subprocess per file. The batch's own exit code and
+# stderr are checked (never masked), and the temp stderr file is always
+# removed.
+#
+# The batch expansion is intentionally unquoted: IDENTITY_FILES is a fixed,
+# space-free set (INTENDED plus .gitignore and the docs-arm gate inputs).
+# The appended inputs are identity-carried, not gate roots: the docslink/
+# citation gate files (scripts/docs_check/*). Word-splitting thus yields
+# exactly the intended paths. The hasher's stderr is retained so a failed hash
+# names the failing input; it is surfaced before removal, never masked.
+identity_snapshot_hash_batch() {
+    dir="$1"
     rc=0
     errf="$dir/inputs.sha256.err"
     : >"$dir/inputs.sha256"
-    # The batch expansion is intentionally unquoted: IDENTITY_FILES is a fixed,
-    # space-free set (INTENDED plus .gitignore and the docs-arm gate inputs).
-    # The appended inputs are identity-carried, not gate roots: the docslink/
-    # citation gate files (scripts/docs_check/*). Word-splitting thus yields
-    # exactly the intended paths. The hasher's stderr is
-    # retained so a failed hash names the failing input; it is surfaced before
-    # removal, never masked.
     if [ "$IDENTITY_HASHER" = "sha256sum" ]; then
         # shellcheck disable=SC2086
         sha256sum $IDENTITY_FILES >"$dir/inputs.sha256" 2>"$errf" || rc=$?
@@ -1234,132 +1249,197 @@ identity_snapshot() {
         exit 1
     }
     rm -f "$errf"
-    # Effective Cargo config inventory (finite ancestor closure, qkl seam A):
-    # Cargo's hierarchical search consults the cwd ancestry -- EVERY parent up
-    # to the filesystem root -- plus the selected Cargo home
-    # ${CARGO_HOME:-$HOME/.cargo}. Both spellings are inventoried at every stop
-    # (config, config.toml); where both exist at one path Cargo prefers the
-    # extensionless `config` spelling (Cargo Book, hierarchical structure). We
-    # record candidates only: no TOML precedence/merge interpreter, no claim
-    # either spelling is necessarily consumed. Path/name plus a SHA256 digest
-    # or a verified-absence marker; any unreadable or non-regular candidate
-    # fails closed. Replaces the prior four hardcoded fields with one
-    # traversal, so a candidate above the checkout now changes this record.
+}
+
+# The effective build env as one record: declared knobs, supply-chain pins, the
+# Node observation and the Cargo config inventory. The single redirect owns the
+# file, so a failure mid-record leaves exactly the lines already produced.
+identity_snapshot_env() {
+    dir="$1"
     config_home="${CARGO_HOME:-$HOME/.cargo}"
     alihash=$(printf '%s\n' '[alias]' 'atest = ["test", "--quiet", "--no-fail-fast"]' 'aclippy = ["clippy", "--quiet", "--message-format=short"]' | sha256_digest stdin) || exit 1
     {
-        printf 'toolchain=%s\n' "$TOOLCHAIN"
-        printf 'hasher=%s\n' "${IDENTITY_HASHER:-<none>}"
-        printf 'cargo_home=%s\n' "${CARGO_HOME:-<unset>}"
-        printf 'cargo_target_dir=%s\n' "${CARGO_TARGET_DIR:-<unset>}"
-        printf 'rustflags=%s\n' "${RUSTFLAGS:-<unset>}"
-        printf 'rustc=%s\n' "${RUSTC:-<unset>}"
-        printf 'rustc_wrapper=%s\n' "${RUSTC_WRAPPER:-<unset>}"
-        printf 'rustc_workspace_wrapper=%s\n' "${RUSTC_WORKSPACE_WRAPPER:-<unset>}"
-        printf 'cargo_incremental=%s\n' "${CARGO_INCREMENTAL:-<unset>}"
-        printf 'cargo_term_progress_when=%s\n' "${CARGO_TERM_PROGRESS_WHEN:-<unset>}"
-        printf 'podman_connection=%s\n' "${PODMAN_CONNECTION:-<unset>}"
-        printf 'podman_root_connection=%s\n' "${PODMAN_ROOT_CONNECTION:-<unset>}"
-        printf 'cargo_home_effective=%s\n' "$config_home"
-        # G8-C10: supply-chain tool versions + advisory-DB freshness. Absent
-        # tools/DB record <absent> (never a hard fail); the before/after env
-        # diff surfaces any host tool/DB change between snapshots.
-        if command -v cargo-audit >/dev/null 2>&1; then
-            cav=$(cargo-audit --version 2>&1) || cav="<unreadable>"
-            printf 'cargo_audit_version=%s\n' "$cav"
-        else
-            printf 'cargo_audit_version=<absent>\n'
-        fi
-        if command -v cargo-deny >/dev/null 2>&1; then
-            cdv=$(cargo-deny --version 2>&1) || cdv="<unreadable>"
-            printf 'cargo_deny_version=%s\n' "$cdv"
-        else
-            printf 'cargo_deny_version=<absent>\n'
-        fi
-        adb="$config_home/advisory-db"
-        printf 'advisory_db_path=%s\n' "$adb"
-        if [ -d "$adb/.git" ]; then
-            adf=$(git -C "$adb" log -1 --format=%H 2>&1) || adf="<unreadable>"
-            printf 'advisory_db_head_date=%s\n' "$adf"
-        else
-            printf 'advisory_db_head_date=<absent>\n'
-        fi
-        node_env_preflight
-        command -v node >/dev/null 2>&1 || {
-            echo "SOURCE-IDENTITY FAIL: node path producer failed (node absent; identity impossible, not PASS)" >&2
-            exit 1
-        }
-        nodepath=$(command -v node 2>&1)
-        nv=$(node --version 2>&1) || {
-            echo "SOURCE-IDENTITY FAIL: node --version exit $? (version unobservable, not PASS)" >&2
-            exit 1
-        }
-        [ -n "$nv" ] || {
-            echo "SOURCE-IDENTITY FAIL: node --version empty output (version unobservable, not PASS)" >&2
-            exit 1
-        }
-        nvh=$(printf '%s\n' "$nv" | sha256_digest stdin) || exit 1
-        printf 'node_executable=%s\n' "$nodepath"
-        printf 'node_version=%s\n' "$nv"
-        printf 'node_version_sha256=%s\n' "$nvh"
-        if [ -z "${NODE_OPTIONS+x}" ]; then printf 'node_options=<unset>\n'
-        elif [ -n "$NODE_OPTIONS" ]; then printf 'node_options=%s\n' "$NODE_OPTIONS"
-        else printf 'node_options=<empty>\n'; fi
-        if [ -z "${NODE_PATH+x}" ]; then printf 'node_path=<unset>\n'
-        elif [ -n "$NODE_PATH" ]; then printf 'node_path=%s\n' "$NODE_PATH"
-        else printf 'node_path=<empty>\n'; fi
-        if [ -z "${NODE_ENV+x}" ]; then printf 'node_env=<unset>\n'
-        elif [ -n "$NODE_ENV" ]; then printf 'node_env=%s\n' "$NODE_ENV"
-        else printf 'node_env=<empty>\n'; fi
-        printf 'installed_closure_vs_lock=package-lock.json identity-covered; node_modules installed closure reconciled at commander intake (1gx.15 default-condition 67-file ledger)\n'
-        printf 'cargo_config_namespace=host: cwd ancestry through filesystem root plus selected Cargo home\n'
-        d="$(pwd)"
-        while :; do
-            for n in config config.toml; do
-                if [ "$d" = "/" ]; then p="/.cargo/$n"; else p="$d/.cargo/$n"; fi
-                st=$(config_observe "$p")
-                case "$st" in
-                    absent) printf 'cargo_config absent    %s\n' "$p" ;;
-                    present)
-                        h=$(sha256_digest file "$p") || { echo "SOURCE-IDENTITY FAIL: unreadable cargo config candidate: $p" >&2; exit 1; }
-                        printf 'cargo_config present   %s  %s\n' "$h" "$p"
-                        ;;
-                    denied|dangling|nonregular|error)
-                        echo "SOURCE-IDENTITY FAIL: cargo config candidate not observable ($st): $p" >&2
-                        exit 1
-                        ;;
-                    *)
-                        echo "SOURCE-IDENTITY FAIL: cargo config observation unknown status '$st' for: $p" >&2
-                        exit 1
-                        ;;
-                esac
-            done
-            [ "$d" = "/" ] && break
-            d="${d%/*}"
-            [ -n "$d" ] || d="/"
-        done
-        for n in config config.toml; do
-            p="$config_home/$n"
-            st=$(config_observe "$p")
-            case "$st" in
-                absent) printf 'cargo_config selected absent    %s\n' "$p" ;;
-                present)
-                    h=$(sha256_digest file "$p") || { echo "SOURCE-IDENTITY FAIL: unreadable selected cargo config: $p" >&2; exit 1; }
-                    printf 'cargo_config selected present   %s  %s\n' "$h" "$p"
-                    ;;
-                denied|dangling|nonregular|error)
-                    echo "SOURCE-IDENTITY FAIL: selected cargo config not observable ($st): $p" >&2
-                    exit 1
-                    ;;
-                *)
-                    echo "SOURCE-IDENTITY FAIL: cargo config observation unknown status '$st' for: $p" >&2
-                    exit 1
-                    ;;
-            esac
-        done
-        printf 'container_cargo_config_namespace=/app/.cargo mirrors repo cwd (inventoried above); fixed fresh /cargo-home provisioned alias block\n'
-        printf 'container_alias_block_sha256=%s\n' "$alihash"
+        identity_snapshot_env_declared
+        identity_snapshot_env_supply_chain "$config_home"
+        identity_snapshot_env_node
+        identity_snapshot_env_node_flags
+        identity_snapshot_env_config "$config_home"
+        identity_snapshot_env_container "$alihash"
     } >"$dir/env"
+}
+
+# The declared build environment the snapshot pins verbatim: toolchain, hasher,
+# Cargo/rustc knobs and the effective Cargo home.
+identity_snapshot_env_declared() {
+    printf 'toolchain=%s\n' "$TOOLCHAIN"
+    printf 'hasher=%s\n' "${IDENTITY_HASHER:-<none>}"
+    printf 'cargo_home=%s\n' "${CARGO_HOME:-<unset>}"
+    printf 'cargo_target_dir=%s\n' "${CARGO_TARGET_DIR:-<unset>}"
+    printf 'rustflags=%s\n' "${RUSTFLAGS:-<unset>}"
+    printf 'rustc=%s\n' "${RUSTC:-<unset>}"
+    printf 'rustc_wrapper=%s\n' "${RUSTC_WRAPPER:-<unset>}"
+    printf 'rustc_workspace_wrapper=%s\n' "${RUSTC_WORKSPACE_WRAPPER:-<unset>}"
+    printf 'cargo_incremental=%s\n' "${CARGO_INCREMENTAL:-<unset>}"
+    printf 'cargo_term_progress_when=%s\n' "${CARGO_TERM_PROGRESS_WHEN:-<unset>}"
+    printf 'podman_connection=%s\n' "${PODMAN_CONNECTION:-<unset>}"
+    printf 'podman_root_connection=%s\n' "${PODMAN_ROOT_CONNECTION:-<unset>}"
+    printf 'cargo_home_effective=%s\n' "$config_home"
+}
+
+# G8-C10: supply-chain tool versions + advisory-DB freshness. Absent tools/DB
+# record <absent> (never a hard fail); the before/after env diff surfaces any
+# host tool/DB change between snapshots.
+identity_snapshot_env_supply_chain() {
+    config_home="$1"
+    if command -v cargo-audit >/dev/null 2>&1; then
+        cav=$(cargo-audit --version 2>&1) || cav="<unreadable>"
+        printf 'cargo_audit_version=%s\n' "$cav"
+    else
+        printf 'cargo_audit_version=<absent>\n'
+    fi
+    if command -v cargo-deny >/dev/null 2>&1; then
+        cdv=$(cargo-deny --version 2>&1) || cdv="<unreadable>"
+        printf 'cargo_deny_version=%s\n' "$cdv"
+    else
+        printf 'cargo_deny_version=<absent>\n'
+    fi
+    adb="$config_home/advisory-db"
+    printf 'advisory_db_path=%s\n' "$adb"
+    if [ -d "$adb/.git" ]; then
+        adf=$(git -C "$adb" log -1 --format=%H 2>&1) || adf="<unreadable>"
+        printf 'advisory_db_head_date=%s\n' "$adf"
+    else
+        printf 'advisory_db_head_date=<absent>\n'
+    fi
+}
+
+# One effective Node observation: the path producer, the version probe and the
+# version digest. An absent producer, a failing probe and empty output are
+# three distinct failures, never one masked success.
+identity_snapshot_env_node() {
+    node_env_preflight
+    command -v node >/dev/null 2>&1 || {
+        echo "SOURCE-IDENTITY FAIL: node path producer failed (node absent; identity impossible, not PASS)" >&2
+        exit 1
+    }
+    nodepath=$(command -v node 2>&1)
+    nv=$(node --version 2>&1) || {
+        echo "SOURCE-IDENTITY FAIL: node --version exit $? (version unobservable, not PASS)" >&2
+        exit 1
+    }
+    [ -n "$nv" ] || {
+        echo "SOURCE-IDENTITY FAIL: node --version empty output (version unobservable, not PASS)" >&2
+        exit 1
+    }
+    nvh=$(printf '%s\n' "$nv" | sha256_digest stdin) || exit 1
+    printf 'node_executable=%s\n' "$nodepath"
+    printf 'node_version=%s\n' "$nv"
+    printf 'node_version_sha256=%s\n' "$nvh"
+}
+
+# Node's execution-affecting environment: unset, empty and set stay distinct --
+# an empty-but-set override is still an override.
+identity_snapshot_env_node_flags() {
+    if [ -z "${NODE_OPTIONS+x}" ]; then printf 'node_options=<unset>\n'
+    elif [ -n "$NODE_OPTIONS" ]; then printf 'node_options=%s\n' "$NODE_OPTIONS"
+    else printf 'node_options=<empty>\n'; fi
+    if [ -z "${NODE_PATH+x}" ]; then printf 'node_path=<unset>\n'
+    elif [ -n "$NODE_PATH" ]; then printf 'node_path=%s\n' "$NODE_PATH"
+    else printf 'node_path=<empty>\n'; fi
+    if [ -z "${NODE_ENV+x}" ]; then printf 'node_env=<unset>\n'
+    elif [ -n "$NODE_ENV" ]; then printf 'node_env=%s\n' "$NODE_ENV"
+    else printf 'node_env=<empty>\n'; fi
+}
+
+# Effective Cargo config inventory (finite ancestor closure, qkl seam A):
+# Cargo's hierarchical search consults the cwd ancestry -- EVERY parent up to
+# the filesystem root -- plus the selected Cargo home
+# ${CARGO_HOME:-$HOME/.cargo}. Both spellings are inventoried at every stop
+# (config, config.toml); where both exist at one path Cargo prefers the
+# extensionless `config` spelling (Cargo Book, hierarchical structure). We
+# record candidates only: no TOML precedence/merge interpreter, no claim
+# either spelling is necessarily consumed. Path/name plus a SHA256 digest or a
+# verified-absence marker; any unreadable or non-regular candidate fails
+# closed. Replaces the prior four hardcoded fields with one traversal, so a
+# candidate above the checkout now changes this record.
+identity_snapshot_env_config() {
+    config_home="$1"
+    printf 'installed_closure_vs_lock=package-lock.json identity-covered; node_modules installed closure reconciled at commander intake (1gx.15 default-condition 67-file ledger)\n'
+    printf 'cargo_config_namespace=host: cwd ancestry through filesystem root plus selected Cargo home\n'
+    identity_snapshot_env_config_ancestry
+    identity_snapshot_env_config_selected "$config_home"
+}
+
+# The ancestry half of the closure: every parent up to the filesystem root,
+# both spellings at every stop.
+identity_snapshot_env_config_ancestry() {
+    d="$(pwd)"
+    while :; do
+        for n in config config.toml; do
+            if [ "$d" = "/" ]; then p="/.cargo/$n"; else p="$d/.cargo/$n"; fi
+            identity_snapshot_env_config_candidate "cargo_config" "cargo config candidate" "$p"
+        done
+        [ "$d" = "/" ] && break
+        d="${d%/*}"
+        [ -n "$d" ] || d="/"
+    done
+}
+
+# The selected-Cargo-home half: the same two spellings under $CARGO_HOME.
+identity_snapshot_env_config_selected() {
+    config_home="$1"
+    for n in config config.toml; do
+        p="$config_home/$n"
+        identity_snapshot_env_config_candidate "cargo_config selected" "selected cargo config" "$p"
+    done
+}
+
+# One candidate, observed once at the standard-library boundary: present
+# records its digest, absent is the only verified-absence marker, and every
+# other status (denied, dangling, nonregular, error, unknown) fails closed.
+identity_snapshot_env_config_candidate() {
+    label="$1"
+    noun="$2"
+    p="$3"
+    st=$(config_observe "$p")
+    case "$st" in
+        absent) printf '%s absent    %s\n' "$label" "$p" ;;
+        present)
+            h=$(sha256_digest file "$p") || {
+                echo "SOURCE-IDENTITY FAIL: unreadable $noun: $p" >&2
+                exit 1
+            }
+            printf '%s present   %s  %s\n' "$label" "$h" "$p"
+            ;;
+        denied|dangling|nonregular|error)
+            echo "SOURCE-IDENTITY FAIL: $noun not observable ($st): $p" >&2
+            exit 1
+            ;;
+        *)
+            echo "SOURCE-IDENTITY FAIL: cargo config observation unknown status '$st' for: $p" >&2
+            exit 1
+            ;;
+    esac
+}
+
+# The container-side config pins: the mirrored namespace and the digest of the
+# alias block the fresh /cargo-home is provisioned with.
+identity_snapshot_env_container() {
+    alihash="$1"
+    printf 'container_cargo_config_namespace=/app/.cargo mirrors repo cwd (inventoried above); fixed fresh /cargo-home provisioned alias block\n'
+    printf 'container_alias_block_sha256=%s\n' "$alihash"
+}
+
+# Boundary identity snapshot: HEAD, working-tree status, one digest per
+# identity input and the effective build env, all written under $dir. Each step
+# exits non-zero on its own failure, so a snapshot that returns 0 is complete.
+identity_snapshot() {
+    dir="$1"
+    identity_snapshot_head "$dir"
+    identity_snapshot_hasher
+    identity_snapshot_inputs_present
+    identity_snapshot_hash_batch "$dir"
+    identity_snapshot_env "$dir"
     echo "SOURCE-IDENTITY: snapshot $dir (HEAD=$head, inputs $(wc -l <"$dir/inputs.sha256"))"
 }
 
