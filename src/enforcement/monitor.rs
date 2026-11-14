@@ -674,7 +674,7 @@ impl Monitor {
     }
 
     #[cfg(test)]
-    fn saturate_resolver_counters_for_test(&mut self) {
+    const fn saturate_resolver_counters_for_test(&mut self) {
         self.facts.resolver_degraded.saturate_for_test();
         self.facts.downgrade_to_plain.saturate_for_test();
         self.facts.probe_relocations.saturate_for_test();
