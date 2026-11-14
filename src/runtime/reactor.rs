@@ -1474,6 +1474,72 @@ fn drain_upstream_loop(serving: &mut Serving, index: usize, secs: u64) -> (usize
     }
 }
 
+fn down_write_once(serving: &mut Serving, index: usize, room: usize) -> (WriteOutcome, bool) {
+    let ws = &mut serving.slots[index];
+    if ws.down_off >= ws.down_len {
+        return (WriteOutcome::None, false);
+    }
+    let end = ws.down_len.min(ws.down_off.saturating_add(room));
+    let Some(client) = ws.client.as_mut() else {
+        return (WriteOutcome::None, false);
+    };
+    match client.write(&ws.down[ws.down_off..end]) {
+        Ok(n) => {
+            ws.down_off += n;
+            let expired = arm_tunnel_idle(ws);
+            (WriteOutcome::Wrote(n), expired)
+        }
+        Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => (WriteOutcome::Wait, false),
+        Err(_) => (WriteOutcome::Failed, false),
+    }
+}
+
+fn note_down_written(serving: &mut Serving, index: usize, bytes: usize, secs: u64) {
+    serving.note_op(index, bytes);
+    if bytes > 0 {
+        serving.note_incident_tunnel_bytes(index, bytes as u64, secs);
+    }
+}
+
+fn flush_down_loop(serving: &mut Serving, index: usize, secs: u64) -> DrainEnd {
+    loop {
+        if serving.visit_exhausted(index) {
+            return DrainEnd::Exhausted;
+        }
+        let room = serving.io_room(index, usize::MAX);
+        let (outcome, expired) = down_write_once(serving, index, room);
+        match outcome {
+            WriteOutcome::Wrote(bytes) => {
+                note_down_written(serving, index, bytes, secs);
+                if expired {
+                    return DrainEnd::IdleExpired;
+                }
+            }
+            WriteOutcome::Wait => {
+                serving.note_op(index, 0);
+                return DrainEnd::Stalled;
+            }
+            WriteOutcome::Failed => {
+                serving.note_op(index, 0);
+                return DrainEnd::Failed;
+            }
+            WriteOutcome::None => return DrainEnd::Stalled,
+        }
+    }
+}
+
+fn flush_down_drained(serving: &mut Serving, index: usize) {
+    if serving.visit_exhausted(index) {
+        serving.reschedule(index, RescheduleArm::Client);
+        return;
+    }
+    let ws = &mut serving.slots[index];
+    if ws.down_off >= ws.down_len {
+        ws.down_len = 0;
+        ws.down_off = 0;
+    }
+}
+
 impl Serving {
     /// Builds the loop's retained serving workspaces over boot-completed
     /// storage and the boot-owned traffic store, moving the retained per-slot
@@ -3384,64 +3450,9 @@ impl Serving {
 
     fn flush_down(&mut self, index: usize) {
         let secs = self.storage.cache_secs(Instant::now());
-        let mut failed = false;
-        let mut idle_expired = false;
-        loop {
-            if self.visit_exhausted(index) {
-                break;
-            }
-            let (stalled, err, note) = {
-                let room = self.io_room(index, usize::MAX);
-                let ws = &mut self.slots[index];
-                if ws.down_off >= ws.down_len {
-                    (true, false, None)
-                } else {
-                    let end = ws.down_len.min(ws.down_off.saturating_add(room));
-                    match ws.client.as_mut() {
-                        Some(client) => match client.write(&ws.down[ws.down_off..end]) {
-                            Ok(n) => {
-                                ws.down_off += n;
-                                if ws.gate.is_open() {
-                                    idle_expired =
-                                        deadline_passed(ws.idle_deadline, Instant::now());
-                                    if !idle_expired {
-                                        ws.arm_idle(Instant::now());
-                                    }
-                                }
-                                (false, false, Some(n))
-                            }
-                            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                                (true, false, Some(0))
-                            }
-                            Err(_) => (true, true, Some(0)),
-                        },
-                        None => (true, false, None),
-                    }
-                }
-            };
-            if let Some(bytes) = note {
-                self.note_op(index, bytes);
-                if bytes > 0 {
-                    self.note_incident_tunnel_bytes(index, bytes as u64, secs);
-                }
-            }
-            failed = failed || err;
-            if stalled || idle_expired {
-                break;
-            }
-        }
-        if failed || idle_expired {
-            self.close_slot(index);
-            return;
-        }
-        if self.visit_exhausted(index) {
-            self.reschedule(index, RescheduleArm::Client);
-            return;
-        }
-        let ws = &mut self.slots[index];
-        if ws.down_off >= ws.down_len {
-            ws.down_len = 0;
-            ws.down_off = 0;
+        match flush_down_loop(self, index, secs) {
+            DrainEnd::Exhausted | DrainEnd::Stalled => flush_down_drained(self, index),
+            DrainEnd::Failed | DrainEnd::IdleExpired => self.close_slot(index),
         }
     }
 
