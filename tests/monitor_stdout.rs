@@ -1,24 +1,14 @@
 #[path = "support/process_harness.rs"]
 mod process_harness;
 use process_harness::{
-    Refusal, capture_stdout, current_exe, serving_config_document, wait_for_success,
+    Refusal, boot_serving_runtime, capture_stdout, spawn_piped_child, wait_for_success,
 };
 
-use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mio::net::TcpListener as MioListener;
-
-use alumina::config::parse_config_document;
-use alumina::inventory::TrafficStorage;
-use alumina::runtime::Runtime;
-use alumina::runtime::ServeStorage;
-
-const BODY_403: &str = "403 Forbidden";
 const LOOPS: usize = 400;
 const MAX_MONITOR_RECORDS: usize = 32;
 const MONITOR_TIMEOUT: Duration = Duration::from_secs(120);
-const NON_ALLOWLISTED_CONNECT: &[u8] = b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n";
 const SETTLE_TURNS: usize = 4;
 
 fn main() {
@@ -27,15 +17,6 @@ fn main() {
     } else {
         parent_main();
     }
-}
-
-fn spawn_piped_child() -> Child {
-    Command::new(current_exe())
-        .arg("--child")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn child with a piped stdout")
 }
 
 struct MonitorRecords<'a> {
@@ -154,31 +135,15 @@ fn parent_main() {
     );
 }
 
-fn boot_serving_runtime() -> (u16, Runtime) {
-    let bind = "127.0.0.1:0".parse().expect("valid bind address");
-    let listener = MioListener::bind(bind).expect("bind serving listener");
-    let port = listener.local_addr().expect("listener local addr").port();
-    let config = parse_config_document(&serving_config_document(port)).expect("valid config");
-    let mut storage = ServeStorage::boot(&config).expect("boot storage");
-    storage
-        .prepare_stdout_log_sink()
-        .expect("prepare nonblocking stdout sink");
-    let traffic = TrafficStorage::allocate().expect("allocate traffic storage");
-    let runtime = Runtime::new(storage, listener, traffic).expect("preallocate + attach runtime");
-    (port, runtime)
-}
-
 fn child_main() {
     let (port, mut runtime) = boot_serving_runtime();
     for i in 0..LOOPS {
-        Refusal {
-            head: NON_ALLOWLISTED_CONNECT,
-            expected_body: BODY_403,
-            settle_turns: SETTLE_TURNS,
-            failure: &format!(
+        Refusal::non_allowlisted_connect(
+            SETTLE_TURNS,
+            &format!(
                 "iteration {i}: the mandatory 403 stop must be served while stdout is drained"
             ),
-        }
+        )
         .drive(&mut runtime, port);
         // A short pause every 50 exchanges lets the nonblocking stdout drain
         // catch up, so the storm exercises the sink rather than a backlog that

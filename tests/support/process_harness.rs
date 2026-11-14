@@ -1,9 +1,9 @@
 //! Test-only owner of the harness shared by every gate binary: a child copy's
-//! executable path, the two bounded exit waits, the stdout capture, the
-//! serving config document the child boots from, and the one-exchange refusal
-//! driver the parent-side gates replay. Both waits kill and reap a child that
-//! outlives its deadline, so a hung or leaked child fails its own test rather
-//! than the runner.
+//! executable path, a piped child spawn, the two bounded exit waits, the
+//! stdout capture, the serving config document and boot the child starts from,
+//! and the one-exchange refusal driver the parent-side gates replay. Both waits
+//! kill and reap a child that outlives its deadline, so a hung or leaked child
+//! fails its own test rather than the runner.
 #![allow(
     dead_code,
     reason = "shared `#[path]` owner; each inclusion site uses only its subset"
@@ -12,15 +12,30 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdout};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use alumina::runtime::Runtime;
+use mio::net::TcpListener as MioListener;
+
+use alumina::config::{Config, parse_config_document};
+use alumina::inventory::TrafficStorage;
+use alumina::runtime::{Runtime, ServeStorage};
 
 /// This test binary's own path: the parent spawns the same executable in a
 /// child mode.
 pub(super) fn current_exe() -> PathBuf {
     std::env::current_exe().expect("current executable path")
+}
+
+/// Spawns this binary in `--child` mode with a piped stdout the parent owns and
+/// inherited stderr.
+pub(super) fn spawn_piped_child() -> Child {
+    Command::new(current_exe())
+        .arg("--child")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn child with a piped stdout")
 }
 
 /// Waits for the child to exit 0 within `timeout`, killing and reaping it on
@@ -89,6 +104,34 @@ pub(super) fn serving_config_document(port: u16) -> String {
     )
 }
 
+/// Boots the serving runtime the gate children drive from the shared serving
+/// config document, with the nonblocking stdout sink prepared, and returns its
+/// bound port and the attached runtime.
+pub(super) fn boot_serving_runtime() -> (u16, Runtime) {
+    let bind = "127.0.0.1:0".parse().expect("valid bind address");
+    let listener = MioListener::bind(bind).expect("bind serving listener");
+    let port = listener.local_addr().expect("listener local addr").port();
+    let config = parse_config_document(&serving_config_document(port)).expect("valid config");
+    (port, attach_serving_runtime(listener, &config))
+}
+
+/// Boots serving storage for `config`, prepares the nonblocking stdout sink,
+/// allocates the traffic workspace, and attaches `listener`.
+pub(super) fn attach_serving_runtime(listener: MioListener, config: &Config) -> Runtime {
+    let mut storage = ServeStorage::boot(config).expect("boot storage");
+    storage
+        .prepare_stdout_log_sink()
+        .expect("prepare nonblocking stdout sink");
+    let traffic = TrafficStorage::allocate().expect("allocate traffic storage");
+    Runtime::new(storage, listener, traffic).expect("preallocate + attach runtime")
+}
+
+/// The body of the non-allowlisted CONNECT refusal every 403 gate replays.
+pub(super) const REFUSAL_403: &str = "403 Forbidden";
+
+/// The non-allowlisted CONNECT head every 403 gate replays.
+pub(super) const NON_ALLOWLISTED_CONNECT: &[u8] = b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n";
+
 /// One client exchange the gate replays against its own runtime: the head
 /// bytes written, the refusal body the first readable reply must carry, the
 /// settle turns that follow the close, and the failure text naming the case.
@@ -99,7 +142,18 @@ pub(super) struct Refusal<'a> {
     pub(super) failure: &'a str,
 }
 
-impl Refusal<'_> {
+impl<'a> Refusal<'a> {
+    /// The standard non-allowlisted CONNECT exchange: the shared head and 403
+    /// stop body, with the caller's settle count and failure text.
+    pub(super) fn non_allowlisted_connect(settle_turns: usize, failure: &'a str) -> Refusal<'a> {
+        Refusal {
+            head: NON_ALLOWLISTED_CONNECT,
+            expected_body: REFUSAL_403,
+            settle_turns,
+            failure,
+        }
+    }
+
     /// Drives `runtime` for at most 100 two-millisecond turns, asserts the
     /// first readable reply carried `expected_body`, then restores blocking
     /// mode, closes the client, and settles `settle_turns` further turns.

@@ -3,7 +3,7 @@ mod dns_responder;
 #[path = "support/process_harness.rs"]
 mod process_harness;
 use dns_responder::{DnsResponder, build_positive};
-use process_harness::{current_exe, wait_for_exit};
+use process_harness::{attach_serving_runtime, current_exe, wait_for_exit};
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -188,12 +188,7 @@ fn child_owner_main() {
     eprintln!("PORT {port}");
     let doc = config_doc(port);
     let config = parse_config_document(&doc).expect("valid config");
-    let mut storage = ServeStorage::boot(&config).expect("boot storage");
-    storage
-        .prepare_stdout_log_sink()
-        .expect("prepare nonblocking stdout sink");
-    let traffic = TrafficStorage::allocate().expect("allocate traffic storage");
-    let mut runtime = Runtime::new(storage, listener, traffic).expect("attach runtime");
+    let mut runtime = attach_serving_runtime(listener, &config);
     report_unexpected_serve("owner", runtime.serve());
 }
 

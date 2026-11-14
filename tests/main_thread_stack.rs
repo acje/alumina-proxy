@@ -13,9 +13,7 @@ use alumina::runtime::ServeStorage;
 const LOOPS: usize = 64;
 const OVERLONG_LOOPS: usize = 4;
 const SETTLE_TURNS: usize = 20;
-const BODY_403: &str = "403 Forbidden";
 const BODY_400: &str = "400 Bad Request";
-const NON_ALLOWLISTED_CONNECT: &[u8] = b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n";
 
 fn rlimit_stack_readable() -> Option<String> {
     let contents = std::fs::read_to_string("/proc/self/limits").ok()?;
@@ -57,14 +55,12 @@ fn boot_serving_runtime() -> (u16, Runtime) {
 
 fn refuse_non_allowlisted_connects(runtime: &mut Runtime, port: u16) {
     for i in 0..LOOPS {
-        Refusal {
-            head: NON_ALLOWLISTED_CONNECT,
-            expected_body: BODY_403,
-            settle_turns: SETTLE_TURNS,
-            failure: &format!(
+        Refusal::non_allowlisted_connect(
+            SETTLE_TURNS,
+            &format!(
                 "iteration {i}: the server must refuse a non-allowlisted CONNECT with the 403 body"
             ),
-        }
+        )
         .drive(runtime, port);
     }
 }
