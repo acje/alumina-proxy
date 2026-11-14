@@ -15,27 +15,31 @@ use mio::{Interest, Token};
 #[cfg(target_os = "linux")]
 const READY_TIMEOUT: Duration = Duration::from_millis(500);
 
-fn accept_ready(listener: &TcpListener) -> MioTcpStream {
+fn accept_ready(listener: &TcpListener) -> std::io::Result<MioTcpStream> {
     let deadline = Instant::now() + Duration::from_millis(500);
     loop {
         match listener.accept() {
-            Ok((server, _peer_addr)) => return server,
+            Ok((server, _peer_addr)) => return Ok(server),
             Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
             {
                 std::thread::sleep(Duration::from_millis(1));
             }
-            Err(error) => panic!("accept after loopback handshake failed: {error}"),
+            Err(error) => return Err(error),
         }
     }
 }
 
 fn bind_accept_pair() -> (TcpListener, StdTcpStream, MioTcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
-        .expect("listener bind");
+    let listener = TcpListener::bind(
+        "127.0.0.1:0"
+            .parse::<std::net::SocketAddr>()
+            .expect("loopback literal parses as a socket address"),
+    )
+    .expect("listener bind");
     let addr = listener.local_addr().expect("listener local addr");
     let peer = StdTcpStream::connect(addr).expect("peer connect");
-    let server = accept_ready(&listener);
+    let server = accept_ready(&listener).expect("accept after loopback handshake");
     (listener, peer, server)
 }
 
@@ -249,16 +253,16 @@ fn linux_epoll_operation_matrix() {
 }
 
 #[cfg(target_os = "linux")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "outbound connect/send-buffer saturation/drain/refused matrix kept as one alloc-phase-guarded sequence"
-)]
-fn exercise_outbound_connect_matrix(
+fn connect_outbound(
     poll: &mut Poll,
     events: &mut Events,
-    payload: &[u8],
 ) -> (TcpListener, MioTcpStream, MioTcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).expect("bind listener");
+    let listener = TcpListener::bind(
+        "127.0.0.1:0"
+            .parse::<std::net::SocketAddr>()
+            .expect("loopback literal parses as a socket address"),
+    )
+    .expect("bind listener");
     let server_addr = listener.local_addr().expect("listener addr");
 
     let mut client = MioTcpStream::connect(server_addr).expect("nonblocking connect");
@@ -285,13 +289,17 @@ fn exercise_outbound_connect_matrix(
         "connecting client's peer is the acceptor's bound address"
     );
 
-    let mut server = accept_ready(&listener);
+    let server = accept_ready(&listener).expect("accept after loopback handshake");
     assert_eq!(
         server.peer_addr().expect("server peer_addr"),
         client_addr,
         "accepted stream's peer is the connecting client"
     );
+    (listener, client, server)
+}
 
+#[cfg(target_os = "linux")]
+fn verify_short_write_roundtrip(client: &mut MioTcpStream, server: &mut MioTcpStream) {
     let tiny = [0x5au8; 5];
     let n = client.write(&tiny).expect("tiny write");
     assert_eq!(n, tiny.len(), "empty socket accepts the full tiny write");
@@ -306,7 +314,10 @@ fn exercise_outbound_connect_matrix(
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
     );
     assert!(drained, "drained socket read must be WouldBlock");
+}
 
+#[cfg(target_os = "linux")]
+fn saturate_send_buffer(client: &mut MioTcpStream, payload: &[u8]) -> std::io::Result<usize> {
     let n0 = client.write(payload).expect("bulk write");
     assert!(n0 > 0, "bulk write must accept at least one byte");
     let mut saw_partial = n0 < payload.len();
@@ -318,7 +329,7 @@ fn exercise_outbound_connect_matrix(
             Ok(n) if n < payload.len() => saw_partial = true,
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => saw_would_block = true,
-            Err(error) => panic!("bulk write failed: {error}"),
+            Err(error) => return Err(error),
         }
     }
     assert!(
@@ -329,7 +340,16 @@ fn exercise_outbound_connect_matrix(
         saw_would_block,
         "saturated send buffer must surface WouldBlock"
     );
+    Ok(n0)
+}
 
+#[cfg(target_os = "linux")]
+fn drain_written_payload(
+    server: &mut MioTcpStream,
+    payload: &[u8],
+    n0: usize,
+) -> std::io::Result<()> {
+    let mut read_buf = [0u8; 128];
     let mut n_read = 0usize;
     let drain_deadline = Instant::now() + Duration::from_millis(250);
     while Instant::now() < drain_deadline {
@@ -347,15 +367,24 @@ fn exercise_outbound_connect_matrix(
                 n_read += n;
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) => panic!("server drain failed: {error}"),
+            Err(error) => return Err(error),
         }
     }
     assert!(
         n_read >= n0,
         "server must drain at least the first accepted bulk write"
     );
+    Ok(())
+}
 
-    let refuse = TcpListener::bind("127.0.0.1:0".parse().unwrap()).expect("bind refuse");
+#[cfg(target_os = "linux")]
+fn verify_refused_connect(poll: &mut Poll, events: &mut Events) {
+    let refuse = TcpListener::bind(
+        "127.0.0.1:0"
+            .parse::<std::net::SocketAddr>()
+            .expect("loopback literal parses as a socket address"),
+    )
+    .expect("bind refuse");
     let refuse_addr = refuse.local_addr().expect("refuse addr");
     drop(refuse);
     match MioTcpStream::connect(refuse_addr) {
@@ -381,16 +410,33 @@ fn exercise_outbound_connect_matrix(
             "immediate refused connect is ConnectionRefused"
         ),
     }
+}
 
+#[cfg(target_os = "linux")]
+fn exercise_outbound_connect_matrix(
+    poll: &mut Poll,
+    events: &mut Events,
+    payload: &[u8],
+) -> (TcpListener, MioTcpStream, MioTcpStream) {
+    let (listener, mut client, mut server) = connect_outbound(poll, events);
+    verify_short_write_roundtrip(&mut client, &mut server);
+    let n0 = saturate_send_buffer(&mut client, payload).expect("bulk write");
+    drain_written_payload(&mut server, payload, n0).expect("server drain");
+    verify_refused_connect(poll, events);
     (listener, client, server)
 }
 
 #[cfg(target_os = "linux")]
 fn exercise_registry_error_kinds(poll: &mut Poll) -> (TcpListener, MioTcpStream, MioTcpStream) {
-    let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).expect("bind listener");
+    let listener = TcpListener::bind(
+        "127.0.0.1:0"
+            .parse::<std::net::SocketAddr>()
+            .expect("loopback literal parses as a socket address"),
+    )
+    .expect("bind listener");
     let server_addr = listener.local_addr().expect("listener addr");
     let mut client = MioTcpStream::connect(server_addr).expect("nonblocking connect");
-    let mut server = accept_ready(&listener);
+    let mut server = accept_ready(&listener).expect("accept after loopback handshake");
 
     poll.registry()
         .register(&mut client, Token(20), Interest::READABLE)
