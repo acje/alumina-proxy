@@ -25,30 +25,48 @@ import stat
 import sys
 
 
-def observe(path):
-    try:
-        lst = os.lstat(path)
-    except OSError as e:
-        if e.errno == errno.ENOENT:
-            return "absent"
-        if e.errno in (errno.EACCES, errno.EPERM):
-            return "denied"
-        return "error"
-    if stat.S_ISLNK(lst.st_mode):
-        try:
-            st = os.stat(path)
-        except OSError as e:
-            if e.errno == errno.ENOENT:
-                return "dangling"
-            if e.errno in (errno.EACCES, errno.EPERM):
-                return "denied"
-            return "error"
-        if stat.S_ISREG(st.st_mode):
-            return "present"
-        return "nonregular"
-    if stat.S_ISREG(lst.st_mode):
+def _fault_word(err):
+    """A denied traversal or an unresolvable fault; neither is ever an absence."""
+    if err.errno in (errno.EACCES, errno.EPERM):
+        return "denied"
+    return "error"
+
+
+def _absent_word(err):
+    """Only ENOENT at the path itself proves absence."""
+    if err.errno == errno.ENOENT:
+        return "absent"
+    return _fault_word(err)
+
+
+def _dangling_word(err):
+    """ENOENT through a symlink is dangling, never absent."""
+    if err.errno == errno.ENOENT:
+        return "dangling"
+    return _fault_word(err)
+
+
+def _mode_word(mode):
+    """A regular file once symlinks resolve; every other entry is nonregular."""
+    if stat.S_ISREG(mode):
         return "present"
     return "nonregular"
+
+
+def observe(path):
+    # lstat names the entry type, stat follows the link; each failure path owns
+    # its own word and the caller only ever sees one.
+    try:
+        lst = os.lstat(path)
+    except OSError as err:
+        return _absent_word(err)
+    if not stat.S_ISLNK(lst.st_mode):
+        return _mode_word(lst.st_mode)
+    try:
+        st = os.stat(path)
+    except OSError as err:
+        return _dangling_word(err)
+    return _mode_word(st.st_mode)
 
 
 def main():
