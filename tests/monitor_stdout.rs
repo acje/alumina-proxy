@@ -10,6 +10,8 @@ const LOOPS: usize = 400;
 const MAX_MONITOR_RECORDS: usize = 32;
 const MONITOR_TIMEOUT: Duration = Duration::from_secs(120);
 const SETTLE_TURNS: usize = 4;
+const DRAIN_EVERY: usize = 50;
+const DRAIN_PAUSE: Duration = Duration::from_millis(30);
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--child") {
@@ -145,11 +147,8 @@ fn child_main() {
             ),
         )
         .drive(&mut runtime, port);
-        // A short pause every 50 exchanges lets the nonblocking stdout drain
-        // catch up, so the storm exercises the sink rather than a backlog that
-        // never reaches it.
-        if i % 50 == 49 {
-            std::thread::sleep(Duration::from_millis(30));
+        if (i + 1) % DRAIN_EVERY == 0 {
+            std::thread::sleep(DRAIN_PAUSE);
         }
     }
     runtime
