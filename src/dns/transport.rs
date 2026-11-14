@@ -2282,64 +2282,40 @@ impl StartupDns {
         #[cfg(test)]
         let mut forced_partial = 0usize;
         #[cfg(test)]
-        {
-            if let Some(force) = self.force_write.take() {
-                blocked = true;
-                if let (Some(stream), WriteForce::Partial(n)) =
-                    (plain_stream(&mut self.conn), force)
-                {
-                    let end = (self.written + n).min(ex.qlen);
-                    if end > self.written {
-                        match stream.write(&self.query_buf[self.written..end]) {
-                            Ok(0) => {
-                                self.close_connection()?;
-                                let reason =
-                                    self.note_failure(ex, schedules, FailureReason::Send)?;
-                                return Ok(SendStep::Failed(reason));
-                            }
-                            Ok(w) => {
-                                self.written += w;
-                                forced_partial = w;
-                            }
-                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                            Err(_) => {
-                                self.close_connection()?;
-                                let reason =
-                                    self.note_failure(ex, schedules, FailureReason::Send)?;
-                                return Ok(SendStep::Failed(reason));
-                            }
-                        }
-                    }
-                }
+        if let Some(force) = self.force_write.take() {
+            blocked = true;
+            if let Some(step) =
+                forced_partial_send(self, ex, force, schedules, &mut forced_partial)?
+            {
+                return Ok(step);
             }
         }
         if !blocked && self.written < ex.qlen {
-            if let Some(stream) = plain_stream(&mut self.conn) {
-                match stream.write(&self.query_buf[self.written..ex.qlen]) {
-                    Ok(0) => {
-                        self.close_connection()?;
-                        let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
-                        return Ok(SendStep::Failed(reason));
-                    }
-                    Ok(n) => {
-                        self.written += n;
-                    }
-                    Err(e)
-                        if e.kind() == io::ErrorKind::WouldBlock
-                            || e.kind() == io::ErrorKind::Interrupted =>
-                    {
-                        blocked = true;
-                    }
-                    Err(_) => {
-                        self.close_connection()?;
-                        let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
-                        return Ok(SendStep::Failed(reason));
-                    }
-                }
-            } else {
+            let Some(stream) = plain_stream(&mut self.conn) else {
                 self.close_connection()?;
                 let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
                 return Ok(SendStep::Failed(reason));
+            };
+            match stream.write(&self.query_buf[self.written..ex.qlen]) {
+                Ok(0) => {
+                    self.close_connection()?;
+                    let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
+                    return Ok(SendStep::Failed(reason));
+                }
+                Ok(n) => {
+                    self.written += n;
+                }
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::Interrupted =>
+                {
+                    blocked = true;
+                }
+                Err(_) => {
+                    self.close_connection()?;
+                    let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
+                    return Ok(SendStep::Failed(reason));
+                }
             }
         }
         if self.written >= ex.qlen {
@@ -3745,6 +3721,41 @@ impl StartupDns {
             }
         }
         Ok(reason)
+    }
+}
+
+#[cfg(test)]
+fn forced_partial_send(
+    transport: &mut StartupDns,
+    ex: &ActiveExchange,
+    force: WriteForce,
+    schedules: &mut Schedules,
+    forced_partial: &mut usize,
+) -> Result<Option<SendStep>, StartupDnsError> {
+    let (Some(stream), WriteForce::Partial(n)) = (plain_stream(&mut transport.conn), force) else {
+        return Ok(None);
+    };
+    let end = (transport.written + n).min(ex.qlen);
+    if end <= transport.written {
+        return Ok(None);
+    }
+    match stream.write(&transport.query_buf[transport.written..end]) {
+        Ok(0) => {
+            transport.close_connection()?;
+            let reason = transport.note_failure(ex, schedules, FailureReason::Send)?;
+            Ok(Some(SendStep::Failed(reason)))
+        }
+        Ok(w) => {
+            transport.written += w;
+            *forced_partial = w;
+            Ok(None)
+        }
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(_) => {
+            transport.close_connection()?;
+            let reason = transport.note_failure(ex, schedules, FailureReason::Send)?;
+            Ok(Some(SendStep::Failed(reason)))
+        }
     }
 }
 
