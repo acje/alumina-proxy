@@ -470,20 +470,7 @@ impl ScriptedSink {
             return match self.first {
                 ScriptedFirst::Interrupted => Err(io::Error::from(io::ErrorKind::Interrupted)),
                 ScriptedFirst::Zero => Ok(0),
-                ScriptedFirst::Partial(limit) => {
-                    let total: usize = iovs.iter().map(|iov| iov.len()).sum();
-                    let consumed = total.min(limit.get());
-                    let mut remaining = consumed;
-                    for iov in iovs {
-                        let take = iov.len().min(remaining);
-                        self.out.extend_from_slice(&iov[..take]);
-                        remaining -= take;
-                        if remaining == 0 {
-                            break;
-                        }
-                    }
-                    Ok(consumed)
-                }
+                ScriptedFirst::Partial(limit) => Ok(self.write_partial(iovs, limit.get())),
             };
         }
         let total = iovs.iter().map(|iov| iov.len()).sum();
@@ -491,6 +478,21 @@ impl ScriptedSink {
             self.out.extend_from_slice(iov);
         }
         Ok(total)
+    }
+
+    fn write_partial(&mut self, iovs: &[IoSlice<'_>], limit: usize) -> usize {
+        let total: usize = iovs.iter().map(|iov| iov.len()).sum();
+        let mut remaining = total.min(limit);
+        let consumed = remaining;
+        for iov in iovs {
+            let take = iov.len().min(remaining);
+            self.out.extend_from_slice(&iov[..take]);
+            remaining -= take;
+            if remaining == 0 {
+                break;
+            }
+        }
+        consumed
     }
 }
 
@@ -612,6 +614,13 @@ pub(crate) struct ResolverProbeSegment<'a> {
     pub(crate) fqdn: Option<&'a Fqdn>,
     pub(crate) pin: bool,
     pub(crate) verdict: ProbeVerdict,
+}
+
+struct MonitorAdmission {
+    domain_total: u32,
+    capture_total: u32,
+    admitted_domain: u32,
+    admitted_capture: u32,
 }
 
 impl LogStore {
@@ -1008,13 +1017,9 @@ impl LogStore {
     /// without a matching monitor loss, which the geometry test excludes.
     pub(crate) fn monitor_summary(&mut self, secs: u64, monitor: &mut Monitor) -> bool {
         self.set_now(secs);
-        let domain_total = count_domain_batches(monitor);
-        let capture_total = count_capture_batches(monitor);
-        let spare = u32::try_from(self.spare_after_reserved()).unwrap_or(u32::MAX);
-        let admitted_domain = domain_total.min(spare);
-        let admitted_capture = capture_total.min(spare - admitted_domain);
-        let lost_domain = domain_total - admitted_domain;
-        let lost_capture = capture_total - admitted_capture;
+        let admission = self.admit_monitor_batches(monitor);
+        let lost_domain = admission.domain_total - admission.admitted_domain;
+        let lost_capture = admission.capture_total - admission.admitted_capture;
         for _ in 0..lost_domain {
             monitor.note_report_drop();
         }
@@ -1033,45 +1038,60 @@ impl LogStore {
             "the reserved summary always commits: a free slot admits it and a full ring displaces a normal record"
         );
         if committed {
-            let mut start = 0usize;
-            for part in 1..=admitted_domain {
-                let ok = self.enqueue_normal(|buf| {
-                    let monitor_ref = &*monitor;
-                    encode_monitor_domain_batch(
-                        buf,
-                        secs,
-                        part,
-                        domain_total,
-                        monitor_ref,
-                        &mut start,
-                    )
-                });
-                debug_assert!(
-                    ok,
-                    "an admitted domain batch has capacity and fits its slot"
-                );
-            }
-            let mut start = 0usize;
-            for part in 1..=admitted_capture {
-                let ok = self.enqueue_normal(|buf| {
-                    let monitor_ref = &*monitor;
-                    encode_monitor_capture_batch(
-                        buf,
-                        secs,
-                        part,
-                        capture_total,
-                        monitor_ref,
-                        &mut start,
-                    )
-                });
-                debug_assert!(
-                    ok,
-                    "an admitted capture batch has capacity and fits its slot"
-                );
-            }
+            self.emit_monitor_batches(secs, &admission, monitor);
         }
         self.note_queue_usage();
         committed
+    }
+
+    fn admit_monitor_batches(&self, monitor: &Monitor) -> MonitorAdmission {
+        let spare = u32::try_from(self.spare_after_reserved()).unwrap_or(u32::MAX);
+        let domain_total = count_domain_batches(monitor);
+        let capture_total = count_capture_batches(monitor);
+        let admitted_domain = domain_total.min(spare);
+        MonitorAdmission {
+            domain_total,
+            capture_total,
+            admitted_domain,
+            admitted_capture: capture_total.min(spare - admitted_domain),
+        }
+    }
+
+    fn emit_monitor_batches(&mut self, secs: u64, admission: &MonitorAdmission, monitor: &Monitor) {
+        let mut domain_start = 0usize;
+        for part in 1..=admission.admitted_domain {
+            let ok = self.enqueue_normal(|buf| {
+                encode_monitor_domain_batch(
+                    buf,
+                    secs,
+                    part,
+                    admission.domain_total,
+                    monitor,
+                    &mut domain_start,
+                )
+            });
+            debug_assert!(
+                ok,
+                "an admitted domain batch has capacity and fits its slot"
+            );
+        }
+        let mut capture_start = 0usize;
+        for part in 1..=admission.admitted_capture {
+            let ok = self.enqueue_normal(|buf| {
+                encode_monitor_capture_batch(
+                    buf,
+                    secs,
+                    part,
+                    admission.capture_total,
+                    monitor,
+                    &mut capture_start,
+                )
+            });
+            debug_assert!(
+                ok,
+                "an admitted capture batch has capacity and fits its slot"
+            );
+        }
     }
 
     /// Evaluates the 80%/70% capacity thresholds for tunnel slots and pending
