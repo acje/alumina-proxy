@@ -2705,11 +2705,12 @@ mod writev_progress {
             true,
             true,
             true,
-            crate::dns::cache::evidence::ResolverSource::index(0).unwrap(),
+            crate::dns::cache::evidence::ResolverSource::index(0)
+                .expect("resolver index 0 is inside MAX_RESOLVERS"),
             Some(600),
             1000,
         )
-        .unwrap()
+        .expect("an attributable source and a 1000 + 600 deadline fit the evidence bounds")
     }
 
     /// Real-cache retained pin: a proven negative for both families survives
