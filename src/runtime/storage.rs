@@ -797,8 +797,16 @@ impl ServeStorage {
     /// even when enqueueing fails.
     pub(crate) fn report_incident_if_due(&mut self, now: Instant) {
         let secs = self.cache_secs(now);
-        let name_count = self.config.allowlist().len();
-        for ordinal in 0..name_count {
+        self.note_open_incidents(secs);
+        self.rotate_and_emit_summaries(secs);
+        self.reconcile_eligible_names(secs);
+        self.close_recovered_windows(secs);
+    }
+
+    /// Opens a window, seeded with the incident snapshot taken at open time, for
+    /// every name whose schedule already holds an open incident.
+    fn note_open_incidents(&mut self, secs: u64) {
+        for ordinal in 0..self.config.allowlist().len() {
             let in_incident = Family::ALL.iter().any(|&family| {
                 matches!(
                     self.schedules.incident(ordinal, family),
@@ -811,20 +819,35 @@ impl ServeStorage {
                     .note_incident_open(ordinal, secs, snapshot);
             }
         }
+    }
+
+    /// Rotates every window at its boundary, then emits the closed-window
+    /// error summary of each name that has one pending.
+    fn rotate_and_emit_summaries(&mut self, secs: u64) {
         self.incident_report.rotate_all_if_due(secs);
-        for ordinal in 0..name_count {
+        for ordinal in 0..self.config.allowlist().len() {
             if let Some(closed) = self.incident_report.take_pending_summary(ordinal) {
                 self.emit_incident_summary(ordinal, closed, Level::Error);
             }
         }
-        for ordinal in 0..name_count {
+    }
+
+    /// Folds each admitted name's current eligible-binding state into the
+    /// report, emitting its transition record or the assurance fault.
+    fn reconcile_eligible_names(&mut self, secs: u64) {
+        for ordinal in 0..self.config.allowlist().len() {
             let Some(name_index) = self.cache.name_index(ordinal) else {
                 continue;
             };
             let result = usable_name(&self.cache, name_index, secs);
             self.reconcile_incident_eligibility(ordinal, secs, result);
         }
-        for ordinal in 0..name_count {
+    }
+
+    /// Closes the window of every name whose families are all closed, emitting
+    /// the info-level partial summary.
+    fn close_recovered_windows(&mut self, secs: u64) {
+        for ordinal in 0..self.config.allowlist().len() {
             let both_closed = Family::ALL.iter().all(|&family| {
                 matches!(
                     self.schedules.incident(ordinal, family),
