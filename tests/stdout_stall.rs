@@ -1,9 +1,7 @@
 #[path = "support/process_harness.rs"]
 mod process_harness;
-use process_harness::{current_exe, serving_config_document, wait_for_success};
+use process_harness::{Refusal, current_exe, serving_config_document, wait_for_success};
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -16,6 +14,9 @@ use alumina::runtime::ServeStorage;
 
 const BODY_403: &str = "403 Forbidden";
 const STALL_TIMEOUT: Duration = Duration::from_secs(120);
+const NON_ALLOWLISTED_CONNECT: &[u8] = b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n";
+const LOOPS: usize = 2000;
+const SETTLE_TURNS: usize = 4;
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--child") {
@@ -40,6 +41,12 @@ fn parent_main() {
 }
 
 fn child_main() {
+    let (port, mut runtime) = boot_stalled_stdout_runtime();
+    let loops = refuse_while_stdout_unconsumed(&mut runtime, port);
+    assert_bounded_drops(&runtime, loops);
+}
+
+fn boot_stalled_stdout_runtime() -> (u16, Runtime) {
     let bind = "127.0.0.1:0".parse().expect("valid bind address");
     let listener = MioListener::bind(bind).expect("bind serving listener");
     let port = listener.local_addr().expect("listener local addr").port();
@@ -50,46 +57,26 @@ fn child_main() {
         .prepare_stdout_log_sink()
         .expect("prepare nonblocking stdout sink");
     let traffic = TrafficStorage::allocate().expect("allocate traffic storage");
-    let mut runtime =
-        Runtime::new(storage, listener, traffic).expect("preallocate + attach runtime");
+    let runtime = Runtime::new(storage, listener, traffic).expect("preallocate + attach runtime");
+    (port, runtime)
+}
 
-    let loops = 2000usize;
-    for i in 0..loops {
-        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect client");
-        client
-            .write_all(b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n")
-            .expect("write connect head");
-        let mut seen = false;
-        let mut buf = [0u8; 128];
-        for _ in 0..100 {
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("owner turn drives accept+decision+refuse+close");
-            client.set_nonblocking(true).expect("nonblocking client");
-            match client.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    let text = String::from_utf8_lossy(&buf[..n]);
-                    if text.contains(BODY_403) {
-                        seen = true;
-                    }
-                    break;
-                }
-                _ => {}
-            }
+fn refuse_while_stdout_unconsumed(runtime: &mut Runtime, port: u16) -> usize {
+    for i in 0..LOOPS {
+        Refusal {
+            head: NON_ALLOWLISTED_CONNECT,
+            expected_body: BODY_403,
+            settle_turns: SETTLE_TURNS,
+            failure: &format!(
+                "iteration {i}: the server must still refuse with 403 while stdout is unconsumed"
+            ),
         }
-        assert!(
-            seen,
-            "iteration {i}: the server must still refuse with 403 while stdout is unconsumed"
-        );
-        client.set_nonblocking(false).expect("blocking client");
-        drop(client);
-        for _ in 0..4 {
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("owner turn settles close_slot reset");
-        }
+        .drive(runtime, port);
     }
+    LOOPS
+}
 
+fn assert_bounded_drops(runtime: &Runtime, loops: usize) {
     let total_emitted = loops as u64;
     let dropped = runtime.serving().storage().log_dropped();
     assert!(
