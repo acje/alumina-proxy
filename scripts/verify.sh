@@ -411,6 +411,145 @@ mid_full() {
     echo "GATE-ONLY-SUITE-MID-OK"
 }
 
+# --- boot fixture capture and assertion owners ------------------------------
+# One fixture case = one podman run of the digest-pinned variant plus assertions
+# over the RAW captured streams. These owners are deliberately top-level: the
+# capture initialisation and the case sequence stay in boot_fixtures, every
+# reusable piece lives here.
+#
+# The staged inputs are written into a disposable container /work dir
+# (cwd-relative contract: main.rs reads config.toml, incl. the resolver set,
+# from the working directory), then privileges are dropped inside that dir.
+# I3: no package install here any more. util-linux (setpriv), python3 and git
+# are baked into the digest-pinned fixture image, so a fixture case performs
+# no network I/O and cannot fail on a flaky mirror.
+fixture_stage_script() {
+    printf '%s\n' \
+        'set -eu' \
+        'python3 /app/scripts/fixture_metadata_probe.py /fixture-alumina "$1" >/dev/null' \
+        'setpriv --reuid 65534 --regid 65534 --clear-groups /bin/sh -c "test -x /fixture-alumina" || { echo "FIXTURE-BLOCKED: variant not executable by uid 65534" >&2; exit 1; }' \
+        'mkdir -p /work' \
+        "printf '%s\\n' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' 'resolver = [\"127.0.0.1\"]' '[any_illegal]' 'connect_parse = { action = \"notify\", scope = \"connection\" }' 'host_not_allowlisted = { action = \"notify\", scope = \"connection\" }' 'tls_profile = { action = \"notify\", scope = \"connection\" }' 'ech = { action = \"notify\", scope = \"connection\" }' '[allowed_fqdn.\"example.com:443\"]' 'early_data = { action = \"notify\", scope = \"connection\" }' 'ja4 = { action = \"notify\", scope = \"connection\" }' 'dns_assurance = \"resolver_trusted\"' > /work/config.toml" \
+        'chown -R 65534:65534 /work'
+    true
+}
+
+fixture_run_case() {
+    label="$1"
+    expected="$2"
+    conn="$3"
+    shift 3
+    run_cmd="$1"
+    shift
+    FIXTURE_LABEL="$label"
+    > "$outf"
+    > "$errf"
+    set +e
+    podman --connection "$conn" run --rm --pull=never \
+        -v "$ROOT:/app:ro,Z" \
+        -v "$VARBIN:/fixture-alumina:ro,Z" \
+        "$@" "$FIXTURE_IMAGE" sh -c "$(fixture_stage_script) && $run_cmd" -- "$variant_sha" >"$outf" 2>"$errf"
+    rc=$?
+    set -e
+    FIXTURE_OUTF="$outf"
+    FIXTURE_ERRF="$errf"
+    echo "FIXTURE $label: exit=$rc"
+    sed 's/^/  out>/' "$outf"
+    sed 's/^/  err>/' "$errf"
+    case "$rc" in
+        "$expected") ;;
+        *) echo "FIXTURE $label FAIL: expected exit $expected, got $rc" >&2; exit 1 ;;
+    esac
+}
+
+# Stream-discipline predicates (unr B3): stdout and stderr are retained as
+# raw files (never command substitution, which strips trailing newline
+# bytes). Negative stdout must be an EMPTY file - any captured byte, even
+# newline-only, fails. Exact-line checks use grep -Fx whole-line match on
+# the retained stdout; byte-exact stderr is a cmp against an explicitly
+# newline-terminated expected file, so an extra or missing trailing newline
+# fails.
+fixture_require_stdout_empty() {
+    if [ -s "$FIXTURE_OUTF" ]; then
+        echo "FIXTURE $FIXTURE_LABEL FAIL: expected empty stdout, got:" >&2
+        sed 's/^/  /' "$FIXTURE_OUTF" >&2
+        exit 1
+    fi
+}
+
+fixture_require_stdout_exact() {
+    line="$1"
+    grep -Fx -- "$line" "$FIXTURE_OUTF" >/dev/null || {
+        echo "FIXTURE $FIXTURE_LABEL FAIL: stdout lacks exact line: $line" >&2
+        exit 1
+    }
+}
+
+fixture_require_stderr_exact() {
+    expected="$1"
+    expectf=$(mktemp) || exit 1
+    printf '%s\n' "$expected" > "$expectf"
+    cmp -s "$FIXTURE_ERRF" "$expectf" || {
+        echo "FIXTURE $FIXTURE_LABEL FAIL: stderr not byte-exact." >&2
+        echo "  expected:" >&2
+        sed 's/^/    /' "$expectf" >&2
+        echo "  got:" >&2
+        sed 's/^/    /' "$FIXTURE_ERRF" >&2
+        rm -f "$expectf"
+        exit 1
+    }
+    rm -f "$expectf"
+}
+
+# Fixed-string stdout probes against the captured fixture stdout. The
+# script runs under `set -eu`, and `$?` is only reliably observed through
+# an if/else guard (a bare `grep; rc=$?` is killed by set -e the instant
+# grep is nonzero -- no-match for not_contains is the REQUIRED outcome, so
+# it must never die silently). Probe error stays distinct from absence:
+# contains passes only on a match and diagnoses a probe error;
+# not_contains passes only on the documented no-match exit (1), and a
+# probe error (2) is a FAIL -- absence is never inferred from an
+# unreadable or failed probe stream.
+fixture_require_stdout_contains() {
+    fragment="$1"
+    if grep -Fq -- "$fragment" "$FIXTURE_OUTF"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -eq 0 ]; then
+        return 0
+    fi
+    if [ "$rc" -eq 2 ]; then
+        echo "FIXTURE $FIXTURE_LABEL ERROR: stdout probe failed (exit 2); required fragment unverifiable: $fragment" >&2
+    else
+        echo "FIXTURE $FIXTURE_LABEL FAIL: stdout lacks fixed-string fragment: $fragment" >&2
+    fi
+    exit 1
+}
+
+fixture_require_stdout_not_contains() {
+    fragment="$1"
+    if grep -Fq -- "$fragment" "$FIXTURE_OUTF"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    case "$rc" in
+        1)
+            return 0
+            ;;
+        0)
+            echo "FIXTURE $FIXTURE_LABEL FAIL: stdout must not contain fixed-string fragment: $fragment" >&2
+            exit 1
+            ;;
+        *)
+            echo "FIXTURE $FIXTURE_LABEL ERROR: stdout probe failed (exit $rc); absence not established: $fragment" >&2
+            exit 1
+            ;;
+    esac
+}
+
 # Linux kernel privilege fixtures. The proof-only `fixture-facts` feature build
 # is executed (a clearly-separate variant artifact under target/fixture-facts;
 # the production target/release artifact is left untouched, with before/after
@@ -511,142 +650,9 @@ boot_fixtures() {
         exit 1
     fi
 
-    # write the fixed documented inputs into a disposable container /work dir
-    # (cwd-relative contract: main.rs reads config.toml, incl. the resolver
-    # set, from the working directory), then drop privileges inside that dir.
-    # I3: no package install here any more. util-linux (setpriv), python3 and git
-    # are baked into the digest-pinned fixture image, so a fixture case performs
-    # no network I/O and cannot fail on a flaky mirror.
-    stage() {
-        printf '%s\n' \
-            'set -eu' \
-            'python3 /app/scripts/fixture_metadata_probe.py /fixture-alumina "$1" >/dev/null' \
-            'setpriv --reuid 65534 --regid 65534 --clear-groups /bin/sh -c "test -x /fixture-alumina" || { echo "FIXTURE-BLOCKED: variant not executable by uid 65534" >&2; exit 1; }' \
-            'mkdir -p /work' \
-            "printf '%s\\n' 'listen = \"0.0.0.0:8080\"' 'startup_unresolved_allowance = 0' 'resolver = [\"127.0.0.1\"]' '[any_illegal]' 'connect_parse = { action = \"notify\", scope = \"connection\" }' 'host_not_allowlisted = { action = \"notify\", scope = \"connection\" }' 'tls_profile = { action = \"notify\", scope = \"connection\" }' 'ech = { action = \"notify\", scope = \"connection\" }' '[allowed_fqdn.\"example.com:443\"]' 'early_data = { action = \"notify\", scope = \"connection\" }' 'ja4 = { action = \"notify\", scope = \"connection\" }' 'dns_assurance = \"resolver_trusted\"' > /work/config.toml" \
-            'chown -R 65534:65534 /work'
-        true
-    }
-
     outf=$(mktemp) || exit 1
     errf=$(mktemp) || exit 1
     trap 'rm -f "$outf" "$errf"' EXIT
-
-    run_fixture() {
-        label="$1"
-        expected="$2"
-        conn="$3"
-        shift 3
-        run_cmd="$1"
-        shift
-        FIXTURE_LABEL="$label"
-        > "$outf"
-        > "$errf"
-        set +e
-        podman --connection "$conn" run --rm --pull=never \
-            -v "$ROOT:/app:ro,Z" \
-            -v "$VARBIN:/fixture-alumina:ro,Z" \
-            "$@" "$FIXTURE_IMAGE" sh -c "$(stage) && $run_cmd" -- "$variant_sha" >"$outf" 2>"$errf"
-        rc=$?
-        set -e
-        FIXTURE_OUTF="$outf"
-        FIXTURE_ERRF="$errf"
-        echo "FIXTURE $label: exit=$rc"
-        sed 's/^/  out>/' "$outf"
-        sed 's/^/  err>/' "$errf"
-        case "$rc" in
-            "$expected") ;;
-            *) echo "FIXTURE $label FAIL: expected exit $expected, got $rc" >&2; exit 1 ;;
-        esac
-    }
-
-    # Stream-discipline predicates (unr B3): stdout and stderr are retained as
-    # raw files (never command substitution, which strips trailing newline
-    # bytes). Negative stdout must be an EMPTY file - any captured byte, even
-    # newline-only, fails. Exact-line checks use grep -Fx whole-line match on
-    # the retained stdout; byte-exact stderr is a cmp against an explicitly
-    # newline-terminated expected file, so an extra or missing trailing newline
-    # fails.
-    fixture_require_stdout_empty() {
-        if [ -s "$FIXTURE_OUTF" ]; then
-            echo "FIXTURE $FIXTURE_LABEL FAIL: expected empty stdout, got:" >&2
-            sed 's/^/  /' "$FIXTURE_OUTF" >&2
-            exit 1
-        fi
-    }
-
-    fixture_require_stdout_exact() {
-        line="$1"
-        grep -Fx -- "$line" "$FIXTURE_OUTF" >/dev/null || {
-            echo "FIXTURE $FIXTURE_LABEL FAIL: stdout lacks exact line: $line" >&2
-            exit 1
-        }
-    }
-
-    fixture_require_stderr_exact() {
-        expected="$1"
-        expectf=$(mktemp) || exit 1
-        printf '%s\n' "$expected" > "$expectf"
-        cmp -s "$FIXTURE_ERRF" "$expectf" || {
-            echo "FIXTURE $FIXTURE_LABEL FAIL: stderr not byte-exact." >&2
-            echo "  expected:" >&2
-            sed 's/^/    /' "$expectf" >&2
-            echo "  got:" >&2
-            sed 's/^/    /' "$FIXTURE_ERRF" >&2
-            rm -f "$expectf"
-            exit 1
-        }
-        rm -f "$expectf"
-    }
-
-    # Fixed-string stdout probes against the captured fixture stdout. The
-    # script runs under `set -eu`, and `$?` is only reliably observed through
-    # an if/else guard (a bare `grep; rc=$?` is killed by set -e the instant
-    # grep is nonzero -- no-match for not_contains is the REQUIRED outcome, so
-    # it must never die silently). Probe error stays distinct from absence:
-    # contains passes only on a match and diagnoses a probe error;
-    # not_contains passes only on the documented no-match exit (1), and a
-    # probe error (2) is a FAIL -- absence is never inferred from an
-    # unreadable or failed probe stream.
-    fixture_require_stdout_contains() {
-        fragment="$1"
-        if grep -Fq -- "$fragment" "$FIXTURE_OUTF"; then
-            rc=0
-        else
-            rc=$?
-        fi
-        if [ "$rc" -eq 0 ]; then
-            return 0
-        fi
-        if [ "$rc" -eq 2 ]; then
-            echo "FIXTURE $FIXTURE_LABEL ERROR: stdout probe failed (exit 2); required fragment unverifiable: $fragment" >&2
-        else
-            echo "FIXTURE $FIXTURE_LABEL FAIL: stdout lacks fixed-string fragment: $fragment" >&2
-        fi
-        exit 1
-    }
-
-    fixture_require_stdout_not_contains() {
-        fragment="$1"
-        if grep -Fq -- "$fragment" "$FIXTURE_OUTF"; then
-            rc=0
-        else
-            rc=$?
-        fi
-        case "$rc" in
-            1)
-                return 0
-                ;;
-            0)
-                echo "FIXTURE $FIXTURE_LABEL FAIL: stdout must not contain fixed-string fragment: $fragment" >&2
-                exit 1
-                ;;
-            *)
-                echo "FIXTURE $FIXTURE_LABEL ERROR: stdout probe failed (exit $rc); absence not established: $fragment" >&2
-                exit 1
-                ;;
-        esac
-    }
 
     # 1) POSITIVE: NoNewPrivs=1, process dropped to uid 65534 with empty cap
     #    sets. The fixture-facts variant runs the CURRENT serving startup under
@@ -682,7 +688,7 @@ printf "FIXTURE-POSITIVE-SUPERVISED: reaped child rc=%s\n" "$rc"
 exit "$rc"
 POSPOS
 )
-    run_fixture "positive" 0 "$CONN" \
+    fixture_run_case "positive" 0 "$CONN" \
         "setpriv --reuid 65534 --regid 65534 --clear-groups /bin/sh -c '$pos_script'" \
         --security-opt no-new-privileges --user 0:0
     # The typed records prove the actual startup-serving/typed-terminal path:
@@ -702,7 +708,7 @@ POSPOS
     # 2) ROOT: euid 0 -> EX_CONFIG 78 (root-UID diagnostic); all four UID axes
     #    reported zero at entry. Negative fixtures must have EMPTY stdout and
     #    byte-exact stderr: exactly the facts line then the diagnostic.
-    run_fixture "root-rejected" 78 "$CONN" \
+    fixture_run_case "root-rejected" 78 "$CONN" \
         "cd /work && /fixture-alumina" \
         --security-opt no-new-privileges --user 0:0
     fixture_require_stdout_empty
@@ -712,7 +718,7 @@ POSPOS
 
     # 3) NNP-MISSING: no no_new_privs flag -> EX_CONFIG 78 (missing-flag
     #    diagnostic); caps empty, uid dropped.
-    run_fixture "no-new-privs-missing" 78 "$CONN" \
+    fixture_run_case "no-new-privs-missing" 78 "$CONN" \
         "setpriv --reuid 65534 --regid 65534 --clear-groups /bin/sh -c 'cd /work && /fixture-alumina'" \
         --user 0:0
     fixture_require_stdout_empty
@@ -727,7 +733,7 @@ POSPOS
     #    non-empty-effective-capability-set diagnostic. The binary's own entry
     #    facts observe all three capability sets non-empty (0x1000 each),
     #    asserting effective-first refusal rather than per-axis isolation.
-    run_fixture "caps-effective" 78 "$ROOTCONN" \
+    fixture_run_case "caps-effective" 78 "$ROOTCONN" \
         "setpriv --reuid 65534 --regid 65534 --clear-groups --inh-caps=+net_admin --ambient-caps=+net_admin /bin/sh -c 'cd /work && /fixture-alumina'" \
         --security-opt no-new-privileges --cap-add NET_ADMIN --user 0:0
     fixture_require_stdout_empty
@@ -1398,18 +1404,18 @@ identity_snapshot_env_config_selected() {
 # records its digest, absent is the only verified-absence marker, and every
 # other status (denied, dangling, nonregular, error, unknown) fails closed.
 identity_snapshot_env_config_candidate() {
-    label="$1"
+    identity_candidate_label="$1"
     noun="$2"
     p="$3"
     st=$(config_observe "$p")
     case "$st" in
-        absent) printf '%s absent    %s\n' "$label" "$p" ;;
+        absent) printf '%s absent    %s\n' "$identity_candidate_label" "$p" ;;
         present)
             h=$(sha256_digest file "$p") || {
                 echo "SOURCE-IDENTITY FAIL: unreadable $noun: $p" >&2
                 exit 1
             }
-            printf '%s present   %s  %s\n' "$label" "$h" "$p"
+            printf '%s present   %s  %s\n' "$identity_candidate_label" "$h" "$p"
             ;;
         denied|dangling|nonregular|error)
             echo "SOURCE-IDENTITY FAIL: $noun not observable ($st): $p" >&2
