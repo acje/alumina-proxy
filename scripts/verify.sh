@@ -1921,11 +1921,30 @@ e2e_verify_stable() {
     echo "E2E-$_gate-CORRESPONDENCE-OK: inputs+binary unchanged across harness execution"
 }
 
-e2e_build_receipt() {
-    _gate="$1"
-    _harness_py="$2"
-    _harness_sh="$3"
-    ROOT="$(pwd)"
+# N1: observe the build-owner native profile with the PRODUCER's own exit
+# checked before any parsing. stdout/stderr are captured together so a
+# failing producer (even one that wrote a plausible host line) is never
+# masked by a later filter's exit 0, and the reason is not swallowed by
+# 2>/dev/null. Parsing (`sed 's/^host: //p'`) runs only on the captured
+# buffer of an exit-0 producer.
+observe_build_target() {
+    _probe_out="$("$@" 2>&1)" || _probe_rc=$?
+    if [ "${_probe_rc:-0}" -ne 0 ]; then
+        printf 'E2E-%s-BLOCKED: build target probe failed before parse (exit %s):\n%s\n' \
+            "$_gate" "$_probe_rc" "$_probe_out" >&2
+        exit 1
+    fi
+    printf '%s\n' "$_probe_out"
+}
+
+# R1: the artifact PROFILE is explicitly observed from the build owner (the
+# native host triple under which the release build actually runs), not
+# guessed from --target-dir. The identical triple is carried into the cargo
+# build AND into the artifact consumer path, so the executed binary is the
+# one Cargo just produced - a stale default-path artifact can never be
+# consumed. On the non-Linux dispatch route the triple is observed inside
+# the same rust image that performs the build.
+e2e_build_owner() {
     # B3: observation and build must share one actual connection. Both the
     # build dispatch (linux_dispatch) and the probe below resolve the SAME
     # PODMAN_CONNECTION, so a probe/build owner mismatch is impossible by
@@ -1937,28 +1956,6 @@ e2e_build_receipt() {
         _builder="podman-dispatch"
         : "${PODMAN_CONNECTION:?PODMAN_CONNECTION must be set to your rootless podman connection}"
     fi
-    # R1: the artifact PROFILE is explicitly observed from the build owner (the
-    # native host triple under which the release build actually runs), not
-    # guessed from --target-dir. The identical triple is carried into the cargo
-    # build AND into the artifact consumer path, so the executed binary is the
-    # one Cargo just produced - a stale default-path artifact can never be
-    # consumed. On the non-Linux dispatch route the triple is observed inside
-    # the same rust image that performs the build.
-    # N1: observe the build-owner native profile with the PRODUCER's own exit
-    # checked before any parsing. stdout/stderr are captured together so a
-    # failing producer (even one that wrote a plausible host line) is never
-    # masked by a later filter's exit 0, and the reason is not swallowed by
-    # 2>/dev/null. Parsing (`sed 's/^host: //p'`) runs only on the captured
-    # buffer of an exit-0 producer.
-    observe_build_target() {
-        _probe_out="$("$@" 2>&1)" || _probe_rc=$?
-        if [ "${_probe_rc:-0}" -ne 0 ]; then
-            printf 'E2E-%s-BLOCKED: build target probe failed before parse (exit %s):\n%s\n' \
-                "$_gate" "$_probe_rc" "$_probe_out" >&2
-            exit 1
-        fi
-        printf '%s\n' "$_probe_out"
-    }
     if [ "$(uname -s)" = "Linux" ]; then
         _probe_buf=$(observe_build_target rustc +${TOOLCHAIN} -vV) || exit 1
     else
@@ -1976,6 +1973,11 @@ e2e_build_receipt() {
             ;;
     esac
     export E2E_TARGET
+}
+
+# The exact-candidate build: pre-build input record, the build itself, the
+# post-build record, the stability compare and the artifact existence gate.
+e2e_build_sources() {
     TGT="$ROOT/target"
     BIN="target/${E2E_TARGET}/release/alumina"
     closure_metadata
@@ -2008,18 +2010,21 @@ e2e_build_receipt() {
         echo "E2E-$_gate-BLOCKED: production static binary missing after rebuild ($BIN for target $E2E_TARGET)" >&2
         exit 1
     }
+}
+
+# B3/R1: resolve the ACTUAL harness-image tag + immutable ID from the rootful
+# connection the harness consumers open (e2e_relay.sh/e2e_shutdown.sh use
+# ${PODMAN_ROOT_CONNECTION}). An unresolvable ID is a blocker. The immutable
+# ID is EXPORTED to the consumers, which must re-check that the tag still
+# resolves to this ID on their connection and then run the ID itself (R1:
+# the receipt's image is the image executed).
+e2e_harness_identity() {
     echo "e2e/$_gate identity (executed binary tied to exact candidate):"
     head=$(git rev-parse --verify HEAD 2>&1) || {
         echo "E2E-$_gate-BLOCKED: git rev-parse HEAD failed" >&2
         exit 1
     }
     binhash=$(sha256_digest file "$ROOT/$BIN") || exit 1
-    # B3/R1: resolve the ACTUAL harness-image tag + immutable ID from the
-    # rootful connection the harness consumers open (e2e_relay.sh/e2e_shutdown.sh
-    # use ${PODMAN_ROOT_CONNECTION}). An unresolvable ID is a
-    # blocker. The immutable ID is EXPORTED to the consumers, which must
-    # re-check that the tag still resolves to this ID on their connection and
-    # then run the ID itself (R1: the receipt's image is the image executed).
     E2E_IMAGE="${E2E_IMAGE:-localhost/alumina-e2e:e2e-20261011}"
     E2E_ROOT_CONN="${PODMAN_ROOT_CONNECTION:?PODMAN_ROOT_CONNECTION must be set to your rootful podman connection}"
     harness_id=$(podman --connection "$E2E_ROOT_CONN" image inspect --format '{{.Id}}' "$E2E_IMAGE" 2>/dev/null) \
@@ -2029,6 +2034,12 @@ e2e_build_receipt() {
         exit 1
     fi
     export E2E_IMAGE E2E_IMAGE_ID="$harness_id" E2E_ROOT_CONN
+}
+
+# Durable through-execution receipt (consumed by e2e_verify_stable after the
+# harness runs): exact-candidate inputs + executed binary digest, then the
+# two-line identity record.
+e2e_receipt_print() {
     # Durable through-execution receipt (consumed by e2e_verify_stable after
     # the harness runs): exact-candidate inputs + executed binary digest.
     printf '%s\n' "$after" >"$TGT/.e2e-$_gate-inputs"
@@ -2040,6 +2051,18 @@ e2e_build_receipt() {
         "$_builder" "docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a" \
         "$E2E_IMAGE" "$harness_id" "$E2E_ROOT_CONN"
 }
+
+e2e_build_receipt() {
+    _gate="$1"
+    _harness_py="$2"
+    _harness_sh="$3"
+    ROOT="$(pwd)"
+    e2e_build_owner
+    e2e_build_sources
+    e2e_harness_identity
+    e2e_receipt_print
+}
+
 
 e2e_relay() {
     e2e_build_receipt relay scripts/e2e_relay.py scripts/e2e_relay.sh
