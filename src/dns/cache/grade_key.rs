@@ -54,45 +54,86 @@ struct FamilyMarker {
     known_valid: Option<bool>,
 }
 
-impl FamilyMarker {
+/// One observation of a family: the served class and the class/time validity a
+/// retained proof implies at the same instant.
+#[derive(Clone, Copy, Debug)]
+struct Observation {
+    current: Option<ProofClass>,
+    retained: Option<RetainedGrade>,
+    class: Option<ProofClass>,
+    valid: Option<bool>,
+}
+
+impl Observation {
     fn new(current: Option<ProofClass>, retained: Option<RetainedGrade>) -> Self {
         Self {
-            last_current: current,
-            known_class: observed_class(current, retained),
-            known_valid: retained.map(|proof| proof.valid),
+            current,
+            retained,
+            class: observed_class(current, retained),
+            valid: retained.map(|proof| proof.valid),
+        }
+    }
+}
+
+impl FamilyMarker {
+    fn new(current: Option<ProofClass>, retained: Option<RetainedGrade>) -> Self {
+        let observed = Observation::new(current, retained);
+        Self {
+            last_current: observed.current,
+            known_class: observed.class,
+            known_valid: observed.valid,
         }
     }
 
     fn observe(&mut self, current: Option<ProofClass>, retained: Option<RetainedGrade>) -> bool {
-        let class = observed_class(current, retained);
-        let valid = retained.map(|proof| proof.valid);
-        let strong_loss = matches!(
+        let observed = Observation::new(current, retained);
+        let strong_loss = self.strong_loss(observed);
+        let class_changed = self.class_changed(observed);
+        let validity_changed = self.validity_changed(observed);
+        self.fold(observed, strong_loss);
+        class_changed || validity_changed || strong_loss
+    }
+
+    /// Losing every current and retained proof after an authenticated or
+    /// delegated class resets the marker rather than folding.
+    fn strong_loss(self, observed: Observation) -> bool {
+        matches!(
             self.last_current,
             Some(ProofClass::Authenticated | ProofClass::Delegated)
-        ) && current.is_none()
-            && retained.is_none()
-            && self.known_valid == Some(true);
-        let class_changed = match (self.known_class, class) {
+        ) && observed.current.is_none()
+            && observed.retained.is_none()
+            && self.known_valid == Some(true)
+    }
+
+    fn class_changed(self, observed: Observation) -> bool {
+        match (self.known_class, observed.class) {
             (Some(before), Some(after)) => before != after,
-            (None, Some(_)) => valid == Some(true) && self.known_valid != Some(true),
-            (Some(_) | None, None) => false,
-        };
-        let validity_changed = matches!(
-            (self.known_valid, valid),
+            (None, Some(_)) => observed.valid == Some(true) && self.known_valid != Some(true),
+            (_, None) => false,
+        }
+    }
+
+    const fn validity_changed(self, observed: Observation) -> bool {
+        matches!(
+            (self.known_valid, observed.valid),
             (Some(true), Some(false)) | (Some(false), Some(true))
-        );
-        self.last_current = current;
+        )
+    }
+
+    /// Records the observation: away from a strong loss, known class and
+    /// validity fold monotonically and never regress.
+    fn fold(&mut self, observed: Observation, strong_loss: bool) {
+        self.last_current = observed.current;
         if strong_loss {
             self.known_class = None;
             self.known_valid = None;
-        } else {
-            self.known_class = match (valid, class) {
-                (Some(false), None) => None,
-                (_, _) => class.or(self.known_class),
-            };
-            self.known_valid = valid.or(self.known_valid);
+            return;
         }
-        class_changed || validity_changed || strong_loss
+        self.known_class = match (observed.valid, observed.class) {
+            (Some(false), None) => None,
+            (_, _) => observed.class.or(self.known_class),
+        };
+        self.known_valid = observed.valid.or(self.known_valid);
     }
 }
 
