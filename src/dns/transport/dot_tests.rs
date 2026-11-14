@@ -411,53 +411,71 @@ fn serve_queries(
     let mut plain: Vec<u8> = Vec::new();
     let mut scratch = [0u8; 4096];
     loop {
-        if plain.len() >= 2 {
-            let full = 2 + usize::from(u16::from_be_bytes([plain[0], plain[1]]));
-            if plain.len() >= full {
-                let query = plain[2..full].to_vec();
-                plain.drain(..full);
-                match mode {
-                    AdversarialReply::ServeOnce => {
-                        write_tls_message(tls, sock, &echo_positive(&query))?;
-                        return Ok(());
-                    }
-                    AdversarialReply::SplitRecord => {
-                        write_tls_split(tls, sock, &echo_positive(&query))?;
-                        continue;
-                    }
-                    AdversarialReply::Positive => {
-                        write_tls_message(tls, sock, &echo_positive(&query))?;
-                    }
-                    AdversarialReply::WrongTid => {
-                        write_tls_message(tls, sock, &wrong_tid_reply(&query))?;
-                    }
-                    AdversarialReply::Oversize => {
-                        let oversize = vec![0u8; crate::dns::wire::DNS_MSG_LIMIT + 1];
-                        write_tls_message(tls, sock, &oversize)?;
-                    }
-                    AdversarialReply::Mangled => {
-                        write_tls_message(tls, sock, &mangled_reply(&query))?;
-                    }
-                }
-                continue;
+        if let Some(query) = take_framed_query(&mut plain) {
+            if serve_one_query(tls, sock, mode, &query)? {
+                return Ok(());
             }
+            continue;
         }
         if drain_plaintext(tls, &mut plain, &mut scratch)? {
             continue;
         }
-        match tls.read_tls(sock) {
-            Ok(0) => return Ok(()),
-            Ok(_) => {
-                if tls.process_new_packets().is_err() {
-                    return Ok(());
-                }
-            }
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => return Ok(()),
+        if !read_more_tls(tls, sock) {
+            return Ok(());
         }
     }
+}
+
+fn take_framed_query(plain: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let prefix = plain.get(..2)?;
+    let full = 2 + usize::from(u16::from_be_bytes([prefix[0], prefix[1]]));
+    if plain.len() < full {
+        return None;
+    }
+    let query = plain[2..full].to_vec();
+    plain.drain(..full);
+    Some(query)
+}
+
+fn serve_one_query(
+    tls: &mut ServerConnection,
+    sock: &mut TcpStream,
+    mode: AdversarialReply,
+    query: &[u8],
+) -> io::Result<bool> {
+    let reply = reply_for(mode, query);
+    if mode == AdversarialReply::SplitRecord {
+        write_tls_split(tls, sock, &reply)?;
+    } else {
+        write_tls_message(tls, sock, &reply)?;
+    }
+    Ok(mode == AdversarialReply::ServeOnce)
+}
+
+fn reply_for(mode: AdversarialReply, query: &[u8]) -> Vec<u8> {
+    match mode {
+        AdversarialReply::Positive
+        | AdversarialReply::ServeOnce
+        | AdversarialReply::SplitRecord => echo_positive(query),
+        AdversarialReply::WrongTid => wrong_tid_reply(query),
+        AdversarialReply::Oversize => vec![0u8; crate::dns::wire::DNS_MSG_LIMIT + 1],
+        AdversarialReply::Mangled => mangled_reply(query),
+    }
+}
+
+fn read_more_tls(tls: &mut ServerConnection, sock: &mut TcpStream) -> bool {
+    match tls.read_tls(sock) {
+        Ok(0) => return false,
+        Ok(_) => {
+            if tls.process_new_packets().is_err() {
+                return false;
+            }
+        }
+        Err(e)
+            if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::Interrupted => {}
+        Err(_) => return false,
+    }
+    true
 }
 
 /// Drives one accepted connection: completes the server handshake (returning
