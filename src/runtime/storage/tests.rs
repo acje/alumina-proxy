@@ -27,6 +27,43 @@ fn v6(octets: [u8; 16]) -> NumericAddr {
     NumericAddr::V6(Ipv6Addr::from(octets))
 }
 
+#[cfg(feature = "alloc-witness")]
+pub(crate) struct ExpirySeed {
+    pub(crate) name: NameIndex,
+    pub(crate) proof: Evidence,
+    pub(crate) ttl: u64,
+}
+
+#[cfg(feature = "alloc-witness")]
+pub(crate) fn expiry_family_matrix() -> [(Family, NumericAddr); 2] {
+    [
+        (Family::A, v4([8, 8, 8, 8])),
+        (
+            Family::Aaaa,
+            v6([
+                0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+            ]),
+        ),
+    ]
+}
+
+#[cfg(feature = "alloc-witness")]
+pub(crate) fn stage_expiry_family(
+    seed: &ExpirySeed,
+    family: Family,
+    address: NumericAddr,
+) -> Result<StagedPositive, CacheError> {
+    StagedPositive::stage_with_evidence(
+        seed.name,
+        family,
+        Generation::INITIAL,
+        &[address],
+        1000,
+        seed.ttl,
+        Some(seed.proof),
+    )
+}
+
 fn config_with_allowance(count: usize, allowance: u8) -> Config {
     let names = match count {
         1 => vec!["alpha.example.org:443"],

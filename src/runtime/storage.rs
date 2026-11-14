@@ -1698,7 +1698,7 @@ fn usable_name(cache: &Cache, name: NameIndex, now: u64) -> Result<bool, CacheEr
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod startup_integration;
@@ -3546,34 +3546,17 @@ mod assurance_bridge_tests {
     #[cfg(feature = "alloc-witness")]
     fn seed_expiry_families(storage: &mut ServeStorage) {
         use crate::dns::cache::evidence::{Evidence, ResolverSource};
-        use crate::dns::cache::{Family, Generation, StagedPositive};
-        use crate::eligibility::NumericAddr;
         let proof =
             Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
         for ordinal in 0..32 {
             let name = storage.cache.name_index(ordinal).unwrap();
-            for (family, address) in [
-                (Family::A, NumericAddr::V4([8, 8, 8, 8].into())),
-                (
-                    Family::Aaaa,
-                    NumericAddr::V6(
-                        [
-                            0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
-                        ]
-                        .into(),
-                    ),
-                ),
-            ] {
-                let staged = StagedPositive::stage_with_evidence(
-                    name,
-                    family,
-                    Generation::INITIAL,
-                    &[address],
-                    1000,
-                    1,
-                    Some(proof),
-                )
-                .unwrap();
+            let seed = super::tests::ExpirySeed {
+                name,
+                proof,
+                ttl: 1,
+            };
+            for (family, address) in super::tests::expiry_family_matrix() {
+                let staged = super::tests::stage_expiry_family(&seed, family, address).unwrap();
                 storage.cache.publish_positive(&staged).unwrap();
                 assert!(
                     storage

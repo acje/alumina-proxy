@@ -3720,8 +3720,6 @@ fn assert_corroboration_incident(
 #[cfg(feature = "alloc-witness")]
 fn seed_populated_families(storage: &mut ServeStorage) -> crate::dns::cache::NameIndex {
     use crate::dns::cache::evidence::{Evidence, ResolverSource};
-    use crate::dns::cache::{Generation, StagedPositive};
-    use crate::eligibility::NumericAddr;
 
     let name = storage
         .cache()
@@ -3740,28 +3738,14 @@ fn seed_populated_families(storage: &mut ServeStorage) -> crate::dns::cache::Nam
         .cache()
         .check_publication_requirement(name, Some(proof), 1000)
         .expect("publication requirement");
-    for (family, address) in [
-        (Family::A, NumericAddr::V4([8, 8, 8, 8].into())),
-        (
-            Family::Aaaa,
-            NumericAddr::V6(
-                [
-                    0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
-                ]
-                .into(),
-            ),
-        ),
-    ] {
-        let staged = StagedPositive::stage_with_evidence(
-            name,
-            family,
-            Generation::INITIAL,
-            &[address],
-            1000,
-            600,
-            Some(proof),
-        )
-        .expect("stage admissible positive");
+    let seed = crate::runtime::storage::tests::ExpirySeed {
+        name,
+        proof,
+        ttl: 600,
+    };
+    for (family, address) in crate::runtime::storage::tests::expiry_family_matrix() {
+        let staged = crate::runtime::storage::tests::stage_expiry_family(&seed, family, address)
+            .expect("stage admissible positive");
         storage
             .cache_mut()
             .publish_positive(&staged)
