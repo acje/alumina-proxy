@@ -37,13 +37,15 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 
-use crate::config::{ALLOWLIST_MAX, Config, Fqdn};
+use crate::config::{ALLOWLIST_MAX, Allowlist, Config, Fqdn};
 use crate::dns::cache::evidence::ResolverSource;
 use crate::dns::cache::{Cache, CacheError, Family, Generation, Generations};
 use crate::dns::resolver::{
     Fqdn as ResolverFqdn, MAX_RESOLVERS, RecursionPolicy, ResolverSet, SpiPin,
 };
-use crate::dns::schedule::{OutcomeIncidents, PerTypeTransition, ScheduleError, Schedules};
+use crate::dns::schedule::{
+    DueToken, OutcomeIncidents, PerTypeTransition, ScheduleError, Schedules,
+};
 use crate::dns::wire::{self, BailiwickZones, DNS_MSG_LIMIT, DnsError, ResponseWorkspace};
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::log;
@@ -1294,6 +1296,16 @@ pub(crate) struct WindowInputs<'a> {
     pub(crate) nameserver: SocketAddr,
     pub(crate) now0: u64,
     pub(crate) window: Duration,
+}
+
+struct WindowRun<'a> {
+    allowlist: &'a Allowlist,
+    window_deadline: Instant,
+    now: u64,
+    cache: &'a mut Cache,
+    schedules: &'a mut Schedules,
+    logs: &'a mut log::LogStore,
+    ledger: WindowLedger,
 }
 
 impl StartupDns {
@@ -2863,30 +2875,66 @@ impl StartupDns {
     /// Returns the underlying fatal storage, entropy, lifecycle, poll, token,
     /// deadline, or schedule error; counted per-exchange network failures are
     /// carried by the report.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "long resolve-window driver covering exchange steps, timeouts, and publish bookkeeping"
-    )]
     pub(crate) fn resolve_window(
         &mut self,
         inputs: WindowInputs<'_>,
         logs: &mut log::LogStore,
     ) -> Result<(StartupReport, u64), StartupDnsError> {
+        let window_deadline = self.open_window(&inputs)?;
         let WindowInputs {
             config,
             cache,
             schedules,
-            nameserver,
+            nameserver: _,
             now0,
-            window,
+            window: _,
         } = inputs;
-        self.now0 = now0;
+        let allowlist = config.allowlist();
+        let names = allowlist.len();
+        let mut run = WindowRun {
+            allowlist,
+            window_deadline,
+            now: now0,
+            cache,
+            schedules,
+            logs,
+            ledger: WindowLedger::new(names),
+        };
+        seed_due(&mut run)?;
+
+        loop {
+            run.now = self.now_u64();
+            run.ledger
+                .refresh_resolved(run.cache, run.now)
+                .map_err(StartupDnsError::Cache)?;
+            if run.ledger.all_resolved() {
+                break;
+            }
+            if Instant::now() >= run.window_deadline {
+                break;
+            }
+            match run.schedules.select_due(run.now) {
+                Ok(Some(token)) => self.exchange_due(&mut run, token)?,
+                Ok(None) => {
+                    if self.idle_wait(&mut run)? {
+                        break;
+                    }
+                }
+                Err(err) => return Err(StartupDnsError::from(err)),
+            }
+        }
+        self.close_window(&mut run.ledger, run.cache)
+    }
+
+    fn open_window(&mut self, inputs: &WindowInputs<'_>) -> Result<Instant, StartupDnsError> {
+        let config = inputs.config;
+        self.now0 = inputs.now0;
         self.start = Instant::now();
         let window_deadline = self
             .start
-            .checked_add(window)
+            .checked_add(inputs.window)
             .ok_or(StartupDnsError::DeadlineOverflow)?;
-        self.addr = nameserver;
+        self.addr = inputs.nameserver;
         self.resolvers = Some(*config.resolver_set());
         self.active_resolver = ActiveResolver::primary_of(config.resolver_set());
         self.mark_window_exercised(self.active_resolver);
@@ -2898,94 +2946,97 @@ impl StartupDns {
                 fqdn: *fqdn,
                 pin: config.resolver_set().primary().pin().copied(),
             });
-        let allowlist = config.allowlist();
-        self.bailiwick = BailiwickZones::from_allowlist(allowlist, config.cname_bailiwick())?;
-        let names = allowlist.len();
-        let mut ledger = WindowLedger::new(names);
+        self.bailiwick =
+            BailiwickZones::from_allowlist(config.allowlist(), config.cname_bailiwick())?;
+        Ok(window_deadline)
+    }
 
-        for ordinal in 0..names {
-            for family in Family::ALL {
-                schedules.overwrite_due_at(ordinal, family, now0)?;
-            }
+    fn exchange_due(
+        &mut self,
+        run: &mut WindowRun<'_>,
+        token: DueToken,
+    ) -> Result<(), StartupDnsError> {
+        let ordinal = token.name();
+        let family = token.family();
+        if run.ledger.is_resolved(ordinal) {
+            run.schedules.release_selection(ordinal, family)?;
+            return Ok(());
         }
-
-        loop {
-            let now = self.now_u64();
-            ledger
-                .refresh_resolved(cache, now)
-                .map_err(StartupDnsError::Cache)?;
-            if ledger.all_resolved() {
-                break;
+        let Some(name) = run.allowlist.get(ordinal) else {
+            return Err(StartupDnsError::Cache(CacheError::NameOutOfRange));
+        };
+        let remaining = run
+            .window_deadline
+            .saturating_duration_since(Instant::now());
+        let exchange_deadline =
+            Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS).min(remaining);
+        let name_index = run
+            .cache
+            .name_index(ordinal)
+            .ok_or(CacheError::NameOutOfRange)?;
+        run.ledger.track_attempt(ordinal, family);
+        match self.exchange(
+            name,
+            family,
+            ordinal,
+            run.cache,
+            run.schedules,
+            exchange_deadline,
+            run.logs,
+        ) {
+            Ok(ExchangeResult::Published(kind)) => {
+                run.ledger.mark_published(ordinal, family, kind);
             }
-            if Instant::now() >= window_deadline {
-                break;
-            }
-            match schedules.select_due(now) {
-                Ok(Some(token)) => {
-                    let ordinal = token.name();
-                    let family = token.family();
-                    if ledger.is_resolved(ordinal) {
-                        schedules.release_selection(ordinal, family)?;
-                        continue;
-                    }
-                    let Some(name) = allowlist.get(ordinal) else {
-                        return Err(StartupDnsError::Cache(CacheError::NameOutOfRange));
-                    };
-                    let remaining = window_deadline.saturating_duration_since(Instant::now());
-                    let exchange_deadline =
-                        Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS).min(remaining);
-                    let name_index = cache
-                        .name_index(ordinal)
-                        .ok_or(CacheError::NameOutOfRange)?;
-                    ledger.track_attempt(ordinal, family);
-                    match self.exchange(
-                        name,
+            Ok(ExchangeResult::Failed(reason)) => {
+                if run.ledger.mark_failed(ordinal, family, reason) {
+                    run.logs.startup_warning_ctx(
+                        run.now,
+                        name.as_str(),
                         family,
-                        ordinal,
-                        cache,
-                        schedules,
-                        exchange_deadline,
-                        logs,
-                    ) {
-                        Ok(ExchangeResult::Published(kind)) => {
-                            ledger.mark_published(ordinal, family, kind);
-                        }
-                        Ok(ExchangeResult::Failed(reason)) => {
-                            if ledger.mark_failed(ordinal, family, reason) {
-                                logs.startup_warning_ctx(
-                                    now,
-                                    name.as_str(),
-                                    family,
-                                    reason.as_str(),
-                                    cache.negative_lease_flags(name_index, now),
-                                );
-                            }
-                        }
-                        Ok(ExchangeResult::Superseded) => {}
-                        Err(err) => return Err(err),
-                    }
+                        reason.as_str(),
+                        run.cache.negative_lease_flags(name_index, run.now),
+                    );
                 }
-                Ok(None) => {
-                    let remaining = window_deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    logs.drain_sink();
-                    let dns_wait = wait_until_next_step(self, schedules, names, ledger.resolved())?
-                        .min(remaining);
-                    let now_i = Instant::now();
-                    let log_wait = logs
-                        .next_drain(now_i)
-                        .map(|retry| retry.saturating_duration_since(now_i));
-                    let wait = log_wait.map_or(dns_wait, |log_wait| dns_wait.min(log_wait));
-                    if wait.is_zero() {
-                        continue;
-                    }
-                    thread::sleep(wait);
-                }
-                Err(err) => return Err(StartupDnsError::from(err)),
             }
+            Ok(ExchangeResult::Superseded) => {}
+            Err(err) => return Err(err),
         }
+        Ok(())
+    }
+
+    fn idle_wait(&mut self, run: &mut WindowRun<'_>) -> Result<bool, StartupDnsError> {
+        let remaining = run
+            .window_deadline
+            .saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(true);
+        }
+        run.logs.drain_sink();
+        let dns_wait = wait_until_next_step(
+            self,
+            run.schedules,
+            run.ledger.names(),
+            run.ledger.resolved(),
+        )?
+        .min(remaining);
+        let now_i = Instant::now();
+        let log_wait = run
+            .logs
+            .next_drain(now_i)
+            .map(|retry| retry.saturating_duration_since(now_i));
+        let wait = log_wait.map_or(dns_wait, |log_wait| dns_wait.min(log_wait));
+        if wait.is_zero() {
+            return Ok(false);
+        }
+        thread::sleep(wait);
+        Ok(false)
+    }
+
+    fn close_window(
+        &mut self,
+        ledger: &mut WindowLedger,
+        cache: &Cache,
+    ) -> Result<(StartupReport, u64), StartupDnsError> {
         let elapsed = self.start.elapsed().as_secs();
         ledger
             .refresh_resolved(cache, self.now0.saturating_add(elapsed))
@@ -4110,6 +4161,15 @@ const fn family_index(family: Family) -> usize {
         Family::A => 0,
         Family::Aaaa => 1,
     }
+}
+
+fn seed_due(run: &mut WindowRun<'_>) -> Result<(), StartupDnsError> {
+    for ordinal in 0..run.ledger.names() {
+        for family in Family::ALL {
+            run.schedules.overwrite_due_at(ordinal, family, run.now)?;
+        }
+    }
+    Ok(())
 }
 
 /// The bounded wait until the earliest scheduled startup step among
