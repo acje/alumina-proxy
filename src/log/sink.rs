@@ -118,11 +118,9 @@ impl LogStore {
             }
         }
     }
-    /// The queue span the next write covers: the retained cursor offset over
-    /// the front record, or the front record's start when no cursor is held.
-    /// Already-consumed records are skipped, so a turn never writes an empty
-    /// fragment. `None` when no write can make progress: the sink latched
-    /// failed, or the queue is empty.
+    /// The next write's span, or `None` when no write can make progress: the
+    /// sink latched failed, or the queue is empty. Consumed records are never
+    /// gathered, so a turn never writes an empty fragment.
     fn next_write_span(&mut self) -> Option<(usize, usize)> {
         if self.sink.failed {
             return None;
@@ -139,11 +137,9 @@ impl LogStore {
             self.advance_front();
         }
     }
-    /// Accounts a successful write of `n` bytes over `gathered` fragments:
-    /// spends the turn budget, clears the stall latch, and consumes the queue
-    /// front once per fully-emitted record. Returns `true` when the write
-    /// stopped mid-record, so the turn ends with the cursor retained at the
-    /// exact residue.
+    /// Accounts a successful write: spends the turn budget and clears the stall
+    /// latch. Returns `true` when the write stopped mid-record, leaving the
+    /// cursor at the exact residue.
     fn accept_write(&mut self, budget: &mut TurnBudget, gathered: usize, n: usize) -> bool {
         budget.spend(gathered, n);
         #[cfg(test)]
@@ -155,8 +151,7 @@ impl LogStore {
         self.consume_gathered(gathered, n)
     }
     /// Latches the stall: the retained cursor keeps the acknowledged prefix
-    /// from being re-sent, and the owner retries on the bounded [`LOG_RETRY`]
-    /// cadence instead of spinning.
+    /// from being re-sent until the bounded [`LOG_RETRY`] retry.
     const fn block_with(&mut self, off: usize) {
         self.sink.blocked = true;
         self.cursor = Some(Cursor { off });
@@ -202,9 +197,7 @@ impl LogStore {
     }
 }
 
-/// One drain turn's work allowance: the fragments and bytes already written
-/// this turn, checked against the fixed per-turn budget before each further
-/// write.
+/// One drain turn's work allowance against the fixed per-turn budget.
 struct TurnBudget {
     ops: usize,
     bytes: usize,
@@ -214,11 +207,9 @@ impl TurnBudget {
     const fn new() -> TurnBudget {
         TurnBudget { ops: 0, bytes: 0 }
     }
-    /// Whether the per-turn budget still allows one more write.
     const fn open(&self) -> bool {
         self.ops < SINK_MAX_OPS && self.bytes < SINK_MAX_BYTES
     }
-    /// The byte allowance the next gather may cover.
     const fn remaining(&self) -> usize {
         SINK_MAX_BYTES - self.bytes
     }
@@ -228,12 +219,9 @@ impl TurnBudget {
     }
 }
 
-/// Gathers the fragments of the next single write: at most [`SINK_MAX_OPS`]
-/// fragments from the queue front, stopping when `remain` bytes are covered or
-/// the queue is exhausted. The first fragment starts at the retained cursor
-/// offset `start.1`; later fragments start at their record beginning. Returns
-/// the stack-held slices and the count in use, so the drain issues exactly one
-/// `write_vectored` per turn without allocating.
+/// Gathers at most [`SINK_MAX_OPS`] queue-front fragments covering at most
+/// `remain` bytes into stack-held slices, so a drain turn issues one
+/// `write_vectored` without allocating.
 fn gather_iovs<'a>(
     slots: &'a [Slot],
     queued: usize,
@@ -256,8 +244,8 @@ fn gather_iovs<'a>(
     (iovs, gathered)
 }
 
-/// Whether a write error means "not right now" rather than a broken sink:
-/// both leave the queue intact and the cursor retained for a later retry.
+/// Whether a write error is a retryable stall rather than a broken sink; both
+/// leave the queue and the retained cursor intact.
 fn is_stalled(err: &io::Error) -> bool {
     matches!(
         err.kind(),

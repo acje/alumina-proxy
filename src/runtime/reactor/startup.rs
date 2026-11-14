@@ -9,9 +9,7 @@ use crate::runtime::storage::{StartupError, StartupOutcome};
 
 use super::{ServeError, Serving};
 
-/// Why the startup window's current iteration stops: every allowlisted name is
-/// already usable, the absolute window deadline expired, or shutdown was
-/// observed before either.
+/// Why the startup window's current iteration stops.
 enum WindowEnd {
     Resolved,
     Expired,
@@ -19,16 +17,9 @@ enum WindowEnd {
 }
 
 impl Serving {
-    /// Drives the startup DNS window cooperatively over the single serving
-    /// poll. The retained DNS transport is attached to the serving poll
-    /// *before* selection starts, so the boot-armed poll carries the SIGTERM
-    /// self-pipe, DNS freshness, and the listener together: a first-observed
-    /// SIGTERM during the window is seen within one bounded poll instead of
-    /// being invisible for the window's full duration, and it settles as the
-    /// typed terminated outcome that never binds a listener. Each iteration
-    /// advances the in-flight cooperative exchange, selects the next due step
-    /// only while idle, and folds a single bounded wait over the serving poll
-    /// (signal priority is handled inside [`Self::run_once`]).
+    /// Drives the startup DNS window over the single serving poll: a
+    /// first-observed SIGTERM is seen within one bounded poll and settles as
+    /// the typed terminated outcome, which never binds a listener.
     ///
     /// # Errors
     ///
@@ -74,10 +65,8 @@ impl Serving {
         self.settle_startup_window(now0, terminated, &mut ledger)
     }
 
-    /// Arms the startup DNS window: attaches the retained transport to the
-    /// serving poll, anchors the window on the boot clock, marks every
-    /// name-family due at the window origin, and returns the fresh ledger with
-    /// the absolute window deadline.
+    /// Arms the startup DNS window and returns the fresh ledger, with every
+    /// name-family due at the window origin, and the absolute window deadline.
     ///
     /// # Errors
     ///
@@ -137,8 +126,7 @@ impl Serving {
     }
 
     /// Releases the active selection at the window deadline and cancels the
-    /// in-flight exchange for shutdown, so a frozen window never strands a
-    /// schedule guard or a retained connection.
+    /// in-flight exchange, never stranding a schedule guard or connection.
     ///
     /// # Errors
     ///
@@ -156,8 +144,6 @@ impl Serving {
         Ok(())
     }
 
-    /// Refreshes the ledger's resolved-name mask from the cache at `now`.
-    ///
     /// # Errors
     ///
     /// Returns the typed startup error when the cache cannot be read.
@@ -172,9 +158,8 @@ impl Serving {
         Ok(())
     }
 
-    /// Advances the single in-flight cooperative exchange against the ledger: a
-    /// published turn merges into the ledger, and the first counted failure
-    /// emits the single first-failure warning.
+    /// Merges a published exchange turn into the ledger and emits the single
+    /// first-failure warning on the first counted failure.
     ///
     /// # Errors
     ///
@@ -197,11 +182,10 @@ impl Serving {
         Ok(())
     }
 
-    /// Selects the next due step while the window is idle: a selection already
-    /// resolved is released and the iteration restarts, otherwise the step
-    /// gets the exchange deadline clipped to the window and starts as a
-    /// startup exchange. Returns whether the iteration restarts before the
-    /// serving poll.
+    /// Selects the next due step while the window is idle: an already-resolved
+    /// selection is released and restarts the iteration; otherwise a startup
+    /// exchange starts on a deadline clipped to the window. Returns whether the
+    /// iteration restarts before the serving poll.
     ///
     /// # Errors
     ///
@@ -238,11 +222,9 @@ impl Serving {
         Ok(true)
     }
 
-    /// The single bounded wait folded into the serving poll: the in-flight
-    /// exchange deadline or the earliest due step, clipped to the window's
-    /// remaining time, and further clipped by the next log drain. An active
-    /// exchange that needs no readiness wait forces a zero wait for prompt
-    /// handling.
+    /// The single bounded wait for the serving poll: the exchange deadline or
+    /// earliest due step, clipped to the window remaining and the next log
+    /// drain, or zero when an active exchange needs no readiness wait.
     ///
     /// # Errors
     ///
@@ -282,9 +264,8 @@ impl Serving {
         )
     }
 
-    /// Settles the frozen window: the test settlement hook, one zero-duration
-    /// poll for the terminal outcome, shutdown cancellation, the shared
-    /// re-sync, and the final refresh before the typed report is recorded.
+    /// Settles the frozen window into the typed report, polling once for the
+    /// terminal outcome when shutdown was not already observed.
     ///
     /// # Errors
     ///
@@ -320,8 +301,6 @@ impl Serving {
     }
 }
 
-/// Maps a serving-poll error at the startup boundary to the shared DNS
-/// registration detail the window reports.
 const fn startup_shared_error(ServeError { kind }: ServeError) -> StartupError {
     StartupError::Dns(StartupDnsError::Transport {
         kind,

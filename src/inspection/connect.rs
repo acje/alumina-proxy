@@ -271,9 +271,8 @@ impl ConnectParser {
     }
 }
 
-/// One classified header line. The classifier owns per-line syntax and value
-/// validation; the header-section loop owns line count, duplicate rejection and
-/// ordering across lines.
+/// One classified header line: the classifier owns per-line syntax and value
+/// validation; the section loop owns line count, duplicates, and ordering.
 enum HeaderLine {
     Empty,
     ContentLength(u64),
@@ -336,9 +335,8 @@ const fn record_content_length(
     Ok(())
 }
 
-/// Classifies one header line, validating it in rejection order: obs-fold before
-/// the colon, header name before value, Content-Length value before anything
-/// else that line carries.
+/// Classifies one header line in rejection order: obs-fold before the colon,
+/// name before value, Content-Length value before the rest of the line.
 fn classify_header_line(line: &[u8]) -> Result<HeaderLine, ConnectError> {
     if line.is_empty() {
         return Ok(HeaderLine::Empty);

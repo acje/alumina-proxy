@@ -54,8 +54,8 @@ struct FamilyMarker {
     known_valid: Option<bool>,
 }
 
-/// One observation of a family: the served class and the class/time validity a
-/// retained proof implies at the same instant.
+/// One family observation at a single instant: the served class and the
+/// class/time validity a retained proof implies.
 #[derive(Clone, Copy, Debug)]
 struct Observation {
     current: Option<ProofClass>,
@@ -120,8 +120,8 @@ impl FamilyMarker {
         )
     }
 
-    /// Records the observation: away from a strong loss, known class and
-    /// validity fold monotonically and never regress.
+    /// Folds one observation: away from a strong loss, known class and validity
+    /// advance monotonically and never regress.
     fn fold(&mut self, observed: Observation, strong_loss: bool) {
         self.last_current = observed.current;
         if strong_loss {
