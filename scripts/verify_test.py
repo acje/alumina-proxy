@@ -173,7 +173,7 @@ esac
             for name, body in {
                 "cargo-audit": 'printf "cargo-audit %s\\n" "${MOCK_AUDIT_VERSION:-0.22.1}"',
                 "cargo-deny": 'printf "cargo-deny %s\\n" "${MOCK_DENY_VERSION:-0.19.4}"',
-                "cargo": 'case "$2" in audit) exit "${AUDIT_EXIT:-0}";; deny) exit "${DENY_EXIT:-0}";; esac; exit 99',
+                "cargo": 'case "$1" in audit) exit "${AUDIT_EXIT:-0}";; deny) exit "${DENY_EXIT:-0}";; esac; exit 99',
             }.items():
                 exe = path / name
                 exe.write_text("#!/bin/sh\n" + body + "\n")
@@ -182,10 +182,16 @@ esac
             result = self.run_verify("supply-chain", "audit-deny", env=env)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("AUDIT-DENY-OK", result.stdout)
-            for setting in ("MOCK_AUDIT_VERSION", "MOCK_DENY_VERSION", "AUDIT_EXIT", "DENY_EXIT"):
+            for setting, expected in (
+                ("MOCK_AUDIT_VERSION", "cargo-audit version"),
+                ("MOCK_DENY_VERSION", "cargo-deny version"),
+                ("AUDIT_EXIT", "cargo audit exit 99"),
+                ("DENY_EXIT", "cargo deny exit 99"),
+            ):
                 result = self.run_verify("supply-chain", "audit-deny", env={**env, setting: "99"})
                 self.assertNotEqual(result.returncode, 0, setting)
                 self.assertIn("AUDIT-DENY FAIL", result.stderr)
+                self.assertIn(expected, result.stderr, setting)
 
     def test_mocked_host_mid_dispatch_and_failure(self):
         with tempfile.TemporaryDirectory() as temp:

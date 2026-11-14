@@ -119,7 +119,10 @@ missing derived image as described below.
   and `E2E_IMAGE` default
   `localhost/alumina-e2e:e2e-20261011`: the immutable harness image ID is
   resolved on that rootful connection, recorded in the receipt, and the
-  consumers re-verify the tag resolves to it and run the ID itself.
+  consumers re-verify the tag resolves to it and run the ID itself; because
+  both consumers gate the harness image's `.Parent` against `BASE_ID`, bumping
+  the pinned base digest invalidates the existing harness image and
+  `localhost/alumina-e2e:<tag>` must be re-derived from the new base.
 - `supply-chain audit-deny` — independent host check requiring `cargo-audit`
   0.22.1 and `cargo-deny` 0.19.4 (the host's default Cargo toolchain; this
   repository ships no toolchain pin). It runs audit with `--no-fetch` against
