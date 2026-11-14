@@ -1281,44 +1281,54 @@ class ClientRun:
 
     # --- main owner loop ---
 
+    def _local_recv_pass(self, now):
+        # C2: fair bounded local recv continuation without a kernel event
+        for conn in list(self.conns):
+            if conn.needs_local_recv and not conn.closed:
+                conn.needs_local_recv = False
+                self._try_recv(conn, now)
+
+    def _warmup_due(self, now):
+        """The warmup->measure start tick observation is due exactly once."""
+        return (self.warmup_end is not None and now >= self.warmup_end
+                and not self._warmup_boundary)
+
+    def _stop_now(self, now):
+        """Measurement window clean-early, drain deadline, or every conn closed."""
+        if now >= self.window_end and self._clean_early():
+            return True
+        if now >= self.drain_end:
+            return True
+        return not any(not c.closed for c in self.conns)
+
+    def _select_and_service(self, now):
+        self._sync_interest()
+        next_wake = self._next_wake(now)
+        timeout = min(max(next_wake - now, 0.0), 0.05)
+        try:
+            events = self.sel.select(timeout=timeout)
+        except OSError:
+            events = []
+        if events:
+            self._service_events(events)
+
     def run(self):
         while not self.done:
             now = _mono()
-            # C2: fair bounded local recv continuation without a kernel event
-            for conn in list(self.conns):
-                if conn.needs_local_recv and not conn.closed:
-                    conn.needs_local_recv = False
-                    self._try_recv(conn, now)
+            self._local_recv_pass(now)
             now = _mono()
             self._admit_due(now)
-            if self.warmup_end is not None and now >= self.warmup_end \
-                    and not self._warmup_boundary:
+            if self._warmup_due(now):
                 self.sampler.sample(boundary="start")  # measurement-window start tick observation
                 self._warmup_boundary = True
             if now >= self.window_end:
                 self._handle_window_end(now)
             self._check_stalls(now)
-            if now >= self.window_end and self._clean_early():
+            if self._stop_now(now):
                 self.terminated = True
                 self.done = True
                 break
-            if now >= self.drain_end:
-                self.terminated = True
-                self.done = True
-                break
-            if not any(not c.closed for c in self.conns):
-                self.terminated = True
-                self.done = True
-                break
-            self._sync_interest()
-            next_wake = self._next_wake(now)
-            timeout = min(max(next_wake - now, 0.0), 0.05)
-            try:
-                events = self.sel.select(timeout=timeout)
-            except OSError:
-                events = []
-            if events:
-                self._service_events(events)
+            self._select_and_service(now)
             now = _mono()
             if now - self._last_sample >= SAMPLE_PERIOD:
                 self.sampler.sample()
@@ -1941,41 +1951,52 @@ class StormRun:
         if self._session_complete(sess):
             self._session_done(sess)
 
+    def _warmup_due(self, now):
+        """The warmup->measure start tick observation is due exactly once."""
+        return not self._warmup_boundary and now >= self.warmup_end
+
+    def _end_due(self, now):
+        """The measurement-window end tick observation is due exactly once."""
+        return now >= self.window_end and not self._end_sampled
+
+    def _stop_now(self, now):
+        """Window complete, drain deadline (closing survivors), or arrivals done."""
+        if self._window_complete(now):
+            return True
+        if now >= self.drain_end:
+            for sess in list(self.sessions):
+                self._session_done(sess)
+            return True
+        return self._arrivals_exhausted()
+
+    def _select_and_service(self, now):
+        self._sync_interest()
+        timeout = min(max(self._next_wake(now) - now, 0.0), 0.05)
+        try:
+            events = self.sel.select(timeout=timeout)
+        except OSError:
+            events = []
+        for key, mask in events:
+            self._service_event(key.data, mask)
+
     def run(self):
         while not self.done:
             now = _mono()
             self._drain_ready(now)
             self._admit_arrivals(now)
             self._track_peaks()     # peak high-water sampled over the window
-            if not self._warmup_boundary and now >= self.warmup_end:
+            if self._warmup_due(now):
                 self.sampler.sample(boundary="start")
                 self._warmup_boundary = True
-            if now >= self.window_end and not self._end_sampled:
+            if self._end_due(now):
                 self.sampler.sample(boundary="end")
                 self._end_sampled = True
             self._check_stalls(now)
-            if self._window_complete(now):
+            if self._stop_now(now):
                 self.terminated = True
                 self.done = True
                 break
-            if now >= self.drain_end:
-                for sess in list(self.sessions):
-                    self._session_done(sess)
-                self.terminated = True
-                self.done = True
-                break
-            if self._arrivals_exhausted():
-                self.terminated = True
-                self.done = True
-                break
-            self._sync_interest()
-            timeout = min(max(self._next_wake(now) - now, 0.0), 0.05)
-            try:
-                events = self.sel.select(timeout=timeout)
-            except OSError:
-                events = []
-            for key, mask in events:
-                self._service_event(key.data, mask)
+            self._select_and_service(now)
             now = _mono()
             if now - self._last_sample >= SAMPLE_PERIOD:
                 self.sampler.sample()
