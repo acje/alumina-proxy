@@ -3532,7 +3532,7 @@ def _workload_validate(args):
     return None
 
 
-def main(argv):
+def _build_parser():
     ap = argparse.ArgumentParser(prog=TOOL_NAME, description=__doc__)
     ap.add_argument("--role", required=False, default=None,
                     choices=["backend", "client", "dns-responder", "selftest"])
@@ -3572,17 +3572,120 @@ def main(argv):
     ap.add_argument("--swallow-after", type=int, default=None)
     ap.add_argument("--corrupt-seq-lt", type=int, default=None)
     ap.add_argument("--selftest-tmp", default=None)
-    args = ap.parse_args(argv)
+    return ap
 
-    if args.role == "selftest" or getattr(args, "selftest", False):
-        if args.selftest_tmp:
-            return run_selftest(args.selftest_tmp)
-        workspace = tempfile.mkdtemp(prefix="alumina-bench-selftest-")
-        os.chmod(workspace, 0o700)
+
+def _selftest_requested(args):
+    """--role selftest or its --selftest alias."""
+    return args.role == "selftest" or getattr(args, "selftest", False)
+
+
+def _timing_error(seconds, warmup):
+    """Which timing bound is violated, or None when both are in range."""
+    if seconds <= 0 or seconds > 600 or _nonfinite(seconds):
+        return "seconds"
+    if warmup < 0 or warmup > 120 or _nonfinite(warmup):
+        return "warmup"
+    return None
+
+
+def _run_selftest_role(args):
+    if args.selftest_tmp:
+        return run_selftest(args.selftest_tmp)
+    workspace = tempfile.mkdtemp(prefix="alumina-bench-selftest-")
+    os.chmod(workspace, 0o700)
+    try:
+        return run_selftest(workspace)
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def _run_dns_role(args):
+    host, _, port = args.dns_bind.partition(":")
+    answers = {}
+    for ans in args.dns_answer:
+        name, _, ip = ans.partition(":")
+        answers[name.encode()] = socket.inet_aton(ip)
+    DnsResponder((host, int(port)), answers).run()
+    return 0
+
+
+def _run_backend_role(args):
+    if not (args.cert and args.key):
+        print("bench-err: backend requires --cert and --key", file=sys.stderr)
+        return 3
+    backend = EchoBackend(
+        (args.backend_addr, args.backend_port), args.cert, args.key,
+        deadline=args.warmup + args.seconds + 20.0,
+        echo_delay_s=args.echo_delay_s,
+        swallow_after=args.swallow_after,
+        corrupt_seq_lt=args.corrupt_seq_lt)
+    backend.run_forever()
+    print("BACKEND-STOP: recv=%d sent=%d conns=%d errors=%d preambles=%d" % (
+        backend.bytes_recv, backend.bytes_sent, backend.conns, backend.errors,
+        backend.connect_preambles),
+        file=sys.stderr, flush=True)
+    return 0
+
+
+def _client_measure(args):
+    run = StormRun(args) if args.workload == "storm" else ClientRun(args)
+    try:
+        run.setup()
+    except (OSError, ssl.SSLError, RuntimeError) as exc:
+        print("bench-err: setup failed: %s" % exc, file=sys.stderr)
+        return None
+    try:
+        run.run()
+    except (OSError, ssl.SSLError, RuntimeError) as exc:
+        print("bench-err: owner loop failed: %s" % exc, file=sys.stderr)
+        return None
+    return run
+
+
+def _emit_report(args, rep):
+    out = json.dumps(rep, indent=2, sort_keys=True)
+    if args.json_out:
         try:
-            return run_selftest(workspace)
-        finally:
-            shutil.rmtree(workspace, ignore_errors=True)
+            with open(args.json_out, "w") as fh:
+                fh.write(out + "\n")
+        except OSError as exc:
+            print("bench-err: cannot write report: %s" % exc, file=sys.stderr)
+            return 1
+        print("REPORT: %s" % args.json_out, flush=True)
+    else:
+        print(out, flush=True)
+    print("SEAM-VERDICT: valid=%s fulfilled=%s reasons=%r exit=%d" % (
+        rep["valid"], rep["workload_fulfilled"], rep["reasons"],
+        0 if rep["valid"] else 3), flush=True)
+    return 0 if rep["valid"] else 3
+
+
+def _run_client_role(args):
+    if args.mode != "proxyless" and not args.proxy_pid:
+        print("bench-err: %s measurement requires --proxy-pid "
+              "(CPU evidence for the proxy subject)" % args.mode,
+              file=sys.stderr)
+        return 3
+    args.target_addr = route_target_addr(
+        args.mode, args.proxy_host, args.proxy_port,
+        args.backend_addr, args.backend_port)
+    try:
+        args.ctx = _build_client_ctx(args.cafile)
+    except (OSError, ssl.SSLError) as exc:
+        print("bench-err: cafile invalid: %s" % exc, file=sys.stderr)
+        return 3
+    run = _client_measure(args)
+    if run is None:
+        return 3
+    return _emit_report(args, run.report())
+
+
+def main(argv):
+    args = _build_parser().parse_args(argv)
+
+    if _selftest_requested(args):
+        return _run_selftest_role(args)
     if args.role is None:
         print("bench-err: --role required (backend|client|dns-responder) unless --selftest",
               file=sys.stderr)
@@ -3591,11 +3694,9 @@ def main(argv):
     if args.kind == "smoke":
         args.seconds, args.warmup = 2.0, 0.0
 
-    if args.seconds <= 0 or args.seconds > 600 or _nonfinite(args.seconds):
-        print("bench-err: seconds out of range", file=sys.stderr)
-        return 3
-    if args.warmup < 0 or args.warmup > 120 or _nonfinite(args.warmup):
-        print("bench-err: warmup out of range", file=sys.stderr)
+    timing = _timing_error(args.seconds, args.warmup)
+    if timing is not None:
+        print("bench-err: %s out of range" % timing, file=sys.stderr)
         return 3
     wv = _workload_validate(args)
     if wv is not None:
@@ -3603,75 +3704,10 @@ def main(argv):
         print("bench-err: %s" % msg, file=sys.stderr)
         return code
 
-    if args.role == "dns-responder":
-        host, _, port = args.dns_bind.partition(":")
-        answers = {}
-        for ans in args.dns_answer:
-            name, _, ip = ans.partition(":")
-            answers[name.encode()] = socket.inet_aton(ip)
-        DnsResponder((host, int(port)), answers).run()
-        return 0
-
-    if args.role == "backend":
-        if not (args.cert and args.key):
-            print("bench-err: backend requires --cert and --key", file=sys.stderr)
-            return 3
-        backend = EchoBackend(
-            (args.backend_addr, args.backend_port), args.cert, args.key,
-            deadline=args.warmup + args.seconds + 20.0,
-            echo_delay_s=args.echo_delay_s,
-            swallow_after=args.swallow_after,
-            corrupt_seq_lt=args.corrupt_seq_lt)
-        backend.run_forever()
-        print("BACKEND-STOP: recv=%d sent=%d conns=%d errors=%d preambles=%d" % (
-            backend.bytes_recv, backend.bytes_sent, backend.conns, backend.errors,
-            backend.connect_preambles),
-            file=sys.stderr, flush=True)
-        return 0
-
-    if args.role == "client":
-        if args.mode != "proxyless" and not args.proxy_pid:
-            print("bench-err: %s measurement requires --proxy-pid "
-                  "(CPU evidence for the proxy subject)" % args.mode,
-                  file=sys.stderr)
-            return 3
-        args.target_addr = route_target_addr(
-            args.mode, args.proxy_host, args.proxy_port,
-            args.backend_addr, args.backend_port)
-        try:
-            args.ctx = _build_client_ctx(args.cafile)
-        except (OSError, ssl.SSLError) as exc:
-            print("bench-err: cafile invalid: %s" % exc, file=sys.stderr)
-            return 3
-        run = StormRun(args) if args.workload == "storm" else ClientRun(args)
-        try:
-            run.setup()
-        except (OSError, ssl.SSLError, RuntimeError) as exc:
-            print("bench-err: setup failed: %s" % exc, file=sys.stderr)
-            return 3
-        try:
-            run.run()
-        except (OSError, ssl.SSLError, RuntimeError) as exc:
-            print("bench-err: owner loop failed: %s" % exc, file=sys.stderr)
-            return 3
-        rep = run.report()
-        out = json.dumps(rep, indent=2, sort_keys=True)
-        if args.json_out:
-            try:
-                with open(args.json_out, "w") as fh:
-                    fh.write(out + "\n")
-            except OSError as exc:
-                print("bench-err: cannot write report: %s" % exc, file=sys.stderr)
-                return 1
-            print("REPORT: %s" % args.json_out, flush=True)
-        else:
-            print(out, flush=True)
-        print("SEAM-VERDICT: valid=%s fulfilled=%s reasons=%r exit=%d" % (
-            rep["valid"], rep["workload_fulfilled"], rep["reasons"],
-            0 if rep["valid"] else 3), flush=True)
-        return 0 if rep["valid"] else 3
-
-    return 3
+    handlers = {"dns-responder": _run_dns_role, "backend": _run_backend_role,
+                "client": _run_client_role}
+    handler = handlers.get(args.role)
+    return handler(args) if handler is not None else 3
 
 
 if __name__ == "__main__":
