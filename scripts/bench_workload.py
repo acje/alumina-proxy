@@ -494,6 +494,13 @@ def proc_vmhwm_kb(pid):
     raise OSError("VmHWM not found")
 
 
+def _interval_contained(rec, tb, te):
+    """Periodic sample strictly inside the observed aperture (start tick
+    excluded, end tick included)."""
+    return (rec.get("boundary") is None and rec.get("cores") is not None
+            and rec["t"] > tb and rec["t"] <= te)
+
+
 class ProcSampler:
     """Tick/current-RSS/lifetime-HWM sampler for named pids. A failed probe is
     recorded as unknown for that pid, never folded into a positive. Window
@@ -543,48 +550,34 @@ class ProcSampler:
                 return r
         return None
 
-    def window_summary(self, label, start, end, min_samples=CPU_MIN_WINDOW_SAMPLES):
-        """CPU over the OBSERVED span between the explicit start and end
-        boundary tick observations (observed timestamps, boundary lag vs the
-        scheduled window disclosed); sampled current RSS over that same
-        observed span; VmHWM reported separately as the process lifetime
-        high-water mark. No warmup-straddling or drain periodic delta is
-        counted as measurement CPU and the observed end delta is included.
-        A missing boundary probe, fewer than min_samples contained periodic
-        intervals, or any failed probe -> unknown."""
+    def _unknown_summary(self, label):
         all_s = self.samples.get(label, [])
-        unknown = {"unknown": True,
-                   "reason": self.unknown.get(label, "no boundary samples"),
-                   "samples": len(all_s), "core_samples": 0, "cores_mean": None,
-                   "cores_peak": None, "rss_current_mean_kb": None,
-                   "rss_current_peak_kb": None, "vmhwm_kb": None,
-                   "sampled_from": None, "sampled_to": None, "intervals": [],
-                   "boundary_lag_s": None,
-                   "probe_failures": self.unknown.get(label)}
-        if self.unknown.get(label):
-            return unknown
-        bs = self._boundary(label, "start")
-        be = self._boundary(label, "end")
-        if bs is None or be is None:
-            unknown["reason"] = ("missing %s boundary tick observation" %
-                                 ("start" if bs is None else "end"))
-            return unknown
+        return {"unknown": True,
+                "reason": self.unknown.get(label, "no boundary samples"),
+                "samples": len(all_s), "core_samples": 0, "cores_mean": None,
+                "cores_peak": None, "rss_current_mean_kb": None,
+                "rss_current_peak_kb": None, "vmhwm_kb": None,
+                "sampled_from": None, "sampled_to": None, "intervals": [],
+                "boundary_lag_s": None,
+                "probe_failures": self.unknown.get(label)}
+
+    def _aperture_rows(self, label, tb, te):
+        all_s = self.samples.get(label, [])
+        intervals = [r for r in all_s if _interval_contained(r, tb, te)]
+        rss = [r["vmrss_kb"] for r in all_s if tb <= r["t"] <= te]
+        hwm = max(r["vmhwm_kb"] for r in all_s if tb <= r["t"] <= te)
+        return all_s, intervals, rss, hwm
+
+    def _aperture_summary(self, label, bs, be, window):
         tb, te = bs["t"], be["t"]
-        dt_total = te - tb
-        if dt_total <= 0:
-            unknown["reason"] = "degenerate observed aperture (dt %.6f s)" % dt_total
-            return unknown
-        intervals = [r for r in all_s
-                     if r.get("boundary") is None and r.get("cores") is not None
-                     and r["t"] > tb and r["t"] <= te]
-        rss = [r["vmrss_kb"] for r in all_s if r["t"] >= tb and r["t"] <= te]
-        hwm = max(r["vmhwm_kb"] for r in all_s if r["t"] >= tb and r["t"] <= te)
-        base = {
+        start, end = window
+        all_s, intervals, rss, hwm = self._aperture_rows(label, tb, te)
+        return {
             "unknown": False,
             "reason": None,
             "samples": len(all_s),
             "core_samples": len(intervals),
-            "cores_mean": (be["ticks"] - bs["ticks"]) / CLK_TCK / dt_total,
+            "cores_mean": (be["ticks"] - bs["ticks"]) / CLK_TCK / (te - tb),
             "cores_peak": max(r["cores"] for r in intervals) if intervals else None,
             "rss_current_mean_kb": int(sum(rss) / len(rss)) if rss else None,
             "rss_current_peak_kb": max(rss) if rss else None,
@@ -596,10 +589,35 @@ class ProcSampler:
                            "cores": r["cores"]} for r in intervals],
             "probe_failures": self.unknown.get(label),
         }
-        if len(intervals) < min_samples:
+
+    def window_summary(self, label, start, end, min_samples=CPU_MIN_WINDOW_SAMPLES):
+        """CPU over the OBSERVED span between the explicit start and end
+        boundary tick observations (observed timestamps, boundary lag vs the
+        scheduled window disclosed); sampled current RSS over that same
+        observed span; VmHWM reported separately as the process lifetime
+        high-water mark. No warmup-straddling or drain periodic delta is
+        counted as measurement CPU and the observed end delta is included.
+        A missing boundary probe, fewer than min_samples contained periodic
+        intervals, or any failed probe -> unknown."""
+        if self.unknown.get(label):
+            return self._unknown_summary(label)
+        bs = self._boundary(label, "start")
+        be = self._boundary(label, "end")
+        if bs is None or be is None:
+            unknown = self._unknown_summary(label)
+            unknown["reason"] = ("missing %s boundary tick observation" %
+                                 ("start" if bs is None else "end"))
+            return unknown
+        dt_total = be["t"] - bs["t"]
+        if dt_total <= 0:
+            unknown = self._unknown_summary(label)
+            unknown["reason"] = "degenerate observed aperture (dt %.6f s)" % dt_total
+            return unknown
+        base = self._aperture_summary(label, bs, be, (start, end))
+        if len(base["intervals"]) < min_samples:
             base["unknown"] = True
             base["reason"] = "fewer than %d contained in-window intervals (%d)" % (
-                min_samples, len(intervals))
+                min_samples, len(base["intervals"]))
         return base
 
 
@@ -3500,36 +3518,69 @@ def _build_client_ctx(cafile):
     return ctx
 
 
-def _workload_validate(args):
-    """Cross-argument legality for the steady/storm workload engines. Returns
-    None when legal, else an (error_message, exit_code) pair. Illegal states
-    are rejected, never silently mixed."""
+def _validate_envelope(args):
     if args.conns < 1 or args.conns > MAX_CONNS:
         return ("conns must be in [1,%d] (safe margin below the fixed 512 pool)"
                 % MAX_CONNS, 3)
     if args.target_mbps <= 0 or args.target_mbps > 2000 or _nonfinite(args.target_mbps):
         return ("target-mbps out of range", 3)
+    return None
+
+
+def _validate_outstanding(args):
     if args.outstanding_cap is not None and not (1 <= args.outstanding_cap
                                                  <= MAX_OUTSTANDING_CAP):
         return ("outstanding-cap must be in [1,%d]" % MAX_OUTSTANDING_CAP, 3)
+    return None
+
+
+def _validate_frames(args):
     if args.session_frames_min < 1 or args.session_frames_max > MAX_SESSION_FRAMES \
             or args.session_frames_min > args.session_frames_max:
         return ("session-frames bounds invalid (1 <= min <= max <= %d)"
                 % MAX_SESSION_FRAMES, 3)
+    return None
+
+
+def _validate_peak(args):
     if not (1 <= args.peak_conns <= MAX_PEAK_CONNS):
         return ("peak-conns must be in [1,%d]" % MAX_PEAK_CONNS, 3)
-    if args.workload == "storm":
-        if args.arrival_rate <= 0 or args.arrival_rate > MAX_STORM_ARRIVAL_RATE \
-                or _nonfinite(args.arrival_rate):
-            return ("storm requires 0 < arrival-rate <= %g" % MAX_STORM_ARRIVAL_RATE, 3)
-        if args.outstanding_cap is not None:
-            return ("storm does not use --outstanding-cap (bounded per-session "
-                    "frames instead)", 3)
-    else:  # steady
-        if args.arrival_rate > 0:
-            return ("steady does not accept --arrival-rate (use --workload storm "
-                    "for connection churn)", 3)
     return None
+
+
+def _validate_common(args):
+    return (_validate_envelope(args) or _validate_outstanding(args)
+            or _validate_frames(args) or _validate_peak(args))
+
+
+def _validate_storm(args):
+    if args.arrival_rate <= 0 or args.arrival_rate > MAX_STORM_ARRIVAL_RATE \
+            or _nonfinite(args.arrival_rate):
+        return ("storm requires 0 < arrival-rate <= %g" % MAX_STORM_ARRIVAL_RATE, 3)
+    if args.outstanding_cap is not None:
+        return ("storm does not use --outstanding-cap (bounded per-session "
+                "frames instead)", 3)
+    return None
+
+
+def _validate_steady(args):
+    if args.arrival_rate > 0:
+        return ("steady does not accept --arrival-rate (use --workload storm "
+                "for connection churn)", 3)
+    return None
+
+
+def _validate_workload(args):
+    if args.workload == "storm":
+        return _validate_storm(args)
+    return _validate_steady(args)
+
+
+def _workload_validate(args):
+    """Cross-argument legality for the steady/storm workload engines. Returns
+    None when legal, else an (error_message, exit_code) pair. Illegal states
+    are rejected, never silently mixed."""
+    return _validate_common(args) or _validate_workload(args)
 
 
 def _build_parser():
