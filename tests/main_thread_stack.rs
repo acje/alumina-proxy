@@ -1,10 +1,6 @@
 #[path = "support/process_harness.rs"]
 mod process_harness;
-use process_harness::serving_config_document;
-
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
+use process_harness::{Refusal, serving_config_document};
 
 use mio::net::TcpListener as MioListener;
 
@@ -16,8 +12,10 @@ use alumina::runtime::ServeStorage;
 
 const LOOPS: usize = 64;
 const OVERLONG_LOOPS: usize = 4;
+const SETTLE_TURNS: usize = 20;
 const BODY_403: &str = "403 Forbidden";
 const BODY_400: &str = "400 Bad Request";
+const NON_ALLOWLISTED_CONNECT: &[u8] = b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n";
 
 fn rlimit_stack_readable() -> Option<String> {
     let contents = std::fs::read_to_string("/proc/self/limits").ok()?;
@@ -28,106 +26,73 @@ fn rlimit_stack_readable() -> Option<String> {
 }
 
 fn main() {
-    let rlimit = rlimit_stack_readable();
-    match &rlimit {
+    report_stack_limit();
+    let (port, mut runtime) = boot_serving_runtime();
+    refuse_non_allowlisted_connects(&mut runtime, port);
+    refuse_overlong_heads(&mut runtime, port);
+    println!(
+        "MAIN-THREAD-STACK-OK loops={LOOPS} accept+reset cycles on true main thread; over-long-head refusals={OVERLONG_LOOPS}"
+    );
+}
+
+fn report_stack_limit() {
+    match rlimit_stack_readable() {
         Some(line) => println!("RLIMIT_STACK {line}"),
         None => println!("RLIMIT_STACK (not readable on this platform)"),
     }
+}
 
+fn boot_serving_runtime() -> (u16, Runtime) {
     let bind = "127.0.0.1:0".parse().expect("valid bind address");
     let listener = MioListener::bind(bind).expect("bind serving listener");
     let port = listener.local_addr().expect("listener local addr").port();
-    let doc = serving_config_document(port);
-    let config = parse_config_document(&doc).expect("valid config");
+    let config = parse_config_document(&serving_config_document(port)).expect("valid config");
     #[cfg(feature = "alloc-witness")]
     actual_attach_registration_failure_on_main(&config);
     let storage = ServeStorage::boot(&config).expect("boot storage");
     let traffic = TrafficStorage::allocate().expect("allocate traffic storage");
-    let mut runtime =
-        Runtime::new(storage, listener, traffic).expect("preallocate + attach runtime");
+    let runtime = Runtime::new(storage, listener, traffic).expect("preallocate + attach runtime");
+    (port, runtime)
+}
 
+fn refuse_non_allowlisted_connects(runtime: &mut Runtime, port: u16) {
     for i in 0..LOOPS {
-        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect client");
-        client
-            .write_all(b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n")
-            .expect("write connect head");
-        let mut seen = false;
-        let mut buf = [0u8; 128];
-        for _ in 0..100 {
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("owner turn drives accept+decision+refuse+close");
-            client.set_nonblocking(true).expect("nonblocking client");
-            match client.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    let text = String::from_utf8_lossy(&buf[..n]);
-                    if text.contains(BODY_403) {
-                        seen = true;
-                    }
-                    break;
-                }
-                _ => {}
-            }
+        Refusal {
+            head: NON_ALLOWLISTED_CONNECT,
+            expected_body: BODY_403,
+            settle_turns: SETTLE_TURNS,
+            failure: &format!(
+                "iteration {i}: the server must refuse a non-allowlisted CONNECT with the 403 body"
+            ),
         }
-        assert!(
-            seen,
-            "iteration {i}: the server must refuse a non-allowlisted CONNECT with the 403 body"
-        );
-        client.set_nonblocking(false).expect("blocking client");
-        drop(client);
-        for _ in 0..20 {
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("owner turn settles close_slot reset");
-        }
+        .drive(runtime, port);
     }
+}
 
+fn overlong_connect_head() -> Vec<u8> {
+    let mut head = Vec::with_capacity(64 + (MAX_HEADER_LINES + 1) * 10);
+    head.extend_from_slice(b"CONNECT sub.example.org:443 HTTP/1.1\r\n");
+    for _ in 0..MAX_HEADER_LINES + 1 {
+        head.extend_from_slice(b"X-Hdr: v\r\n");
+    }
+    head.extend_from_slice(b"\r\n");
+    head
+}
+
+fn refuse_overlong_heads(runtime: &mut Runtime, port: u16) {
     for i in 0..OVERLONG_LOOPS {
-        let mut head = Vec::with_capacity(64 + (MAX_HEADER_LINES + 1) * 10);
-        head.extend_from_slice(b"CONNECT sub.example.org:443 HTTP/1.1\r\n");
-        for _ in 0..MAX_HEADER_LINES + 1 {
-            head.extend_from_slice(b"X-Hdr: v\r\n");
+        let head = overlong_connect_head();
+        Refusal {
+            head: &head,
+            expected_body: BODY_400,
+            settle_turns: SETTLE_TURNS,
+            failure: &format!(
+                "over-long iteration {i}: a CONNECT head with more than {MAX_HEADER_LINES} header \
+                 lines must be refused with the 400 body"
+            ),
         }
-        head.extend_from_slice(b"\r\n");
-        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect client");
-        client
-            .write_all(&head)
-            .expect("write over-long connect head");
-        let mut seen = false;
-        let mut buf = [0u8; 128];
-        for _ in 0..100 {
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("owner turn drives accept+parse+refuse+close");
-            client.set_nonblocking(true).expect("nonblocking client");
-            match client.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    let text = String::from_utf8_lossy(&buf[..n]);
-                    if text.contains(BODY_400) {
-                        seen = true;
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-        assert!(
-            seen,
-            "over-long iteration {i}: a CONNECT head with more than {MAX_HEADER_LINES} header \
-             lines must be refused with the 400 body"
-        );
-        client.set_nonblocking(false).expect("blocking client");
-        drop(client);
-        for _ in 0..20 {
-            runtime
-                .turn(Some(Duration::from_millis(2)))
-                .expect("owner turn settles close_slot reset");
-        }
+        .drive(runtime, port);
     }
-
-    println!(
-        "MAIN-THREAD-STACK-OK loops={LOOPS} accept+reset cycles on true main thread; over-long-head refusals={OVERLONG_LOOPS}"
-    );
 }
 
 #[cfg(feature = "alloc-witness")]
