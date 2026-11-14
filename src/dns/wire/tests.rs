@@ -3007,6 +3007,8 @@ mod embedded_dot {
 mod production_apply_route {
     use super::*;
     use crate::dns::cache::Generation;
+    use crate::dns::cache::Generations;
+    use crate::dns::cache::NameIndex;
     use crate::dns::cache::evidence::ProofClass;
     use crate::dns::cache::grade_key::FamilySnapshot;
     use crate::dns::publication::ObservationPhase;
@@ -3917,18 +3919,16 @@ mod production_apply_route {
         assert_eq!(aaaa.generation(), other, "Aaaa generation stable");
     }
 
-    #[test]
-    #[expect(
-        clippy::too_many_lines,
-        reason = "pre-existing ownership-matrix test at the house line ceiling; the typed origin_policy field is required on every ApplyOrigin literal"
-    )]
-    fn nodata_generation_ownership_matrix() {
-        let mut ws = ResponseWorkspace::default();
+    fn nodata_ownership_message() -> Vec<u8> {
         let mut msg = header(0x4600, true, 0, 1, 0, 1, 0);
         msg.extend_from_slice(&qname_bytes("sub.example.org"));
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&soa_record("example.org", 300, 60));
+        msg
+    }
+
+    fn assert_fixture_families_diverge() {
         let (fixture_cache, _fixture_schedules) = owned_cache_fixture();
         let fixture_name = fixture_cache.name_index(0).expect("index");
         let initial = fixture_cache
@@ -3943,41 +3943,51 @@ mod production_apply_route {
             initial,
             "fixture advanced A past the initial generation"
         );
-        for (advance, query_family, snapshot_after, reject) in [
-            (Some(Family::A), Family::A, false, true),
-            (Some(Family::Aaaa), Family::Aaaa, true, true),
-            (Some(Family::Aaaa), Family::A, false, false),
-        ] {
-            let (mut cache, mut schedules) = owned_cache_fixture();
-            let name = cache.name_index(0).expect("index");
-            let mut pair = cache
+    }
+
+    fn nodata_row_setup(
+        advance: Option<Family>,
+        query_family: Family,
+        snapshot_after: bool,
+    ) -> (Cache, Schedules, NameIndex, Generations) {
+        let (mut cache, schedules) = owned_cache_fixture();
+        let name = cache.name_index(0).expect("index");
+        let mut pair = cache
+            .generations_before_query(name, query_family)
+            .expect("query-start snapshot");
+        if let Some(family) = advance {
+            cache
+                .evict_nodata(name, family)
+                .expect("deliberate family advance");
+        }
+        if snapshot_after {
+            pair = cache
                 .generations_before_query(name, query_family)
-                .expect("query-start snapshot");
-            if let Some(family) = advance {
-                cache
-                    .evict_nodata(name, family)
-                    .expect("deliberate family advance");
-            }
-            if snapshot_after {
-                pair = cache
-                    .generations_before_query(name, query_family)
-                    .expect("post-advance snapshot");
-                assert_eq!(pair.queried, pair.other, "A1 == AAAA1 at the mismatch row");
-            }
-            let cache_baseline = cache;
-            let schedules_baseline = schedules;
-            let a_after = cache.entry(name, Family::A).expect("entry").generation();
-            let aaaa_after = cache.entry(name, Family::Aaaa).expect("entry").generation();
-            let nodata = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4600, &msg)
-                .expect("validated NODATA");
-            let result = nodata.observe().apply(
-                &mut cache,
-                &mut schedules,
+                .expect("post-advance snapshot");
+        }
+        (cache, schedules, name, pair)
+    }
+
+    fn apply_nodata(
+        cache: &mut Cache,
+        schedules: &mut Schedules,
+        tracked: Generations,
+        query_family: Family,
+    ) -> Result<PublishedKind, DnsError> {
+        let mut ws = ResponseWorkspace::default();
+        let msg = nodata_ownership_message();
+        let nodata = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x4600, &msg)
+            .expect("validated NODATA");
+        nodata
+            .observe()
+            .apply(
+                cache,
+                schedules,
                 crate::dns::publication::ApplyContext {
                     index: 0,
-                    generation: pair.queried,
+                    generation: tracked.queried,
                     query_family: Some(query_family),
-                    other_generation: Some(pair.other),
+                    other_generation: Some(tracked.other),
                     receipt: 6_000,
                     now: 6_000,
                 },
@@ -3987,15 +3997,40 @@ mod production_apply_route {
                     origin_authenticated: false,
                     origin_policy: RecursionPolicy::Undeclared,
                 },
-            );
+            )
+            .map(|(kind, _, _)| kind)
+    }
+
+    fn stale_generation_refused(result: &Result<PublishedKind, DnsError>) -> bool {
+        matches!(
+            result,
+            Err(crate::dns::wire::DnsError::Cache(
+                crate::dns::cache::CacheError::StaleGeneration
+            ))
+        )
+    }
+
+    #[test]
+    fn nodata_generation_ownership_matrix() {
+        assert_fixture_families_diverge();
+        for (advance, query_family, snapshot_after, reject) in [
+            (Some(Family::A), Family::A, false, true),
+            (Some(Family::Aaaa), Family::Aaaa, true, true),
+            (Some(Family::Aaaa), Family::A, false, false),
+        ] {
+            let (mut cache, mut schedules, name, pair) =
+                nodata_row_setup(advance, query_family, snapshot_after);
+            if snapshot_after {
+                assert_eq!(pair.queried, pair.other, "A1 == AAAA1 at the mismatch row");
+            }
+            let cache_baseline = cache;
+            let schedules_baseline = schedules;
+            let a_after = cache.entry(name, Family::A).expect("entry").generation();
+            let aaaa_after = cache.entry(name, Family::Aaaa).expect("entry").generation();
+            let result = apply_nodata(&mut cache, &mut schedules, pair, query_family);
             if reject {
                 assert!(
-                    matches!(
-                        result,
-                        Err(crate::dns::wire::DnsError::Cache(
-                            crate::dns::cache::CacheError::StaleGeneration
-                        ))
-                    ),
+                    stale_generation_refused(&result),
                     "obsolete NODATA refused before mutation"
                 );
                 assert_eq!(
@@ -4004,7 +4039,7 @@ mod production_apply_route {
                 );
                 assert_eq!(cache, cache_baseline, "rejected without cache mutation");
             } else {
-                let (kind, _extreme, _incidents) = result.expect("accepted NODATA publishes");
+                let kind = result.expect("accepted NODATA publishes");
                 assert_eq!(kind, PublishedKind::Negative, "queried Negative published");
                 let accepted_entry = cache.entry(name, Family::A).expect("entry");
                 assert_ne!(
@@ -4132,15 +4167,7 @@ mod production_apply_route {
         (cache, schedules, kind)
     }
 
-    #[test]
-    fn below_minimum_publication_preserves_owned_state_under_strong_requirement() {
-        use crate::dns::cache::CacheError;
-        use crate::dns::cache::evidence::ProofClass;
-        use crate::dns::wire::DnsError;
-
-        let mut ws = ResponseWorkspace::default();
-        let (cache, schedules, kind) = authenticated_preseed();
-        let name = cache.name_index(0).expect("index");
+    fn assert_authenticated_seed(cache: Cache, name: NameIndex, kind: PublishedKind) {
         assert_eq!(
             kind,
             PublishedKind::ResolvedPositive,
@@ -4166,6 +4193,49 @@ mod production_apply_route {
             crate::dns::cache::EntryState::Fresh,
             "seed entry is observed fresh at the rejection point"
         );
+    }
+
+    fn apply_below_minimum(
+        ws: &mut ResponseWorkspace,
+        msg: &[u8],
+        tid: u16,
+        cache: &mut Cache,
+        schedules: &mut Schedules,
+        tracked: Generations,
+    ) -> Result<(), DnsError> {
+        let reply = parse_reply_into(ws, "sub.example.org", Family::A, tid, msg)
+            .expect("validated below-minimum reply");
+        reply
+            .observe()
+            .apply(
+                cache,
+                schedules,
+                crate::dns::publication::ApplyContext {
+                    index: 0,
+                    generation: tracked.queried,
+                    receipt: 6_000,
+                    now: 6_000,
+                    query_family: Some(Family::A),
+                    other_generation: Some(tracked.other),
+                },
+                ApplyOrigin {
+                    source: ResolverSource::index(1).expect("index"),
+                    query_floor: 6_000,
+                    origin_authenticated: false,
+                    origin_policy: RecursionPolicy::Undeclared,
+                },
+            )
+            .map(|_| ())
+    }
+
+    #[test]
+    fn below_minimum_publication_preserves_owned_state_under_strong_requirement() {
+        use crate::dns::cache::CacheError;
+
+        let mut ws = ResponseWorkspace::default();
+        let (cache, schedules, kind) = authenticated_preseed();
+        let name = cache.name_index(0).expect("index");
+        assert_authenticated_seed(cache, name, kind);
         let cache_baseline = cache;
         let schedules_baseline = schedules;
 
@@ -4201,26 +4271,8 @@ mod production_apply_route {
                 }
                 other => panic!("unknown fixture label: {other}"),
             };
-            let reply = parse_reply_into(&mut ws, "sub.example.org", Family::A, tid, &msg)
-                .expect("validated below-minimum reply");
-            let result = reply.observe().apply(
-                &mut cache,
-                &mut schedules,
-                crate::dns::publication::ApplyContext {
-                    index: 0,
-                    generation: tracked.queried,
-                    receipt: 6_000,
-                    now: 6_000,
-                    query_family: Some(Family::A),
-                    other_generation: Some(tracked.other),
-                },
-                ApplyOrigin {
-                    source: ResolverSource::index(1).expect("index"),
-                    query_floor: 6_000,
-                    origin_authenticated: false,
-                    origin_policy: RecursionPolicy::Undeclared,
-                },
-            );
+            let result =
+                apply_below_minimum(&mut ws, &msg, tid, &mut cache, &mut schedules, tracked);
             assert!(
                 matches!(
                     result,
