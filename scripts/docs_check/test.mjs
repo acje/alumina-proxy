@@ -9,26 +9,38 @@ const base = await mkdtemp(path.join(repoRoot, 'target', 'docsctl-'))
 let failures = 0
 let ran = 0
 
+function evaluate(res, opts) {
+  const err = res.stderr || ''
+  const out = res.stdout || ''
+  return {
+    got: res.status,
+    err,
+    out,
+    diag: !opts.diag || err.includes(opts.diag),
+    clean: (opts.noClean || []).every((s) => !out.includes(s)),
+    has: !opts.hasOut || out.includes(opts.hasOut)
+  }
+}
+
+function report(name, wantExit, check) {
+  const { got, diag, clean, has, err, out } = check
+  const ok = got === wantExit && diag && clean && has
+  if (ok) {
+    console.log(`CTRL-PASS ${name} (exit ${got})`)
+    return
+  }
+  failures++
+  console.error(
+    `CTRL-FAIL ${name}: got exit ${got} (want ${wantExit}) diag=${diag} clean=${clean} has=${has}` +
+      `\n  out: ${out.split('\n').filter(Boolean).join(' | ')}` +
+      `\n  err: ${err.split('\n').filter(Boolean).join(' | ')}`
+  )
+}
+
 function expect(name, files, wantExit, opts) {
   ran++
   const res = spawnSync(process.execPath, [checker, ...files], { cwd: base, encoding: 'utf8' })
-  const got = res.status
-  const err = res.stderr || ''
-  const out = res.stdout || ''
-  const diag = !opts.diag || err.includes(opts.diag)
-  const clean = (opts.noClean || []).every((s) => !out.includes(s))
-  const has = !opts.hasOut || out.includes(opts.hasOut)
-  const ok = got === wantExit && diag && clean && has
-  if (!ok) {
-    failures++
-    console.error(
-      `CTRL-FAIL ${name}: got exit ${got} (want ${wantExit}) diag=${diag} clean=${clean} has=${has}` +
-        `\n  out: ${out.split('\n').filter(Boolean).join(' | ')}` +
-        `\n  err: ${err.split('\n').filter(Boolean).join(' | ')}`
-    )
-  } else {
-    console.log(`CTRL-PASS ${name} (exit ${got})`)
-  }
+  report(name, wantExit, evaluate(res, opts))
 }
 
 try {
