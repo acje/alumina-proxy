@@ -725,7 +725,6 @@ def _accept_bridge(ln):
     except (OSError, socket.timeout) as exc:
         fail("POS-RELAY-TLS13", f"s_client never connected to -unix listener: {exc}")
         return None
-    ux.settimeout(None)
     return ux
 
 
@@ -878,6 +877,7 @@ def case_relay_tls13():
         ux = _accept_bridge(ln)
         if ux is None:
             return
+        ux.settimeout(None)
         _start_bridge(ux, tunnel)
         seen, got = _await_reversed_echo(proc, select)
         if seen:
