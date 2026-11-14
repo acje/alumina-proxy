@@ -1,5 +1,8 @@
+#[path = "support/dns_responder.rs"]
+mod dns_responder;
 #[path = "support/process_harness.rs"]
 mod process_harness;
+use dns_responder::{DnsResponder, build_positive};
 use process_harness::{current_exe, wait_for_exit};
 
 use std::io::{Read, Write};
@@ -65,104 +68,6 @@ fn read_port(mut stderr: impl Read) -> u16 {
         }
     }
     panic!("child never reported its serving port; stderr so far: {buf:?}");
-}
-
-/// TCP-framed DNS over TCP: reads one 2-byte length-prefixed query.
-fn read_query(sock: &mut TcpStream) -> Option<Vec<u8>> {
-    let mut lenb = [0u8; 2];
-    if sock.read_exact(&mut lenb).is_err() {
-        return None;
-    }
-    let qlen = usize::from(u16::from_be_bytes(lenb));
-    if qlen == 0 || qlen > 2048 {
-        return None;
-    }
-    let mut q = vec![0u8; qlen];
-    if sock.read_exact(&mut q).is_err() {
-        return None;
-    }
-    Some(q)
-}
-
-/// Writes one 2-byte length-prefixed DNS over TCP message.
-fn write_message(sock: &mut TcpStream, msg: &[u8]) -> std::io::Result<()> {
-    let mut out = Vec::with_capacity(msg.len() + 2);
-    out.extend_from_slice(
-        &u16::try_from(msg.len())
-            .expect("dns message fits u16 length prefix")
-            .to_be_bytes(),
-    );
-    out.extend_from_slice(msg);
-    sock.write_all(&out)?;
-    sock.flush()
-}
-
-/// A local loopback plain-DNS responder that answers every query positively on
-/// the loopback address, so the child's startup window resolves the allowlist
-/// name early and reaches a `Serve` decision without external network. The
-/// child's configured resolver is a bare-IP literal, which dials plain TCP DNS
-/// (`startup_dns`), so a TCP DNS responder is sufficient.
-struct DnsResponder {
-    addr: SocketAddr,
-}
-
-impl DnsResponder {
-    fn spawn() -> DnsResponder {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind responder");
-        let addr = listener.local_addr().expect("responder address");
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut sock) = stream else {
-                    break;
-                };
-                while let Some(query) = read_query(&mut sock) {
-                    let Some(reply) = build_positive(&query) else {
-                        break;
-                    };
-                    if write_message(&mut sock, &reply).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-        DnsResponder { addr }
-    }
-}
-
-/// Builds a positive DNS reply (A or AAAA) echoing the question.
-fn build_positive(query: &[u8]) -> Option<Vec<u8>> {
-    if query.len() < 16 {
-        return None;
-    }
-    let tid = u16::from_be_bytes([query[0], query[1]]);
-    let qname = &query[12..query.len() - 4];
-    let qtype = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
-    let rdata: &[u8] = match qtype {
-        1 => &[1, 1, 1, 1],
-        28 => &[
-            0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
-        ],
-        _ => return None,
-    };
-    let mut msg = Vec::with_capacity(query.len() + 22);
-    msg.extend_from_slice(&tid.to_be_bytes());
-    msg.extend_from_slice(&0x8000u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&query[12..]);
-    msg.extend_from_slice(qname);
-    msg.extend_from_slice(&qtype.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&300u32.to_be_bytes());
-    msg.extend_from_slice(
-        &u16::try_from(rdata.len())
-            .expect("rdata fits u16 wire length")
-            .to_be_bytes(),
-    );
-    msg.extend_from_slice(rdata);
-    Some(msg)
 }
 
 /// Returns a child with a single allowlist entry and the config used by all
@@ -242,7 +147,7 @@ fn scenario_owner_latch() {
 /// serving owner turn exits `74` (no shutdown) or `0` (SIGTERM first) pins the
 /// latch-observability and shutdown-precedence contracts.
 fn scenario_startup_latch(shutdown_first: bool) {
-    let responder = DnsResponder::spawn();
+    let responder = DnsResponder::spawn(|query| build_positive(&query));
     let port = responder.addr.port().to_string();
     let args = if shutdown_first {
         ["--child-shutdown", &port]

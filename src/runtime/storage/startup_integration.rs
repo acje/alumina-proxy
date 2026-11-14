@@ -9,9 +9,13 @@ use crate::dns::cache::Family;
 #[path = "../../../tests/support/temp_dir.rs"]
 mod temp_dir;
 
+#[path = "../../../tests/support/dns_responder.rs"]
+mod dns_responder;
+use dns_responder::{DnsResponder, build_positive};
+
 use std::fmt::Write as _;
-use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::{self, Read};
+use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 const NOW0: u64 = 1000;
@@ -32,99 +36,6 @@ fn config_with(names: &str, allowance: u8, listen_port: u16) -> Config {
 
 fn ephemeral_config(names: &str, allowance: u8) -> Config {
     config_with(names, allowance, 9).with_kernel_assigned_test_listener()
-}
-
-fn read_query(sock: &mut TcpStream) -> Option<Vec<u8>> {
-    let mut lenb = [0u8; 2];
-    if sock.read_exact(&mut lenb).is_err() {
-        return None;
-    }
-    let qlen = usize::from(u16::from_be_bytes(lenb));
-    if qlen == 0 || qlen > 2048 {
-        return None;
-    }
-    let mut q = vec![0u8; qlen];
-    if sock.read_exact(&mut q).is_err() {
-        return None;
-    }
-    Some(q)
-}
-
-fn write_message(sock: &mut TcpStream, msg: &[u8]) -> std::io::Result<()> {
-    let mut out = Vec::with_capacity(msg.len() + 2);
-    out.extend_from_slice(
-        &u16::try_from(msg.len())
-            .expect("dns message fits u16 length prefix")
-            .to_be_bytes(),
-    );
-    out.extend_from_slice(msg);
-    sock.write_all(&out)?;
-    sock.flush()
-}
-
-struct DnsResponder {
-    addr: SocketAddr,
-}
-
-impl DnsResponder {
-    fn spawn<F>(mut on_query: F) -> DnsResponder
-    where
-        F: FnMut(Vec<u8>) -> Option<Vec<u8>> + Send + 'static,
-    {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind responder");
-        let addr = listener.local_addr().expect("responder address");
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut sock) = stream else {
-                    break;
-                };
-                while let Some(query) = read_query(&mut sock) {
-                    let Some(reply) = on_query(query) else {
-                        break;
-                    };
-                    if write_message(&mut sock, &reply).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-        DnsResponder { addr }
-    }
-}
-
-fn build_positive(query: &[u8]) -> Option<Vec<u8>> {
-    if query.len() < 16 {
-        return None;
-    }
-    let tid = u16::from_be_bytes([query[0], query[1]]);
-    let qname = &query[12..query.len() - 4];
-    let qtype = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
-    let rdata: &[u8] = match qtype {
-        1 => &[1, 1, 1, 1],
-        28 => &[
-            0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
-        ],
-        _ => return None,
-    };
-    let mut msg = Vec::with_capacity(query.len() + 22);
-    msg.extend_from_slice(&tid.to_be_bytes());
-    msg.extend_from_slice(&0x8000u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&query[12..]);
-    msg.extend_from_slice(qname);
-    msg.extend_from_slice(&qtype.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&300u32.to_be_bytes());
-    msg.extend_from_slice(
-        &u16::try_from(rdata.len())
-            .expect("rdata fits u16 wire length")
-            .to_be_bytes(),
-    );
-    msg.extend_from_slice(rdata);
-    Some(msg)
 }
 
 fn qname_contains(query: &[u8], label: &[u8]) -> bool {
