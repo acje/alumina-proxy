@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use super::{
     Cursor, LOG_RETRY, LogStore, LogStoreError, QUEUE_MASK, SINK_MAX_BYTES, SINK_MAX_OPS, SinkIo,
+    Slot,
 };
 
 impl LogStore {
@@ -98,79 +99,78 @@ impl LogStore {
     /// later drain — so a startup-window or probe drain that latches it is
     /// still seen by the first serving owner turn.
     pub(crate) fn drain_sink(&mut self) {
-        if self.sink.failed {
-            return;
-        }
-        let mut ops = 0usize;
-        let mut bytes_out = 0usize;
-        loop {
-            if ops >= SINK_MAX_OPS || bytes_out >= SINK_MAX_BYTES {
+        let mut budget = TurnBudget::new();
+        while budget.open() {
+            let Some((index, off)) = self.next_write_span() else {
                 return;
-            }
-            let (index, off) = if let Some(cursor) = self.cursor {
-                (self.front, cursor.off)
-            } else {
-                if self.count == 0 {
-                    return;
-                }
-                (self.front, 0)
             };
-            let rec_len = self.slots[index].bytes;
-            if off >= rec_len {
-                self.advance_front();
-                continue;
-            }
-            let mut iovs: [IoSlice<'_>; SINK_MAX_OPS] = [IoSlice::new(&[]); SINK_MAX_OPS];
-            let mut remain = SINK_MAX_BYTES - bytes_out;
-            let mut gathered = 0usize;
-            while gathered < self.count && gathered < SINK_MAX_OPS && remain > 0 {
-                let fi = (index + gathered) & QUEUE_MASK;
-                let start = if gathered == 0 { off } else { 0 };
-                let end = self.slots[fi].bytes;
-                let part = (end - start).min(remain);
-                iovs[gathered] = IoSlice::new(&self.slots[fi].buf[start..start + part]);
-                gathered += 1;
-                remain -= part;
-            }
-            let written = self.sink.io.write_vectored(&iovs[..gathered]);
-            match written {
-                Err(ref err)
-                    if err.kind() == io::ErrorKind::WouldBlock
-                        || err.kind() == io::ErrorKind::Interrupted =>
-                {
-                    self.sink.blocked = true;
-                    self.cursor = Some(Cursor { off });
-                    return;
-                }
-                Err(_) => {
-                    self.sink.failed = true;
-                    while self.count > 0 {
-                        self.drop_one();
-                        self.count -= 1;
-                    }
-                    self.cursor = None;
-                    return;
-                }
-                Ok(0) => {
-                    self.sink.blocked = true;
-                    self.cursor = Some(Cursor { off });
-                    return;
-                }
+            let (iovs, gathered) =
+                gather_iovs(&self.slots, self.count, (index, off), budget.remaining());
+            match self.sink.io.write_vectored(&iovs[..gathered]) {
+                Err(ref err) if is_stalled(err) => return self.block_with(off),
+                Err(_) => return self.fail_and_discard(),
+                Ok(0) => return self.block_with(off),
                 Ok(n) => {
-                    ops += gathered;
-                    #[cfg(test)]
-                    {
-                        self.sink.ops += gathered;
-                        self.sink.syscalls += 1;
-                    }
-                    bytes_out += n;
-                    self.sink.blocked = false;
-                    if self.consume_gathered(gathered, n) {
+                    if self.accept_write(&mut budget, gathered, n) {
                         return;
                     }
                 }
             }
         }
+    }
+    /// The queue span the next write covers: the retained cursor offset over
+    /// the front record, or the front record's start when no cursor is held.
+    /// Already-consumed records are skipped, so a turn never writes an empty
+    /// fragment. `None` when no write can make progress: the sink latched
+    /// failed, or the queue is empty.
+    fn next_write_span(&mut self) -> Option<(usize, usize)> {
+        if self.sink.failed {
+            return None;
+        }
+        loop {
+            let off = match self.cursor {
+                Some(cursor) => cursor.off,
+                None if self.count == 0 => return None,
+                None => 0,
+            };
+            if off < self.slots[self.front].bytes {
+                return Some((self.front, off));
+            }
+            self.advance_front();
+        }
+    }
+    /// Accounts a successful write of `n` bytes over `gathered` fragments:
+    /// spends the turn budget, clears the stall latch, and consumes the queue
+    /// front once per fully-emitted record. Returns `true` when the write
+    /// stopped mid-record, so the turn ends with the cursor retained at the
+    /// exact residue.
+    fn accept_write(&mut self, budget: &mut TurnBudget, gathered: usize, n: usize) -> bool {
+        budget.spend(gathered, n);
+        #[cfg(test)]
+        {
+            self.sink.ops += gathered;
+            self.sink.syscalls += 1;
+        }
+        self.sink.blocked = false;
+        self.consume_gathered(gathered, n)
+    }
+    /// Latches the stall: the retained cursor keeps the acknowledged prefix
+    /// from being re-sent, and the owner retries on the bounded [`LOG_RETRY`]
+    /// cadence instead of spinning.
+    const fn block_with(&mut self, off: usize) {
+        self.sink.blocked = true;
+        self.cursor = Some(Cursor { off });
+    }
+    /// Latches the sink failed and drops the whole queue through the shared
+    /// record accounting, so no later drain runs and the serving owner exits
+    /// `EX_IOERR` on [`Self::sink_has_failed`] (F-09).
+    const fn fail_and_discard(&mut self) {
+        self.sink.failed = true;
+        while self.count > 0 {
+            self.drop_one();
+            self.count -= 1;
+        }
+        self.cursor = None;
     }
     /// Accounts `n` written bytes over the `gathered` fragments of a single
     /// `writev`, advancing the queue front once per fully-emitted record so
@@ -200,4 +200,67 @@ impl LogStore {
             self.note_queue_usage();
         }
     }
+}
+
+/// One drain turn's work allowance: the fragments and bytes already written
+/// this turn, checked against the fixed per-turn budget before each further
+/// write.
+struct TurnBudget {
+    ops: usize,
+    bytes: usize,
+}
+
+impl TurnBudget {
+    const fn new() -> TurnBudget {
+        TurnBudget { ops: 0, bytes: 0 }
+    }
+    /// Whether the per-turn budget still allows one more write.
+    const fn open(&self) -> bool {
+        self.ops < SINK_MAX_OPS && self.bytes < SINK_MAX_BYTES
+    }
+    /// The byte allowance the next gather may cover.
+    const fn remaining(&self) -> usize {
+        SINK_MAX_BYTES - self.bytes
+    }
+    const fn spend(&mut self, ops: usize, bytes: usize) {
+        self.ops += ops;
+        self.bytes += bytes;
+    }
+}
+
+/// Gathers the fragments of the next single write: at most [`SINK_MAX_OPS`]
+/// fragments from the queue front, stopping when `remain` bytes are covered or
+/// the queue is exhausted. The first fragment starts at the retained cursor
+/// offset `start.1`; later fragments start at their record beginning. Returns
+/// the stack-held slices and the count in use, so the drain issues exactly one
+/// `write_vectored` per turn without allocating.
+fn gather_iovs<'a>(
+    slots: &'a [Slot],
+    queued: usize,
+    start: (usize, usize),
+    remain: usize,
+) -> ([IoSlice<'a>; SINK_MAX_OPS], usize) {
+    let (index, off) = start;
+    let mut iovs = [IoSlice::new(&[]); SINK_MAX_OPS];
+    let mut left = remain;
+    let mut gathered = 0usize;
+    while gathered < queued && gathered < SINK_MAX_OPS && left > 0 {
+        let fi = (index + gathered) & QUEUE_MASK;
+        let begin = if gathered == 0 { off } else { 0 };
+        let end = slots[fi].bytes;
+        let part = (end - begin).min(left);
+        iovs[gathered] = IoSlice::new(&slots[fi].buf[begin..begin + part]);
+        gathered += 1;
+        left -= part;
+    }
+    (iovs, gathered)
+}
+
+/// Whether a write error means "not right now" rather than a broken sink:
+/// both leave the queue intact and the cursor retained for a later retry.
+fn is_stalled(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
 }
