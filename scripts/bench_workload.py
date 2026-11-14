@@ -714,49 +714,10 @@ class EchoBackend:
         tls = None
         try:
             raw.settimeout(self.deadline)
-            # A relay-style CONNECT forward proxy (Envoy's canonical HCM CONNECT
-            # mode per configs/proxy_connect.yaml, and HAProxy 3.4 http-mode
-            # CONNECT) connects to the origin and sends the client's HTTP
-            # CONNECT request line to it before any TLS byte. Direct tunneling
-            # forward proxies (alumina) connect and immediately present the TLS
-            # ClientHello. Peek WITHOUT consuming so a pipelined ClientHello is
-            # never eaten by the probe; if a CONNECT preamble is present, read
-            # and answer it exactly, then continue with the TLS handshake.
-            try:
-                peek = raw.recv(4096, socket.MSG_PEEK)
-            except OSError:
-                peek = b""
-            if peek.startswith(b"CONNECT "):
-                hdr = peek
-                while b"\r\n\r\n" not in hdr:
-                    more = raw.recv(4096, socket.MSG_PEEK)
-                    if not more or len(more) == len(hdr):
-                        return
-                    hdr = more
-                hdr_len = hdr.find(b"\r\n\r\n") + 4
-                got = 0
-                while got < hdr_len:
-                    chunk = raw.recv(hdr_len - got)
-                    if not chunk:
-                        return
-                    got += len(chunk)
-                raw.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                with self._lock:
-                    self.connect_preambles += 1
+            if not self._accept_preamble(raw):
+                return
             tls = self.ctx.wrap_socket(raw, server_side=True)
-            while True:
-                chunk = tls.recv(1 << 16)
-                if not chunk:
-                    break
-                with self._lock:
-                    self.bytes_recv += len(chunk)
-                out = self._apply_knobs(chunk)
-                if self.echo_delay_s > 0:
-                    time.sleep(self.echo_delay_s)
-                if out:
-                    tls.sendall(out)
-                    with self._lock:
-                        self.bytes_sent += len(out)
+            self._pump(tls)
         except (OSError, ssl.SSLError):
             with self._lock:
                 self.errors += 1
@@ -768,6 +729,54 @@ class EchoBackend:
                 raw.close()
             with self._lock:
                 self._workers.discard(threading.current_thread())
+
+    def _accept_preamble(self, raw):
+        # A relay-style CONNECT forward proxy (Envoy's canonical HCM CONNECT
+        # mode per configs/proxy_connect.yaml, and HAProxy 3.4 http-mode
+        # CONNECT) connects to the origin and sends the client's HTTP
+        # CONNECT request line to it before any TLS byte. Direct tunneling
+        # forward proxies (alumina) connect and immediately present the TLS
+        # ClientHello. Peek WITHOUT consuming so a pipelined ClientHello is
+        # never eaten by the probe; if a CONNECT preamble is present, read
+        # and answer it exactly, then continue with the TLS handshake.
+        try:
+            peek = raw.recv(4096, socket.MSG_PEEK)
+        except OSError:
+            peek = b""
+        if not peek.startswith(b"CONNECT "):
+            return True
+        hdr = peek
+        while b"\r\n\r\n" not in hdr:
+            more = raw.recv(4096, socket.MSG_PEEK)
+            if not more or len(more) == len(hdr):
+                return False
+            hdr = more
+        hdr_len = hdr.find(b"\r\n\r\n") + 4
+        got = 0
+        while got < hdr_len:
+            chunk = raw.recv(hdr_len - got)
+            if not chunk:
+                return False
+            got += len(chunk)
+        raw.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        with self._lock:
+            self.connect_preambles += 1
+        return True
+
+    def _pump(self, tls):
+        while True:
+            chunk = tls.recv(1 << 16)
+            if not chunk:
+                break
+            with self._lock:
+                self.bytes_recv += len(chunk)
+            out = self._apply_knobs(chunk)
+            if self.echo_delay_s > 0:
+                time.sleep(self.echo_delay_s)
+            if out:
+                tls.sendall(out)
+                with self._lock:
+                    self.bytes_sent += len(out)
 
     def _apply_knobs(self, chunk):
         if self.swallow_after is None and self.corrupt_seq_lt is None:
@@ -783,13 +792,18 @@ class EchoBackend:
                 break
             frame = chunk[pos:end]
             pos = end
-            if self.swallow_after is not None and seq >= self.swallow_after:
-                continue
-            if self.corrupt_seq_lt is not None and seq < self.corrupt_seq_lt:
-                frame = frame[:FRAME_HDR_LEN] + bytes(
-                    b ^ 0xFF for b in frame[FRAME_HDR_LEN:])
-            out += frame
+            knobbed = self._knobbed_frame(frame, seq)
+            if knobbed is not None:
+                out += knobbed
         return bytes(out)
+
+    def _knobbed_frame(self, frame, seq):
+        if self.swallow_after is not None and seq >= self.swallow_after:
+            return None
+        if self.corrupt_seq_lt is not None and seq < self.corrupt_seq_lt:
+            return frame[:FRAME_HDR_LEN] + bytes(
+                b ^ 0xFF for b in frame[FRAME_HDR_LEN:])
+        return frame
 
 
 # --------------------------------------------------------------------------
@@ -905,35 +919,7 @@ class ClientRun:
         opened = []
         try:
             for ci in range(self.args.conns):
-                left = setup_end - _mono()
-                if left <= 0:
-                    raise RuntimeError("setup deadline exceeded before dial")
-                if self.args.mode == "via-proxy":
-                    raw = connect_tunnel(self.args.target_addr, self.args.peer_host,
-                                         self.args.peer_port, setup_end)
-                else:
-                    raw = socket.create_connection(self.args.target_addr,
-                                                   timeout=max(left, 1e-3))
-                opened.append(raw)
-                left = setup_end - _mono()
-                if left <= 0:
-                    raise RuntimeError("setup deadline exceeded before handshake")
-                tls = self.args.ctx.wrap_socket(
-                    raw, server_hostname=self.args.peer_host,
-                    do_handshake_on_connect=False)
-                opened.append(tls)
-                tls.settimeout(max(left, 1e-3))
-                tls.do_handshake()
-                if _mono() > setup_end:
-                    raise RuntimeError("setup deadline exceeded after handshake")
-                version = tls.version()
-                if not (version or "").startswith("TLSv1.3"):
-                    raise RuntimeError("endpoint negotiated %r, not TLSv1.3" % version)
-                tls.setblocking(False)
-                conn = _Conn(ci, tls)
-                self.conns.append(conn)
-                # idle interest: READ only (waiting for echoes); no WRITE spin
-                self.sel.register(tls, selectors.EVENT_READ, conn)
+                self._dial_conn(ci, setup_end, opened)
         except Exception:
             for s in opened:
                 with contextlib.suppress(OSError):
@@ -948,6 +934,37 @@ class ClientRun:
         self.drain_end = self.window_end + DRAIN_DEADLINE
         for conn in self.conns:
             conn.last_progress = _mono()
+
+    def _dial_conn(self, ci, setup_end, opened):
+        left = setup_end - _mono()
+        if left <= 0:
+            raise RuntimeError("setup deadline exceeded before dial")
+        if self.args.mode == "via-proxy":
+            raw = connect_tunnel(self.args.target_addr, self.args.peer_host,
+                                 self.args.peer_port, setup_end)
+        else:
+            raw = socket.create_connection(self.args.target_addr,
+                                           timeout=max(left, 1e-3))
+        opened.append(raw)
+        left = setup_end - _mono()
+        if left <= 0:
+            raise RuntimeError("setup deadline exceeded before handshake")
+        tls = self.args.ctx.wrap_socket(
+            raw, server_hostname=self.args.peer_host,
+            do_handshake_on_connect=False)
+        opened.append(tls)
+        tls.settimeout(max(left, 1e-3))
+        tls.do_handshake()
+        if _mono() > setup_end:
+            raise RuntimeError("setup deadline exceeded after handshake")
+        version = tls.version()
+        if not (version or "").startswith("TLSv1.3"):
+            raise RuntimeError("endpoint negotiated %r, not TLSv1.3" % version)
+        tls.setblocking(False)
+        conn = _Conn(ci, tls)
+        self.conns.append(conn)
+        # idle interest: READ only (waiting for echoes); no WRITE spin
+        self.sel.register(tls, selectors.EVENT_READ, conn)
 
     # --- admission / schedule ---
 
