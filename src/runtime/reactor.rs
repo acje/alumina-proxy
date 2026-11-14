@@ -1406,6 +1406,74 @@ fn client_readable_step(serving: &mut Serving, index: usize) -> Result<ClientSte
     }
 }
 
+enum DrainEnd {
+    Exhausted,
+    Stalled,
+    Failed,
+    IdleExpired,
+}
+
+fn arm_tunnel_idle(ws: &mut SlotWorkspace) -> bool {
+    if !ws.gate.is_open() {
+        return false;
+    }
+    let expired = deadline_passed(ws.idle_deadline, Instant::now());
+    if !expired {
+        ws.arm_idle(Instant::now());
+    }
+    expired
+}
+
+fn upstream_write_once(serving: &mut Serving, index: usize, room: usize) -> (WriteOutcome, bool) {
+    let ws = &mut serving.slots[index];
+    if ws.fwd >= ws.buf_len {
+        return (WriteOutcome::None, false);
+    }
+    let end = ws.buf_len.min(ws.fwd.saturating_add(room));
+    let Some(up) = ws.upstream.as_mut() else {
+        return (WriteOutcome::None, false);
+    };
+    match up.write(&ws.buf[ws.fwd..end]) {
+        Ok(n) => {
+            ws.fwd += n;
+            let expired = arm_tunnel_idle(ws);
+            (WriteOutcome::Wrote(n), expired)
+        }
+        Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => (WriteOutcome::Wait, false),
+        Err(_) => (WriteOutcome::Failed, false),
+    }
+}
+
+fn drain_upstream_loop(serving: &mut Serving, index: usize, secs: u64) -> (usize, DrainEnd) {
+    let mut written = 0;
+    loop {
+        if serving.visit_exhausted(index) {
+            return (written, DrainEnd::Exhausted);
+        }
+        let room = serving.io_room(index, usize::MAX);
+        let (outcome, expired) = upstream_write_once(serving, index, room);
+        match outcome {
+            WriteOutcome::Wrote(n) => {
+                written += n;
+                serving.note_op(index, n);
+                serving.note_incident_tunnel_bytes(index, n as u64, secs);
+                if expired {
+                    return (written, DrainEnd::IdleExpired);
+                }
+            }
+            WriteOutcome::Wait => {
+                serving.note_op(index, 0);
+                return (written, DrainEnd::Stalled);
+            }
+            WriteOutcome::Failed => {
+                serving.note_op(index, 0);
+                return (written, DrainEnd::Failed);
+            }
+            WriteOutcome::None => return (written, DrainEnd::Stalled),
+        }
+    }
+}
+
 impl Serving {
     /// Builds the loop's retained serving workspaces over boot-completed
     /// storage and the boot-owned traffic store, moving the retained per-slot
@@ -3257,64 +3325,9 @@ impl Serving {
     /// deadline already expired instead of re-arming it.
     fn drain_to_upstream(&mut self, index: usize) -> (usize, bool) {
         let secs = self.storage.cache_secs(Instant::now());
-        let mut written = 0;
-        let mut failed = false;
-        let mut idle_expired = false;
-        loop {
-            if self.visit_exhausted(index) {
-                break;
-            }
-            let room = self.io_room(index, usize::MAX);
-            let outcome = {
-                let ws = &mut self.slots[index];
-                if ws.fwd >= ws.buf_len {
-                    WriteOutcome::None
-                } else {
-                    let end = ws.buf_len.min(ws.fwd.saturating_add(room));
-                    match ws.upstream.as_mut() {
-                        Some(up) => match up.write(&ws.buf[ws.fwd..end]) {
-                            Ok(n) => {
-                                ws.fwd += n;
-                                if ws.gate.is_open() {
-                                    idle_expired =
-                                        deadline_passed(ws.idle_deadline, Instant::now());
-                                    if !idle_expired {
-                                        ws.arm_idle(Instant::now());
-                                    }
-                                }
-                                WriteOutcome::Wrote(n)
-                            }
-                            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {
-                                WriteOutcome::Wait
-                            }
-                            Err(_) => WriteOutcome::Failed,
-                        },
-                        None => WriteOutcome::None,
-                    }
-                }
-            };
-            match outcome {
-                WriteOutcome::Wrote(n) => {
-                    written += n;
-                    self.note_op(index, n);
-                    self.note_incident_tunnel_bytes(index, n as u64, secs);
-                    if idle_expired {
-                        break;
-                    }
-                }
-                WriteOutcome::Wait => {
-                    self.note_op(index, 0);
-                    break;
-                }
-                WriteOutcome::Failed => {
-                    failed = true;
-                    self.note_op(index, 0);
-                    break;
-                }
-                WriteOutcome::None => break,
-            }
-        }
-        (written, failed || idle_expired)
+        let (written, end) = drain_upstream_loop(self, index, secs);
+        let close = matches!(end, DrainEnd::Failed | DrainEnd::IdleExpired);
+        (written, close)
     }
 
     fn flush_client_upstream(&mut self, index: usize) {
