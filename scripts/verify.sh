@@ -1107,7 +1107,9 @@ cfg_test_parentage_gate() {
         # `set +e` scoped to this substitution (the surrounding script is
         # `set -eu` and the status is checked immediately below), so a green
         # read, a non-attributed declaration and a tooling error are three
-        # distinct outcomes of one observation.
+        # distinct outcomes of one observation. The diagnostic channel is merged
+        # into the verdict (`2>&1`), so an exit-0 producer that writes a
+        # diagnostic has an incomplete file in hand and can never read as `ok`.
         _cg_decl="$(set +e; awk -v stem="$stem" '
             {
                 rest = $0
@@ -1129,10 +1131,10 @@ cfg_test_parentage_gate() {
                 pending = 0
             }
             END { printf "%s", ((total > 0 && bad == 0) ? "ok" : "missing") }
-        ' "$parent" 2>/dev/null; printf ':%s' "$?")"
+        ' "$parent" 2>&1; printf ':%s' "$?")"
         case "$_cg_decl" in
             ok:0) ;;
-            missing:0) pg_bad="$pg_bad $m(parent:$parent carries a non-#[cfg(test)] 'mod $stem;' declaration)" ;;
+            *:0) pg_bad="$pg_bad $m(parent:$parent carries a non-#[cfg(test)] 'mod $stem;' declaration)" ;;
             *) echo "CFG-TEST-PARENTAGE-FAIL: awk producer exit ${_cg_decl##*:} on $parent (tooling error, not PASS)" >&2; exit 1 ;;
         esac
     done
