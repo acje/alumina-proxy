@@ -131,8 +131,26 @@ fn qname_contains(query: &[u8], label: &[u8]) -> bool {
     query.windows(label.len()).any(|w| w == label)
 }
 
-#[test]
-fn full_serve_opens_listener_early_before_the_window_elapses() {
+struct FullServeReceipt {
+    outcome: super::StartupOutcome,
+    elapsed: Duration,
+    window: Duration,
+    text: String,
+}
+
+fn read_sink_text(log_reader: &mut std::os::unix::net::UnixStream) -> String {
+    let mut log_bytes = [0u8; 16384];
+    let n = log_reader.read(&mut log_bytes).unwrap();
+    std::str::from_utf8(&log_bytes[..n]).unwrap().to_owned()
+}
+
+fn dns_assurance_frames(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| line.contains("kind=dns_assurance"))
+        .collect()
+}
+
+fn full_serve_receipt() -> FullServeReceipt {
     let window = Duration::from_secs(2);
     let config = ephemeral_config("\"alpha.example.org:443\", \"beta.example.org:443\"", 0);
     let responder = DnsResponder::spawn(|q| build_positive(&q));
@@ -145,6 +163,22 @@ fn full_serve_opens_listener_early_before_the_window_elapses() {
         .run_startup_within(responder.addr, NOW0, window)
         .expect("startup");
     let elapsed = start.elapsed();
+    let text = read_sink_text(&mut log_reader);
+    FullServeReceipt {
+        outcome,
+        elapsed,
+        window,
+        text,
+    }
+}
+
+fn assert_full_serve_receipt(receipt: FullServeReceipt) {
+    let FullServeReceipt {
+        outcome,
+        elapsed,
+        window,
+        text,
+    } = receipt;
     let decision = outcome.decision();
     assert_eq!(decision, StartupDecision::Serve(ServingMode::Full));
     assert_eq!(outcome.report.resolved_names, 2);
@@ -156,13 +190,7 @@ fn full_serve_opens_listener_early_before_the_window_elapses() {
         assert!(!outcome.report.attempted[ordinal][1]);
         assert_eq!(outcome.report.family_results[ordinal][1], None);
     }
-    let mut log_bytes = [0u8; 16384];
-    let n = log_reader.read(&mut log_bytes).unwrap();
-    let text = std::str::from_utf8(&log_bytes[..n]).unwrap();
-    let frames: Vec<_> = text
-        .lines()
-        .filter(|line| line.contains("kind=dns_assurance"))
-        .collect();
+    let frames = dns_assurance_frames(&text);
     assert_eq!(frames.len(), 2, "full startup: {text}");
     for frame in frames {
         assert!(
@@ -192,6 +220,12 @@ fn full_serve_opens_listener_early_before_the_window_elapses() {
     );
     let conn = TcpStream::connect(addr);
     assert!(conn.is_ok(), "bound listener must accept connections");
+}
+
+#[test]
+fn full_serve_opens_listener_early_before_the_window_elapses() {
+    let receipt = full_serve_receipt();
+    assert_full_serve_receipt(receipt);
 }
 
 #[test]
@@ -257,13 +291,8 @@ fn degraded_is_decided_only_at_the_actual_window_deadline() {
         outcome.listener().is_some(),
         "degraded serve must bind a listener"
     );
-    let mut log_bytes = [0u8; 16384];
-    let n = log_reader.read(&mut log_bytes).unwrap();
-    let text = std::str::from_utf8(&log_bytes[..n]).unwrap();
-    let frames: Vec<_> = text
-        .lines()
-        .filter(|line| line.contains("kind=dns_assurance"))
-        .collect();
+    let text = read_sink_text(&mut log_reader);
+    let frames = dns_assurance_frames(&text);
     assert_eq!(frames.len(), 2, "degraded startup: {text}");
     assert!(
         frames
