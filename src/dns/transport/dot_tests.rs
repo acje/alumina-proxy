@@ -221,6 +221,10 @@ impl DotExchange {
             .expect("a live loopback DoT exchange starts without a fatal error");
     }
 
+    fn drive(&mut self, fqdn: &Fqdn, deadline: Instant) -> Option<TurnResult> {
+        self.drive_observed(fqdn, deadline, |_, _| {})
+    }
+
     fn drive_observed(
         &mut self,
         fqdn: &Fqdn,
@@ -1899,47 +1903,29 @@ fn drain_budget_deferral_then_resume_keeps_would_block_distinct() {
 fn handshake_budget_deferral_stays_sendable_and_resumes() {
     let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
     let cfg = dot_config(&pinned_resolver());
-    let mut cache = Cache::new(2).unwrap();
-    let mut schedules = Schedules::new(2).unwrap();
-    let mut transport = StartupDns::new().unwrap();
-    transport.addr = ns(responder.port());
-    transport.now0 = 1_000_000;
-    transport.resolvers = Some(*cfg.resolver_set());
-    transport.active_resolver = ActiveResolver::primary_of(cfg.resolver_set());
-    transport.tls_target = cfg.resolver_set().primary().fqdn().map(|fqdn| TlsTarget {
-        fqdn: *fqdn,
-        pin: cfg.resolver_set().primary().pin().copied(),
-    });
+    let mut dot = DotExchange::new(&cfg, responder.port());
     let fqdn = cfg.allowlist().get(0).unwrap();
     let deadline = Instant::now() + Duration::from_millis(1500);
-    transport.hold_handshake_defer = true;
-    transport
-        .start_exchange(
-            fqdn,
-            Family::A,
-            0,
-            deadline,
-            Generation::INITIAL,
-            ExchangeClass::Startup,
-        )
-        .unwrap();
+    dot.transport.hold_handshake_defer = true;
+    dot.start_family_a(fqdn, 0, deadline);
     let mut saw_continue = false;
     for _ in 0..256 {
-        match transport
-            .advance_exchange(fqdn, &mut cache, &mut schedules)
+        match dot
+            .transport
+            .advance_exchange(fqdn, &mut dot.cache, &mut dot.schedules)
             .unwrap()
         {
             TurnResult::Pending => {
-                if transport.exchange_step() == Some(ExchangeStep::Connecting) {
-                    let _ = transport.wait_dns_readiness(deadline).unwrap();
+                if dot.transport.exchange_step() == Some(ExchangeStep::Connecting) {
+                    let _ = dot.transport.wait_dns_readiness(deadline).unwrap();
                 }
             }
             other => panic!("deferred handshake must stay pending, got {other:?}"),
         }
-        if transport.exchange_step() == Some(ExchangeStep::HandshakeContinue) {
+        if dot.transport.exchange_step() == Some(ExchangeStep::HandshakeContinue) {
             saw_continue = true;
             assert!(
-                !transport.needs_wait(),
+                !dot.transport.needs_wait(),
                 "a budget-deferred handshake is sendable without wait"
             );
             break;
@@ -1950,33 +1936,13 @@ fn handshake_budget_deferral_stays_sendable_and_resumes() {
         "the held budget deferral must park in HandshakeContinue"
     );
 
-    transport.hold_handshake_defer = false;
-    let mut terminal = None;
-    for _ in 0..256 {
-        match transport
-            .advance_exchange(fqdn, &mut cache, &mut schedules)
-            .unwrap()
-        {
-            TurnResult::Pending => {
-                if transport
-                    .exchange_deadline()
-                    .is_some_and(|d| Instant::now() >= d)
-                {
-                    continue;
-                }
-                let _ = transport.wait_dns_readiness(deadline).unwrap();
-            }
-            other => {
-                terminal = Some(other);
-                break;
-            }
-        }
-    }
+    dot.transport.hold_handshake_defer = false;
+    let terminal = dot.drive(fqdn, deadline);
     assert!(
         matches!(terminal, Some(TurnResult::Published(_))),
         "a deferred handshake must resume and publish, got {terminal:?}"
     );
-    transport.close_connection().unwrap();
+    dot.transport.close_connection().unwrap();
     drop(responder);
 }
 
