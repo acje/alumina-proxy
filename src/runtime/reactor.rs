@@ -1947,6 +1947,19 @@ impl Serving {
         tokens: &[(Token, Readiness)],
     ) -> Result<(), ServeError> {
         let mut coalesced = CoalescedBatch::new();
+        self.coalesce_tokens(tokens, &mut coalesced)?;
+        while let Some(index) = coalesced.next() {
+            self.dispatch_coalesced_slot(&coalesced, index)?;
+        }
+        self.finish_coalesced_batch();
+        Ok(())
+    }
+
+    fn coalesce_tokens(
+        &mut self,
+        tokens: &[(Token, Readiness)],
+        coalesced: &mut CoalescedBatch,
+    ) -> Result<(), ServeError> {
         for (token, ready) in tokens {
             let raw = token.0;
             let local = raw & LOCAL_MASK;
@@ -1964,75 +1977,75 @@ impl Serving {
             if local == SIGNAL_LOCAL {
                 continue;
             }
-            let event_gen = decode_generation(raw, GEN_BITS);
-            let upstream = local >= UPSTREAM_BASE;
-            let index = if upstream {
-                local - UPSTREAM_BASE
-            } else {
-                local - 1
+            let Some((index, upstream, event_gen)) = self.coalescible_slot(raw, local) else {
+                continue;
             };
-            if index >= self.slots.len() {
-                continue;
-            }
-            if self.slots[index].stage == Stage::Idle {
-                continue;
-            }
-            if event_gen != self.slots[index].slot_gen {
-                continue;
-            }
             coalesced.fold(index, event_gen, upstream, *ready);
         }
-        while let Some(index) = coalesced.next() {
-            if self.recheck_due() {
-                self.recheck_now();
-            }
-            let slot_gen = coalesced.slots[index].slot_gen;
-            let first_client = coalesced.slots[index].client_first;
-            let (client_ready, upstream_ready) = (
-                coalesced.slots[index].client,
-                coalesced.slots[index].upstream,
-            );
-            if self.slots[index].slot_gen == slot_gen
-                && self.slots[index].stage != Stage::Idle
-                && let Some(ready) = if first_client {
-                    client_ready
-                } else {
-                    upstream_ready
-                }
-            {
-                self.dispatch_readiness(
-                    if first_client {
-                        client_token(slot_gen, index)
-                    } else {
-                        upstream_token(slot_gen, index)
-                    },
-                    ready,
-                )?;
-            }
-            if self.slots[index].slot_gen == slot_gen
-                && self.slots[index].stage != Stage::Idle
-                && let Some(ready) = if first_client {
-                    upstream_ready
-                } else {
-                    client_ready
-                }
-            {
-                self.dispatch_readiness(
-                    if first_client {
-                        upstream_token(slot_gen, index)
-                    } else {
-                        client_token(slot_gen, index)
-                    },
-                    ready,
-                )?;
-            }
+        Ok(())
+    }
+
+    fn coalescible_slot(&self, raw: usize, local: usize) -> Option<(usize, bool, u64)> {
+        let event_gen = decode_generation(raw, GEN_BITS);
+        let upstream = local >= UPSTREAM_BASE;
+        let index = if upstream {
+            local - UPSTREAM_BASE
+        } else {
+            local - 1
+        };
+        if index >= self.slots.len() {
+            return None;
         }
+        if self.slots[index].stage == Stage::Idle {
+            return None;
+        }
+        if event_gen != self.slots[index].slot_gen {
+            return None;
+        }
+        Some((index, upstream, event_gen))
+    }
+
+    fn dispatch_coalesced_slot(
+        &mut self,
+        coalesced: &CoalescedBatch,
+        index: usize,
+    ) -> Result<(), ServeError> {
+        if self.recheck_due() {
+            self.recheck_now();
+        }
+        let slot = coalesced.slots[index];
+        let client = (client_token(slot.slot_gen, index), slot.client);
+        let upstream = (upstream_token(slot.slot_gen, index), slot.upstream);
+        let (first, second) = if slot.client_first {
+            (client, upstream)
+        } else {
+            (upstream, client)
+        };
+        self.dispatch_coalesced_arm(index, slot.slot_gen, first)?;
+        self.dispatch_coalesced_arm(index, slot.slot_gen, second)
+    }
+
+    fn dispatch_coalesced_arm(
+        &mut self,
+        index: usize,
+        slot_gen: u64,
+        (token, ready): (Token, Option<Readiness>),
+    ) -> Result<(), ServeError> {
+        if self.slots[index].slot_gen != slot_gen || self.slots[index].stage == Stage::Idle {
+            return Ok(());
+        }
+        let Some(ready) = ready else {
+            return Ok(());
+        };
+        self.dispatch_readiness(token, ready)
+    }
+
+    const fn finish_coalesced_batch(&mut self) {
         if let VisitState::Live { ops, .. } = self.visit {
             self.note_visit(ops);
         }
         self.visit = VisitState::idle();
         self.in_batch = false;
-        Ok(())
     }
 
     /// The single rearm site for a paused listener. It re-registers the
