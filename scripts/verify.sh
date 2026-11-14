@@ -550,25 +550,9 @@ fixture_require_stdout_not_contains() {
     esac
 }
 
-# Linux kernel privilege fixtures. The proof-only `fixture-facts` feature build
-# is executed (a clearly-separate variant artifact under target/fixture-facts;
-# the production target/release artifact is left untouched, with before/after
-# digest equality enforced) so the fixture binary prints its own kernel facts
-# to stderr at actual entry. Each fixture runs the digest-checked copied variant
-# via a read-only file bind, from cwd=/work holding the fixed documented
-# config/resolver inputs, under a different kernel-grounded process-attribute
-# profile. Fixture stdout and stderr are captured as separate streams: a
-# negative fixture requires EMPTY stdout and byte-exact stderr (exact facts line
-# plus exact diagnostic); the positive fixture requires the exact banner line on
-# stdout (legitimate inventory retained) and byte-exact stderr facts; each
-# asserts the integer exit (0 / EX_CONFIG 78). A metadata probe rejects a setid
-# mode, proves security.capability absence + variant digest match on the
-# executed variant via the xattr filesystem API, with probe errors kept
-# distinct from verified absence.
-# Quick reference:
-#   PODMAN_CONNECTION       rootless builder (required)
-#   PODMAN_ROOT_CONNECTION  rootful builder for --cap-add probes (required)
-boot_fixtures() {
+# The host and builder-connection guards: no fixture command may run before
+# the rootless connection is known to exist and answer.
+boot_fixtures_guard() {
     command -v podman >/dev/null 2>&1 || {
         echo "BOOT-FIXTURES-BLOCKED: podman required on the host" >&2
         exit 1
@@ -580,10 +564,14 @@ boot_fixtures() {
         echo "BOOT-FIXTURES-BLOCKED: cannot reach podman connection $CONN" >&2
         exit 1
     }
+}
+
+# The pinned builder image must be present on BOTH connections: the
+# capability-set axes are kernel fixtures that need the real container
+# privileges, so a missing image or an unreachable rootful connection is a
+# BLOCKER, never a silent SKIP->0.
+boot_fixtures_builder_image() {
     IMAGE="docker.io/library/rust@sha256:484dce463db97ee3b9c3dbeb82ac48408091573ec2da1ce9ccd84c823642779a"
-    # Fail closed: a missing image or rootful connection is a BLOCKER, never a
-    # silent SKIP->0. The capability-set axes below are kernel fixtures that
-    # require the actual container privileges.
     podman --connection "$CONN" image exists "$IMAGE" || {
         echo "BOOT-FIXTURES-BLOCKED: builder image absent on $CONN; pull required" >&2
         exit 1
@@ -596,11 +584,15 @@ boot_fixtures() {
         echo "BOOT-FIXTURES-BLOCKED: builder image absent on $ROOTCONN; pull required" >&2
         exit 1
     }
-    # I3: fixtures run on a digest-pinned image that already carries util-linux,
-    # python3 and git, so no fixture performs an `apk add` (network) inside the
-    # measured path. The image is built once FROM the same pinned rust base used
-    # by the build dispatch, so its provenance is a strict superset of the base
-    # the fixture proofs were accepted against.
+}
+
+# The derived fixture image on both connections, identified by immutable id.
+# I3: fixtures run on a digest-pinned image that already carries util-linux,
+# python3 and git, so no fixture performs an `apk add` (network) inside the
+# measured path. The image is built once FROM the same pinned rust base used
+# by the build dispatch, so its provenance is a strict superset of the base
+# the fixture proofs were accepted against.
+boot_fixtures_fixture_image() {
     ensure_fixture_image "$CONN"
     ensure_fixture_image "$ROOTCONN"
     fixture_id=$(podman --connection "$CONN" image inspect --format '{{.Id}}' "$FIXTURE_IMAGE" 2>/dev/null) || fixture_id=""
@@ -609,12 +601,22 @@ boot_fixtures() {
         exit 1
     }
     echo "  fixture image $FIXTURE_IMAGE id=$fixture_id (base $FIXTURE_BASE_IMAGE)"
+}
+
+# The production artifact exists and its digest is recorded BEFORE the
+# proof-only variant build, so the after-build equality gate has a baseline.
+boot_fixtures_binary() {
     BIN="target/release/alumina"
     [ -x "$ROOT/$BIN" ] || {
         echo "BOOT-FIXTURES-BLOCKED: static binary missing ($BIN); run 'verify.sh mid union' first" >&2
         exit 1
     }
     release_sha_before=$(sha256_digest file "$ROOT/$BIN") || exit 1
+}
+
+# Build the proof-only fixture-facts variant and prove the production
+# artifact is untouched across it (unr B4).
+boot_fixtures_build_variant() {
     echo "BUILD fixture-facts variant (proof-only feature; separate target dir; production artifact untouched):"
     _bf_t0=$(now_ms)
     linux_dispatch 'cargo +${TOOLCHAIN} build --release --locked --features fixture-facts --target-dir target/fixture-facts'
@@ -649,7 +651,11 @@ boot_fixtures() {
         echo "BOOT-FIXTURES FAIL: production artifact digest changed across variant build ($release_sha_before -> $release_sha_after)" >&2
         exit 1
     fi
+}
 
+# Fixture 1: the POSITIVE case. Streams are captured raw and asserted after
+# the run, so this case also owns the capture initialisation.
+boot_fixtures_positive() {
     outf=$(mktemp) || exit 1
     errf=$(mktemp) || exit 1
     trap 'rm -f "$outf" "$errf"' EXIT
@@ -704,7 +710,11 @@ POSPOS
     fixture_require_stderr_exact "$(printf '%s\n' \
         "kernel-facts: ruid=65534 euid=65534 suid=65534 fsuid=65534 cap_eff=0 cap_prm=0 cap_amb=0 no_new_privs=1" \
         "alumina: warning: resolver 127.0.0.1 has no FQDN (IP#fqdn) metadata; plain DNS over port 53 only — the DoT (853) SNI/SAN identity surface is unavailable")"
+}
 
+# Fixtures 2-4: the NEGATIVE cases (root UID, missing no_new_privs, and the
+# rootful non-empty effective capability set).
+boot_fixtures_rejected() {
     # 2) ROOT: euid 0 -> EX_CONFIG 78 (root-UID diagnostic); all four UID axes
     #    reported zero at entry. Negative fixtures must have EMPTY stdout and
     #    byte-exact stderr: exactly the facts line then the diagnostic.
@@ -740,7 +750,10 @@ POSPOS
     fixture_require_stderr_exact "$(printf '%s\n' \
         "kernel-facts: ruid=65534 euid=65534 suid=65534 fsuid=65534 cap_eff=1000 cap_prm=1000 cap_amb=1000 no_new_privs=1" \
         "alumina: prerequisite failure: non-empty effective capability set")"
+}
 
+# Fixture 5: the permitted-only applicability disposition.
+boot_fixtures_applicability() {
     # 5) PERMITTED-ONLY APPLICABILITY (corrects the earlier KEEP_CAPS/capsh
     #    VM rationale per authoritative evidence alumina-5zn + orientation
     #    alumina-mlb): for a non-root exec of an ordinary non-setid executable
@@ -759,7 +772,10 @@ POSPOS
     #    unchanged decision-table unit test.
     echo "FIXTURE permitted-only: APPLICABILITY (alumina-5zn) - ordinary non-setid no-file-cap exec gives P'=E'=ambient; isolated CapEff=0/CapPrm!=0 not reachable; ambient-only not reachable"
     echo "FIXTURE permitted-only: kernel nonempty-permitted and nonempty-ambient refusal policy UNCHANGED; decision-table unit test preflight_rejects_each_unmet_prerequisite_independently asserts each axis"
+}
 
+# Fixture 6: the METADATA proof on the executed variant.
+boot_fixtures_metadata() {
     # 6) METADATA: authoritative Linux xattr proof on the executed variant
     #    (same inode the fixtures ran) that security.capability is absent -
     #    via the xattr filesystem API, never getcap-output-absence - plus file
@@ -785,9 +801,39 @@ POSPOS
         exit 1
     }
     echo "METADATA-OK: executed variant ordinary non-setid, security.capability absent, sha256 matches $variant_sha"
+}
 
+# Linux kernel privilege fixtures. The proof-only `fixture-facts` feature build
+# is executed (a clearly-separate variant artifact under target/fixture-facts;
+# the production target/release artifact is left untouched, with before/after
+# digest equality enforced) so the fixture binary prints its own kernel facts
+# to stderr at actual entry. Each fixture runs the digest-checked copied variant
+# via a read-only file bind, from cwd=/work holding the fixed documented
+# config/resolver inputs, under a different kernel-grounded process-attribute
+# profile. Fixture stdout and stderr are captured as separate streams: a
+# negative fixture requires EMPTY stdout and byte-exact stderr (exact facts line
+# plus exact diagnostic); the positive fixture requires the exact banner line on
+# stdout (legitimate inventory retained) and byte-exact stderr facts; each
+# asserts the integer exit (0 / EX_CONFIG 78). A metadata probe rejects a setid
+# mode, proves security.capability absence + variant digest match on the
+# executed variant via the xattr filesystem API, with probe errors kept
+# distinct from verified absence.
+# Quick reference:
+#   PODMAN_CONNECTION       rootless builder (required)
+#   PODMAN_ROOT_CONNECTION  rootful builder for --cap-add probes (required)
+boot_fixtures() {
+    boot_fixtures_guard
+    boot_fixtures_builder_image
+    boot_fixtures_fixture_image
+    boot_fixtures_binary
+    boot_fixtures_build_variant
+    boot_fixtures_positive
+    boot_fixtures_rejected
+    boot_fixtures_applicability
+    boot_fixtures_metadata
     echo "BOOT-FIXTURES-RAN (separate-stream capture; negative stdout empty + stderr byte-exact facts+diagnostic; positive supervised typed-terminated startup record (startup_final status=terminated + shutdown_final status=drained, reaped exit 0) with retained stdout; integer exit 0/78; all cap sets observed non-empty in caps-effective; permitted-only applicability disposition; production digest unchanged; setid-reject + security.capability absence + variant sha256 match proven)"
 }
+
 
 # One effective Node environment preflight: refuse ANY set NODE_OPTIONS/NODE_PATH
 # -- non-empty or empty alike -- before ANY Node invocation (the docs adapter and
