@@ -940,20 +940,21 @@ unsafe_surface_gate() {
     # decision, so the transport must exit 0: any other code is a scan failure,
     # never a clean scan. An empty universe is a scan failure too.
     paths_file=$(mktemp "${TMPDIR:-/tmp}/alumina-unsafe-paths.XXXXXX") || { echo "UNSAFE-SURFACE-SCAN-FAIL: path list temp file unavailable (tooling error, not PASS)" >&2; exit 1; }
-    frc=0
-    find . \( -name target -o -name .git -o -name .ooda \) -prune -o \( -type f -o -type l \) -name '*.rs' -print0 > "$paths_file" 2>/dev/null || frc=$?
-    [ "$frc" -eq 0 ] || { rm -f "$paths_file"; echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe path enumeration exit $frc (tooling error, not PASS)" >&2; exit 1; }
-    [ -s "$paths_file" ] || { rm -f "$paths_file"; echo "UNSAFE-SURFACE-SCAN-FAIL: empty .rs path universe (tooling error, not PASS)" >&2; exit 1; }
-    producer=grep
-    if command -v rg >/dev/null 2>&1; then
-        producer=rg
+    if find . \( -name target -o -name .git -o -name .ooda \) -prune -o \( -type f -o -type l \) -name '*.rs' -print0 > "$paths_file" 2>/dev/null; then
+        :
+    else
+        frc=$?
+        rm -f "$paths_file"
+        echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe path enumeration exit $frc (tooling error, not PASS)" >&2
+        exit 1
     fi
-    offenders=""
-    scan_rc=0
-    offenders="$(xargs -0 sh -c '
-        producer=$1
-        pattern=$2
-        shift 2
+    [ -s "$paths_file" ] || { rm -f "$paths_file"; echo "UNSAFE-SURFACE-SCAN-FAIL: empty .rs path universe (tooling error, not PASS)" >&2; exit 1; }
+    # Every enumerated path is validated (whitespace-free regular file) before
+    # the producer runs; the shard owns its own producer choice, so rg is used
+    # exactly where it is present and grep -l covers every other host.
+    if offenders="$(xargs -0 sh -c '
+        pattern=$1
+        shift
         [ "$#" -gt 0 ] || exit 255
         for f do
             case "$f" in
@@ -966,7 +967,7 @@ unsafe_surface_gate() {
                 exit 255
             }
         done
-        if [ "$producer" = rg ]; then
+        if command -v rg >/dev/null 2>&1; then
             rg -l "$pattern" -- "$@"
         else
             grep -l -E "$pattern" -- "$@"
@@ -974,17 +975,19 @@ unsafe_surface_gate() {
         rc=$?
         [ "$rc" -le 1 ] || exit 255
         exit 0
-    ' sh "$producer" '\bunsafe\b' < "$paths_file")" || scan_rc=$?
-    rm -f "$paths_file"
-    [ "$scan_rc" -eq 0 ] || { echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe scan transport exit $scan_rc (tooling error, not PASS)" >&2; exit 1; }
+    ' sh '\bunsafe\b' < "$paths_file")"; then
+        rm -f "$paths_file"
+    else
+        scan_rc=$?
+        rm -f "$paths_file"
+        echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe scan transport exit $scan_rc (tooling error, not PASS)" >&2
+        exit 1
+    fi
     bad=""
     for f in $offenders; do
         case "$f" in
-            ./*) f=${f#./} ;;
-        esac
-        case "$f" in
-            src/alloc.rs|tests/*|src/*/tests.rs|src/*/dot_tests.rs) ;;
-            *) bad="$bad $f" ;;
+            ./src/alloc.rs|src/alloc.rs|./tests/*|tests/*|./src/*/tests.rs|src/*/tests.rs|./src/*/dot_tests.rs|src/*/dot_tests.rs) ;;
+            *) bad="$bad ${f#./}" ;;
         esac
     done
     if [ -n "$bad" ]; then
@@ -1060,27 +1063,28 @@ intended_coverage_gate() {
 # symlinks included: a symlinked tests.rs is parentage-checked, not skipped),
 # exit captured so a scan failure fails closed and never reads as PASS.
 cfg_test_parentage_gate() {
-    fsrc=0
-    umods="$(find src -mindepth 2 \( -type f -o -type l \) \( -name 'tests.rs' -o -name 'dot_tests.rs' \) 2>/dev/null)" || fsrc=$?
-    [ "$fsrc" -eq 0 ] || {
+    if umods="$(find src -mindepth 2 \( -type f -o -type l \) \( -name 'tests.rs' -o -name 'dot_tests.rs' \) 2>/dev/null)"; then
+        :
+    else
+        fsrc=$?
         echo "CFG-TEST-PARENTAGE-SCAN-FAIL: unit-module scan producer exit $fsrc (tooling error, not PASS)" >&2
         exit 1
-    }
+    fi
     pg_bad=""
     for m in $umods; do
         d=$(dirname "$m")
         stem=$(basename "$m" .rs)
-        if [ -f "$d.rs" ] && [ -f "$d/mod.rs" ]; then
-            pg_bad="$pg_bad $m(ambiguous parent: both $d.rs and $d/mod.rs)"
-            continue
-        elif [ -f "$d.rs" ]; then
-            parent="$d.rs"
-        elif [ -f "$d/mod.rs" ]; then
-            parent="$d/mod.rs"
-        else
-            pg_bad="$pg_bad $m(no parent module: neither $d.rs nor $d/mod.rs)"
-            continue
-        fi
+        # The actual immediate parent module is <d>.rs, else <d>/mod.rs. Both
+        # present is ambiguous and fails closed; neither is a missing parent.
+        found=""
+        [ -f "$d.rs" ] && found="rs"
+        [ -f "$d/mod.rs" ] && found="$found+mod"
+        case "$found" in
+            rs) parent="$d.rs" ;;
+            +mod) parent="$d/mod.rs" ;;
+            rs+mod) pg_bad="$pg_bad $m(ambiguous parent: both $d.rs and $d/mod.rs)"; continue ;;
+            *) pg_bad="$pg_bad $m(no parent module: neither $d.rs nor $d/mod.rs)"; continue ;;
+        esac
         # Every declaration of `mod <stem>;` in the parent must be attributed
         # under #[cfg(test)]: a bare production `mod <stem>;` fails, and so does
         # any later non-cfg(test) redeclaration after a cfg(test) one.
@@ -1099,8 +1103,12 @@ cfg_test_parentage_gate() {
         # doc comments inside the attribute block) fail closed by design — no
         # comment or Rust parser is built, so text that happens to form a
         # declaration can only make the gate stricter, never greener.
-        prc=0
-        decl=$(awk -v stem="$stem" '
+        # The producer status is part of the observation: the capture runs with
+        # `set +e` scoped to this substitution (the surrounding script is
+        # `set -eu` and the status is checked immediately below), so a green
+        # read, a non-attributed declaration and a tooling error are three
+        # distinct outcomes of one observation.
+        _cg_decl="$(set +e; awk -v stem="$stem" '
             {
                 rest = $0
                 cfgt = 0
@@ -1120,13 +1128,13 @@ cfg_test_parentage_gate() {
                 if ($0 ~ /^[[:space:]]*$/) next
                 pending = 0
             }
-            END { print ((total > 0 && bad == 0) ? "ok" : "missing") }
-        ' "$parent" 2>&1) || prc=$?
-        [ "$prc" -eq 0 ] || {
-            echo "CFG-TEST-PARENTAGE-FAIL: awk producer exit $prc on $parent (tooling error, not PASS)" >&2
-            exit 1
-        }
-        [ "$decl" = "ok" ] || pg_bad="$pg_bad $m(parent:$parent carries a non-#[cfg(test)] 'mod $stem;' declaration)"
+            END { printf "%s", ((total > 0 && bad == 0) ? "ok" : "missing") }
+        ' "$parent" 2>/dev/null; printf ':%s' "$?")"
+        case "$_cg_decl" in
+            ok:0) ;;
+            missing:0) pg_bad="$pg_bad $m(parent:$parent carries a non-#[cfg(test)] 'mod $stem;' declaration)" ;;
+            *) echo "CFG-TEST-PARENTAGE-FAIL: awk producer exit ${_cg_decl##*:} on $parent (tooling error, not PASS)" >&2; exit 1 ;;
+        esac
     done
     if [ -n "$pg_bad" ]; then
         echo "CFG-TEST-PARENTAGE-FAIL: admitted unit-test modules not declared under #[cfg(test)] by parent:$pg_bad" >&2
