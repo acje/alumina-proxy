@@ -2226,6 +2226,38 @@ impl StartupDns {
         schedules: &mut Schedules,
     ) -> Result<SendStep, StartupDnsError> {
         #[cfg(test)]
+        let harness = self.plain_harness(ex, schedules)?;
+        #[cfg(test)]
+        if let Some(step) = harness.step {
+            return Ok(step);
+        }
+        #[cfg(test)]
+        let mut blocked = harness.blocked;
+        #[cfg(not(test))]
+        let mut blocked = false;
+        #[cfg(test)]
+        let forced_bytes = harness.forced_bytes;
+        #[cfg(not(test))]
+        let forced_bytes = 0usize;
+        if !blocked && self.written < ex.qlen {
+            match self.write_plain_query(ex, schedules)? {
+                PlainSendProbe::Progress => {}
+                PlainSendProbe::Blocked => blocked = true,
+                PlainSendProbe::Stopped(step) => return Ok(step),
+            }
+        }
+        if let Some(step) = self.plain_settle_write(ex, schedules)? {
+            return Ok(step);
+        }
+        self.plain_wait_step(blocked, forced_bytes)
+    }
+
+    #[cfg(test)]
+    fn plain_harness(
+        &mut self,
+        ex: &ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<PlainHarness, StartupDnsError> {
         if self.hold_send_partial {
             if let Some(stream) = plain_stream(&mut self.conn) {
                 let end = (self.written + 1).min(ex.qlen);
@@ -2235,68 +2267,79 @@ impl StartupDns {
                     self.written += w;
                 }
             }
-            return Ok(SendStep::Waiting);
+            return Ok(PlainHarness {
+                blocked: false,
+                forced_bytes: 0,
+                step: Some(SendStep::Waiting),
+            });
         }
-        let mut blocked = false;
-        #[cfg(test)]
-        let mut forced_partial = 0usize;
-        #[cfg(test)]
-        if let Some(force) = self.force_write.take() {
-            blocked = true;
-            if let Some(step) =
-                forced_partial_send(self, ex, force, schedules, &mut forced_partial)?
+        let Some(force) = self.force_write.take() else {
+            return Ok(PlainHarness {
+                blocked: false,
+                forced_bytes: 0,
+                step: None,
+            });
+        };
+        let mut forced_bytes = 0usize;
+        let step = forced_partial_send(self, ex, force, schedules, &mut forced_bytes)?;
+        Ok(PlainHarness {
+            blocked: true,
+            forced_bytes,
+            step,
+        })
+    }
+
+    fn write_plain_query(
+        &mut self,
+        ex: &mut ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<PlainSendProbe, StartupDnsError> {
+        let Some(stream) = plain_stream(&mut self.conn) else {
+            return self.fail_send(ex, schedules).map(PlainSendProbe::Stopped);
+        };
+        match stream.write(&self.query_buf[self.written..ex.qlen]) {
+            Ok(0) => self.fail_send(ex, schedules).map(PlainSendProbe::Stopped),
+            Ok(n) => {
+                self.written += n;
+                Ok(PlainSendProbe::Progress)
+            }
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::Interrupted =>
             {
-                return Ok(step);
+                Ok(PlainSendProbe::Blocked)
             }
+            Err(_) => self.fail_send(ex, schedules).map(PlainSendProbe::Stopped),
         }
-        if !blocked && self.written < ex.qlen {
-            let Some(stream) = plain_stream(&mut self.conn) else {
-                self.close_connection()?;
-                let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
-                return Ok(SendStep::Failed(reason));
-            };
-            match stream.write(&self.query_buf[self.written..ex.qlen]) {
-                Ok(0) => {
-                    self.close_connection()?;
-                    let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
-                    return Ok(SendStep::Failed(reason));
-                }
-                Ok(n) => {
-                    self.written += n;
-                }
-                Err(e)
-                    if e.kind() == io::ErrorKind::WouldBlock
-                        || e.kind() == io::ErrorKind::Interrupted =>
-                {
-                    blocked = true;
-                }
-                Err(_) => {
-                    self.close_connection()?;
-                    let reason = self.note_failure(ex, schedules, FailureReason::Send)?;
-                    return Ok(SendStep::Failed(reason));
-                }
-            }
-        }
+    }
+
+    fn plain_settle_write(
+        &mut self,
+        ex: &ActiveExchange,
+        schedules: &mut Schedules,
+    ) -> Result<Option<SendStep>, StartupDnsError> {
         if self.written >= ex.qlen {
             self.set_stream_interest_readable()?;
-            return Ok(SendStep::Transition);
+            return Ok(Some(SendStep::Transition));
         }
         if Instant::now() >= ex.deadline {
             self.close_connection()?;
             let reason = self.note_failure(ex, schedules, FailureReason::Timeout)?;
-            return Ok(SendStep::Failed(reason));
+            return Ok(Some(SendStep::Failed(reason)));
         }
-        if blocked {
-            #[cfg(test)]
-            {
-                if forced_partial > 0 {
-                    return Ok(SendStep::Waiting);
-                }
-            }
-            self.set_stream_interest_writable()?;
-            return Ok(SendStep::Blocked);
+        Ok(None)
+    }
+
+    fn plain_wait_step(
+        &mut self,
+        blocked: bool,
+        forced_bytes: usize,
+    ) -> Result<SendStep, StartupDnsError> {
+        if !blocked || forced_bytes > 0 {
+            return Ok(SendStep::Waiting);
         }
-        Ok(SendStep::Waiting)
+        self.set_stream_interest_writable()?;
+        Ok(SendStep::Blocked)
     }
 
     /// One nonblocking `DoT` query-write step: the remaining length-prefixed
@@ -3777,6 +3820,13 @@ impl StartupDns {
 }
 
 #[cfg(test)]
+struct PlainHarness {
+    blocked: bool,
+    forced_bytes: usize,
+    step: Option<SendStep>,
+}
+
+#[cfg(test)]
 fn forced_partial_send(
     transport: &mut StartupDns,
     ex: &ActiveExchange,
@@ -3860,6 +3910,12 @@ const fn plain_stream(conn: &mut Option<DnsConn>) -> Option<&mut TcpStream> {
         Some(DnsConn::Plain { stream, .. }) => Some(stream),
         _ => None,
     }
+}
+
+enum PlainSendProbe {
+    Progress,
+    Blocked,
+    Stopped(SendStep),
 }
 
 /// The progress of one nonblocking TLS application-data write probe, decided
