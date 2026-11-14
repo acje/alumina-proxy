@@ -1617,6 +1617,19 @@ def _client_measurement_notes():
 # storm workload (connection-churn engine, e2-micro profiles)
 # --------------------------------------------------------------------------
 
+def _setup_failure_kind(exc):
+    em = "%s" % exc
+    if "deadline exceeded" in em or isinstance(exc, socket.timeout):
+        return "deadline"
+    if "CONNECT refused" in em or "refused" in em:
+        return "connect-refused"
+    if isinstance(exc, ssl.SSLError):
+        return "tls"
+    if isinstance(exc, (OSError, socket.timeout)):
+        return "connect"
+    return "other"
+
+
 class _StormSession:
     """One storm connection: setup (CONNECT+TLS, performed concurrently in a
     worker thread) followed by a bounded burst echo session driven by the same
@@ -1725,44 +1738,38 @@ class StormRun:
     def _storm_setup_worker(self, sid, due_ts):
         start = _mono()
         setup_end = due_ts + SETUP_DEADLINE
-        kind = None
         try:
-            if self.args.mode in ("via-proxy", "direct-proxy"):
-                raw = connect_tunnel(self.args.target_addr, self.args.peer_host,
-                                     self.args.peer_port, setup_end)
-            else:
-                raw = socket.create_connection(
-                    self.args.target_addr, timeout=max(setup_end - _mono(), 1e-3))
-            tls = self.args.ctx.wrap_socket(
-                raw, server_hostname=self.args.peer_host,
-                do_handshake_on_connect=False)
-            left = setup_end - _mono()
-            if left <= 0:
-                raise RuntimeError("setup deadline exceeded before handshake")
-            tls.settimeout(max(left, 1e-3))
-            tls.do_handshake()
-            version = tls.version()
-            if not (version or "").startswith("TLSv1.3"):
-                raise RuntimeError("storm endpoint negotiated %r, not TLSv1.3" % version)
+            tls = self._dial_session(due_ts, setup_end)
             done = _mono()
             tls.setblocking(False)
             self._ready_q.append(("ok", sid, tls, start, done))
             return
         except Exception as exc:  # noqa: BLE001
             em = "%s" % exc
-            if "deadline exceeded" in em or isinstance(exc, socket.timeout):
-                kind = "deadline"
-            elif "CONNECT refused" in em or "refused" in em:
-                kind = "connect-refused"
-            elif isinstance(exc, ssl.SSLError):
-                kind = "tls"
-            elif isinstance(exc, (OSError, socket.timeout)):
-                kind = "connect"
-            else:
-                kind = "other"
+            kind = _setup_failure_kind(exc)
             self._ready_q.append(("fail", sid, kind, em))
         finally:
             self._live_dials -= 1
+
+    def _dial_session(self, due_ts, setup_end):
+        if self.args.mode in ("via-proxy", "direct-proxy"):
+            raw = connect_tunnel(self.args.target_addr, self.args.peer_host,
+                                 self.args.peer_port, setup_end)
+        else:
+            raw = socket.create_connection(
+                self.args.target_addr, timeout=max(setup_end - _mono(), 1e-3))
+        tls = self.args.ctx.wrap_socket(
+            raw, server_hostname=self.args.peer_host,
+            do_handshake_on_connect=False)
+        left = setup_end - _mono()
+        if left <= 0:
+            raise RuntimeError("setup deadline exceeded before handshake")
+        tls.settimeout(max(left, 1e-3))
+        tls.do_handshake()
+        version = tls.version()
+        if not (version or "").startswith("TLSv1.3"):
+            raise RuntimeError("storm endpoint negotiated %r, not TLSv1.3" % version)
+        return tls
 
     def _admit_arrivals(self, now):
         while self.next_arrival < self.planned_arrivals:
@@ -1844,19 +1851,22 @@ class StormRun:
             post = _mono()
             sess.off += n
             sess.last_progress = post
-            new_full = sess.off // FRAME_SIZE
-            while sess.framed_sent < new_full:
-                seq = sess.framed_sent
-                sess.framed_sent += 1
-                sess.sent_ts[seq] = post
-                sess.sent_queue.append(seq)
-                self.frames_sent += 1
-                self.timing["in_window_sent_frames"] += (
-                    1 if post <= self.window_end else 0)
+            self._advance_session_frames(sess, post)
         if sess.off >= len(sess.to_send):
             sess.pending = "recv"
             sess.want = "r"
         return True
+
+    def _advance_session_frames(self, sess, post):
+        new_full = sess.off // FRAME_SIZE
+        while sess.framed_sent < new_full:
+            seq = sess.framed_sent
+            sess.framed_sent += 1
+            sess.sent_ts[seq] = post
+            sess.sent_queue.append(seq)
+            self.frames_sent += 1
+            self.timing["in_window_sent_frames"] += (
+                1 if post <= self.window_end else 0)
 
     def _session_try_recv(self, sess, now):
         visited = 0
@@ -1882,15 +1892,20 @@ class StormRun:
                 sess.closed = True
                 return
             visited += 1
-            try:
-                frames = sess.asm.feed(chunk)
-            except ValueError as exc:
-                self.protocol_errors += 1
-                self.failures.setdefault("protocol", True)
-                sess.closed = True
+            if not self._session_fan_out(sess, chunk, now):
                 return
-            for _plen, seq, payload in frames:
-                self._session_handle_echo(sess, seq, payload, now)
+
+    def _session_fan_out(self, sess, chunk, now):
+        try:
+            frames = sess.asm.feed(chunk)
+        except ValueError as exc:
+            self.protocol_errors += 1
+            self.failures.setdefault("protocol", True)
+            sess.closed = True
+            return False
+        for _plen, seq, payload in frames:
+            self._session_handle_echo(sess, seq, payload, now)
+        return True
 
     def _session_handle_echo(self, sess, seq, payload, now):
         q = sess.sent_queue
@@ -2397,6 +2412,33 @@ def _dns_tcp_query(addr, qname_bytes, qtype=1, timeout=3.0):
         return None
 
 
+def _skip_dns_name(resp, pos):
+    if pos >= len(resp):
+        return None
+    if resp[pos] & 0xC0 == 0xC0:
+        return pos + 2
+    while pos < len(resp) and resp[pos] != 0:
+        pos += 1 + resp[pos]
+    if pos >= len(resp):
+        return None
+    return pos + 1
+
+
+def _a_answer_records(resp, pos, ancount):
+    out = []
+    for _ in range(ancount):
+        pos = _skip_dns_name(resp, pos)
+        if pos is None:
+            return []
+        rtype = int.from_bytes(resp[pos:pos + 2], "big")
+        rdlen = int.from_bytes(resp[pos + 8:pos + 10], "big")
+        rdata = resp[pos + 10:pos + 10 + rdlen]
+        pos += 10 + rdlen
+        if rtype == 1 and rdlen == 4:
+            out.append(socket.inet_ntoa(rdata))
+    return out
+
+
 def _dns_a_answer_ips(resp):
     """Extract A-record rdata addresses from a DNS response (or [])."""
     if resp is None or len(resp) < 12:
@@ -2409,21 +2451,7 @@ def _dns_a_answer_ips(resp):
         while resp[pos] != 0:
             pos += 1 + resp[pos]
         pos += 1 + 4  # root label + qtype/qclass
-        out = []
-        for _ in range(ancount):
-            if resp[pos] & 0xC0 == 0xC0:
-                pos += 2
-            else:
-                while resp[pos] != 0:
-                    pos += 1 + resp[pos]
-                pos += 1
-            rtype = int.from_bytes(resp[pos:pos + 2], "big")
-            rdlen = int.from_bytes(resp[pos + 8:pos + 10], "big")
-            rdata = resp[pos + 10:pos + 10 + rdlen]
-            pos += 10 + rdlen
-            if rtype == 1 and rdlen == 4:
-                out.append(socket.inet_ntoa(rdata))
-        return out
+        return _a_answer_records(resp, pos, ancount)
     except (IndexError, ValueError):
         return []
 
