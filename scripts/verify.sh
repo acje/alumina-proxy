@@ -1835,42 +1835,39 @@ e2e_untracked_input_guard() {
         echo "E2E-$_gate-BLOCKED: mktemp failed (untracked-input observation impossible, not a receipt)" >&2
         exit 1
     }
-    _ug_rc=0
-    _ug_list=$(git ls-files --others --full-name --exclude-per-directory=.gitignore 2>"$_ug_err") || _ug_rc=$?
-    if [ "$_ug_rc" -ne 0 ]; then
-        echo "E2E-$_gate-BLOCKED: git ls-files --others exit $_ug_rc (untracked-input observation failed, not a receipt)" >&2
+    if _ug_list=$(git ls-files --others --full-name --exclude-per-directory=.gitignore 2>"$_ug_err"); then
+        # A diagnostic on an exit-0 producer means the universe is INCOMPLETE
+        # (git reports an unreadable directory or pattern file as a warning and
+        # then simply leaves its contents out), so it is a gap, never a clean
+        # observation. The stderr channel is kept separate so a real path list
+        # is never polluted by it, and it is never discarded.
         if [ -s "$_ug_err" ]; then
+            echo "E2E-$_gate-BLOCKED: git ls-files --others produced diagnostics (untracked-input observation incomplete, not a receipt)" >&2
             sed 's/^/  /' "$_ug_err" >&2
+            rm -f "$_ug_err"
+            exit 1
         fi
         rm -f "$_ug_err"
-        exit 1
-    fi
-    # A diagnostic on an exit-0 producer means the universe is INCOMPLETE (git
-    # reports an unreadable directory or pattern file as a warning and then
-    # simply leaves its contents out), so it is a gap, never a clean
-    # observation. The stderr channel is kept separate so a real path list is
-    # never polluted by it, and it is never discarded.
-    if [ -s "$_ug_err" ]; then
-        echo "E2E-$_gate-BLOCKED: git ls-files --others produced diagnostics (untracked-input observation incomplete, not a receipt)" >&2
+    else
+        _ug_rc=$?
+        echo "E2E-$_gate-BLOCKED: git ls-files --others exit $_ug_rc (untracked-input observation failed, not a receipt)" >&2
         sed 's/^/  /' "$_ug_err" >&2
         rm -f "$_ug_err"
         exit 1
     fi
-    rm -f "$_ug_err"
-    [ -n "$_ug_list" ] || return 0
     _ug_bad=""
     while IFS= read -r _ug_path; do
-        [ -n "$_ug_path" ] || continue
-        _ug_allowed=0
         # The expansion is intentionally unquoted: the allowlist is a fixed,
         # space-separated prefix set and word-splitting is the list separator.
         # shellcheck disable=SC2086
         for _ug_prefix in $E2E_UNTRACKED_ALLOW; do
+            # An empty record (no untracked path at all) and an allowlisted
+            # path are both skipped for the next observed path.
             case "$_ug_path" in
-                "$_ug_prefix"*) _ug_allowed=1 ;;
+                ""|"$_ug_prefix"*) continue 2 ;;
             esac
         done
-        [ "$_ug_allowed" -eq 1 ] || _ug_bad="$_ug_bad
+        _ug_bad="$_ug_bad
   $_ug_path"
     done <<EOF
 $_ug_list
@@ -1893,7 +1890,6 @@ e2e_receipt_fields() {
     _harness_py="$2"
     _harness_sh="$3"
     e2e_untracked_input_guard "$_gate"
-    rcd=0
     # --no-ext-diff/--no-textconv: an external diff driver or a textconv
     # attribute can make `git diff HEAD` emit a constant (or nothing) with exit
     # 0, which would hide every tracked worktree edit from the receipt - and
@@ -1906,33 +1902,38 @@ e2e_receipt_fields() {
         echo "E2E-$_gate-BLOCKED: mktemp failed (source-diff observation impossible, not a receipt)" >&2
         exit 1
     }
-    git diff --no-ext-diff --no-textconv --binary HEAD >"$TGT/$_gate-diff.$$" 2>"$_df_err" || rcd=$?
-    if [ "$rcd" -ne 0 ]; then
-        echo "E2E-$_gate-BLOCKED: git diff HEAD exit $rcd (unreadable diff, not a receipt)" >&2
+    if git diff --no-ext-diff --no-textconv --binary HEAD >"$TGT/$_gate-diff.$$" 2>"$_df_err"; then
         if [ -s "$_df_err" ]; then
+            echo "E2E-$_gate-BLOCKED: git diff HEAD produced diagnostics (source-diff observation incomplete, not a receipt)" >&2
             sed 's/^/  /' "$_df_err" >&2
+            rm -f "$_df_err"
+            exit 1
         fi
         rm -f "$_df_err"
-        exit 1
-    fi
-    if [ -s "$_df_err" ]; then
-        echo "E2E-$_gate-BLOCKED: git diff HEAD produced diagnostics (source-diff observation incomplete, not a receipt)" >&2
+    else
+        rcd=$?
+        echo "E2E-$_gate-BLOCKED: git diff HEAD exit $rcd (unreadable diff, not a receipt)" >&2
         sed 's/^/  /' "$_df_err" >&2
         rm -f "$_df_err"
         exit 1
     fi
-    rm -f "$_df_err"
     rgh=0
     head=$(git rev-parse --verify HEAD 2>&1) || rgh=$?
-    [ "$rgh" -eq 0 ] && [ -n "$head" ] || {
-        echo "E2E-$_gate-BLOCKED: git rev-parse --verify HEAD exit $rgh (unreadable HEAD, not a receipt)" >&2
-        exit 1
-    }
-    diffhash=$(sha256_digest file "$TGT/$_gate-diff.$$") || exit 1
-    harness1=$(sha256_digest file "$_harness_py") || exit 1
-    harness2=$(sha256_digest file "$_harness_sh") || exit 1
-    shellhash=$(sha256_digest file "scripts/verify.sh") || exit 1
-    printf '%s %s %s %s %s\n' "$head" "$diffhash" "$harness1" "$harness2" "$shellhash"
+    # The receipt binds the checkout only when HEAD was read AND is non-empty:
+    # an unreadable and an empty HEAD are one refusal, with the observed exit.
+    case "$rgh:$head" in
+        0:?*) ;;
+        *) echo "E2E-$_gate-BLOCKED: git rev-parse --verify HEAD exit $rgh (unreadable HEAD, not a receipt)" >&2; exit 1 ;;
+    esac
+    # The four input digest fields, in order: the dirty diff, the harness py,
+    # the harness sh and this gate script. One pass, one guard: an unhashable
+    # input refuses the receipt exactly as a per-field guard did, and the
+    # sha256_digest owner names the failing path.
+    _rf_fields=""
+    for _rf_path in "$TGT/$_gate-diff.$$" "$_harness_py" "$_harness_sh" scripts/verify.sh; do
+        _rf_fields="$_rf_fields $(sha256_digest file "$_rf_path")" || exit 1
+    done
+    printf '%s%s\n' "$head" "$_rf_fields"
 }
 
 # B3 through-execution correspondence: after the harness has consumed the
