@@ -435,13 +435,13 @@ fixture_stage_script() {
 }
 
 fixture_run_case() {
-    label="$1"
-    expected="$2"
+    _frc_label="$1"
+    _frc_expected="$2"
     conn="$3"
     shift 3
     run_cmd="$1"
     shift
-    FIXTURE_LABEL="$label"
+    FIXTURE_LABEL="$_frc_label"
     > "$outf"
     > "$errf"
     set +e
@@ -453,12 +453,12 @@ fixture_run_case() {
     set -e
     FIXTURE_OUTF="$outf"
     FIXTURE_ERRF="$errf"
-    echo "FIXTURE $label: exit=$rc"
+    echo "FIXTURE $_frc_label: exit=$rc"
     sed 's/^/  out>/' "$outf"
     sed 's/^/  err>/' "$errf"
     case "$rc" in
-        "$expected") ;;
-        *) echo "FIXTURE $label FAIL: expected exit $expected, got $rc" >&2; exit 1 ;;
+        "$_frc_expected") ;;
+        *) echo "FIXTURE $_frc_label FAIL: expected exit $_frc_expected, got $rc" >&2; exit 1 ;;
     esac
 }
 
@@ -2041,8 +2041,6 @@ e2e_harness_identity() {
 # harness runs): exact-candidate inputs + executed binary digest, then the
 # two-line identity record.
 e2e_receipt_print() {
-    # Durable through-execution receipt (consumed by e2e_verify_stable after
-    # the harness runs): exact-candidate inputs + executed binary digest.
     printf '%s\n' "$after" >"$TGT/.e2e-$_gate-inputs"
     printf '%s\n' "$binhash" >"$TGT/.e2e-$_gate-binhash"
     printf '  HEAD=%s target=%s dirty-diff-sha256=%s harness-py-sha256=%s harness-sh-sha256=%s binary-sha256=%s\n' \
