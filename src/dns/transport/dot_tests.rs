@@ -283,9 +283,12 @@ fn bindings_of(
     ordinal: usize,
     family: Family,
 ) -> Vec<crate::eligibility::NumericAddr> {
+    let name = cache
+        .name_index(ordinal)
+        .expect("the test cache admits every allowlist ordinal");
     cache
-        .entry(cache.name_index(ordinal).unwrap(), family)
-        .unwrap()
+        .entry(name, family)
+        .expect("an admitted test name has an entry for every family")
         .bindings()
         .to_vec()
 }
@@ -1059,10 +1062,12 @@ fn drive_to_terminal(
     events: &mut Events,
 ) -> TurnResult {
     loop {
-        match transport.advance_exchange(fqdn, cache, schedules) {
-            Ok(TurnResult::Pending) => {}
-            Ok(terminal) => return terminal,
-            Err(err) => panic!("drive_to_terminal: {err:?}"),
+        match transport
+            .advance_exchange(fqdn, cache, schedules)
+            .expect("a live shared-registration DoT exchange advances without a fatal error")
+        {
+            TurnResult::Pending => {}
+            terminal => return terminal,
         }
         transport
             .sync_shared(poll.registry())
