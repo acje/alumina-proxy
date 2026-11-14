@@ -377,12 +377,13 @@ class DnsResponder:
         self.queries += 1
         ip = self.answers.get(qname.lower())
         if ip is None:
-            return self._reply(tid, question, 3, b"", 0)
+            return self._reply(tid, question, rcode=3, rr=b"", ancount=0)
         if qtype == 1:
             rr = qname_literal(qname) + b"\x00\x01\x00\x01"
             rr += (60).to_bytes(4, "big") + (4).to_bytes(2, "big") + ip
-            return self._reply(tid, question, 0, rr, 1)
-        return self._reply(tid, question, 0, soa_record(qname, 300, 60), 0,
+            return self._reply(tid, question, rcode=0, rr=rr, ancount=1)
+        return self._reply(tid, question, rcode=0,
+                           rr=soa_record(qname, 300, 60), ancount=0,
                            nscount=1)
 
     def _serve_tcp(self, conn):
@@ -412,7 +413,7 @@ class DnsResponder:
             if resp is not None:
                 self.udpsock.sendto(resp, peer)
 
-    def _reply(self, tid, question, rcode, rr, ancount, nscount=0):
+    def _reply(self, tid, question, *, rcode, rr, ancount, nscount=0):
         flags = 0x8000 | 0x0100 | (rcode & 0x0F)
         hdr = tid + flags.to_bytes(2, "big")
         hdr += (1).to_bytes(2, "big") + ancount.to_bytes(2, "big")
@@ -631,7 +632,7 @@ class EchoBackend:
     Test-only knobs (echo_delay_s, swallow_after, corrupt_seq_lt) let the
     selftest inject real byte streams; defaults reproduce the authentic echo."""
 
-    def __init__(self, addr, certfile, keyfile, deadline=30.0,
+    def __init__(self, addr, certfile, keyfile, *, deadline=30.0,
                  echo_delay_s=0.0, swallow_after=None, corrupt_seq_lt=None,
                  max_workers=1024):
         self.addr = addr
@@ -2227,7 +2228,7 @@ def _gen_ca_and_cert(tmpdir):
     return pem, key, ca_pem
 
 
-def _make_client_args(backend_port, backend_pid, temp=None, warmup=0.0,
+def _make_client_args(backend_port, backend_pid, *, temp=None, warmup=0.0,
                       seconds=0.5, target_mbps=40.0, conns=2, proxy_pid=None,
                       mode="proxyless"):
     return argparse.Namespace(
@@ -2245,7 +2246,8 @@ def _make_client_args(backend_port, backend_pid, temp=None, warmup=0.0,
         peak_conns=DEFAULT_PEAK_CONNS)
 
 
-def _run_proxyless(tmpdir, seconds, target_mbps, conns, warmup=0.0, **backend_kw):
+def _run_proxyless(tmpdir, *, seconds, target_mbps, conns, warmup=0.0,
+                   **backend_kw):
     pem, key, ca_pem = _gen_ca_and_cert(tmpdir)
     backend = EchoBackend(("127.0.0.1", 0), pem, key, deadline=30.0, **backend_kw)
     backend.start()
@@ -3066,7 +3068,8 @@ def _selftest_f3_aperture(check, skip, tmpdir):
     # start/end boundary baselines, observed timestamps, disclosed boundary
     # lag and typed Unknown; warmup/drain deltas never counted, the terminal
     # observed end delta always included. ---
-    def _f3rec(t, ticks, boundary=None, cores=None, dt_s=None, rss=128, hwm=512):
+    def _f3rec(t, ticks, *, boundary=None, cores=None, dt_s=None, rss=128,
+               hwm=512):
         rec = {"t": t, "ticks": ticks, "vmrss_kb": rss, "vmhwm_kb": hwm,
                "dt_s": dt_s, "cores": cores}
         if boundary is not None:
@@ -3155,11 +3158,17 @@ def _selftest_direct_proxy(check, skip, tmpdir, f3ctx):
           r12.failures.get("unknown-cpu") is True,
           "failures=%r" % r12.failures)
     check("direct-proxy-target-is-proxy",
-          route_target_addr("direct-proxy", "127.0.0.1", 8080, "8.8.8.8", 443)
+          route_target_addr("direct-proxy", proxy_host="127.0.0.1",
+                            proxy_port=8080, backend_addr="8.8.8.8",
+                            backend_port=443)
           == ("127.0.0.1", 8080) and
-          route_target_addr("via-proxy", "127.0.0.1", 8080, "8.8.8.8", 443)
+          route_target_addr("via-proxy", proxy_host="127.0.0.1",
+                            proxy_port=8080, backend_addr="8.8.8.8",
+                            backend_port=443)
           == ("127.0.0.1", 8080) and
-          route_target_addr("proxyless", "127.0.0.1", 8080, "8.8.8.8", 443)
+          route_target_addr("proxyless", proxy_host="127.0.0.1",
+                            proxy_port=8080, backend_addr="8.8.8.8",
+                            backend_port=443)
           == ("8.8.8.8", 443),
           "route target must track the client mode")
     r13, _c13 = _mk_run()
@@ -3586,7 +3595,8 @@ def _nonfinite(v):
         return True
 
 
-def route_target_addr(mode, proxy_host, proxy_port, backend_addr, backend_port):
+def route_target_addr(mode, *, proxy_host, proxy_port, backend_addr,
+                      backend_port):
     if mode == "proxyless":
         return (backend_addr, backend_port)
     return (proxy_host, proxy_port)
@@ -3800,8 +3810,8 @@ def _run_client_role(args):
               file=sys.stderr)
         return 3
     args.target_addr = route_target_addr(
-        args.mode, args.proxy_host, args.proxy_port,
-        args.backend_addr, args.backend_port)
+        args.mode, proxy_host=args.proxy_host, proxy_port=args.proxy_port,
+        backend_addr=args.backend_addr, backend_port=args.backend_port)
     try:
         args.ctx = _build_client_ctx(args.cafile)
     except (OSError, ssl.SSLError) as exc:
