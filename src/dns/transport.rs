@@ -2184,61 +2184,20 @@ impl StartupDns {
         let mut budget = TLS_SEND_TRIES;
         if conn.tls.wants_write() {
             match drain_tls_bytes(&mut conn.tcp, &mut conn.tls, &mut budget) {
+                Ok(TlsDrain::Flushed) => {}
                 Ok(TlsDrain::Pending) => return HandshakeProbe::Waiting,
                 Ok(TlsDrain::Deferred) => return HandshakeProbe::Deferred,
-                Ok(TlsDrain::Flushed) => {}
                 Err(_) => return HandshakeProbe::Failed(FailureReason::TlsProtocol),
             }
         }
-        if budget > 0 {
-            budget -= 1;
-            match conn.tls.read_tls(&mut conn.tcp) {
-                Ok(0) => {
-                    return HandshakeProbe::Failed(FailureReason::TlsProtocol);
-                }
-                Ok(_) => {
-                    if let Err(err) = conn.tls.process_new_packets() {
-                        let reason = match &err {
-                            rustls::Error::InvalidCertificate(
-                                rustls::CertificateError::ApplicationVerificationFailure,
-                            ) => FailureReason::PinMismatch,
-                            rustls::Error::InvalidCertificate(
-                                rustls::CertificateError::NotValidForName
-                                | rustls::CertificateError::NotValidForNameContext { .. },
-                            ) => FailureReason::NameMismatch,
-                            rustls::Error::InvalidCertificate(
-                                rustls::CertificateError::UnknownIssuer,
-                            ) => FailureReason::NoTrustAnchor,
-
-                            _ => FailureReason::TlsProtocol,
-                        };
-                        return HandshakeProbe::Failed(reason);
-                    }
-                    if conn.tls.wants_write() {
-                        match drain_tls_bytes(&mut conn.tcp, &mut conn.tls, &mut budget) {
-                            Ok(TlsDrain::Pending) => return HandshakeProbe::Waiting,
-                            Ok(TlsDrain::Deferred) => return HandshakeProbe::Deferred,
-                            Ok(TlsDrain::Flushed) => {}
-                            Err(_) => {
-                                return HandshakeProbe::Failed(FailureReason::TlsProtocol);
-                            }
-                        }
-                    }
-                }
-                Err(e)
-                    if e.kind() == io::ErrorKind::WouldBlock
-                        || e.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => {
-                    return HandshakeProbe::Failed(FailureReason::TlsProtocol);
-                }
-            }
+        if let Some(probe) = tls_handshake_read(conn, &mut budget) {
+            return probe;
         }
         if conn.tls.is_handshaking() {
-            HandshakeProbe::Waiting
-        } else {
-            self.expired_pin_certs += conn.expired_pin_certs.swap(0, Ordering::Relaxed) as usize;
-            HandshakeProbe::Transition
+            return HandshakeProbe::Waiting;
         }
+        self.expired_pin_certs += conn.expired_pin_certs.swap(0, Ordering::Relaxed) as usize;
+        HandshakeProbe::Transition
     }
 
     /// One nonblocking query-write step, routing by transport: `DoT` connections
@@ -3931,6 +3890,54 @@ fn tls_send_probe<W: io::Write>(
         Ok(TlsDrain::Pending) => TlsSendProbe::Blocked,
         Ok(TlsDrain::Deferred) => TlsSendProbe::Yield,
         Err(_) => TlsSendProbe::Fail,
+    }
+}
+
+fn tls_handshake_read(conn: &mut TlsConn, budget: &mut u32) -> Option<HandshakeProbe> {
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    match conn.tls.read_tls(&mut conn.tcp) {
+        Ok(0) => Some(HandshakeProbe::Failed(FailureReason::TlsProtocol)),
+        Ok(_) => tls_handshake_process(conn, budget),
+        Err(e)
+            if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::Interrupted =>
+        {
+            None
+        }
+        Err(_) => Some(HandshakeProbe::Failed(FailureReason::TlsProtocol)),
+    }
+}
+
+fn tls_handshake_process(conn: &mut TlsConn, budget: &mut u32) -> Option<HandshakeProbe> {
+    if let Err(err) = conn.tls.process_new_packets() {
+        return Some(HandshakeProbe::Failed(handshake_failure_reason(&err)));
+    }
+    if !conn.tls.wants_write() {
+        return None;
+    }
+    match drain_tls_bytes(&mut conn.tcp, &mut conn.tls, budget) {
+        Ok(TlsDrain::Flushed) => None,
+        Ok(TlsDrain::Pending) => Some(HandshakeProbe::Waiting),
+        Ok(TlsDrain::Deferred) => Some(HandshakeProbe::Deferred),
+        Err(_) => Some(HandshakeProbe::Failed(FailureReason::TlsProtocol)),
+    }
+}
+
+const fn handshake_failure_reason(err: &rustls::Error) -> FailureReason {
+    match err {
+        rustls::Error::InvalidCertificate(
+            rustls::CertificateError::ApplicationVerificationFailure,
+        ) => FailureReason::PinMismatch,
+        rustls::Error::InvalidCertificate(
+            rustls::CertificateError::NotValidForName
+            | rustls::CertificateError::NotValidForNameContext { .. },
+        ) => FailureReason::NameMismatch,
+        rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer) => {
+            FailureReason::NoTrustAnchor
+        }
+        _ => FailureReason::TlsProtocol,
     }
 }
 
