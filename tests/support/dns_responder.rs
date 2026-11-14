@@ -1,7 +1,8 @@
 //! Test-only owner of the loopback plain-DNS responder shared by the gate
 //! binaries and the storage startup-window tests: the two-byte length framing
 //! readers and writers, the responder thread that answers every query through
-//! one caller-supplied builder, and the positive A/AAAA answer builder.
+//! one caller-supplied builder, the parsed-query reply skeleton, and the
+//! positive A/AAAA answer builder.
 //!
 //! Both owners drive a real TCP DNS exchange against a runtime that dials a
 //! bare-IP resolver, so the framing and the reply shape live in exactly one
@@ -80,31 +81,68 @@ fn write_message(sock: &mut TcpStream, msg: &[u8]) -> std::io::Result<()> {
     sock.flush()
 }
 
+/// One parsed single-question query: the transaction id, and the question's
+/// owner name, type, and raw wire bytes.
+pub(super) struct Query<'a> {
+    tid: u16,
+    pub(super) question: &'a [u8],
+    pub(super) qname: &'a [u8],
+    pub(super) qtype: u16,
+}
+
+impl<'a> Query<'a> {
+    /// Parses a query that is at least a fixed header plus one type/class pair
+    /// wide; the question section is everything after the twelve-byte header.
+    pub(super) fn parse(query: &'a [u8]) -> Option<Query<'a>> {
+        if query.len() < 16 {
+            return None;
+        }
+        Some(Query {
+            tid: u16::from_be_bytes([query[0], query[1]]),
+            question: &query[12..],
+            qname: &query[12..query.len() - 4],
+            qtype: u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]),
+        })
+    }
+
+    /// Starts a reply carrying the query's transaction id, one question echoed
+    /// verbatim, `answers` answer records, and no authority or additional
+    /// records. `capacity` is the reply's exact final wire size.
+    pub(super) fn reply(&self, capacity: usize, answers: u16) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(capacity);
+        msg.extend_from_slice(&self.tid.to_be_bytes());
+        msg.extend_from_slice(&0x8000u16.to_be_bytes());
+        msg.extend_from_slice(&1u16.to_be_bytes());
+        msg.extend_from_slice(&answers.to_be_bytes());
+        msg.extend_from_slice(&0u16.to_be_bytes());
+        msg.extend_from_slice(&0u16.to_be_bytes());
+        msg.extend_from_slice(self.question);
+        msg
+    }
+}
+
+const RDATA_A: [u8; 4] = [1, 1, 1, 1];
+const RDATA_AAAA: [u8; 16] = [
+    0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
+];
+
+/// The terminal record data for a query type the responder answers, or `None`
+/// for every other type.
+pub(super) const fn positive_rdata(qtype: u16) -> Option<&'static [u8]> {
+    match qtype {
+        1 => Some(&RDATA_A),
+        28 => Some(&RDATA_AAAA),
+        _ => None,
+    }
+}
+
 /// Builds a positive DNS reply (A or AAAA) echoing the question.
 pub(super) fn build_positive(query: &[u8]) -> Option<Vec<u8>> {
-    if query.len() < 16 {
-        return None;
-    }
-    let tid = u16::from_be_bytes([query[0], query[1]]);
-    let qname = &query[12..query.len() - 4];
-    let qtype = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
-    let rdata: &[u8] = match qtype {
-        1 => &[1, 1, 1, 1],
-        28 => &[
-            0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
-        ],
-        _ => return None,
-    };
-    let mut msg = Vec::with_capacity(query.len() + 22);
-    msg.extend_from_slice(&tid.to_be_bytes());
-    msg.extend_from_slice(&0x8000u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&query[12..]);
-    msg.extend_from_slice(qname);
-    msg.extend_from_slice(&qtype.to_be_bytes());
+    let q = Query::parse(query)?;
+    let rdata = positive_rdata(q.qtype)?;
+    let mut msg = q.reply(query.len() + 22, 1);
+    msg.extend_from_slice(q.qname);
+    msg.extend_from_slice(&q.qtype.to_be_bytes());
     msg.extend_from_slice(&1u16.to_be_bytes());
     msg.extend_from_slice(&300u32.to_be_bytes());
     msg.extend_from_slice(

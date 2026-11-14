@@ -11,7 +11,7 @@ mod temp_dir;
 
 #[path = "../../../tests/support/dns_responder.rs"]
 mod dns_responder;
-use dns_responder::{DnsResponder, build_positive};
+use dns_responder::{DnsResponder, Query, build_positive, positive_rdata};
 
 use std::fmt::Write as _;
 use std::io::{self, Read};
@@ -669,29 +669,11 @@ fn startup_drain_stops_on_a_stalled_sink_and_counts_each_stranded_record_once() 
 /// the exact cross-suffix shape the bailiwick parser reaches (dns tests
 /// `accepts_declared_suffix_cname_target`), at a real loopback responder.
 fn build_cross_suffix_cname(query: &[u8]) -> Option<Vec<u8>> {
-    if query.len() < 16 {
-        return None;
-    }
-    let tid = u16::from_be_bytes([query[0], query[1]]);
-    let qname = &query[12..query.len() - 4];
-    let qtype = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
-    let rdata: &[u8] = match qtype {
-        1 => &[1, 1, 1, 1],
-        28 => &[
-            0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11,
-        ],
-        _ => return None,
-    };
+    let q = Query::parse(query)?;
+    let rdata = positive_rdata(q.qtype)?;
     let target = b"\x03cdn\x07example\x03net\x00";
-    let mut msg = Vec::with_capacity(query.len() + 40);
-    msg.extend_from_slice(&tid.to_be_bytes());
-    msg.extend_from_slice(&0x8000u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&2u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&query[12..]);
-    msg.extend_from_slice(qname);
+    let mut msg = q.reply(query.len() + 40, 2);
+    msg.extend_from_slice(q.qname);
     msg.extend_from_slice(&5u16.to_be_bytes());
     msg.extend_from_slice(&1u16.to_be_bytes());
     msg.extend_from_slice(&200u32.to_be_bytes());
@@ -702,7 +684,7 @@ fn build_cross_suffix_cname(query: &[u8]) -> Option<Vec<u8>> {
     );
     msg.extend_from_slice(target);
     msg.extend_from_slice(target);
-    msg.extend_from_slice(&qtype.to_be_bytes());
+    msg.extend_from_slice(&q.qtype.to_be_bytes());
     msg.extend_from_slice(&1u16.to_be_bytes());
     msg.extend_from_slice(&40u32.to_be_bytes());
     msg.extend_from_slice(
