@@ -353,6 +353,77 @@ class DnsResponder:
             pos += 1 + ln
         return b".".join(labels), pos
 
+    def _read_message(self, conn):
+        hdr = conn.recv(2)
+        if len(hdr) != 2:
+            return None
+        qlen = int.from_bytes(hdr, "big")
+        if qlen == 0 or qlen > 65535:
+            return None
+        msg = b""
+        while len(msg) < qlen:
+            chunk = conn.recv(qlen - len(msg))
+            if not chunk:
+                return None
+            msg += chunk
+        if len(msg) < 12:
+            return None
+        return msg, qlen
+
+    def _log_query(self, qname, qtype, tid, qlen):
+        params = f"{qname.decode(errors='replace')} type={qtype} tid={tid.hex()} qlen={qlen}"
+        if os.environ.get("E2E_DNS_TS"):
+            import datetime
+
+            params += f" t={datetime.datetime.now().isoformat(timespec='milliseconds')}"
+        print(f"E2E-DNS-QUERY: {params}", file=sys.stderr, flush=True)
+
+    def _build_response(self, qname, qtype, tid, question):
+        ip = self.answers.get(qname.lower())
+        if ip is None:
+            return None
+        if qtype == 1:  # A
+            ancount = 1
+            rcode = 0
+            nscount = 0
+            ns_rr = b""
+            rr = qname_literal(qname) + b"\x00\x01\x00\x01"
+            rr += (60).to_bytes(4, "big")
+            rr += (4).to_bytes(2, "big")
+            rr += ip
+        else:
+            # existing name, non-A type (AAAA/...): validated NODATA.
+            # The name EXISTS for A, so a type-absence answer must be
+            # NOERROR with zero answers plus a covering SOA (RFC 2308),
+            # never a whole-name NXDOMAIN. NODATA lets the runtime evict
+# only the queried family (src/dns/wire.rs classify_soa,
+# src/dns/cache.rs evict_nodata), keeping the A binding, so a
+            # query of the other family cannot take an existing
+            # IPv4-only name down.
+            ancount = 0
+            rcode = 0
+            nscount = 1
+            ns_rr = soa_record(qname, 300, 60)
+            rr = b""
+        flags = (0x8000 | 0x0100 | (rcode & 0x0F))
+        hdrw = tid + flags.to_bytes(2, "big")
+        hdrw += (1).to_bytes(2, "big")
+        hdrw += (ancount).to_bytes(2, "big")
+        hdrw += (nscount).to_bytes(2, "big")
+        hdrw += (0).to_bytes(2, "big")
+        return hdrw + question + rr + ns_rr
+
+    def _close_connection(self, conn):
+        with self._hlock:
+            try:
+                self._conns.remove(conn)
+            except ValueError:
+                pass
+        try:
+            conn.close()
+        except OSError:
+            pass
+
     def _serve(self, conn):
         try:
             conn.settimeout(5.0)
@@ -361,20 +432,10 @@ class DnsResponder:
             # a real TCP nameserver keeps the connection open across many
             # exchanges; the binary reuses one connection for the whole window
             while not self._stop:
-                hdr = conn.recv(2)
-                if len(hdr) != 2:
+                parsed = self._read_message(conn)
+                if parsed is None:
                     return
-                qlen = int.from_bytes(hdr, "big")
-                if qlen == 0 or qlen > 65535:
-                    return
-                msg = b""
-                while len(msg) < qlen:
-                    chunk = conn.recv(qlen - len(msg))
-                    if not chunk:
-                        return
-                    msg += chunk
-                if len(msg) < 12:
-                    return
+                msg, qlen = parsed
                 tid = msg[0:2]
                 qdcount = int.from_bytes(msg[4:6], "big")
                 if qdcount != 1:
@@ -384,64 +445,21 @@ class DnsResponder:
                     return
                 qtype = int.from_bytes(msg[qpos:qpos + 2], "big")
                 question = msg[12:qpos + 4]
-                params = f"{qname.decode(errors='replace')} type={qtype} tid={tid.hex()} qlen={qlen}"
-                if os.environ.get("E2E_DNS_TS"):
-                    import datetime
+                self._log_query(qname, qtype, tid, qlen)
 
-                    params += f" t={datetime.datetime.now().isoformat(timespec='milliseconds')}"
-                print(f"E2E-DNS-QUERY: {params}", file=sys.stderr, flush=True)
-
-                ip = self.answers.get(qname.lower())
-                if ip is None:
+                resp = self._build_response(qname, qtype, tid, question)
+                if resp is None:
                     # unknown NAME -> NXDOMAIN for any type (whole-name
                     # nonexistence, the runtime's name-wide eviction), never a
                     # fake positive
                     self._reply(conn, tid, question, 3)
                     continue
-                if qtype == 1:  # A
-                    ancount = 1
-                    rcode = 0
-                    nscount = 0
-                    ns_rr = b""
-                    rr = qname_literal(qname) + b"\x00\x01\x00\x01"
-                    rr += (60).to_bytes(4, "big")
-                    rr += (4).to_bytes(2, "big")
-                    rr += ip
-                else:
-                    # existing name, non-A type (AAAA/...): validated NODATA.
-                    # The name EXISTS for A, so a type-absence answer must be
-                    # NOERROR with zero answers plus a covering SOA (RFC 2308),
-                    # never a whole-name NXDOMAIN. NODATA lets the runtime evict
-# only the queried family (src/dns/wire.rs classify_soa,
-# src/dns/cache.rs evict_nodata), keeping the A binding, so a
-                    # query of the other family cannot take an existing
-                    # IPv4-only name down.
-                    ancount = 0
-                    rcode = 0
-                    nscount = 1
-                    ns_rr = soa_record(qname, 300, 60)
-                    rr = b""
-                flags = (0x8000 | 0x0100 | (rcode & 0x0F))
-                hdrw = tid + flags.to_bytes(2, "big")
-                hdrw += (1).to_bytes(2, "big")
-                hdrw += (ancount).to_bytes(2, "big")
-                hdrw += (nscount).to_bytes(2, "big")
-                hdrw += (0).to_bytes(2, "big")
-                resp = hdrw + question + rr + ns_rr
                 print(f"E2E-DNS-TX: {resp.hex()}", file=sys.stderr, flush=True)
                 conn.sendall(len(resp).to_bytes(2, "big") + resp)
         except OSError:
             return
         finally:
-            with self._hlock:
-                try:
-                    self._conns.remove(conn)
-                except ValueError:
-                    pass
-            try:
-                conn.close()
-            except OSError:
-                pass
+            self._close_connection(conn)
 
     def _reply(self, conn, tid, question, rcode):
         flags = (0x8000 | 0x0100 | 0x0080 | (rcode & 0x0F))
@@ -651,6 +669,167 @@ def proxy_socket():
     return s
 
 
+def _connect_relay_tunnel():
+    # Spec-compliant HTTP/1.1 CONNECT on a raw socket; the tunnel is the
+    # byte pipe the authentic TLS handshake and relay flow through.
+    tunnel = proxy_socket()
+    send_connect(tunnel, "example.com")
+    resp, rest, complete = recv_http_response(tunnel)
+    status = http_status_code(resp)
+    if not complete or status != 200:
+        fail(
+            "POS-RELAY-TLS13",
+            f"CONNECT not established (status={status} complete={complete} head={resp[:64]!r})",
+        )
+        try:
+            tunnel.close()
+        except OSError:
+            pass
+        return None
+    if rest != b"":
+        # A real TLS upstream cannot send app bytes before our ClientHello, so
+        # surplus bytes after the 200 are an anomaly: fail, never bridge
+        # over-read bytes into the TLS stream.
+        fail(
+            "POS-RELAY-TLS13",
+            f"unexpected upstream bytes before ServerHello (rest={rest[:32]!r})",
+        )
+        tunnel.close()
+        return None
+    tunnel.settimeout(None)
+    return tunnel
+
+
+def _bridge_listener(sock_path, tunnel):
+    try:
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+    except OSError:
+        pass
+    ln = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        ln.bind(sock_path)
+        ln.listen(1)
+        ln.settimeout(10.0)
+    except OSError as exc:
+        ln.close()
+        tunnel.close()
+        fail("POS-RELAY-TLS13", f"unix listener setup failed: {exc}")
+        return None
+    return ln
+
+
+def _accept_bridge(ln):
+    try:
+        ux, _ = ln.accept()
+    except (OSError, socket.timeout) as exc:
+        fail("POS-RELAY-TLS13", f"s_client never connected to -unix listener: {exc}")
+        return None
+    ux.settimeout(None)
+    return ux
+
+
+def _bridge_pump(src, dst):
+    try:
+        while True:
+            chunk = src.recv(1 << 16)
+            if not chunk:
+                break
+            dst.sendall(chunk)
+    except OSError:
+        pass
+    finally:
+        try:
+            dst.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+
+def _start_bridge(ux, tunnel):
+    u2t = threading.Thread(target=_bridge_pump, args=(ux, tunnel), daemon=True)
+    t2u = threading.Thread(target=_bridge_pump, args=(tunnel, ux), daemon=True)
+    u2t.start()
+    t2u.start()
+
+
+def _await_reversed_echo(proc, selector):
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    proc.stdin.write(b"hello-e2e\n")
+    proc.stdin.flush()
+    proc.stdin.close()
+
+    got = b""
+    deadline = time.time() + 20.0
+    fd = proc.stdout.fileno()
+    while time.time() < deadline:
+        ready, _, _ = selector.select([fd], [], [], 0.5)
+        if fd in ready:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            got += chunk
+            if b"\ne2e-olleh" in got or b"e2e-olleh" in got:
+                pass_(
+                    "POS-RELAY-TLS13",
+                    f"authentic TLS1.3 handshake + reversed app bytes relaying (got {len(got)}B)",
+                )
+                return True, got
+    return False, got
+
+
+def _report_missing_echo(proc, got):
+    err = b""
+    # R3: terminate the TLS client BEFORE draining stderr. A held-open
+    # upstream keeps s_client alive and its stderr pipe open, so reading to
+    # EOF first would block forever and the finally kill/wait would never
+    # run. Standard bounded subprocess completion: kill, then a bounded
+    # wait, then read the drained pipe (guaranteed EOF after reap).
+    if proc.poll() is None:
+        proc.kill()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    try:
+        err = proc.stderr.read()
+    except OSError:
+        pass
+    fail(
+        "POS-RELAY-TLS13",
+        f"reversed echo missing; out={got!r} err={err!r}",
+    )
+
+
+def _reap_tls_client(proc):
+    # the TLS client child is always reaped (kill-then-wait) on success AND
+    # failure paths; a live child at driver completion is a leaked process.
+    if proc.poll() is None:
+        proc.kill()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def _close_bridge(ux, tunnel, ln, sock_path):
+    # close the bridge endpoints so the daemon pumps observe EOF/error and
+    # exit; remove the unix listener node (no leaks, no stale sockets).
+    for sock in (ux, tunnel, ln):
+        try:
+            if sock is not None:
+                sock.close()
+        except OSError:
+            pass
+    try:
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+    except OSError:
+        pass
+
+
 def case_relay_tls13():
     """Real TLS1.3 ClientHello through the proxy to the -rev upstream.
 
@@ -672,54 +851,17 @@ def case_relay_tls13():
     """
     import select
 
-    got = b""
-    # Spec-compliant HTTP/1.1 CONNECT on a raw socket; the tunnel is the
-    # byte pipe the authentic TLS handshake and relay flow through.
-    tunnel = proxy_socket()
-    send_connect(tunnel, "example.com")
-    resp, rest, complete = recv_http_response(tunnel)
-    status = http_status_code(resp)
-    if not complete or status != 200:
-        fail(
-            "POS-RELAY-TLS13",
-            f"CONNECT not established (status={status} complete={complete} head={resp[:64]!r})",
-        )
-        try:
-            tunnel.close()
-        except OSError:
-            pass
+    tunnel = _connect_relay_tunnel()
+    if tunnel is None:
         return
-    if rest != b"":
-        # A real TLS upstream cannot send app bytes before our ClientHello, so
-        # surplus bytes after the 200 are an anomaly: fail, never bridge
-        # over-read bytes into the TLS stream.
-        fail(
-            "POS-RELAY-TLS13",
-            f"unexpected upstream bytes before ServerHello (rest={rest[:32]!r})",
-        )
-        tunnel.close()
-        return
-    tunnel.settimeout(None)
 
     # Adopt the established tunnel for the authentic openssl TLS1.3 handshake:
     # s_client -unix dials a unix-socket listener, and two pump threads copy
     # bytes in both directions so the unix socket and the TCP tunnel act as one
     # opaque pipe for openssl (no -proxy, no -fd).
     sock_path = "/work/m06-relay.sock"
-    try:
-        if os.path.exists(sock_path):
-            os.unlink(sock_path)
-    except OSError:
-        pass
-    ln = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        ln.bind(sock_path)
-        ln.listen(1)
-        ln.settimeout(10.0)
-    except OSError as exc:
-        ln.close()
-        tunnel.close()
-        fail("POS-RELAY-TLS13", f"unix listener setup failed: {exc}")
+    ln = _bridge_listener(sock_path, tunnel)
+    if ln is None:
         return
 
     proc = subprocess.Popen(
@@ -733,98 +875,17 @@ def case_relay_tls13():
     )
     ux = None
     try:
-        try:
-            ux, _ = ln.accept()
-        except (OSError, socket.timeout) as exc:
-            fail("POS-RELAY-TLS13", f"s_client never connected to -unix listener: {exc}")
+        ux = _accept_bridge(ln)
+        if ux is None:
             return
-        ux.settimeout(None)
-
-        def pump(src, dst):
-            try:
-                while True:
-                    chunk = src.recv(1 << 16)
-                    if not chunk:
-                        break
-                    dst.sendall(chunk)
-            except OSError:
-                pass
-            finally:
-                try:
-                    dst.shutdown(socket.SHUT_WR)
-                except OSError:
-                    pass
-
-        u2t = threading.Thread(target=pump, args=(ux, tunnel), daemon=True)
-        t2u = threading.Thread(target=pump, args=(tunnel, ux), daemon=True)
-        u2t.start()
-        t2u.start()
-
-        assert proc.stdin is not None
-        assert proc.stdout is not None
-        proc.stdin.write(b"hello-e2e\n")
-        proc.stdin.flush()
-        proc.stdin.close()
-
-        deadline = time.time() + 20.0
-        fd = proc.stdout.fileno()
-        while time.time() < deadline:
-            ready, _, _ = select.select([fd], [], [], 0.5)
-            if fd in ready:
-                chunk = os.read(fd, 4096)
-                if not chunk:
-                    break
-                got += chunk
-                if b"\ne2e-olleh" in got or b"e2e-olleh" in got:
-                    pass_(
-                        "POS-RELAY-TLS13",
-                        f"authentic TLS1.3 handshake + reversed app bytes relaying (got {len(got)}B)",
-                    )
-                    return
-        err = b""
-        # R3: terminate the TLS client BEFORE draining stderr. A held-open
-        # upstream keeps s_client alive and its stderr pipe open, so reading to
-        # EOF first would block forever and the finally kill/wait would never
-        # run. Standard bounded subprocess completion: kill, then a bounded
-        # wait, then read the drained pipe (guaranteed EOF after reap).
-        if proc.poll() is None:
-            proc.kill()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        try:
-            err = proc.stderr.read()
-        except OSError:
-            pass
-        fail(
-            "POS-RELAY-TLS13",
-            f"reversed echo missing; out={got!r} err={err!r}",
-        )
+        _start_bridge(ux, tunnel)
+        seen, got = _await_reversed_echo(proc, select)
+        if seen:
+            return
+        _report_missing_echo(proc, got)
     finally:
-        # the TLS client child is always reaped (kill-then-wait) on success AND
-        # failure paths; a live child at driver completion is a leaked process.
-        if proc.poll() is None:
-            proc.kill()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        # close the bridge endpoints so the daemon pumps observe EOF/error and
-        # exit; remove the unix listener node (no leaks, no stale sockets).
-        for sock in (ux, tunnel, ln):
-            try:
-                if sock is not None:
-                    sock.close()
-            except OSError:
-                pass
-        try:
-            if os.path.exists(sock_path):
-                os.unlink(sock_path)
-        except OSError:
-            pass
+        _reap_tls_client(proc)
+        _close_bridge(ux, tunnel, ln, sock_path)
 
 
 def recv_until_complete_eof(sock, rest, expected_len, name, timeout=20.0):
@@ -863,6 +924,32 @@ def recv_until_complete_eof(sock, rest, expected_len, name, timeout=20.0):
     return got
 
 
+def _coalesced_handshake(s, host, hello, name):
+    # CONNECT head and the full hello in one write, before reading 200:
+    # the proxy must validate the already-buffered pipelined hello. The
+    # upstream echo of the hello can arrive in the same segment as the 200,
+    # so recv_http_response returns the over-read remainder and we preserve
+    # it (never lose bytes past the head).
+    head = f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode()
+    s.sendall(head + hello)
+    resp, rest, complete = recv_http_response(s)
+    if not complete or http_status_code(resp) != 200:
+        fail(name, f"no completed exact-200 head for {host}: complete={complete} {resp!r}")
+        s.close()
+        return None
+    return rest
+
+
+def _fragmented_head(s, host, chunks_each, name):
+    send_connect(s, host, head_chunks=chunks_each["head"])
+    resp, _, complete = recv_http_response(s)
+    if not complete or http_status_code(resp) != 200:
+        fail(name, f"no completed exact-200 head for {host}: complete={complete} {resp!r}")
+        s.close()
+        return False
+    return True
+
+
 def case_raw_echo(host, chunks_each, total_bytes, name, coalesce_hello=False):
     """Valid matching ClientHello through the proxy to the raw echo upstream.
 
@@ -877,27 +964,13 @@ def case_raw_echo(host, chunks_each, total_bytes, name, coalesce_hello=False):
     s = proxy_socket()
     rest = b""
     if coalesce_hello:
-        # CONNECT head and the full hello in one write, before reading 200:
-        # the proxy must validate the already-buffered pipelined hello. The
-        # upstream echo of the hello can arrive in the same segment as the 200,
-        # so recv_http_response returns the over-read remainder and we preserve
-        # it (never lose bytes past the head).
-        head = f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode()
-        s.sendall(head + hello)
-        resp, rest, complete = recv_http_response(s)
-        if not complete or http_status_code(resp) != 200:
-            fail(name, f"no completed exact-200 head for {host}: complete={complete} {resp!r}")
-            s.close()
+        rest = _coalesced_handshake(s, host, hello, name)
+        if rest is None:
             return
     else:
-        send_connect(s, host, head_chunks=chunks_each["head"])
-        resp, _, complete = recv_http_response(s)
-        if not complete or http_status_code(resp) != 200:
-            fail(name, f"no completed exact-200 head for {host}: complete={complete} {resp!r}")
-            s.close()
+        if not _fragmented_head(s, host, chunks_each, name):
             return
         send_chunked(s, hello, chunks_each["hello_chunks"])
-        rest = b""
 
     payload = bytes((i * 31) % 256 for i in range(total_bytes))
     s.sendall(payload)
@@ -1088,6 +1161,17 @@ def case_neg_disallowed(counting_conns_before, echo_conns_before):
     )
 
 
+def _rejected_hello_tunnel(what):
+    s = proxy_socket()
+    send_connect(s, "neg.example.org")
+    resp, _, complete = recv_http_response(s)
+    if not complete or http_status_code(resp) != 200:
+        fail(what, f"expected completed exact-200 before hello reject, got complete={complete} {resp!r}")
+        s.close()
+        return None
+    return s
+
+
 def case_neg_hello(name_label, hello, what, counting_conns_before, counting_bytes_before):
     """Allowlisted CONNECT to the counting listener (proxy dials, sends 200),
     then a rejected ClientHello: barrier A must stay closed -- ZERO bytes
@@ -1098,12 +1182,8 @@ def case_neg_hello(name_label, hello, what, counting_conns_before, counting_byte
     the rejected tunnel has completed (drain_handlers), so a handler that
     reads leaked bytes later cannot race past the zero-byte assertion.
     """
-    s = proxy_socket()
-    send_connect(s, "neg.example.org")
-    resp, _, complete = recv_http_response(s)
-    if not complete or http_status_code(resp) != 200:
-        fail(what, f"expected completed exact-200 before hello reject, got complete={complete} {resp!r}")
-        s.close()
+    s = _rejected_hello_tunnel(what)
+    if s is None:
         return
     s.sendall(hello)
     kind, data = read_close_after(s, 6.0)
@@ -1140,11 +1220,7 @@ def case_neg_hello(name_label, hello, what, counting_conns_before, counting_byte
     pass_(what, "proxy closed without forwarding; upstream received zero bytes (barrier A closed)")
 
 
-def main():
-    # The static-ELF gate runs in the container shell via GNU readelf (the
-    # authoritative binutils seam) against the exact executed binary before the
-    # driver is launched; no ELF parsing happens here.
-
+def _start_fixtures():
     answers = {
         b"example.com": bytes([8, 8, 8, 8]),
         b"echo.example.org": bytes([8, 8, 4, 4]),
@@ -1159,21 +1235,116 @@ def main():
     global counting, echo_fx
     echo_fx = RawEchoServer(("8.8.4.4", 443)).start()
     counting = CountingListener(("208.67.222.220", 443)).start()
-    fixtures = [dns, echo_fx, counting]
+    return [dns, echo_fx, counting]
+
+
+def _wait_for_listener():
+    # wait for the proxy listener (startup DNS resolved + listener attached)
+    deadline = time.time() + 60.0
+    while time.time() < deadline:
+        try:
+            probe = socket.create_connection(PROXY, timeout=1.0)
+            probe.close()
+            break
+        except OSError:
+            time.sleep(0.5)
+    else:
+        fail("SETUP-LISTENER", "proxy listener never became reachable")
+        return False
+    return True
+
+
+def _run_positives():
+    case_relay_tls13()
+
+    case_raw_echo(
+        "echo.example.org",
+        {"head": [1, 1, 2, 1, 3, 2, 1], "hello_chunks": [1, 2, 3, 5, 8, 13, 21]},
+        4096,
+        "POS-FRAGMENTED-HELLO",
+    )
+    case_raw_echo(
+        "echo.example.org",
+        {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
+        4096,
+        "POS-COALESCED",
+        coalesce_hello=True,
+    )
+    case_raw_echo(
+        "echo.example.org",
+        {"head": [2, 9, 5, 1], "hello_chunks": [7, 11, 13, 17, 19, 23]},
+        4096,
+        "POS-PARTIAL-WRITES",
+    )
+    case_fin_halfclose("echo.example.org")
+    # large multi-chunk echo: sustained bidirectional relay + backpressure
+    case_raw_echo(
+        "echo.example.org",
+        {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
+        4 * 1024 * 1024,
+        "POS-LARGE-ECHO",
+        coalesce_hello=True,
+    )
+    # retained-edge smoke: 192 KiB (>3 complete-visit budgets) from a
+    # peer that half-closes then stays fully silent, echoed byte-exact.
+    # A single lost retained edge would strand the relay tail at ~64 KiB;
+    # this case exercises the reregister resumption path as blackbox
+    # smoke, while the isolation contract itself is proven by the Linux
+    # serving-seam unit tests (docs/alumina-proxy.md:146 MEDIUM-3).
+    case_raw_echo(
+        "echo.example.org",
+        {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
+        192 * 1024,
+        "POS-RETAINED-EDGE-SILENT",
+        coalesce_hello=True,
+    )
+    # multi-budget smoke: full 256 KiB sent in one burst BEFORE the 200
+    # is read; the post-setup write-side FIN is a stated transition and
+    # the echo must still land byte-exact to EOF across >=3 budget
+    # splits. Kernel-receipt / no-new-edge isolation lives in the Linux
+    # serving-seam unit tests, not this blackbox.
+    case_no_new_edge_retained("echo.example.org")
+
+
+def _run_negatives():
+    # negatives with upstream-effect assertions
+    c_conns = counting.conns
+    c_bytes = counting.bytes_received()
+
+    case_neg_disallowed(c_conns, echo_fx.conns)
+    # wait one accept-turn so a newly accepted negative-tunnel connection
+    # is observed before the next slice's counter snapshot
+    time.sleep(0.3)
+    c_conns = counting.conns
+    c_bytes = counting.bytes_received()
+    case_neg_hello(
+        "NEG-SNI-MISMATCH",
+        client_hello("other.example.org"),
+        "NEG-SNI-MISMATCH",
+        c_conns,
+        c_bytes,
+    )
+    time.sleep(0.3)
+    c_conns = counting.conns
+    c_bytes = counting.bytes_received()
+    case_neg_hello("NEG-ECH", client_hello("neg.example.org", ech=True), "NEG-ECH", c_conns, c_bytes)
+    time.sleep(0.3)
+    c_conns = counting.conns
+    c_bytes = counting.bytes_received()
+    case_neg_hello("NEG-MALFORMED", b"\x16\x03\x01\x00\x03\x01\x02\x03", "NEG-MALFORMED", c_conns, c_bytes)
+    case_neg_dial_fail()
+
+
+def main():
+    # The static-ELF gate runs in the container shell via GNU readelf (the
+    # authoritative binutils seam) against the exact executed binary before the
+    # driver is launched; no ELF parsing happens here.
+
+    fixtures = _start_fixtures()
 
     supervisor_rc = 0
     try:
-        # wait for the proxy listener (startup DNS resolved + listener attached)
-        deadline = time.time() + 60.0
-        while time.time() < deadline:
-            try:
-                probe = socket.create_connection(PROXY, timeout=1.0)
-                probe.close()
-                break
-            except OSError:
-                time.sleep(0.5)
-        else:
-            fail("SETUP-LISTENER", "proxy listener never became reachable")
+        if not _wait_for_listener():
             return 1
 
         if os.environ.get("E2E_EARLY_ONLY"):
@@ -1185,83 +1356,9 @@ def main():
             case_neg_dial_fail()
             print("E2E-DIAGNOSTIC-ONLY: subset probe executed; NOT a gate verdict", flush=True)
             return 2
-        else:
-            case_relay_tls13()
 
-            case_raw_echo(
-                "echo.example.org",
-                {"head": [1, 1, 2, 1, 3, 2, 1], "hello_chunks": [1, 2, 3, 5, 8, 13, 21]},
-                4096,
-                "POS-FRAGMENTED-HELLO",
-            )
-            case_raw_echo(
-                "echo.example.org",
-                {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
-                4096,
-                "POS-COALESCED",
-                coalesce_hello=True,
-            )
-            case_raw_echo(
-                "echo.example.org",
-                {"head": [2, 9, 5, 1], "hello_chunks": [7, 11, 13, 17, 19, 23]},
-                4096,
-                "POS-PARTIAL-WRITES",
-            )
-            case_fin_halfclose("echo.example.org")
-            # large multi-chunk echo: sustained bidirectional relay + backpressure
-            case_raw_echo(
-                "echo.example.org",
-                {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
-                4 * 1024 * 1024,
-                "POS-LARGE-ECHO",
-                coalesce_hello=True,
-            )
-            # retained-edge smoke: 192 KiB (>3 complete-visit budgets) from a
-            # peer that half-closes then stays fully silent, echoed byte-exact.
-            # A single lost retained edge would strand the relay tail at ~64 KiB;
-            # this case exercises the reregister resumption path as blackbox
-            # smoke, while the isolation contract itself is proven by the Linux
-            # serving-seam unit tests (docs/alumina-proxy.md:146 MEDIUM-3).
-            case_raw_echo(
-                "echo.example.org",
-                {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
-                192 * 1024,
-                "POS-RETAINED-EDGE-SILENT",
-                coalesce_hello=True,
-            )
-            # multi-budget smoke: full 256 KiB sent in one burst BEFORE the 200
-            # is read; the post-setup write-side FIN is a stated transition and
-            # the echo must still land byte-exact to EOF across >=3 budget
-            # splits. Kernel-receipt / no-new-edge isolation lives in the Linux
-            # serving-seam unit tests, not this blackbox.
-            case_no_new_edge_retained("echo.example.org")
-
-            # negatives with upstream-effect assertions
-            c_conns = counting.conns
-            c_bytes = counting.bytes_received()
-
-            case_neg_disallowed(c_conns, echo_fx.conns)
-            # wait one accept-turn so a newly accepted negative-tunnel connection
-            # is observed before the next slice's counter snapshot
-            time.sleep(0.3)
-            c_conns = counting.conns
-            c_bytes = counting.bytes_received()
-            case_neg_hello(
-                "NEG-SNI-MISMATCH",
-                client_hello("other.example.org"),
-                "NEG-SNI-MISMATCH",
-                c_conns,
-                c_bytes,
-            )
-            time.sleep(0.3)
-            c_conns = counting.conns
-            c_bytes = counting.bytes_received()
-            case_neg_hello("NEG-ECH", client_hello("neg.example.org", ech=True), "NEG-ECH", c_conns, c_bytes)
-            time.sleep(0.3)
-            c_conns = counting.conns
-            c_bytes = counting.bytes_received()
-            case_neg_hello("NEG-MALFORMED", b"\x16\x03\x01\x00\x03\x01\x02\x03", "NEG-MALFORMED", c_conns, c_bytes)
-            case_neg_dial_fail()
+        _run_positives()
+        _run_negatives()
     finally:
         # supervision runs on EVERY exit path: setup failure, case exception,
         # early return -- never skipped by an early `return` up the stack.
