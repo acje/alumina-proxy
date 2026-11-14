@@ -645,37 +645,20 @@ fn inventory_actually_initializes_full_traffic_storage() {
     assert_eq!(total, inventory::TRAFFIC_STORAGE_BYTES);
     assert!(!storage.is_empty());
     let inv = BootInventory::phase1();
-    assert_eq!(
-        inv.named_fixed_buffer_bytes(),
-        inventory::TRAFFIC_STORAGE_BYTES
-            + inventory::SERVING_WORKSPACE_BYTES
-            + inventory::DNS_NAMED_BUFFER_BYTES,
-        "named-fixed lower bound = traffic 128 MiB + per-slot serving workspaces + DNS named buffers"
-    );
-    assert_eq!(
-        inv.traffic_storage_bytes(),
-        inventory::TRAFFIC_STORAGE_BYTES
-    );
-    assert_eq!(
-        inv.serving_workspace_bytes(),
-        inventory::SERVING_WORKSPACE_BYTES
-    );
-    assert_eq!(
-        inv.dns_named_buffer_bytes(),
-        inventory::DNS_NAMED_BUFFER_BYTES
-    );
-    assert_eq!(
-        inv.transient_scratch_bytes(),
-        config::CONFIG_DOC_LIMIT + 1,
-        "transient config read buffer is one byte past the document bound"
-    );
-    assert!(inv.reserved_future_bytes() > 0);
-    assert_ne!(inv.named_fixed_buffer_bytes(), inv.reserved_future_bytes());
+    assert_phase1_inventory(&inv);
 }
 
 #[test]
 fn inventory_reports_retained_vs_transient_vs_reserved_honestly() {
     let inv = BootInventory::phase1();
+    assert_phase1_inventory(&inv);
+    assert!(
+        inv.dns_named_buffer_bytes() > 512 + 16 * 1024,
+        "DNS named buffers must cover the query buffer plus the message-limit response buffer"
+    );
+}
+
+fn assert_phase1_inventory(inv: &BootInventory) {
     assert_eq!(
         inv.named_fixed_buffer_bytes(),
         inventory::TRAFFIC_STORAGE_BYTES
@@ -702,10 +685,6 @@ fn inventory_reports_retained_vs_transient_vs_reserved_honestly() {
     );
     assert!(inv.reserved_future_bytes() > 0);
     assert_ne!(inv.named_fixed_buffer_bytes(), inv.reserved_future_bytes());
-    assert!(
-        inv.dns_named_buffer_bytes() > 512 + 16 * 1024,
-        "DNS named buffers must cover the query buffer plus the message-limit response buffer"
-    );
 }
 
 fn plant_symlink(link: &std::path::Path, target: &std::path::Path) {
