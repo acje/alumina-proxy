@@ -1823,49 +1823,30 @@ impl Serving {
     /// after a paused accept fails.
     pub fn run_once(&mut self, timeout: Option<Duration>) -> Result<(), ServeError> {
         self.resume_listener(Instant::now())?;
+        let batch = self.poll_batch(timeout)?;
+        let now = Instant::now();
+        self.handle_batch_signal(&batch)?;
+        self.sweep_expiries(now);
+        self.batch_gen = self.batch_gen.wrapping_add(1);
+        self.in_batch = true;
+        self.dispatch_events(&batch)?;
+        self.events = batch;
+        Ok(())
+    }
+
+    fn poll_batch(&mut self, timeout: Option<Duration>) -> Result<Events, ServeError> {
         let mut batch = std::mem::replace(&mut self.events, Events::with_capacity(0));
         let mut attempts = 0usize;
         loop {
             attempts += 1;
-            let regular = self.poll_timeout();
-            let assurance_now = Instant::now();
-            let assurance = match self.storage.assurance_wake(assurance_now) {
-                Ok(wake) => wake.map(|wake| wake.saturating_duration_since(Instant::now())),
-                Err(fault) => {
-                    self.storage
-                        .report_assurance_wake_fault(assurance_now, fault);
+            let effective = match self.effective_deadline(timeout) {
+                Ok(deadline) => deadline,
+                Err(err) => {
                     self.events = batch;
-                    return Err(io::Error::from(io::ErrorKind::Other).into());
+                    return Err(err);
                 }
             };
-            let internal = match (regular, assurance) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, b) => b,
-            };
-            let effective = match (internal, timeout) {
-                (Some(d), Some(t)) => Some(d.min(t)),
-                (Some(d), None) => Some(d),
-                (None, t) => t,
-            };
-            #[cfg(test)]
-            let storm = {
-                if self.poll_interrupts_remaining > 0 {
-                    self.poll_interrupts_remaining -= 1;
-                    self.poll_attempts += 1;
-                    true
-                } else {
-                    false
-                }
-            };
-            #[cfg(not(test))]
-            let storm = false;
-            let outcome = if storm {
-                Err(io::Error::from(io::ErrorKind::Interrupted))
-            } else {
-                self.poll.poll(&mut batch, effective)
-            };
-            match outcome {
+            match self.poll_once(&mut batch, effective) {
                 Ok(()) => break,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => {
                     if attempts >= Self::SERVING_POLL_INTERRUPT_ALLOWANCE {
@@ -1876,19 +1857,73 @@ impl Serving {
                 Err(err) => return Err(err.into()),
             }
         }
-        let now = Instant::now();
+        Ok(batch)
+    }
+
+    fn effective_deadline(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> Result<Option<Duration>, ServeError> {
+        let regular = self.poll_timeout();
+        let assurance_now = Instant::now();
+        let assurance = match self.storage.assurance_wake(assurance_now) {
+            Ok(wake) => wake.map(|wake| wake.saturating_duration_since(Instant::now())),
+            Err(fault) => {
+                self.storage
+                    .report_assurance_wake_fault(assurance_now, fault);
+                return Err(io::Error::from(io::ErrorKind::Other).into());
+            }
+        };
+        let internal = match (regular, assurance) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
+        Ok(match (internal, timeout) {
+            (Some(d), Some(t)) => Some(d.min(t)),
+            (Some(d), None) => Some(d),
+            (None, t) => t,
+        })
+    }
+
+    fn poll_once(&mut self, batch: &mut Events, effective: Option<Duration>) -> io::Result<()> {
+        #[cfg(test)]
+        let storm = {
+            if self.poll_interrupts_remaining > 0 {
+                self.poll_interrupts_remaining -= 1;
+                self.poll_attempts += 1;
+                true
+            } else {
+                false
+            }
+        };
+        #[cfg(not(test))]
+        let storm = false;
+        if storm {
+            Err(io::Error::from(io::ErrorKind::Interrupted))
+        } else {
+            self.poll.poll(batch, effective)
+        }
+    }
+
+    fn handle_batch_signal(&mut self, batch: &Events) -> Result<(), ServeError> {
         if batch
             .iter()
             .any(|event| event.token().0 & LOCAL_MASK == SIGNAL_LOCAL)
         {
             self.on_sigterm()?;
         }
+        Ok(())
+    }
+
+    fn sweep_expiries(&mut self, now: Instant) {
         self.storage.observe_assurance_expiry(Instant::now());
         if self.next_expiry.is_some_and(|deadline| now >= deadline) {
             self.expire_sweep(now);
         }
-        self.batch_gen = self.batch_gen.wrapping_add(1);
-        self.in_batch = true;
+    }
+
+    fn dispatch_events(&mut self, batch: &Events) -> Result<(), ServeError> {
         let mut items = [(Token(0), Readiness::default()); POLL_EVENTS_CAP];
         let mut count = 0;
         for event in batch.iter() {
@@ -1907,9 +1942,7 @@ impl Serving {
             );
             count += 1;
         }
-        self.dispatch_coalesced_batch(&items[..count])?;
-        self.events = batch;
-        Ok(())
+        self.dispatch_coalesced_batch(&items[..count])
     }
 
     /// Two-pass slot readiness coalescing for one poll batch (or a direct test
