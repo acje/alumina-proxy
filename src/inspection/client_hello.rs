@@ -505,67 +505,94 @@ impl ChInspector {
     /// count consumed to the end of that message.
     fn scan_available(&mut self) -> Result<Option<(usize, usize)>, ChError> {
         loop {
-            if self.scan_pos >= self.len {
+            let Some((rec_end, rlen)) = scan_record_header(&self.buf, self.scan_pos, self.len)?
+            else {
                 return Ok(None);
-            }
-            let pos = self.scan_pos;
-            if self.buf[pos] & 0x80 != 0 {
-                return Err(ChError::Sslv2Framing);
-            }
-            if pos + 5 > self.len {
-                return Ok(None);
-            }
-            if self.buf[pos] != CONTENT_HANDSHAKE {
-                return Err(ChError::NotHandshake {
-                    content_type: self.buf[pos],
-                });
-            }
-            let record_version = u16::from_be_bytes([self.buf[pos + 1], self.buf[pos + 2]]);
-            if record_version != TLS10 && record_version != TLS12 {
-                return Err(ChError::BadRecordVersion {
-                    got: record_version,
-                });
-            }
-            let rlen = usize::from(u16::from_be_bytes([self.buf[pos + 3], self.buf[pos + 4]]));
-            if rlen > RECORD_PAYLOAD_LIMIT {
-                return Err(ChError::RecordTooLarge { got: rlen });
-            }
-            if rlen == 0 {
-                return Err(ChError::ZeroLengthRecord);
-            }
-            let rec_end = pos + 5 + rlen;
-            if rec_end > self.len {
-                return Ok(None);
-            }
+            };
             if self.flat == 0 && rlen < 4 {
                 return Err(ChError::TruncatedHandshake);
             }
             if self.flat + rlen > MAX_CLIENT_HELLO {
                 return Err(ChError::TooLarge);
             }
-            self.scratch[self.flat..self.flat + rlen].copy_from_slice(&self.buf[pos + 5..rec_end]);
+            let payload = self.scan_pos + 5;
+            self.scratch[self.flat..self.flat + rlen].copy_from_slice(&self.buf[payload..rec_end]);
             self.flat += rlen;
             self.scan_pos = rec_end;
-            if self.flat >= 4 {
-                if self.scratch[0] != HANDSHAKE_CLIENT_HELLO {
-                    return Err(ChError::NotClientHello {
-                        handshake_type: self.scratch[0],
-                    });
-                }
-                let msg_len = (usize::from(self.scratch[1]) << 16)
-                    | (usize::from(self.scratch[2]) << 8)
-                    | usize::from(self.scratch[3]);
-                let need = 4 + msg_len;
-                if need > MAX_HANDSHAKE_LEN {
-                    return Err(ChError::HandshakeTooLarge { got: need });
-                }
-                if self.flat >= need {
-                    let consumed = self.scan_pos + need - self.flat;
-                    return Ok(Some((msg_len, consumed)));
-                }
+            if let Some(complete) = self.completed_handshake()? {
+                return Ok(Some(complete));
             }
         }
     }
+
+    fn completed_handshake(&self) -> Result<Option<(usize, usize)>, ChError> {
+        if self.flat < 4 {
+            return Ok(None);
+        }
+        if self.scratch[0] != HANDSHAKE_CLIENT_HELLO {
+            return Err(ChError::NotClientHello {
+                handshake_type: self.scratch[0],
+            });
+        }
+        let msg_len = (usize::from(self.scratch[1]) << 16)
+            | (usize::from(self.scratch[2]) << 8)
+            | usize::from(self.scratch[3]);
+        let need = 4 + msg_len;
+        if need > MAX_HANDSHAKE_LEN {
+            return Err(ChError::HandshakeTooLarge { got: need });
+        }
+        if self.flat >= need {
+            return Ok(Some((msg_len, self.scan_pos + need - self.flat)));
+        }
+        Ok(None)
+    }
+}
+
+const fn is_initial_record_version(version: u16) -> bool {
+    version == TLS10 || version == TLS12
+}
+
+const fn check_record_payload(rlen: usize) -> Result<(), ChError> {
+    if rlen > RECORD_PAYLOAD_LIMIT {
+        return Err(ChError::RecordTooLarge { got: rlen });
+    }
+    if rlen == 0 {
+        return Err(ChError::ZeroLengthRecord);
+    }
+    Ok(())
+}
+
+fn scan_record_header(
+    buf: &[u8],
+    pos: usize,
+    len: usize,
+) -> Result<Option<(usize, usize)>, ChError> {
+    if pos >= len {
+        return Ok(None);
+    }
+    let content_type = buf[pos];
+    if content_type & 0x80 != 0 {
+        return Err(ChError::Sslv2Framing);
+    }
+    if pos + 5 > len {
+        return Ok(None);
+    }
+    if content_type != CONTENT_HANDSHAKE {
+        return Err(ChError::NotHandshake { content_type });
+    }
+    let record_version = u16::from_be_bytes([buf[pos + 1], buf[pos + 2]]);
+    if !is_initial_record_version(record_version) {
+        return Err(ChError::BadRecordVersion {
+            got: record_version,
+        });
+    }
+    let rlen = usize::from(u16::from_be_bytes([buf[pos + 3], buf[pos + 4]]));
+    check_record_payload(rlen)?;
+    let rec_end = pos + 5 + rlen;
+    if rec_end > len {
+        return Ok(None);
+    }
+    Ok(Some((rec_end, rlen)))
 }
 
 fn u16_at(buf: &[u8], at: usize) -> Result<u16, ChError> {
