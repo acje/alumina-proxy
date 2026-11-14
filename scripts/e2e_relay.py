@@ -888,7 +888,7 @@ def case_relay_tls13():
         _close_bridge(ux, tunnel, ln, sock_path)
 
 
-def recv_until_complete_eof(sock, rest, expected_len, name, timeout=20.0):
+def recv_until_complete_eof(sock, rest, expected_len, *, name, timeout=20.0):
     """Receive until orderly EOF, rejecting timeout, transport error and every
     surplus byte; returns the complete stream on success, else records a
     failure and returns None. Stopping at the exact expected length would pass
@@ -950,7 +950,7 @@ def _fragmented_head(s, host, chunks_each, name):
     return True
 
 
-def case_raw_echo(host, chunks_each, total_bytes, name, coalesce_hello=False):
+def case_raw_echo(host, chunks_each, total_bytes, *, name, coalesce_hello=False):
     """Valid matching ClientHello through the proxy to the raw echo upstream.
 
     Fragmented head + fragmented hello + odd-sized writes + byte-exact echo
@@ -984,7 +984,7 @@ def case_raw_echo(host, chunks_each, total_bytes, name, coalesce_hello=False):
     # proxy must drain the whole expected stream AND deliver the reverse
     # half-close (EOF); stopping at the exact expected length would pass a
     # stream that later duplicates bytes or never completes the tunnel.
-    got = recv_until_complete_eof(s, rest, len(expected), name)
+    got = recv_until_complete_eof(s, rest, len(expected), name=name)
     if got is None:
         return
     if got != expected:
@@ -1012,7 +1012,7 @@ def case_fin_halfclose(host):
         host,
         {"head": [3, 5, 2, 6, 1], "hello_chunks": [4, 1, 3, 2, 8, 5, 1]},
         512,
-        "POS-FIN-HALFCLOSE",
+        name="POS-FIN-HALFCLOSE",
     )
 
 
@@ -1059,7 +1059,7 @@ def case_no_new_edge_retained(host):
     # the echo concludes on the clean EOF, never on a timeout race.
     s.shutdown(socket.SHUT_WR)
     expected = hello + payload
-    got = recv_until_complete_eof(s, rest, len(expected), "POS-NO-NEW-EDGE-RETAINED")
+    got = recv_until_complete_eof(s, rest, len(expected), name="POS-NO-NEW-EDGE-RETAINED")
     if got is None:
         return
     if got != expected:
@@ -1172,7 +1172,7 @@ def _rejected_hello_tunnel(what):
     return s
 
 
-def case_neg_hello(name_label, hello, what, counting_conns_before, counting_bytes_before):
+def case_neg_hello(name_label, hello, what, *, counting_conns_before, counting_bytes_before):
     """Allowlisted CONNECT to the counting listener (proxy dials, sends 200),
     then a rejected ClientHello: barrier A must stay closed -- ZERO bytes
     forwarded upstream (counter delta 0) and zero bytes back to the client --
@@ -1261,20 +1261,20 @@ def _run_positives():
         "echo.example.org",
         {"head": [1, 1, 2, 1, 3, 2, 1], "hello_chunks": [1, 2, 3, 5, 8, 13, 21]},
         4096,
-        "POS-FRAGMENTED-HELLO",
+        name="POS-FRAGMENTED-HELLO",
     )
     case_raw_echo(
         "echo.example.org",
         {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
         4096,
-        "POS-COALESCED",
+        name="POS-COALESCED",
         coalesce_hello=True,
     )
     case_raw_echo(
         "echo.example.org",
         {"head": [2, 9, 5, 1], "hello_chunks": [7, 11, 13, 17, 19, 23]},
         4096,
-        "POS-PARTIAL-WRITES",
+        name="POS-PARTIAL-WRITES",
     )
     case_fin_halfclose("echo.example.org")
     # large multi-chunk echo: sustained bidirectional relay + backpressure
@@ -1282,7 +1282,7 @@ def _run_positives():
         "echo.example.org",
         {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
         4 * 1024 * 1024,
-        "POS-LARGE-ECHO",
+        name="POS-LARGE-ECHO",
         coalesce_hello=True,
     )
     # retained-edge smoke: 192 KiB (>3 complete-visit budgets) from a
@@ -1295,7 +1295,7 @@ def _run_positives():
         "echo.example.org",
         {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
         192 * 1024,
-        "POS-RETAINED-EDGE-SILENT",
+        name="POS-RETAINED-EDGE-SILENT",
         coalesce_hello=True,
     )
     # multi-budget smoke: full 256 KiB sent in one burst BEFORE the 200
@@ -1318,20 +1318,23 @@ def _run_negatives():
     c_conns = counting.conns
     c_bytes = counting.bytes_received()
     case_neg_hello(
-        "NEG-SNI-MISMATCH",
-        client_hello("other.example.org"),
-        "NEG-SNI-MISMATCH",
-        c_conns,
-        c_bytes,
+        "NEG-SNI-MISMATCH", client_hello("other.example.org"), "NEG-SNI-MISMATCH",
+        counting_conns_before=c_conns, counting_bytes_before=c_bytes,
     )
     time.sleep(0.3)
     c_conns = counting.conns
     c_bytes = counting.bytes_received()
-    case_neg_hello("NEG-ECH", client_hello("neg.example.org", ech=True), "NEG-ECH", c_conns, c_bytes)
+    case_neg_hello(
+        "NEG-ECH", client_hello("neg.example.org", ech=True), "NEG-ECH",
+        counting_conns_before=c_conns, counting_bytes_before=c_bytes,
+    )
     time.sleep(0.3)
     c_conns = counting.conns
     c_bytes = counting.bytes_received()
-    case_neg_hello("NEG-MALFORMED", b"\x16\x03\x01\x00\x03\x01\x02\x03", "NEG-MALFORMED", c_conns, c_bytes)
+    case_neg_hello(
+        "NEG-MALFORMED", b"\x16\x03\x01\x00\x03\x01\x02\x03", "NEG-MALFORMED",
+        counting_conns_before=c_conns, counting_bytes_before=c_bytes,
+    )
     case_neg_dial_fail()
 
 
