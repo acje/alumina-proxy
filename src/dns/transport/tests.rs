@@ -160,7 +160,21 @@ fn question_from(query: &[u8]) -> Vec<u8> {
     query[12..].to_vec()
 }
 
-fn record(owner: &[u8], ty: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
+/// The fixed DNS header the fixture messages share: one question, `answers`
+/// answer records, and empty authority and additional sections.
+pub(crate) fn dns_header(tid: u16, flags: u16, answers: u16) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&tid.to_be_bytes());
+    msg.extend_from_slice(&flags.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&answers.to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes());
+    msg
+}
+
+/// One answer record: owner, type, IN class, TTL, RDATA length and RDATA.
+pub(crate) fn record(owner: &[u8], ty: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
     let mut rec = owner.to_vec();
     rec.extend_from_slice(&ty.to_be_bytes());
     rec.extend_from_slice(&1u16.to_be_bytes());
@@ -546,13 +560,7 @@ fn read_query(sock: &mut TcpStream) -> Option<Vec<u8>> {
 fn positive_a_message(q: &[u8], ttl: u32, octets: [u8; 4]) -> Vec<u8> {
     let tid = u16::from_be_bytes([q[0], q[1]]);
     let qname = &q[12..q.len() - 4];
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&tid.to_be_bytes());
-    msg.extend_from_slice(&0x8000u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
+    let mut msg = dns_header(tid, 0x8000, 1);
     msg.extend_from_slice(&question_from(q));
     msg.extend_from_slice(&record(qname, 1, ttl, &octets));
     msg
@@ -702,6 +710,26 @@ fn start_first_exchange(
     transport
         .start_exchange(fqdn, Family::A, 0, deadline, Generation::INITIAL, class)
         .expect("first exchange starts");
+}
+
+/// Starts the ordinal-th exchange seat at the initial generation under the
+/// startup class every fixture shares as its boot predecessor.
+pub(crate) fn start_startup_exchange(
+    transport: &mut StartupDns,
+    fqdn: &Fqdn,
+    ordinal: usize,
+    deadline: Instant,
+) {
+    transport
+        .start_exchange(
+            fqdn,
+            Family::A,
+            ordinal,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
+        .expect("startup-class exchange starts");
 }
 
 /// Advances one exchange turn, returning the turn the transport reported so the
@@ -1569,16 +1597,7 @@ mod cooperative {
         transport.now0 = 1_000_000;
         let fqdn = cfg.allowlist().get(0).unwrap();
         let deadline = Instant::now() + Duration::from_millis(400);
-        transport
-            .start_exchange(
-                fqdn,
-                Family::A,
-                0,
-                deadline,
-                Generation::INITIAL,
-                ExchangeClass::Startup,
-            )
-            .unwrap();
+        start_startup_exchange(&mut transport, fqdn, 0, deadline);
         let first = transport
             .advance_exchange(fqdn, &mut cache, &mut schedules)
             .unwrap();
@@ -1645,16 +1664,7 @@ mod cooperative {
         transport.now0 = 1_000_000;
         let fqdn = cfg.allowlist().get(0).unwrap();
         let deadline = Instant::now() + Duration::from_millis(400);
-        transport
-            .start_exchange(
-                fqdn,
-                Family::A,
-                0,
-                deadline,
-                Generation::INITIAL,
-                ExchangeClass::Startup,
-            )
-            .unwrap();
+        start_startup_exchange(&mut transport, fqdn, 0, deadline);
         let mut worker_turns = 0u32;
         let mut terminal = None;
         for _ in 0..64 {
@@ -1732,16 +1742,7 @@ mod cooperative {
         transport.now0 = 1_000_000;
         let fqdn = cfg.allowlist().get(0).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        transport
-            .start_exchange(
-                fqdn,
-                Family::A,
-                0,
-                deadline,
-                Generation::INITIAL,
-                ExchangeClass::Startup,
-            )
-            .unwrap();
+        start_startup_exchange(&mut transport, fqdn, 0, deadline);
         for _ in 0..32 {
             let before = transport.poll_ticks;
             let res = transport
@@ -3814,16 +3815,7 @@ mod probe_sweep {
 
         // Phase 1: a normal active exchange publishes name-authorization state.
         let deadline = Instant::now() + Duration::from_millis(200);
-        transport
-            .start_exchange(
-                fqdn,
-                Family::A,
-                0,
-                deadline,
-                Generation::INITIAL,
-                ExchangeClass::Startup,
-            )
-            .unwrap();
+        start_startup_exchange(&mut transport, fqdn, 0, deadline);
         assert!(
             matches!(
                 run_exchange_to_terminal(

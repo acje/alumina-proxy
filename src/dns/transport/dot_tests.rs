@@ -209,16 +209,7 @@ impl DotExchange {
     }
 
     fn start_family_a(&mut self, fqdn: &Fqdn, ordinal: usize, deadline: Instant) {
-        self.transport
-            .start_exchange(
-                fqdn,
-                Family::A,
-                ordinal,
-                deadline,
-                Generation::INITIAL,
-                ExchangeClass::Startup,
-            )
-            .expect("a live loopback DoT exchange starts without a fatal error");
+        super::tests::start_startup_exchange(&mut self.transport, fqdn, ordinal, deadline);
     }
 
     fn drive(&mut self, fqdn: &Fqdn, deadline: Instant) -> Option<TurnResult> {
@@ -311,25 +302,9 @@ fn echo_positive(query: &[u8]) -> Vec<u8> {
         ],
         _ => Vec::new(),
     };
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&tid.to_be_bytes());
-    msg.extend_from_slice(&0x8180u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
+    let mut msg = super::tests::dns_header(tid, 0x8180, 1);
     msg.extend_from_slice(&question_bytes(query));
-    let mut rec = qname.to_vec();
-    rec.extend_from_slice(&qtype.to_be_bytes());
-    rec.extend_from_slice(&1u16.to_be_bytes());
-    rec.extend_from_slice(&120u32.to_be_bytes());
-    rec.extend_from_slice(
-        &u16::try_from(rdata.len())
-            .expect("reply rdata fits u16 wire length")
-            .to_be_bytes(),
-    );
-    rec.extend_from_slice(&rdata);
-    msg.extend_from_slice(&rec);
+    msg.extend_from_slice(&super::tests::record(qname, qtype, 120, &rdata));
     msg
 }
 
@@ -348,13 +323,7 @@ fn wrong_tid_reply(query: &[u8]) -> Vec<u8> {
 /// `NotResponse` instead of publishing anything.
 fn mangled_reply(query: &[u8]) -> Vec<u8> {
     let tid = u16::from_be_bytes([query[0], query[1]]);
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&tid.to_be_bytes());
-    msg.extend_from_slice(&0x0100u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
-    msg.extend_from_slice(&0u16.to_be_bytes());
+    let mut msg = super::tests::dns_header(tid, 0x0100, 0);
     msg.extend_from_slice(&question_bytes(query));
     msg
 }
@@ -1417,16 +1386,7 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
     let fqdn = cfg.allowlist().get(0).unwrap();
 
     let deadline = Instant::now() + Duration::from_millis(1500);
-    transport
-        .start_exchange(
-            fqdn,
-            Family::A,
-            0,
-            deadline,
-            Generation::INITIAL,
-            ExchangeClass::Startup,
-        )
-        .unwrap();
+    super::tests::start_startup_exchange(&mut transport, fqdn, 0, deadline);
     let first = drive_to_terminal(
         &mut transport,
         &mut cache,
@@ -1446,16 +1406,7 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
     );
 
     let deadline = Instant::now() + Duration::from_millis(1500);
-    transport
-        .start_exchange(
-            fqdn,
-            Family::A,
-            1,
-            deadline,
-            Generation::INITIAL,
-            ExchangeClass::Startup,
-        )
-        .unwrap();
+    super::tests::start_startup_exchange(&mut transport, fqdn, 1, deadline);
     let second = drive_to_terminal(
         &mut transport,
         &mut cache,
@@ -1539,16 +1490,7 @@ fn dot_warm_serving_exchange_alloc_witness() {
     // outside the measured phase, so the warm path below is the only
     // allocation surface under witness.
     let deadline = Instant::now() + Duration::from_millis(1500);
-    transport
-        .start_exchange(
-            fqdn,
-            Family::A,
-            0,
-            deadline,
-            Generation::INITIAL,
-            ExchangeClass::Startup,
-        )
-        .unwrap();
+    super::tests::start_startup_exchange(&mut transport, fqdn, 0, deadline);
     let cold = drive_to_terminal(
         &mut transport,
         &mut cache,
@@ -1580,16 +1522,7 @@ fn dot_warm_serving_exchange_alloc_witness() {
     // not allocate, so reallocs stay zero and total events stay within the
     // calibrated rustls seam bound.
     let deadline = Instant::now() + Duration::from_millis(1500);
-    transport
-        .start_exchange(
-            fqdn,
-            Family::A,
-            1,
-            deadline,
-            Generation::INITIAL,
-            ExchangeClass::Startup,
-        )
-        .unwrap();
+    super::tests::start_startup_exchange(&mut transport, fqdn, 1, deadline);
     let (warm, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
         drive_to_terminal(
             &mut transport,
@@ -1931,16 +1864,12 @@ fn wait_dns_readiness_bounds_interrupted_poll_storm_and_yields_promptly() {
         pin: cfg.resolver_set().primary().pin().copied(),
     });
     let fqdn = cfg.allowlist().get(0).unwrap();
-    transport
-        .start_exchange(
-            fqdn,
-            Family::A,
-            0,
-            Instant::now() + Duration::from_millis(60),
-            Generation::INITIAL,
-            ExchangeClass::Startup,
-        )
-        .unwrap();
+    super::tests::start_startup_exchange(
+        &mut transport,
+        fqdn,
+        0,
+        Instant::now() + Duration::from_millis(60),
+    );
     assert!(
         transport.needs_wait(),
         "a freshly started exchange must sit in Connecting and wait for the connect edge"
