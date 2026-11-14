@@ -650,6 +650,15 @@ impl Monitor {
 
     #[cfg(test)]
     fn saturate_metrics_for_test(&mut self) {
+        self.saturate_fact_counters_for_test();
+        self.saturate_resolver_counters_for_test();
+        self.saturate_ja4_counters_for_test();
+        self.saturate_action_counters_for_test();
+        self.saturate_refusals_and_drops_for_test();
+    }
+
+    #[cfg(test)]
+    fn saturate_fact_counters_for_test(&mut self) {
         for c in &mut self.facts.any_illegal {
             c.saturate_for_test();
         }
@@ -659,13 +668,21 @@ impl Monitor {
         for c in &mut self.facts.unknown {
             c.saturate_for_test();
         }
-        self.facts.resolver_degraded.saturate_for_test();
         for c in &mut self.facts.dns_anomaly {
             c.saturate_for_test();
         }
+    }
+
+    #[cfg(test)]
+    fn saturate_resolver_counters_for_test(&mut self) {
+        self.facts.resolver_degraded.saturate_for_test();
         self.facts.downgrade_to_plain.saturate_for_test();
         self.facts.probe_relocations.saturate_for_test();
         self.facts.expired_pin_certs.saturate_for_test();
+    }
+
+    #[cfg(test)]
+    fn saturate_ja4_counters_for_test(&mut self) {
         self.facts.ja4_seed.saturate_for_test();
         self.facts
             .ja4_peer_ip
@@ -677,6 +694,10 @@ impl Monitor {
         self.facts
             .ja4_value
             .fill(*b"t13d1516h2_8daaf6152771_02713d6af862");
+    }
+
+    #[cfg(test)]
+    fn saturate_action_counters_for_test(&mut self) {
         for c in &mut self.actions.first_slot_block {
             c.saturate_for_test();
         }
@@ -687,6 +708,10 @@ impl Monitor {
             c.saturate_for_test();
         }
         self.actions.block_all.saturate_for_test();
+    }
+
+    #[cfg(test)]
+    fn saturate_refusals_and_drops_for_test(&mut self) {
         for c in &mut self.refusals.blocked_domain {
             c.saturate_for_test();
         }
