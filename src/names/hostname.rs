@@ -40,20 +40,7 @@ impl FixedHostname {
     /// input is rejected without copying outside the fixed buffer.
     #[must_use]
     pub fn normalize(input: &[u8]) -> Option<FixedHostname> {
-        if input.is_empty() || input.len() > FQDN_MAX_LEN + 1 {
-            return None;
-        }
-        if !input.is_ascii() {
-            return None;
-        }
-        let len = if input[input.len() - 1] == b'.' {
-            input.len() - 1
-        } else {
-            input.len()
-        };
-        if len == 0 || len > FQDN_MAX_LEN {
-            return None;
-        }
+        let len = normalized_len(input)?;
         let mut out = FixedHostname {
             bytes: [0u8; FQDN_MAX_LEN],
             len: u8::try_from(len).ok()?,
@@ -61,16 +48,40 @@ impl FixedHostname {
         for (i, &b) in input[..len].iter().enumerate() {
             out.bytes[i] = b.to_ascii_lowercase();
         }
-        for label in out.bytes[..usize::from(out.len)].split(|&b| b == b'.') {
-            if crate::names::rules::classify_label(label).is_err() {
-                return None;
-            }
-        }
-        if crate::names::rules::is_ip_literal_shape(&out.bytes[..usize::from(out.len)]) {
+        if !is_legal(&out.bytes[..usize::from(out.len)]) {
             return None;
         }
         Some(out)
     }
+}
+
+/// Returns the byte length to copy after stripping one trailing dot and
+/// bounding the name, or `None` for an empty, over-length, non-ASCII, or
+/// dot-only input.
+const fn normalized_len(input: &[u8]) -> Option<usize> {
+    if input.is_empty() || input.len() > FQDN_MAX_LEN + 1 {
+        return None;
+    }
+    if !input.is_ascii() {
+        return None;
+    }
+    let len = if input[input.len() - 1] == b'.' {
+        input.len() - 1
+    } else {
+        input.len()
+    };
+    if len == 0 || len > FQDN_MAX_LEN {
+        return None;
+    }
+    Some(len)
+}
+
+/// Whether every label of the normalized name is legal and the whole name is
+/// not an IP-literal shape.
+fn is_legal(name: &[u8]) -> bool {
+    name.split(|&b| b == b'.')
+        .all(|label| crate::names::rules::classify_label(label).is_ok())
+        && !crate::names::rules::is_ip_literal_shape(name)
 }
 
 #[cfg(test)]
