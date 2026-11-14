@@ -924,22 +924,11 @@ unsafe_surface_gate() {
     # shards themselves always exit 0 after mapping a normal match/no-match
     # decision, so the transport must exit 0: any other code is a scan failure,
     # never a clean scan. An empty universe is a scan failure too.
-    paths_file=$(mktemp "${TMPDIR:-/tmp}/alumina-unsafe-paths.XXXXXX") || {
-        echo "UNSAFE-SURFACE-SCAN-FAIL: path list temp file unavailable (tooling error, not PASS)" >&2
-        exit 1
-    }
+    paths_file=$(mktemp "${TMPDIR:-/tmp}/alumina-unsafe-paths.XXXXXX") || { echo "UNSAFE-SURFACE-SCAN-FAIL: path list temp file unavailable (tooling error, not PASS)" >&2; exit 1; }
     frc=0
     find . \( -name target -o -name .git -o -name .ooda \) -prune -o \( -type f -o -type l \) -name '*.rs' -print0 > "$paths_file" 2>/dev/null || frc=$?
-    [ "$frc" -eq 0 ] || {
-        rm -f "$paths_file"
-        echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe path enumeration exit $frc (tooling error, not PASS)" >&2
-        exit 1
-    }
-    [ -s "$paths_file" ] || {
-        rm -f "$paths_file"
-        echo "UNSAFE-SURFACE-SCAN-FAIL: empty .rs path universe (tooling error, not PASS)" >&2
-        exit 1
-    }
+    [ "$frc" -eq 0 ] || { rm -f "$paths_file"; echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe path enumeration exit $frc (tooling error, not PASS)" >&2; exit 1; }
+    [ -s "$paths_file" ] || { rm -f "$paths_file"; echo "UNSAFE-SURFACE-SCAN-FAIL: empty .rs path universe (tooling error, not PASS)" >&2; exit 1; }
     producer=grep
     if command -v rg >/dev/null 2>&1; then
         producer=rg
@@ -972,10 +961,7 @@ unsafe_surface_gate() {
         exit 0
     ' sh "$producer" '\bunsafe\b' < "$paths_file")" || scan_rc=$?
     rm -f "$paths_file"
-    [ "$scan_rc" -eq 0 ] || {
-        echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe scan transport exit $scan_rc (tooling error, not PASS)" >&2
-        exit 1
-    }
+    [ "$scan_rc" -eq 0 ] || { echo "UNSAFE-SURFACE-SCAN-FAIL: unsafe scan transport exit $scan_rc (tooling error, not PASS)" >&2; exit 1; }
     bad=""
     for f in $offenders; do
         case "$f" in
@@ -1640,17 +1626,20 @@ copy_out_artifact() {
     echo "ALT-COPY-OK: $_dest sha256 $_host_sha (volume-side and host-side agree)"
 }
 
-# Host -> existing Linux dispatch: boundary children that must run on Linux are
-# executed inside the derived image, never by calling Linux-only functions
-# directly on a Darwin host. I4: the Cargo cache is a named volume mounted at
-# /app/target, so container-internal paths (/app/target/release/alumina,
-# /app/target/fixture-facts/release/alumina) keep their exact meaning while the
-# host target/ is no longer a build home.
-# G8-C17 preserved: the source stays mounted read-only (:ro,Z, matching the
-# fixture convention), so the checkout itself is never a build output location;
-# only the target path is writable, now via a volume rather than a host bind.
-linux_dispatch() {
-    inner="$1"
+# Only the alias block is written now: clippy/rustfmt/git are baked into the
+# derived image and the crate cache persists in $ALT_CARGO_HOME_VOL, so the
+# dispatch performs no network provisioning. The two presence checks fail
+# closed rather than silently installing -- a missing tool means the image is
+# wrong, and installing it would reintroduce the network dependency.
+DISPATCH_PROVISION='mkdir -p /cargo-home
+printf "%s\n" "[alias]" "atest = [\"test\", \"--quiet\", \"--no-fail-fast\"]" "aclippy = [\"clippy\", \"--quiet\", \"--message-format=short\"]" > /cargo-home/config.toml
+command -v git >/dev/null 2>&1 || { echo "LINUX-DISPATCH-BLOCKED: git absent from dispatch image (whitespace gate requires it)" >&2; exit 1; }
+rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-DISPATCH-BLOCKED: clippy component absent from dispatch image" >&2; exit 1; }
+'
+
+# Host and image guards: the dispatch connection must answer and the derived
+# image must resolve to an immutable id before any container runs.
+linux_dispatch_prepare() {
     CONN="${PODMAN_CONNECTION:?PODMAN_CONNECTION must be set to your rootless podman connection}"
     command -v podman >/dev/null 2>&1 || {
         echo "LINUX-DISPATCH-BLOCKED: podman required on the host" >&2
@@ -1669,50 +1658,62 @@ linux_dispatch() {
         exit 1
     }
     echo "  dispatch image $IMAGE id=$_img_id"
-    # Only the alias block is written now: clippy/rustfmt/git are baked into the
-    # derived image and the crate cache persists in $ALT_CARGO_HOME_VOL, so the
-    # dispatch performs no network provisioning. The two presence checks fail
-    # closed rather than silently installing -- a missing tool means the image is
-    # wrong, and installing it would reintroduce the network dependency.
-    prov='mkdir -p /cargo-home
-printf "%s\n" "[alias]" "atest = [\"test\", \"--quiet\", \"--no-fail-fast\"]" "aclippy = [\"clippy\", \"--quiet\", \"--message-format=short\"]" > /cargo-home/config.toml
-command -v git >/dev/null 2>&1 || { echo "LINUX-DISPATCH-BLOCKED: git absent from dispatch image (whitespace gate requires it)" >&2; exit 1; }
-rustup component list --installed 2>/dev/null | grep -q clippy || { echo "LINUX-DISPATCH-BLOCKED: clippy component absent from dispatch image" >&2; exit 1; }
-'
+}
+
+linux_dispatch_bind() {
+    # Baseline mode only: verify.sh's original host bind-mount of target/, so
+    # the alt can be measured apples-to-apples against verify.sh.
+    podman --connection "$CONN" run --rm --pull=never \
+        -v "$ROOT:/app:ro,Z" \
+        -v "$ROOT/target:/app/target:Z" \
+        --user 0:0 \
+        -e CARGO_HOME=/cargo-home \
+        -e CARGO_INCREMENTAL=0 \
+        -e CARGO_TERM_PROGRESS_WHEN=never \
+        -e TOOLCHAIN="$TOOLCHAIN" \
+        -e RUST_MIN_STACK=16777216 \
+        -w /app \
+        "$IMAGE" sh -c "$DISPATCH_PROVISION$inner" || drc=$?
+}
+
+linux_dispatch_volume() {
+    ensure_volume "$CONN" "$ALT_TARGET_VOL"
+    ensure_volume "$CONN" "$ALT_CARGO_HOME_VOL"
+    # The target path must exist inside the read-only source mount before the
+    # volume is mounted over it.
+    podman --connection "$CONN" run --rm --pull=never \
+        -v "$ROOT:/app:ro,Z" \
+        -v "$ALT_TARGET_VOL:/app/target" \
+        -v "$ALT_CARGO_HOME_VOL:/cargo-home" \
+        --user 0:0 \
+        -e CARGO_HOME=/cargo-home \
+        -e CARGO_INCREMENTAL=0 \
+        -e CARGO_TERM_PROGRESS_WHEN=never \
+        -e TOOLCHAIN="$TOOLCHAIN" \
+        -e RUST_MIN_STACK=16777216 \
+        -w /app \
+        "$IMAGE" sh -c "$DISPATCH_PROVISION$inner" || drc=$?
+}
+
+# Host -> existing Linux dispatch: boundary children that must run on Linux are
+# executed inside the derived image, never by calling Linux-only functions
+# directly on a Darwin host. I4: the Cargo cache is a named volume mounted at
+# /app/target, so container-internal paths (/app/target/release/alumina,
+# /app/target/fixture-facts/release/alumina) keep their exact meaning while the
+# host target/ is no longer a build home.
+# G8-C17 preserved: the source stays mounted read-only (:ro,Z, matching the
+# fixture convention), so the checkout itself is never a build output location;
+# only the target path is writable, now via a volume rather than a host bind.
+linux_dispatch() {
+    inner="$1"
+    linux_dispatch_prepare
     _ld_t0=$(now_ms)
     drc=0
     mkdir -p "$ROOT/target"
     if [ "$ALT_NO_VOLUME" = "1" ]; then
-        # Baseline mode only: verify.sh's original host bind-mount of target/, so
-        # the alt can be measured apples-to-apples against verify.sh.
-        podman --connection "$CONN" run --rm --pull=never \
-            -v "$ROOT:/app:ro,Z" \
-            -v "$ROOT/target:/app/target:Z" \
-            --user 0:0 \
-            -e CARGO_HOME=/cargo-home \
-            -e CARGO_INCREMENTAL=0 \
-            -e CARGO_TERM_PROGRESS_WHEN=never \
-            -e TOOLCHAIN="$TOOLCHAIN" \
-            -e RUST_MIN_STACK=16777216 \
-            -w /app \
-            "$IMAGE" sh -c "$prov$inner" || drc=$?
+        linux_dispatch_bind
     else
-        ensure_volume "$CONN" "$ALT_TARGET_VOL"
-        ensure_volume "$CONN" "$ALT_CARGO_HOME_VOL"
-        # The target path must exist inside the read-only source mount before the
-        # volume is mounted over it.
-        podman --connection "$CONN" run --rm --pull=never \
-            -v "$ROOT:/app:ro,Z" \
-            -v "$ALT_TARGET_VOL:/app/target" \
-            -v "$ALT_CARGO_HOME_VOL:/cargo-home" \
-            --user 0:0 \
-            -e CARGO_HOME=/cargo-home \
-            -e CARGO_INCREMENTAL=0 \
-            -e CARGO_TERM_PROGRESS_WHEN=never \
-            -e TOOLCHAIN="$TOOLCHAIN" \
-            -e RUST_MIN_STACK=16777216 \
-            -w /app \
-            "$IMAGE" sh -c "$prov$inner" || drc=$?
+        linux_dispatch_volume
     fi
     _ld_t1=$(now_ms)
     case "${_ld_t0}${_ld_t1}" in
