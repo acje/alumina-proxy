@@ -289,6 +289,31 @@ def probe_refused_sampled(deadline, name, proc):
     return True
 
 
+def sample_no_bind_until(deadline, name, proc):
+    """Sample the interval [now, deadline] through sample_no_bind(), stopping
+    when the child exits. Returns True when every sampled instant was an
+    authoritative refusal, or when the child exited before the deadline."""
+    while proc.poll() is None and time.monotonic() < deadline:
+        if not sample_no_bind(name, proc):
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def storm_no_bind_until(deadline, name, proc, count=6):
+    """Fire `count` SIGTERMs with a no-bind sample interleaved from the FIRST
+    signal, then keep sampling to `deadline`: a bind during the observed phase
+    is seen between signals, not only after the storm has fired."""
+    for _ in range(count):
+        if proc.poll() is not None:
+            break
+        os.kill(proc.pid, signal.SIGTERM)
+        if not sample_no_bind(name, proc):
+            return False
+        time.sleep(0.05)
+    return sample_no_bind_until(deadline, name, proc)
+
+
 def wait_log_marker(name, marker, timeout=8.0):
     """Poll the case's captured stdout file until the binary has actually
     emitted `marker` (a real phase receipt from the child's log output), so a
@@ -967,6 +992,38 @@ def case_neg_no_self_exit(fixtures):
         log.close()
 
 
+def await_startup_query(name, proc, dns, timeout=5.0):
+    """Wait until the startup DNS window has begun (>= 1 query observed): the
+    boot-armed handler is installed before run_startup, so at that moment the
+    exchange is in Receiving against the silent resolver."""
+    probe_deadline = time.monotonic() + timeout
+    while time.monotonic() < probe_deadline and dns.queries == 0:
+        time.sleep(0.02)
+    if dns.queries > 0:
+        return True
+    proc.kill(); proc.wait()
+    fail(name, "no DNS query observed; startup window never began")
+    return False
+
+
+def require_pre_signal_unbound(name, proc):
+    """Pre-signal probe point: the listener is neither reachable (bound) nor an
+    operational probe error, and the child is still running."""
+    kind, exc = connect_probe()
+    if kind == "reachable":
+        proc.kill(); proc.wait()
+        fail(name, "listener bound before the signal: not a pre-serving probe")
+        return False
+    if kind == "error":
+        proc.kill(); proc.wait()
+        fail(name, f"operational connect error before the signal (indeterminate, not absence): {exc}")
+        return False
+    if proc.poll() is not None:
+        fail(name, f"process exited before the pre-serving SIGTERM (rc {proc.returncode})")
+        return False
+    return True
+
+
 def case_pre_serving(fixtures):
     """SIGTERM while the startup DNS window is still resolving against a
     fully SILENT resolver (accepts the query, never replies, keeps the window
@@ -982,37 +1039,18 @@ def case_pre_serving(fixtures):
     log = open_case_log(name)
     try:
         proc = spawn_binary(stdout_target=log, stderr_target=log)
-        # Wait until the startup DNS window has begun (>=1 query observed):
-        # the boot-armed handler is installed before run_startup, at that
-        # moment the exchange is in Receiving against the silent resolver.
-        probe_deadline = time.monotonic() + 5.0
-        while time.monotonic() < probe_deadline and dns.queries == 0:
-            time.sleep(0.02)
-        if dns.queries == 0:
-            proc.kill(); proc.wait()
-            fail(name, "no DNS query observed; startup window never began")
+        if not await_startup_query(name, proc, dns):
             return
-        kind, exc = connect_probe()
-        if kind == "reachable":
-            proc.kill(); proc.wait()
-            fail(name, "listener bound before the signal: not a pre-serving probe")
+        if not require_pre_signal_unbound(name, proc):
             return
-        if kind == "error":
-            proc.kill(); proc.wait()
-            fail(name, f"operational connect error before the signal (indeterminate, not absence): {exc}")
-            return
-        if proc.poll() is not None:
-            fail(name, f"process exited before the pre-serving SIGTERM (rc {proc.returncode})"); return
         t0 = time.monotonic()
         os.kill(proc.pid, signal.SIGTERM)
         # interval-wide no-bind: from the first signal to process exit the
         # listener port must NEVER become reachable (no bind at any point
         # across the whole observation interval, not just at signal time);
         # operational probe errors fail the case rather than green an absence.
-        while proc.poll() is None and time.monotonic() - t0 < 12.0:
-            if not sample_no_bind(name, proc):
-                return
-            time.sleep(0.02)
+        if not sample_no_bind_until(t0 + 12.0, name, proc):
+            return
         rc = bounded_wait(proc, time.monotonic() + 12.0, name)
         if rc is None:
             return
@@ -1025,6 +1063,36 @@ def case_pre_serving(fixtures):
             pass_(name, f"SIGTERM mid-window against silent resolver -> exit 0 in {elapsed:.2f}s with the listener never bound across the interval")
     finally:
         log.close()
+
+
+def backoff_stage(name, log):
+    """Spawn the binary with no resolver listening and wait for the counted
+    startup failure record, which arms the retry-backoff phase for the next
+    due: a phase observed from the binary's own log, never assumed by a sleep."""
+    proc = spawn_binary(stdout_target=log, stderr_target=log)
+    if wait_log_marker(name, b"kind=startup_warning", timeout=8.0):
+        return proc
+    proc.kill(); proc.wait()
+    fail(name, "counted-failure phase never observed (no startup_warning record emitted before the signal)")
+    return None
+
+
+def require_backoff_probe_point(name, proc):
+    """Backoff probe point: the process is still running and the listener is
+    unbound (a probe error is indeterminate, never absence)."""
+    if proc.poll() is not None:
+        fail(name, f"process exited on its own (rc {proc.returncode})")
+        return False
+    kind, exc = connect_probe()
+    if kind == "reachable":
+        proc.kill(); proc.wait()
+        fail(name, "listener bound before the signal during backoff")
+        return False
+    if kind == "error":
+        proc.kill(); proc.wait()
+        fail(name, f"operational connect error before the signal (indeterminate, not absence): {exc}")
+        return False
+    return True
 
 
 def case_retry_backoff_storm(fixtures):
@@ -1041,40 +1109,18 @@ def case_retry_backoff_storm(fixtures):
     # backoff for the next due.
     log = open_case_log(name)
     try:
-        proc = spawn_binary(stdout_target=log, stderr_target=log)
-        # phase-observed counted failure: wait for the real startup_warning
-        # record instead of sleeping to assume the backoff phase was reached.
-        if not wait_log_marker(name, b"kind=startup_warning", timeout=8.0):
-            proc.kill(); proc.wait()
-            fail(name, "counted-failure phase never observed (no startup_warning record emitted before the signal)")
+        proc = backoff_stage(name, log)
+        if proc is None:
             return
-        if proc.poll() is not None:
-            fail(name, f"process exited on its own (rc {proc.returncode})"); return
-        kind, exc = connect_probe()
-        if kind == "reachable":
-            proc.kill(); proc.wait()
-            fail(name, "listener bound before the signal during backoff"); return
-        if kind == "error":
-            proc.kill(); proc.wait()
-            fail(name, f"operational connect error before the signal (indeterminate, not absence): {exc}")
+        if not require_backoff_probe_point(name, proc):
             return
         t0 = time.monotonic()
         # Storm with error-aware no-bind probes interleaved from the FIRST
         # signal: a bind during the backoff is observed between signals, not
         # only after all six have fired, so the interval-wide no-bind claim
         # covers the post-first-signal window and not just post-storm.
-        for _ in range(6):
-            if proc.poll() is not None:
-                break
-            os.kill(proc.pid, signal.SIGTERM)
-            if not sample_no_bind(name, proc):
-                return
-            time.sleep(0.05)
-        # post-signal no-bind, error-aware, across the whole interval to exit
-        while proc.poll() is None and time.monotonic() - t0 < 10.0:
-            if not sample_no_bind(name, proc):
-                return
-            time.sleep(0.02)
+        if not storm_no_bind_until(t0 + 10.0, name, proc):
+            return
         rc = bounded_wait(proc, time.monotonic() + 10.0, name)
         if rc is None:
             return
