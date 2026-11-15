@@ -175,7 +175,7 @@ The example allowlist is in `<fqdn>:<port>` form — `api.github.com:443` (a
 real-world HTTPS API target) and illustrative `example.com:443` /
 `www.example.net:443` — so HTTPS and NATS transports can be reasoned about
 against Alumina's fixed wire contract, with **zero `alumina-proxy` code
-changes**. The contract (`docs/alumina-proxy.md:17-50,200-202`) requires: (1)
+changes**. The contract (`docs/alumina-proxy.md#protocol-contract`, `#initial-resource-profile`) requires: (1)
 an explicit `HTTP/1.1` `CONNECT <fqdn>:<port>` whose port exactly
 matches the allowlisted entry; (2) the **client speaks first**,
 immediately after `200 Connection established`, with a TLS 1.3 `ClientHello`
@@ -183,7 +183,7 @@ whose SNI equals `<fqdn>` (Barrier A); (3) the upstream server sends **zero
 bytes before the validated `ClientHello` is flushed upstream** (Barrier B —
 `EarlyUpstreamData` closes the tunnel if the server speaks first). Once the
 gate opens, encrypted application bytes are relayed opaquely, with no ALPN or
-application-protocol inspection (`docs/alumina-proxy.md:19-21,48-50`).
+application-protocol inspection (`docs/alumina-proxy.md#design-philosophy--the-exit-gate`, `#threat-model`).
 
 | Workload | Transport | Against Alumina |
 | --- | --- | --- |
@@ -217,8 +217,8 @@ fingerprints differ. The change is a **fact** that selects the configured per-FQ
 `ja4` control action through `decide()` (§T6, §Per-control enforcement schema):
 with the example config's `ja4 = { action = "notify", scope = "connection" }` the
 change fires a **Notify** — never a Block. The client must be pinned
-to TLS 1.3 on both offers — the version-offer gate (`docs/alumina-proxy.md:47`;
-`validate_versions` at `src/inspection/client_hello.rs:701-716`) requires `supported_versions`
+to TLS 1.3 on both offers — the version-offer gate (`docs/alumina-proxy.md#tls-clienthello-profile`;
+`validate_versions` at `src/inspection/client_hello.rs::validate_versions`) requires `supported_versions`
 with `0x0304` as the only non-GREASE version, so a TLS 1.2-capable offer is
 `InvalidVersionOffer` → `any_illegal` → the configured `any_illegal` action
 (**Block** in the example config), not a JA4 change signal.
@@ -232,12 +232,12 @@ Procedure (Go client pinned to TLS 1.3):
    JA4 change fact.
 2. Open a second tunnel to the same ordinal and send a ClientHello yielding a
    **distinct JA4** (e.g. a different ALPN set in `NextProtos`). The serving path
-   records `note_fact_ja4_change` (`src/runtime/reactor.rs:2859`) — the change fact
+   records `note_fact_ja4_change` (`src/enforcement/monitor.rs::Monitor::note_fact_ja4_change`) — the change fact
    that selects the per-FQDN `ja4` control action.
 3. Read the monitor records. The `kind=monitor_domain` detail batch carries the
    change signal — `d0j=1` (per-ordinal change counter) with
    `d0v="<36-char-ja4>"` (the latest changed JA4, 36 chars), zero-suppressed
-   together per the C1 amendment (`docs/alumina-proxy.md:713-718`). The
+   together per the C1 amendment (`docs/alumina-proxy.md#control-storage-table`). The
    `kind=monitor` summary carries the globals `actions_total=1` (the Notify) and
    `refusals_total=0` (no Block).
 

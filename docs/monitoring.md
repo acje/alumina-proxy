@@ -13,29 +13,29 @@ cannot observe its own unread pipe (writes succeed into a buffer nobody reads).
 **Proxy-owned, tested** — rely on, do not re-verify:
 
 - Nonblocking stdout: fd 1 is made nonblocking once
-  ([src/log/sink.rs](../src/log/sink.rs):16-27), writes are `write_vectored` against a
-  16-op / 64 KiB per-turn budget ([src/log/mod.rs](../src/log/mod.rs):66-67), and a
-  stalled or full pipe can never stall serving ([src/log/sink.rs](../src/log/sink.rs):100-179).
+  (`src/log/sink.rs::LogStore::prepare_stdout`), writes are `write_vectored` against a
+  16-op / 64 KiB per-turn budget (`src/log/mod.rs::SINK_MAX_OPS`, `src/log/mod.rs::SINK_MAX_BYTES`), and a
+  stalled or full pipe can never stall serving (`src/log/sink.rs::LogStore::drain_sink`).
   A `WouldBlock` retains the partial cursor and retries
-  ([src/log/sink.rs](../src/log/sink.rs):100-179); byte conservation is exact.
-- Bounded queue: 256 × 2 KiB (`src/log/mod.rs:53-54`); on overflow a whole record is
+  (`src/log/sink.rs::LogStore::drain_sink`); byte conservation is exact.
+- Bounded queue: 256 × 2 KiB (`src/log/mod.rs::QUEUE_SLOTS`, `src/log/mod.rs::SLOT_BYTES`); on overflow a whole record is
   dropped and counted (`dropped`), never truncated.
 - The monitor family is split into a reserved `kind=monitor` summary whose
   fixed core is admitted even when the queue is full, and best-effort
   `monitor_domain` / `monitor_capture` detail batches
-  ([docs/alumina-proxy.md](alumina-proxy.md):341-343).
-- A failed sink latches permanently and the drain quiesces (`src/log/sink.rs:87-99,100-179`):
+  ([docs/alumina-proxy.md §Monitoring](alumina-proxy.md#monitoring)).
+- A failed sink latches permanently and the drain quiesces (`src/log/sink.rs::LogStore::fail_and_discard`, `src/log/sink.rs::LogStore::sink_has_failed`):
   no further records of any kind are emitted until the proxy restarts.
   Backpressure is never a failure: a `WouldBlock`/`Interrupted` write retains
   the cursor and retries on the bounded retry cadence, so a stalled/full pipe
   is lossy only (whole-record drop, count on overflow) — never a hard failure
-  or a stall of serving (`src/log/sink.rs:136-144`). An **unrecoverable**
+  or a stall of serving (`src/log/sink.rs::LogStore::block_with`). An **unrecoverable**
   write error (e.g. stdout pipe closed) latches the sink failed, stranding
   every remaining queued record once in the shared `dropped` tally
-  (`src/log/sink.rs:145-153`); outside shutdown the serving owner exits
+  (`src/log/sink.rs::LogStore::fail_and_discard`); outside shutdown the serving owner exits
   `EX_IOERR` (74) at the next owner-turn boundary rather than continue without
-  an external log-loss signal (`src/runtime/owner.rs:309-310`; §F-09
-  `docs/alumina-proxy.md:1235`). During shutdown the drain carries no exit; the
+  an external log-loss signal (`src/runtime/owner.rs::EX_IOERR`; §F-09
+  `docs/alumina-proxy.md#f-09--unrecoverable-stdout-sink-failure-exits-the-serving-owner-with-ex_ioerr-74`). During shutdown the drain carries no exit; the
   shutdown verdict alone terminates the process.
 
 **Deployment-owned** — you must build and assure; no proxy test covers this:
@@ -59,7 +59,7 @@ receipts ([docs/benchmarks/e2micro-suite.md](benchmarks/e2micro-suite.md) §2,
 measurements**, not e2-micro: they were recorded on an arm64 Apple VM (8 CPU /
 14 GiB, rootful podman, loopback alias) modelling e2-micro by workload
 parameters only, with no cgroup CPU/mem cap
-([docs/benchmarks/e2micro-suite.md](benchmarks/e2micro-suite.md):97-107).
+([docs/benchmarks/e2micro-suite.md §Host-vs-target disclosure](benchmarks/e2micro-suite.md#host-vs-target-disclosure)).
 Read the CPU/RSS numbers below as host-measured indications for a collector
 budget, never as e2-micro certifications. The receipts measure **relay
 throughput**, not notify stdout volume (the proxy emits essentially nothing on a
@@ -85,8 +85,8 @@ warn/info records (≤ 2 KiB each, e.g. `reject` / `early_activity`) as **their
 own records**, plus the event-driven monitor family as a separate aggregate: a
 reserved `kind=monitor` summary (≤ 2048 B fixed core) and best-effort
 `monitor_domain` / `monitor_capture` detail batches (≤ 2048 B each, up to 3+3
-per dirty second, `src/log/mod.rs:60-63`); the summary emits at most once per dirty
-whole-second (`src/enforcement/monitor.rs:351-353`). Budget collector CPU/RAM in
+per dirty second, `src/log/mod.rs::DOMAIN_BATCH`, `src/log/mod.rs::CAPTURE_BATCH`); the summary emits at most once per dirty
+whole-second (`src/enforcement/monitor.rs::Monitor::report_due`). Budget collector CPU/RAM in
 the same order of magnitude as the proxy's recorded footprint above and never
 assume the proxy slows down for a slow reader.
 
@@ -102,23 +102,23 @@ exit-accounting note below.
 
 | Signal | Where | Unit (exact) | Means |
 | --- | --- | --- | --- |
-| `dropped` | `startup_final` ([src/log/mod.rs](../src/log/mod.rs):836-860) and `shutdown_final` (:935-944) **only** — never in the monitor summary core (:945-980) | 1 per whole record lost, all classes | Whole-record loss over boot/full run. Long-run loss surfaces **only** at these two boundaries while serving (not refreshed in-band); serving-exit residue after the single bounded drain is **uncounted, unobservable** (exit-accounting note below) |
-| `report_drops` / `oreport_drops` | every `kind=monitor` summary fixed-core wire grammar ([src/log/encoding.rs](../src/log/encoding.rs):572-581) | 1 per dropped `monitor_domain` **batch** at report time ([src/log/mod.rs](../src/log/mod.rs):953-962; `src/enforcement/monitor.rs:321`) — a batch is up to 11 domain blocks, never per block | Queue-full refusal of a domain detail batch |
-| `capture_drops` / `ocapture_drops` | every `kind=monitor` summary fixed-core wire grammar ([src/log/encoding.rs](../src/log/encoding.rs):572-581) | **mixed, by design**: 1 per detail at capture time (later-relation suppression [reactor.rs](../src/runtime/reactor.rs):2414-2430; 64-detail window eviction [monitor.rs](../src/enforcement/monitor.rs):335-338) **and** 1 per dropped `monitor_capture` batch at report time ([src/log/mod.rs](../src/log/mod.rs):945-980) — a batch is up to 22 details | Capture-detail loss in mixed units; a nonzero value means detail loss, never treat "1" as "one detail" |
-| `dx=` | `kind=monitor`, square brackets loss bitset, present only when nonzero ([src/log/encoding.rs](../src/log/encoding.rs):666-675) | 1 bit per allowlist ordinal, hex | That ordinal's JA4-change facts overflowed the bounded detail |
+| `dropped` | `startup_final` (`src/log/mod.rs::LogStore::startup_final`) and `shutdown_final` (`src/log/mod.rs::LogStore::shutdown_final`) **only** — never in the monitor summary core (`src/log/encoding.rs::write_monitor_globals`) | 1 per whole record lost, all classes | Whole-record loss over boot/full run. Long-run loss surfaces **only** at these two boundaries while serving (not refreshed in-band); serving-exit residue after the single bounded drain is **uncounted, unobservable** (exit-accounting note below) |
+| `report_drops` / `oreport_drops` | every `kind=monitor` summary fixed-core wire grammar (`src/log/encoding.rs::write_monitor_globals`) | 1 per dropped `monitor_domain` **batch** at report time (`src/log/mod.rs::LogStore::monitor_summary`; `src/enforcement/monitor.rs::Monitor::note_report_drop`) — a batch is up to 11 domain blocks, never per block | Queue-full refusal of a domain detail batch |
+| `capture_drops` / `ocapture_drops` | every `kind=monitor` summary fixed-core wire grammar (`src/log/encoding.rs::write_monitor_globals`) | **mixed, by design**: 1 per detail at capture time (later-relation suppression `src/runtime/reactor.rs::stamp_capture`; 64-detail window eviction `src/enforcement/monitor.rs::Monitor::note_consumed_capture`) **and** 1 per dropped `monitor_capture` batch at report time (`src/log/mod.rs::LogStore::monitor_summary`) — a batch is up to 22 details | Capture-detail loss in mixed units; a nonzero value means detail loss, never treat "1" as "one detail" |
+| `dx=` | `kind=monitor`, square brackets loss bitset, present only when nonzero (`src/log/encoding.rs::write_monitor_loss_bitset`) | 1 bit per allowlist ordinal, hex | That ordinal's JA4-change facts overflowed the bounded detail |
 
 **Notification drop path (exit accounting — counted vs unobservable).** Queue
 residue a drain cannot deliver is accounted differently per path, never as
 `report_drops`/`capture_drops`. **Counted residue:** a sink failure drops and
 counts every remaining queued record exactly once in the shared `dropped` tally
-([src/log/sink.rs](../src/log/sink.rs):145-153, per-record via [src/log/queue.rs](../src/log/queue.rs):176-181), and a startup-termination exit
+(`src/log/sink.rs::LogStore::fail_and_discard`, per-record via `src/log/queue.rs::LogStore::drop_one`), and a startup-termination exit
 (`Exit75`/`Terminated`) additionally strands whatever its bounded startup drains
 did not deliver, each counted once in the same tally
-([src/runtime/storage.rs](../src/runtime/storage.rs):1249-1258, `strand_queued`'s only call site).
+(`src/runtime/storage.rs::drain_startup_records`, `strand_queued`'s only call site).
 **Unobservable residue:** the serving exit
-([src/runtime/owner.rs](../src/runtime/owner.rs):30-40, :332-343) reads `dropped`, enqueues
+(`src/runtime/owner.rs::emit_terminal_shutdown_finish`) reads `dropped`, enqueues
 `shutdown_final` with that snapshot, performs exactly **one** bounded drain
-(16 ops / 64 KiB, [src/log/mod.rs](../src/log/mod.rs):66-67), then `process::exit` — records
+(16 ops / 64 KiB, `src/log/mod.rs::SINK_MAX_OPS`, `src/log/mod.rs::SINK_MAX_BYTES`, then `process::exit` — records
 still queued at that moment are destroyed **uncounted**, and a stalled sink can
 make that single drain deliver nothing at all, so even `shutdown_final` itself
 is lost. Therefore any `dropped` value in `shutdown_final` is a **lower bound**,
@@ -128,18 +128,18 @@ never proof of a lossless exit window.
 
 - The monitor summary is **event-driven**: it is emitted only when the aggregate
   is dirty, at most once per whole second
-  (`src/enforcement/monitor.rs:351-353`). On a silent golden path there are
+  (`src/enforcement/monitor.rs::Monitor::report_due`). On a silent golden path there are
   **no** periodic summaries at all — so "no summary for N s" is not an alarm by
   itself. Alert instead on **silence where emission was expected**: a stream that
   had been delivering `kind=monitor` lines (or an open DNS incident per the
   incident-summary window) going quiet for > N s is an **investigation signal,
   not a proof of failure or exit**: causes are a latched hard sink failure
   (outside shutdown the proxy exits `EX_IOERR` (74); nothing more is emitted;
-  `src/log/sink.rs:135-153`; `src/runtime/owner.rs:309-310`; §F-09), a dead
+  `src/log/sink.rs::LogStore::drain_sink`; `src/runtime/owner.rs::EX_IOERR`; §F-09), a dead
   collector, or **live backpressure** — a live but stalled/slow collector
   leaves the pipe full while events continue (`WouldBlock`/`Interrupted`
   retains the cursor, never latches the sink; no exit, serving continues;
-  `src/log/sink.rs:136-144`). Correlate process status and collector read
+  (`src/log/sink.rs::LogStore::block_with`). Correlate process status and collector read
   progress out-of-band; a latched sink is cleared only by operator restart.
 - **A dropped record and a dropped counter can themselves be lost.** The summary
   line that would carry `report_drops`/`capture_drops` is itself a record the
@@ -164,10 +164,9 @@ never proof of a lossless exit window.
 ## Restart semantics (state that is in-memory and does not survive)
 
 - **Proxy restart** clears all in-memory enforcement state: the per-ordinal
-  domain block-latch bitset
-  ([src/enforcement/state.rs](../src/enforcement/state.rs):220-222,233-235,359) and the
-  all-scope block latch (:277-278), plus the JA4 first-seen baselines
-  ([src/runtime/reactor.rs](../src/runtime/reactor.rs):579-598, :1098, "reset on restart"). A previously
+  domain block-latch bitset and the all-scope block latch
+  (`src/enforcement/state.rs::Enforcement`), plus the JA4 first-seen baselines
+  (`src/runtime/reactor.rs::Ja4BaselineTable`, "reset on restart"). A previously
   blocked or baselined identity is treated as first-seen again, and the monitor
   aggregate (including the drop counters in the summary) starts at zero. Treat a
   proxy restart as a clean-slate for block and baseline state; a restarted proxy
@@ -219,7 +218,7 @@ and `startup_final`/`shutdown_final` `dropped` all stay 0. The pipe buffer and
 the 256-slot in-memory queue absorb the burst. (b) **Loss branch (requires a
 sustained burst, not a few events):** `report_drops`/`capture_drops` move only
 if the in-memory queue is full **at report time** (a dropped `monitor_domain`
-/`monitor_capture` batch, `src/log/mod.rs:945-980`), and generic `dropped` moves
+/`monitor_capture` batch, `src/log/mod.rs::LogStore::monitor_summary`), and generic `dropped` moves
 only when the queue overflows — both need enough un-drained records to exhaust
 the 256 × 2 KiB queue, i.e. well over a hundred retained records with the
 collector stopped. With the small burst a small drill generates, do not expect

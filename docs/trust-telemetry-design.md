@@ -105,7 +105,7 @@ The four RCODE classes stay separate because the operator action differs (delega
 outage, ACL, upstream defect). The parse and size families group within class because the
 action is identical.
 
-`REASON_TOKEN_MAX` (`src/log/mod.rs:83`) grows 13 → 20.
+`REASON_TOKEN_MAX` (`src/log/mod.rs::REASON_TOKEN_MAX`) grows 13 → 20.
 
 ## 4. Enum segmentation
 
@@ -150,14 +150,14 @@ class is reviewable in isolation.
 
 | Lint | Disposition |
 | --- | --- |
-| `large_enum_variant` (`Cargo.toml:121`, warn) | avoid by construction (boundary classification, `Copy` classes); if a variant later needs a payload, box it or split the enum — never merge variants |
-| `too_many_lines` (`Cargo.toml:19`, warn) | one `token()` per class; reasoned `#[expect]` only if a single exhaustive match still exceeds |
+| `large_enum_variant` (`Cargo.toml`, warn) | avoid by construction (boundary classification, `Copy` classes); if a variant later needs a payload, box it or split the enum — never merge variants |
+| `too_many_lines` (`Cargo.toml`, warn) | one `token()` per class; reasoned `#[expect]` only if a single exhaustive match still exceeds |
 | `enum_variant_names` | short variants (`Expired`, not `CertExpired`); the enum carries the class |
-| `unwrap_used` / `expect_used` (`src/lib.rs:1`, deny) | exhaustive match on `Copy` enums; no unwrap introduced |
+| `unwrap_used` / `expect_used` (`src/lib.rs`, deny) | exhaustive match on `Copy` enums; no unwrap introduced |
 
 ## 6. Record budget
 
-Measured worst cases (spec §Recorded worst-case encoded lengths, `docs/alumina-proxy.md:883`):
+Measured worst cases (spec §Recorded worst-case encoded lengths, `docs/alumina-proxy.md#startup-final-record-shape`):
 
 | Record | Now | After taxonomy | Headroom after |
 | --- | --- | --- | --- |
