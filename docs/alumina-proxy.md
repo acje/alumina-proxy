@@ -1593,10 +1593,10 @@ warning fact (`cert_outside_validity_window` `src/dns/transport.rs::cert_outside
 The `0xffce` codepoint is treated as ECH-present and rejected fail-closed, consistent with the existing `0xfe0d` handling. The `0xff01` (`renegotiation_info`) codepoint is deliberately not folded in; it appears only in JA4 golden test vectors and is not an ECH signal.
 
 The `encrypted_server_name` codepoint is folded into the same `has_ech` profile
-fact as `encrypted_client_hello` (`src/inspection/client_hello.rs:104-106`, match arm
-`src/inspection/client_hello.rs:724-726`), so `validate` rejects it with `ChError::EchPresent`
-(`src/inspection/client_hello/tests.rs:348-355`). Test: `rejects_esni_codepoint`
-(`src/inspection/client_hello/tests.rs:358-370`).
+fact as `encrypted_client_hello` (`src/inspection/client_hello.rs::ClientHello::has_ech`, match arm
+`src/inspection/client_hello.rs::apply_extension`), so `validate` rejects it with `ChError::EchPresent`
+(`src/inspection/client_hello/tests.rs::rejects_ech`). Test: `rejects_esni_codepoint`
+(`src/inspection/client_hello/tests.rs::rejects_esni_codepoint`).
 
 
 ## Fail-stop bailiwick suffix-slot bound
@@ -1605,9 +1605,9 @@ fact as `encrypted_client_hello` (`src/inspection/client_hello.rs:104-106`, matc
 The flat union of declared `cname_bailiwick` suffixes is bounded by the Resource-Bounds
 Invariant (§II. Memory & Resource Invariants): exhaustion rejects work rather than expanding storage without bound. The
 config validator already rejects a suffix total above `ALLOWLIST_MAX`
-(`CnameBailiwickTooMany`, `src/config/mod.rs:323-325`; Display `src/config/mod.rs:443`), so the
+(`CnameBailiwickTooMany`, `src/config/mod.rs::ConfigError::CnameBailiwickTooMany`; Display `src/config/mod.rs::ConfigError::fmt`), so the
 overflow is unreachable through validated configuration — this amendment makes the defence
-structural. `from_allowlist` (`src/dns/wire.rs:909-953`) now returns `Result<BailiwickZones, DnsError>`
+structural. `from_allowlist` (`src/dns/wire.rs::BailiwickZones::from_allowlist`) now returns `Result<BailiwickZones, DnsError>`
 and replaces the debug-only assert on the suffix slot with the typed
 `DnsError::BailiwickSuffixOverflow { got, max }` fail-stop check, propagated at boot through
 the new `StartupDnsError::BailiwickSuffixOverflow` variant (`src/dns/transport.rs`) so any future
@@ -1621,16 +1621,16 @@ Test: `from_allowlist_fails_stop_on_suffix_slot_overflow` (`src/dns/wire/tests.r
 Previously the apply step re-read the entry generation from the cache at the moment of
 publication, so an exchange that started against generation *G* and applied after the entry
 had advanced to *G*+1 would re-read *G*+1 and publish, defeating the guard. Now
-`start_exchange` (`src/dns/transport.rs:3159-3169`) takes the generation captured by its
-caller, and `ActiveExchange` carries it (`src/dns/transport.rs:232-236`); the apply step
-(`src/dns/transport.rs:2601`) passes `ex.generation` to `apply_outcome`, so an obsolete
+`start_exchange` (`src/dns/transport.rs::StartupDns`) takes the generation captured by its
+caller, and `ActiveExchange` carries it (`src/dns/transport.rs::ActiveExchange`); the apply step
+(`src/dns/transport.rs::StartupDns::publication_inputs`) passes `ex.generation` to `apply_outcome`, so an obsolete
 in-flight result is refused with `StaleGeneration` exactly as the guard intends. The
 startup blocking driver captures the current entry generation before starting
-(`src/dns/transport.rs:3345`), and the serving seam does the same
-(`src/runtime/storage.rs:1225`). A post-window probe is a pure sensor that never applies cache
+(`src/dns/transport.rs::StartupDns::exchange`), and the serving seam does the same
+(`src/runtime/storage.rs::ServeStorage::start_dns_exchange`). A post-window probe is a pure sensor that never applies cache
 state, so its exchange carries `Generation::INITIAL` and never compares
-(`src/dns/transport.rs:3608-3611`). Test: `stale_generation_is_refused_at_apply`
-(`src/dns/transport/tests.rs:1978-2027`) bumps the entry generation while an exchange is in
+(`src/dns/transport.rs::StartupDns::sweep_next_probe`). Test: `stale_generation_is_refused_at_apply`
+(`src/dns/transport/tests.rs::stale_generation_is_refused_at_apply`) bumps the entry generation while an exchange is in
 flight and asserts the apply is refused.
 
 
@@ -1668,38 +1668,38 @@ connection is always closed so the next exchange re-dials the restored or reloca
 
 
 Three claims are confirmed at source level. First, the fixed core is always encoded: the
-always-emitted monitor summary (`encode_monitor_summary`, `src/log/encoding.rs:795-816`) carries the
+always-emitted monitor summary (`encode_monitor_summary`, `src/log/encoding.rs::encode_monitor_summary`) carries the
 aggregate counters and ALL aggregate overflow flags folded into `ofacts`
-(`src/log/encoding.rs:818-850`: any-illegal, early-data, unknown, resolver-degraded, dns-anomaly,
+(`src/log/encoding.rs::write_monitor_globals`: any-illegal, early-data, unknown, resolver-degraded, dns-anomaly,
 downgrade-to-plain, probe-relocations, expired-pin-cert, ja4-change, ja4-seed) plus the
-per-ordinal `dx` hex loss bitset (`src/log/encoding.rs:933-944`). The adversarial-population
+per-ordinal `dx` hex loss bitset (`src/log/encoding.rs::write_monitor_loss_bitset`). The adversarial-population
 worst-case test `logging_monitor_all_saturated_record_fits_the_2k_slot`
-(`src/log/tests.rs:2039-2086`) saturates the whole Monitor (`saturate_all_for_test`) and asserts every
+(`src/log/tests.rs::logging_monitor_all_saturated_record_fits_the_2k_slot`) saturates the whole Monitor (`saturate_all_for_test`) and asserts every
 emitted record fits the 2 KiB slot, carrying `ofacts=1` / `ocapture_drops=1` / `sn=32` /
 `js=4294967295` / `d31p` — the fixed core is never dropped. Family-split variants assert the
-same worst case with serving-stale latched (`src/log/tests.rs:2089-2121`) and exactly one summary plus
-3 domain and 3 capture batches each under the 2048 B cap (`src/log/tests.rs:2144-2196`).
+same worst case with serving-stale latched (`src/log/tests.rs::logging_monitor_all_saturated_with_serving_stale_fits_the_2k_slot`) and exactly one summary plus
+3 domain and 3 capture batches each under the 2048 B cap (`src/log/tests.rs::logging_monitor_family_each_record_fits_monitor_record_max`).
 
 Second, JA4 detail is sharded: per-ordinal `d<i>j` (change count), `d<i>v` (36-byte JA4
 value), and `d<i>p` (latest-change peer IP) ride the best-effort `monitor_domain` detail
-batches (`src/log/encoding.rs:1023-1039`), packed `DOMAIN_BATCH=11` ordinals per batch so 32
+batches (`src/log/encoding.rs::encode_monitor_domain_batch`), packed `DOMAIN_BATCH=11` ordinals per batch so 32
 ordinals span 3 batches, never the fixed core. The counters live in
-`FactCounters` (`src/enforcement/monitor.rs:12-26`): `ja4_change`
+`FactCounters` (`src/enforcement/monitor.rs::FactCounters`): `ja4_change`
 `[SaturatingCounter; ALLOWLIST_MAX]`, `ja4_change_loss` `[bool; ALLOWLIST_MAX]`, `ja4_value`
 `[[u8; 36]; ALLOWLIST_MAX]`, `ja4_seed`, `ja4_peer_ip` `NumericAddr`, `ja4_peer_ordinal`
 `Option<DomainOrdinal>`. The serving path keeps a fixed 512-entry zero-heap
-`Ja4BaselineTable` (`src/runtime/reactor.rs:652-654`, `ALLOWLIST_MAX` × `MAX_ADDRESSES` = 32 × 16)
+`Ja4BaselineTable` (`src/runtime/reactor.rs::Ja4BaselineTable`, `ALLOWLIST_MAX` × `MAX_ADDRESSES` = 32 × 16)
 with `BaselineOutcome { Seed, Changed, Unchanged, Overflow }`; a new in-capacity value and a
 capacity overflow both count as a change signal.
 
 Third, an explicit loss flag exists on detail suppression:
-`note_fact_ja4_change` (`src/enforcement/monitor.rs:268-278`) counts the change and retains
+`note_fact_ja4_change` (`src/enforcement/monitor.rs::Monitor::note_fact_ja4_change`) counts the change and retains
 the value and peer; the overflow path additionally latches the per-ordinal `ja4_change_loss`
 flag (`note_fact_ja4_change_loss`, `src/enforcement/monitor.rs`) — the deviation decision
 fires regardless of set capacity, but the overflowed value is not added to the set, so the
 operator sees detail was suppressed. The summary always encodes the `dx` hex bitset of loss flags when any is set
-(`src/log/encoding.rs:933-944`); the exact-grammar test
-`logging_monitor_summary_exact_grammar_and_zero_suppression` (`src/log/tests.rs:1848`) asserts the
+(`src/log/encoding.rs::write_monitor_loss_bitset`); the exact-grammar test
+`logging_monitor_summary_exact_grammar_and_zero_suppression` (`src/log/tests.rs::logging_monitor_summary_exact_grammar_and_zero_suppression`) asserts the
 summary carries the fixed core and the `dx` bitset while the single nonzero domain block
 rides its `monitor_domain` batch.
 
@@ -1713,7 +1713,7 @@ decision that has to be taken before it can.
 
 `IP#fqdn` entries without `#pin-sha256=` validate the chain with
 `verify_server_cert_signed_by_trust_anchor` against `RootCertStore::empty()`
-(`src/dns/transport.rs:827`; §Verifier — strict pin + FQDN/SAN, or empty-root CA-chain), so
+(`src/dns/transport.rs::AluminaServerCertVerifier::verify_server_cert`; §Verifier — strict pin + FQDN/SAN, or empty-root CA-chain), so
 an unpinned entry fails closed and cannot reach a publicly-trusted resolver. The intake is
 therefore a prerequisite, not an enhancement: a `rust-dep-intake` crate decision over which
 trust anchors are carried (a webpki-roots bundle or a first-party bundle), their provenance
