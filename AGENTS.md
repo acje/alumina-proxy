@@ -5,10 +5,13 @@ constrained servers. Work here is governed by the fixed repository
 specification, not feature growth.
 
 ## Rust style
-Select the `alox-style` pointer skill; canonical rules are the sf-sdlc SSOT
-docs `docs/rust-style.md` + `docs/alox-style.md` (global pointers only). The
-fixed governing spec, allocation limits, numeric bounds, and verification
-gates here are unchanged.
+Select the `alox-style` pointer skill; the canonical rules are the sf-sdlc SSOT
+document [rust-style.md](https://github.com/acje/sf-sdlc/blob/main/docs/rust-style.md)
+(in the private fleet repository) and the public
+[AloxStyle](https://github.com/acje/aloxstyle/blob/main/aloxstyle.md) document;
+sf-sdlc retired its local copy in favour of that public guidance. The fixed
+governing spec, allocation limits, numeric bounds, and verification gates here
+are unchanged.
 
 ## Design direction
 
@@ -64,7 +67,7 @@ because one side "wins".
 ## Rules
 
 - `docs/alumina-proxy.md` is the sole, byte-canonical governing
-  specification (sha256 `d558a588cb547a3803bdeab6fa4b4d49c986798faa12c2eeb2a6a696e87329f4`) and is byte-frozen by default.
+  specification (sha256 `ad6a3788eccd5d067e179ce6958d4478839c02c8848a3db6ce9b80e7d357934f`) and is byte-frozen by default.
   Only an explicitly user-authorized, scoped governance amendment may change
   it. That increment must update the spec, this digest pin, code and tests
   together, pass required independent source and governance

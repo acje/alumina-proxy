@@ -1757,8 +1757,8 @@ lossy by construction on detail overflow.
 The proxy's facts are emitted only to the bounded stdout log. Its manager, `corundum`
 (https://github.com/acje/corundum — the managed-Alumina supervisor: signed image and config
 over NATS, warming standby, atomic host-level port swap, per-proxy metrics), carries **core
-NATS only** and lists JetStream or any NATS server-side feature as a non-goal
-(`docs/corundum.md` §2 Goals and non-goals, §7 Wire format). A durable events integration
+NATS only** and lists JetStream or any NATS server-side feature as a non-goal (the corundum
+architecture document §2 Goals and non-goals, §7 Wire format). A durable events integration
 therefore needs an explicit decision rather than an assumption: an event schema for proxy
 lifecycle (startup, promotion, refusal) and for tripwire/action facts, a delivery guarantee
 that survives process and host restart, and the anchor for durability (a store owned by the
