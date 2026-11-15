@@ -16,6 +16,12 @@ THE SEAMS A CASE OWNS
   writes. That is how each case chooses a verified answer, an error payload or
   an exit status. No network, no real index, no real `.repowise/`.
 
+  The same fake answers the batched `repowise context` prefilter from a second
+  table (`self.cards`), so a case can choose which citations the batch answers
+  and which ones fall through to a per-symbol call. An empty card table is the
+  degrading prefilter: every id is then resolved the slow way, which is also
+  what the pre-batching gate did.
+
   Cases 12-14 exercise type containment and the literal/comment traps through
   the shipped lexer reading fixture Rust sources, so the containment path is
   proven without the index.
@@ -34,12 +40,31 @@ ROOT = Path(__file__).resolve().parent.parent
 REF_CHECK = ROOT / "scripts/ref_check.py"
 
 FAKE_REPOWISE = '''#!{python}
-import json, os, sys
+import json, os, sys, time
+delay = float(os.environ.get("REF_CHECK_FAKE_SLEEP", "0"))
+if sys.argv[1] == "context":
+    # `context <paths...> --include symbols --format json`: answer with a card
+    # per requested path that the case's card table names, and nothing for the
+    # rest (an omitted target is the degradation the gate must survive).
+    paths = [a for a in sys.argv[2:] if not a.startswith("--")
+             and a not in ("symbols", "json")]
+    cards = {{}}
+    if os.environ.get("REF_CHECK_FAKE_CARDS"):
+        with open(os.environ["REF_CHECK_FAKE_CARDS"], encoding="utf-8") as handle:
+            cards = json.load(handle)
+    if delay:
+        time.sleep(delay * (len(paths) % 3))
+    sys.stdout.write(json.dumps({{"targets": {{
+        path: {{"type": "file", "docs": {{"symbols": cards[path]}}}}
+        for path in paths if path in cards}}}}))
+    sys.exit(0)
 symbol = sys.argv[2]
 log = os.environ.get("REF_CHECK_FAKE_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(symbol + "\\n")
+if delay:
+    time.sleep(delay * (len(symbol) % 5))
 entry = json.load(open(os.environ["REF_CHECK_FAKE_TABLE"], encoding="utf-8")).get(symbol)
 if entry is None:
     sys.stdout.write(json.dumps({{"error": "no such symbol: %s. Not in the index." % symbol}}))
@@ -96,6 +121,8 @@ class RefCheck(unittest.TestCase):
         self.write_verify_sh()
         self.write("docs/a.md", "Prose without any references.\n")
         self.table = {}
+        self.cards = {}
+        self.sleep = 0.0
         self.log = self.temp / "resolver-calls"
         self.git("init", "-q", "--template=")
         self.commit("base")
@@ -142,9 +169,13 @@ class RefCheck(unittest.TestCase):
         fake.chmod(0o755)
         table = self.temp / "resolver-table.json"
         table.write_text(json.dumps(self.table))
+        cards = self.temp / "card-table.json"
+        cards.write_text(json.dumps(self.cards))
         env = {**git_env(),
                "PATH": path if path is not None else f"{self.tools}:{os.environ['PATH']}",
                "REF_CHECK_FAKE_TABLE": str(table),
+               "REF_CHECK_FAKE_CARDS": str(cards),
+               "REF_CHECK_FAKE_SLEEP": str(self.sleep),
                "REF_CHECK_FAKE_LOG": str(self.log)}
         return subprocess.run(
             [sys.executable, str(self.repo / "scripts/ref_check.py")],
@@ -539,6 +570,80 @@ class RefCheck(unittest.TestCase):
         result = self.run_ref_check()
         self.assert_exit(result, 0, "REF-CHECK-OK 0")
         self.assertNotIn("continuation reference", result.stdout)
+
+    # -- 24-27: the batched prefilter is an optimisation, never the authority --
+    # A batched `context` card is trusted for a citation only when it names the
+    # construct positively; everything else falls back to the per-symbol call.
+    # These four cases pin that divide: it is what keeps the fast path from
+    # becoming a weaker gate.
+    def test_24_a_batched_card_answers_a_citation_without_a_symbol_call(self):
+        self.write("src/lib.rs", "pub struct Alpha {\n    pub value: u8,\n}\n")
+        self.write("docs/a.md", "See src/lib.rs::Alpha for the shape.\n")
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        self.cards = {"src/lib.rs": [{"name": "Alpha", "kind": "struct", "line": 1}]}
+        result = self.run_ref_check()
+        self.assert_exit(result, 0, "REF-CHECK-OK 1")
+        self.assertEqual(self.calls(), [],
+                         "the batch answered positively; no symbol call is owed")
+
+    def test_25_a_citation_the_batch_did_not_answer_is_resolved_per_symbol(self):
+        # The card table names another construct in the same file, which is the
+        # shape of an incomplete card (repowise budgets its batched output and
+        # drops targets). Silence is never a finding and never a pass: it is
+        # owed a resolver call.
+        self.write("src/lib.rs", "pub struct Alpha {\n    pub value: u8,\n}\n")
+        self.write("docs/a.md", "See src/lib.rs::Alpha for the shape.\n")
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        self.cards = {"src/lib.rs": [{"name": "Beta", "kind": "struct", "line": 1}]}
+        self.table = {"src/lib.rs::Alpha": verified("src/lib.rs", 1, 3)}
+        result = self.run_ref_check()
+        self.assert_exit(result, 0, "REF-CHECK-OK 1")
+        self.assertEqual(self.calls(), ["src/lib.rs::Alpha"])
+
+    def test_26_a_batched_card_still_pays_the_containment_contract(self):
+        # A card is an answer, not a bypass: the member line it reports is put
+        # through the same enclosing-declaration read as a resolver payload, so
+        # a card naming the other type's `member` is still a finding.
+        _, member_b = self.fixture_types()
+        self.write("docs/a.md", "See src/fixture.rs::TypeA::member.\n")
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        self.cards = {"src/fixture.rs": [
+            {"name": "TypeA", "kind": "struct", "line": 1},
+            {"name": "member", "kind": "field", "line": member_b,
+             "symbol_id": "src/fixture.rs::TypeA::member"},
+        ]}
+        result = self.run_ref_check()
+        self.assert_exit(result, 1, "REF-CHECK-FINDING")
+        self.assertIn("type-containment: src/fixture.rs::TypeA::member", result.stdout)
+        self.assertEqual(self.calls(), [], "both ids were card-answered")
+
+    def test_27_output_is_independent_of_resolver_completion_order(self):
+        # The workers finish in whatever order they finish. Output order is a
+        # function of the corpus (sorted findings), never of the pool, so two
+        # runs of the same corpus must be byte-identical.
+        self.write("src/lib.rs", (
+            "pub struct Alpha {}\npub struct Beta {}\npub struct Gamma {}\n"))
+        self.write("docs/a.md", (
+            "See src/lib.rs::Gamma, src/lib.rs::Alpha and src/lib.rs::Missing.\n"))
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        self.table = {
+            "src/lib.rs::Alpha": verified("src/lib.rs", 1, 1),
+            "src/lib.rs::Beta": verified("src/lib.rs", 2, 2),
+            "src/lib.rs::Gamma": verified("src/lib.rs", 3, 3),
+        }
+        self.sleep = 0.02
+        first = self.run_ref_check()
+        second = self.run_ref_check()
+        self.assert_exit(first, 1, "REF-CHECK-FINDING")
+        self.assertEqual(first.stdout, second.stdout)
+        findings = [line for line in first.stdout.splitlines()
+                    if line.startswith("REF-CHECK-FINDING ")]
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings, sorted(findings))
 
 
 if __name__ == "__main__":

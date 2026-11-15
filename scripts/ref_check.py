@@ -47,6 +47,42 @@ STALENESS
       1812405b5c9130a170d1e00988b2a77d80d86e3d
   and the `repowise status` table reports the identical "Last sync commit".
 
+RESOLUTION (batched, parallel, order-stable)
+  `repowise symbol` is still what answers a citation; what changed is how many
+  of those subprocesses are needed. Each costs ~0.65s of interpreter start-up
+  and the corpus cites 216 distinct ids, so the serial run measured 2m19s --
+  long enough that an enforcing gate gets routed around, which is the same as
+  having no gate. Two things cut the cost without cutting a check.
+
+  (a) A batched prefilter. A `repowise context <path> --include symbols
+      --format json` call reports, for one file, the symbols the index holds in
+      it: name, kind and declaration line. A citation is answered from that card
+      only when the card names it POSITIVELY -- the leaf name for a
+      `path::Name` citation, the full symbol id for a `path::Type::member` one --
+      and the card's answer then pays the same checks a resolver payload pays
+      (reported file, intermediate kind, member line containment). A card is
+      never evidence that something is absent: repowise budgets the whole
+      batched response and silently omits targets (see
+      CONTEXT_PATHS_PER_CALL), so an id the prefilter did not answer -- target
+      omitted, call failed, payload unreadable, call timed out -- is resolved
+      with `repowise symbol` exactly as before. The prefilter can make this gate
+      slower or faster; it cannot make it prove less.
+
+  (b) Bounded parallelism over the ids that still need that call. The batches
+      and the per-symbol resolutions both run on a ThreadPoolExecutor; each
+      answer is filed under its symbol id, and the corpus is walked in sorted id
+      order afterwards, so findings and counts do not depend on which worker
+      finished first. A BLOCKED answer raised anywhere in the pool is reported
+      for the first such id in sorted order, for the same reason.
+
+  No cache is kept between runs. The bead that commissioned this allows one
+  keyed on both HEAD and `indexed_commit`; it is declined because a stored
+  answer table is the exact artifact this gate refuses everywhere else (see
+  EXEMPTIONS: a text-based exemption is a baseline by another name), and its own
+  key would make it nearly worthless -- HEAD advances with every commit, so a
+  run against a new commit is always cold. The speed is bought by batching and
+  parallelism, both re-derived from the index on every run.
+
 RESOLVER EXIT CODES (measured, not assumed)
   `repowise symbol <id> --format json` exits 0 for a symbol it found and 1 for a
   symbol it did not find, writing the "not found" explanation as the `{"error":
@@ -151,11 +187,22 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERIFY_SH = os.path.join(REPO_ROOT, "scripts", "verify.sh")
 INDEX_STATE = os.path.join(REPO_ROOT, ".repowise", "state.json")
 RESOLVER_TIMEOUT_SECONDS = 120
+# How many paths one batched prefilter call may ask about, and how wide the pool
+# runs. `repowise context` budgets the WHOLE response, not one target within it,
+# and drops the targets that do not fit without saying so -- measured on this
+# corpus (37 cited files, 216 cited ids): 20 paths answered 2 files / 0 ids, 10
+# answered 20 / 11, 5 answered 28 / 41, 2 answered 31 / 126, 1 answered 37 / 165.
+# So a call asks about one path, and the parallelism is what makes the prefilter
+# cheap; a larger batch would trade coverage (and therefore time) for nothing.
+# Coverage only ever costs a fallback call, never a proof (see RESOLUTION).
+CONTEXT_PATHS_PER_CALL = 1
+RESOLVER_WORKERS = 16
 
 # Two token classes, one path prefix: a live symbol reference (what the gate
 # verifies) and a live line reference (what the ratchet forbids from returning).
@@ -444,6 +491,117 @@ def resolve(repowise, symbol_id):
     return payload
 
 
+def _card_entries(card):
+    """The usable symbol entries of one batched context card.
+
+    An entry is usable only when it carries all three things the gate compares:
+    a name, a kind and a declaration line. A card that omits one is treated as
+    silence for every id it might have covered, which sends those ids to the
+    per-symbol resolver.
+    """
+    docs = card.get("docs") if isinstance(card, dict) else None
+    symbols = docs.get("symbols") if isinstance(docs, dict) else None
+    if not isinstance(symbols, list):
+        return []
+    usable = []
+    for entry in symbols:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        kind = entry.get("kind")
+        line = entry.get("line")
+        if not isinstance(name, str) or not isinstance(kind, str):
+            continue
+        if not isinstance(line, int) or isinstance(line, bool):
+            continue
+        usable.append(
+            {
+                "name": name,
+                "kind": kind,
+                "line": line,
+                "symbol_id": entry.get("symbol_id"),
+            }
+        )
+    return usable
+
+
+def _context_cards(repowise, paths):
+    """{path: [entry]} from one batched `repowise context` call.
+
+    Never raises. The prefilter is an optimisation, and a call that fails, times
+    out or omits a requested target leaves those ids to the per-symbol resolver,
+    which is the gate's authority (see RESOLUTION). That is also why an absent
+    path is not read as a symbol's absence: repowise budgets its batched output
+    and drops targets without saying so.
+    """
+    if not paths:
+        return {}
+    try:
+        proc = subprocess.run(
+            [repowise, "context"]
+            + list(paths)
+            + ["--include", "symbols", "--format", "json"],
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=RESOLVER_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if proc.returncode != 0:
+        return {}
+    payload = _first_json_object(proc.stdout.decode("utf-8", "replace"))
+    targets = payload.get("targets") if isinstance(payload, dict) else None
+    if not isinstance(targets, dict):
+        return {}
+    cards = {}
+    for path in paths:
+        entries = _card_entries(targets.get(path))
+        if entries:
+            cards[path] = entries
+    return cards
+
+
+def batched_cards(repowise, paths):
+    """{path: [entry]} over every cited path, in bounded parallel batches."""
+    ordered = sorted(paths)
+    batches = [
+        ordered[index:index + CONTEXT_PATHS_PER_CALL]
+        for index in range(0, len(ordered), CONTEXT_PATHS_PER_CALL)
+    ]
+    if not batches:
+        return {}
+    cards = {}
+    with ThreadPoolExecutor(max_workers=min(RESOLVER_WORKERS, len(batches))) as pool:
+        for answered in pool.map(lambda batch: _context_cards(repowise, batch), batches):
+            cards.update(answered)
+    return cards
+
+
+def card_for(symbol_id, entries):
+    """The card entry that positively identifies `symbol_id`, or None.
+
+    A qualified citation must match the card's own symbol id: the card lists the
+    members of every type in the file, and matching by leaf name would let it
+    answer with another type's member -- precisely the confusion the containment
+    check exists to catch. A plain citation matches by leaf name, and only when
+    every entry carrying that name agrees about kind and line; a disagreement is
+    handed to the per-symbol resolver, which is the authority.
+    """
+    parts = symbol_id.split("::")
+    if len(parts) > 2:
+        hits = [entry for entry in entries if entry.get("symbol_id") == symbol_id]
+    else:
+        hits = [entry for entry in entries if entry["name"] == parts[-1]]
+    if not hits:
+        return None
+    first = hits[0]
+    for other in hits[1:]:
+        if (other["kind"], other["line"]) != (first["kind"], first["line"]):
+            return None
+    return first
+
+
 def _bounds(payload):
     """Containment bounds for the verified construct, or None when unreported.
 
@@ -482,6 +640,58 @@ def verdict(payload, path_part):
         if start < 1 or end < start:
             return "out-of-range bounds: symbol spans %d-%d" % (start, end)
     return None
+
+
+def _card_answer(entry):
+    """The answer a batched card carries, in the shape the checks consume."""
+    return {
+        "kind": entry["kind"],
+        "line": entry["line"],
+        "reason": None,
+        "source": "batched card",
+    }
+
+
+def _payload_answer(payload, path_part):
+    """The answer a per-symbol resolver payload carries."""
+    bounds = _bounds(payload)
+    return {
+        "kind": payload.get("kind"),
+        "line": None if bounds is None else bounds[0],
+        "reason": verdict(payload, path_part),
+        "source": "repowise symbol",
+    }
+
+
+def resolve_all(repowise, symbol_ids):
+    """{symbol_id: payload} for every id, on a bounded thread pool.
+
+    BLOCKED wins: when any id comes back operational (resolver absent, exit 2,
+    unreadable answer) the run is BLOCKED, and the id reported is the first in
+    sorted order rather than the first to finish, so the message is a function
+    of the corpus too.
+    """
+    if not symbol_ids:
+        return {}
+
+    def one(symbol_id):
+        try:
+            return resolve(repowise, symbol_id)
+        except Blocked as exc:
+            return exc
+
+    payloads = {}
+    blocked = {}
+    with ThreadPoolExecutor(max_workers=min(RESOLVER_WORKERS, len(symbol_ids))) as pool:
+        for symbol_id, result in zip(symbol_ids, pool.map(one, symbol_ids)):
+            if isinstance(result, Blocked):
+                blocked[symbol_id] = result
+            else:
+                payloads[symbol_id] = result
+    for symbol_id in symbol_ids:
+        if symbol_id in blocked:
+            raise blocked[symbol_id]
+    return payloads
 
 
 def _declaration_header(header):
@@ -805,16 +1015,41 @@ def main():
         )
 
     findings = []
-    answers = {}
-
-    def answer(symbol_id):
-        # One resolver call per distinct id: qualifications and leaves overlap
-        # heavily across citations, and the resolver is the slow step.
-        if symbol_id not in answers:
-            answers[symbol_id] = resolve(repowise, symbol_id)
-        return answers[symbol_id]
-
     unique_ids = sorted({_plain(token) for hits in symbols.values() for _, token in hits})
+
+    # Every id this run will ask about: each citation whose path exists, plus
+    # every enclosing segment a qualified citation names (see TYPE CONTAINMENT).
+    # One answer per distinct id -- the same memo the serial run kept -- except
+    # that the expensive answers are fetched in bulk and in parallel (see
+    # RESOLUTION), and a citation the batch did not positively identify is left
+    # to the per-symbol resolver.
+    resolvable = [
+        symbol_id
+        for symbol_id in unique_ids
+        if os.path.exists(os.path.join(REPO_ROOT, symbol_id.split("::")[0]))
+    ]
+    wanted = set(resolvable)
+    for symbol_id in resolvable:
+        parts = symbol_id.split("::")
+        for depth in range(2, len(parts)):
+            wanted.add("::".join(parts[:depth]))
+    resolve_ids = sorted(wanted)
+
+    cards = batched_cards(repowise, {symbol_id.split("::")[0] for symbol_id in resolve_ids})
+    answers = {}
+    for symbol_id in resolve_ids:
+        entry = card_for(symbol_id, cards.get(symbol_id.split("::")[0], []))
+        if entry is not None:
+            answers[symbol_id] = _card_answer(entry)
+    payloads = resolve_all(
+        repowise, [symbol_id for symbol_id in resolve_ids if symbol_id not in answers]
+    )
+    for symbol_id in resolve_ids:
+        if symbol_id not in answers:
+            answers[symbol_id] = _payload_answer(
+                payloads[symbol_id], symbol_id.split("::")[0]
+            )
+
     verified_ids = set()
     for symbol_id in unique_ids:
         parts = symbol_id.split("::")
@@ -832,29 +1067,29 @@ def main():
         reason = None
         for depth in range(2, len(parts)):
             qualifier = "::".join(parts[:depth])
-            qualifier_payload = answer(qualifier)
-            reason = verdict(qualifier_payload, path_part)
+            qualifier_answer = answers[qualifier]
+            reason = qualifier_answer["reason"]
             if reason is not None:
                 reason = "%s: %s" % (qualifier, reason)
                 break
-            if qualifier_payload.get("kind") not in TYPE_LIKE_KINDS:
+            if qualifier_answer["kind"] not in TYPE_LIKE_KINDS:
                 reason = "%s: intermediate segment resolves to kind %r, not a type-like construct" % (
                     qualifier,
-                    qualifier_payload.get("kind"),
+                    qualifier_answer["kind"],
                 )
                 break
             prefixes.append((qualifier, parts[depth - 1]))
         if reason is not None:
             findings.append("%s: %s" % (symbol_id, reason))
             continue
-        payload = answer(symbol_id)
-        reason = verdict(payload, path_part)
+        leaf = answers[symbol_id]
+        reason = leaf["reason"]
         if reason is not None:
             findings.append("%s: %s" % (symbol_id, reason))
             continue
         if prefixes:
-            bounds = _bounds(payload)
-            if bounds is None:
+            member_line = leaf["line"]
+            if member_line is None:
                 # Containment is the whole point of the multi-segment form: a
                 # member the resolver places nowhere cannot be attributed, and
                 # an unattributable citation is not a verified one.
@@ -863,7 +1098,7 @@ def main():
                     "member, so its enclosing type cannot be checked" % symbol_id
                 )
                 continue
-            reason = type_containment(path_part, bounds[0], symbol_id, prefixes)
+            reason = type_containment(path_part, member_line, symbol_id, prefixes)
             if reason is not None:
                 findings.append(reason)
                 continue
