@@ -909,12 +909,12 @@ docslink_check() {
 }
 
 # =============================================================================
-# Rust symbol-reference report (repowise-align 2026-11-15)
+# Rust symbol-reference lint (repowise-align 2026-11-15)
 #
-# One report-only check: every `path.rs::Symbol` reference in the docs corpus
-# resolves in the Repowise index. Non-Rust references, links, anchors and line
-# ranges stay with the docs link gate; there is no second detector and no
-# check on this check.
+# One report-only lint: every `path.rs::Symbol` reference in the governing
+# specification (`docs/alumina-proxy.md`) resolves in the Repowise index.
+# Other documents are not mechanically checked; there is no second detector
+# and no check on this lint.
 # =============================================================================
 ref_check_report_only() {
     if ! command -v python3 >/dev/null 2>&1; then

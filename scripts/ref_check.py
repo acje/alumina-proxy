@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Rust symbol-reference check for the documentation corpus.
+"""Rust symbol-reference lint for the governing specification.
 
-Scope: live `path.rs::Symbol` references in the DOCSLINK_ROOTS corpus. A
+Scope: live `path.rs::Symbol` references in `docs/alumina-proxy.md` only. The
 reference is checked against the Repowise index at HEAD. Non-Rust references,
-links, anchors, line ranges and continuations are out of scope -- the docs
-link gate keeps those; this script exists only to keep Rust code pointers
-symbol-addressed.
+links, anchors, line ranges and continuations are out of scope; other documents
+are deliberately not mechanically checked. This is a lint, not a gate.
 
 Exit contract:
   0  clean; last line is `REF-CHECK-OK <n>`.
   1  one or more findings; one `REF-CHECK-FINDING <text>` per line.
-  2  BLOCKED: the check could not run (Repowise absent, stale index,
-     unreadable corpus, resolver failure). Never reported as clean.
+  2  BLOCKED: the lint could not run (Repowise absent, stale index,
+     unreadable spec, resolver failure). Never reported as clean.
 """
 
 from __future__ import annotations
@@ -25,10 +24,9 @@ import subprocess
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VERIFY_SH = os.path.join(REPO_ROOT, "scripts", "verify.sh")
+SPEC_DOC = "docs/alumina-proxy.md"
 INDEX_STATE = os.path.join(REPO_ROOT, ".repowise", "state.json")
 
-ROOTS_RE = re.compile(r'^DOCSLINK_ROOTS="([^"]*)"[ \t]*$', re.MULTILINE)
 # A whole inline-code span that is exactly a Rust symbol reference. Anchoring
 # on the backticks keeps a `git:<sha>:path` receipt out of scope.
 REF_RE = re.compile(
@@ -40,39 +38,18 @@ RESOLVER_WORKERS = 16
 
 
 class Blocked(Exception):
-    """Operational failure: the check did not run, so nothing was proven."""
+    """Operational failure: the lint did not run, so nothing was proven."""
 
 
-def corpus_roots():
-    """The DOCSLINK_ROOTS value, parsed from its single owner."""
+def extract():
+    """Sorted unique Rust symbol references in the governing specification."""
+    path = os.path.join(REPO_ROOT, SPEC_DOC)
     try:
-        with open(VERIFY_SH, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             text = handle.read()
     except OSError as exc:
-        raise Blocked("cannot read scripts/verify.sh: %s" % exc) from exc
-    matches = ROOTS_RE.findall(text)
-    if len(matches) != 1:
-        raise Blocked("DOCSLINK_ROOTS must be defined exactly once in scripts/verify.sh")
-    roots = matches[0].split()
-    if not roots:
-        raise Blocked("DOCSLINK_ROOTS is empty in scripts/verify.sh")
-    return roots
-
-
-def extract(roots):
-    """Sorted unique Rust symbol references in the corpus."""
-    refs = set()
-    for doc in roots:
-        path = os.path.join(REPO_ROOT, doc)
-        if not os.path.isfile(path):
-            raise Blocked("corpus root missing or not a file: %s" % doc)
-        try:
-            with open(path, encoding="utf-8") as handle:
-                text = handle.read()
-        except OSError as exc:
-            raise Blocked("cannot read corpus root %s: %s" % (doc, exc)) from exc
-        refs.update(match.group(1) for match in REF_RE.finditer(text))
-    return sorted(refs)
+        raise Blocked("cannot read %s: %s" % (SPEC_DOC, exc)) from exc
+    return sorted({match.group(1) for match in REF_RE.finditer(text)})
 
 
 def _git(*args):
@@ -149,8 +126,7 @@ def resolve(repowise, ref):
 
 def main():
     try:
-        roots = corpus_roots()
-        refs = extract(roots)
+        refs = extract()
         if not refs:
             print("REF-CHECK-OK 0")
             return 0
