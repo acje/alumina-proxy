@@ -112,7 +112,7 @@ INTENDED="Cargo.toml Cargo.lock deny.toml scripts/verify.sh scripts/cargo_config
 # Doc-gate roots: the primary docs the identity snapshot covers. The Repowise
 # drift gate scans the full tracked corpus; this list keeps the boundary
 # content identity stable for the docs that gate reads most.
-DOC_GATE_ROOTS="docs/alumina-proxy.md docs/trust-telemetry-design.md docs/trust-chain-design.md docs/deployment.md docs/monitoring.md docs/verification.md docs/qa-package/README.md README.md"
+DOC_GATE_ROOTS="docs/alumina-proxy.md docs/trust-chain-design.md docs/deployment.md docs/monitoring.md docs/verification.md docs/qa-package/README.md README.md"
 
 # B1: every relevant before/after identity input consumed by the boundary run:
 # source/config/lock/deny plus the docs and .gitignore that the docs gate and
