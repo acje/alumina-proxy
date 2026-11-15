@@ -462,17 +462,45 @@ def _skip_char_literal(text, index):
     return following
 
 
+def _block_header(brace_text, brace_line, statement_text, statement_line):
+    """The reading of a block header that actually declares something.
+
+    A declaration can follow a brace-less statement, and such a statement leaves
+    no brace boundary behind: after `use super::{ ... };` or `const LIMIT: u8 =
+    1;` the tightest boundary for the next `impl`/`struct` is the statement
+    terminator. Reading only from the brace boundary yields a header like
+    "; impl LogStore", which declares nothing, so the block is unattributable
+    and every qualified citation into it is falsely rejected.
+
+    A `;` can also sit INSIDE a declaration header -- a const-generic array
+    length, `where [(); N]: Sized` -- where the tightest boundary amputates the
+    declaration (`N]: Sized,`). The whole segment since the previous brace
+    boundary is still a valid reading there, so it is kept as the fallback.
+    Asking which reading yields a declaration is what keeps this a header
+    reader rather than a statement parser: no statement grammar is modelled,
+    and a block that declares nothing keeps its previous header verbatim (the
+    enclosing-block text diagnostics quote).
+    """
+    for text, start in ((statement_text, statement_line), (brace_text, brace_line)):
+        if _declared_type(text)[0] is not None:
+            return text, start
+    return brace_text, brace_line
+
+
 @functools.lru_cache(maxsize=None)
 def _brace_blocks(path):
     """Every brace-delimited block in `path`: [(header text, start line, end)].
 
-    The header is the text between the previous brace boundary and the opening
-    brace, which is how `impl fmt::Display for ConnectError` and
-    `pub enum ConnectError` are recovered without a Rust parser. Braces inside
-    comments, string literals, raw strings and character literals are not
-    structure and are skipped: a `"{"` in a format string would otherwise shift
-    every enclosing-block reading below it. Cached because a document cites one
-    file many times and the file is scanned only to answer line attribution.
+    The header is the text since the previous block boundary, which is how
+    `impl fmt::Display for ConnectError` and `pub enum ConnectError` are
+    recovered without a Rust parser. Two boundaries count, because a block can
+    follow either: a brace (`{` / `}`) or a statement terminator (`;`). See
+    `_block_header` for why both readings exist and how they are chosen.
+    Braces inside comments, string literals, raw strings, character literals
+    and statement terminators inside those same literals are not structure and
+    are skipped: a `"{"` in a format string would otherwise shift every
+    enclosing-block reading below it. Cached because a document cites one file
+    many times and the file is scanned only to answer line attribution.
     """
     text = _read_text(os.path.join(REPO_ROOT, path))
     length = len(text)
@@ -481,6 +509,8 @@ def _brace_blocks(path):
     line = 1
     boundary = 0
     boundary_line = 1
+    statement = 0
+    statement_line = 1
     index = 0
     while index < length:
         char = text[index]
@@ -530,17 +560,25 @@ def _brace_blocks(path):
         elif char == "'":
             index = _skip_char_literal(text, index)
         elif char == "{":
-            stack.append((text[boundary:index], boundary_line))
+            header, start = _block_header(
+                text[boundary:index], boundary_line,
+                text[statement:index], statement_line,
+            )
+            stack.append((header, start))
             index += 1
-            boundary = index
-            boundary_line = line
+            boundary = statement = index
+            boundary_line = statement_line = line
         elif char == "}":
             if stack:
                 header, start = stack.pop()
                 blocks.append((header, start, line))
             index += 1
-            boundary = index
-            boundary_line = line
+            boundary = statement = index
+            boundary_line = statement_line = line
+        elif char == ";":
+            index += 1
+            statement = index
+            statement_line = line
         else:
             index += 1
     return blocks

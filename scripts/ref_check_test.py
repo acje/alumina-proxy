@@ -380,6 +380,88 @@ class RefCheck(unittest.TestCase):
         self.assert_exit(result, 0, "REF-CHECK-OK 1")
         self.assertNotIn("type-containment", result.stdout)
 
+    # -- 15-17: statement-terminator boundaries -------------------------------
+    # A declaration can follow a brace-less statement. Measured defect (P1.11):
+    # `use super::{ ... };` leaves no brace boundary, so the next impl was read
+    # as `; impl LogStore`, declared nothing, and every qualified citation into
+    # it was rejected as "sits outside every declaration".
+    def test_15_an_impl_after_a_use_group_is_attributable(self):
+        source = self.write("src/logstore.rs", (
+            "use super::{\n"
+            "    Cursor, LOG_RETRY, LogStore,\n"
+            "};\n"
+            "\n"
+            "impl LogStore {\n"
+            "    pub fn drain_sink(&mut self) {\n"
+            "        self.queued = 0;\n"
+            "    }\n"
+            "}\n"))
+        lines = source.read_text().splitlines()
+        member = lines.index("        self.queued = 0;") + 1
+        self.write("docs/a.md", "See src/logstore.rs::LogStore::drain_sink.\n")
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        self.table = {
+            "src/logstore.rs::LogStore": verified("src/logstore.rs", 5, 9, kind="impl"),
+            "src/logstore.rs::LogStore::drain_sink": verified(
+                "src/logstore.rs", member, kind="function"),
+        }
+        result = self.run_ref_check()
+        self.assert_exit(result, 0, "REF-CHECK-OK 1")
+        self.assertNotIn("type-containment", result.stdout)
+
+    def test_16_a_struct_and_an_enum_after_a_const_statement_are_attributable(self):
+        source = self.write("src/window.rs", (
+            "const LIMIT: usize = 8;\n"
+            "\n"
+            "pub struct Window {\n"
+            "    pub member: u8,\n"
+            "}\n"
+            "\n"
+            "pub enum Mode {\n"
+            "    Idle,\n"
+            "}\n"))
+        lines = source.read_text().splitlines()
+        field = lines.index("    pub member: u8,") + 1
+        variant = lines.index("    Idle,") + 1
+        self.write("docs/a.md", (
+            "See src/window.rs::Window::member and src/window.rs::Mode::Idle.\n"))
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        self.table = {
+            "src/window.rs::Window": verified("src/window.rs", 3, 5),
+            "src/window.rs::Window::member": verified("src/window.rs", field, kind="field"),
+            "src/window.rs::Mode": verified("src/window.rs", 7, 9, kind="enum"),
+            "src/window.rs::Mode::Idle": verified("src/window.rs", variant, kind="enum"),
+        }
+        result = self.run_ref_check()
+        self.assert_exit(result, 0, "REF-CHECK-OK 2")
+        self.assertNotIn("type-containment", result.stdout)
+
+    def test_17_a_statement_terminator_inside_a_header_does_not_amputate_it(self):
+        # `[(); N]` carries a `;` before the opening brace. A boundary reader
+        # that trusted only the last terminator would keep "N]: Sized," and lose
+        # the declaration entirely, so the whole segment must stay readable.
+        source = self.write("src/holder.rs", (
+            "pub struct Holder<const N: usize>\n"
+            "where\n"
+            "    [(); N]: Sized,\n"
+            "{\n"
+            "    pub member: u8,\n"
+            "}\n"))
+        lines = source.read_text().splitlines()
+        field = lines.index("    pub member: u8,") + 1
+        self.write("docs/a.md", "See src/holder.rs::Holder::member.\n")
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        self.table = {
+            "src/holder.rs::Holder": verified("src/holder.rs", 1, 6),
+            "src/holder.rs::Holder::member": verified("src/holder.rs", field, kind="field"),
+        }
+        result = self.run_ref_check()
+        self.assert_exit(result, 0, "REF-CHECK-OK 1")
+        self.assertNotIn("type-containment", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
