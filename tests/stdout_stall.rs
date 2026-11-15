@@ -1,6 +1,8 @@
 #[path = "support/process_harness.rs"]
 mod process_harness;
-use process_harness::{Refusal, boot_serving_runtime, spawn_piped_child, wait_for_success};
+use process_harness::{
+    Refusal, boot_serving_runtime, run_child_or_parent, spawn_piped_child, wait_for_success,
+};
 
 use std::time::Duration;
 
@@ -11,11 +13,7 @@ const LOOPS: usize = 2000;
 const SETTLE_TURNS: usize = 4;
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("--child") {
-        child_main();
-    } else {
-        parent_main();
-    }
+    run_child_or_parent(parent_main, child_main);
 }
 
 /// Spawns the child with a piped stdout that is never read, so the pipe fills,

@@ -1,7 +1,8 @@
 #[path = "support/process_harness.rs"]
 mod process_harness;
 use process_harness::{
-    Refusal, boot_serving_runtime, capture_stdout, spawn_piped_child, wait_for_success,
+    Refusal, boot_serving_runtime, capture_stdout, run_child_or_parent, spawn_piped_child,
+    wait_for_success,
 };
 
 use std::time::{Duration, Instant};
@@ -14,11 +15,7 @@ const DRAIN_EVERY: usize = 50;
 const DRAIN_PAUSE: Duration = Duration::from_millis(30);
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("--child") {
-        child_main();
-    } else {
-        parent_main();
-    }
+    run_child_or_parent(parent_main, child_main);
 }
 
 struct MonitorRecords<'a> {

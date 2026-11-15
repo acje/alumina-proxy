@@ -1,9 +1,10 @@
 //! Test-only owner of the harness shared by every gate binary: a child copy's
-//! executable path, a piped child spawn, the two bounded exit waits, the
-//! stdout capture, the serving config document and boot the child starts from,
-//! and the one-exchange refusal driver the parent-side gates replay. Both waits
-//! kill and reap a child that outlives its deadline, so a hung or leaked child
-//! fails its own test rather than the runner.
+//! executable path, the `--child` dispatch that selects a child body from the
+//! parent's own entry point, a piped child spawn, the two bounded exit waits,
+//! the stdout capture, the serving config document and boot the child starts
+//! from, and the one-exchange refusal driver the parent-side gates replay. Both
+//! waits kill and reap a child that outlives its deadline, so a hung or leaked
+//! child fails its own test rather than the runner.
 #![allow(
     dead_code,
     reason = "shared `#[path]` owner; each inclusion site uses only its subset"
@@ -21,17 +22,31 @@ use alumina::config::{Config, parse_config_document};
 use alumina::inventory::TrafficStorage;
 use alumina::runtime::{Runtime, ServeStorage};
 
+/// The first process argument that selects a gate binary's child body over its
+/// parent body.
+pub(super) const CHILD_FLAG: &str = "--child";
+
 /// This test binary's own path: the parent spawns the same executable in a
 /// child mode.
 pub(super) fn current_exe() -> PathBuf {
     std::env::current_exe().expect("current executable path")
 }
 
+/// Runs `child` when this process was spawned in `--child` mode, `parent`
+/// otherwise.
+pub(super) fn run_child_or_parent(parent: fn(), child: fn()) {
+    if std::env::args().nth(1).as_deref() == Some(CHILD_FLAG) {
+        child();
+    } else {
+        parent();
+    }
+}
+
 /// Spawns this binary in `--child` mode with a piped stdout the parent owns and
 /// inherited stderr.
 pub(super) fn spawn_piped_child() -> Child {
     Command::new(current_exe())
-        .arg("--child")
+        .arg(CHILD_FLAG)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
