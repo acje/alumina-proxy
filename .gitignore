@@ -1,13 +1,7 @@
 .ooda/
 
-# Intake anchor snapshot (excluded from publication; pre-intake lock baseline)
-Cargo.lock.pre
-
 # Cargo build artifacts
 target/
-
-# Node tooling installs (scripts/docs_check)
-node_modules/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

@@ -18,26 +18,13 @@ general-purpose gateway, an ingress defense, or an encrypted-payload inspector.
 ## Design principles
 
 Alumina follows [AloxStyle](https://github.com/acje/aloxstyle) for Rust code.
-
-- **Narrow authority.** Admit allowlisted HTTP CONNECT destinations, validate
-  the initial TLS 1.3 ClientHello and matching SNI, then relay without
-  decryption. Additional protocols and runtime controls are outside the fixed
-  scope.
-- **Bounded execution.** Fixed capacities, a single boot owner and a single
-  serving owner, and two reused 128 KiB directional buffers per tunnel constrain
-  resource use and make invariants explicit and verifiable.
-- **Allocation discipline.** Serving and DNS-refresh paths reuse storage
-  allocated at initialization, with no first-party heap allocation or
-  deallocation except the authorized per-connect DoT setup. Bounded dependency
-  allocations are outside that invariant's scope; see the
-  [allocation contract](docs/alumina-proxy.md#zero-allocation-invariant-scope).
-- **No silent acceptance.** Every deviation on the defined CONNECT,
-  initial-ClientHello, and tripwire surfaces triggers action. The operator
-  chooses `notify` or `block`; Alumina owns the enforcement semantics.
-
-Robustness comes from these constraints, not an expanding feature set. The
-lightweight, statically linked single binary is an implementation of that
-design.
+The governing requirements are the [specification](docs/alumina-proxy.md). Its
+design constraints are narrow authority, bounded execution (fixed capacities,
+one boot owner, one serving owner, two reused 128 KiB per-tunnel buffers), the
+[allocation contract](docs/alumina-proxy.md#zero-allocation-invariant-scope),
+and no silent acceptance of any deviation on the defined CONNECT,
+initial-ClientHello and tripwire surfaces: the operator chooses `notify` or
+`block`, the proxy owns the semantics.
 
 ## Security boundaries
 
@@ -63,32 +50,13 @@ design.
 
 ## DNS assurance
 
-Each allowlisted `name:port` has an immutable minimum that must be declared
-explicitly: `dns_assurance` is mandatory, and a missing key fails startup with
-exit 78. `resolver_trusted` preserves legacy bounded stale-serving; operators
-can select `resolver_authenticated` or `delegated_dnssec`. Both stronger
-settings require every configured resolver to be strict-pinned and the operator
-to declare `root_validating_no_stale`. Delegated DNSSEC additionally requires
-the resolver's AD verdict. The proxy does not independently validate DNSSEC or
-establish the resolver's trust anchors, clock or no-stale behavior; those are
-deployment conditions, not consequences of the AD bit.
-
-Startup readiness and every actual upstream connection attempt, including
-retries, check the entry's current proof against its minimum. Strong profiles
-do not admit expired or absent proof, promote zero-TTL evidence, or silently
-fall back to weaker resolution. A and AAAA are observed separately, never
-combined into a best-family assurance claim. The proxy attempts bounded
-per-entry assurance records at full, degraded or failed startup and on
-material changes, including idle expiry. Logging is best-effort: a record
-attempt is not a delivery or availability guarantee. See the
-[governing assurance rules](docs/alumina-proxy.md#hardening-per-entry-dns-assurance-and-qualified-admission) and
-[trust-chain status](docs/trust-chain-design.md).
-
-Endpoint verification stays client-owned: the client — not the proxy —
-checks the upstream server certificate and hostname; client certificates apply
-only under mutual TLS; SNI matching is already separate policy. Achieved
-assurance is not an availability guarantee; monitoring follows the
-[monitoring](docs/monitoring.md) model.
+Each allowlisted `name:port` must declare `dns_assurance`; a missing key fails
+startup with exit 78, and `resolver_trusted` must be declared explicitly. The
+stronger profiles require strict-pinned resolvers plus an operator-declared
+root-validating no-stale policy. Endpoint verification stays client-owned: the
+client, not the proxy, checks the upstream certificate and hostname. See the
+[governing assurance rules](docs/alumina-proxy.md#hardening-per-entry-dns-assurance-and-qualified-admission)
+and [trust-chain design](docs/trust-chain-design.md).
 
 ## Getting started
 

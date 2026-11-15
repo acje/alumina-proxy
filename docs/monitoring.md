@@ -178,62 +178,28 @@ never proof of a lossless exit window.
   at the proxy's current emission; do not expect past records, and do not
   back-fill from the proxy.
 
-## Failure drill (stall the collector) — status: proxy-owned portion executed on the exact candidate; deployment-owned collector-restore portion BLOCKED/Unknown
+## Failure drill (stall the collector)
 
-Execution is D4's scope (bead `alumina-cdwui.13`) on the exact candidate. The **proxy-owned**
-portion — pipe stdout to a non-reading consumer, generate notify-path activity, observe the
-whole-record drop counter (a documented lower bound) and continued denial while stalled — was
-executed by the repository's gate harness (historical `stdout_stall` / `monitor_stdout`,
-`mid full` via the then-existing `boundary phase1`, witness-off/on); result and raw exits:
-bead `alumina-cdwui.13`. The former wrapper has since been removed. The
-**deployment-owned** collector-stall-and-restore portion was **not executed**: no external
-collector process, alerting stack, or liveness-probe infrastructure exists for this repository
-(missing prerequisite), so it is recorded **BLOCKED/Unknown**, never PASS and never an external
-alert-delivery claim. The historical wrapper did not execute E2E; nothing here is production
-qualification. Prerequisites for an executor of the full drill:
+Execution status, provenance and prerequisites are bead `alumina-0gs7p`.
 
-1. A running proxy with at least one `notify` action reachable on a fixed golden
-   path; a collector process that reads proxy stdout and appends to a durable
-   stream it can search; ability to stop and start the collector **without**
-   restarting the proxy (separate process/identity); a way to generate one
-   controlled notify-tripping event (e.g. the TLS 1.3-only JA4-change procedure
-   in [docs/qa-package/README.md](qa-package/README.md) §JA4
-   change-signal verification).
-2. **Stall** the collector (SIGSTOP or stop the service — not the proxy).
-3. **Generate** one controlled notify event, then a second, a few seconds apart.
-4. **Restore** the collector; let it drain and persist what remains queued in
-   the pipe.
-5. **Inspect drop/liveness signals** in the persisted stream: whether a
-   `kind=monitor` summary appears and whether `report_drops`/`capture_drops`/`dx`
-   are nonzero; whether records emitted during the stall are missing; and, on an
-   operator-controlled proxy SIGTERM/start (restart is operator-controlled, a
-   preserved constraint), whether `startup_final`/`shutdown_final` `dropped`
-   stayed 0.
+1. Prerequisites: a proxy with a reachable `notify` action, a collector that reads proxy stdout into a durable searchable stream and can be stopped and restarted without restarting the proxy, and a way to generate one controlled notify event.
+2. Stall the collector (SIGSTOP or stop the service — not the proxy).
+3. Generate one controlled notify event, then a second, a few seconds apart.
+4. Restore the collector; let it drain and persist what remains queued in the pipe.
+5. Inspect the persisted stream: whether a `kind=monitor` summary appears, whether `report_drops`/`capture_drops`/`dx` are nonzero, whether stall-window records are missing, and, after an operator-controlled proxy SIGTERM/start, whether `startup_final`/`shutdown_final` `dropped` stayed 0.
 
-**Expected observations.** Two branches. (a) **No-loss branch (the honest default
-for a small drill):** with a short stall and a handful of notify events, the
-records are pipe-buffered — the write succeeds into the pipe, nothing is lost,
-and the resumed collector delivers them late; `report_drops`/`capture_drops`/`dx`
-and `startup_final`/`shutdown_final` `dropped` all stay 0. The pipe buffer and
-the 256-slot in-memory queue absorb the burst. (b) **Loss branch (requires a
-sustained burst, not a few events):** `report_drops`/`capture_drops` move only
-if the in-memory queue is full **at report time** (a dropped `monitor_domain`
-/`monitor_capture` batch, `src/log/mod.rs::LogStore::monitor_summary`), and generic `dropped` moves
-only when the queue overflows — both need enough un-drained records to exhaust
-the 256 × 2 KiB queue, i.e. well over a hundred retained records with the
-collector stopped. With the small burst a small drill generates, do not expect
-counters to move; forcing branch (b) deliberately is its own larger drill. The
-proxy never stalls serving in either branch (nonblocking sink).
+**Expected observations.** A small drill is usually the no-loss branch: records
+are pipe-buffered, delivered late, and every counter stays 0. The loss branch
+needs a sustained burst that exhausts pipe plus the 256 × 2 KiB queue; the
+proxy never stalls serving in either branch.
 
 **Pass / Unknown criteria.** PASS if: the proxy never stalled serving; some
-subset of the events survived (pipe-buffered) and were drained after restore;
-and, **within the serving window only**, every counter that moved is exactly
+subset of the events survived (pipe-buffered) and drained after restore; and,
+**within the serving window only**, every counter that moved is exactly
 explicable by the recorded geometry — or, on the no-loss branch, all event
 records for the stall window are present and all counters stayed 0. Do **not**
 require exact reconciliation across a proxy exit: residue between the single
 exit drain and `process::exit` is uncounted and unobservable (exit-accounting
 note above). **Unknown** (record as Unknown, never PASS) if: the collector or
-proxy OOM/thrashed (environment), a latched sink silently quiesced (no in-band
-evidence by design), or the stall duration versus pipe capacity was not
-measured. No direct-egress fallback is required anywhere in this drill — the
-proxy's stdout pipe is the only path exercised.
+proxy OOM/thrashed, a latched sink silently quiesced, or the stall duration
+versus pipe capacity was not measured.

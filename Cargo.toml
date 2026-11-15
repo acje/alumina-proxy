@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
-description = "Alumina phase-1 foundations: F0 toolchain pin, F1/F2/F4 witness scaffolds"
+description = "A narrow HTTPS CONNECT egress proxy with a fixed security and resource profile"
 
 [lints.clippy]
 uninlined_format_args = "warn"

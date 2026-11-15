@@ -59,32 +59,6 @@ runs lib plus all eight integration targets (foundations, boot, and those
 same 6) witness-off then witness-on (the `mid foundations` / `mid boot` inner
 loops additionally run the two during development).
 
-### Verification scope
-
-Verification is tiered; each tier backs a different claim:
-
-- **INNER** — `sh scripts/verify.sh inner check`: cargo check only (no
-  clippy/fmt/whitespace/release). Host-runnable (compiles on macOS). Fast
-  per-edit feedback; backs no done-claim.
-- **MID** — Linux-only selectors (fail closed off-Linux): `mid foundations`
-  and `mid boot` are behavior-proof + fmt/whitespace fast loops (their former
-  static-ELF/clippy/release/closure proofs moved to `mid union`); `mid
-  clippy` runs clippy `-D warnings` for production and the alloc-witness
-  test harness; `mid union` carries release + static-ELF + closure metadata
-  - clippy; `mid full` is the standalone gate-only selector (lib units +
-  the 6 gate-only binaries) witness-off then witness-on, its surface
-  subsumed by `mid union`. MID backs per-sub-mission
-  done-claims.
-- **Candidate-wide evidence** — select the independent docs, Linux MID,
-  fixtures, supply-chain and identity checks applicable to the change; record
-  their individual outcomes and inputs. E2E selectors are separate. No
-  standalone success implies release qualification.
-
-The former `boundary phase1` selector has been removed. The byte-frozen spec
-still says `dot_tests` is wired through `mid`/`boundary phase1`; that selector
-reference is historical, not a current command. The discrepancy is tracked at
-`alumina-k2x9u`; `mid union` retains the lib suite containing `dot_tests`.
-
 ### Offline docs gate — the `docs` selector (not just links)
 
 `sh scripts/verify.sh docs` is the full offline docs gate, not a link-only
@@ -115,89 +89,20 @@ sole owner is [docs/qa-package/README.md](qa-package/README.md).
 
 ## Test suite navigation & ownership
 
-Navigation/ownership instructions, not an architecture narrative (no
-findings, verdicts, or issue records here).
+Navigation/ownership instructions, not an architecture narrative (no findings,
+verdicts, or issue records here).
 
-- **One Linux `sh scripts/verify.sh mid union` is the whole verified surface:**
-  it runs the lib unit suite plus all **eight** integration test targets
-  (foundations, boot, eligibility, mio_matrix, main_thread_stack,
-  monitor_stdout, stdout_stall, stdout_closed) witness-off then witness-on
-  (`--features alloc-witness`); the same union also runs release/static-ELF/
-  closure-metadata, clippy, and fmt/whitespace. The 2026-11-08 run on
-  `b1ff6909f215b860badec8f519349d7dc85f688c` recorded 1114/1163 lib tests
-  witness-off/on; the libtest integration targets recorded boot 28/28,
-  eligibility 5/6, foundations 9/13, and mio_matrix 0/8. The four
-  process-entry harnesses are separate, not included in those counts. These
-  are observed run counts, not fixed future suite totals.
-  `mid full` remains a standalone gate-only selector.
-- **The root `--test boot` suite is the broad boot component/API integration
-  target**: it exercises config load and strict-schema rejection (config
-  errors → exit 78, including a missing per-entry `dns_assurance`), bare-IP
-  resolver validation, synthetic preflight
-  privilege floors, and inventory/traffic-storage component APIs — not the
-  assembled boot runner. The assembled boot path and resolver trust/pin
-  preparation live in the boot unit suite `src/boot/tests.rs` (selected by
-  `--lib` inside `mid union`), where `run_boot_with_facts` assembles the
-  stages. Both suites share the `TempDir` fixture through the private shared
-  helper (`tests/support/temp_dir.rs`).
-- **Foundations** (`tests/foundations.rs`) is the API/support harness:
-  fault and fuzz-style inputs plus the allocation-witness proving surface,
-  not just the off/on witness count.
-- **Four gate-only targets are `harness=false` process-entry binaries**, not
-  libtest tests: `main_thread_stack`, `stdout_stall`, `monitor_stdout`,
-  `stdout_closed` (each `[[test]] harness = false` with its own `main()`);
-  the lib unit suite plus `foundations`, `boot`, `eligibility`, and
-  `mio_matrix` are the libtest-harness targets.
-- **Remaining roots are discovery-based and legitimate** (default
-  `tests/*.rs`); `tests/support/` is a private helper dir, never an
-  auto-discovered Cargo target. There is no catch-all, helper, or hook
-  framework.
-- **`fixtures boot` is separate from the E2E selectors.** It is a fixture smoke,
-  not E2E or release qualification.
-- **Owner-local convention for `cfg(test)` suites.** Unit suites live
-  colocated at `src/<owner>/tests.rs` (or a dot-named variant such as
-  `dot_tests.rs`); genuine topic groups split into child
-  `src/<owner>/<mod>/tests/<topic>.rs` files declared by the parent — or inline
-  `mod <topic> { .. }` children colocated in the parent's own `tests.rs`. Storage
-  startup integration stays a colocated private seam
-  (`src/runtime/storage/startup_integration.rs`). `src/config/**` is the one
-  module owner using the substantial `*_config_tests.rs` named roots
-  (`cname_bailiwick_config_tests.rs`, `enforcement_config_tests.rs`,
-  `resolver_config_tests.rs`), all retained whole-file; the enforcement and
-  resolver paths are specifically frozen-spec-cited, and the third is a
-  legitimate private cfg(test) root.
-- **Small inline suites stay inline deliberately; group only genuine
-  cohesion.** Moving a suite between these forms MAY change qualified test
-  names — adding a topic child module introduces a prefix, while a same-name
-  `#[cfg(test)]` module externalization preserves the qualified prefix — so a
-  move records its name/identity mapping (renames where they occur, identity
-  preservation for same-module externalizations). Shared test-only helpers
-  live under `tests/support/` and are included via private `#[path]` modules —
-  no Cargo target, no production export.
-- **Reactor topic grouping via inline child modules.** `runtime/reactor/tests.rs`
-  wraps its tests in 14 inline topic modules (poll_timeout, run_once, serving,
-  connect_setup, deadlines, generation_tokens, dialing, relay, visit_budget,
-  sigterm_shutdown, enforcement, admission, coalescing, ja4_baseline), with
-  helpers/fixtures kept in the parent and the external `tests/refusals.rs`
-  child (5 refusal tests) unchanged. `dns/transport/tests.rs` has the
-  `shared_armed_cache` topic child (unchanged, 3 tests). `dns/transport/tests.rs`
-  now holds 13 inline topic modules (exchange, cooperative, startup, apply,
-  cancel, degraded, anomaly, failover, failback, probe_sweep, note_failure,
-  corroboration, turn_result) with all helpers kept in the parent;
-  `runtime/owner` follows the same
-  inline-topic form in ten modules (cooperative_dns, probe_sweep, publishing,
-  main_wiring, startup_warning, startup_window, sigterm_shutdown,
-  startup_exchange, probe_records, due_refresh) with shared helpers kept in the
-  parent; `dns/wire/tests.rs` now holds 16 inline protocol topic modules (positive,
-  validation, bailiwick_cname, ttl_flags, workspace, negative_soa, authority_soa,
-  policy_rejects, malformed_rdata, cache_schedule, family, wire_names,
-  duplicate_cname, robustness, alloc_witness, embedded_dot) with all helper
-  fns kept in the parent. `log/tests.rs` now holds 14 inline topic modules
-  (record_encoding, startup_records, fatal_grammar, oversize_drops, queue_overflow,
-  sink_budget, monitor_queue, monitor_records, monitor_edges, reserved_records,
-  shutdown, writev_progress, sink_failure, typed_incidents) with all helper fns
-  kept in the parent. The previously whole-file runtime/owner, dns/wire, and
-  log suites now expose named inline topic modules.
+- **Owner-local `cfg(test)` suites.** Unit suites live at
+  `src/<owner>/tests.rs` or a dot-named variant such as `dot_tests.rs`; genuine
+  topic groups split into child `src/<owner>/<mod>/tests/<topic>.rs` files
+  declared by the parent, or inline `mod <topic> { .. }` children in the
+  parent's own `tests.rs`. Small inline suites stay inline; group only genuine
+  cohesion.
+- **Shared test-only helpers** live under `tests/support/` as private `#[path]`
+  modules — no Cargo target, no production export.
+- **Moving a suite MAY change qualified test names** (a topic child introduces a
+  prefix; a same-name `#[cfg(test)]` externalization preserves it), so a move
+  records its name/identity mapping.
 
 ## Docs drift gate
 
