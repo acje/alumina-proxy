@@ -2644,29 +2644,42 @@ mod generation_tokens {
         );
     }
 
-    fn dispatch_own_wrapped_token(serving: &mut Serving) {
-        // The wrapped connection's own token (generation 0, exactly what
-        // register_client encoded at admit) dispatches and drives the full
-        // read -> parse -> decision -> release path.
+    /// Bounded re-dispatch of a freshly accepted connection's own token until
+    /// its queued malformed head is read and the seat is released: the accept
+    /// retry breaks the instant the slot is re-admitted, which can precede byte
+    /// arrival, so the first dispatch may WouldBlock. Re-dispatch is inert once
+    /// the slot returns to `Stage::Idle` (an idle slot cannot progress), making
+    /// the retry idempotent and the released-seat post-condition sticky. Covers
+    /// socket-arrival latency only — never use it for a stale or pre-wrap token,
+    /// whose inertness proof must stay a single dispatch. `released` is the
+    /// per-site post-condition failure message.
+    fn dispatch_own_token_until_released(serving: &mut Serving, token: Token, released: &str) {
         for _ in 0..10_000 {
             serving
                 .dispatch_readiness(
-                    client_token(0, 0),
+                    token,
                     Readiness {
                         readable: true,
                         ..Readiness::none()
                     },
                 )
-                .expect("dispatch wrapped own token");
+                .expect("dispatch the connection's own token");
             if serving.storage().occupied() == 0 {
-                break;
+                return;
             }
             std::thread::yield_now();
         }
-        assert_eq!(
-            serving.storage().occupied(),
-            0,
-            "the wrapped connection's own token dispatched — the malformed head was read, refused, and the seat released"
+        assert_eq!(serving.storage().occupied(), 0, "{released}");
+    }
+
+    fn dispatch_own_wrapped_token(serving: &mut Serving) {
+        // The wrapped connection's own token (generation 0, exactly what
+        // register_client encoded at admit) dispatches and drives the full
+        // read -> parse -> decision -> release path.
+        dispatch_own_token_until_released(
+            serving,
+            client_token(0, 0),
+            "the wrapped connection's own token dispatched — the malformed head was read, refused, and the seat released",
         );
         assert!(matches!(serving.slots[0].stage, Stage::Idle));
     }
@@ -2758,19 +2771,10 @@ mod generation_tokens {
             "the token must keep the client local id decodable (never a wrap into the local-id range)"
         );
 
-        serving
-            .dispatch_readiness(
-                own,
-                Readiness {
-                    readable: true,
-                    ..Readiness::none()
-                },
-            )
-            .expect("dispatch the field-boundary connection's own token");
-        assert_eq!(
-            serving.storage().occupied(),
-            0,
-            "the connection's own token must dispatch — the malformed head is read, refused, and the seat released"
+        dispatch_own_token_until_released(
+            serving,
+            own,
+            "the connection's own token must dispatch — the malformed head is read, refused, and the seat released",
         );
         assert!(matches!(serving.slots[0].stage, Stage::Idle));
         assert_eq!(
