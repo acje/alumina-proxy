@@ -1,8 +1,8 @@
 //! Test-only owner of the loopback plain-DNS responder shared by the gate
 //! binaries and the storage startup-window tests: the two-byte length framing
 //! readers and writers, the responder thread that answers every query through
-//! one caller-supplied builder, the parsed-query reply skeleton, and the
-//! positive A/AAAA answer builder.
+//! one caller-supplied builder, the parsed-query reply skeleton, the
+//! answer-record writer, and the positive A/AAAA answer builder.
 //!
 //! Both owners drive a real TCP DNS exchange against a runtime that dials a
 //! bare-IP resolver, so the framing and the reply shape live in exactly one
@@ -137,20 +137,27 @@ pub(super) const fn positive_rdata(qtype: u16) -> Option<&'static [u8]> {
     }
 }
 
+/// Appends one answer record: owner, type, class 1, TTL, and the
+/// length-prefixed record data. Every answer builder shares this layout, so the
+/// field order and the class live here.
+pub(super) fn push_answer(msg: &mut Vec<u8>, owner: &[u8], rtype: u16, ttl: u32, rdata: &[u8]) {
+    msg.extend_from_slice(owner);
+    msg.extend_from_slice(&rtype.to_be_bytes());
+    msg.extend_from_slice(&1u16.to_be_bytes());
+    msg.extend_from_slice(&ttl.to_be_bytes());
+    msg.extend_from_slice(
+        &u16::try_from(rdata.len())
+            .expect("answer rdata fits u16 wire length")
+            .to_be_bytes(),
+    );
+    msg.extend_from_slice(rdata);
+}
+
 /// Builds a positive DNS reply (A or AAAA) echoing the question.
 pub(super) fn build_positive(query: &[u8]) -> Option<Vec<u8>> {
     let q = Query::parse(query)?;
     let rdata = positive_rdata(q.qtype)?;
     let mut msg = q.reply(query.len() + 22, 1);
-    msg.extend_from_slice(q.qname);
-    msg.extend_from_slice(&q.qtype.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&300u32.to_be_bytes());
-    msg.extend_from_slice(
-        &u16::try_from(rdata.len())
-            .expect("rdata fits u16 wire length")
-            .to_be_bytes(),
-    );
-    msg.extend_from_slice(rdata);
+    push_answer(&mut msg, q.qname, q.qtype, 300, rdata);
     Some(msg)
 }

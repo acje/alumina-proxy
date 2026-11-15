@@ -11,7 +11,7 @@ mod temp_dir;
 
 #[path = "../../../tests/support/dns_responder.rs"]
 mod dns_responder;
-use dns_responder::{DnsResponder, Query, build_positive, positive_rdata};
+use dns_responder::{DnsResponder, Query, build_positive, positive_rdata, push_answer};
 
 use std::fmt::Write as _;
 use std::io::{self, Read};
@@ -673,26 +673,8 @@ fn build_cross_suffix_cname(query: &[u8]) -> Option<Vec<u8>> {
     let rdata = positive_rdata(q.qtype)?;
     let target = b"\x03cdn\x07example\x03net\x00";
     let mut msg = q.reply(query.len() + 40, 2);
-    msg.extend_from_slice(q.qname);
-    msg.extend_from_slice(&5u16.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&200u32.to_be_bytes());
-    msg.extend_from_slice(
-        &u16::try_from(target.len())
-            .expect("cname target wire length fits u16")
-            .to_be_bytes(),
-    );
-    msg.extend_from_slice(target);
-    msg.extend_from_slice(target);
-    msg.extend_from_slice(&q.qtype.to_be_bytes());
-    msg.extend_from_slice(&1u16.to_be_bytes());
-    msg.extend_from_slice(&40u32.to_be_bytes());
-    msg.extend_from_slice(
-        &u16::try_from(rdata.len())
-            .expect("terminal rdata wire length fits u16")
-            .to_be_bytes(),
-    );
-    msg.extend_from_slice(rdata);
+    push_answer(&mut msg, q.qname, 5, 200, target);
+    push_answer(&mut msg, target, q.qtype, 40, rdata);
     Some(msg)
 }
 
