@@ -909,39 +909,13 @@ docslink_check() {
 }
 
 # =============================================================================
-# P0 report-only parity surface (repowise-align 2026-11-15)
+# Rust symbol-reference report (repowise-align 2026-11-15)
 #
-# Both helpers run EXACTLY the command their enforcing P2 counterpart will run
-# and then swallow the disposition, so the docs selector cannot fail from them.
-# They exist so the replacements are observable beside the still-enforcing
-# scripts/docs_check/check.mjs gate before anything is retired, and so the
-# parity table is a reading of the real command rather than a rehearsal.
-#
-# Base resolution is local and offline by design: `git rev-parse HEAD`. With
-# `--since HEAD`, doc-drift scopes to documents this change is answerable for
-# (working-tree edits against HEAD plus commits after HEAD), which is this
-# repository's pre-commit verification window. Resolving a remote merge base is
-# deliberately NOT done (no fetch, no network); a post-commit CI gate needs an
-# explicit base and that is a P2 decision, stated as a parity caveat rather
-# than guessed here.
+# One report-only check: every `path.rs::Symbol` reference in the docs corpus
+# resolves in the Repowise index. Non-Rust references, links, anchors and line
+# ranges stay with the docs link gate; there is no second detector and no
+# check on this check.
 # =============================================================================
-docs_drift_report_only() {
-    if ! command -v repowise >/dev/null 2>&1; then
-        echo "DOC-DRIFT-REPORT-ONLY: unavailable (repowise not on PATH)"
-        return 0
-    fi
-    dd_base="$(git rev-parse HEAD 2>/dev/null)" || dd_base=""
-    if [ -z "$dd_base" ]; then
-        echo "DOC-DRIFT-REPORT-ONLY: unavailable (git rev-parse HEAD failed)"
-        return 0
-    fi
-    dd_rc=0
-    dd_out="$(repowise doc-drift --check --since "$dd_base" --kind path --kind link --kind anchor --kind command --format json 2>&1)" || dd_rc=$?
-    echo "DOC-DRIFT-REPORT-ONLY: exit=$dd_rc (base=$dd_base; report-only, not failing)"
-    printf '%s\n' "$dd_out" | sed 's/^/  DOC-DRIFT: /'
-    return 0
-}
-
 ref_check_report_only() {
     if ! command -v python3 >/dev/null 2>&1; then
         echo "REF-CHECK-REPORT-ONLY: unavailable (python3 not on PATH)"
@@ -2296,6 +2270,6 @@ case "$TIER/$SCOPE" in
     identity/artifact) [ "$#" -eq 3 ] && [ -n "$3" ] || usage; artifact_identity "$3" ;;
     e2e/relay) e2e_relay ;;
     e2e/shutdown) e2e_shutdown ;;
-    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate; docs_drift_report_only; ref_check_report_only ;;
+    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate; ref_check_report_only ;;
     *) usage ;;
 esac
