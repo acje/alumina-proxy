@@ -10370,19 +10370,38 @@ struct IdleExpiryCase {
 
 #[cfg(feature = "alloc-witness")]
 fn publish_idle_expiry_a(storage: &mut ServeStorage) {
+    publish_idle_expiry_a_with_ttl(storage, 1);
+}
+
+/// The relay expiry fixture must still hold a live proof after an arbitrary
+/// amount of setup, so it publishes a minutes-wide evidential window instead of
+/// the idle fixture's one second; the test then advances the mounted clock to
+/// the exact deadline rather than waiting for wall time to cross it.
+#[cfg(feature = "alloc-witness")]
+const RELAY_PROOF_TTL_SECS: u32 = 300;
+
+#[cfg(feature = "alloc-witness")]
+fn publish_idle_expiry_a_with_ttl(storage: &mut ServeStorage, supporting_ttl: u32) {
     use crate::dns::cache::evidence::{Evidence, ResolverSource};
     use crate::dns::cache::{Family, Generation, StagedPositive};
     use crate::eligibility::NumericAddr;
     let name = storage.cache().name_index(0).expect("cached name index");
-    let proof = Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000)
-        .expect("A proof evidence");
+    let proof = Evidence::new(
+        false,
+        false,
+        false,
+        ResolverSource::UNKNOWN,
+        Some(supporting_ttl),
+        1000,
+    )
+    .expect("A proof evidence");
     let staged = StagedPositive::stage_with_evidence(
         name,
         Family::A,
         Generation::INITIAL,
         &[NumericAddr::V4([8, 8, 8, 8].into())],
         1000,
-        1,
+        u64::from(supporting_ttl),
         Some(proof),
     )
     .expect("stage the A positive");
@@ -11272,7 +11291,7 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
             for full_queue in [false, true] {
                 let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
                 let (mut storage, mut reader) = witnessed_idle_storage(&config);
-                publish_idle_expiry_a(&mut storage);
+                publish_idle_expiry_a_with_ttl(&mut storage, RELAY_PROOF_TTL_SECS);
                 let outcome = storage
                     .settle_startup(1000, StartupReport::default(), 0, false)
                     .unwrap();
@@ -11290,6 +11309,8 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
                 prime_expiry_relay(&mut serving, up, client);
                 if full_queue {
                     fill_relay_log_until_expiry(&mut serving);
+                } else {
+                    advance_to_proof_expiry(&mut serving);
                 }
                 let dropped = serving.storage().logs().dropped();
                 let wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
@@ -11329,13 +11350,39 @@ fn fill_relay_log_until_expiry(serving: &mut Serving) {
         );
     }
     assert!(serving.storage().logs().is_full());
-    let now = Instant::now();
-    let expiry = serving
+    let now = advance_to_proof_expiry(serving);
+    assert_eq!(
+        serving
+            .storage()
+            .assurance_wake(now)
+            .expect("the assurance wake must be computed"),
+        Some(now),
+        "a filled log queue must leave a pending assurance wake at the proof expiry"
+    );
+}
+
+/// Advances the mounted serving clock to the seeded proof's retained
+/// evidential deadline, so the expiry is due at the returned instant however
+/// much wall time fixture setup consumed. The deadline is a cache-seconds
+/// value, so mounting `now0` at it is exact rather than a wall-clock guess.
+#[cfg(feature = "alloc-witness")]
+fn advance_to_proof_expiry(serving: &mut Serving) -> Instant {
+    let deadline = serving
         .storage()
-        .assurance_wake(now)
-        .expect("the assurance wake must be computed")
-        .expect("a filled log queue must leave a pending assurance wake");
-    std::thread::sleep(expiry.saturating_duration_since(now) + Duration::from_millis(25));
+        .cache()
+        .retained_evidential_deadline(
+            serving
+                .storage()
+                .cache()
+                .name_index(0)
+                .expect("cached name index"),
+            Family::A,
+        )
+        .expect("the proof deadline must be readable")
+        .expect("the seeded proof must carry an evidential deadline");
+    let now = Instant::now();
+    serving.storage_mut().mount_clock(now, deadline);
+    now
 }
 
 #[cfg(feature = "alloc-witness")]
