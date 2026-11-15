@@ -2368,6 +2368,37 @@ mod generation_tokens {
         });
     }
 
+    /// Bounded re-dispatch of one freshly accepted generation's own token until
+    /// the client's queued head lands in the receive buffer: the accept retry
+    /// breaks the instant the slot is re-admitted, which can precede byte
+    /// arrival. Covers socket-arrival latency only — never use it for a stale or
+    /// pre-wrap token, whose inertness proof must stay a single dispatch.
+    fn dispatch_new_generation_token_until_queued_head_read(
+        serving: &mut Serving,
+        token: Token,
+        expected_len: usize,
+    ) {
+        for _ in 0..10_000 {
+            if serving.slots[0].buf_len == expected_len {
+                return;
+            }
+            serving
+                .dispatch_readiness(
+                    token,
+                    Readiness {
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                )
+                .expect("dispatch the new-generation token");
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            serving.slots[0].buf_len, expected_len,
+            "the new-generation token never read the queued head"
+        );
+    }
+
     #[test]
     /// G1.R3 — one coalesced batch re-admits a released slot index mid-batch
     /// (`accept_all` between two same-slot tokens): the slot is still free
@@ -2434,6 +2465,11 @@ mod generation_tokens {
             assert_eq!(
                 serving.slots[0].slot_gen, new_gen,
                 "the mid-batch accept reused slot 0 at the new generation"
+            );
+            dispatch_new_generation_token_until_queued_head_read(
+                serving,
+                client_token(new_gen, 0),
+                PARTIAL.len(),
             );
             assert_eq!(
                 serving.slots[0].buf_len,
@@ -2540,6 +2576,11 @@ mod generation_tokens {
             dispatch_accept_first_reuse_batch(serving, &batch, new_gen);
 
             assert_eq!(serving.slots[0].slot_gen, new_gen);
+            dispatch_new_generation_token_until_queued_head_read(
+                serving,
+                client_token(new_gen, 0),
+                PARTIAL.len(),
+            );
             assert_eq!(
                 serving.slots[0].buf_len,
                 PARTIAL.len(),
@@ -2607,15 +2648,21 @@ mod generation_tokens {
         // The wrapped connection's own token (generation 0, exactly what
         // register_client encoded at admit) dispatches and drives the full
         // read -> parse -> decision -> release path.
-        serving
-            .dispatch_readiness(
-                client_token(0, 0),
-                Readiness {
-                    readable: true,
-                    ..Readiness::none()
-                },
-            )
-            .expect("dispatch wrapped own token");
+        for _ in 0..10_000 {
+            serving
+                .dispatch_readiness(
+                    client_token(0, 0),
+                    Readiness {
+                        readable: true,
+                        ..Readiness::none()
+                    },
+                )
+                .expect("dispatch wrapped own token");
+            if serving.storage().occupied() == 0 {
+                break;
+            }
+            std::thread::yield_now();
+        }
         assert_eq!(
             serving.storage().occupied(),
             0,
