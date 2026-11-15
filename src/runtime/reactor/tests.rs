@@ -10414,7 +10414,9 @@ fn seeded_idle_expiry_case(dual_family: bool) -> IdleExpiryCase {
     assert_eq!(storage.logs().len(), 0);
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic storage");
     let serving = Serving::new(storage, listener, traffic).expect("serving on the seeded storage");
-    assert_eq!(serving.storage().dns().now_u64(), 1000);
+    // Mounted at the DNS window origin: cache_secs at the origin reads now0.
+    let origin = serving.storage().dns().window_start();
+    assert_eq!(serving.storage().cache_secs(origin), 1000);
     IdleExpiryCase {
         serving,
         reader,
@@ -10940,7 +10942,9 @@ fn idle_negative_expiry_does_not_revive_positive_bindings() {
                 assert_eq!(storage.logs().len(), 0);
                 let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
                 let mut serving = Serving::new(storage, listener, traffic).unwrap();
-                assert_eq!(serving.storage().dns().now_u64(), 1000);
+                // Mounted at the DNS window origin: cache_secs at the origin reads now0.
+                let origin = serving.storage().dns().window_start();
+                assert_eq!(serving.storage().cache_secs(origin), 1000);
                 let wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
                 let counts = watched_idle_turn(&mut serving, wake, Duration::from_secs(3));
                 assert!(counts.all_zero(), "idle negative expiry turn allocated: {counts:?}");
@@ -11042,7 +11046,9 @@ fn idle_strong_proof_expiry_denies_new_peer_admission() {
             assert_eq!(storage.logs().len(), 0);
             let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
             let mut serving = Serving::new(storage, listener, traffic).unwrap();
-            assert_eq!(serving.storage().dns().now_u64(), 1000);
+            // Mounted at the DNS window origin: cache_secs at the origin reads now0.
+            let origin = serving.storage().dns().window_start();
+            assert_eq!(serving.storage().cache_secs(origin), 1000);
             let wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
             let counts = watched_idle_turn(&mut serving, wake, Duration::from_secs(3));
             assert!(counts.all_zero(), "strong expiry turn allocated: {counts:?}");
