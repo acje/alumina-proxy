@@ -118,7 +118,7 @@ did not deliver, each counted once in the same tally
 **Unobservable residue:** the serving exit
 (`src/runtime/owner.rs::emit_terminal_shutdown_finish`) reads `dropped`, enqueues
 `shutdown_final` with that snapshot, performs exactly **one** bounded drain
-(16 ops / 64 KiB, `src/log/mod.rs::SINK_MAX_OPS`, `src/log/mod.rs::SINK_MAX_BYTES`, then `process::exit` — records
+(16 ops / 64 KiB, `src/log/mod.rs::SINK_MAX_OPS`, `src/log/mod.rs::SINK_MAX_BYTES`), then `process::exit` — records
 still queued at that moment are destroyed **uncounted**, and a stalled sink can
 make that single drain deliver nothing at all, so even `shutdown_final` itself
 is lost. Therefore any `dropped` value in `shutdown_final` is a **lower bound**,
@@ -139,7 +139,7 @@ never proof of a lossless exit window.
   collector, or **live backpressure** — a live but stalled/slow collector
   leaves the pipe full while events continue (`WouldBlock`/`Interrupted`
   retains the cursor, never latches the sink; no exit, serving continues;
-  (`src/log/sink.rs::LogStore::block_with`). Correlate process status and collector read
+  `src/log/sink.rs::LogStore::block_with`). Correlate process status and collector read
   progress out-of-band; a latched sink is cleared only by operator restart.
 - **A dropped record and a dropped counter can themselves be lost.** The summary
   line that would carry `report_drops`/`capture_drops` is itself a record the

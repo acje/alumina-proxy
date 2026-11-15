@@ -175,7 +175,7 @@ The example allowlist is in `<fqdn>:<port>` form — `api.github.com:443` (a
 real-world HTTPS API target) and illustrative `example.com:443` /
 `www.example.net:443` — so HTTPS and NATS transports can be reasoned about
 against Alumina's fixed wire contract, with **zero `alumina-proxy` code
-changes**. The contract (`docs/alumina-proxy.md#protocol-contract`, `#initial-resource-profile`) requires: (1)
+changes**. The contract (`docs/alumina-proxy.md#protocol-contract`, [`#initial-resource-profile`](../alumina-proxy.md#initial-resource-profile)) requires: (1)
 an explicit `HTTP/1.1` `CONNECT <fqdn>:<port>` whose port exactly
 matches the allowlisted entry; (2) the **client speaks first**,
 immediately after `200 Connection established`, with a TLS 1.3 `ClientHello`
@@ -183,7 +183,7 @@ whose SNI equals `<fqdn>` (Barrier A); (3) the upstream server sends **zero
 bytes before the validated `ClientHello` is flushed upstream** (Barrier B —
 `EarlyUpstreamData` closes the tunnel if the server speaks first). Once the
 gate opens, encrypted application bytes are relayed opaquely, with no ALPN or
-application-protocol inspection (`docs/alumina-proxy.md#design-philosophy--the-exit-gate`, `#threat-model`).
+application-protocol inspection (`docs/alumina-proxy.md#design-philosophy--the-exit-gate`, [`#threat-model`](../alumina-proxy.md#threat-model)).
 
 | Workload | Transport | Against Alumina |
 | --- | --- | --- |
@@ -237,7 +237,7 @@ Procedure (Go client pinned to TLS 1.3):
 3. Read the monitor records. The `kind=monitor_domain` detail batch carries the
    change signal — `d0j=1` (per-ordinal change counter) with
    `d0v="<36-char-ja4>"` (the latest changed JA4, 36 chars), zero-suppressed
-   together per the C1 amendment (`docs/alumina-proxy.md#control-storage-table`). The
+   together per the C1 amendment (`docs/alumina-proxy.md#ja4-change-signal-value`). The
    `kind=monitor` summary carries the globals `actions_total=1` (the Notify) and
    `refusals_total=0` (no Block).
 
