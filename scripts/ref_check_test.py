@@ -462,6 +462,48 @@ class RefCheck(unittest.TestCase):
         self.assert_exit(result, 0, "REF-CHECK-OK 1")
         self.assertNotIn("type-containment", result.stdout)
 
+    # -- 18-21: continuations must belong to a receipt ------------------------
+    # LINE_RE needs a path prefix, so `:1937` standing in for a path named
+    # earlier is invisible to both the resolver check and the ratchet. Shape is
+    # what separates a continuation from a port or a clock time.
+    def test_18_an_orphaned_span_continuation_is_a_finding(self):
+        self.write("src/lib.rs", "pub struct Alpha {}\n")
+        self.write("docs/a.md", "See src/lib.rs::Alpha, then `:42` for the body.\n")
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        self.table = {"src/lib.rs::Alpha": verified("src/lib.rs", 1, 1)}
+        result = self.run_ref_check()
+        self.assert_exit(result, 1, "REF-CHECK-FINDING")
+        self.assertIn("continuation reference: `:42`", result.stdout)
+
+    def test_19_a_link_target_with_a_line_number_outside_the_link_is_a_finding(self):
+        self.write("src/lib.rs", "pub struct Alpha {}\n")
+        self.write("docs/a.md", "See [lib](../src/lib.rs):12 for the shape.\n")
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        result = self.run_ref_check()
+        self.assert_exit(result, 1, "REF-CHECK-FINDING")
+        self.assertIn("continuation reference: [lib](../src/lib.rs):12", result.stdout)
+
+    def test_20_ports_times_and_ranges_in_prose_do_not_fire(self):
+        self.write("docs/a.md", (
+            "The listener binds :8080 and `:443` for TLS; the log rotates at 12:30.\n"))
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        result = self.run_ref_check()
+        self.assert_exit(result, 0, "REF-CHECK-OK 0")
+        self.assertNotIn("continuation reference", result.stdout)
+
+    def test_21_a_receipt_continuation_passes(self):
+        receipt = "git:1812405b5c9130a170d1e00988b2a77d80d86e3d:"
+        self.write("docs/a.md", (
+            "See `%ssrc/log.rs#L1850`, `:1937` for the labels.\n" % receipt))
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        result = self.run_ref_check()
+        self.assert_exit(result, 0, "REF-CHECK-OK 0")
+        self.assertNotIn("continuation reference", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

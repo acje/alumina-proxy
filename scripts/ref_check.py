@@ -4,7 +4,8 @@
 WHAT IT PROVES
   Every `path::Symbol` reference in the DOCSLINK_ROOTS corpus resolves to a
   live, index-verified symbol in THIS checkout, and no document that has already
-  been migrated off line numbers regains one.
+  been migrated off line numbers regains one, in path form or in continuation
+  form.
 
 WHY IT IS LIVE
   A line-number citation gate answers "does line 42 of this file exist", which
@@ -23,7 +24,8 @@ EXIT CONTRACT (exactly three outcomes, no folding)
   0  clean. Last line is `REF-CHECK-OK <n>` where n is the number of live
      symbol references that resolved to a verified symbol.
   1  one or more findings (unresolved symbol, unknown path, unverified answer,
-     out-of-range bounds, type-containment failure, ratchet violation). One
+     out-of-range bounds, type-containment failure, ratchet violation,
+     unreceipted continuation). One
      `REF-CHECK-FINDING <text>` line per finding, deterministically sorted.
   2  operational / BLOCKED: repowise absent from PATH, the index is stale
      (recorded commit != HEAD), DOCSLINK_ROOTS unparseable, a resolver call
@@ -100,6 +102,19 @@ RATCHET (structural, no baseline file)
   holds zero committed references, and a new document must not start on line
   numbers.
 
+CONTINUATIONS (a line number must belong to a receipt)
+  LINE_RE needs a path prefix, so a continuation token is invisible to both the
+  resolver check and the ratchet: `:1937` standing in for a path named earlier,
+  or a markdown link target with `:12` left outside the link. Two shapes are
+  findings. (a) A backticked span holding nothing but `:NNN` or `:N-M`, when a
+  citation precedes it on the same line and no `git:<commit>:` receipt appears
+  there: the continuation is neither readable on its own nor checked, so the
+  document has regained a line number. (b) A markdown link whose target is a
+  source path and whose `:NNN` sits outside the link -- the shape
+  docs/monitoring.md carried 21 times before it was converted. Shape is the
+  entire test: a port or a clock time in prose (`:443`, `12:30`) never fires,
+  and a receipt on the line attributes its continuations to a pinned tree.
+
 EXEMPTIONS ARE STRUCTURAL ONLY
   Two things are exempt, both because of where the text sits, never because of
   what it says: (a) fenced code blocks (``` / ~~~ fences, honouring the info
@@ -141,6 +156,19 @@ SYMBOL_RE = re.compile(
 )
 LINE_RE = re.compile(r"(?<![A-Za-z0-9_./-])(" + _PATH_CORE + r":\d+(?:-\d+)?)")
 RECEIPT_RE = re.compile(r"git:[0-9a-f]{7,40}:$")
+
+# Continuation shapes: a line number whose path was named elsewhere. Shape is
+# the entire test, so a port (`:443`), a clock time (`12:30`) or a prose range
+# never matches: a span continuation must be a backticked token holding nothing
+# but a line number, and a link continuation must be a markdown link to a source
+# path with the number left outside the link.
+CONTINUATION_SPAN_RE = re.compile(r"`(:[0-9]+(?:-[0-9]+)?)`")
+LINK_CONTINUATION_RE = re.compile(
+    r"\[[^\]\n]*\]\([^()\s]*" + _SOURCE_EXT + r"\):[0-9]+(?:-[0-9]+)?"
+)
+LINK_PATH_RE = re.compile(r"\]\([^()\s]*" + _SOURCE_EXT + r"\)")
+LINE_RECEIPT_RE = re.compile(r"git:[0-9a-f]{7,40}:")
+
 FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
 ROOTS_RE = re.compile(r'^DOCSLINK_ROOTS="([^"]*)"[ \t]*$', re.MULTILINE)
 
@@ -229,13 +257,48 @@ def scan_text(raw):
     return symbols, lines
 
 
+def _cites_before(text, end):
+    """True when a citation precedes `end`, so a `:NNN` there is a continuation."""
+    head = text[:end]
+    return (
+        SYMBOL_RE.search(head) is not None
+        or LINE_RE.search(head) is not None
+        or LINK_PATH_RE.search(head) is not None
+    )
+
+
+def scan_continuations(raw):
+    """Return [(line, token)] for continuation tokens no receipt covers.
+
+    A continuation continues a citation that precedes it on the same line, and
+    `git:<commit>:` on that line attributes it to a pinned tree, which is the
+    one form that is both readable and immovable. Everything else that is
+    continuation-shaped belongs to no receipt: the reader cannot resolve it and
+    the line-reference grammar cannot see it, which is exactly the false green
+    this class exists to close.
+    """
+    found = []
+    for number, text in _live_lines(raw):
+        receipted = LINE_RECEIPT_RE.search(text) is not None
+        for match in CONTINUATION_SPAN_RE.finditer(text):
+            if receipted or not _cites_before(text, match.start()):
+                continue
+            found.append((number, match.group(0)))
+        for match in LINK_CONTINUATION_RE.finditer(text):
+            found.append((number, match.group(0)))
+    return found
+
+
 def extract(roots):
     """Scan the working tree of every corpus document."""
     symbols = {}
     lines = {}
+    continuations = {}
     for doc in roots:
-        symbols[doc], lines[doc] = scan_text(_read_text(os.path.join(REPO_ROOT, doc)))
-    return symbols, lines
+        raw = _read_text(os.path.join(REPO_ROOT, doc))
+        symbols[doc], lines[doc] = scan_text(raw)
+        continuations[doc] = scan_continuations(raw)
+    return symbols, lines, continuations
 
 
 def _plain(token):
@@ -681,7 +744,7 @@ def main():
     for doc in roots:
         if not os.path.isfile(os.path.join(REPO_ROOT, doc)):
             raise Blocked("corpus root missing or not a file: %s" % doc)
-    symbols, lines = extract(roots)
+    symbols, lines, continuations = extract(roots)
 
     # Both operational gates are unconditional. A gate that skipped the index
     # freshness check whenever the corpus happened to hold no symbol references
@@ -774,6 +837,16 @@ def main():
             findings.append(
                 "%s:%d: ratchet violation: locked document regained line reference %s"
                 % (doc, number, token)
+            )
+
+    # A continuation belongs to the citation before it, and only a receipt on
+    # the same line makes that attribution durable. Anything else is a line
+    # number the grammar cannot see, so it is a finding whatever the lock state.
+    for doc in roots:
+        for number, token in continuations[doc]:
+            findings.append(
+                "%s:%d: continuation reference: %s continues a path named earlier "
+                "and no git: receipt covers it" % (doc, number, token)
             )
 
     if findings:
