@@ -88,31 +88,25 @@ reference is historical, not a current command. The discrepancy is tracked at
 ### Offline docs gate — the `docs` selector (not just links)
 
 `sh scripts/verify.sh docs` is the full offline docs gate, not a link-only
-check. It runs, in sequence: the link/fragment gate over the **8-root
-`DOCSLINK_ROOTS`** set (`docs/alumina-proxy.md`,
-`docs/trust-telemetry-design.md`, `docs/trust-chain-design.md`,
-`docs/deployment.md`, `docs/monitoring.md`, `docs/verification.md`,
-`docs/qa-package/README.md`, `README.md` — trust-telemetry native coverage is
-exercised here via its root entry); the physical **INTENDED** inventory (every
-`src`/`tests` `.rs` listed);
+check. It runs, in sequence: the **Repowise doc-drift** gate over the tracked
+documentation corpus (local paths, links, anchors and commands); the physical
+**INTENDED** inventory (every `src`/`tests` `.rs` listed);
 **CFG-TEST-PARENTAGE** (admitted `src/*/tests.rs` and `src/*/dot_tests.rs`
 declared `#[cfg(test)]` by their parent); the **UNSAFE-SURFACE** confinement
-gate; and the **CANONICAL-DIGEST** pin (frozen spec sha equals the `AGENTS.md`
-pin). A docs change reruns this whole selector — the link gate alone is not
-the gate.
+gate; the **CANONICAL-DIGEST** pin (frozen spec sha equals the `AGENTS.md`
+pin); and the report-only Rust symbol-reference lint. A docs change reruns this
+whole selector — the drift gate alone is not the gate.
 
-The full retained Markdown corpus is checked with the explicit, nonempty argv
-command, run with `NODE_OPTIONS`/`NODE_PATH` cleared:
+The retained Markdown corpus is checked by Repowise:
 
+```sh
+repowise doc-drift --check --kind path --kind link --kind anchor --kind command --fail-on-confidence 0.7
 ```
-env -u NODE_OPTIONS -u NODE_PATH node scripts/docs_check/check.mjs AGENTS.md README.md docs/alumina-proxy.md docs/trust-telemetry-design.md docs/trust-chain-design.md docs/deployment.md docs/monitoring.md docs/verification.md docs/qa-package/README.md
-```
 
-Manual checker regression fixtures, hand-run (identity-tracked, **not** wired
-into any dispatch arm):
+The Rust symbol-reference lint over the governing specification is report-only:
 
-```
-node scripts/docs_check/test.mjs
+```sh
+python3 scripts/ref_check.py
 ```
 
 Selector host context / prerequisites (incl. `mid` Linux-only fail-closed and
@@ -205,22 +199,18 @@ findings, verdicts, or issue records here).
   kept in the parent. The previously whole-file runtime/owner, dns/wire, and
   log suites now expose named inline topic modules.
 
-## Offline docs link checker
+## Docs drift gate
 
-`scripts/docs_check/check.mjs` is a zero-network offline AST link checker. It
-parses Markdown, builds heading slugs with `github-slugger`, and verifies
-every **local** link target exists and its literal fragment matches a generated
-slug (`DOCSLINK-MISSING` / `DOCSLINK-MISSING-FRAGMENT`); operational or
-unsupported constructs fail `DOCSLINK-OP-FAIL` and are never read as clean.
-Limitations (documented, retained as approved — not removed, node deps stay):
+`sh scripts/verify.sh docs` runs `repowise doc-drift --check` over the tracked
+documentation corpus. It verifies every local path, link target, heading
+fragment and inline command; external URLs are out of scope and never fetched.
+Operational failure (Repowise absent, unreadable corpus) is BLOCKED, never a
+pass. Historical `git:<sha>:path` receipts are content-addressed and not
+reinterpreted as live paths.
 
-- External `http:`/`https:`/`mailto:` links are **out of scope**, not failed.
-- Long-form `rustdoc`/`cargo doctests` are **not** part of this gate.
-- A zero-argument invocation is an **operational false-clean** — never a pass.
-- Fragment verification is AST-literal: a fragment must match the slugger
-  output exactly (local paths, GitHub slug rules).
-
-The checker's own behavioral controls run via `node scripts/docs_check/test.mjs`.
+The Rust symbol-reference lint (`scripts/ref_check.py`) is separate and
+report-only; it checks only `path.rs::Symbol` references in
+`docs/alumina-proxy.md`. Other documents are not mechanically reference-checked.
 
 ## Native proofs (scoped, exact-input)
 

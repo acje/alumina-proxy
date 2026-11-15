@@ -130,18 +130,17 @@ missing derived image as described below.
   mismatch or a failing check is nonzero.
 - `identity snapshot <directory>` / `identity compare <before> <after>` —
   independent source/environment stability receipts. Snapshots require git,
-  SHA256, Python 3 and Node with `NODE_OPTIONS`/`NODE_PATH` unset; they record
-  HEAD, status, hashes of the fixed input set and selected environment/config
-  observations. Compare checks those four records, not every possible input.
+  SHA256 and Python 3; they record HEAD, status, hashes of the fixed input set
+  and selected environment/config observations. Compare checks those four
+  records, not every possible input.
   `identity artifact <path>` hashes an existing file; it does not prove that
   file was built or executed. Keep snapshots under `target/` to avoid changing
   the status list.
 - `docs` (`verify.sh docs`) — full offline docs gate, not just links:
-  link/fragment over the 8-root `DOCSLINK_ROOTS` (incl.
-  `docs/trust-telemetry-design.md`) + physical INTENDED +
-  cfg-parentage + unsafe surface + frozen-spec digest; requires Node with
-  **`NODE_OPTIONS`/`NODE_PATH` unset** and `scripts/docs_check/check.mjs`
-  present; runs no network.
+  Repowise doc-drift over the tracked documentation corpus (path, link,
+  anchor, command) + physical INTENDED + cfg-parentage + unsafe surface +
+  frozen-spec digest + report-only Rust symbol lint; requires `repowise`;
+  runs no network.
 
 ## Example inputs are illustrative — never executed by any gate
 

@@ -109,26 +109,26 @@ phase_mark() {
 
 INTENDED="Cargo.toml Cargo.lock deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/qa/mod.rs src/qa/fault.rs src/qa/fuzz.rs src/config/fqdn_tests.rs src/config/mod.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/dns/resolver.rs src/dns/resolver/tests.rs src/boot/preflight.rs src/inventory.rs src/boot/mod.rs src/boot/tests.rs src/dns/cache.rs src/dns/cache/grade_key.rs src/dns/cache/grade_key/tests.rs src/dns/cache/tests.rs src/inspection/mod.rs src/inspection/connect.rs src/inspection/connect/tests.rs src/inspection/client_hello.rs src/inspection/client_hello/ja4.rs src/inspection/client_hello/tests.rs src/dns/mod.rs src/dns/outcome.rs src/dns/publication.rs src/dns/wire.rs src/dns/wire/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/dns/incident_report.rs src/dns/incident_report/tests.rs src/names/mod.rs src/names/hostname.rs src/names/hostname/tests.rs src/names/rules.rs src/log/mod.rs src/log/queue.rs src/log/sink.rs src/log/encoding.rs src/log/tests.rs src/runtime/gate.rs src/runtime/mod.rs src/runtime/owner.rs src/runtime/owner/tests.rs src/runtime/reactor.rs src/runtime/reactor/policy.rs src/runtime/reactor/reject.rs src/runtime/reactor/startup.rs src/runtime/reactor/tests.rs src/runtime/reactor/tests/refusals.rs src/runtime/storage.rs src/runtime/storage/startup_integration.rs src/runtime/storage/tests.rs src/runtime/tunnel.rs src/runtime/tunnel/tests.rs src/dns/schedule.rs src/dns/schedule/tests.rs src/dns/transport.rs src/dns/transport/registration.rs src/dns/transport/tests.rs src/dns/transport/tests/shared_armed_cache.rs src/dns/transport/dot_tests.rs tests/foundations.rs tests/boot.rs tests/support/temp_dir.rs tests/support/enforcement_tables.rs tests/support/dns_responder.rs tests/support/process_harness.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
 
-# docslink gate roots: the exact nonempty argv docslink_check consumes. Shared
-# with the identity snapshot so the boundary content identity covers precisely
-# the bytes docslink_check reads (drift-proof by construction).
-DOCSLINK_ROOTS="docs/alumina-proxy.md docs/trust-telemetry-design.md docs/trust-chain-design.md docs/deployment.md docs/monitoring.md docs/verification.md docs/qa-package/README.md README.md"
+# Doc-gate roots: the primary docs the identity snapshot covers. The Repowise
+# drift gate scans the full tracked corpus; this list keeps the boundary
+# content identity stable for the docs that gate reads most.
+DOC_GATE_ROOTS="docs/alumina-proxy.md docs/trust-telemetry-design.md docs/trust-chain-design.md docs/deployment.md docs/monitoring.md docs/verification.md docs/qa-package/README.md README.md"
 
 # B1: every relevant before/after identity input consumed by the boundary run:
-# source/config/lock/deny plus the docs and .gitignore that
-# docslink_check and the working-tree view consume. Changing build outputs (the
-# compiled artifact) are intentionally excluded from this stability set and are
-# recorded separately at executed output. README.md is already covered by
-# INTENDED; the remaining DOCSLINK_ROOTS are added here so a gate-root edit
-# cannot silently drop an identity input.
+# source/config/lock/deny plus the docs and .gitignore that the docs gate and
+# the working-tree view consume. Changing build outputs (the compiled artifact)
+# are intentionally excluded from this stability set and are recorded separately
+# at executed output. README.md is already covered by INTENDED; the remaining
+# DOC_GATE_ROOTS are added here so a gate-root edit cannot silently drop an
+# identity input.
 GATE_ROOT_EXTRAS=""
-for root in $DOCSLINK_ROOTS; do
+for root in $DOC_GATE_ROOTS; do
     case " $INTENDED " in
         *" $root "*) ;;
         *) GATE_ROOT_EXTRAS="$GATE_ROOT_EXTRAS $root" ;;
     esac
 done
-IDENTITY_FILES="$INTENDED .gitignore AGENTS.md$GATE_ROOT_EXTRAS scripts/docs_check/check.mjs scripts/docs_check/package.json scripts/docs_check/package-lock.json scripts/docs_check/test.mjs scripts/verify_test.py docs/qa-package/validate.sh docs/qa-package/validate_test.py"
+IDENTITY_FILES="$INTENDED .gitignore AGENTS.md$GATE_ROOT_EXTRAS scripts/verify_test.py docs/qa-package/validate.sh docs/qa-package/validate_test.py"
 
 # Keep snapshot locations under target/ so they do not alter working-tree status.
 # scripts/verify.sh is itself an identity input in INTENDED.
@@ -851,61 +851,21 @@ boot_fixtures() {
 }
 
 
-# One effective Node environment preflight: refuse ANY set NODE_OPTIONS/NODE_PATH
-# -- non-empty or empty alike -- before ANY Node invocation (the docs adapter and
-# the boundary identity version probe), because a set option is an explicit
-# execution-affecting override even when empty. An unset variable is the only
-# accepted state.
-node_env_preflight() {
-    if [ -n "${NODE_OPTIONS+x}" ]; then
-        echo "NODE-REFUSED: NODE_OPTIONS is set (${NODE_OPTIONS}); execution-affecting Node options not covered by default-condition intake" >&2
-        exit 1
-    fi
-    if [ -n "${NODE_PATH+x}" ]; then
-        echo "NODE-REFUSED: NODE_PATH is set (${NODE_PATH}); execution-affecting module resolution not covered by default-condition intake" >&2
-        exit 1
-    fi
-}
-
-docslink_check() {
-    # Offline AST + authoritative slugger adapter (scripts/docs_check/check.mjs):
-    # fixed argv, literal fragment lookup, distinct operational failure. Document
-    # bytes are filesystem data passed to node; they never reach a shell here.
-    command -v node >/dev/null 2>&1 || {
-        echo "DOCSLINK-BLOCKED: node required for offline AST docs check (absent)" >&2
-        exit 1
-    }
-    [ -f scripts/docs_check/check.mjs ] || {
-        echo "DOCSLINK-BLOCKED: scripts/docs_check/check.mjs missing (no docs check)" >&2
-        exit 1
-    }
-    node_env_preflight
-    drc=0
-    docs_out="$(node scripts/docs_check/check.mjs $DOCSLINK_ROOTS)" || drc=$?
-    [ -n "$docs_out" ] && printf '%s\n' "$docs_out"
-    case "$drc" in
-        0) ;;
-        1)
-            echo "DOCSLINK-CHECK-FAIL or CITATION-CHECK-FAIL (missing file/fragment or unresolvable/out-of-range citation)" >&2
-            exit 1
-            ;;
-        2)
-            echo "DOCSLINK-CHECK-OP-FAIL or CITATION-CHECK-OP-FAIL (operational or unsupported construct)" >&2
-            exit 2
-            ;;
-        *)
-            echo "DOCSLINK-CHECK-FAIL (adapter exit $drc)" >&2
-            exit 1
-            ;;
-    esac
-    # Fail closed on the citation marker: a green adapter must have proven the
-    # corpus citations resolve and are in range (the marker line is the proof).
-    if ! printf '%s\n' "$docs_out" | grep -q '^CITATION-CHECK-OK '; then
-        echo "CITATION-CHECK-BLOCKED: adapter exit 0 but no CITATION-CHECK-OK marker" >&2
+# Docs drift gate: Repowise checks every local path, link, anchor and command in
+# the tracked documentation corpus. No Node, no second checker.
+docs_drift_gate() {
+    command -v repowise >/dev/null 2>&1 || {
+        echo "DOC-DRIFT-BLOCKED: repowise required for the docs drift gate (absent)" >&2
         exit 2
-    fi
-    echo "DOCSLINK-CHECK-OK"
-    echo "CITATION-CHECK-OK"
+    }
+    drc=0
+    repowise doc-drift --check --kind path --kind link --kind anchor --kind command --fail-on-confidence 0.7 || drc=$?
+    case "$drc" in
+        0) echo "DOC-DRIFT-OK" ;;
+        1) echo "DOC-DRIFT-FAIL (unresolved path, link, anchor or command)" >&2; exit 1 ;;
+        2) echo "DOC-DRIFT-BLOCKED (repowise could not evaluate the corpus)" >&2; exit 2 ;;
+        *) echo "DOC-DRIFT-FAIL (adapter exit $drc)" >&2; exit 1 ;;
+    esac
 }
 
 # =============================================================================
@@ -1340,9 +1300,9 @@ identity_snapshot_inputs_present() {
 #
 # The batch expansion is intentionally unquoted: IDENTITY_FILES is a fixed,
 # space-free set (INTENDED plus .gitignore and the docs-arm gate inputs).
-# The appended inputs are identity-carried, not gate roots: the docslink/
-# citation gate files (scripts/docs_check/*). Word-splitting thus yields
-# exactly the intended paths. The hasher's stderr is retained so a failed hash
+# The appended inputs are identity-carried, not gate roots: the docs gate roots
+# and scripts/verify_test.py. Word-splitting thus yields exactly the intended
+# paths. The hasher's stderr is retained so a failed hash
 # names the failing input; it is surfaced before removal, never masked.
 identity_snapshot_hash_batch() {
     dir="$1"
@@ -1368,9 +1328,9 @@ identity_snapshot_hash_batch() {
     rm -f "$errf"
 }
 
-# The effective build env as one record: declared knobs, supply-chain pins, the
-# Node observation and the Cargo config inventory. The single redirect owns the
-# file, so a failure mid-record leaves exactly the lines already produced.
+# The effective build env as one record: declared knobs, supply-chain pins and
+# the Cargo config inventory. The single redirect owns the file, so a failure
+# mid-record leaves exactly the lines already produced.
 identity_snapshot_env() {
     dir="$1"
     config_home="${CARGO_HOME:-$HOME/.cargo}"
@@ -1378,8 +1338,6 @@ identity_snapshot_env() {
     {
         identity_snapshot_env_declared
         identity_snapshot_env_supply_chain "$config_home"
-        identity_snapshot_env_node
-        identity_snapshot_env_node_flags
         identity_snapshot_env_config "$config_home"
         identity_snapshot_env_container "$alihash"
     } >"$dir/env"
@@ -1440,44 +1398,6 @@ identity_snapshot_env_supply_chain() {
     else
         printf 'advisory_db_head_date=<absent>\n'
     fi
-}
-
-# One effective Node observation: the path producer, the version probe and the
-# version digest. An absent producer, a failing probe and empty output are
-# three distinct failures, never one masked success.
-identity_snapshot_env_node() {
-    node_env_preflight
-    command -v node >/dev/null 2>&1 || {
-        echo "SOURCE-IDENTITY FAIL: node path producer failed (node absent; identity impossible, not PASS)" >&2
-        exit 1
-    }
-    nodepath=$(command -v node 2>&1)
-    nv=$(node --version 2>&1) || {
-        echo "SOURCE-IDENTITY FAIL: node --version exit $? (version unobservable, not PASS)" >&2
-        exit 1
-    }
-    [ -n "$nv" ] || {
-        echo "SOURCE-IDENTITY FAIL: node --version empty output (version unobservable, not PASS)" >&2
-        exit 1
-    }
-    nvh=$(printf '%s\n' "$nv" | sha256_digest stdin) || exit 1
-    printf 'node_executable=%s\n' "$nodepath"
-    printf 'node_version=%s\n' "$nv"
-    printf 'node_version_sha256=%s\n' "$nvh"
-}
-
-# Node's execution-affecting environment: unset, empty and set stay distinct --
-# an empty-but-set override is still an override.
-identity_snapshot_env_node_flags() {
-    if [ -z "${NODE_OPTIONS+x}" ]; then printf 'node_options=<unset>\n'
-    elif [ -n "$NODE_OPTIONS" ]; then printf 'node_options=%s\n' "$NODE_OPTIONS"
-    else printf 'node_options=<empty>\n'; fi
-    if [ -z "${NODE_PATH+x}" ]; then printf 'node_path=<unset>\n'
-    elif [ -n "$NODE_PATH" ]; then printf 'node_path=%s\n' "$NODE_PATH"
-    else printf 'node_path=<empty>\n'; fi
-    if [ -z "${NODE_ENV+x}" ]; then printf 'node_env=<unset>\n'
-    elif [ -n "$NODE_ENV" ]; then printf 'node_env=%s\n' "$NODE_ENV"
-    else printf 'node_env=<empty>\n'; fi
 }
 
 # Effective Cargo config inventory (finite ancestor closure, qkl seam A):
@@ -2270,6 +2190,6 @@ case "$TIER/$SCOPE" in
     identity/artifact) [ "$#" -eq 3 ] && [ -n "$3" ] || usage; artifact_identity "$3" ;;
     e2e/relay) e2e_relay ;;
     e2e/shutdown) e2e_shutdown ;;
-    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate; ref_check_report_only ;;
+    docs/*) docs_drift_gate; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate; ref_check_report_only ;;
     *) usage ;;
 esac
