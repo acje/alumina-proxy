@@ -492,7 +492,7 @@ changes nothing in them; it is not a benchmark framework and creates no files.
 | Item | Identity (record verbatim) |
 |---|---|
 | Source SHA | `3f587e947fa8f050954b2f1fa7ec6b47012ac769` (short `3f587e9`; sole parent `ad82b77c…`; 19 commits `c27115e..HEAD`; no push) |
-| P1 base / changed set | base `eedec45`; 10 paths: `README.md`, `docs/architecture.md`, `docs/serving-datastructure.html` (deleted), `src/config.rs`, `src/enforcement/policy.rs`, `src/incident_report.rs`, `src/log.rs`, `src/serve.rs`, `src/serving.rs`, `src/serving/tests.rs` |
+| P1 base / changed set | base `eedec45`; 10 paths: `git:3f587e9:README.md`, `git:3f587e9:docs/architecture.md`, `git:d23d9f6cc2f83afd11718f405cbe5e25f76ca89f:docs/serving-datastructure.html` (deleted by `ed43b4f` before the candidate, so absent at `3f587e9`; cited at its last carrying commit), `git:3f587e9:src/config.rs`, `git:3f587e9:src/enforcement/policy.rs`, `git:3f587e9:src/incident_report.rs`, `git:3f587e9:src/log.rs`, `git:3f587e9:src/serve.rs`, `git:3f587e9:src/serving.rs`, `git:3f587e9:src/serving/tests.rs` |
 | Canonical spec digest (at candidate time `3f587e9`) | `e39dd75d33635d582e981bfcb4f91fa92e3f23f2bf9a408c3d7dcd5079cd4401` (unchanged within the candidate) |
 | Current governing spec digest (post-F-09 amendment) | `111e71a1d410295bbc260d9730157abff630a587d5e92ae2df6ae17b133d1543` (re-pinned by the governed gate-section amendment; CANONICAL-DIGEST-OK pins AGENTS.md) |
 | Executed artifact sha256 | `c869192e67032597c4b490de16260cdc33b5b7a811cb7e37308f9b5d25274031` (`target/release/alumina`; production digest identical to the D4 candidate `a19d407`) |
@@ -506,10 +506,12 @@ changes nothing in them; it is not a benchmark framework and creates no files.
 
 The P1 gate earned **CONDITIONAL-COMPLETE**, not clean-tree qualification: at
 gate time `git status --porcelain` was non-empty because of one **foreign,
-untracked** file `scripts/verify_alt.sh` (99,890 B; sha256
-`85465b4c96daeef4234ac33168b4d831548aed0f7d9b3b7f8df37bb7dda0c8ee`) — another
-session's in-progress harness experiment, not authored by the gate, not a build
-input, byte-stable across the run, deliberately not deleted/staged/ignored.
+untracked** harness file named `verify_alt.sh` under `scripts/`, never tracked
+by this repository and therefore carrying no path identity to cite (99,890 B;
+sha256 `85465b4c96daeef4234ac33168b4d831548aed0f7d9b3b7f8df37bb7dda0c8ee`).
+That file is another session's in-progress harness experiment, not authored by
+the gate, not a build input, byte-stable across the run, deliberately not
+deleted/staged/ignored.
 (The same external session produced `arch_alt/architecture-review.md`,
 `d25b3458…0802f`, mid-run on one aborted attempt; treat any such foreign
 untracked path the same way.)
@@ -886,7 +888,7 @@ RUN 9/9 haproxy timed storm50  EXIT=0 BENCH-OK  3f587e9-bench-haproxy-storm50-ti
 `rust_target=aarch64-unknown-linux-musl`, `config_sha256` per subject,
 openssl 3.5.7 / python 3.13.5, `tool_sha256=5ac6475b…`. §10.3 identity bracket
 held: HEAD pinned to `3f587e9` for all 9 runs; the two foreign untracked files
-(`scripts/verify_alt.sh` `85465b4c…`, `arch_alt/architecture-review.md`
+(`verify_alt.sh` `85465b4c…`, `arch_alt/architecture-review.md`
 `d25b3458…`, sizes 99890 / 37818 B) are byte-identical on the pre- and
 post-run snapshots — SOURCE-IDENTITY-STABLE. Run-time pins: BENCH-ECHO-IDENTITY
 `efa64083…72cd` on all 9; BENCH-BINARY-IDENTITY `c869192e…` on the three
@@ -979,7 +981,7 @@ candidate's current result.
 | E3 (`alumina-cdwui.16`, §10.6) | No 10-Gbps number exists. Preflight: near-saturated open-loop client (`sampling.client.cores_mean` ≈ 0.92 at 1 Gbps, §11), loopback-only aperture (any claim would be "proxy-on-this-harness"), and the expressibility seam (`bench_run.sh` label set, `--target-mbps 10000` wiring, lifting `MAX_TARGET_MBPS`/`MAX_OUTSTANDING_CAP`, `scripts/bench_workload.py:3335/:107`) is unauthorised. | `BLOCKED`/`Unknown` — capability, not a proxy finding |
 | E4 (`alumina-cdwui.17`, §10.7) | (a) slow-peer base / (b) sink-drain injection `BLOCKED` (seam-gated); (c1) full 32-name allowlist DNS fail/recovery `BLOCKED` (seam-gated); (c2) deadline progress under load **MEASURED** by exact-input reuse of E2 storm receipts (`setup_failures={}`, `valid=true`); (d) stalled-stdout+load **MEASURED** by D2/D4 reuse. No correctness defect discovered; no P1 raised. | 2 measured, 3 `BLOCKED` |
 | D2/D4 (`alumina-cdwui.11`/`.13`) | Proxy-owned notification evidence measured (`stdout_stall` whole-record drop counter = lower bound; bounded drain); **deployment-owned** collector liveness/alerting/retention `BLOCKED`/Unknown — named prerequisite absent. | proxy measured; deployment comparator open |
-| P1 gate (`alumina-cdwui.20`) | Combined post-P1 candidate integrated; constituent markers exit 0; **CONDITIONAL-COMPLETE** under the §10.2.1 clean-identity caveat (foreign untracked `scripts/verify_alt.sh` + `arch_alt/` present, stable) — clean-tree re-run required before any production-qualification claim; BOUNDARY never runs E2E. | CONDITIONAL-COMPLETE (not production-qualified) |
+| P1 gate (`alumina-cdwui.20`) | Combined post-P1 candidate integrated; constituent markers exit 0; **CONDITIONAL-COMPLETE** under the §10.2.1 clean-identity caveat (foreign untracked `verify_alt.sh` + `arch_alt/` present, stable) — clean-tree re-run required before any production-qualification claim; BOUNDARY never runs E2E. | CONDITIONAL-COMPLETE (not production-qualified) |
 
 ### 12.2 Verdict — NoChangeJustified
 
