@@ -2647,7 +2647,7 @@ mod generation_tokens {
     /// Bounded re-dispatch of a freshly accepted connection's own token until
     /// its queued malformed head is read and the seat is released: the accept
     /// retry breaks the instant the slot is re-admitted, which can precede byte
-    /// arrival, so the first dispatch may WouldBlock. Re-dispatch is inert once
+    /// arrival, so the first dispatch may `WouldBlock`. Re-dispatch is inert once
     /// the slot returns to `Stage::Idle` (an idle slot cannot progress), making
     /// the retry idempotent and the released-seat post-condition sticky. Covers
     /// socket-arrival latency only — never use it for a stale or pre-wrap token,
