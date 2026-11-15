@@ -52,24 +52,26 @@ cannot observe its own unread pipe (writes succeed into a buffer nobody reads).
 ## Capacity guidance (derived from recorded workload receipts, not an invented rate)
 
 Two inputs: the fixed emission geometry (source fact) and the recorded workload
-receipts ([docs/benchmarks/e2micro-suite.md](benchmarks/e2micro-suite.md) §2,
-§9; `.ooda/benchmarks/85b7769-*.json`, 85b7769 baseline).
+receipts ([docs/benchmarks/e2-micro-1gbps.md §Honest readings](benchmarks/e2-micro-1gbps.md#honest-readings-m-04-corrected);
+`.ooda/benchmarks/85b7769-*.json`, 85b7769 baseline — those receipts are **absent
+from the tree**, so the numbers below are historical, not re-derivable).
 
 **Receipt provenance / host disclosure.** The M-04 receipts are **host
 measurements**, not e2-micro: they were recorded on an arm64 Apple VM (8 CPU /
 14 GiB, rootful podman, loopback alias) modelling e2-micro by workload
 parameters only, with no cgroup CPU/mem cap
-([docs/benchmarks/e2micro-suite.md §Host-vs-target disclosure](benchmarks/e2micro-suite.md#host-vs-target-disclosure)).
+([docs/benchmarks/e2-micro-1gbps.md §Host-vs-target disclosure](benchmarks/e2-micro-1gbps.md#host-vs-target-disclosure)).
 Read the CPU/RSS numbers below as host-measured indications for a collector
 budget, never as e2-micro certifications. The receipts measure **relay
 throughput**, not notify stdout volume (the proxy emits essentially nothing on a
 clean golden path).
 
-**What the receipts record** (corrected M-04, §9): 1gbps steady alumina achieved
-999.969 Mbps at 32 sustained conns with CPU mean/peak 0.409/0.440 cores and RSS
-mean 211,188 KiB (`85b7769-bench-alumina-1gbps-timed-20261028T131504Z.json`);
-storm150 (150 new conns/s) established 9000/9000 sessions with CPU mean/peak
-0.028/0.119 cores and RSS mean 210,915 KiB
+**What the receipts record** (corrected M-04, historical — receipts absent):
+1gbps steady alumina achieved 999.969 Mbps at 32 sustained conns with CPU
+mean/peak 0.409/0.440 cores and RSS mean 211,188 KiB
+(`85b7769-bench-alumina-1gbps-timed-20261028T131504Z.json`); storm150 (150 new
+conns/s) established 9000/9000 sessions with CPU mean/peak 0.028/0.119 cores and
+RSS mean 210,915 KiB
 (`85b7769-bench-alumina-storm150-timed-20261028T131839Z.json`); storm50
 established 3000/3000 at 0.011/0.077 cores RSS 210,832 KiB
 (`85b7769-bench-alumina-storm50-timed-20261028T132204Z.json`).

@@ -83,8 +83,10 @@ For local build and validation prerequisites, follow the
 - [Deployment](docs/deployment.md): container, runtime, and network confinement.
 - [Monitoring](docs/monitoring.md): stdout collection, loss alerting, and
   restart semantics.
-- [Benchmarks](docs/benchmarks/e2micro-suite.md): methodology, results, and
-  limitations.
+- [Benchmark method](docs/benchmarks/e2-micro-1gbps.md): e2-micro target,
+  topology, metrics, and historical M-04 readings.
+- [Capability matrix](docs/benchmarks/feature-matrix.md): keyed capabilities vs
+  Envoy v1.40.2 and HAProxy v3.4.0.
 - [Trust-chain design](docs/trust-chain-design.md): current status and
   conditional goal.
 
