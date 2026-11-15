@@ -1093,9 +1093,14 @@ use crate::runtime::storage::{ServingMode, StartupDecision};
 /// Mirrors main.rs exactly: the retained serving workspaces are preallocated
 /// BEFORE any DNS exchange, the startup window then runs over that complete
 /// owner, and the serving decision's listener is attached for traffic.
+///
+/// The listen port is kernel-assigned inside the startup window, so that bind
+/// is the port's single owner and the client dials the port the listener
+/// actually holds; no probe is bound, dropped, or re-taken. The literal below
+/// only has to parse: the kernel-assigned override replaces it before boot.
 fn main_wiring_body() {
-    let port = ephemeral_port();
-    let storage = ServeStorage::boot(&config(port)).expect("boot storage");
+    let storage =
+        ServeStorage::boot(&config(1).with_kernel_assigned_test_listener()).expect("boot storage");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
     let mut owner =
         Preallocated::preallocate(storage, traffic).expect("preallocate serving workspaces");
@@ -1119,6 +1124,7 @@ fn main_wiring_body() {
     let listener = outcome
         .into_listener()
         .expect("a serving decision binds the connect listener");
+    let port = listener.local_addr().expect("bound listener addr").port();
     let mut runtime = owner.attach(listener).expect("attach listener + dns");
 
     let client = connect(port);
