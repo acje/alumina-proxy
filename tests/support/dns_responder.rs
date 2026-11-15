@@ -105,9 +105,10 @@ impl<'a> Query<'a> {
         })
     }
 
-    /// Starts a reply carrying the query's transaction id, one question echoed
-    /// verbatim, `answers` answer records, and no authority or additional
-    /// records. `capacity` is the reply's exact final wire size.
+    /// Starts a reply with the query's transaction id, one question echoed
+    /// verbatim, `answers` declared answer records, and no authority or
+    /// additional records. `capacity` is the caller's allocation hint; the
+    /// caller's answer records may extend past it.
     pub(super) fn reply(&self, capacity: usize, answers: u16) -> Vec<u8> {
         let mut msg = Vec::with_capacity(capacity);
         msg.extend_from_slice(&self.tid.to_be_bytes());
