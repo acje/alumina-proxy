@@ -908,6 +908,68 @@ docslink_check() {
     echo "CITATION-CHECK-OK"
 }
 
+# =============================================================================
+# P0 report-only parity surface (repowise-align 2026-11-15)
+#
+# Both helpers run EXACTLY the command their enforcing P2 counterpart will run
+# and then swallow the disposition, so the docs selector cannot fail from them.
+# They exist so the replacements are observable beside the still-enforcing
+# scripts/docs_check/check.mjs gate before anything is retired, and so the
+# parity table is a reading of the real command rather than a rehearsal.
+#
+# Base resolution is local and offline by design: `git rev-parse HEAD`. With
+# `--since HEAD`, doc-drift scopes to documents this change is answerable for
+# (working-tree edits against HEAD plus commits after HEAD), which is this
+# repository's pre-commit verification window. Resolving a remote merge base is
+# deliberately NOT done (no fetch, no network); a post-commit CI gate needs an
+# explicit base and that is a P2 decision, stated as a parity caveat rather
+# than guessed here.
+# =============================================================================
+docs_drift_report_only() {
+    if ! command -v repowise >/dev/null 2>&1; then
+        echo "DOC-DRIFT-REPORT-ONLY: unavailable (repowise not on PATH)"
+        return 0
+    fi
+    dd_base="$(git rev-parse HEAD 2>/dev/null)" || dd_base=""
+    if [ -z "$dd_base" ]; then
+        echo "DOC-DRIFT-REPORT-ONLY: unavailable (git rev-parse HEAD failed)"
+        return 0
+    fi
+    dd_rc=0
+    dd_out="$(repowise doc-drift --check --since "$dd_base" --kind path --kind link --kind anchor --kind command --format json 2>&1)" || dd_rc=$?
+    echo "DOC-DRIFT-REPORT-ONLY: exit=$dd_rc (base=$dd_base; report-only, not failing)"
+    printf '%s\n' "$dd_out" | sed 's/^/  DOC-DRIFT: /'
+    return 0
+}
+
+ref_check_report_only() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "REF-CHECK-REPORT-ONLY: unavailable (python3 not on PATH)"
+        return 0
+    fi
+    if [ ! -f scripts/ref_check.py ]; then
+        echo "REF-CHECK-REPORT-ONLY: unavailable (scripts/ref_check.py missing)"
+        return 0
+    fi
+    rr_rc=0
+    rr_out="$(python3 scripts/ref_check.py 2>&1)" || rr_rc=$?
+    echo "REF-CHECK-REPORT-ONLY: exit=$rr_rc (report-only, not failing)"
+    printf '%s\n' "$rr_out" | sed 's/^/  REF-CHECK: /'
+    case "$rr_rc" in
+        0) ;;
+        1) echo "REF-CHECK-REPORT-ONLY: findings (report-only, not failing)" ;;
+        2)
+            case "$rr_out" in
+                *"stale symbol index"*) echo "REF-CHECK-REPORT-ONLY: unavailable (stale index)" ;;
+                *"repowise not on PATH"*) echo "REF-CHECK-REPORT-ONLY: unavailable (repowise not on PATH)" ;;
+                *) echo "REF-CHECK-REPORT-ONLY: unavailable (BLOCKED; see REF-CHECK-BLOCKED line above)" ;;
+            esac
+            ;;
+        *) echo "REF-CHECK-REPORT-ONLY: unavailable (adapter exit $rr_rc)" ;;
+    esac
+    return 0
+}
+
 unsafe_surface_gate() {
     # F3 (08-tooling-ci-scripts): file-level unsafe-surface confinement. The
     # `unsafe` keyword is allowed ONLY in the production surface — src/alloc.rs
@@ -2234,6 +2296,6 @@ case "$TIER/$SCOPE" in
     identity/artifact) [ "$#" -eq 3 ] && [ -n "$3" ] || usage; artifact_identity "$3" ;;
     e2e/relay) e2e_relay ;;
     e2e/shutdown) e2e_shutdown ;;
-    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate ;;
+    docs/*) docslink_check; intended_coverage_gate; cfg_test_parentage_gate; unsafe_surface_gate; canonical_digest_gate; docs_drift_report_only; ref_check_report_only ;;
     *) usage ;;
 esac
