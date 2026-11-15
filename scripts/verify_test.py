@@ -11,6 +11,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -945,5 +946,23 @@ class E2EReceiptInputs(unittest.TestCase):
                             "the tracked dirty diff must still be receipt-carried")
 
 
+def ref_check_suite():
+    """The docs symbol gate's own regression suite, scripts/ref_check_test.py.
+
+    It stays separately runnable (`python3 scripts/ref_check_test.py`) and is
+    fully offline: a temp repo, a fake resolver on PATH, no index. Loading it
+    here means one harness selector still covers both suites, so the docs gate
+    cannot trade its test surface away.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "ref_check_under_test", ROOT / "scripts/ref_check_test.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return unittest.TestLoader().loadTestsFromModule(module)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
+    suite.addTests(ref_check_suite())
+    result = unittest.TextTestRunner().run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)
