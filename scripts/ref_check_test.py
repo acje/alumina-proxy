@@ -462,10 +462,12 @@ class RefCheck(unittest.TestCase):
         self.assert_exit(result, 0, "REF-CHECK-OK 1")
         self.assertNotIn("type-containment", result.stdout)
 
-    # -- 18-21: continuations must belong to a receipt ------------------------
+    # -- 18-23: continuations must carry their own path ----------------------
     # LINE_RE needs a path prefix, so `:1937` standing in for a path named
-    # earlier is invisible to both the resolver check and the ratchet. Shape is
-    # what separates a continuation from a port or a clock time.
+    # earlier is invisible to both the resolver check and the ratchet. A
+    # citation precedes it, but a citation is not a waiver: shape is what
+    # separates a continuation from a port or a clock time, and a `git:<commit>:`
+    # receipt is itself one of the citations.
     def test_18_an_orphaned_span_continuation_is_a_finding(self):
         self.write("src/lib.rs", "pub struct Alpha {}\n")
         self.write("docs/a.md", "See src/lib.rs::Alpha, then `:42` for the body.\n")
@@ -494,10 +496,44 @@ class RefCheck(unittest.TestCase):
         self.assert_exit(result, 0, "REF-CHECK-OK 0")
         self.assertNotIn("continuation reference", result.stdout)
 
-    def test_21_a_receipt_continuation_passes(self):
+    def test_21_a_receipt_on_the_line_does_not_cover_a_bare_continuation(self):
+        # The receipt names ONE path and ONE line. The bare `:1937` beside it
+        # continues a path the reader has to infer and no grammar checks, so the
+        # document has regained a line number. This is the shape the class was
+        # added for, and it must not be exempted by a receipt sharing its line:
+        # the receipt covers its own path, never the token next to it.
         receipt = "git:1812405b5c9130a170d1e00988b2a77d80d86e3d:"
         self.write("docs/a.md", (
             "See `%ssrc/log.rs#L1850`, `:1937` for the labels.\n" % receipt))
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        result = self.run_ref_check()
+        self.assert_exit(result, 1, "REF-CHECK-FINDING")
+        self.assertIn("continuation reference: `:1937`", result.stdout)
+
+    def test_22_the_exact_pre_fix_spec_shape_is_a_finding(self):
+        # docs/alumina-proxy.md carried this token pair four times before the
+        # migration (`:1937`/`:1951` after the log.rs receipt, `:1694`/`:1700`
+        # after startup_dns.rs). Pinned verbatim: a regression to it, or a
+        # receipt exemption readmitted to the class, must fail here.
+        sha = "5486a6f0a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        self.write("docs/a.md", (
+            "The log slot receipt is `git:%s:src/log.rs#L1850`, `:1937`.\n" % sha))
+        self.commit("corpus")
+        self.write_state(self.rev("HEAD"))
+        result = self.run_ref_check()
+        self.assert_exit(result, 1, "REF-CHECK-FINDING")
+        self.assertIn("continuation reference: `:1937`", result.stdout)
+
+    def test_23_a_continuation_that_repeats_its_receipt_stays_clean(self):
+        # The migrated form: every token carries its own sha, path and line, so
+        # nothing has to be inferred and nothing is continuation-shaped. This is
+        # the shape the four spec tokens now use, and dropping the receipt
+        # exemption must not turn it into a false positive.
+        sha = "5486a6f0a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        self.write("docs/a.md", (
+            "The log slot receipt is `git:%s:src/log.rs#L1850`, "
+            "`git:%s:src/log.rs#L1937`.\n" % (sha, sha)))
         self.commit("corpus")
         self.write_state(self.rev("HEAD"))
         result = self.run_ref_check()

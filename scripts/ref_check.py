@@ -25,8 +25,8 @@ EXIT CONTRACT (exactly three outcomes, no folding)
      symbol references that resolved to a verified symbol.
   1  one or more findings (unresolved symbol, unknown path, unverified answer,
      out-of-range bounds, type-containment failure, ratchet violation,
-     unreceipted continuation). One
-     `REF-CHECK-FINDING <text>` line per finding, deterministically sorted.
+     continuation with no path of its own). One `REF-CHECK-FINDING <text>`
+     line per finding, deterministically sorted.
   2  operational / BLOCKED: repowise absent from PATH, the index is stale
      (recorded commit != HEAD), DOCSLINK_ROOTS unparseable, a resolver call
      failed or timed out, or the repository state could not be read. An
@@ -102,28 +102,41 @@ RATCHET (structural, no baseline file)
   holds zero committed references, and a new document must not start on line
   numbers.
 
-CONTINUATIONS (a line number must belong to a receipt)
+CONTINUATIONS (a line number must carry its own path)
   LINE_RE needs a path prefix, so a continuation token is invisible to both the
   resolver check and the ratchet: `:1937` standing in for a path named earlier,
   or a markdown link target with `:12` left outside the link. Two shapes are
   findings. (a) A backticked span holding nothing but `:NNN` or `:N-M`, when a
-  citation precedes it on the same line and no `git:<commit>:` receipt appears
-  there: the continuation is neither readable on its own nor checked, so the
-  document has regained a line number. (b) A markdown link whose target is a
-  source path and whose `:NNN` sits outside the link -- the shape
-  docs/monitoring.md carried 21 times before it was converted. Shape is the
-  entire test: a port or a clock time in prose (`:443`, `12:30`) never fires,
-  and a receipt on the line attributes its continuations to a pinned tree.
+  citation precedes it on the same line -- the continuation is neither readable
+  on its own nor checked, so the document has regained a line number.
+  (b) A markdown link whose target is a source path and whose `:NNN` sits
+  outside the link -- the shape docs/monitoring.md carried 21 times before it
+  was converted.
+
+  A `git:<commit>:` receipt is a citation here, not a licence: the continued
+  token must repeat it (`git:<commit>:path#L1937`) to be readable and immovable,
+  and that form is not continuation-shaped at all. A receipt anywhere on the
+  line therefore covers nothing, because `` `git:<commit>:src/log.rs#L1850`,
+  `:1937` `` -- the shape this class was added for -- would otherwise pass on
+  the strength of a token it does not belong to. Shape is the entire test: a
+  port or a clock time in prose (`:443`, `12:30`) follows no citation and never
+  fires.
+
+  KNOWN RESIDUE: continuation detection is grammar-shaped only inside backticks
+  and inside markdown link targets. A bare `:1937` written straight into prose
+  is not a continuation to this gate (see `_live_lines`).
 
 EXEMPTIONS ARE STRUCTURAL ONLY
   Two things are exempt, both because of where the text sits, never because of
   what it says: (a) fenced code blocks (``` / ~~~ fences, honouring the info
   string and requiring a closing fence at least as long as the opener), and
-  (b) the `git:<commit>:path` receipt form, whose path is immediately preceded
-  by `git:<commit>:`. There is deliberately no `# ref-check-disable` marker, no
-  allow-list file and no `--ignore` option: a text-based exemption is a baseline
-  by another name, and the whole point of this gate is that a finding cannot be
-  argued away by annotating the text that caused it.
+  (b) a path immediately preceded by `git:<commit>:`, whose live-reference
+  claim is about another tree. The continuation class takes no exemption from
+  either: a receipt is a citation, never a waiver. There is deliberately no
+  `# ref-check-disable` marker, no allow-list file and no `--ignore` option: a
+  text-based exemption is a baseline by another name, and the whole point of
+  this gate is that a finding cannot be argued away by annotating the text that
+  caused it.
 
 STYLE
   Stdlib only, no network, no third-party import. Document bytes are read as
@@ -167,7 +180,10 @@ LINK_CONTINUATION_RE = re.compile(
     r"\[[^\]\n]*\]\([^()\s]*" + _SOURCE_EXT + r"\):[0-9]+(?:-[0-9]+)?"
 )
 LINK_PATH_RE = re.compile(r"\]\([^()\s]*" + _SOURCE_EXT + r"\)")
-LINE_RECEIPT_RE = re.compile(r"git:[0-9a-f]{7,40}:")
+# A receipt names a pinned tree AND a path, so it is a citation the same way
+# `path:NNN` is: a `:NNN` after it continues that path. Recognising it is what
+# makes the continuation class see the shape it was added for.
+RECEIPT_CITATION_RE = re.compile(r"git:[0-9a-f]{7,40}:[A-Za-z0-9_./-]+")
 
 FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
 ROOTS_RE = re.compile(r'^DOCSLINK_ROOTS="([^"]*)"[ \t]*$', re.MULTILINE)
@@ -216,6 +232,21 @@ def _live_lines(raw):
     whole live line rather than over a parsed inline-code tree, so a reference
     written without backticks is caught by the same grammar (and a reference
     cannot hide by dropping its backticks).
+
+    That holds for `path::Symbol` and `path:NNN`, which are grammar-shaped
+    wherever they sit, and NOT for continuations. A continuation carries no path
+    of its own, so it is only recognisable by the punctuation around it, and
+    this reader finds one in exactly two places: a backticked span holding
+    nothing but `:NNN` (`CONTINUATION_SPAN_RE`) and a `:NNN` left outside a
+    markdown link target (`LINK_CONTINUATION_RE`). A bare `:1937` written
+    straight into prose is therefore KNOWN RESIDUE: this gate does not see it,
+    and nothing else in the gate does either, so that spelling could regain a
+    line number without a finding. It is accepted rather than closed because an
+    unquoted `:NNN` is indistinguishable from the port and clock-time prose
+    `docs/deployment.md` legitimately holds, and a class that fires on
+    `dial :443` costs more in false positives than the residue costs in
+    coverage. Diff review is the only cover for the residue; this docstring is
+    the record.
     """
     fence = None
     for number, line in enumerate(raw.splitlines(), 1):
@@ -258,30 +289,41 @@ def scan_text(raw):
 
 
 def _cites_before(text, end):
-    """True when a citation precedes `end`, so a `:NNN` there is a continuation."""
+    """True when a citation precedes `end`, so a `:NNN` there is a continuation.
+
+    A `git:<commit>:path` receipt is a citation on the same footing as a symbol,
+    line or link-target reference: it names a pinned tree and a path, so a
+    `:NNN` after it continues that path exactly as one after `path:NNN` does.
+    Reading the receipt as a citation is what stops the pre-fix spec shape
+    (`` `git:<commit>:src/log.rs#L1850`, `:1937` ``) from being taken for prose
+    and slipping through the class built to catch it.
+    """
     head = text[:end]
     return (
         SYMBOL_RE.search(head) is not None
         or LINE_RE.search(head) is not None
         or LINK_PATH_RE.search(head) is not None
+        or RECEIPT_CITATION_RE.search(head) is not None
     )
 
 
 def scan_continuations(raw):
-    """Return [(line, token)] for continuation tokens no receipt covers.
+    """Return [(line, token)] for continuation tokens with no path restated.
 
-    A continuation continues a citation that precedes it on the same line, and
-    `git:<commit>:` on that line attributes it to a pinned tree, which is the
-    one form that is both readable and immovable. Everything else that is
-    continuation-shaped belongs to no receipt: the reader cannot resolve it and
-    the line-reference grammar cannot see it, which is exactly the false green
-    this class exists to close.
+    A continuation continues a citation that precedes it on the same line, and a
+    citation is any of the four shapes `_cites_before` recognises -- including a
+    `git:<commit>:path` receipt. What a receipt does NOT do is cover its
+    neighbours: a bare `:1937` beside a receipt still restates a line number the
+    reader cannot resolve and both grammars cannot see, so it is a finding
+    whether or not a receipt shares the line. The readable, immovable form
+    repeats the receipt (`git:<commit>:path#L1937`), and that token is not
+    continuation-shaped at all -- which is why removing the old line-level
+    receipt exemption costs the corpus nothing.
     """
     found = []
     for number, text in _live_lines(raw):
-        receipted = LINE_RECEIPT_RE.search(text) is not None
         for match in CONTINUATION_SPAN_RE.finditer(text):
-            if receipted or not _cites_before(text, match.start()):
+            if not _cites_before(text, match.start()):
                 continue
             found.append((number, match.group(0)))
         for match in LINK_CONTINUATION_RE.finditer(text):
@@ -839,14 +881,15 @@ def main():
                 % (doc, number, token)
             )
 
-    # A continuation belongs to the citation before it, and only a receipt on
-    # the same line makes that attribution durable. Anything else is a line
-    # number the grammar cannot see, so it is a finding whatever the lock state.
+    # A continuation belongs to the citation before it, and a `git:<commit>:`
+    # receipt on the line is one of those citations, never a waiver: a bare
+    # `:NNN` beside a receipt is a line number the grammar cannot see, so it is
+    # a finding whatever the lock state.
     for doc in roots:
         for number, token in continuations[doc]:
             findings.append(
                 "%s:%d: continuation reference: %s continues a path named earlier "
-                "and no git: receipt covers it" % (doc, number, token)
+                "and does not carry that path itself" % (doc, number, token)
             )
 
     if findings:
