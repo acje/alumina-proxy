@@ -1953,7 +1953,8 @@ mod assurance_bridge_tests {
         let mut arrange = arrange_expiry_recovery();
         let storage = &mut arrange.storage;
         let name = storage.cache.name_index(0).unwrap();
-        assert_eq!(storage.dns.now_u64(), 1000);
+        // Mounted at the DNS window origin: cache_secs at the origin reads now0.
+        assert_eq!(storage.cache_secs(storage.dns.window_start()), 1000);
         assert!(
             storage
                 .cache
