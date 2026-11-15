@@ -23,8 +23,8 @@ EXIT CONTRACT (exactly three outcomes, no folding)
   0  clean. Last line is `REF-CHECK-OK <n>` where n is the number of live
      symbol references that resolved to a verified symbol.
   1  one or more findings (unresolved symbol, unknown path, unverified answer,
-     out-of-range bounds, ratchet violation). One `REF-CHECK-FINDING <text>`
-     line per finding, deterministically sorted.
+     out-of-range bounds, type-containment failure, ratchet violation). One
+     `REF-CHECK-FINDING <text>` line per finding, deterministically sorted.
   2  operational / BLOCKED: repowise absent from PATH, the index is stale
      (recorded commit != HEAD), DOCSLINK_ROOTS unparseable, a resolver call
      failed or timed out, or the repository state could not be read. An
@@ -59,6 +59,34 @@ RESOLVER EXIT CODES (measured, not assumed)
       $ repowise symbol 'src/boot/mod.rs::NoSuchSymbol' --format json >/dev/null; echo $?
       1
 
+TYPE CONTAINMENT (a leaf name is not a citation)
+  `path::A::b` names two constructs, and the resolver answers with one: asked
+  for `src/inspection/connect.rs::ConnectError::TooManyHeaderLines` it returns
+  the member of `ConnectHeadReason` -- same file, same leaf name, verified:true,
+  line 132 instead of 63. A gate that checks only the file and the leaf name
+  certifies a citation that names the wrong construct, so every enclosing
+  segment is resolved and attributed separately: each `path::A` must resolve,
+  verify, and be a type-like construct, and the member's reported line must lie
+  inside a declaration of `A` in that file. Nested segments (`path::A::B::b`)
+  are matched outermost-first against the enclosing declarations read from the
+  source, innermost declaration first.
+
+  The enclosing declaration is read from the file's brace structure rather than
+  from the type's resolver answer, because the resolver's span cannot carry
+  containment. Measured on this corpus:
+    - A type with several impl blocks is reported at ONE of them, arbitrarily:
+      `src/runtime/storage.rs::ServeStorage` answers 1770-1786 while the cited
+      methods sit in the 336-1724 block.
+    - Variants and fields live in the declaration, which the index does not
+      report at all once the type has an impl: `ConfigError::InvalidResolver`
+      resolves to line 362 while `path::ConfigError` answers the impl 391-527.
+  Both readings are legitimately contained members, so span containment against
+  the resolver answer would reject 8 of this corpus's 24 qualified references.
+  The block header (`impl Trait for X` names X; `pub enum X` names X) is what
+  the citation means by `A`, and it is the same reading the compiler uses to
+  resolve `X::b`. A member whose enclosing declarations do not name every cited
+  segment is a finding, never a pass, and there is no allow-list.
+
 RATCHET (structural, no baseline file)
   A document is *locked* when its COMMITTED content (at HEAD) holds zero live
   line references -- the `path:NNN` and `path:NNN-MMM` token class. For a locked
@@ -88,6 +116,7 @@ STYLE
   list. Output order is a pure function of the corpus.
 """
 
+import functools
 import json
 import os
 import re
@@ -114,6 +143,16 @@ LINE_RE = re.compile(r"(?<![A-Za-z0-9_./-])(" + _PATH_CORE + r":\d+(?:-\d+)?)")
 RECEIPT_RE = re.compile(r"git:[0-9a-f]{7,40}:$")
 FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
 ROOTS_RE = re.compile(r'^DOCSLINK_ROOTS="([^"]*)"[ \t]*$', re.MULTILINE)
+
+# Kinds the index reports for a construct a member can hang off. A type with an
+# impl block is spelled `impl` (see TYPE CONTAINMENT), which is why that
+# spelling is accepted for a type name.
+TYPE_LIKE_KINDS = ("enum", "impl", "struct", "trait", "type", "union")
+_DECL_RE = re.compile(
+    r"(?:pub(?:\([^)]*\))? )?(?:enum|struct|union|trait) ([A-Za-z_][A-Za-z0-9_]*)"
+)
+_IMPL_RE = re.compile(r"(?:unsafe )?impl(.*)$")
+_PATH_HEAD_RE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*([A-Za-z_][A-Za-z0-9_]*)")
 
 
 class Blocked(Exception):
@@ -340,6 +379,222 @@ def verdict(payload, path_part):
     return None
 
 
+def _declaration_header(header):
+    """(lines skipped, declaration text) for a block header.
+
+    A block header starts at the previous brace boundary, so it carries the doc
+    comments and attributes that precede the item. Those are documentation
+    about the declaration, not the declaration, so they are skipped and the
+    remaining text is whitespace-normalized.
+    """
+    skipped = 0
+    depth = 0
+    for line in header.splitlines():
+        stripped = line.strip()
+        if depth > 0:
+            depth += stripped.count("[") - stripped.count("]")
+            skipped += 1
+            continue
+        if not stripped or stripped.startswith("//"):
+            skipped += 1
+            continue
+        if stripped.startswith("#[") or stripped.startswith("#!["):
+            depth = max(0, stripped.count("[") - stripped.count("]"))
+            skipped += 1
+            continue
+        break
+    return skipped, " ".join(" ".join(header.split("\n")[skipped:]).split())
+
+
+def _declared_type(header):
+    """(declared type name, lines to its declaration) or (None, 0).
+
+    `enum X`, `struct X`, `union X`, `trait X`, `impl X`, `impl<T> X<T>` and the
+    trait-impl form `impl Trait for X` all declare a type; in the last form the
+    right-hand type owns the members, so that is the answer. A body block
+    (`match self`, `if let ...`) matches neither and declares nothing.
+    """
+    skipped, text = _declaration_header(header)
+    match = _DECL_RE.match(text)
+    if match is not None:
+        return match.group(1), skipped
+    match = _IMPL_RE.match(text)
+    if match is None:
+        return None, 0
+    rest = match.group(1).strip()
+    if rest.startswith("<"):
+        depth = 0
+        for index, char in enumerate(rest):
+            if char == "<":
+                depth += 1
+            elif char == ">":
+                depth -= 1
+            if depth == 0:
+                rest = rest[index + 1:].strip()
+                break
+        else:
+            return None, 0
+    if " for " in rest:
+        rest = rest.rsplit(" for ", 1)[1].strip()
+    match = _PATH_HEAD_RE.match(rest)
+    return (match.group(1), skipped) if match is not None else (None, 0)
+
+
+def _skip_char_literal(text, index):
+    """Index just past a character literal, or past the quote of a lifetime.
+
+    `'a` is a lifetime or loop label with no closing quote; a character literal
+    has one and may carry an escape whose braces are not structure (`'\\u{7b}'`).
+    """
+    following = index + 1
+    if following >= len(text):
+        return len(text)
+    if text[following] == "\\":
+        if text.startswith("\\u{", following):
+            close = text.find("}", following)
+            index = len(text) if close < 0 else close + 1
+        else:
+            index = following + 2
+        quote = text.find("'", index)
+        return len(text) if quote < 0 else quote + 1
+    if text.startswith("'", following + 1):
+        return following + 2
+    return following
+
+
+@functools.lru_cache(maxsize=None)
+def _brace_blocks(path):
+    """Every brace-delimited block in `path`: [(header text, start line, end)].
+
+    The header is the text between the previous brace boundary and the opening
+    brace, which is how `impl fmt::Display for ConnectError` and
+    `pub enum ConnectError` are recovered without a Rust parser. Braces inside
+    comments, string literals, raw strings and character literals are not
+    structure and are skipped: a `"{"` in a format string would otherwise shift
+    every enclosing-block reading below it. Cached because a document cites one
+    file many times and the file is scanned only to answer line attribution.
+    """
+    text = _read_text(os.path.join(REPO_ROOT, path))
+    length = len(text)
+    blocks = []
+    stack = []
+    line = 1
+    boundary = 0
+    boundary_line = 1
+    index = 0
+    while index < length:
+        char = text[index]
+        if char == "\n":
+            line += 1
+            index += 1
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            index = length if end < 0 else end
+        elif text.startswith("/*", index):
+            depth = 1
+            index += 2
+            while index < length and depth:
+                if text.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    line += text[index] == "\n"
+                    index += 1
+        elif char.isalpha() or char == "_":
+            start = index
+            while index < length and (text[index].isalnum() or text[index] == "_"):
+                index += 1
+            raw = text[start:index] in ("r", "br", "cr")
+            if raw and index < length and text[index] in '#"':
+                hashes = 0
+                while index < length and text[index] == "#":
+                    hashes += 1
+                    index += 1
+                if index < length and text[index] == '"':
+                    end = text.find('"' + "#" * hashes, index + 1)
+                    index = length if end < 0 else end + 1 + hashes
+                    line += text.count("\n", start, index)
+        elif char == '"':
+            index += 1
+            while index < length and text[index] != '"':
+                if text[index] == "\\":
+                    line += index + 1 < length and text[index + 1] == "\n"
+                    index += 2
+                    continue
+                line += text[index] == "\n"
+                index += 1
+            index += 1
+        elif char == "'":
+            index = _skip_char_literal(text, index)
+        elif char == "{":
+            stack.append((text[boundary:index], boundary_line))
+            index += 1
+            boundary = index
+            boundary_line = line
+        elif char == "}":
+            if stack:
+                header, start = stack.pop()
+                blocks.append((header, start, line))
+            index += 1
+            boundary = index
+            boundary_line = line
+        else:
+            index += 1
+    return blocks
+
+
+def _type_chain(path, line):
+    """Declarations enclosing `line`, innermost first: [(start, name, end, header)]."""
+    chain = []
+    for header, start, end in _brace_blocks(path):
+        name, skipped = _declared_type(header)
+        declared = start + skipped
+        if name is not None and declared <= line <= end:
+            chain.append((declared, name, end, header))
+    chain.sort(key=lambda entry: entry[0], reverse=True)
+    return chain
+
+
+def type_containment(path, line, symbol_id, prefixes):
+    """None when `line` sits inside every cited type, else the finding.
+
+    `prefixes` is [(qualifier, name)] outermost first. Matching runs innermost
+    segment against the innermost enclosing declaration, so `path::A::B::b`
+    must be enclosed by B inside A and cannot borrow A for a member of B.
+    """
+    chain = _type_chain(path, line)
+    names = [entry[1] for entry in chain]
+    cursor = 0
+    for qualifier, name in reversed(prefixes):
+        while cursor < len(names) and names[cursor] != name:
+            cursor += 1
+        if cursor < len(names):
+            cursor += 1
+            continue
+        if not chain:
+            return (
+                "type-containment: %s: member line %d sits outside every "
+                "declaration, so it is not a member of %s" % (symbol_id, line, qualifier)
+            )
+        enclosing = chain[0]
+        return (
+            "type-containment: %s: member line %d lies inside %s (%d-%d), "
+            "not inside %s"
+            % (
+                symbol_id,
+                line,
+                _declaration_header(enclosing[3])[1],
+                enclosing[0],
+                enclosing[2],
+                qualifier,
+            )
+        )
+    return None
+
+
 def _git(git, argv):
     try:
         proc = subprocess.run(
@@ -407,21 +662,69 @@ def main():
         )
 
     findings = []
+    answers = {}
+
+    def answer(symbol_id):
+        # One resolver call per distinct id: qualifications and leaves overlap
+        # heavily across citations, and the resolver is the slow step.
+        if symbol_id not in answers:
+            answers[symbol_id] = resolve(repowise, symbol_id)
+        return answers[symbol_id]
+
     unique_ids = sorted({_plain(token) for hits in symbols.values() for _, token in hits})
     verified_ids = set()
     for symbol_id in unique_ids:
-        path_part = symbol_id.split("::", 1)[0]
+        parts = symbol_id.split("::")
+        path_part = parts[0]
         if not os.path.exists(os.path.join(REPO_ROOT, path_part)):
             findings.append(
                 "unknown path: %s (no such file in the checkout)" % path_part
             )
             continue
-        payload = resolve(repowise, symbol_id)
-        reason = verdict(payload, path_part)
-        if reason is None:
-            verified_ids.add(symbol_id)
+        # A qualified reference names a chain of constructs, and the leaf answer
+        # alone cannot prove the chain: `path::A::b` and `path::C::b` return the
+        # same payload when both types hold a `b`. Every enclosing segment is
+        # resolved and verified on its own (see TYPE CONTAINMENT).
+        prefixes = []
+        reason = None
+        for depth in range(2, len(parts)):
+            qualifier = "::".join(parts[:depth])
+            qualifier_payload = answer(qualifier)
+            reason = verdict(qualifier_payload, path_part)
+            if reason is not None:
+                reason = "%s: %s" % (qualifier, reason)
+                break
+            if qualifier_payload.get("kind") not in TYPE_LIKE_KINDS:
+                reason = "%s: intermediate segment resolves to kind %r, not a type-like construct" % (
+                    qualifier,
+                    qualifier_payload.get("kind"),
+                )
+                break
+            prefixes.append((qualifier, parts[depth - 1]))
+        if reason is not None:
+            findings.append("%s: %s" % (symbol_id, reason))
             continue
-        findings.append("%s: %s" % (symbol_id, reason))
+        payload = answer(symbol_id)
+        reason = verdict(payload, path_part)
+        if reason is not None:
+            findings.append("%s: %s" % (symbol_id, reason))
+            continue
+        if prefixes:
+            bounds = _bounds(payload)
+            if bounds is None:
+                # Containment is the whole point of the multi-segment form: a
+                # member the resolver places nowhere cannot be attributed, and
+                # an unattributable citation is not a verified one.
+                findings.append(
+                    "type-containment: %s: the resolver reported no line for the "
+                    "member, so its enclosing type cannot be checked" % symbol_id
+                )
+                continue
+            reason = type_containment(path_part, bounds[0], symbol_id, prefixes)
+            if reason is not None:
+                findings.append(reason)
+                continue
+        verified_ids.add(symbol_id)
 
     # Ratchet: the floor is the committed document, so a locked document is one
     # whose bytes at HEAD hold no live line reference at all. Reading lock state
