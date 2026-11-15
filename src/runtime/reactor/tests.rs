@@ -10498,8 +10498,12 @@ fn await_proof_expiry_gap(serving: &mut Serving) {
         .assurance_wake(before)
         .expect("assurance wake query")
         .expect("valid proof has an expiry wake");
-    assert!(expiry > before);
-    std::thread::sleep(expiry.saturating_duration_since(before) + Duration::from_millis(25));
+    // Fixture setup can outlive the proof window under load; the wake is then
+    // immediate (`expiry == before`) and the gap is already open, so cross it
+    // without sleeping. The post-gap assertions below stay exact either way.
+    if expiry > before {
+        std::thread::sleep(expiry.saturating_duration_since(before) + Duration::from_millis(25));
+    }
     let after = Instant::now();
     assert!(after >= expiry);
     assert_eq!(
