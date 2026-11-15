@@ -1450,28 +1450,28 @@ the originating setup.
 The CONNECT request head is rejected when it contains a bare carriage return (a `0x0d` not
 immediately followed by `0x0a`) or a bare line feed (`0x0a` not immediately preceded by
 `0x0d`), located incrementally while scanning for the `\r\n\r\n` head terminator
-(`src/inspection/connect.rs:259-271`, `bare_line_feed` `src/inspection/connect.rs:374-376`, `bare_carriage_return`
-`src/inspection/connect.rs:382-384`). Tests: `rejects_bare_lf` (`src/inspection/connect/tests.rs:315-318`),
-`rejects_bare_carriage_return_in_header_value` (`src/inspection/connect/tests.rs:321-327`),
-`rejects_bare_carriage_return_before_delimiter` (`src/inspection/connect/tests.rs:330-336`).
+(`src/inspection/connect.rs::ConnectParser::find_delimiter`, `bare_line_feed` `src/inspection/connect.rs::bare_line_feed`, `bare_carriage_return`
+`src/inspection/connect.rs::bare_carriage_return`). Tests: `rejects_bare_lf` (`src/inspection/connect/tests.rs::rejects_bare_lf`),
+`rejects_bare_carriage_return_in_header_value` (`src/inspection/connect/tests.rs::rejects_bare_carriage_return_in_header_value`),
+`rejects_bare_carriage_return_before_delimiter` (`src/inspection/connect/tests.rs::rejects_bare_carriage_return_before_delimiter`).
 
 #### L8 — Non-`host_name` `server_name` rejection
 
 Within the `server_name` extension, any entry whose name type is not `host_name` (0) is
-rejected as `non-host_name name type` rather than ignored (`src/inspection/client_hello.rs:879-883` in
-`parse_server_names` `src/inspection/client_hello.rs:857-899`). Test: `non_host_name_sni_rejected`
-(`src/inspection/client_hello/tests.rs:580-592`).
+rejected as `non-host_name name type` rather than ignored (`src/inspection/client_hello.rs::parse_server_names` in
+`parse_server_names` `src/inspection/client_hello.rs::parse_server_names`). Test: `non_host_name_sni_rejected`
+(`src/inspection/client_hello/tests.rs::non_host_name_sni_rejected`).
 
 #### SP-006 — >64 sigalgs rejected; `count:02` overflow saturates
 
-The `signature_algorithms` list is bounded at `MAX_SIGALGS = 64` (`src/inspection/client_hello.rs:44`);
+The `signature_algorithms` list is bounded at `MAX_SIGALGS = 64` (`src/inspection/client_hello.rs::MAX_SIGALGS`);
 a list declaring more than 64 entries is rejected as `TooManySigAlgs` — an AnyIllegal profile
 violation, not a JA4 admit/reject — so the JA4 hash input is never silently truncated
-(`parse_sig_algs` `src/inspection/client_hello.rs:933-954`). The `count:02` token saturates at 99 with no
-literal marker (`count_token` `src/inspection/client_hello/ja4.rs:100-103`). Tests:
-`sigalgs_over_max_sigalgs_rejected` (`src/inspection/client_hello/tests.rs:1085-1090`),
-`sigalgs_at_max_sigalgs_accepted` (`src/inspection/client_hello/tests.rs:1093-1101`),
-`sigalgs_over_max_rejects_as_profile` (`src/inspection/client_hello/tests.rs:1104-1109`).
+(`parse_sig_algs` `src/inspection/client_hello.rs::parse_sig_algs`). The `count:02` token saturates at 99 with no
+literal marker (`count_token` `src/inspection/client_hello/ja4.rs::count_token`). Tests:
+`sigalgs_over_max_sigalgs_rejected` (`src/inspection/client_hello/tests.rs::sigalgs_over_max_sigalgs_rejected`),
+`sigalgs_at_max_sigalgs_accepted` (`src/inspection/client_hello/tests.rs::sigalgs_at_max_sigalgs_accepted`),
+`sigalgs_over_max_rejects_as_profile` (`src/inspection/client_hello/tests.rs::sigalgs_over_max_rejects_as_profile`).
 
 
 ## P-B7b note: one-label allowlist names accepted (no minimum label count)
@@ -1479,24 +1479,24 @@ literal marker (`count_token` `src/inspection/client_hello/ja4.rs:100-103`). Tes
 
 #### One-label allowlist names are accepted; only `cname_bailiwick` requires ≥ 2 labels
 
-An allowlist entry key is parsed by `Fqdn::parse` (`src/config/mod.rs:44-61`): it requires a
-`<fqdn>:<port>` shape (`rsplit_once(':')`, `src/config/mod.rs:46-48`), rejects an IP-literal
-host shape (`is_ip_literal_shape`, `src/config/mod.rs:49-51`), and validates the bare name via
-`validate_bare_name` (`src/config/mod.rs:94-106`). `validate_bare_name` enforces the shared
-lowercase-ASCII label rules (`validate_label`, `src/config/mod.rs:80-88`) and the 253-byte
+An allowlist entry key is parsed by `Fqdn::parse` (`src/config/mod.rs::Fqdn::parse`): it requires a
+`<fqdn>:<port>` shape (`rsplit_once(':')`, `src/config/mod.rs::Fqdn::parse`), rejects an IP-literal
+host shape (`is_ip_literal_shape`, `src/config/mod.rs::Fqdn::parse`), and validates the bare name via
+`validate_bare_name` (`src/config/mod.rs::validate_bare_name`). `validate_bare_name` enforces the shared
+lowercase-ASCII label rules (`validate_label`, `src/config/mod.rs::validate_label`) and the 253-byte
 `FQDN_MAX_LEN` bound, but imposes no minimum label count — the contract note at
-`src/config/mod.rs:90-93` leaves shape-specific checks such as minimum label count to the
+`src/config/mod.rs::validate_bare_name` leaves shape-specific checks such as minimum label count to the
 caller, and `Fqdn::parse` never applies one. The only configuration surface that requires
 at least two labels is the declared `cname_bailiwick` zone suffix
-(`parse_cname_bailiwick_suffix`, `src/config/mod.rs:111-120`, ≥ 2-label check at
-`src/config/mod.rs:116-118`), a distinct F-07 safety rule; it never constrains the allowlist
-name itself. The allowlist key path is `parse_allowed_fqdn_table` (`src/config/mod.rs:899-937`),
+(`parse_cname_bailiwick_suffix`, `src/config/mod.rs::parse_cname_bailiwick_suffix`, ≥ 2-label check at
+`src/config/mod.rs::parse_cname_bailiwick_suffix`), a distinct F-07 safety rule; it never constrains the allowlist
+name itself. The allowlist key path is `parse_allowed_fqdn_table` (`src/config/mod.rs::parse_allowed_fqdn_table`),
 which parses each key through `Fqdn::parse`.
 
 Tests: `Fqdn::parse("1.2.3.4:443").is_err()` and `Fqdn::parse("93.184.216.34:443").is_err()`
-(IP literals rejected) with `Fqdn::parse("4example.com:443").is_ok()` (`src/config/fqdn_tests.rs:5-7`);
-the accepted-entries list at `src/config/fqdn_tests.rs:29-38`; and `rejects_bare_fqdn_key`
-(`src/config/enforcement_config_tests.rs:799-810`) confirming the only allowlist-key rejection is a missing `:port`,
+(IP literals rejected) with `Fqdn::parse("4example.com:443").is_ok()` (`src/config/fqdn_tests.rs::rejects_ip_literal_allowlist_entry`);
+the accepted-entries list at `src/config/fqdn_tests.rs::accepts_numeric_prefixed_hostnames`; and `rejects_bare_fqdn_key`
+(`src/config/enforcement_config_tests.rs::rejects_bare_fqdn_key`) confirming the only allowlist-key rejection is a missing `:port`,
 not a label count.
 
 
@@ -1507,12 +1507,12 @@ not a label count.
 
 All-scope latch arms fire only after a bounded fact counter crosses the CONFIGURED threshold
 within the CONFIGURED window, with no speculative pacing (`WindowedCounter`
-`src/enforcement/state.rs:129-135`, `decide` `src/enforcement/state.rs:264-309`). Each class's
+`src/enforcement/state.rs::WindowedCounter`, `decide` `src/enforcement/state.rs::Enforcement::decide`). Each class's
 threshold and window are operator-configurable via its optional gate section —
 `[bad_handshake]`, `[illegal_fqdn]`, `[ja4]` — (§Keyed
 configuration schema), with defaults `threshold = 1` fact within `window_secs = 900` seconds
 (`ALL_SCOPE_GATE_DEFAULT_THRESHOLD`/`ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS`,
-`src/enforcement/state.rs:12,17`). The values are deliberate under the design philosophy
+`src/enforcement/state.rs::ALL_SCOPE_GATE_DEFAULT_THRESHOLD, src/enforcement/state.rs::ALL_SCOPE_GATE_DEFAULT_WINDOW_SECS`). The values are deliberate under the design philosophy
 (§Design philosophy — the exit gate): in the idiomatic deployment the only client is the
 trusted-at-rest application on a fixed golden path, so a tripwire firing is a high-value
 signal — almost certainly operator misconfiguration or adversarial activity. At the default
@@ -1522,10 +1522,10 @@ raising a threshold is the operator's deliberate choice to tolerate a bounded bu
 a hidden tolerated rate. No speculative pacing is retained; the window only binds when
 `threshold > 1`. A false positive costs a trusted-operator restart; a false negative costs
 exfiltration. Tests: `single_any_illegal_arms_all_scope_at_default_threshold`
-(`src/enforcement/state/tests.rs:683-700`), `single_any_illegal_below_threshold_never_latches_all`
-(`src/enforcement/state/tests.rs:624-642`), `three_any_illegal_facts_within_the_window_latch_all`
-(`src/enforcement/state/tests.rs:645-680`), `any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once`
-(`src/enforcement/state/tests.rs:202-300`).
+(`src/enforcement/state/tests.rs::single_any_illegal_arms_all_scope_at_default_threshold`), `single_any_illegal_below_threshold_never_latches_all`
+(`src/enforcement/state/tests.rs::single_any_illegal_below_threshold_never_latches_all`), `three_any_illegal_facts_within_the_window_latch_all`
+(`src/enforcement/state/tests.rs::three_any_illegal_facts_within_the_window_latch_all`), `any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once`
+(`src/enforcement/state/tests.rs::any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once`).
 
 The gates apply to ANY effect projecting to Block All, from any control, not only
 `any_illegal`: each class's `WindowedCounter` folds only that class's facts — `bad_handshake`
@@ -1538,54 +1538,54 @@ configured window (§Per-control enforcement schema T6 — SP-001 preservation).
 #### SP-003 — homogeneous-trust resolver arrays
 
 A resolver array must be trust-homogeneous; a mixed plain (bare-IP) and DoT (`IP#fqdn`) set
-is rejected at startup exit 78 (`src/config/mod.rs:719`). Test: `resolver_mixed_plain_and_dot_trust_rejected`
-(`src/config/resolver_config_tests.rs:204-217`).
+is rejected at startup exit 78 (`src/config/mod.rs::validate_resolver_entries`). Test: `resolver_mixed_plain_and_dot_trust_rejected`
+(`src/config/resolver_config_tests.rs::resolver_mixed_plain_and_dot_trust_rejected`).
 
 #### SP-004 — sustained-negative incident class
 
 `INCIDENT_N` negatives across `INCIDENT_M` windows raise an `rd`-class incident in hourly
-summaries (`src/dns/schedule.rs:23`/`:27`/`:30`). Test: `sustained_negative_streak_opens_incident_at_n_across_m_windows`
-(`src/dns/schedule/tests.rs:594-628`).
+summaries (`src/dns/schedule.rs::INCIDENT_N`/`src/dns/schedule.rs::INCIDENT_M`/`src/dns/schedule.rs::INCIDENT_WINDOW`). Test: `sustained_negative_streak_opens_incident_at_n_across_m_windows`
+(`src/dns/schedule/tests.rs::sustained_negative_streak_opens_incident_at_n_across_m_windows`).
 
 #### SP-005 — per-ordinal JA4 set up to K=16
 
 Each ordinal holds a set of up to `MAX_ADDRESSES` (16) distinct JA4 strings; overflow
-suppresses adds and increments a count; seeding events are recorded (`src/runtime/reactor.rs:652-654`,
-`src/runtime/reactor.rs:3460-3506`, `src/dns/cache.rs:7`). Test: `ja4_baseline_set_overflow_suppresses_and_dedups_unchanged`
-(`src/runtime/reactor/tests.rs:9530-9568`).
+suppresses adds and increments a count; seeding events are recorded (`src/runtime/reactor.rs::Ja4BaselineTable`,
+`src/runtime/reactor.rs::Serving::maybe_record_ja4_baseline`, `src/dns/cache.rs::MAX_ADDRESSES`). Test: `ja4_baseline_set_overflow_suppresses_and_dedups_unchanged`
+(`src/runtime/reactor/tests.rs::ja4_baseline_set_overflow_suppresses_and_dedups_unchanged`).
 
 #### RT-001 — sigalg-list bound at 64
 
 The `signature_algorithms` list is bounded at `MAX_SIGALGS = 64` with no silent truncation
-of the JA4 hash input (`src/inspection/client_hello.rs:44`, `TooManySigAlgs` `src/inspection/client_hello.rs:264`,
-`src/inspection/client_hello.rs:933-954`). Tests: `sigalgs_over_max_sigalgs_rejected`
-(`src/inspection/client_hello/tests.rs:1085-1090`), `sigalgs_at_max_sigalgs_accepted` (`src/inspection/client_hello/tests.rs:1093-1101`).
+of the JA4 hash input (`src/inspection/client_hello.rs::MAX_SIGALGS`, `TooManySigAlgs` `src/inspection/client_hello.rs::ChError::TooManySigAlgs`,
+`src/inspection/client_hello.rs::parse_sig_algs`). Tests: `sigalgs_over_max_sigalgs_rejected`
+(`src/inspection/client_hello/tests.rs::sigalgs_over_max_sigalgs_rejected`), `sigalgs_at_max_sigalgs_accepted` (`src/inspection/client_hello/tests.rs::sigalgs_at_max_sigalgs_accepted`).
 
 #### SP-009 — probe-relocation counter disjoint from `dp=`
 
 The probe-relocation counter (`probe_relocations` → `pr=`) is disjoint from the serving
-`downgrade_to_plain` (`dp=`) downgrade surface (`src/dns/transport.rs:1216`/`:1210`). Test:
-`src/dns/transport/tests.rs:3955-3997`.
+`downgrade_to_plain` (`dp=`) downgrade surface (`src/dns/transport.rs::StartupDns::probe_relocations`/`src/dns/transport.rs::StartupDns::downgrade_to_plain`). Test:
+`src/dns/transport/tests.rs::relocate_for_probe_counts_a_probe_relocation_and_restores_without_extra`.
 
 #### SP-010 — log-queue priority classes; reserved records; drop newest-lowest
 
 Latch/event records are reserved and drop newest-lowest first (`is_reserved`
-`src/log/mod.rs:302-307`, `enqueue_reserved` `src/log/queue.rs:179-207`). Tests: `logging_reserved_startup_final_displaces_newest_normal_when_full`
-(`src/log/tests.rs:2445-2490`), `logging_reserved_records_survive_normal_overflow` (`src/log/tests.rs:2493-2527`),
-`logging_all_reserved_full_drops_newest_reserved` (`src/log/tests.rs:2530-2572`).
+`src/log/mod.rs::Kind::is_reserved`, `enqueue_reserved` `src/log/queue.rs::LogStore::enqueue_reserved`). Tests: `logging_reserved_startup_final_displaces_newest_normal_when_full`
+(`src/log/tests.rs::logging_reserved_startup_final_displaces_newest_normal_when_full`), `logging_reserved_records_survive_normal_overflow` (`src/log/tests.rs::logging_reserved_records_survive_normal_overflow`),
+`logging_all_reserved_full_drops_newest_reserved` (`src/log/tests.rs::logging_all_reserved_full_drops_newest_reserved`).
 
 #### RT-006 — independent stale-serving window
 
 `STALE_SERVING_WINDOW` (3600 s) is independent of the 259200 s retention deadline
-(`src/dns/cache.rs:15`, `src/dns/cache.rs:152-154`). Tests: `src/dns/cache/tests.rs:239-264`, `:713-744`, `:747-779`,
-`src/dns/cache/tests.rs:239-264`.
+(`src/dns/cache.rs::STALE_SERVING_WINDOW`, `src/dns/cache.rs::Entry::generation`). Tests: `src/dns/cache/tests.rs::owned_assurance_requirement_wrapper_uses_cached_owner_min`, `src/dns/cache/tests.rs::nxdomain_evicts_both_families`, `src/dns/cache/tests.rs::nodata_evicts_only_queried_family`,
+`src/dns/cache/tests.rs::owned_assurance_requirement_wrapper_uses_cached_owner_min`.
 
 #### RT-007 — pin-branch validity check non-blocking + distinct expired-cert fact
 
 The pin-branch Not-Before/Not-After check is non-blocking and emits a distinct expired-cert
-warning fact (`cert_outside_validity_window` `src/dns/transport.rs:1056-1062`, `expired_pin_certs`
-`src/dns/transport.rs:783`). Tests: `pinned_dot_accepts_expired_cert_with_matching_pin`
-(`src/dns/transport/dot_tests.rs:1104-1137`), `:1110-1118`, `:1131-1135`.
+warning fact (`cert_outside_validity_window` `src/dns/transport.rs::cert_outside_validity_window`, `expired_pin_certs`
+`src/dns/transport.rs::TlsConn`). Tests: `pinned_dot_accepts_expired_cert_with_matching_pin`
+(`src/dns/transport/dot_tests.rs::pinned_dot_accepts_expired_cert_with_matching_pin`), `src/dns/transport/dot_tests.rs::pinned_dot_accepts_expired_cert_with_matching_pin`, `src/dns/transport/dot_tests.rs::pinned_dot_accepts_expired_cert_with_matching_pin`.
 
 
 ## Reject unknown ECH codepoint 0xffce fail-closed
