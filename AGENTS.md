@@ -64,7 +64,7 @@ because one side "wins".
 ## Rules
 
 - `docs/alumina-proxy.md` is the sole, byte-canonical governing
-  specification (sha256 `09f60d09018fa367b169dfbb0ae577a02bd8a9224ae5db1be31221ec34c0d59f`) and is byte-frozen by default.
+  specification (sha256 `4fda7d76ac9d952912dbde3b5031813862869a998296809cc1ecf2560f35e4bc`) and is byte-frozen by default.
   Only an explicitly user-authorized, scoped governance amendment may change
   it. That increment must update the spec, this digest pin, code and tests
   together, pass required independent source and governance
