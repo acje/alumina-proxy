@@ -920,14 +920,15 @@ unsafe_surface_gate() {
     # name or does not resolve to a regular file is a scan failure rather than a
     # silently dropped path. The universe is enumerated with `find -print0`
     # (every directory named target, .git or .ooda pruned at any depth — the
-    # prior rg/grep exclusion semantics, so a bench crate's generated target/
-    # tree cannot turn this gate into a spurious FAIL; producer exit captured)
+    # prior rg/grep exclusion semantics, so a generated target/ tree — for
+    # example from a nested crate — cannot turn this gate into a spurious
+    # FAIL; producer exit captured)
     # and carried NUL-separated, so no argv word-splitting can lose a path: a
     # path list carried as shell words silently drops a whitespace-bearing entry
     # before the decision, which the mission intent forbids (a release-assurance
     # PASS must not coexist with admitted production unsafe). The list keeps the
     # scanned universe a superset of the admitted inventory, including untracked
-    # and non-src .rs paths (the bench crate stays covered). rg is preferred;
+    # and non-src .rs paths (a non-src crate stays covered). rg is preferred;
     # grep -l covers hosts without rg.
     # Producer exits are captured (cf. sha256_digest): rg/grep exit 1 = no match
     # (clean); any exit >= 2 is a tooling error and fails closed, never passing

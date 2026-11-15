@@ -346,22 +346,22 @@ class GateIntegrity(unittest.TestCase):
             for pruned in ("target", ".ooda"):
                 (repo / pruned).mkdir()
                 (repo / pruned / "planted.rs").write_text("fn planted() { unsafe {} }\n")
-            bench_target = repo / "scripts/bench/echo-backend/target"
-            bench_target.mkdir(parents=True)
-            (bench_target / "planted.rs").write_text("fn planted() { unsafe {} }\n")
+            nested_target = repo / "scripts/probe/build/target"
+            nested_target.mkdir(parents=True)
+            (nested_target / "planted.rs").write_text("fn planted() { unsafe {} }\n")
             result = self.run_gate(repo, "unsafe_surface_gate")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("UNSAFE-SURFACE-OK", result.stdout)
 
-    def test_non_src_bench_source_stays_in_scan_universe(self):
+    def test_non_src_crate_source_stays_in_scan_universe(self):
         with tempfile.TemporaryDirectory() as temp:
             repo, _ = self.sandbox(temp)
-            bench = repo / "scripts/bench/echo-backend/src"
-            bench.mkdir(parents=True)
-            (bench / "main.rs").write_text("fn main() { unsafe {} }\n")
+            probe = repo / "scripts/probe"
+            probe.mkdir(parents=True)
+            (probe / "main.rs").write_text("fn main() { unsafe {} }\n")
             result = self.run_gate(repo, "unsafe_surface_gate")
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("scripts/bench/echo-backend/src/main.rs", result.stderr)
+            self.assertIn("scripts/probe/main.rs", result.stderr)
 
     def test_empty_scan_universe_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp:
