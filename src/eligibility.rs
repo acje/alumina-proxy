@@ -35,7 +35,11 @@ const fn v6_in(addr: u128, net: u128, prefix: u8) -> bool {
     (addr >> (128 - prefix as u32)) == (net >> (128 - prefix as u32))
 }
 
-const V4_EXCLUSIONS: &[(u32, u8)] = &[
+/// The fixed IPv4 destination-exclusion table
+/// (`docs/alumina-proxy.md` §Configuration & DNS — Addresses) that
+/// [`ipv4_is_eligible`] enforces: each entry is a network and its prefix
+/// length, compared on parsed numeric addresses rather than textual forms.
+pub const V4_EXCLUSIONS: &[(u32, u8)] = &[
     (0x0000_0000, 8),
     (0x0a00_0000, 8),
     (0x6440_0000, 10),
@@ -53,7 +57,12 @@ const V4_EXCLUSIONS: &[(u32, u8)] = &[
     (0xf000_0000, 4),
 ];
 
-const V6_EXCLUSIONS: &[(u128, u8)] = &[
+/// The fixed IPv6 destination-exclusion table
+/// (`docs/alumina-proxy.md` §Configuration & DNS — Addresses) that
+/// [`ipv6_is_eligible`] enforces, on top of the required `2000::/3`
+/// membership: each entry is a network and its prefix length, compared on
+/// parsed numeric addresses rather than textual forms.
+pub const V6_EXCLUSIONS: &[(u128, u8)] = &[
     (0x2001_0000_0000_0000_0000_0000_0000_0000, 23),
     (0x2001_0db8_0000_0000_0000_0000_0000_0000, 32),
     (0x2002_0000_0000_0000_0000_0000_0000_0000, 16),

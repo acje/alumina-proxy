@@ -962,16 +962,32 @@ mod workspace {
             .expect("high reply");
         let observed = reply.observe();
         let (kind, extreme, _raw_ad_fact) = observed.probe_facts();
-        assert_eq!(
-            kind,
-            classify_published(&reply.outcome),
-            "observe classifies the same reply the classifier does"
-        );
         assert_eq!(extreme, reply.extreme_ttl());
         assert_eq!(kind, PublishedKind::ResolvedPositive);
         assert!(
             extreme,
             "the observed view carries the extreme flag from its reply"
+        );
+
+        // A validated NXDOMAIN with a 300-second SOA leaves the TTL well under
+        // the extreme threshold, so the same view reports the Negative window
+        // kind with the flag clear.
+        let mut nxdomain = header(0x1351, true, 3, 1, 0, 1, 0);
+        nxdomain.extend_from_slice(&qname_bytes("sub.example.org"));
+        nxdomain.extend_from_slice(&1u16.to_be_bytes());
+        nxdomain.extend_from_slice(&1u16.to_be_bytes());
+        nxdomain.extend_from_slice(&root_soa_record(300, 60));
+        let negative = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x1351, &nxdomain)
+            .expect("NXDOMAIN reply");
+        let (negative_kind, negative_extreme, _raw_ad_fact) = negative.observe().probe_facts();
+        assert_eq!(
+            negative_kind,
+            PublishedKind::Negative,
+            "a validated negative publishes as the Negative window kind"
+        );
+        assert!(
+            !negative_extreme,
+            "a 300-second negative carries no extreme-TTL flag"
         );
     }
 

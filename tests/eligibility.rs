@@ -225,6 +225,24 @@ fn ipv6_every_exclusion_range_boundary() {
 }
 
 #[test]
+fn boundary_vectors_match_the_production_exclusion_tables() {
+    let v4_vectors: Vec<(u32, u8)> = V4_RANGES.iter().map(|r| (r.net, r.prefix)).collect();
+    assert_eq!(
+        v4_vectors,
+        alumina::eligibility::V4_EXCLUSIONS,
+        "the boundary vector set must be the production exclusion table, so adding, \
+         moving, or removing a range fails until the vectors follow"
+    );
+    let v6_vectors: Vec<(u128, u8)> = V6_RANGES.iter().map(|r| (r.net, r.prefix)).collect();
+    assert_eq!(
+        v6_vectors,
+        alumina::eligibility::V6_EXCLUSIONS,
+        "the boundary vector set must be the production exclusion table, so adding, \
+         moving, or removing a range fails until the vectors follow"
+    );
+}
+
+#[test]
 fn ipv4_golden_corpus() {
     for &addr in V4_ELIGIBLE {
         assert!(

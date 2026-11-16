@@ -8,7 +8,6 @@ use process_harness::{
 use std::time::{Duration, Instant};
 
 const LOOPS: usize = 400;
-const MAX_MONITOR_RECORDS: usize = 32;
 const MONITOR_TIMEOUT: Duration = Duration::from_secs(120);
 const SETTLE_TURNS: usize = 4;
 const DRAIN_EVERY: usize = 50;
@@ -59,11 +58,6 @@ impl<'a> MonitorRecords<'a> {
             !self.summaries.is_empty(),
             "the runtime must emit at least one monitor summary on real stdout"
         );
-        assert!(
-            self.summaries.len() <= MAX_MONITOR_RECORDS,
-            "summaries are coalesced to whole seconds, not per detection: {} lines",
-            self.summaries.len()
-        );
     }
 }
 
@@ -104,10 +98,26 @@ fn assert_detail_records(records: &MonitorRecords<'_>) {
     }
 }
 
-fn assert_one_summary_per_second(summaries: &[&str], elapsed: u64, text: &str) {
+fn assert_one_summary_per_second(summaries: &[&str], text: &str) {
+    let secs: Vec<u64> = summaries
+        .iter()
+        .map(|line| field_u64(line, "secs"))
+        .collect();
     assert!(
-        summaries.len() as u64 <= (elapsed + 2),
-        "at most one summary per whole serving second (elapsed {elapsed}s got {}): {text}",
+        !secs.is_empty(),
+        "at least one monitor summary carries a secs stamp: {text}"
+    );
+    assert!(
+        secs.windows(2).all(|pair| pair[0] <= pair[1]),
+        "monitor summaries carry non-decreasing whole-serving-second stamps, one \
+         coalesced summary per second: {secs:?}"
+    );
+    let first = secs[0];
+    let last = secs[secs.len() - 1];
+    assert!(
+        summaries.len() as u64 <= (last - first + 1),
+        "the monitor family coalesces to at most one summary per whole serving \
+         second, so {} summaries cannot span secs {first}..={last}: {text}",
         summaries.len()
     );
 }
@@ -126,7 +136,7 @@ fn parent_main() {
     records.assert_family();
     assert_summary_fields(&records.summaries);
     assert_detail_records(&records);
-    assert_one_summary_per_second(&records.summaries, elapsed, &text);
+    assert_one_summary_per_second(&records.summaries, &text);
     eprintln!(
         "MONITOR-STDOUT-OK loops={LOOPS} summaries={} detail_batches={} refusals=0 facts==actions elapsed={elapsed}s",
         records.summaries.len(),

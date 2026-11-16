@@ -222,75 +222,81 @@ fn next_selectable_due_guides_the_owner_wake() {
     );
 }
 
-fn oracle_next_due(schedules: &Schedules) -> Option<u64> {
-    let mut earliest: Option<u64> = None;
-    let total = schedules.name_count() * 2;
-    for linear in 0..total {
-        let name = linear >> 1;
-        let family = match linear & 1 == 0 {
-            true => Family::A,
-            false => Family::Aaaa,
-        };
-        let slot = schedules.slot(name, family);
-        if slot.pending {
-            continue;
-        }
-        let Some(due) = slot.due else {
-            continue;
-        };
-        let selectable_at = due.max(slot.not_before);
-        earliest = Some(earliest.map_or(selectable_at, |e| e.min(selectable_at)));
-    }
-    earliest
-}
-
 #[test]
-fn cached_next_due_matches_oracle_through_all_mutations() {
+fn next_due_is_the_written_down_expectation_at_every_mutation() {
     let mut schedules = Schedules::new(3).unwrap();
-    let check = |s: &Schedules| {
-        let oracle = oracle_next_due(s);
-        assert_eq!(s.next_due, oracle, "cache must equal a fresh oracle scan");
-        let public = s.next_selectable_due(1000);
-        assert_eq!(
-            public,
-            match oracle {
-                Some(e) if e <= 1000 => Some(1000),
-                other => other,
-            },
-            "public wake must equal the same scan clamped at `now`"
-        );
-    };
-    check(&schedules);
+
+    // No slot is scheduled: no wake at any instant.
+    assert_eq!(schedules.next_due, None);
+    assert_eq!(schedules.next_selectable_due(1000), None);
 
     schedules.overwrite_due_at(0, Family::A, 1000).unwrap();
-    check(&schedules);
+    // The one scheduled slot is due at its own stamp, inside the clamp.
+    assert_eq!(schedules.next_due, Some(1000));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1000));
+
     schedules.overwrite_due_at(0, Family::Aaaa, 1020).unwrap();
-    check(&schedules);
+    // Both slots are selectable; the earlier overwritten due wins.
+    assert_eq!(schedules.next_due, Some(1000));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1000));
+
     let token = schedules.select_due(1000).unwrap().unwrap();
     assert_eq!((token.name(), token.family()), (0, Family::A));
-    check(&schedules);
+    // The selected slot is in flight and contributes nothing; its sibling's
+    // 1020 due is the next selectable moment.
+    assert_eq!(schedules.next_due, Some(1020));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1020));
+
     schedules
         .note_exchange_failure(0, Family::A, 1000, FailureReason::Timeout)
         .unwrap();
-    check(&schedules);
+    // The stage-0 backoff retries from the failure instant at 1000 + 1, which
+    // equals the start-rate guard left by the selection.
+    assert_eq!(schedules.next_due, Some(1001));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1001));
+
     schedules.release_selection(0, Family::A).unwrap();
-    check(&schedules);
+    // Releasing only clears the in-flight marker: the 1001 due and its
+    // one-second start guard are unchanged.
+    assert_eq!(schedules.next_due, Some(1001));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1001));
+
     schedules
         .note_positive(0, Family::A, 1000, 60, true, 1000)
         .unwrap();
-    check(&schedules);
+    // A cacheable positive reschedules from receipt at the TTL floor:
+    // 1000 + clamp(60, 5, 900) = 1060, so the sibling's 1020 due is earliest.
+    assert_eq!(schedules.next_due, Some(1020));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1020));
 
     schedules.overwrite_due_at(1, Family::A, 2000).unwrap();
-    check(&schedules);
+    // A second name's 2000 due is later than the still-earliest 1020.
+    assert_eq!(schedules.next_due, Some(1020));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1020));
+
     schedules.note_nxdomain(1, None, 0, 1000).unwrap();
-    check(&schedules);
+    // NXDOMAIN without an SOA retries both families from `now` at stage 0:
+    // 1000 + 1, earlier than every other slot.
+    assert_eq!(schedules.next_due, Some(1001));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1001));
+
     schedules.note_nodata(1, Family::A, None, 0, 1500).unwrap();
-    check(&schedules);
+    // NODATA without an SOA advances only A to stage 1: 1500 + 2 = 1502; the
+    // untouched AAAA sibling stays the earliest slot at 1001.
+    assert_eq!(schedules.next_due, Some(1001));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1001));
 
     schedules.overwrite_due_at(2, Family::Aaaa, 500).unwrap();
-    check(&schedules);
+    // The fresh 500 due is already selectable, so the cached moment keeps 500
+    // while the public wake clamps to the present.
+    assert_eq!(schedules.next_due, Some(500));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1000));
+
     schedules.overwrite_due_at(2, Family::Aaaa, 3000).unwrap();
-    check(&schedules);
+    // Retargeting name 2 past every other slot hands the cache back to the
+    // 1001 due of name 1's AAAA family.
+    assert_eq!(schedules.next_due, Some(1001));
+    assert_eq!(schedules.next_selectable_due(1000), Some(1001));
 }
 
 #[test]
