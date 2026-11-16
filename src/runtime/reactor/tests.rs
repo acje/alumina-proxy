@@ -11154,11 +11154,8 @@ fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            use crate::dns::cache::evidence::{Evidence, ResolverSource};
-            use crate::dns::cache::{Family, Generation, StagedPositive};
             use crate::dns::transport::StartupReport;
             use crate::dns::transport::tests::{Step, spawn_bounded_responder};
-            use crate::eligibility::NumericAddr;
             use std::io::Write as _;
             use std::os::unix::net::UnixStream;
 
@@ -11180,20 +11177,11 @@ fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
                 .dns_mut()
                 .begin_window(peer, *config.resolver_set(), 1000, Duration::ZERO)
                 .unwrap();
-            let name = storage.cache().name_index(0).unwrap();
-            let proof =
-                Evidence::new(false, false, false, ResolverSource::UNKNOWN, Some(1), 1000).unwrap();
-            let staged = StagedPositive::stage_with_evidence(
-                name,
-                Family::A,
-                Generation::INITIAL,
-                &[NumericAddr::V4([8, 8, 8, 8].into())],
-                1000,
-                1,
-                Some(proof),
-            )
-            .unwrap();
-            storage.cache_mut().publish_positive(&staged).unwrap();
+            // A long supporting TTL keeps the evidential marker un-observed
+            // across setup, which under CPU oversubscription can outlive a
+            // one-second proof window; advance_to_proof_expiry then mounts the
+            // clock exactly at the retained deadline so the expiry is due.
+            publish_idle_expiry_a_with_ttl(&mut storage, RELAY_PROOF_TTL_SECS);
             let outcome = storage
                 .settle_startup(1000, StartupReport::default(), 0, false)
                 .unwrap();
@@ -11204,11 +11192,14 @@ fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
             let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
             let mut serving = Serving::new(storage, listener, traffic).unwrap();
             let exchange_deadline = start_waiting_dns_exchange(&mut serving);
+            // The mounted deadline falls before the exchange deadline by
+            // construction, so a waiting DNS exchange must not mask the expiry.
+            let now = advance_to_proof_expiry(&mut serving);
             let expiry = serving
                 .storage()
-                .assurance_wake(Instant::now())
-                .unwrap()
-                .unwrap();
+                .assurance_wake(now)
+                .expect("the assurance wake must be computed")
+                .expect("the idle proof expiry must still be pending");
             assert!(expiry < exchange_deadline);
             let mut wake = serving.signal_wake_mut().unwrap().try_clone().unwrap();
             let (done, cancelled) = std::sync::mpsc::channel::<()>();
