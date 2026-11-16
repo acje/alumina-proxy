@@ -293,10 +293,16 @@ fn resolver_key_respected_in_compact_fit_form() {
     let mut compact = String::from(
         "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\", \"8.8.8.8\", \"1.0.0.1\", \"8.8.4.4\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n",
     );
+    // These 48- and 43-octet labels are the longest names this fixture
+    // constructs (94/95 octets with the ordinal prefix and the separating
+    // dots), so each `<fqdn>:443` key is the spec's ~100-ASCII-byte
+    // compact-entry shape (§Configuration & DNS) and the bound below is
+    // measured on the widest entry the fit form carries, never on a
+    // short-name case.
     for i in 0..32usize {
         let _ = write!(
             compact,
-            "[allowed_fqdn.\"{i}.{}.{}:443\"]\nearly_data = {{ action = \"block\", scope = \"fqdn\" }}\nja4 = {{ action = \"block\", scope = \"fqdn\" }}\ndns_assurance = \"resolver_trusted\"\n",
+            "[allowed_fqdn.\"{i}.{}.{}:443\"]\nearly_data = {{ action = \"block\", scope = \"connection\" }}\nja4 = {{ action = \"block\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n",
             "a".repeat(48),
             "b".repeat(43)
         );
@@ -305,6 +311,18 @@ fn resolver_key_respected_in_compact_fit_form() {
         compact.len() <= CONFIG_DOC_LIMIT,
         "compact 32-name fit form with resolver must still be documented; measured {}",
         compact.len()
+    );
+    let cfg =
+        parse_config_document(&compact).expect("the compact-fit form must be a legal document");
+    assert_eq!(
+        cfg.allowlist().len(),
+        32,
+        "the compact-fit form must keep all 32 allowlist entries"
+    );
+    assert_eq!(
+        cfg.resolver_set().len(),
+        4,
+        "the compact-fit form must keep its four resolvers"
     );
 }
 

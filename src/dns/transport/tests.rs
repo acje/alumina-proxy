@@ -57,6 +57,9 @@ pub(crate) enum Step {
     LengthPrefixOnly {
         len: u16,
     },
+    ServFail,
+    Refused,
+    Truncated,
     Close,
 }
 
@@ -237,6 +240,21 @@ fn answer_sections(qname: &[u8], step: &Step) -> Option<AnswerSections> {
             answers: vec![record(qname, 5, *ttl, &qname_bytes("evil.com"))],
             authority: Vec::new(),
         },
+        Step::ServFail => AnswerSections {
+            rcode: 2,
+            answers: Vec::new(),
+            authority: Vec::new(),
+        },
+        Step::Refused => AnswerSections {
+            rcode: 5,
+            answers: Vec::new(),
+            authority: Vec::new(),
+        },
+        Step::Truncated => AnswerSections {
+            rcode: 0,
+            answers: Vec::new(),
+            authority: Vec::new(),
+        },
         Step::Stall(_)
         | Step::Malformed(_)
         | Step::LengthPrefixOnly { .. }
@@ -253,6 +271,11 @@ fn assemble_reply(tid: u16, step: &Step, question: &[u8], sections: AnswerSectio
         | sections.rcode
         | if matches!(step, Step::PositiveAAd { .. }) {
             0x20
+        } else {
+            0
+        }
+        | if matches!(step, Step::Truncated) {
+            0x0200
         } else {
             0
         };
@@ -1992,6 +2015,75 @@ mod startup {
             "a name whose latest concluded exchanges all timed out carries the failure reason (T1)"
         );
     }
+
+    /// One startup resolve in which name0's A exchange gets `reply` — a
+    /// reply-level wire error, not a silence — and every later exchange gets a
+    /// NODATA on the reconnected peer. The wire error must settle the exchange
+    /// as a counted receive failure with no cache publication, and the AAAA
+    /// NODATA must be the latest concluded outcome for the name.
+    fn assert_reply_settles_as_receive(step: Step, reply: &str) {
+        let cfg = config();
+        let responder = spawn_responder(vec![
+            vec![step],
+            vec![
+                Step::NodataWithSoa { ttl: 300, min: 60 },
+                Step::NodataWithSoa { ttl: 300, min: 60 },
+                Step::NodataWithSoa { ttl: 300, min: 60 },
+            ],
+        ]);
+        let mut cache = Cache::new(2).unwrap();
+        let mut schedules = Schedules::new(2).unwrap();
+        let mut transport = StartupDns::new().unwrap();
+        let report = transport
+            .resolve(
+                &cfg,
+                &mut cache,
+                &mut schedules,
+                ns(responder.port()),
+                1_000_000,
+            )
+            .unwrap();
+        assert_eq!(
+            report.exchanges, 3,
+            "the report counts published exchanges, so the {reply} exchange contributes none \
+             and the peer's three NODATAs carry the rest: {report:?}"
+        );
+        assert_eq!(
+            report.failed, 1,
+            "only the {reply} exchange fails: {report:?}"
+        );
+        assert_eq!(
+            report.family_results[0][0],
+            Some(Err(FailureReason::Receive)),
+            "a {reply} parses far enough to classify and is a receive failure, never a timeout"
+        );
+        assert_eq!(
+            bindings_of(&cache, 0, Family::A),
+            [],
+            "a {reply} must not publish an A binding"
+        );
+        assert_eq!(
+            report.outcomes[0],
+            NameOutcome::Negative,
+            "the AAAA NODATA is the latest concluded outcome for name0"
+        );
+    }
+
+    #[test]
+    fn servfail_rcode_settles_as_receive_failure() {
+        assert_reply_settles_as_receive(Step::ServFail, "SERVFAIL (rcode 2)");
+    }
+
+    #[test]
+    fn refused_rcode_settles_as_receive_failure() {
+        assert_reply_settles_as_receive(Step::Refused, "REFUSED (rcode 5)");
+    }
+
+    #[test]
+    fn truncated_reply_settles_as_receive_failure() {
+        assert_reply_settles_as_receive(Step::Truncated, "TC=1 truncated reply");
+    }
+
     #[cfg(feature = "alloc-witness")]
     #[test]
     /// Boot-window allocation witness: the ACTUAL startup DNS window is allocation-free
