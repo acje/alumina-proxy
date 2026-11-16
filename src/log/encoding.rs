@@ -145,6 +145,10 @@ pub(super) fn encode_record(
 /// `startup_warning` record into a fixed slot, returning `Some(length)` when
 /// the record fit. Only the fuzz driver reaches this; no production path calls
 /// it. Overflow returns `None` with the slot left uncommitted.
+///
+/// Exists for the §L17 fuzz driver only and carries the same gate as
+/// [`crate::qa::fuzz`], so the release lib never compiles it.
+#[cfg(any(test, debug_assertions))]
 pub(crate) fn fuzz_encode_text(text: &str) -> Option<usize> {
     let mut slot = [0u8; SLOT_BYTES];
     encode_record(

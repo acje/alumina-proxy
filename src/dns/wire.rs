@@ -953,7 +953,9 @@ impl BailiwickZones {
     }
 
     /// A single-zone set covering one allowlist hostname's bailiwick, used by
-    /// the wire-parser fuzz target that holds no allowlist.
+    /// the wire-parser fuzz target that holds no allowlist — its only caller,
+    /// so it carries the same gate as [`crate::qa::fuzz`].
+    #[cfg(any(test, debug_assertions))]
     pub(crate) fn single(fqdn: &Fqdn) -> BailiwickZones {
         let mut zones = [DnsName::default(); ALLOWLIST_MAX];
         let zone = fqdn.as_str().as_bytes();

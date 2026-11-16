@@ -351,7 +351,11 @@ mod encoding;
 mod queue;
 mod sink;
 
-pub(crate) use self::encoding::{AssurancePhase, fuzz_encode_text};
+pub(crate) use self::encoding::AssurancePhase;
+/// §L17 fuzz-driver seam: same gate as [`fuzz`](crate::qa::fuzz), so the
+/// release lib carries neither the driver nor this re-export.
+#[cfg(any(test, debug_assertions))]
+pub(crate) use self::encoding::fuzz_encode_text;
 use self::encoding::{
     Field, Val, count_capture_batches, count_domain_batches, encode_fatal,
     encode_monitor_capture_batch, encode_monitor_domain_batch, encode_monitor_summary,
