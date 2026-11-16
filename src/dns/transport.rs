@@ -2747,7 +2747,7 @@ impl StartupDns {
 
     fn recv_tls(&mut self) -> RecvTry {
         let filled_before = self.filled;
-        if !self.read_tls_frame() {
+        if !matches!(self.read_tls_frame(), TlsRead::Data) {
             return RecvTry::Failure;
         }
         if !self.drain_tls_plaintext() {
@@ -2760,20 +2760,26 @@ impl StartupDns {
         }
     }
 
-    fn read_tls_frame(&mut self) -> bool {
+    fn read_tls_frame(&mut self) -> TlsRead {
         let Some(DnsConn::Tls(conn)) = &mut self.conn else {
-            return false;
+            return TlsRead::Fault;
         };
         match conn.tls.read_tls(&mut conn.tcp) {
-            Ok(0) => false,
-            Ok(_) => conn.tls.process_new_packets().is_ok(),
+            Ok(0) => TlsRead::Eof,
+            Ok(_) => {
+                if conn.tls.process_new_packets().is_ok() {
+                    TlsRead::Data
+                } else {
+                    TlsRead::Fault
+                }
+            }
             Err(e)
                 if e.kind() == io::ErrorKind::WouldBlock
                     || e.kind() == io::ErrorKind::Interrupted =>
             {
-                true
+                TlsRead::Data
             }
-            Err(_) => false,
+            Err(_) => TlsRead::Fault,
         }
     }
 
@@ -4076,6 +4082,14 @@ enum RecvTry {
     Wait,
     Progress,
     Failure,
+}
+
+/// The outcome of one non-blocking TLS record read. `WouldBlock` and
+/// `Interrupted` are `Data`: nothing was absorbed and nothing is wrong.
+enum TlsRead {
+    Data,
+    Eof,
+    Fault,
 }
 
 enum FrameGate {
