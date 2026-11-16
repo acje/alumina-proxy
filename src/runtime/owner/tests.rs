@@ -117,11 +117,25 @@ fn startup_zero_window_reports_current_cache_admission_without_exchange() {
     );
 }
 
+/// Ports already handed out in this process. Two tests that probe
+/// `127.0.0.1:0`, drop the probe and bind later can be handed the same port in
+/// between, which surfaced as a spurious `AddrInUse` (`alumina-auatf`). Issuing
+/// each port once removes that inter-test collision. It does not guard against
+/// a non-test process taking the port, so fixtures that must connect prefer
+/// `Config::with_kernel_assigned_test_listener`.
+static ISSUED_PORTS: std::sync::Mutex<std::collections::BTreeSet<u16>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
 fn ephemeral_port() -> u16 {
-    let probe = StdListener::bind("127.0.0.1:0").expect("bind probe");
-    let port = probe.local_addr().expect("probe addr").port();
-    drop(probe);
-    port
+    for _ in 0..64 {
+        let probe = StdListener::bind("127.0.0.1:0").expect("bind probe");
+        let port = probe.local_addr().expect("probe addr").port();
+        drop(probe);
+        if ISSUED_PORTS.lock().expect("issued-port lock").insert(port) {
+            return port;
+        }
+    }
+    panic!("no unissued ephemeral port after 64 probes");
 }
 
 /// A stale DNS peer: accepts the transport connection, reads the query,
