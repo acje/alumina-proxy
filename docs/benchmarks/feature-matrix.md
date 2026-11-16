@@ -1,18 +1,19 @@
 # Alumina — capability matrix vs Envoy and HAProxy
 
 **Verified: 2026-11-15 · Envoy v1.40.2 · HAProxy v3.4.0.** Any version bump requires
-re-verifying every cited row before this pin changes.
+re-verifying every row before this pin changes.
 
 Provenance: one first-party evidence pass over official documentation and tagged source,
 with no runtime verification. Absence of evidence is never graded as absence of
 capability, and everything this pass did not establish is listed under Unconfirmed below.
+Each row's mechanism and citation are recorded in bd `alumina-8bdgu`, keyed by row id.
 
 ## Legend
 
 | Mark | Grade | Rule |
 |---|---|---|
-| `✓` | Exact | Same outcome; any mechanism difference is named in the evidence list below. |
-| `≈` | Similar | Same or closely related outcome by another mechanism — the difference is named in the evidence list, or the mark is downgraded to `?`. |
+| `✓` | Exact | Same outcome; any mechanism difference is named in bd `alumina-8bdgu`. |
+| `≈` | Similar | Same or closely related outcome by another mechanism — the specific difference is named in bd `alumina-8bdgu`, or the mark is downgraded to `?`. |
 | `✗` | None | No first-party mechanism found for the pinned version (absence of evidence). |
 | `?` | Unknown | Not established in this pass; never promoted to `✗` by assumption. |
 
@@ -21,8 +22,7 @@ that column is the reference the comparator columns are graded against, not a ma
 itself. Grid columns are `A` = Alumina, `E` = Envoy v1.40.2, `H` = HAProxy v3.4.0. A `†`
 after a row number marks a resource or telemetry contract rather than a security gate; `✗`
 on such a row means no counterpart contract (a scope difference, not a missing control).
-Each capability carries its governing spec section in parentheses, and each row's evidence is
-the matching row-id entry in that block's evidence list.
+Each capability carries its governing spec section in parentheses.
 
 ## Matrix
 
@@ -38,14 +38,6 @@ Blocks are capability families; numbers are stable and never reused.
 | A4 | Opaque relay — no payload inspection, no TLS interception, proxy holds no keys (§Design philosophy) | ✓ | ✓ | ≈ |
 | A5 | Two forwarding barriers: hold client bytes until the ClientHello validates; terminate if upstream speaks first (§Gate) | ✓ | ✗ | ≈ |
 
-**Evidence.**
-
-- **A1** — Envoy: `upgrade_configs[CONNECT]` + `connect_config`; 200 synthesized in `TcpUpstream::encodeHeaders` on upstream-pool-ready (`source/extensions/upstreams/http/tcp/upstream_request.cc:74-77@v1.40.2`). HAProxy: mux blocks client TX (`H1S_F_TX_BLK`) then tunnels, but never originates the 2xx — it relays the configured `server`'s 200, and the dial target is the `server` line, not the CONNECT authority (`src/mux_h1.c@v3.4.0:L2972-2987,L1537,L2275`).
-- **A2** — Envoy: `LocalReplyConfig`/`ResponseMapper` remaps status+body, but class→code is Envoy's own default, not a declared per-class contract; 400 exists only at the HTTP/1 codec layer (`http_connection_manager.proto:1004`, `router.cc`, `codec_impl.cc:805@v1.40.2`). HAProxy: `deny status <code>` + inline body, and `errorfile` enumerates per-code bodies; no CONNECT-specific contract, each class is an authored ACL (`doc/configuration.txt@v3.4.0:L15755-L15770,L7611-L7645`).
-- **A3** — Not established in the 2026-11-15 pass. Both products bound request heads at the codec layer, but equivalence to this declared contract was not verified.
-- **A4** — Envoy: raw-TCP upstream via `connect_config`, no TLS role in the upstream path. HAProxy: tunnels after the relayed 2xx, but upstream is a fixed `server` (so destination binding is config, not the CONNECT authority).
-- **A5** — Envoy: `paused_for_connect_` is a connect-ordering pause, not a validation barrier; no early-upstream-byte rule; the HTTP `buffer` filter is documented as incompatible with upgrades. HAProxy: `tcp-request inspect-delay` provides barrier 1; barrier 2 is not expressible — after a CONNECT 2xx the mux switches to tunnel mode and stops applying content rules (`doc/configuration.txt@v3.4.0:L14486-L14515`, `src/mux_h1.c@v3.4.0:L2983-L2987`).
-
 ### B — ClientHello inspection
 
 | # | Capability (§spec) | A | E | H |
@@ -56,14 +48,6 @@ Blocks are capability families; numbers are stable and never reused.
 | B4 | ECH extension (0xfe0d, incl. GREASE form) rejected, never stripped (§Reject unknown ECH codepoint) | ✓ | ✗ | ✗ |
 | B5 | JA4 fingerprint + first-seen baseline per destination + change signal (§JA4 tripwire, §C1) | ✓ | ✗ | ✗ |
 
-**Evidence.**
-
-- **B1** — Envoy: `tls_inspector` is a listener filter on the accepted socket's first bytes — on a CONNECT proxy those are the `CONNECT` line, so tunnel payload is never parsed; it also enforces only `max_client_hello_size` ≤ 16 KiB (`tls_inspector.cc:53,79,201,223,245@v1.40.2`). HAProxy: `req.ssl_*` parses the raw ClientHello and `req.ssl_ver` is checkable, but there is no compression-method fetch and no raw `supported_versions` (`doc/configuration.txt@v3.4.0:L27063-L27077,L27290-L27360`).
-- **B2** — Envoy: no component compares two independently parsed values; SNI is available only from a listener-terminated handshake. HAProxy: `req.ssl_sni` compared via `strcmp(var)` (documented domain-fronting example), but HAProxy's built-in CONNECT check is authority-vs-`Host`, not SNI-vs-authority, so this is authored (`doc/configuration.txt@v3.4.0:L23003-L23018,L27069-L27300`).
-- **B3** — Envoy: no structural validator; GREASE skipping exists only inside JA4 string construction, not as policy. HAProxy: raw walker requires `name_type == 0` and skips unknown types by declared length (so GREASE is inert), but there is no duplicate-extension rejection and "exactly one" is not derivable from fetches (`src/payload.c@v3.4.0:L864-L890`).
-- **B4** — Envoy: zero ECH awareness in protos or `tls_inspector`. HAProxy: ECH exists only as server-side decryption on terminated binds (`src/ech.c@v3.4.0:L413-L435`); no fetch exposes ECH presence for a tunnel.
-- **B5** — Envoy: `enable_ja4_fingerprinting` computes JA4 only where TLS terminates at the listener, stores it via `Socket::setJA4Hash`, is absent from `StreamInfo`, and there is no baseline store or change detection. HAProxy: zero case-insensitive `ja4` matches in the v3.4.0 tree; only JA3-shaped components, mostly `ssl_fc_*` (terminated).
-
 ### C — Authorisation & enforcement
 
 | # | Capability (§spec) | A | E | H |
@@ -71,12 +55,6 @@ Blocks are capability families; numbers are stable and never reused.
 | C1 | Exact `<fqdn>:<port>` allowlist enforced before the upstream dial (§Keyed allowlist) | ✓ | ✓ | ✓ |
 | C2 | Per-control actions (notify/block) scoped connection / destination / global (§T3, §T6) | ✓ | ≈ | ≈ |
 | C3 | Threshold+window bar per violation class (§SP-001 gate sections) | ✓ | ≈ | ≈ |
-
-**Evidence.**
-
-- **C1** — Envoy: route `domains` match the CONNECT target including port; exact strings unless the operator writes a wildcard. HAProxy: ACL default matching is exact (`str`); caveat case-sensitive without `-i`, and per-destination dialing needs `do-resolve` + `set-dst`.
-- **C2** — Envoy: connection = local reply; global = runtime keys + admin `/runtime`; destination-wide requires config/runtime mutation — no destination-keyed enforcement state. HAProxy: `deny`/`reject` = connection; a table keyed on the destination = all connections to it; no first-class scoped-action object, and notify-only is `log`/`do-log`.
-- **C3** — Envoy: `local_ratelimit` token bucket (`fill_interval` ≥ 50 ms) with runtime fractions; no per-violation-class counters and no peer-keyed "N bad handshakes in W" rule in-process. HAProxy: stick-tables (`expire`, `store http_err_cnt,http_req_rate(10s)`, `sc-inc-gpc0`, `deny if { sc0_http_req_rate gt N }`); no "block for W seconds" state, no per-class escalation.
 
 ### D — DNS assurance
 
@@ -90,16 +68,6 @@ Blocks are capability families; numbers are stable and never reused.
 | D6 | TTL clamp, zero-TTL handling, bounded stale serving (§Configuration & DNS, §F-10) | ✓ | ≈ | ✗ |
 | D7 | Failover with consecutive-failure degrade + consecutive-success failback hysteresis (§V18, §Failback hysteresis) | ✓ | ≈ | ≈ |
 
-**Evidence.**
-
-- **D1** — Envoy: resolver config has no assurance concept (no AD-bit validation, no validator policy). HAProxy: `resolvers` section has no DNSSEC validation and no AD inspection.
-- **D2** — Envoy: c-ares resolver proto carries plain addresses only — zero TLS occurrences, so no DoT at all. HAProxy: DoT reachable via stream prefix + `use_ssl`, but verification is CA-based (`verify required` + `ca-file`); no SPKI pinning exists.
-- **D3** — Not established in the 2026-11-15 pass.
-- **D4** — Envoy: c-ares follows chains; Envoy filters only resulting addresses. HAProxy: the parser rejects an owner that is neither the queried name nor the previous CNAME target, but has no zone/bailiwick concept and does not query the target separately (`src/resolvers.c@v3.4.0:L1183-L1199,L1253-L1265`).
-- **D5** — Envoy: `DnsCacheConfig.resolved_address_filter` is documented as an SSRF/rebinding control, but it is an operator-authored matcher on the DFPC path, with no built-in taxonomy and no IPv4-mapped/NAT64/Teredo normalisation. HAProxy: `resolve-net` is explicitly a preference, not a filter ("If no address matches … another address is selected").
-- **D6** — Envoy: lower clamp via `dns_min_refresh_rate` (default 5 s); no upper clamp and no bounded stale-serving (failure refresh or cache-miss fail-closed). HAProxy: answer TTL is parsed but unread; lifetime comes from `hold valid`/`hold obsolete`, so no clamp and no zero-TTL case (`src/resolvers.c@v3.4.0:L1226,L1490`).
-- **D7** — Envoy: resolver list + `use_resolvers_as_fallback` + per-attempt rotation; degradation state lives inside c-ares, neither configurable nor observable. HAProxy: `resolve_retries`/`timeout retry`/`hold valid`; `hold` is a time window, not a consecutive-failure counter, and failback is immediate ("marked UP immediately upon receiving a valid status").
-
 ### E — Runtime & resource
 
 | # | Capability (§spec) | A | E | H |
@@ -110,14 +78,6 @@ Blocks are capability families; numbers are stable and never reused.
 | E4† | Static single binary, no interpreter (§Design philosophy) | ✓ | ≈ | ≈ |
 | E5 | Policy configurable only from a file — no CLI/env overrides (§Configuration) | ✓ | ✗ | ✗ |
 
-**Evidence.**
-
-- **E1†** — No such invariant in either product. Envoy: `OwnedImpl` ring growth reallocates plus per-request header maps. HAProxy: every stream allocates from a pool (`stream_new`, `src/stream.c@v3.4.0:L346-L352`); pools are preallocated but refilled.
-- **E2†** — Envoy: overload manager + circuit breakers, runtime-configured; capacity refusal shares 503 with other classes. HAProxy: `SYSTEM_MAXCONN`/`tune.bufsize` are build-time, but exhaustion means "stop accepting" or a 503, not a distinct refusal.
-- **E3†** — Envoy: `--concurrency 1` gives one worker, but a main thread plus auxiliary threads remain and the knob is a CLI flag. HAProxy: `nbthread 1`, but the default auto-selects CPU count on affinity-capable hosts and master-worker adds a non-serving master.
-- **E4†** — Envoy: `//source/exe:envoy-static` is a supported target; glibc/tcmalloc-linked, extensions may be dynamic modules. HAProxy: single native binary; default linkage is dynamic libc and TLS exists only with `USE_OPENSSL`.
-- **E5** — Envoy: `--config-yaml` merges over the file, `--service-cluster` overrides file values, env affects `--concurrency`. HAProxy: the config supports `${VAR}` environment expansion and `-n` overrides `maxconn`.
-
 ### F — Lifecycle, telemetry & operations
 
 | # | Capability (§spec) | A | E | H |
@@ -127,14 +87,6 @@ Blocks are capability families; numbers are stable and never reused.
 | F3† | Record geometry: 2 KiB log slot, monitor family split, lossless peer-IP rendering (§2 KiB log slot) | ✓ | ✗ | ✗ |
 | F4 | SIGTERM drain of established tunnels, non-extendable grace, distinct exit codes (0/70) (§Lifecycle) | ✓ | ≈ | ≈ |
 | F5 | Terminal exit on unrecoverable stdout-sink failure (74), never continuing blind (§P-F09) | ✓ | ? | ? |
-
-**Evidence.**
-
-- **F1** — Envoy: no uid/capability/`no_new_privs` check; only `--enable-core-dump`, the opposite direction. HAProxy: drop-privileges-after-bind model (it "must be started with superuser privileges"), zero `no_new_privs` occurrences, no start refusal.
-- **F2** — Envoy: stdout access logger exists, but component logs go to stderr by default and no dropped-record counter is documented. HAProxy: `log stdout` = `fd@1`, unbuffered one-`writev`-per-record, `DroppedLogs` counter; caveat: the write happens on the serving thread (`src/log.c@v3.4.0:L1801-L1803`).
-- **F3†** — No counterpart contract in either product (scope difference, not a defect).
-- **F4** — Envoy: SIGTERM → immediate `instance.shutdown()`, no drain; a bounded drain exists only via admin `drain_listeners?graceful`/LDS, and CONNECT streams are explicitly RESET; exit codes are only SUCCESS/FAILURE. HAProxy: graceful drain is on SIGUSR1, SIGTERM closes immediately; `hard-stop-after` bounds the soft-stop; no drained-vs-forced exit codes documented.
-- **F5** — Not established in the 2026-11-15 pass.
 
 The reserved `tarpit` action is deferred and not configurable, so it is not a row here. The
 benchmark measures configured subjects whose configurations are a small subset of their
