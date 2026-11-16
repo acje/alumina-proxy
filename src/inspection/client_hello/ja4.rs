@@ -33,7 +33,7 @@ impl fmt::Display for Ja4Error {
 
 /// Computes the canonical `FoxIO` `JA4` client fingerprint as the fixed 36-byte
 /// ASCII string `t{ver}{sni}{cc:02}{ec:02}{alpn}_{chash}_{ehash}` per the
-/// `alumina-xfbq8` amendment (docs/alumina-proxy.md:879-895). Pure and
+/// `alumina-xfbq8` amendment (§JA4 format clause). Pure and
 /// allocation-free: the SHA-256 inputs are fed incrementally through a
 /// stack-based `ring::digest::Context`, and the sorted cipher/extension lists
 /// are materialized in fixed-capacity stack buffers.

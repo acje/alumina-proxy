@@ -1,4 +1,4 @@
-//! Startup DNS-over-TCP transport (docs/alumina-proxy.md:62-68, 82, 171, 180): a single
+//! Startup DNS-over-TCP transport (see §Protocol contract and §Configuration & DNS): a single
 //! reusable connection with one outstanding query, transaction ids drawn from
 //! the OS CSPRNG, and publication of only fully validated outcomes into the
 //! cache and schedule.
@@ -15,7 +15,7 @@
 //! [`StartupDns::exchange_deadline`] and [`StartupDns::wait_dns_readiness`]
 //! export the deadline and a wakeup the owner folds into its one combined
 //! wait, so the shared reactor can observe traffic, log, and shutdown
-//! readiness without DNS-internal blocking (docs/alumina-proxy.md:146).
+//! readiness without DNS-internal blocking (§Architecture).
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -194,7 +194,7 @@ enum ExchangeResult {
 /// cancels only a retained [`ExchangeClass::Startup`] exchange; a serving
 /// refresh ([`ExchangeClass::Serving`]) and a post-window probe or
 /// corroboration ([`ExchangeClass::Probe`]) are owned by the serving path and
-/// are never cancelled there (docs/alumina-proxy.md:107, :627-642, :1196).
+/// are never cancelled there (§Configuration & DNS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExchangeClass {
     /// A startup-window exchange owned by the single boot owner.
@@ -227,16 +227,16 @@ struct ActiveExchange {
     /// The class the caller chose at start. The runtime cancellation guard
     /// cancels only a retained [`ExchangeClass::Startup`] exchange; a serving
     /// refresh and a post-window probe are owned by the serving path and are
-    /// never cancelled there (docs/alumina-proxy.md:107, :627-642, :1196).
+    /// never cancelled there (§Configuration & DNS).
     class: ExchangeClass,
     /// The cache entry generation captured at exchange start. Apply compares
     /// the staged result against this captured value so an obsolete result
-    /// cannot overwrite newer cache state (docs/alumina-proxy.md:74,
-    /// cache.rs:357-359).
+    /// cannot overwrite newer cache state (§Configuration & DNS;
+    /// `cache.rs:357-359`).
     generation: Generation,
     /// The non-queried family's cache generation captured from the same
     /// query-start snapshot and retained immutably; the whole-family negative
-    /// guard compares it alongside `generation` (docs/alumina-proxy.md:119).
+    /// guard compares it alongside `generation` (§Configuration & DNS).
     other_generation: Generation,
     /// The query-start clock floor captured before any failback, connect,
     /// entropy, TLS, or query work: the immutable time anchor every reply
@@ -246,7 +246,7 @@ struct ActiveExchange {
 
 /// The stage of one outstanding exchange, advanced by at most one stage each
 /// cooperative turn by [`StartupDns::advance_exchange`]. Turns never wait for
-/// readiness (docs/alumina-proxy.md:146); the owner decides when to advance again.
+/// readiness (§Architecture); the owner decides when to advance again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExchangeStep {
     /// A nonblocking connect is in progress toward the exchange deadline; the
@@ -1249,7 +1249,7 @@ pub struct StartupDns {
     /// that became the active resolver at least once, from the seeded primary
     /// through each failover/failback relocation. The post-window probe sweep
     /// skips these as already exercised, probing only resolvers the window
-    /// never touched (docs/alumina-proxy.md:826).
+    /// never touched (§Keyed configuration schema).
     window_exercised: [bool; MAX_RESOLVERS],
     /// The latched corroboration request awaiting the serving owner: present
     /// only while a sustained-negative incident has opened for an admitted name
@@ -1403,7 +1403,7 @@ impl StartupDns {
     /// The exact monotonic origin of the most recent `resolve_window` run —
     /// the single elapsed base startup receipts were written on. The owning
     /// storage re-anchors its serving clock to this origin so cache seconds
-    /// continue seamlessly from startup into serving (one anchor, 1cws M2r).
+    /// continue seamlessly from startup into serving (one anchor).
     pub(crate) const fn window_start(&self) -> Instant {
         self.start
     }
@@ -1640,7 +1640,7 @@ impl StartupDns {
 
     /// Cancels a retained startup exchange whose window already expired: the
     /// serving runtime must never advance or publish it
-    /// (docs/alumina-proxy.md:64-65). The discriminator is the typed class
+    /// (§Configuration & DNS). The discriminator is the typed class
     /// chosen at start — only a genuinely-startup exchange is cancelled here;
     /// a serving-runtime refresh, a probe-sweep probe, and a corroboration
     /// exchange (all owned by the serving path) are never cancelled, and the
@@ -3185,7 +3185,7 @@ impl StartupDns {
     /// waits: it performs at most one nonblocking I/O attempt and at most one
     /// stage transition, re-checks the absolute exchange deadline, and
     /// otherwise returns [`TurnResult::Pending`] so the single owner keeps
-    /// control of all waiting (docs/alumina-proxy.md:146).
+    /// control of all waiting (§Architecture).
     ///
     /// # Errors
     ///
@@ -3322,7 +3322,7 @@ impl StartupDns {
     /// polling the DNS registry once per turn until the exchange concludes
     /// within its single clipped deadline. The boot-owned log store is passed
     /// at this seam so logging steps and the log retry deadline participate in
-    /// the same wait without restarting the 90s or 5s deadlines (704q); any
+    /// the same wait without restarting the 90s or 5s deadlines; any
     /// other owner replaces this driver body with a fold of the DNS readiness
     /// and [`Self::exchange_deadline`] into its own combined wait.
     #[expect(
@@ -3396,7 +3396,7 @@ impl StartupDns {
     /// the active resolver at least once, from the seeded primary through each
     /// failover/failback relocation — so the post-window probe sweep skips it
     /// as already exercised and probes only resolvers the window never touched
-    /// (docs/alumina-proxy.md:826).
+    /// (§Keyed configuration schema).
     const fn mark_window_exercised(&mut self, resolver: ActiveResolver) {
         self.window_exercised[resolver.index()] = true;
     }

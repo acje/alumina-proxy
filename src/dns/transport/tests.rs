@@ -3236,7 +3236,7 @@ mod failback {
     fn failback_begin_from_dot_backup_onto_plain_primary_counts_a_downgrade() {
         // A plain primary with a DoT backup: the failover onto the DoT backup is
         // not a downgrade, but the failback-begin relocation back onto the plain
-        // primary IS a DoT→plain downgrade that must be counted (G6-C01).
+        // primary IS a DoT→plain downgrade that must be counted.
         let plain_dot_set = {
             let mut entries = [crate::dns::resolver::select("1.1.1.1").expect("ns"); MAX_RESOLVERS];
             entries[0] = crate::dns::resolver::select("1.1.1.1").expect("plain ns");
@@ -4949,7 +4949,7 @@ mod turn_result {
 /// from the one Cache-owned capture helper shared with production startup
 /// and serving, and this witness checks both captured tags against the live
 /// cache, then moves the non-queried family after the exchange begins
-/// (docs/alumina-proxy.md:119).
+/// (§Configuration & DNS).
 #[test]
 fn snapshot_retains_other_family_generation_after_start() {
     let mut cache = Cache::new(2).unwrap();

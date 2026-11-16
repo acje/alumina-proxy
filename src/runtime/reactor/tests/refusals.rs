@@ -40,7 +40,7 @@ fn refused_wire_bodies_are_pinned_plain_text() {
 
 #[test]
 /// The five pre-Peer refusal sites carry the requested hostname into the
-/// reject telemetry even though `slot.approved` is not yet set (G11-C01): a
+/// reject telemetry even though `slot.approved` is not yet set: a
 /// `Forbidden` and a `NoResolvedAddresses` rejection must both emit
 /// `hostname="<requested>"` on the warn-reject record — never a raw-SNI or a
 /// missing hostname field.
@@ -84,7 +84,7 @@ fn pre_peer_refusals_carry_requested_hostname_in_reject_record() {
 
 #[test]
 /// The pre-Peer `SetupTimeout` refusal must carry the requested hostname into
-/// the reject telemetry once the CONNECT head has parsed (G11-C01): an
+/// the reject telemetry once the CONNECT head has parsed: an
 /// expired setup on a `ReadingConnect` slot whose parser holds a valid
 /// request emits `hostname="<requested>"` on the warn-reject record, matching
 /// the other pre-Peer refusal sites.
@@ -113,7 +113,7 @@ fn expire_setup_timeout_carries_requested_hostname_in_reject_record() {
 
 #[test]
 /// The pre-Peer `SetupTimeout` refusal must NOT carry a hostname when the
-/// CONNECT head has not parsed (G11-C01, docs/alumina-proxy.md:198): an
+/// CONNECT head has not parsed (§Lifecycle): an
 /// expired setup on a `ReadingConnect` slot whose parser holds no result
 /// still emits the 504 reject record, but with the hostname field absent —
 /// the hostname is carried only when the parsed request is valid.

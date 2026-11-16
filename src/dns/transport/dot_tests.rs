@@ -1,7 +1,7 @@
-//! Hermetic loopback DNS-over-TLS transport tests (docs/alumina-proxy.md:62-68,
-//! 82, 171, 180): a rustls `ServerConnection` answers the transport's `DoT`
-//! exchanges so the strict-SPKI-pin, FQDN/SAN-identity, and CA-chain verifier
-//! branches are exercised against deterministic certificates — no real `DoT`
+//! Hermetic loopback DNS-over-TLS transport tests (§Protocol contract;
+//! §Configuration & DNS): a rustls `ServerConnection` answers the transport's
+//! `DoT` exchanges so the strict-SPKI-pin, FQDN/SAN-identity, and CA-chain
+//! verifier branches are exercised against deterministic certificates — no real `DoT`
 //! resolver is ever dialed (docs contract, alumina-dot-chain-v1-v5).
 
 use super::*;
@@ -1435,7 +1435,7 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
 
 /// Calibrated upper bound on allocation events during one warm `DoT` exchange:
 /// the transport itself must not allocate, while the bounded rustls seam may
-/// allocate a small number of per-record buffers (docs/alumina-proxy.md:795).
+/// allocate a small number of per-record buffers (§Zero-Allocation Invariant).
 #[cfg(feature = "alloc-witness")]
 const WARM_DOT_ALLOC_BOUND: u64 = 8;
 

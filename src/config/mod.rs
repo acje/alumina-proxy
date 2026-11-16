@@ -247,8 +247,8 @@ impl Config {
     /// The allowlist position of an exact `<fqdn>:<port>` pair, or `None` when
     /// no entry matches both hostname and port. The single source of allowlist
     /// authorization shared by the serving domain-block/attribution ordinals
-    /// and the worker CONNECT decision (alumina-9t6w B1), so the pair predicate
-    /// cannot drift between sites (alumina-sechd L14).
+    /// and the worker CONNECT decision, so the pair predicate
+    /// cannot drift between sites.
     pub(crate) fn allowlist_position(&self, hostname: &str, port: u16) -> Option<usize> {
         self.allowlist().iter().position(|entry| {
             entry.as_str().as_bytes() == hostname.as_bytes() && entry.port() == port

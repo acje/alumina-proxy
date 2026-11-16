@@ -15,7 +15,7 @@ impl Serving {
     }
 
     /// Refuses a connection whose requested hostname is known but whose slot
-    /// has not yet been approved (the pre-Peer refusal sites, G11-C01): the
+    /// has not yet been approved (the pre-Peer refusal sites): the
     /// hostname is carried into the reject telemetry without setting
     /// `slot.approved`.
     pub(super) fn refuse_with_hostname(

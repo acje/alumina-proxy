@@ -35,8 +35,8 @@ use crate::runtime::tunnel::{
 /// The explicit far-future boundary for [`ServeStorage::schedule_due_instant`].
 /// A schedule due beyond `now0 + this many seconds` is clamped to this
 /// boundary instead of collapsing to the current instant, so an extreme or
-/// overflowing due can never wake the serving loop spuriously early
-/// (alumina-sechd I19). Ten years is far beyond any refresh interval and is
+/// overflowing due can never wake the serving loop spuriously early. Ten
+/// years is far beyond any refresh interval and is
 /// always representable on every supported platform.
 const SCHEDULE_FAR_FUTURE_SECS: u64 = 365 * 24 * 60 * 60 * 10;
 
@@ -66,7 +66,7 @@ pub struct ServeStorage {
     origin: Instant,
     now0: u64,
     logs: LogStore,
-    /// The per-name DNS incident reporting surface (docs/alumina-proxy.md:79-81):
+    /// The per-name DNS incident reporting surface (§Configuration & DNS):
     /// window state, per-type counters, tunnel-activity slot markers, and
     /// eligible-binding transition tracking, all preallocated at boot.
     incident_report: IncidentReport,
@@ -261,7 +261,7 @@ pub enum ServingMode {
 }
 
 /// The terminal startup-readiness decision from the canonical rule
-/// (docs/alumina-proxy.md:65): open the listener when the unresolved count is at most the
+/// (§Configuration & DNS): open the listener when the unresolved count is at most the
 /// configured allowance, else exit with status 75; a first-observed SIGTERM
 /// short-circuits the window as [`Self::Terminated`], which never binds or
 /// attaches a listener.
@@ -376,7 +376,7 @@ impl ServeStorage {
     /// The single owned config/cache/clock view used for CONNECT decisions: a
     /// [`crate::runtime::tunnel::WorkerView`] bound to this storage's own config, cache,
     /// and clock authority, so no code can pair an unrelated config or clock
-    /// with this cache (1cws M4r/M2r; destination-binding, docs/alumina-proxy.md:145).
+    /// with this cache (§The Destination-Binding Invariant).
     #[must_use]
     pub const fn work_view(&self) -> WorkerView<'_> {
         WorkerView::new(&self.config, &self.cache, self.worker.clock())
@@ -425,7 +425,7 @@ impl ServeStorage {
     /// The whole-second DNS/cache serving clock, mounted on the same origin
     /// and epoch the startup window wrote receipts on: `now0` plus whole
     /// seconds since the window origin. The single origin+offset continuity
-    /// that keeps cache freshness comparable in serving (1cws M2r).
+    /// that keeps cache freshness comparable in serving.
     pub(crate) fn cache_secs(&self, now: Instant) -> u64 {
         self.now0
             .saturating_add(now.saturating_duration_since(self.origin).as_secs())
@@ -547,7 +547,7 @@ impl ServeStorage {
     /// fires, relative to the mounted clock origin. A due beyond the
     /// documented far-future boundary is clamped to that boundary rather than
     /// collapsing to "now", so an extreme or overflowing schedule never wakes
-    /// the loop spuriously early (alumina-sechd I19).
+    /// the loop spuriously early.
     pub(crate) fn schedule_due_instant(&self, due: u64) -> Instant {
         let secs = due.saturating_sub(self.now0).min(SCHEDULE_FAR_FUTURE_SECS);
         self.origin + Duration::from_secs(secs)
@@ -663,8 +663,8 @@ impl ServeStorage {
     /// Block-Domain, the domain sweep, JA4 baselines) must key on the pair, so
     /// a same-hostname different-port allowlist entry gets its own ordinal and
     /// a configured Block on one port can never over-close or under-close the
-    /// other (alumina-9t6w B1). Shares the single allowlist-pair predicate with
-    /// the worker decision (alumina-sechd L14).
+    /// other. Shares the single allowlist-pair predicate with
+    /// the worker decision.
     #[cfg(test)]
     pub(crate) fn ordinal_for_pair(
         &self,
@@ -714,7 +714,7 @@ impl ServeStorage {
     }
 
     /// Whole-record log drops so far, saturating at `u64::MAX`: the
-    /// documented dropped-record metric (docs/alumina-proxy.md:193).
+    /// documented dropped-record metric (§Lifecycle).
     #[must_use]
     pub const fn log_dropped(&self) -> u64 {
         self.logs.dropped()
@@ -735,7 +735,7 @@ impl ServeStorage {
     /// Emits one stdout-only fatal record and performs one bounded drain, then
     /// lets the process exit: the only post-sink-switch channel for a
     /// process-fatal failure, so an attach/serve/listener failure never blocks
-    /// on a separate stalled stderr descriptor (docs/alumina-proxy.md:149, B1). The
+    /// on a separate stalled stderr descriptor. The
     /// message is formatted directly into the fixed slot, so a fatal path
     /// performs no heap allocation beyond what the slot itself already owns.
     ///
@@ -787,7 +787,7 @@ impl ServeStorage {
         snap
     }
 
-    /// The per-turn incident reporting pass (docs/alumina-proxy.md:79-81): opens
+    /// The per-turn incident reporting pass (§Configuration & DNS): opens
     /// windows for names already in incident (including incidents opened before
     /// serving began), rotates every open window at its 3600-second boundary,
     /// drains closed-window error summaries, folds eligible-binding transitions
@@ -889,7 +889,7 @@ impl ServeStorage {
 
     /// Emits one incident summary record for a closed window, after sampling
     /// the shared record second and folding the live cache facts
-    /// (docs/alumina-proxy.md:80).
+    /// (§Configuration & DNS).
     fn emit_incident_summary(&mut self, ordinal: usize, closed: ClosedWindow, level: Level) {
         let Some(fqdn) = self.config.allowlist().get(ordinal) else {
             return;
@@ -923,7 +923,7 @@ impl ServeStorage {
 
     /// Emits one typed eligible-binding transition record for a hostname:
     /// `Lost` is the immediate error when it loses its eligible bindings,
-    /// `Recovered` the info when they return (docs/alumina-proxy.md:79).
+    /// `Recovered` the info when they return (§Configuration & DNS).
     fn emit_eligible(&mut self, ordinal: usize, secs: u64, event: EligibleTransition) {
         if let Some(fqdn) = self.config.allowlist().get(ordinal) {
             self.logs.incident_eligible(secs, fqdn.as_str(), event);
@@ -1131,7 +1131,7 @@ impl ServeStorage {
     }
 
     /// Emits the per-type exchange-failure incident open and recovery records
-    /// the DNS transport accumulated (docs/alumina-proxy.md:79): the allowlist
+    /// the DNS transport accumulated (§Configuration & DNS): the allowlist
     /// FQDN is recovered from the ordinal captured before the exchange settled.
     /// Startup suppression already filtered the notes, so every note drained
     /// here is a serving incident. The transport drains to zero, so a later
@@ -1281,7 +1281,7 @@ impl ServeStorage {
     /// previous concludes, and emits the single `resolver_probe` record when no
     /// unprobed resolver remains. The sweep never relocates a healthy active
     /// transport — the pre-sweep active resolver is restored after each probe —
-    /// and is mutually exclusive with failback (docs/alumina-proxy.md:67).
+    /// and is mutually exclusive with failback (§Configuration & DNS).
     ///
     /// # Errors
     ///
@@ -1335,7 +1335,7 @@ impl ServeStorage {
     /// inline segment per configured resolver in index order, carrying its
     /// address and FQDN/pin presence plus the accumulated verdict. The record
     /// is written allocation-free into the fixed 2 KiB slot and drained once
-    /// (docs/alumina-proxy.md:67).
+    /// (§Configuration & DNS).
     #[expect(
         clippy::expect_used,
         reason = "resolver index is below MAX_RESOLVERS=5, which fits u32"
@@ -1375,7 +1375,7 @@ impl ServeStorage {
     /// # Errors
     ///
     /// `SlotCapacity` or `PendingCapacity`, mapped to HTTP 503 + close
-    /// (docs/alumina-proxy.md:193).
+    /// (§Lifecycle).
     pub(crate) fn accept(
         &mut self,
         now: Instant,
@@ -1387,8 +1387,8 @@ impl ServeStorage {
     /// The single exact-pair resolution of an already-validated CONNECT for
     /// one decision: binds the request to the allowlist position computed once
     /// from this storage's config, so the serving block precheck, `decide`,
-    /// peer freshness and report attribution all share one resolution
-    /// (alumina-sechd L14). Decision-scoped and borrowing the caller's local
+    /// peer freshness and report attribution all share one resolution.
+    /// Decision-scoped and borrowing the caller's local
     /// request, never copying it. See [`ResolvedRequest`].
     pub(crate) fn resolve_request<'a>(
         &'a self,
@@ -1617,13 +1617,13 @@ impl ServeStorage {
     /// is first emitted as its own
     /// `startup_name` record carrying the full FQDN, outcome and reason; the
     /// `startup_final` summary record then carries the canonical counts plus
-    /// `names_dropped` (docs/alumina-proxy.md:193,236). The split keeps every
+    /// `names_dropped` (§Lifecycle). The split keeps every
     /// valid configuration's startup result inside the encoded-entry limit by
     /// construction. The first-failure warning is NOT replayed here: the window
     /// seam (`startup_dns.rs` `resolve_window`) enqueues exactly one warning at
     /// the first counted exchange failure inside the window, so emitting again
     /// at end-of-window would duplicate it (no end-window replay,
-    /// docs/alumina-proxy.md:67).
+    /// §Configuration & DNS).
     #[expect(
         clippy::expect_used,
         reason = "allowlist ordinal is below ALLOWLIST_MAX=32, which fits u32"
@@ -1689,8 +1689,7 @@ impl ServeStorage {
     /// stopping early when the sink stalls (`WouldBlock`) or latches failed.
     /// On a decision that ends the process (`Exit75`, `Terminated`) nothing
     /// later can deliver a remaining record, so the residue is counted as
-    /// stranded rather than destroyed uncounted (docs/alumina-proxy.md:197,
-    /// L18); a serving decision leaves it queued for the serving loop's next
+    /// stranded rather than destroyed uncounted (§L18); a serving decision leaves it queued for the serving loop's next
     /// drain.
     fn drain_startup_records(&mut self, exiting: bool) {
         let mut turns = 0usize;

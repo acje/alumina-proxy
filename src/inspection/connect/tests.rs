@@ -202,8 +202,7 @@ fn rejects_two_token_request_line() {
 fn rejects_space_in_target_as_malformed_request_line() {
     // `CONNECT host :443 HTTP/1.1` mis-splits at the first space after the
     // method, leaving a space inside the version token; that is a malformed
-    // request line (four tokens), never a genuine version mismatch
-    // (W1-L1b-F2).
+    // request line (four tokens), never a genuine version mismatch.
     let head = "CONNECT host :443 HTTP/1.1\r\n\r\n";
     assert_eq!(
         parse_full(head.as_bytes()),

@@ -6,7 +6,7 @@
 //! terminating newline framing) is dropped whole and counted. Enqueue and
 //! drain are allocation-free and nonblocking; a stalled stdout sink yields
 //! with its partial write cursor retained and never delays traffic, DNS, or
-//! deadlines (docs/alumina-proxy.md:178-179,193-194).
+//! deadlines (§Lifecycle).
 //!
 //! Grammar: `level=<warn|info|error> kind=<kind> <key>=<value>...\n`.
 //! Text values are double-quoted; `\` and `"` are backslash-escaped and every
@@ -22,7 +22,7 @@
 //! enqueued (full queue or encode overflow) is dropped whole and increments the
 //! shared drop counter exactly once; `names_dropped` reports how many of those
 //! attempts failed, so it is a subset of the summary's cumulative `dropped`
-//! tally and the two are never summed (docs/alumina-proxy.md:236).
+//! tally and the two are never summed (§Initial resource profile).
 //!
 //! Address fields are never escaped: resolver `SocketAddr` Display emits only
 //! digits, `.`, `:`, `[`, `]`, and `%`, none of which require quoting, and is
@@ -62,12 +62,12 @@ const DOMAIN_BATCH: usize = 11;
 /// Nonzero capture details packed per `monitor_capture` batch (64 -> 3).
 const CAPTURE_BATCH: usize = 22;
 /// Per-turn sink budget: at most this many write calls or this many bytes,
-/// whichever is exhausted first (docs/alumina-proxy.md:178,194,146).
+/// whichever is exhausted first (§Initial resource profile).
 pub(crate) const SINK_MAX_OPS: usize = 16;
 pub(crate) const SINK_MAX_BYTES: usize = 64 * 1024;
 /// The bounded retry deadline after a `WouldBlock`: the sink cannot accept more
 /// right now, so the owner wakes to try again on this cadence instead of
-/// busy-spinning (704q N4/T3: a stalled stdout sink never delays traffic, DNS,
+/// busy-spinning (a stalled stdout sink never delays traffic, DNS,
 /// or deadlines).
 const LOG_RETRY: Duration = Duration::from_millis(100);
 
@@ -146,7 +146,7 @@ const _: () = assert!(
 );
 
 /// Threshold edges: attempt an error record when usage first exceeds 80%,
-/// and again when it falls below 70% (docs/alumina-proxy.md:193).
+/// and again when it falls below 70% (§Lifecycle).
 const HIGH_PCT_NUMBER: u64 = 80;
 const LOW_PCT_NUMBER: u64 = 70;
 
@@ -167,7 +167,7 @@ pub(crate) enum Level {
     Error,
 }
 
-/// The fixed reason vocabulary for a rejected connection (docs/alumina-proxy.md:193).
+/// The fixed reason vocabulary for a rejected connection (§Lifecycle).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RejectReason {
     Capacity,
@@ -192,7 +192,7 @@ impl RejectReason {
 }
 
 /// The fixed reason vocabulary for a tunnel closed for early upstream
-/// activity (docs/alumina-proxy.md:193).
+/// activity (§Lifecycle).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActivityKind {
     Data,
@@ -211,7 +211,7 @@ impl ActivityKind {
 }
 
 /// The fixed occupancy dimension a capacity threshold edge reports
-/// (docs/alumina-proxy.md:193).
+/// (§Lifecycle).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Dimension {
     Slots,
@@ -292,7 +292,7 @@ impl Kind {
         }
     }
 
-    /// The priority class (docs/alumina-proxy.md:1299-1301): latch/event
+    /// The priority class (§SP-010): latch/event
     /// records are reserved against normal overflow, so they displace the
     /// newest normal record under pressure instead of being dropped whole.
     /// `ShutdownFinal` is the terminal verdict and belongs to the same class:
@@ -330,7 +330,7 @@ impl StartupStatus {
 /// The typed terminal outcome of a SIGTERM shutdown drain: a clean drain of
 /// every established tunnel (or an empty drain with no tunnels) exits 0; a
 /// deadline-forced closure of remaining sockets is a failure and exits
-/// `EX_SOFTWARE` (70) (docs/alumina-proxy.md:220). Emitted as the single shutdown record
+/// `EX_SOFTWARE` (70; §Lifecycle). Emitted as the single shutdown record
 /// before the owner exits so a forced closure is never silently lost.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShutdownStatus {
@@ -723,7 +723,7 @@ impl LogStore {
     /// negative-lease set: `context` renders `none`/`a`/`aaaa`/`both` when
     /// both owner projections resolve and is omitted (`None`, UNKNOWN) when a
     /// projection lookup errors. Exactly one attempt across all names and
-    /// record types (docs/alumina-proxy.md:67).
+    /// record types (§Configuration & DNS).
     pub(crate) fn startup_warning_ctx(
         &mut self,
         secs: u64,
@@ -754,7 +754,7 @@ impl LogStore {
     }
 
     /// One warn per counted exchange failure in the serving loop
-    /// (docs/alumina-proxy.md:67): the allowlist name (when the ordinal is
+    /// (§Configuration & DNS): the allowlist name (when the ordinal is
     /// still recoverable after the exchange settled), the structural failure
     /// reason, and the configured-resolver origin (`unknown` when metadata is
     /// absent).
@@ -776,7 +776,7 @@ impl LogStore {
     }
 
     /// One warn per per-type exchange-failure incident open in the serving loop
-    /// (docs/alumina-proxy.md:79): the allowlist FQDN, the family, and the
+    /// (§Configuration & DNS): the allowlist FQDN, the family, and the
     /// structural failure reason. Startup-window failures never emit this
     /// record; only serving failures do.
     pub(crate) fn incident_open(
@@ -799,7 +799,7 @@ impl LogStore {
     }
 
     /// One info per per-type exchange-failure incident recovery in the serving
-    /// loop (docs/alumina-proxy.md:79): the allowlist FQDN, the family, and the
+    /// loop (§Configuration & DNS): the allowlist FQDN, the family, and the
     /// elapsed duration the incident stayed open.
     pub(crate) fn incident_recovered(
         &mut self,
@@ -822,7 +822,7 @@ impl LogStore {
 
     /// One error summary per hostname after each 3600-second reporting window
     /// while either type has an incident, or the info-level final partial
-    /// summary on full hostname incident recovery (docs/alumina-proxy.md:79-80).
+    /// summary on full hostname incident recovery (§Configuration & DNS).
     /// The full record payload is built by the serving side; this encoder only
     /// formats it.
     pub(crate) fn incident_summary(
@@ -839,7 +839,7 @@ impl LogStore {
 
     /// One typed eligible-binding transition for a hostname: `Lost` logs one
     /// error when the name transitions to having no eligible bindings,
-    /// `Recovered` logs one info when they recover (docs/alumina-proxy.md:79).
+    /// `Recovered` logs one info when they recover (§Configuration & DNS).
     pub(crate) fn incident_eligible(
         &mut self,
         secs: u64,
@@ -907,7 +907,7 @@ impl LogStore {
         self.note_queue_usage();
     }
 
-    /// The single post-window probe record (docs/alumina-proxy.md:67): one inline
+    /// The single post-window probe record (§Post-window probe sweep): one inline
     /// segment per resolver in index order with its probe verdict and failure
     /// reason. All resolvers share this one record — the sweep result is never
     /// fanned out into per-resolver records. An oversize record is dropped
@@ -923,7 +923,7 @@ impl LogStore {
     /// One error record for a process-fatal post-sink failure: emitted on the
     /// boot-owned stdout store before the owner exits, so an attach/serve/
     /// listener failure never writes to a stderr that could block a separate
-    /// blocked descriptor (docs/alumina-proxy.md:149, B1). The message is formatted
+    /// blocked descriptor. The message is formatted
     /// directly into the fixed slot (no heap String) and escaped by the same
     /// deterministic grammar as a `Str` field; an oversize record is dropped
     /// whole and counted.
@@ -942,7 +942,7 @@ impl LogStore {
         self.note_queue_usage();
     }
 
-    /// One warn per rejected connection (docs/alumina-proxy.md:193): `reason` selects the
+    /// One warn per rejected connection (§Lifecycle): `reason` selects the
     /// fixed vocabulary; the hostname is included only when valid.
     pub(crate) fn reject(
         &mut self,
@@ -961,7 +961,7 @@ impl LogStore {
         self.enqueue(Level::Warn, Kind::Reject, &fields);
     }
 
-    /// One warn per tunnel closed for early upstream activity (docs/alumina-proxy.md:193):
+    /// One warn per tunnel closed for early upstream activity (§Lifecycle):
     /// the peer address and whether data, EOF, or reset was observed.
     pub(crate) fn early_activity(
         &mut self,
@@ -983,7 +983,7 @@ impl LogStore {
     /// The single typed shutdown record emitted before the owner exits on a
     /// SIGTERM: `status` names whether the drain finished clean or was
     /// deadline-forced, so a forced closure is never silently lost to the
-    /// immediate `process::exit` that follows (docs/alumina-proxy.md:220). The caller
+    /// immediate `process::exit` that follows (§Lifecycle). The caller
     /// drains once after this, and the drain is bounded/nonblocking so a
     /// stalled stdout can never delay the exit verdict.
     pub(crate) fn shutdown_final(&mut self, secs: u64, status: ShutdownStatus, dropped: u64) {
@@ -1001,7 +1001,7 @@ impl LogStore {
 
     /// Emits the reserved monitor summary plus the best-effort detail batches.
     /// The summary is the authoritative report of report-time loss
-    /// (docs/alumina-proxy.md:344), so the admission of every detail batch is
+    /// (§Monitoring), so the admission of every detail batch is
     /// planned from the exact capacity the reserved commit leaves and each
     /// refused batch is counted on the monitor *before* the summary is
     /// encoded: the summary that reports the loss is the one that caused it.
@@ -1095,7 +1095,7 @@ impl LogStore {
     }
 
     /// Evaluates the 80%/70% capacity thresholds for tunnel slots and pending
-    /// setups (docs/alumina-proxy.md:193). Call after any occupancy transition.
+    /// setups (§Lifecycle). Call after any occupancy transition.
     pub(crate) fn note_capacity(&mut self, secs: u64, occupied: usize, pending: usize) {
         self.secs = secs;
         if let Some(edge) = note_usage(

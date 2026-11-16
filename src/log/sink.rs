@@ -56,7 +56,7 @@ impl LogStore {
     /// exit paths, where the queue would otherwise be destroyed uncounted:
     /// queue-accepted records that cannot be drained before the process ends
     /// are counted under the existing whole-record drop accounting, never
-    /// silently lost (docs/alumina-proxy.md:197, L18). A path that keeps
+    /// silently lost (§L18). A path that keeps
     /// running never calls this — it leaves the records queued and retries on
     /// the bounded [`LOG_RETRY`] cadence (`next_drain`).
     pub(crate) const fn strand_queued(&mut self) -> u64 {

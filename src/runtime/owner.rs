@@ -157,7 +157,7 @@ impl Preallocated {
 
     /// Emits one stdout-only fatal record and performs one bounded drain on
     /// the owner's boot-owned log store, for the post-sink-switch fatal paths
-    /// in main that must not write to stderr (docs/alumina-proxy.md:149, B1). The
+    /// in main that must not write to stderr. The
     /// message is formatted directly into the fixed slot (no heap String).
     pub fn emit_fatal_and_drain(&mut self, args: std::fmt::Arguments<'_>) {
         self.serving.storage_mut().emit_fatal_and_drain(args);
@@ -389,7 +389,7 @@ impl Runtime {
     /// [`std::process::exit`], which skips the owner's destructors, so the
     /// boot-owned heap (traffic store, serving workspaces, log queue, retained
     /// DNS transport) is never freed before the operating system reclaims it
-    /// at process exit (docs/alumina-proxy.md:150,206): a clean drain exits 0, and a
+    /// at process exit (§Lifecycle): a clean drain exits 0, and a
     /// deadline-forced closure of remaining sockets exits `EX_SOFTWARE` (70).
     ///
     /// # Errors

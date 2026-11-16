@@ -1733,7 +1733,7 @@ mod malformed_rdata {
 
     #[test]
     fn rejects_soa_with_truncated_tail() {
-        // W1-L1a-F2: the fixed 20-byte SOA tail (serial, refresh, retry,
+        // the fixed 20-byte SOA tail (serial, refresh, retry,
         // expire, minimum) must follow the two names exactly; a truncated
         // tail is rejected as MalformedSoa rather than misread.
         let mut rdata = qname_bytes("ns1.example.org");
@@ -1753,7 +1753,7 @@ mod malformed_rdata {
 
     #[test]
     fn rejects_soa_with_name_overrunning_rdata() {
-        // W1-L1a-F2: a name whose encoded form overruns the declared rdata
+        // a name whose encoded form overruns the declared rdata
         // boundary is rejected as MalformedSoa (cumulative sub-component
         // bounds), even though the name bytes remain inside the message.
         let mut rdata = qname_bytes("ns1.example.org");

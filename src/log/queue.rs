@@ -171,7 +171,7 @@ impl LogStore {
         self.set_now(self.secs.max(secs));
         self.enqueue_normal(|slot| encode_dns_assurance_unknown(slot, fqdn, secs, boot))
     }
-    /// Enqueues a reserved priority-class record (docs/alumina-proxy.md:1299-1301).
+    /// Enqueues a reserved priority-class record (§SP-010).
     /// On a full ring the record is encoded into a stack scratch slot first and
     /// only on encode success displaces the newest normal record, so a failed
     /// encode never evicts a held record. Returns whether the record was
@@ -215,7 +215,7 @@ impl LogStore {
     /// the front and the encoded record takes the newest slot, so only the
     /// newest-lowest-priority record is lost. When every held record is
     /// reserved the newest reserved record is the bounded-not-lossless victim
-    /// (docs/alumina-proxy.md:290, :1303).
+    /// (§Verification requirements).
     fn displace_reserved(&mut self, scratch: &[u8]) {
         let front_started = self.cursor.is_some_and(|cursor| cursor.off > 0);
         let victim = (0..QUEUE_SLOTS)

@@ -64,7 +64,7 @@ impl Generation {
 /// The query-start generation snapshot for one exchange: the queried family's
 /// cache entry generation plus the other family's, captured together from the
 /// same cache before any network work and retained immutably for the
-/// whole-family negative guard (docs/alumina-proxy.md:119, :121-124).
+/// whole-family negative guard (§Configuration & DNS).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Generations {
     /// The queried family's entry generation, authoritative for positives.
@@ -525,11 +525,11 @@ impl Cache {
 
     /// Constructs a cache whose name count exactly matches the validated
     /// allowlist of `config`, so allowlist ordinals index the same names in
-    /// the cache (destination-binding, docs/alumina-proxy.md:145). Each
+    /// the cache (destination-binding, §The Destination-Binding Invariant). Each
     /// admitted entry retains the config's per-allowlist assurance
     /// requirement at the same ordinal, so requirement ownership stays in
     /// config. The single running-path constructor: a worker never pairs a
-    /// config with an independently sized cache (9pac M4).
+    /// config with an independently sized cache.
     ///
     /// # Errors
     ///
@@ -585,7 +585,7 @@ impl Cache {
     /// The query-start snapshot for `family` at `name`: the queried family's
     /// entry generation plus the other family's, captured together from this
     /// cache before any network work and owned here so startup, serving, and
-    /// test witnesses share one capture path (docs/alumina-proxy.md:119).
+    /// test witnesses share one capture path (§Configuration & DNS).
     ///
     /// # Errors
     ///

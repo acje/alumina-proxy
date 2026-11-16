@@ -136,7 +136,7 @@ fn marker_dedups_same_window_and_reuse_resets_it() {
 /// pre-wrap pair can never become current again for the reused slot. The
 /// full 2^64 cycle that would return a slot to an earlier generation is
 /// unreachable by construction (the fixed profile adds no production hook)
-/// and stays BLOCKED/Unknown per decision bead alumina-v52be; no wrap
+/// and stays BLOCKED/Unknown; no wrap
 /// policy is invented here (the stored marker key,
 /// `src/incident_report.rs:244`, is built as `(window_start, slot_gen)` at
 /// :357).
@@ -171,7 +171,7 @@ fn pre_wrap_generation_marker_is_rekeyed_on_rotation() {
 /// slot_gen)` pair from the pre-wrap `u64::MAX` marker and is never
 /// deduped against it, so all three generations count as separate tunnels
 /// in one window (the u64 width witness at `src/incident_report.rs:244`
-/// records the residue exactly; per decision bead alumina-v52be it is
+/// records the residue exactly; it is
 /// an artifact, not a proof).
 fn marker_records_extreme_generation_values_exactly() {
     let mut rep = IncidentReport::new();
@@ -279,7 +279,7 @@ fn counters_saturate_and_latch_overflow() {
 
 #[test]
 /// G4 — window counters saturate with the overflow flag instead of wrapping
-/// (docs/alumina-proxy.md:340 logging contract): a byte write past
+/// (§Lifecycle logging contract): a byte write past
 /// `u64::MAX` pins the closed window's byte count at the maximum and
 /// latches `overflow`, without disturbing the exact-once tunnel count, and
 /// the next window's fresh counters clear the flag.

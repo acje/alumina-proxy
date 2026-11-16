@@ -1,7 +1,7 @@
 //! The in-repo deterministic fuzz harness: one checked-in corpus plus a
 //! generated-input campaign per parser target, driving the **real** parsers —
 //! CONNECT request-head, `ClientHello`, DNS-wire, and log-record encoding —
-//! instead of a scaffold (docs/alumina-proxy.md:388-391, alumina-sechd M3/L17).
+//! instead of a scaffold (§L17).
 //! Campaigns are test-augmented (`cargo test`); the harness is never called on
 //! a production path, so it adds no post-boot allocation or runtime surface.
 
@@ -110,7 +110,7 @@ impl ParserTarget {
 
     /// Whether the target drives a real parser under the campaign rather than
     /// a scaffold. All four targets are wired to their real parser, so every
-    /// target reports `driven` (alumina-sechd M3).
+    /// target reports `driven`.
     #[must_use]
     pub const fn status(self) -> &'static str {
         "driven"
@@ -119,7 +119,7 @@ impl ParserTarget {
 
 /// The checked-in corpus inputs for a target: representative inputs that
 /// complete the real parser, so every campaign reaches at least one deep parse
-/// independent of the generated space (docs/alumina-proxy.md:388-391).
+/// independent of the generated space (§L17).
 #[must_use]
 pub const fn corpus(target: ParserTarget) -> &'static [&'static [u8]] {
     match target {
@@ -214,7 +214,7 @@ fn drive(target: ParserTarget, input: &[u8]) -> DriveOutcome {
 }
 
 /// Runs [`drive`] under a panic guard so a campaign can record a crashing
-/// input's hash for exact reproduction (docs/alumina-proxy.md:388-391). A
+/// input's hash for exact reproduction (§L17). A
 /// `Panicked` verdict is the campaign's crash signal; the parsers must never
 /// panic over the sampled space.
 #[must_use]
@@ -346,7 +346,7 @@ impl FuzzRun {
 /// Runs one deterministic fuzz campaign over `target`: every checked-in corpus
 /// input first, then `iterations` generated inputs of length `1..=max_len`
 /// derived from `seed`, driven through the real parsers under a panic guard
-/// (docs/alumina-proxy.md:388-391). A panic aborts the campaign with the
+/// (§L17). A panic aborts the campaign with the
 /// offending input's hash recorded so the input reproduces exactly. Never
 /// called on a production path; campaigns execute under `cargo test`.
 ///

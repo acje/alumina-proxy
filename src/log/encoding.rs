@@ -140,7 +140,7 @@ pub(super) fn encode_record(
     Some(w.len)
 }
 
-/// Verification seam for the in-repo fuzz campaign (docs/alumina-proxy.md:390):
+/// Verification seam for the in-repo fuzz campaign (§L17):
 /// encodes attacker-controlled text as a single `name` string field of an info
 /// `startup_warning` record into a fixed slot, returning `Some(length)` when
 /// the record fit. Only the fuzz driver reaches this; no production path calls
@@ -478,7 +478,7 @@ const fn summary_types(summary: &IncidentSummary) -> &'static str {
     }
 }
 
-/// The fixed 33-field incident summary record (docs/alumina-proxy.md:80):
+/// The fixed 33-field incident summary record (§Configuration & DNS):
 /// window span, coalescing and overflow flags, window activity, and the
 /// per-type incident/cache snapshot. Optional fields emit nothing when absent.
 pub(super) fn incident_summary_fields<'a>(

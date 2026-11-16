@@ -73,7 +73,7 @@ const LISTENER: Token = Token(0);
 /// coalesced tunnel bytes up to the `ClientHello` inspection cap, reused as a
 /// recycling relay pending buffer. Allocated once before the postboot phase and
 /// reused across connections. The mandated directional profile is two 128 KiB
-/// buffers per tunnel (docs/alumina-proxy.md:161-164,:183; RF-008): 512 slots x 256 KiB =
+/// buffers per tunnel (§Initial resource profile): 512 slots x 256 KiB =
 /// 128 MiB traffic storage, not total RSS.
 const HOLD_CAP: usize = crate::inventory::BUFFER_BYTES;
 
@@ -82,17 +82,17 @@ const HOLD_CAP: usize = crate::inventory::BUFFER_BYTES;
 const DOWN_CAP: usize = crate::inventory::BUFFER_BYTES;
 
 /// Idle deadline for an established tunnel once the gate has opened, reset on
-/// every successful tunnel-byte write (docs/alumina-proxy.md:190,:147). Readiness alone
+/// every successful tunnel-byte write (§Lifecycle). Readiness alone
 /// never extends it.
 const IDLE_SECS: Duration = Duration::from_secs(300);
 
 /// The first orderly EOF starts a drain deadline that is never reset
-/// (docs/alumina-proxy.md:191; RF-003); the slot closes at both-EOF-drained or here.
+/// (§Lifecycle); the slot closes at both-EOF-drained or here.
 const DRAIN_SECS: Duration = Duration::from_secs(5);
 
 /// The fixed shutdown grace from the first observed SIGTERM: establish-alone
 /// drains close their tunnels under this deadline, forced closure after is a
-/// failure (docs/alumina-proxy.md:181,220; oracle b3nx B12/B16).
+/// failure (§Lifecycle).
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
 
 /// Bounded re-arm backoff after a transient accept failure (e.g. EMFILE).
@@ -100,23 +100,23 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
 /// (xz3f N6 factual note).
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
-/// The canonical complete-visit I/O budget (docs/alumina-proxy.md:146): at
+/// The canonical complete-visit I/O budget (§Architecture): at
 /// most 64 KiB of I/O or 16 I/O operations per connection visit, whichever
 /// comes first, combined across both directions and every arm of one visit.
 /// A `WouldBlock` or spurious-readiness attempt counts as an I/O operation
-/// (:226; oracle alumina-8d7z §4), so a stalled arm still consumes budget.
+/// so a stalled arm still consumes budget.
 const VISIT_OPS: u16 = 16;
 const VISIT_BYTES: u32 = 64 * 1024;
 
 /// Timers rejoin the turn after at most this many ready-slot visits or I/O
-/// operations within one poll dispatch (docs/alumina-proxy.md:146), so an
+/// operations within one poll dispatch (§Architecture), so an
 /// over-long batch cannot delay an expired deadline past this bound.
 const TIMER_RECHECK_EVERY: usize = 256;
 
 /// The fixed event-buffer capacity: the poll batch is a bounded 1024-event
 /// snapshot, preallocated at boot and reused across iterations. Per-batch slot
 /// dedup (one complete visit per connection per batch) means the visit budget,
-/// not this cap, bounds a slot's turn (docs/alumina-proxy.md:146).
+/// not this cap, bounds a slot's turn (§Architecture).
 const POLL_EVENTS_CAP: usize = 1024;
 
 /// The coarse direct-into-slab read chunk: a single read spans up to 32 KiB
@@ -149,7 +149,7 @@ const DNS_LOCAL: usize = UPSTREAM_BASE + MAX_TUNNELS;
 /// The SIGTERM self-pipe source token: the next free local id after the DNS
 /// source, dispatched as a benign readiness flag that wakes the single poll
 /// so a handler-only route could never start the shutdown grace on an idle
-/// loop (oracle b3nx B18).
+/// loop.
 const SIGNAL_LOCAL: usize = DNS_LOCAL + 1;
 
 /// Token layout: low 11 bits = local id (`1..=MAX_TUNNELS` client,
@@ -197,7 +197,7 @@ pub enum Shutdown {
 
 /// The typed process exit decision once shutdown settles: a clean drain of
 /// every established tunnel exits 0; a deadline-forced closure of remaining
-/// sockets is a failure and exits `EX_SOFTWARE` (70) (docs/alumina-proxy.md:220).
+/// sockets is a failure and exits `EX_SOFTWARE` (70; §Lifecycle).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ShutdownExit {
     Drained,
@@ -290,11 +290,11 @@ fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
 /// The complete-visit I/O budget of one connection: how much read+write work
 /// that visit has performed, so every arm of the visit resolves into one
 /// shared counter against the canonical 16-op/64 KiB bound
-/// (docs/alumina-proxy.md:146; oracle alumina-8d7z A1). `Idle` between
+/// (§Architecture). `Idle` between
 /// dispatches and for non-connection events, so deadline sweeps and direct
 /// test calls are never accidentally budgeted against a stale visit. One
 /// connection is one visit per poll batch: both of its readiness tokens merge
-/// into a single `Live` budget (HIGH-1 dedup), sealed and counted once when a
+/// into a single `Live` budget, sealed and counted once when a
 /// different slot begins its visit or the batch ends.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum VisitState {
@@ -354,7 +354,7 @@ impl VisitState {
 
 /// Counter of ready-slot visits and I/O operations since the last timer
 /// recheck, so `expire_sweep` can rejoin the turn after at most
-/// [`TIMER_RECHECK_EVERY`] units of work (docs/alumina-proxy.md:146), even
+/// [`TIMER_RECHECK_EVERY`] units of work (§Architecture), even
 /// when dispatch stays hot. The recheck is decided *before* dispatching the
 /// visit that would cross the bound (one visit may add `1 + VISIT_OPS`
 /// units), so no threshold overshoot lands before the sweep.
@@ -364,7 +364,7 @@ struct BatchProgress {
 }
 
 impl BatchProgress {
-    /// MEDIUM-2 pre-dispatch bound: the next visit would add at most
+    /// Pre-dispatch bound: the next visit would add at most
     /// `1 + VISIT_OPS` units, so the recheck is due the moment those units
     /// would carry cumulative work past [`TIMER_RECHECK_EVERY`]. Checked
     /// *before* dispatching, so the sweep never lands after work has already
@@ -419,7 +419,7 @@ enum Stage {
 /// reaches `Eof` when its orderly FIN is observed; the sink half-close
 /// (write) is sent only once that direction's accepted bytes have fully
 /// drained, so the typed state can never claim a half-close while the
-/// opposite direction still has pending accepted bytes (RF-003).
+/// opposite direction still has pending accepted bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SideEof {
     Open,
@@ -703,7 +703,7 @@ struct SlotWorkspace {
     tunnel: Option<TunnelIndex>,
     slot_gen: u64,
     /// The batch generation in which this slot last began its single complete
-    /// visit (HIGH-1 per-batch dedup): a later token for the same slot in the
+    /// visit: a later token for the same slot in the
     /// same batch merges or re-arms instead of opening a second visit.
     batch_seen: u64,
     client: Option<TcpStream>,
@@ -731,7 +731,7 @@ struct SlotWorkspace {
     drain_deadline: Option<Instant>,
     idle_deadline: Option<Instant>,
     /// C15 snapshot of the absolute per-setup deadline
-    /// (docs/alumina-proxy.md:192), fixed at admit and immutable until release:
+    /// (§Architecture), fixed at admit and immutable until release:
     /// `Some` exactly while the slot holds its worker setup handle (pre-gate),
     /// so the [`Serving::poll_timeout`] slot fold reads a local field instead
     /// of a storage Vec access per occupied slot. Cleared when the handle is
@@ -749,7 +749,7 @@ struct SlotWorkspace {
     /// committed peer, so pre-relay writes are never attributed.
     report_name: Option<usize>,
     /// The clipped per-attempt connect deadline anchored at this attempt's
-    /// initiation (docs/alumina-proxy.md:189). Only meaningful while
+    /// initiation (§Architecture). Only meaningful while
     /// `stage == Stage::Dialing`; `None` otherwise.
     connect_deadline: Option<Deadline>,
     /// The destination IP the slot's upstream dial established, set on the
@@ -1071,14 +1071,14 @@ pub struct Serving {
     /// for the same slot merge into that batch's single visit instead of
     /// opening fresh budgets.
     in_batch: bool,
-    /// Work-since-recheck counter (MEDIUM-2): the timer/DNS recheck rejoins
+    /// Work-since-recheck counter: the timer/DNS recheck rejoins
     /// the turn before the next visit would push the count past 256.
     progress: BatchProgress,
     /// Cached earliest live deadline across the four sources [`Self::expire_sweep`]
     /// enforces (setup, connect, idle, drain), recomputed fresh in
     /// [`Self::poll_timeout`] from the slot-scan it already performs so the
     /// per-poll O(512) sweep runs only once a deadline has actually elapsed
-    /// (perf-mission C16). `None` when no slot holds a deadline, so the
+    /// `None` when no slot holds a deadline, so the
     /// [`Self::run_once`] gate skips the sweep entirely for deadline-free
     /// serving; the recheck backstop in [`Self::recheck_now`] still enforces
     /// every deadline regardless of this field.
@@ -1104,7 +1104,7 @@ pub struct Serving {
     pub(crate) sweeps: u64,
     /// Test-only tally of client-side re-arms issued by [`Self::reschedule`],
     /// so fixtures assert a budget-exhausted visit re-registers only the busy
-    /// direction (perf-mission C14).
+    /// direction.
     #[cfg(test)]
     pub(crate) reschedule_client_arms: u64,
     /// Test-only tally of upstream-side re-arms issued by [`Self::reschedule`].
@@ -1133,7 +1133,7 @@ type PrePollHook = Rc<dyn Fn(&Serving)>;
 /// on a budget-exhausted or re-queued visit: `Client` and `Upstream` name the
 /// one busy side, `Both` the two sides serving pending work together. Making
 /// the choice a typed sum keeps "re-arm nothing on a visit that still holds
-/// pending work" unrepresentable (docs/alumina-proxy.md:146; perf-mission C14).
+/// pending work" unrepresentable (§Architecture).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RescheduleArm {
     Client,
@@ -1982,7 +1982,7 @@ impl Serving {
     /// Pass 1 folds the batch into per-slot merged readiness in first-arrival
     /// order (a slot's client and upstream tokens merge even when other slots'
     /// tokens interleave). The listener is folded as its own dispatch unit so
-    /// the recheck decision precedes the accept batch (MEDIUM-2). Slot tokens
+    /// the recheck decision precedes the accept batch. Slot tokens
     /// are skipped when the slot is idle, when their generation does not match
     /// the live slot generation, or when a mid-batch reuse gives them a
     /// generation different from the one recorded for the slot in this batch.
@@ -1992,7 +1992,7 @@ impl Serving {
     /// guarded so a slot closed (`Stage::Idle`) or re-admitted at a newer
     /// generation by [`Self::accept_all`], [`Self::recheck_now`], or the slot's
     /// own first arm is never dispatched onto stale state. The first arm opens
-    /// the slot's single visit and the second merges into it (HIGH-1 dedup),
+    /// the slot's single visit and the second merges into it,
     /// so interleaved tokens can never fall into another slot's live visit and
     /// false-reschedule.
     ///
@@ -2668,7 +2668,7 @@ impl Serving {
     }
 
     /// Folds one successful relay-phase write into the slot's name incident
-    /// report window (docs/alumina-proxy.md:80): only `Stage::Relay` writes are
+    /// report window (§Configuration & DNS): only `Stage::Relay` writes are
     /// tunnel payload bytes — the CONNECT request, the CONNECT response, and
     /// refusal bodies are excluded. The slot's committed peer ordinal and
     /// generation stamp attribute the bytes to the exact tunnel and name.
@@ -2722,7 +2722,7 @@ impl Serving {
         }
     }
 
-    /// MEDIUM-2 pre-dispatch bound: the timer/DNS recheck must rejoin the turn
+    /// Pre-dispatch bound: the timer/DNS recheck must rejoin the turn
     /// before the next visit would push cumulative work past the canonical
     /// [`TIMER_RECHECK_EVERY`] units, where one visit adds at most
     /// `1 + VISIT_OPS` units. Checked *before* dispatching, so the sweep never
@@ -2744,7 +2744,7 @@ impl Serving {
     }
 
     /// Counts one ready-slot visit plus its I/O operations into the running
-    /// work-since-recheck total (MEDIUM-2). Called on the seal of a visit —
+    /// work-since-recheck total. Called on the seal of a visit —
     /// when a different slot opens its own, or at end of batch — so each slot
     /// counts exactly once per poll batch.
     const fn note_visit(&mut self, ops: u16) {
@@ -2753,11 +2753,11 @@ impl Serving {
 
     /// Re-arms poll interest on a budget-exhausted or re-queued slot so its
     /// unfinished work reschedules without waiting for a fresh readiness edge
-    /// (docs/alumina-proxy.md:146). Re-registers only the side(s) named by the
+    /// (§Architecture). Re-registers only the side(s) named by the
     /// arm: a direction still holding pending/readable work gets its
     /// `EPOLL_CTL_MOD`, while the untouched, satisfied side keeps its existing
     /// registration, so a later readiness transition still raises a fresh edge
-    /// (perf-mission C14). A re-registration failure leaves the slot without
+    /// A re-registration failure leaves the slot without
     /// interest and is unclosable-only-once: a `Both` re-arm registers the
     /// client first and, on error, closes and returns before the upstream
     /// register is attempted, so a first-arm failure never double-closes via
@@ -2806,7 +2806,7 @@ impl Serving {
     /// interest is additionally re-registered while buffered client bytes still
     /// await forwarding, since a partial flush can leave a still-writable
     /// upstream edge consumed without an automatic `WouldBlock` re-arm
-    /// (perf-mission C14). A drained buffer (`fwd >= buf_len`) means only the
+    /// A drained buffer (`fwd >= buf_len`) means only the
     /// client carries pending work.
     fn client_visit_reschedule_arm(&self, index: usize) -> RescheduleArm {
         if self.slots[index].fwd < self.slots[index].buf_len {
@@ -3108,12 +3108,12 @@ impl Serving {
     }
 
     /// Folds the admitted peer's selected-entry freshness into the persistent
-    /// "serving from a stale cache entry" monitor level bit (W6-H6b-F5): a
+    /// "serving from a stale cache entry" monitor level bit: a
     /// `Stale` observation latches the bit, a `Fresh` observation clears it.
     /// `Empty`/`Retired` and `None` are unreachable on a granted `Peer`
     /// (usable-peer gates on `Fresh | Stale`) and are no-ops. A first
     /// admission on a `Stale` entry also records a stale-binding admission in
-    /// the name's incident report window (docs/alumina-proxy.md:80): retries
+    /// the name's incident report window (§Configuration & DNS): retries
     /// (the slot already carries a `connect_family`) and relay activity are
     /// not admissions. The state arrives from the bound-context observation
     /// ([`crate::runtime::tunnel::ResolvedRequest::peer_state`]); this helper never
@@ -3705,7 +3705,7 @@ impl Serving {
     /// Record the client's orderly EOF on the up flow and start the once-started
     /// drain deadline. The accepted up bytes already in `buf` keep draining to
     /// the upstream; the upstream write half-close happens only once that drain
-    /// finishes ([`Self::finish_drain`]). Never destroys the slot (RF-003).
+    /// finishes ([`Self::finish_drain`]). Never destroys the slot.
     fn observe_up_eof(&mut self, index: usize) {
         {
             let ws = &mut self.slots[index];
@@ -3741,7 +3741,7 @@ impl Serving {
     /// have fully drained: the client EOF drains the up buffer then
     /// `shutdown(Write)`s the upstream; the upstream EOF drains the down buffer
     /// then `shutdown(Write)`s the client. The typed state guarantees a
-    /// half-close is never claimed while pending accepted bytes remain (RF-003).
+    /// half-close is never claimed while pending accepted bytes remain.
     fn finish_drain(&mut self, index: usize) {
         let up_drained = {
             let ws = &self.slots[index];
@@ -3852,7 +3852,7 @@ impl Serving {
 
     /// Expire the in-flight upstream dial when its per-attempt connect
     /// deadline has passed. The per-attempt 2 s cutoff is genuinely enforced
-    /// here (docs/alumina-proxy.md:82,169 — "each with a 2-second deadline"),
+    /// here (§Configuration & DNS — "each with a 2-second deadline"),
     /// so a slow-but-healthy connect that crossed the 2 s bound is failed and
     /// retried or refused exactly like a refused one. The `Result` of
     /// [`Serving::fail_current_attempt`] is intentionally discarded: the sweep

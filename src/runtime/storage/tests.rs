@@ -1002,7 +1002,7 @@ fn report_incident_if_due_emits_window_summary_through_real_path() {
 /// rotation observed 2.5 windows after the window opened spans both full
 /// intervals (`window_end = start + 2*W`, `duration = 2*W`) and sets
 /// `skipped=1`, the exact shape D1/D2 build on
-/// (docs/alumina-proxy.md:122-124).
+/// (§Configuration & DNS).
 fn delayed_window_summary_reports_skip_count_instead_of_one_hour_merger() {
     let mut storage = booted(1, 0);
     let origin = Instant::now();
@@ -1064,7 +1064,7 @@ fn delayed_window_summary_reports_skip_count_instead_of_one_hour_merger() {
 /// the window counters, so the next window starts fresh and later activity
 /// is not merged into the dropped window. The incident-report pass never
 /// changes authorization or retry scheduling: the schedule still holds the
-/// open A incident after the failed enqueue (docs/alumina-proxy.md:193).
+/// open A incident after the failed enqueue (§Lifecycle).
 fn enqueue_failure_drops_summary_resets_window_and_counts_drop() {
     use crate::dns::schedule::TypeIncident;
     let mut storage = booted(1, 0);

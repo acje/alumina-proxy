@@ -193,8 +193,8 @@ impl Monitor {
         self.dirty = true;
     }
 
-    /// Latches the persistent "serving from a stale cache entry" level bit
-    /// (W6-H6b-F5). The bit is a level, not an event fold: it survives
+    /// Latches the persistent "serving from a stale cache entry" level bit.
+    /// The bit is a level, not an event fold: it survives
     /// `mark_reported` and is cleared only by a later fresh admission.
     pub(crate) const fn note_serving_stale(&mut self) {
         self.serving_stale = true;

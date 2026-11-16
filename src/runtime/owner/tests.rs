@@ -119,7 +119,7 @@ fn startup_zero_window_reports_current_cache_admission_without_exchange() {
 
 /// Ports already handed out in this process. Two tests that probe
 /// `127.0.0.1:0`, drop the probe and bind later can be handed the same port in
-/// between, which surfaced as a spurious `AddrInUse` (`alumina-auatf`). Issuing
+/// between, which surfaced as a spurious `AddrInUse`. Issuing
 /// each port once removes that inter-test collision. It does not guard against
 /// a non-test process taking the port, so fixtures that must connect prefer
 /// `Config::with_kernel_assigned_test_listener`.
@@ -1501,7 +1501,7 @@ fn startup_zero_wait_body() {
 /// SIGTERM — delivered through the real signal self-pipe and observed by a
 /// serving `turn`, not by calling `on_sigterm` directly — must cancel the
 /// active exchange, leave no DNS deadline due, and keep the owner draining
-/// across later turns (oracle 991u C1, dm48, U1).
+/// across later turns.
 fn selfpipe_receiving_cancellation_body() {
     let port = ephemeral_port();
     let (mut runtime, responder) =
@@ -1557,7 +1557,7 @@ fn selfpipe_receiving_cancellation_body() {
 /// all-resolved; only then — at the pre-settlement checkpoint, before the
 /// zero-wait recheck decides Serve-vs-Terminated — a real SIGTERM self-pipe
 /// byte becomes readable. The settlement turn must observe it and settle
-/// Terminated, never binding a listener (oracle 991u C2, dm48, U1): the
+/// Terminated, never binding a listener: the
 /// pending-signal race is against the settlement boundary, not a stale DNS
 /// deadline.
 fn post_all_resolved_settlement_body() {
@@ -1604,7 +1604,7 @@ fn post_all_resolved_settlement_body() {
 /// single in-loop poll observes DNS-ready plus the pending signal in one
 /// batch. A correct owner must settle that batch as Terminated (signal
 /// priority over a just-completed DNS readiness) and never bind a listener
-/// (oracle 991u C2), and must not count the final name as resolved or
+/// and must not count the final name as resolved or
 /// published past the signal. Both ordering defenses matter: the startup DNS
 /// transport cancellation in `on_sigterm` clears the active exchange inside
 /// the same turn, and the post-poll loop head re-checks shutdown before
@@ -1708,7 +1708,7 @@ fn both_ready_settlement_body() {
 /// F3 boundary: a complete response already readable at window expiry must
 /// not be published. The window withholds the final allowlist answer until
 /// the exchange deadline passes with the response fully queued on the DNS fd;
-/// the pre-publication clock check (docs/alumina-proxy.md:64) must fail the
+/// the pre-publication clock check (§Configuration & DNS) must fail the
 /// exchange without publishing, so the name stays unresolved and no later
 /// publication occurs.
 fn startup_expiry_gates_already_readable_response_body() {
@@ -1775,7 +1775,7 @@ fn startup_expiry_gates_already_readable_response_body() {
 /// exchange deadline) must not be published. The window withholds the final
 /// answer until the exchange deadline has passed, so the response completes
 /// strictly after expiry; the pre-publication clock check must fail the
-/// exchange without publishing (docs/alumina-proxy.md:64-65).
+/// exchange without publishing (§Configuration & DNS).
 fn startup_expiry_gates_response_completing_during_final_turn_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config_two_names(port)).expect("boot storage");
@@ -1841,7 +1841,7 @@ fn startup_expiry_gates_response_completing_during_final_turn_body() {
 /// expiry. A past-deadline exchange is constructed directly on the attached
 /// owner (bypassing the window) and deliberately NOT marked as serving; one
 /// serving turn must cancel it without mutating the refresh schedule and
-/// without any publication (docs/alumina-proxy.md:64-65).
+/// without any publication (§Configuration & DNS).
 fn retained_startup_exchange_cannot_advance_body() {
     let port = ephemeral_port();
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");

@@ -16,7 +16,7 @@ fn config(port: u16) -> crate::config::Config {
 
 /// Ports already handed out in this process. Two tests that probe
 /// `127.0.0.1:0`, drop the probe and bind later can be handed the same port in
-/// between, which surfaced as a spurious `AddrInUse` (`alumina-auatf`). Issuing
+/// between, which surfaced as a spurious `AddrInUse`. Issuing
 /// each port once removes that inter-test collision. It does not guard against
 /// a non-test process taking the port, so fixtures that must connect prefer
 /// `Config::with_kernel_assigned_test_listener`.
@@ -673,7 +673,7 @@ fn shutdown_alloc_witness_body() {
     drop(pending_client);
 }
 
-/// Compile-time pin of the fixed serving buffer profile (alumina-tm6m): each
+/// Compile-time pin of the fixed serving buffer profile: each
 /// tunnel carries two reused 128 KiB buffers across the 512-slot budget, and
 /// pending setups stay within the 128-slot cap. These are true compile-time
 /// guards, not runtime assertions over a constant.
@@ -708,8 +708,7 @@ fn cfg_doc1(port: u16, any_scope: &str, kind: &str, action_scope: &str) -> crate
 }
 
 /// Two allowlist entries for the same hostname on different ports, each with
-/// its own per-entry action: the pair-aware enforcement-attribution fixture
-/// (H1, alumina-qwzns).
+/// its own per-entry action: the pair-aware enforcement-attribution fixture.
 fn cfg_two_ports(port: u16, kind: &str, action_scope: &str) -> crate::config::Config {
     let doc = format!(
         "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"block\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"a.example:443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\ndns_assurance = \"resolver_trusted\"\n[allowed_fqdn.\"a.example:8443\"]\nearly_data = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\nja4 = {{ action = \"{kind}\", scope = \"{action_scope}\" }}\ndns_assurance = \"resolver_trusted\"\n"
@@ -794,7 +793,7 @@ fn fabric_relay_slot(serving: &mut Serving, index: usize, approved: &[u8], pendi
 }
 
 /// `fabric_validated_early_data_at` plus an explicit `approved_port`: the
-/// pair-aware attribution fixture (H1, alumina-qwzns).
+/// pair-aware attribution fixture.
 fn fabric_validated_early_data_pair(
     serving: &mut Serving,
     index: usize,
@@ -1729,7 +1728,7 @@ mod connect_setup {
 
             // A slow-client pseudo-handshake: one validly-framed TLS record whose
             // claimed 5-byte payload is only partially delivered, so the inspector
-            // retains the bytes and never completes a ClientHello (W7-L7a-F2).
+            // retains the bytes and never completes a ClientHello.
             let partial: &[u8] = &[0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x00];
             {
                 let ws = &mut serving.slots[0];
@@ -1994,7 +1993,7 @@ mod deadlines {
     /// S1: the poll-timeout fold over the C50-live slot must be the exact minimum
     /// across every armed deadline source — the C15 setup snapshot, the
     /// connect (Dialing-guarded), idle, and drain — mirroring the four
-    /// `expire_sweep` arms (docs/alumina-proxy.md:192). The slot stays live in the
+    /// `expire_sweep` arms (§Architecture). The slot stays live in the
     /// bitmap while multi-armed, so no armed deadline can silently fall out of the
     /// C16/C50 poll fold.
     fn s1_fold_min_is_exact_min_over_all_four_arm_sources() {
@@ -2147,7 +2146,7 @@ mod generation_tokens {
     /// G1.R1 — a stale client token for a live slot index is dropped before any
     /// socket I/O through the real `dispatch_readiness` decode: the new
     /// connection's stage, buffered cursors, deadlines, and generation state are
-    /// untouched and the seat is never released (matrix alumina-cdwui.4 §2 G1.R1,
+    /// untouched and the seat is never released (test-matrix row G1.R1,
     /// REJECT class).
     fn stale_event_for_a_reused_slot_index_is_dropped() {
         let port = ephemeral_port();
@@ -2319,7 +2318,7 @@ mod generation_tokens {
     /// upstream read, and never mutates cursors or release accounting; release
     /// accounting runs exactly once (typed-handle consumption).
     /// Only the current-generation upstream token drives the upstream arm (matrix
-    /// alumina-cdwui.4 §2 G1.R2, REJECT class).
+    /// test-matrix row G1.R2, REJECT class).
     fn g1_r2_stale_upstream_token_after_reuse_is_dropped_before_socket_io() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
@@ -2420,7 +2419,7 @@ mod generation_tokens {
     /// the fold-time idle guard (src/serving.rs:1373) before it can claim the
     /// slot; only the new-generation token dispatches onto the reused connection.
     /// Proves batch dedup cannot resurrect a prior generation (matrix
-    /// alumina-cdwui.4 §2 G1.R3, REJECT class).
+    /// test-matrix row G1.R3, REJECT class).
     fn g1_r3_coalesced_batch_accept_between_tokens_drops_stale_gen_only_new_dispatches() {
         const PARTIAL: &[u8] = b"CONNECT sub.example.org:443 HTTP/1.1";
         let port = ephemeral_port();
@@ -2550,7 +2549,7 @@ mod generation_tokens {
     /// the live generation already advanced past it) and only the new-generation
     /// token dispatches. Proves batch dedup/dirty workflow cannot resurrect a
     /// prior generation even when the stale token arrives in the same poll batch
-    /// as the reused connection (matrix alumina-cdwui.4 §2 G1.R3, REJECT class).
+    /// as the reused connection (test-matrix row G1.R3, REJECT class).
     fn g1_r3_coalesced_batch_stale_gen_token_dropped_at_fold_guard_after_reuse() {
         const PARTIAL: &[u8] = b"CONNECT sub.example.org:443 HTTP/1.1";
         let port = ephemeral_port();
@@ -2704,8 +2703,8 @@ mod generation_tokens {
     /// and drives the real read/parse/decision path, while a pre-wrap `u64::MAX`
     /// epoch token is dropped before socket I/O — no false-live dispatch onto the
     /// wrapped connection. Near-wrap exhaustion, executed end-to-end through the
-    /// real token encode/decode and dispatch paths (matrix alumina-cdwui.4 §2
-    /// G1.R4, EXHAUST/REJECT — reachable and falsifiable).
+    /// real token encode/decode and dispatch paths (test-matrix row G1.R4,
+    /// EXHAUST/REJECT — reachable and falsifiable).
     fn g1_r4_wrapped_generation_drops_pre_wrap_token_and_dispatches_own() {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
@@ -2857,9 +2856,8 @@ mod generation_tokens {
     /// encode ids never decode to another slot's arm); decode-side routing of real
     /// client/upstream tokens through `dispatch_readiness` is exercised end-to-end
     /// by G1.R1–G1.R4. This closes only the cross-slot/cross-source lemmas; the
-    /// full u64-cycle same-slot reuse row G1.R5 stays BLOCKED/Unknown (decision
-    /// bead alumina-v52be) and is not invented here (matrix alumina-cdwui.4 §2
-    /// G1.R5, §5.1).
+    /// full u64-cycle same-slot reuse row G1.R5 stays BLOCKED/Unknown and is
+    /// not invented here (test-matrix row G1.R5, §5.1).
     fn g1_local_id_ranges_cannot_alias_reserved_sources_or_other_slots() {
         const _: () = assert!(
             SIGNAL_LOCAL <= LOCAL_MASK,
@@ -3181,7 +3179,7 @@ mod dialing {
     }
 
     #[test]
-    /// D18 (alumina-gzqn4.17.5): one readiness event carrying **both** an error
+    /// D18: one readiness event carrying **both** an error
     /// and readability on a pre-gate upstream must still record the activity the
     /// upstream already sent, and its tripwire projection, before the slot
     /// closes. The error alone closes the slot, but the fact lives only in the
@@ -3662,7 +3660,7 @@ mod dialing {
     /// entry's own `{dial_port}` passes pair-authorization and reaches the
     /// `NoBinding` 502. The pair-authorized slot then dials its entry port directly
     /// into a deterministic in-process loopback listener, and `close_slot`
-    /// resets `approved_port` back to the 443 default (alumina-9t6w B2).
+    /// resets `approved_port` back to the 443 default.
     /// `Serving::dial` itself does not re-check `V4_EXCLUSIONS` (only the DNS
     /// cache does), so the loopback dial is a legitimate seam; a hardcoded-443
     /// bug would instead dial the loopback's 443 and trip the capture assertions.
@@ -4032,7 +4030,7 @@ mod dialing {
     /// A, Aaaa, A, Aaaa across the budget as the worker's selection flips; the
     /// budget-exhausted seam then resolves to the fixed "upstream connection
     /// failed" 502 refusal and releases the seat. The family per round is chosen by
-    /// the harness because destination eligibility (alumina-skhc) excludes loopback
+    /// the harness because destination eligibility excludes loopback
     /// from cache selection, so a hermetic served seam cannot select these
     /// addresses itself.
     fn full_family_alternation_retry_loop_exhausts_at_four_real_dials() {
@@ -4205,7 +4203,7 @@ mod dialing {
     /// ending in the `CandidatesExhausted` refusal and the seat release — must
     /// complete inside the `Phase::Serving` witness with zero post-boot heap
     /// allocation. Families are chosen per round by the harness because
-    /// destination eligibility (alumina-skhc) excludes loopback from cache
+    /// destination eligibility excludes loopback from cache
     /// selection, so a hermetic served seam cannot select these addresses itself.
     fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
         enforcement_witness_thread(|| {
@@ -7405,7 +7403,7 @@ mod enforcement {
     #[test]
     /// A validated early-data anomaly on a slot whose (host, port) pair is not an
     /// allowlist entry must fold to `Unattributed` — never a panic and never a
-    /// wrong ordinal attribution (defensive fallback, H1, alumina-qwzns).
+    /// wrong ordinal attribution (defensive fallback).
     fn early_data_on_unconfigured_pair_folds_unattributed() {
         let port = ephemeral_port();
         let cfg = cfg_two_ports(port, "block", "connection");
@@ -8375,7 +8373,7 @@ mod admission {
     use super::*;
 
     #[test]
-    /// The Peer-branch freshness fold (W6-H6b-F5) latches the persistent
+    /// The Peer-branch freshness fold latches the persistent
     /// "serving from a stale cache entry" monitor level bit on a Stale admission
     /// and clears it on a later Fresh admission. The helper is invoked directly
     /// against the real storage/cache/clock because a real `Peer` admission
@@ -9252,7 +9250,7 @@ mod ja4_baseline {
     #[test]
     /// The JA4 baseline for a connection authorized on the second port of a
     /// same-hostname different-port pair must key the second port's own ordinal,
-    /// never the first entry's (H1, alumina-qwzns).
+    /// never the first entry's.
     fn ja4_baseline_keys_second_port_ordinal() {
         let port = ephemeral_port();
         let cfg = cfg_two_ports(port, "notify", "connection");

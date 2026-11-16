@@ -1,6 +1,6 @@
 //! Pure per-name DNS incident reporting state: window rotation, per-type
 //! exchange counters, tunnel-activity slot markers, and eligible-binding
-//! transition tracking (docs/alumina-proxy.md:79-81).
+//! transition tracking (§Configuration & DNS).
 //!
 //! Everything here is allocation-free and preallocated at boot: one report per
 //! configured name and one last-counted window marker per tunnel slot. The
@@ -11,11 +11,11 @@ use crate::config::ALLOWLIST_MAX;
 use crate::dns::cache::Family;
 use crate::inventory::TUNNEL_SLOTS;
 
-/// The fixed reporting-window length in seconds (docs/alumina-proxy.md:79).
+/// The fixed reporting-window length in seconds (§Configuration & DNS).
 pub(crate) const REPORT_WINDOW_SECS: u64 = 3600;
 
 /// A saturating counter: saturates at `u64::MAX` and latches an overflow flag
-/// rather than wrapping (docs/alumina-proxy.md:81).
+/// rather than wrapping (§Configuration & DNS).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Sat {
     pub value: u64,
@@ -69,7 +69,7 @@ pub(crate) struct Activity {
 /// reason, or `None` when the family had no incident during the window.
 /// Sticky within a window: a recovery mid-window does not clear it, so the
 /// closing summary reflects the window's actual incident activity even when
-/// the incident recovered at the boundary turn (docs/alumina-proxy.md:80).
+/// the incident recovered at the boundary turn (§Configuration & DNS).
 /// The origin is the saved per-family table value at failure time, never a
 /// live current-actor lookup at emission.
 pub(crate) type IncidentSnapshot = Option<(u64, &'static str, Option<u8>)>;
@@ -77,7 +77,7 @@ pub(crate) type IncidentSnapshot = Option<(u64, &'static str, Option<u8>)>;
 /// The closed-window snapshot captured at rotation or final recovery: the
 /// window span, the coalesced skipped-window count, the per-type and activity
 /// counters, the monotonic last-positive times, the per-family incident
-/// snapshot, and the aggregated overflow flag (docs/alumina-proxy.md:80-81).
+/// snapshot, and the aggregated overflow flag (§Configuration & DNS).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct ClosedWindow {
     pub window_start: u64,
@@ -186,7 +186,7 @@ impl NameReport {
     /// captures it into `pending`, advancing `window_start` to the most recent
     /// boundary and resetting the per-window counters. Delayed rotation
     /// coalesces skipped windows into one snapshot with a `skipped` count
-    /// rather than emitting a catch-up burst (docs/alumina-proxy.md:81).
+    /// rather than emitting a catch-up burst (§Configuration & DNS).
     fn rotate_if_due(&mut self, now: u64) {
         if !self.window_open || now < self.window_start + REPORT_WINDOW_SECS {
             return;
@@ -237,7 +237,7 @@ impl NameReport {
 }
 
 /// The eligible-binding transition for one name since the previous per-turn
-/// observation (docs/alumina-proxy.md:79).
+/// observation (§Configuration & DNS).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum EligibleTransition {
     Lost,
@@ -246,7 +246,7 @@ pub(crate) enum EligibleTransition {
 
 /// The per-type summary fields for one record family, projected by
 /// [`ClosedWindow::to_summary`] from the window's captured incident snapshot
-/// and the serving-provided live cache facts (docs/alumina-proxy.md:80).
+/// and the serving-provided live cache facts (§Configuration & DNS).
 /// `freshness`/`retirement` carry the remaining seconds until the entry's
 /// freshness and retirement deadlines (deadline minus the record's `secs`),
 /// not the absolute monotonic deadlines.
@@ -281,7 +281,7 @@ impl TypeSummary {
     };
 }
 
-/// The full incident summary record payload (docs/alumina-proxy.md:80).
+/// The full incident summary record payload (§Configuration & DNS).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct IncidentSummary {
     pub window_start: u64,
@@ -313,7 +313,7 @@ impl IncidentReport {
     /// Opens the reporting window for `name` when it first enters an incident:
     /// the first window starts at `now` and per-window counters reset. A
     /// window already open is a no-op — the window is never restarted when the
-    /// other type fails or recovers (docs/alumina-proxy.md:79). The passed
+    /// other type fails or recovers (§Configuration & DNS). The passed
     /// per-family incident snapshot (from the schedule) refreshes the sticky
     /// window snapshot: families currently open are recorded with their
     /// `opened_at`, latest reason, and paired captured origin, and a family
@@ -341,7 +341,7 @@ impl IncidentReport {
     }
 
     /// Records one exchange attempt for `name` and `family`. Rotation precedes
-    /// the recording (docs/alumina-proxy.md:81); the attempt is counted only
+    /// the recording (§Configuration & DNS); the attempt is counted only
     /// while a window is open, so attempts outside an incident belong to no
     /// window.
     pub(crate) fn note_exchange_attempt(&mut self, name: usize, family: Family, now: u64) {
@@ -393,7 +393,7 @@ impl IncidentReport {
     /// `(window_start, slot_gen)` resets on slot reuse (a new generation) and
     /// never matches across windows (`window_start` is monotonic), so a tunnel
     /// is counted fresh in each window it forwards bytes in. Bytes are counted
-    /// on every successful write (docs/alumina-proxy.md:80-81).
+    /// on every successful write (§Configuration & DNS).
     pub(crate) fn note_tunnel_bytes(
         &mut self,
         name: usize,
@@ -416,7 +416,7 @@ impl IncidentReport {
     }
 
     /// Records one new tunnel admitted with a stale binding for `name`.
-    /// Retries and relay activity are not admissions (docs/alumina-proxy.md:80).
+    /// Retries and relay activity are not admissions (§Configuration & DNS).
     pub(crate) fn note_stale_admission(&mut self, name: usize, now: u64) {
         let nr = &mut self.names[name];
         nr.rotate_if_due(now);
@@ -430,7 +430,7 @@ impl IncidentReport {
     /// sets the baseline (never emitting, so a name already ineligible at
     /// serving start does not report a spurious recovery); later observations
     /// report `Lost` on eligible→none and `Recovered` on none→eligible
-    /// (docs/alumina-proxy.md:79).
+    /// (§Configuration & DNS).
     pub(crate) const fn note_eligible_state(
         &mut self,
         name: usize,
@@ -455,7 +455,7 @@ impl IncidentReport {
     }
 
     /// Rotates every open window that is due at `now`, so a window boundary is
-    /// honored even when no event crossed it (docs/alumina-proxy.md:79,81).
+    /// honored even when no event crossed it (§Configuration & DNS).
     pub(crate) fn rotate_all_if_due(&mut self, now: u64) {
         for nr in &mut self.names {
             nr.rotate_if_due(now);
@@ -470,7 +470,7 @@ impl IncidentReport {
 
     /// Closes the open window for `name` at `now` (a full hostname incident
     /// recovery) and returns the partial-window snapshot, or `None` when no
-    /// window is open (docs/alumina-proxy.md:80). The snapshot is captured
+    /// window is open (§Configuration & DNS). The snapshot is captured
     /// before the per-family incident state is cleared, so the closing summary
     /// keeps the window's incident activity while a window opened later starts
     /// with no recorded family: a later incident reports only the families

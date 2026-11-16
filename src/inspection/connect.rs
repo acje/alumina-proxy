@@ -255,7 +255,7 @@ impl ConnectParser {
     /// window appended since the previous feed. The head is capped at
     /// `CONNECT_LIMIT` (8 KiB), so the whole scan is bounded by a fixed
     /// constant; the cursor turns the per-feed full-head rescan from O(N²) into
-    /// O(N) across feeds (W1-L1b-F6).
+    /// O(N) across feeds.
     fn find_delimiter(&mut self) -> Option<usize> {
         if self.head_len < END_OF_HEAD.len() {
             return None;
@@ -432,7 +432,7 @@ fn parse_request_line(line: &[u8]) -> Result<ConnectRequest, ConnectError> {
         // A space inside the version token means the target itself contained a
         // space (e.g. `CONNECT host :443 HTTP/1.1`): the request line has more
         // than the three CONNECT tokens, so it is malformed, never a genuine
-        // version mismatch (W1-L1b-F2).
+        // version mismatch.
         return Err(ConnectError::MalformedRequestLine {
             detail: "not exactly three tokens",
         });
