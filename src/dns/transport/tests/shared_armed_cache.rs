@@ -15,6 +15,8 @@ fn shared_exchange(step: ExchangeStep) -> ActiveExchange {
         generation: Generation::INITIAL,
         other_generation: Generation::INITIAL,
         query_floor: 0,
+        reused: false,
+        stale_retried: false,
     }
 }
 

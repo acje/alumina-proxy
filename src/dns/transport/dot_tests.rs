@@ -11,7 +11,7 @@ use rustls::{ServerConfig, ServerConnection};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -546,7 +546,12 @@ fn read_more_tls(tls: &mut ServerConnection, sock: &mut TcpStream) -> bool {
 
 /// Drives one accepted connection: completes the server handshake (returning
 /// cleanly on a client alert or EOF) and then serves DNS queries.
-fn serve_conn_blocking(sock: TcpStream, config: &Arc<ServerConfig>, mode: AdversarialReply) {
+fn serve_conn_blocking(
+    sock: TcpStream,
+    config: &Arc<ServerConfig>,
+    mode: AdversarialReply,
+    _observations: &ResponderObservations,
+) {
     let mut sock = sock;
     let Ok(mut tls) = ServerConnection::new(Arc::clone(config)) else {
         return;
@@ -567,6 +572,7 @@ fn serve_conn_blocking_post_handshake(
     sock: TcpStream,
     config: &Arc<ServerConfig>,
     mode: AdversarialReply,
+    _observations: &ResponderObservations,
 ) {
     let mut sock = sock;
     let Ok(mut tls) = ServerConnection::new(Arc::clone(config)) else {
@@ -584,6 +590,70 @@ fn serve_conn_blocking_post_handshake(
     let _ = serve_queries(&mut tls, &mut sock, mode);
 }
 
+/// Drives one accepted connection like [`serve_conn_blocking`], and records
+/// whether the client ended the TLS session with a `close_notify` alert. A
+/// graceful close surfaces as a decrypted clean EOF (`Ok(0)` from the rustls
+/// reader) after the alert record is processed; a bare TCP FIN surfaces as
+/// `read_tls` returning `Ok(0)` with no alert, which leaves the observation
+/// false.
+fn serve_conn_blocking_observed(
+    sock: TcpStream,
+    config: &Arc<ServerConfig>,
+    _mode: AdversarialReply,
+    observations: &ResponderObservations,
+) {
+    let mut sock = sock;
+    let Ok(mut tls) = ServerConnection::new(Arc::clone(config)) else {
+        return;
+    };
+    if tls.complete_io(&mut sock).is_err() {
+        return;
+    }
+    let mut plain: Vec<u8> = Vec::new();
+    let mut scratch = [0u8; 4096];
+    loop {
+        if let Some(query) = take_framed_query(&mut plain) {
+            match serve_one_query(&mut tls, &mut sock, AdversarialReply::Positive, &query) {
+                Ok(false) => continue,
+                Ok(true) | Err(_) => return,
+            }
+        }
+        match tls.reader().read(&mut scratch) {
+            Ok(0) => {
+                observations.close_notify.store(true, Ordering::SeqCst);
+                return;
+            }
+            Ok(n) => {
+                plain.extend_from_slice(&scratch[..n]);
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(_) => return,
+        }
+        match tls.read_tls(&mut sock) {
+            Ok(0) => return,
+            Ok(_) => {
+                if tls.process_new_packets().is_err() {
+                    return;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// The peer-side facts a responder records: how many connections it accepted,
+/// and whether a TLS `close_notify` was observed on a served connection. The
+/// alert is distinguished from a bare TCP FIN by which read reports the end:
+/// the rustls reader returning `Ok(0)` records it, while `read_tls` returning
+/// `Ok(0)` is the bare FIN and records nothing.
+#[derive(Debug, Default)]
+pub(crate) struct ResponderObservations {
+    accepts: AtomicUsize,
+    close_notify: AtomicBool,
+}
+
 /// A loopback TLS responder that accepts connections until dropped, completing
 /// the rustls server handshake and answering each accepted connection's DNS
 /// queries. The nonblocking accept loop with a stop flag lets the owning test
@@ -592,11 +662,25 @@ pub(crate) struct TlsResponder {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    observations: Arc<ResponderObservations>,
 }
 
 impl TlsResponder {
     pub(crate) fn port(&self) -> u16 {
         self.addr.port()
+    }
+
+    /// How many connections the peer accepted: a redial is observed at the
+    /// peer, never by pointer identity, because a freed connection can be
+    /// reallocated at the same address.
+    pub(crate) fn accepts(&self) -> usize {
+        self.observations.accepts.load(Ordering::SeqCst)
+    }
+
+    /// Whether the peer read a TLS `close_notify` on an accepted connection:
+    /// the retirement's graceful close, as opposed to a bare TCP FIN.
+    pub(crate) fn saw_close_notify(&self) -> bool {
+        self.observations.close_notify.load(Ordering::SeqCst)
     }
 }
 
@@ -610,8 +694,9 @@ impl Drop for TlsResponder {
 }
 
 /// The per-connection driver for a spawned TLS responder: completes the
-/// handshake (or performs post-handshake work) and serves the connection.
-type ConnHandler = fn(TcpStream, &Arc<ServerConfig>, AdversarialReply);
+/// handshake (or performs post-handshake work) and serves the connection,
+/// recording whatever peer-side fact it must observe into `observations`.
+type ConnHandler = fn(TcpStream, &Arc<ServerConfig>, AdversarialReply, &ResponderObservations);
 
 pub(crate) fn spawn_tls_responder(
     cert: &'static [u8],
@@ -640,6 +725,18 @@ fn spawn_tls_responder_post_handshake(
     spawn_tls_responder_with(Arc::new(config), mode, serve_conn_blocking_post_handshake)
 }
 
+/// Spawns a TLS responder that records whether the client closed an accepted
+/// connection with a `close_notify` alert. It answers queries positively like
+/// the default responder, so a graceful close and a bare FIN stay the only
+/// difference the owning test observes.
+fn spawn_close_notify_responder(cert: &'static [u8], key: &'static [u8]) -> TlsResponder {
+    spawn_tls_responder_with(
+        Arc::new(server_config(cert, key)),
+        AdversarialReply::Positive,
+        serve_conn_blocking_observed,
+    )
+}
+
 fn spawn_tls_responder_with(
     config: Arc<ServerConfig>,
     mode: AdversarialReply,
@@ -652,12 +749,15 @@ fn spawn_tls_responder_with(
     let addr = listener.local_addr().expect("tls responder addr");
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
+    let observations = Arc::new(ResponderObservations::default());
+    let observed = Arc::clone(&observations);
     let handle = thread::spawn(move || {
         while !stop_thread.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((sock, _)) => {
+                    observed.accepts.fetch_add(1, Ordering::SeqCst);
                     if sock.set_nonblocking(false).is_ok() {
-                        handler(sock, &config, mode);
+                        handler(sock, &config, mode, &observed);
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -671,6 +771,7 @@ fn spawn_tls_responder_with(
         addr,
         stop,
         handle: Some(handle),
+        observations,
     }
 }
 
@@ -686,11 +787,14 @@ fn spawn_raw_responder(bytes: Vec<u8>) -> TlsResponder {
     let addr = listener.local_addr().expect("raw responder addr");
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
+    let observations = Arc::new(ResponderObservations::default());
+    let observed = Arc::clone(&observations);
     let handle = thread::spawn(move || {
         let mut held: Vec<TcpStream> = Vec::new();
         while !stop_thread.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut sock, _)) => {
+                    observed.accepts.fetch_add(1, Ordering::SeqCst);
                     let _ = sock.set_nonblocking(false);
                     let _ = sock.write_all(&bytes);
                     held.push(sock);
@@ -706,6 +810,192 @@ fn spawn_raw_responder(bytes: Vec<u8>) -> TlsResponder {
         addr,
         stop,
         handle: Some(handle),
+        observations,
+    }
+}
+
+/// One scripted peer action for the query it receives, so a single retained
+/// connection can behave differently per exchange — which the one-mode
+/// responder cannot express.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PeerScript {
+    /// A valid positive echo.
+    Positive,
+    /// A structurally valid message that is not a response (`QR=0`).
+    Mangled,
+    /// Write only the length prefix of a positive reply, then end the TCP
+    /// stream without answering the rest.
+    ClosedAfterPrefix,
+    /// End the TCP stream without answering and hold the socket read, so the
+    /// client observes a clean end of stream rather than a reset.
+    CloseTcp,
+    /// Send a `close_notify` and hold the socket open: the TLS session is over
+    /// but the TCP stream never ends.
+    HalfClose,
+    /// Write non-TLS octets instead of a record.
+    Garbage,
+    /// Never answer and hold the socket open.
+    Withhold,
+    /// Answer after waiting.
+    Late(Duration),
+}
+
+/// Spawns a TLS responder that serves each accepted connection from its own
+/// script: entry `n` is the query script for the `n`th accepted connection,
+/// with the last entry repeating. It lets a retained connection change
+/// behaviour between exchanges without conflating a redial with the first
+/// dial.
+fn spawn_scripted_responder(
+    cert: &'static [u8],
+    key: &'static [u8],
+    scripts: Vec<Vec<PeerScript>>,
+) -> TlsResponder {
+    let config = Arc::new(server_config(cert, key));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted responder");
+    listener
+        .set_nonblocking(true)
+        .expect("scripted responder nonblocking");
+    let addr = listener.local_addr().expect("scripted responder addr");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = Arc::clone(&stop);
+    let observations = Arc::new(ResponderObservations::default());
+    let observed = Arc::clone(&observations);
+    let handle = thread::spawn(move || {
+        let mut accepted = 0usize;
+        while !stop_thread.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((sock, _)) => {
+                    let script = scripts
+                        .get(accepted)
+                        .or_else(|| scripts.last())
+                        .cloned()
+                        .unwrap_or_default();
+                    accepted += 1;
+                    observed.accepts.fetch_add(1, Ordering::SeqCst);
+                    if sock.set_nonblocking(false).is_ok() {
+                        serve_scripted_conn(sock, &config, &script);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    TlsResponder {
+        addr,
+        stop,
+        handle: Some(handle),
+        observations,
+    }
+}
+
+/// Drives one scripted accepted connection: completes the server handshake,
+/// then applies the script entry for each query, with the last entry repeating.
+fn serve_scripted_conn(sock: TcpStream, config: &Arc<ServerConfig>, script: &[PeerScript]) {
+    let mut sock = sock;
+    let Ok(mut tls) = ServerConnection::new(Arc::clone(config)) else {
+        return;
+    };
+    if tls.complete_io(&mut sock).is_err() {
+        return;
+    }
+    let mut plain: Vec<u8> = Vec::new();
+    let mut scratch = [0u8; 4096];
+    let mut served = 0usize;
+    loop {
+        if let Some(query) = take_framed_query(&mut plain) {
+            let Some(step) = script.get(served).or_else(|| script.last()).copied() else {
+                return;
+            };
+            served += 1;
+            if !serve_scripted_step(&mut tls, &mut sock, step, &query) {
+                return;
+            }
+            continue;
+        }
+        match drain_plaintext(&mut tls, &mut plain, &mut scratch) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(_) => return,
+        }
+        if !read_more_tls(&mut tls, &mut sock) {
+            return;
+        }
+    }
+}
+
+fn serve_scripted_step(
+    tls: &mut ServerConnection,
+    sock: &mut TcpStream,
+    step: PeerScript,
+    query: &[u8],
+) -> bool {
+    match step {
+        PeerScript::Positive => write_tls_message(tls, sock, &echo_positive(query)).is_ok(),
+        PeerScript::Mangled => write_tls_message(tls, sock, &mangled_reply(query)).is_ok(),
+        PeerScript::ClosedAfterPrefix => {
+            let reply = echo_positive(query);
+            let prefix = u16::try_from(reply.len()).expect("reply fits u16");
+            if tls.writer().write_all(&prefix.to_be_bytes()).is_err()
+                || tls.writer().flush().is_err()
+                || flush_tls(tls, sock).is_err()
+            {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(50));
+            end_tcp_stream(sock)
+        }
+        PeerScript::CloseTcp => end_tcp_stream(sock),
+        PeerScript::HalfClose => {
+            tls.send_close_notify();
+            let _ = flush_tls(tls, sock);
+            hold_open(sock);
+            false
+        }
+        PeerScript::Garbage => {
+            let _ = sock.write_all(&[0xff; 8]);
+            false
+        }
+        PeerScript::Withhold => {
+            hold_open(sock);
+            false
+        }
+        PeerScript::Late(delay) => {
+            thread::sleep(delay);
+            write_tls_message(tls, sock, &echo_positive(query)).is_ok()
+        }
+    }
+}
+
+/// Ends the TCP stream and keeps the socket read, so the client observes a
+/// clean end of stream and its own later write is resolved instead of reset.
+fn end_tcp_stream(sock: &mut TcpStream) -> bool {
+    let _ = sock.shutdown(std::net::Shutdown::Write);
+    hold_open(sock);
+    false
+}
+
+/// Discards whatever the client sends until it closes, under a bounded wait so
+/// a peer that never closes cannot wedge the responder thread.
+fn hold_open(sock: &mut TcpStream) {
+    let started = Instant::now();
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(50)));
+    let mut scratch = [0u8; 256];
+    loop {
+        if started.elapsed() > Duration::from_secs(5) {
+            return;
+        }
+        match sock.read(&mut scratch) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::TimedOut
+                    || e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
     }
 }
 
@@ -1030,7 +1320,36 @@ fn drive_to_terminal(
     poll: &mut Poll,
     events: &mut Events,
 ) -> TurnResult {
+    drive_to_terminal_observed(
+        transport,
+        cache,
+        schedules,
+        fqdn,
+        deadline,
+        (poll, events),
+        |_| {},
+    )
+}
+
+/// The longest the harness owner blocks in one poll. A serving owner re-advances
+/// a cooperative exchange on its own cadence, so the harness never depends on a
+/// peer close producing a readiness edge in order to make progress.
+const OWNER_TURN_SLICE: Duration = Duration::from_millis(20);
+
+/// [`drive_to_terminal`] with a per-turn observer over the live transport, so a
+/// case can record a fact the concluded exchange no longer exposes — such as
+/// the exchange deadline it never renewed.
+fn drive_to_terminal_observed(
+    transport: &mut StartupDns,
+    cache: &mut Cache,
+    schedules: &mut Schedules,
+    fqdn: &Fqdn,
+    deadline: Instant,
+    (poll, events): (&mut Poll, &mut Events),
+    mut observe: impl FnMut(&StartupDns),
+) -> TurnResult {
     loop {
+        observe(transport);
         match transport
             .advance_exchange(fqdn, cache, schedules)
             .expect("a live shared-registration DoT exchange advances without a fatal error")
@@ -1052,8 +1371,8 @@ fn drive_to_terminal(
         if now >= until {
             continue;
         }
-        poll.poll(events, Some(until - now))
-            .expect("external poll wait");
+        let wait = (until - now).min(OWNER_TURN_SLICE);
+        poll.poll(events, Some(wait)).expect("external poll wait");
     }
 }
 
@@ -1366,8 +1685,15 @@ fn pinned_dot_reply_split_across_records_drains_and_publishes() {
 }
 
 #[test]
-fn pinned_dot_idle_closed_retained_transport_fails_closed() {
-    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::ServeOnce);
+fn reused_connection_clean_eof_is_retired_once() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![
+            vec![PeerScript::Positive, PeerScript::CloseTcp],
+            vec![PeerScript::Positive],
+        ],
+    );
     let cfg = dot_config(&pinned_resolver());
     let mut cache = Cache::new(2).unwrap();
     let mut schedules = Schedules::new(2).unwrap();
@@ -1404,6 +1730,7 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
         transport.conn.is_some(),
         "a concluded exchange must retain its DoT transport for the next exchange"
     );
+    assert_eq!(responder.accepts(), 1, "one dial serves the first exchange");
 
     let deadline = Instant::now() + Duration::from_millis(1500);
     super::tests::start_startup_exchange(&mut transport, fqdn, 1, deadline);
@@ -1417,19 +1744,780 @@ fn pinned_dot_idle_closed_retained_transport_fails_closed() {
         &mut events,
     );
     assert!(
-        matches!(second, TurnResult::Failed(FailureReason::Receive)),
-        "a retained transport whose peer closed after one reply must fail the next exchange closed, got {second:?}"
+        matches!(second, TurnResult::Published(_)),
+        "a clean peer close before any reply octet must retire the retained transport and restart the same exchange once on a fresh connection, so the second exchange publishes instead of failing closed, got {second:?}"
+    );
+    assert_eq!(
+        responder.accepts(),
+        2,
+        "the silent retirement redials exactly once"
+    );
+    assert!(
+        transport.last_failed[1][0].is_none(),
+        "the retired exchange counts no failure, so no backoff advances and no resolver is blamed"
+    );
+    assert_eq!(
+        transport.incident_opens, 0,
+        "the retired exchange opens no incident"
     );
     let evidence = cache
         .entry(cache.name_index(0).unwrap(), Family::A)
         .unwrap()
         .evidence()
-        .expect("the first published proof survives the later disconnect");
+        .expect("the first published proof survives the retirement");
     assert!(
         evidence.origin_authenticated(),
-        "the pre-disconnect authenticated proof is preserved, never cleared by the failed exchange"
+        "the published proof is authenticated, never weakened by the retirement"
     );
     transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+/// Publishes exchange `ordinal` over the loopback responder through the shared
+/// owner's cooperative loop, so every idle-retire case observes the same
+/// retained-connection baseline.
+fn publish_exchange(
+    dot: &mut DotExchange,
+    fqdn: &Fqdn,
+    ordinal: usize,
+    poll: &mut Poll,
+    events: &mut Events,
+) -> TurnResult {
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    dot.start_family_a(fqdn, ordinal, deadline);
+    dot.drive_shared(fqdn, deadline, poll, events)
+}
+
+/// The rustls client allocation a retained `DoT` transport holds, so a case can
+/// prove the very same connection object was reused.
+fn retained_tls(dot: &DotExchange) -> *const ClientConnection {
+    match dot.transport.conn.as_ref().expect("retained DoT transport") {
+        DnsConn::Tls(conn) => &*conn.tls as *const _,
+        DnsConn::Plain { .. } => panic!("a pinned DoT exchange must retain a TLS transport"),
+    }
+}
+
+/// A two-entry `DoT` resolver set whose primary is the pinned loopback identity
+/// and whose backup shares the FQDN, so a failback probe is a same-form
+/// relocation with no downgrade to count.
+fn two_dot_resolvers() -> ResolverSet {
+    let primary = crate::dns::resolver::select(&pinned_resolver()).expect("primary dot entry");
+    let backup =
+        crate::dns::resolver::select(&format!("127.0.0.2#{DOT_FQDN}")).expect("backup dot entry");
+    ResolverSet::from_slice(&[primary, backup]).expect("two DoT entries fit the resolver bound")
+}
+
+#[test]
+fn idle_connection_beyond_the_bound_is_retired_and_redialled() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish over the dialed connection, got {first:?}"
+    );
+    assert_eq!(responder.accepts(), 1, "one dial serves the first exchange");
+    assert!(
+        dot.transport.last_used.is_some(),
+        "a concluded exchange that kept its connection records when it was last used"
+    );
+
+    dot.transport.last_used = Some(Instant::now() - Duration::from_secs(20));
+    let second = publish_exchange(&mut dot, fqdn, 1, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Published(_)),
+        "the retired-then-redialled exchange must publish, got {second:?}"
+    );
+    assert_eq!(
+        responder.accepts(),
+        2,
+        "a retained DoT connection past the idle bound is retired before reuse, so the next exchange dials fresh instead of writing to a socket the peer may have closed"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn retained_connection_without_recorded_use_is_retired() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish over the dialed connection, got {first:?}"
+    );
+
+    dot.transport.last_used = None;
+    let second = publish_exchange(&mut dot, fqdn, 1, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Published(_)),
+        "the exchange that replaced an unrecorded retained connection must publish, got {second:?}"
+    );
+    assert_eq!(
+        responder.accepts(),
+        2,
+        "a retained connection with no recorded use may be an arbitrary age, so it is retired and redialled"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn retirement_sends_close_notify() {
+    let responder = spawn_close_notify_responder(GOOD_CERT, GOOD_KEY);
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish over the dialed connection, got {first:?}"
+    );
+    assert!(
+        !responder.saw_close_notify(),
+        "a retained connection is not closed by its exchange, so the peer has seen no alert yet"
+    );
+
+    dot.transport.last_used = Some(Instant::now() - Duration::from_secs(20));
+    let second = publish_exchange(&mut dot, fqdn, 1, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Published(_)),
+        "the exchange over the fresh connection must publish, got {second:?}"
+    );
+    assert_eq!(responder.accepts(), 2, "the retirement redials");
+    assert!(
+        responder.saw_close_notify(),
+        "the retirement ends the TLS session with a close_notify alert, not a bare TCP FIN"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn idle_retire_is_skipped_when_residual_is_small() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish over the dialed connection, got {first:?}"
+    );
+    let retained = retained_tls(&dot);
+
+    dot.transport.last_used = Some(Instant::now() - Duration::from_secs(20));
+    let deadline = Instant::now() + Duration::from_millis(800);
+    dot.start_family_a(fqdn, 1, deadline);
+    assert_eq!(
+        responder.accepts(),
+        1,
+        "a retirement that could not complete its dial inside the exchange deadline is skipped, leaving the counted failure as the honest outcome"
+    );
+    let second = dot.drive_shared(fqdn, deadline, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Published(_)),
+        "the retained connection still serves the exchange, got {second:?}"
+    );
+    assert!(
+        std::ptr::addr_eq(retained, retained_tls(&dot)),
+        "the skip leaves the very same retained connection in place"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn failback_then_idle_retire_closes_once() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let set = two_dot_resolvers();
+    dot.transport.resolvers = Some(set);
+    dot.transport.active_resolver = ActiveResolver::primary_of(&set);
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish over the dialed connection, got {first:?}"
+    );
+    assert_eq!(responder.accepts(), 1, "one dial serves the first exchange");
+
+    dot.transport.active_resolver = ActiveResolver::primary_of(&set)
+        .with_index(1)
+        .expect("the backup seat is in range");
+    dot.transport.failback_due = Some(dot.transport.now_u64());
+    dot.transport.last_used = Some(Instant::now() - Duration::from_secs(20));
+    dot.transport
+        .maybe_begin_failback()
+        .expect("the failback close is the single close of the retained connection");
+    assert!(
+        dot.transport.conn.is_none() && dot.transport.last_used.is_none(),
+        "the failback closes the retained connection before repointing, so no stale retention state survives it"
+    );
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    dot.transport.retire_stale_idle_connection(deadline).expect(
+        "the idle retire on the already-closed connection is a no-op, never a double close",
+    );
+    assert_eq!(
+        responder.accepts(),
+        1,
+        "the failback close is the only close: the idle retire adds no dial and no second connection"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn idle_retire_touches_no_attempt_or_incident() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish over the dialed connection, got {first:?}"
+    );
+    let before = (
+        dot.schedules.due_time(0, Family::A).expect("due in range"),
+        dot.schedules.incident(0, Family::A),
+        dot.transport.last_failed[0][0],
+        dot.transport.resolver_transitions,
+        dot.transport.incident_opens,
+        dot.transport.incident_closes,
+        dot.transport.dns_anomalies,
+        dot.transport.failback_due,
+    );
+
+    dot.transport.last_used = Some(Instant::now() - Duration::from_secs(20));
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    dot.transport
+        .retire_stale_idle_connection(deadline)
+        .expect("the idle retire closes the connection");
+    let after = (
+        dot.schedules.due_time(0, Family::A).expect("due in range"),
+        dot.schedules.incident(0, Family::A),
+        dot.transport.last_failed[0][0],
+        dot.transport.resolver_transitions,
+        dot.transport.incident_opens,
+        dot.transport.incident_closes,
+        dot.transport.dns_anomalies,
+        dot.transport.failback_due,
+    );
+    assert_eq!(
+        before, after,
+        "retiring an idle connection advances no attempt, failure, backoff, degradation, or incident state"
+    );
+    assert!(
+        dot.transport.conn.is_none(),
+        "the retired connection is gone"
+    );
+
+    let second = publish_exchange(&mut dot, fqdn, 1, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Published(_)),
+        "the redialled exchange after the retire must publish, got {second:?}"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn retirement_never_runs_under_a_live_exchange() {
+    let responder = spawn_tls_responder(GOOD_CERT, GOOD_KEY, AdversarialReply::Positive);
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish over the dialed connection, got {first:?}"
+    );
+    let retained = retained_tls(&dot);
+
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    dot.start_family_a(fqdn, 1, deadline);
+    let live = dot
+        .transport
+        .advance_exchange(fqdn, &mut dot.cache, &mut dot.schedules)
+        .expect("the live exchange takes its first turn");
+    assert!(
+        matches!(live, TurnResult::Pending),
+        "the live exchange is still in progress, got {live:?}"
+    );
+
+    dot.transport.last_used = Some(Instant::now() - Duration::from_secs(20));
+    let refused = dot
+        .transport
+        .start_exchange(
+            fqdn,
+            Family::A,
+            0,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Startup,
+        )
+        .expect_err("a start over a live exchange is refused before anything is touched");
+    assert_eq!(
+        refused,
+        StartupDnsError::ExchangeActive,
+        "the live-exchange guard is the typed refusal, not a silent retire of the live socket"
+    );
+    assert_eq!(
+        responder.accepts(),
+        1,
+        "the refusal retires nothing and dials nothing"
+    );
+    assert!(
+        std::ptr::addr_eq(retained, retained_tls(&dot)),
+        "the refused start leaves the live exchange's connection untouched"
+    );
+
+    let concluded = dot.drive_shared(fqdn, deadline, &mut poll, &mut events);
+    assert!(
+        matches!(concluded, TurnResult::Published(_)),
+        "the live exchange still concludes over its connection, got {concluded:?}"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+/// Publishes exchange `ordinal` over the loopback responder, then reports the
+/// retained connection's next exchange.
+fn second_exchange_over_retained(
+    dot: &mut DotExchange,
+    fqdn: &Fqdn,
+    poll: &mut Poll,
+    events: &mut Events,
+) -> TurnResult {
+    publish_exchange(dot, fqdn, 1, poll, events)
+}
+
+/// Drives one exchange on a two-second budget and reports how long it took, so
+/// a case can prove the conclusion landed while the retirement residual was
+/// still available — leaving only the gate under test to explain it.
+fn timed_exchange(
+    dot: &mut DotExchange,
+    fqdn: &Fqdn,
+    ordinal: usize,
+    poll: &mut Poll,
+    events: &mut Events,
+) -> (TurnResult, Duration) {
+    let deadline = Instant::now() + Duration::from_millis(2000);
+    let started = Instant::now();
+    dot.start_family_a(fqdn, ordinal, deadline);
+    let result = dot.drive_shared(fqdn, deadline, poll, events);
+    (result, started.elapsed())
+}
+
+/// The elapsed bound that proves a failed exchange concluded with more than
+/// `RETIRE_MIN_RESIDUAL` left, so the residual gate could not have decided it.
+const PROMPT_CONCLUSION: Duration = Duration::from_millis(1000);
+
+#[test]
+fn retire_is_bounded_to_one_per_exchange() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![
+            vec![PeerScript::Positive, PeerScript::CloseTcp],
+            vec![PeerScript::CloseTcp],
+        ],
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish, got {first:?}"
+    );
+
+    let (second, elapsed) = timed_exchange(&mut dot, fqdn, 1, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Failed(FailureReason::Receive)),
+        "the replacement connection closing cleanly before any reply octet spends the exchange's single retirement budget, so the second clean EOF is counted, got {second:?}"
+    );
+    assert!(
+        elapsed < PROMPT_CONCLUSION,
+        "the second clean EOF was concluded with the retirement residual still available ({elapsed:?}), so only the spent retirement budget can explain the counted failure"
+    );
+    assert_eq!(
+        responder.accepts(),
+        2,
+        "one retire, one redial: the counted second failure dials no third connection"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn reused_connection_tls_error_is_counted() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![vec![PeerScript::Positive, PeerScript::Garbage]],
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish, got {first:?}"
+    );
+
+    let (second, elapsed) = timed_exchange(&mut dot, fqdn, 1, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Failed(FailureReason::Receive)),
+        "non-TLS octets on a reused connection are a protocol fault, never a clean end of stream, so the failure is counted, got {second:?}"
+    );
+    assert!(
+        elapsed < PROMPT_CONCLUSION,
+        "the fault was concluded with the retirement residual still available ({elapsed:?}), so only the unclean end of stream can explain the counted failure"
+    );
+    assert_eq!(
+        responder.accepts(),
+        1,
+        "a counted protocol fault retires nothing and dials nothing"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn reused_connection_malformed_reply_is_counted() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![vec![PeerScript::Positive, PeerScript::Mangled]],
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish, got {first:?}"
+    );
+
+    let second = second_exchange_over_retained(&mut dot, fqdn, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Failed(FailureReason::Receive)),
+        "a full but unparseable reply is counted, got {second:?}"
+    );
+    assert!(
+        dot.transport.reply_octets > 0,
+        "the peer answered with reply octets, so the retirement predicate must not apply"
+    );
+    assert_eq!(responder.accepts(), 1, "a malformed reply dials nothing");
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn reused_connection_late_reply_is_counted() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![vec![
+            PeerScript::Positive,
+            PeerScript::Late(Duration::from_millis(600)),
+        ]],
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish, got {first:?}"
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(300);
+    dot.start_family_a(fqdn, 1, deadline);
+    let second = dot.drive_shared(fqdn, deadline, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Failed(FailureReason::Timeout)),
+        "a reply past the exchange deadline is counted, never awaited on a second budget, got {second:?}"
+    );
+    assert_eq!(responder.accepts(), 1, "a counted timeout dials nothing");
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn reused_connection_timeout_is_counted() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![vec![PeerScript::Positive, PeerScript::Withhold]],
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish, got {first:?}"
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(300);
+    dot.start_family_a(fqdn, 1, deadline);
+    let mut budgets = Vec::new();
+    let second = drive_to_terminal_observed(
+        &mut dot.transport,
+        &mut dot.cache,
+        &mut dot.schedules,
+        fqdn,
+        deadline,
+        (&mut poll, &mut events),
+        |transport| budgets.push(transport.exchange_deadline()),
+    );
+    assert!(
+        matches!(second, TurnResult::Failed(FailureReason::Timeout)),
+        "a silent peer is a counted timeout, got {second:?}"
+    );
+    assert!(
+        !budgets.is_empty() && budgets.iter().all(|budget| *budget == Some(deadline)),
+        "the counted timeout spends the one exchange deadline and is granted no second budget: {budgets:?}"
+    );
+    assert_eq!(responder.accepts(), 1, "a counted timeout dials nothing");
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn retire_skipped_when_residual_deadline_is_small() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![vec![PeerScript::Positive, PeerScript::CloseTcp]],
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish, got {first:?}"
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(900);
+    dot.start_family_a(fqdn, 1, deadline);
+    let second = dot.drive_shared(fqdn, deadline, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Failed(FailureReason::Receive)),
+        "a retirement that could not finish its dial inside the remaining deadline is skipped, leaving the counted failure as the honest outcome, got {second:?}"
+    );
+    assert_eq!(
+        responder.accepts(),
+        1,
+        "the skipped retirement dials nothing"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn peer_close_mid_burst_is_still_a_counted_failure() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![vec![PeerScript::Positive, PeerScript::ClosedAfterPrefix]],
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish, got {first:?}"
+    );
+
+    let (second, elapsed) = timed_exchange(&mut dot, fqdn, 1, &mut poll, &mut events);
+    assert!(
+        matches!(second, TurnResult::Failed(FailureReason::Receive)),
+        "a peer that closed after part of a reply is a counted failure, got {second:?}"
+    );
+    assert!(
+        dot.transport.reply_octets > 0,
+        "the partial frame's octets were absorbed, so the clean close is not a stale retirement"
+    );
+    assert!(
+        elapsed < PROMPT_CONCLUSION,
+        "the clean end of stream was concluded with the retirement residual still available ({elapsed:?}), so only the absorbed reply octets can explain the counted failure"
+    );
+    assert_eq!(responder.accepts(), 1, "a mid-burst close dials nothing");
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn retire_never_runs_for_probe_class() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![vec![PeerScript::Positive, PeerScript::CloseTcp]],
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish, got {first:?}"
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(2000);
+    let started = Instant::now();
+    dot.transport
+        .start_exchange(
+            fqdn,
+            Family::A,
+            1,
+            deadline,
+            Generation::INITIAL,
+            ExchangeClass::Probe,
+        )
+        .expect("a probe may start on the retained connection");
+    let second = drive_to_terminal(
+        &mut dot.transport,
+        &mut dot.cache,
+        &mut dot.schedules,
+        fqdn,
+        deadline,
+        &mut poll,
+        &mut events,
+    );
+    assert!(
+        matches!(second, TurnResult::Failed(FailureReason::Receive)),
+        "a probe-class clean EOF is counted by class, never silently retired, got {second:?}"
+    );
+    assert!(
+        started.elapsed() < PROMPT_CONCLUSION,
+        "the probe's clean EOF was concluded with the retirement residual still available, so only the exchange class can explain the counted failure"
+    );
+    assert_eq!(
+        responder.accepts(),
+        1,
+        "the probe's clean EOF dials nothing"
+    );
+    dot.transport.cancel_for_shutdown();
+    drop(responder);
+}
+
+#[test]
+fn half_closed_reused_connection_times_out() {
+    let responder = spawn_scripted_responder(
+        GOOD_CERT,
+        GOOD_KEY,
+        vec![vec![PeerScript::Positive, PeerScript::HalfClose]],
+    );
+    let cfg = dot_config(&pinned_resolver());
+    let mut dot = DotExchange::new(&cfg, responder.port());
+    dot.transport.registration = Registration::shared(Token(0));
+    let mut poll = Poll::new().expect("external poll");
+    let mut events = Events::with_capacity(8);
+    let fqdn = cfg.allowlist().get(0).unwrap();
+
+    let first = publish_exchange(&mut dot, fqdn, 0, &mut poll, &mut events);
+    assert!(
+        matches!(first, TurnResult::Published(_)),
+        "the first exchange must publish, got {first:?}"
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(300);
+    dot.start_family_a(fqdn, 1, deadline);
+    let mut budgets = Vec::new();
+    let second = drive_to_terminal_observed(
+        &mut dot.transport,
+        &mut dot.cache,
+        &mut dot.schedules,
+        fqdn,
+        deadline,
+        (&mut poll, &mut events),
+        |transport| budgets.push(transport.exchange_deadline()),
+    );
+    assert!(
+        matches!(second, TurnResult::Failed(_)),
+        "an ended TLS session over a live TCP stream must conclude as a counted failure, never publish, got {second:?}"
+    );
+    assert!(
+        !budgets.is_empty() && budgets.iter().all(|budget| *budget == Some(deadline)),
+        "the exchange spends its one deadline and is granted no second budget: {budgets:?}"
+    );
+    assert_eq!(
+        responder.accepts(),
+        1,
+        "the stale retire never fires and dials nothing"
+    );
+    dot.transport.cancel_for_shutdown();
     drop(responder);
 }
 

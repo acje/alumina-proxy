@@ -56,6 +56,16 @@ use registration::Registration;
 pub use crate::dns::outcome::{FailureReason, NameOutcome, NotAttemptedReason, ProbeVerdict};
 
 pub const EXCHANGE_DEADLINE_SECS: u64 = 5;
+/// A retained `DoT` connection is retired before reuse once this long has passed
+/// since its last exchange concluded: the measured minimum peer idle-close
+/// interval (10.0 s, `§Serving-lifetime warm reuse` under `## DoT transport:
+/// serving-lifetime warm reuse`) less a two-second guard band. Held as a
+/// `Duration` so the bound never truncates to a shorter whole-second window.
+const IDLE_RETIRE_AFTER: Duration = Duration::from_secs(8);
+/// A retirement spends a connect plus a TLS handshake (184–296 ms measured) plus
+/// one query round trip; below this residual exchange deadline the counted
+/// failure it would cause is the honest outcome instead.
+const RETIRE_MIN_RESIDUAL: Duration = Duration::from_secs(1);
 pub const STARTUP_WINDOW_SECS: u64 = 90;
 pub const QUERY_BUF_LEN: usize = 512;
 pub const RECV_BUF_LEN: usize = DNS_MSG_LIMIT + 2;
@@ -242,6 +252,12 @@ struct ActiveExchange {
     /// entropy, TLS, or query work: the immutable time anchor every reply
     /// evidence value from this exchange starts from.
     query_floor: u64,
+    /// This exchange is running on the connection retained from the previous
+    /// one, captured at start after the failback and idle-retire closers.
+    reused: bool,
+    /// The single stale-retirement budget for this exchange: spent by the
+    /// first retire, so a second failure is counted.
+    stale_retried: bool,
 }
 
 /// The stage of one outstanding exchange, advanced by at most one stage each
@@ -338,6 +354,11 @@ enum SendStep {
 /// The progress of one nonblocking response-read step.
 enum RecvStep {
     Waiting,
+    /// A reused `DoT` connection ended cleanly before any response octet: the
+    /// transport has been retired and the same exchange redialled, so the read
+    /// restarts on a fresh connection inside the same deadline without
+    /// counting anything.
+    Retire,
     Failed(FailureReason),
     Published(PublishedKind),
     Superseded,
@@ -1140,6 +1161,11 @@ pub struct StartupDns {
     /// client connection over its own TCP socket for a `DoT` resolver. `None`
     /// between connections (closed, cancelled, or before the first connect).
     conn: Option<DnsConn>,
+    /// When the retained connection was last used: stamped when an exchange
+    /// concludes with a retained connection, cleared when one closes. `None` on a
+    /// retained connection means no use is recorded, which retires it — no
+    /// invariant about stamping completeness has to hold.
+    last_used: Option<Instant>,
     /// The `DoT` identity of the resolver the transport currently points at:
     /// FQDN (SNI and SAN validation) plus an optional strict SPKI pin. `None`
     /// for a bare-IP resolver, which dials plain DNS with no TLS upgrade.
@@ -1151,6 +1177,10 @@ pub struct StartupDns {
     written: usize,
     filled: usize,
     msglen: Option<usize>,
+    /// Decrypted plaintext octets absorbed in the current exchange: zero at
+    /// every start and accumulating only while receiving. A close resets
+    /// nothing here; the stale-retire predicate reads it before any close.
+    reply_octets: usize,
     now0: u64,
     start: Instant,
     addr: SocketAddr,
@@ -1333,6 +1363,7 @@ impl StartupDns {
             poll,
             events,
             conn: None,
+            last_used: None,
             tls_target: None,
             query_buf: [0; QUERY_BUF_LEN],
             recv_buf: [0; RECV_BUF_LEN],
@@ -1341,6 +1372,7 @@ impl StartupDns {
             written: 0,
             filled: 0,
             msglen: None,
+            reply_octets: 0,
             now0: 0,
             start: Instant::now(),
             addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -1601,6 +1633,7 @@ impl StartupDns {
         } else if let Err(e) = self.registration.close(self.poll.registry(), None) {
             deregister_error = Some(e);
         }
+        self.last_used = None;
         self.reset_exchange_frame();
         deregister_error.map_or(Ok(()), Err)
     }
@@ -1630,6 +1663,7 @@ impl StartupDns {
     pub(crate) fn cancel_for_shutdown(&mut self) {
         self.active = None;
         self.conn = None;
+        self.last_used = None;
         self.registration.abandon();
         self.reset_exchange_frame();
         self.probe_sweep = None;
@@ -2498,11 +2532,11 @@ impl StartupDns {
                 if matches!(err, DnsError::BailiwickViolation) {
                     self.note_dns_anomaly(DnsAnomalyKind::BailiwickViolation);
                 }
-                return self.fail_recv(ex, schedules, FailureReason::Receive);
+                return self.fail_recv(ex, schedules, FailureReason::Receive, false);
             }
         };
         if Instant::now() >= ex.deadline {
-            return self.fail_recv(ex, schedules, FailureReason::Timeout);
+            return self.fail_recv(ex, schedules, FailureReason::Timeout, false);
         }
         let parsed = reply.observe();
         if let Some(step) = self.probe_reply(ex, &parsed) {
@@ -2513,15 +2547,15 @@ impl StartupDns {
 
     fn recv_frame(
         &mut self,
-        ex: &ActiveExchange,
+        ex: &mut ActiveExchange,
         schedules: &mut Schedules,
     ) -> Result<FrameGate, StartupDnsError> {
         let want = self.msglen.map_or(2, |len| len + 2);
         if self.filled < want {
             match self.try_recv() {
-                RecvTry::Failure => {
+                RecvTry::Failure { clean_eof } => {
                     return self
-                        .fail_recv(ex, schedules, FailureReason::Receive)
+                        .fail_recv(ex, schedules, FailureReason::Receive, clean_eof)
                         .map(FrameGate::Stopped);
                 }
                 RecvTry::Wait | RecvTry::Progress => {}
@@ -2531,7 +2565,7 @@ impl StartupDns {
             let len = usize::from(u16::from_be_bytes([self.recv_buf[0], self.recv_buf[1]]));
             if len == 0 || len > DNS_MSG_LIMIT {
                 return self
-                    .fail_recv(ex, schedules, FailureReason::Receive)
+                    .fail_recv(ex, schedules, FailureReason::Receive, false)
                     .map(FrameGate::Stopped);
             }
             self.msglen = Some(len);
@@ -2539,7 +2573,7 @@ impl StartupDns {
         let Some(len) = self.msglen.filter(|len| self.filled >= len + 2) else {
             if Instant::now() >= ex.deadline {
                 return self
-                    .fail_recv(ex, schedules, FailureReason::Timeout)
+                    .fail_recv(ex, schedules, FailureReason::Timeout, false)
                     .map(FrameGate::Stopped);
             }
             return Ok(FrameGate::Stopped(RecvStep::Waiting));
@@ -2549,13 +2583,54 @@ impl StartupDns {
 
     fn fail_recv(
         &mut self,
-        ex: &ActiveExchange,
+        ex: &mut ActiveExchange,
         schedules: &mut Schedules,
         reason: FailureReason,
+        clean_eof: bool,
     ) -> Result<RecvStep, StartupDnsError> {
+        if self.stale_retirement_applies(ex, reason, clean_eof) {
+            self.restart_after_stale(ex)?;
+            return Ok(RecvStep::Retire);
+        }
         self.close_connection()?;
         let reason = self.note_failure(ex, schedules, reason)?;
         Ok(RecvStep::Failed(reason))
+    }
+
+    /// Whether a clean end-of-stream on a retained `DoT` connection is the
+    /// stale-retirement case rather than a counted failure. `clean_eof` is
+    /// `true` only from a plain `Ok(0)` read and from `TlsRead::Eof`; every
+    /// other failure site (parse error, post-parse deadline, oversized length,
+    /// drain fault, absent connection, `TlsRead::Fault`) passes `false`, so the
+    /// clean-EOF door is the only retirement door. Reads only the detached
+    /// exchange's facts and the per-exchange reply octet count, none of which
+    /// any close mutates.
+    fn stale_retirement_applies(
+        &self,
+        ex: &ActiveExchange,
+        reason: FailureReason,
+        clean_eof: bool,
+    ) -> bool {
+        ex.reused
+            && matches!(ex.class, ExchangeClass::Startup | ExchangeClass::Serving)
+            && matches!(reason, FailureReason::Receive)
+            && clean_eof
+            && self.reply_octets == 0
+            && !ex.stale_retried
+            && ex.deadline.saturating_duration_since(Instant::now()) >= RETIRE_MIN_RESIDUAL
+    }
+
+    /// Rewinds the exchange onto a fresh connection inside its own deadline:
+    /// the retained transport is closed and redialled through the normal
+    /// connect path, while the exchange identity, deadline, and query survive
+    /// untouched. The retire spends exactly one dial and one retirement budget.
+    fn restart_after_stale(&mut self, ex: &mut ActiveExchange) -> Result<(), StartupDnsError> {
+        self.close_connection()?;
+        ex.connect_err = self.begin_connect(self.addr)?;
+        ex.step = ExchangeStep::Connecting;
+        ex.reused = false;
+        ex.stale_retried = true;
+        Ok(())
     }
 
     fn probe_reply(
@@ -2619,7 +2694,7 @@ impl StartupDns {
 
     fn publish_reply<F>(
         &mut self,
-        ex: &ActiveExchange,
+        ex: &mut ActiveExchange,
         parsed: wire::ObservedReply<'_>,
         cache: &mut Cache,
         schedules: &mut Schedules,
@@ -2659,7 +2734,7 @@ impl StartupDns {
 
     fn settle_publication(
         &mut self,
-        ex: &ActiveExchange,
+        ex: &mut ActiveExchange,
         schedules: &mut Schedules,
         publication: Result<(PublishedKind, bool, OutcomeIncidents), DnsError>,
         obsolete_negative: bool,
@@ -2679,6 +2754,7 @@ impl StartupDns {
                     ex,
                     schedules,
                     FailureReason::InsufficientAssurance,
+                    false,
                 )?))
             }
             Err(err) => Err(err.into()),
@@ -2714,7 +2790,7 @@ impl StartupDns {
     /// `process_new_packets` and drain the decrypted plaintext via the reader.
     fn try_recv(&mut self) -> RecvTry {
         match &self.conn {
-            None => RecvTry::Failure,
+            None => RecvTry::Failure { clean_eof: false },
             Some(DnsConn::Plain { .. }) => self.recv_plain(),
             Some(DnsConn::Tls(_)) => self.recv_tls(),
         }
@@ -2722,13 +2798,14 @@ impl StartupDns {
 
     fn recv_plain(&mut self) -> RecvTry {
         let Some(DnsConn::Plain { stream, .. }) = &mut self.conn else {
-            return RecvTry::Failure;
+            return RecvTry::Failure { clean_eof: false };
         };
         let filled_before = self.filled;
         match stream.read(&mut self.recv_buf[self.filled..]) {
-            Ok(0) => RecvTry::Failure,
+            Ok(0) => RecvTry::Failure { clean_eof: true },
             Ok(n) => {
                 self.filled += n;
+                self.reply_octets += n;
                 if self.filled > filled_before {
                     RecvTry::Progress
                 } else {
@@ -2741,17 +2818,19 @@ impl StartupDns {
             {
                 RecvTry::Wait
             }
-            Err(_) => RecvTry::Failure,
+            Err(_) => RecvTry::Failure { clean_eof: false },
         }
     }
 
     fn recv_tls(&mut self) -> RecvTry {
         let filled_before = self.filled;
-        if !matches!(self.read_tls_frame(), TlsRead::Data) {
-            return RecvTry::Failure;
+        match self.read_tls_frame() {
+            TlsRead::Data => {}
+            TlsRead::Eof => return RecvTry::Failure { clean_eof: true },
+            TlsRead::Fault => return RecvTry::Failure { clean_eof: false },
         }
         if !self.drain_tls_plaintext() {
-            return RecvTry::Failure;
+            return RecvTry::Failure { clean_eof: false };
         }
         if self.filled > filled_before {
             RecvTry::Progress
@@ -2790,7 +2869,10 @@ impl StartupDns {
         for _ in 0..TLS_SEND_TRIES {
             match conn.tls.reader().read(&mut self.recv_buf[self.filled..]) {
                 Ok(0) => break,
-                Ok(n) => self.filled += n,
+                Ok(n) => {
+                    self.filled += n;
+                    self.reply_octets += n;
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => return false,
@@ -3134,6 +3216,8 @@ impl StartupDns {
         let Generations { queried, other } = generation;
         let query_floor = self.now_u64();
         self.maybe_begin_failback()?;
+        self.retire_stale_idle_connection(deadline)?;
+        let reused = matches!(self.conn, Some(DnsConn::Tls(_)));
         let connect_err = if self.conn.is_none() {
             self.begin_connect(self.addr)?
         } else {
@@ -3145,6 +3229,7 @@ impl StartupDns {
         let wire_len = u16::try_from(qlen).expect("dns query length fits u16 prefix");
         self.query_buf[..2].copy_from_slice(&wire_len.to_be_bytes());
         self.reset_exchange_frame();
+        self.reply_octets = 0;
         self.active = Some(ActiveExchange {
             ordinal,
             family,
@@ -3157,6 +3242,8 @@ impl StartupDns {
             generation: queried,
             other_generation: other,
             query_floor,
+            reused,
+            stale_retried: false,
         });
         Ok(())
     }
@@ -3247,7 +3334,12 @@ impl StartupDns {
                 self.active = Some(ex);
                 Ok(TurnResult::Pending)
             }
-            AdvanceStep::Concluded(result) => Ok(result),
+            AdvanceStep::Concluded(result) => {
+                if self.conn.is_some() {
+                    self.last_used = Some(Instant::now());
+                }
+                Ok(result)
+            }
         }
     }
 
@@ -3305,6 +3397,7 @@ impl StartupDns {
     fn advance_receiving(&mut self, step: &RecvStep) -> Result<AdvanceStep, StartupDnsError> {
         Ok(match step {
             RecvStep::Waiting => AdvanceStep::Proceed(None),
+            RecvStep::Retire => AdvanceStep::Proceed(Some(ExchangeStep::Connecting)),
             RecvStep::Failed(reason) => self.conclude_failed(*reason),
             RecvStep::Published(kind) => {
                 self.active = None;
@@ -3422,6 +3515,34 @@ impl StartupDns {
             }
         }
         None
+    }
+
+    /// Retires a retained `DoT` connection that has outlived the peer's idle
+    /// close policy before the next exchange reuses it: one best-effort
+    /// `close_notify` record when the handshake is complete, then the single
+    /// close primitive. A plain connection is untouched, and a retirement whose
+    /// dial could not finish inside the exchange deadline leaves the counted
+    /// failure as the honest outcome instead.
+    fn retire_stale_idle_connection(&mut self, deadline: Instant) -> Result<(), StartupDnsError> {
+        if !matches!(self.conn, Some(DnsConn::Tls(_))) {
+            return Ok(());
+        }
+        if deadline.saturating_duration_since(Instant::now()) < RETIRE_MIN_RESIDUAL {
+            return Ok(());
+        }
+        let unused = self
+            .last_used
+            .is_none_or(|at| at.elapsed() >= IDLE_RETIRE_AFTER);
+        if !unused {
+            return Ok(());
+        }
+        if let Some(DnsConn::Tls(conn)) = self.conn.as_mut()
+            && !conn.tls.is_handshaking()
+        {
+            conn.tls.send_close_notify();
+            let _ = conn.tls.write_tls(&mut conn.tcp);
+        }
+        self.close_connection()
     }
 
     /// Probes the primary again when the active resolver is not the primary and
@@ -4077,11 +4198,13 @@ enum TlsSendProbe {
 
 /// The progress of one nonblocking receive probe across the plain/TLS split:
 /// `Wait` when no bytes were absorbed this turn, `Progress` when the fixed
-/// receive buffer grew, `Failure` on EOF or a transport/decryption error.
+/// receive buffer grew, `Failure` on EOF or a transport/decryption error. The
+/// failure carries whether the peer ended the stream cleanly, so a stale
+/// retained connection is distinguishable from a genuine protocol fault.
 enum RecvTry {
     Wait,
     Progress,
-    Failure,
+    Failure { clean_eof: bool },
 }
 
 /// The outcome of one non-blocking TLS record read. `WouldBlock` and

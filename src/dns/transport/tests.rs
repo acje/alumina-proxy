@@ -844,6 +844,8 @@ fn fixture_exchange(ordinal: usize, family: Family, class: ExchangeClass) -> Act
         generation: Generation::INITIAL,
         other_generation: Generation::INITIAL,
         query_floor: 0,
+        reused: false,
+        stale_retried: false,
     }
 }
 
@@ -1539,6 +1541,67 @@ mod exchange {
                 std::net::Ipv4Addr::new(1, 1, 1, 1)
             )]
         );
+    }
+    #[test]
+    fn plain_idle_retention_is_unchanged() {
+        let cfg = config();
+        let responder = spawn_responder(vec![vec![
+            Step::PositiveA {
+                ttl: 120,
+                octets: [1, 1, 1, 1],
+            },
+            Step::PositiveA {
+                ttl: 120,
+                octets: [1, 1, 1, 2],
+            },
+        ]]);
+        let mut cache = Cache::new(2).unwrap();
+        let mut schedules = Schedules::new(2).unwrap();
+        let mut transport = StartupDns::new().unwrap();
+        transport.addr = ns(responder.port());
+        transport.now0 = 1_000_000;
+        let fqdn = cfg.allowlist().get(0).unwrap();
+        let first_deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+        start_startup_exchange(&mut transport, fqdn, 0, first_deadline);
+        let first = drive_exchange_to_terminal(
+            &mut transport,
+            fqdn,
+            &mut cache,
+            &mut schedules,
+            first_deadline,
+        )
+        .expect("the first plain exchange concludes");
+        assert!(
+            matches!(first, Ok(TurnResult::Published(_))),
+            "the first plain exchange must publish, got {first:?}"
+        );
+        assert!(
+            matches!(transport.conn, Some(DnsConn::Plain { .. })),
+            "a concluded plain exchange retains its plain connection"
+        );
+
+        transport.last_used = Some(Instant::now() - Duration::from_secs(20));
+        let second_deadline = Instant::now() + Duration::from_secs(EXCHANGE_DEADLINE_SECS);
+        start_startup_exchange(&mut transport, fqdn, 1, second_deadline);
+        let second = drive_exchange_to_terminal(
+            &mut transport,
+            fqdn,
+            &mut cache,
+            &mut schedules,
+            second_deadline,
+        )
+        .expect("the second plain exchange concludes");
+        assert!(
+            matches!(second, Ok(TurnResult::Published(_))),
+            "the second plain exchange must publish over the retained connection, got {second:?}"
+        );
+        assert_eq!(
+            responder.connections(),
+            1,
+            "the idle-retire bound scopes to DoT: a retained plain connection past it is still reused, never redialled"
+        );
+        transport.cancel_for_shutdown();
+        drop(responder);
     }
     #[test]
     fn stalled_responder_times_out_exchange_and_reconnects() {
