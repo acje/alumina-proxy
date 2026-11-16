@@ -57,14 +57,22 @@ fn hello_extensions(versions_data: &[u8], snis_data: &[u8], ech: bool) -> Vec<u8
     exts
 }
 
-fn hello_msg_comp(legacy: u16, versions: &[u16], snis: &[&str], ech: bool, comp: u8) -> Vec<u8> {
+fn hello_body(
+    legacy: u16,
+    versions: &[u16],
+    snis: &[&str],
+    ech: bool,
+    session_id: &[u8],
+    comp: u8,
+) -> Vec<u8> {
     let versions_data = versions_extension_data(versions);
     let snis_data = sni_extension_data(snis);
     let exts = hello_extensions(&versions_data, &snis_data, ech);
     let mut body = Vec::new();
     body.extend_from_slice(&legacy.to_be_bytes());
     body.extend_from_slice(&[0u8; RANDOM_LEN]);
-    body.push(0);
+    body.push(u8::try_from(session_id.len()).expect("legacy_session_id fits u8"));
+    body.extend_from_slice(session_id);
     body.extend_from_slice(&4u16.to_be_bytes());
     body.extend_from_slice(&[0x13, 0x01, 0x13, 0x02]);
     body.push(1);
@@ -75,25 +83,38 @@ fn hello_msg_comp(legacy: u16, versions: &[u16], snis: &[&str], ech: bool, comp:
             .to_be_bytes(),
     );
     body.extend_from_slice(&exts);
+    body
+}
+
+fn framed(body: &[u8], record_version: u16) -> Vec<u8> {
     let mut handshake = vec![HANDSHAKE_CLIENT_HELLO];
     let hl = u32::try_from(body.len()).expect("client hello body fits u32");
     handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
-    handshake.extend_from_slice(&body);
-
-    let mut record = vec![CONTENT_HANDSHAKE];
-    record.extend_from_slice(&0x0301u16.to_be_bytes());
-    record.extend_from_slice(
-        &u16::try_from(handshake.len())
-            .expect("handshake fits u16 wire length")
-            .to_be_bytes(),
-    );
-    record.extend_from_slice(&handshake);
-    record
+    handshake.extend_from_slice(body);
+    record_with_version(&handshake, record_version)
 }
 
-fn record(payload: &[u8]) -> Vec<u8> {
+fn hello_msg_full(
+    legacy: u16,
+    versions: &[u16],
+    snis: &[&str],
+    ech: bool,
+    session_id: &[u8],
+    record_version: u16,
+) -> Vec<u8> {
+    framed(
+        &hello_body(legacy, versions, snis, ech, session_id, 0),
+        record_version,
+    )
+}
+
+fn hello_msg_comp(legacy: u16, versions: &[u16], snis: &[&str], ech: bool, comp: u8) -> Vec<u8> {
+    framed(&hello_body(legacy, versions, snis, ech, &[], comp), TLS10)
+}
+
+fn record_with_version(payload: &[u8], version: u16) -> Vec<u8> {
     let mut record = vec![CONTENT_HANDSHAKE];
-    record.extend_from_slice(&0x0301u16.to_be_bytes());
+    record.extend_from_slice(&version.to_be_bytes());
     record.extend_from_slice(
         &u16::try_from(payload.len())
             .expect("record payload fits u16 wire length")
@@ -101,6 +122,10 @@ fn record(payload: &[u8]) -> Vec<u8> {
     );
     record.extend_from_slice(payload);
     record
+}
+
+fn record(payload: &[u8]) -> Vec<u8> {
+    record_with_version(payload, TLS10)
 }
 
 fn parse_one(bytes: &[u8]) -> Result<ClientHello, ChError> {
@@ -207,6 +232,57 @@ fn accepts_tls13_with_single_sni() {
 }
 
 #[test]
+fn accepts_hello_with_a_real_legacy_session_id() {
+    let session_id = *b"0123456789abcdef0123456789abcdef";
+    let with_session_id = hello_msg_full(
+        TLS12,
+        &[TLS13],
+        &["sub.example.org"],
+        false,
+        &session_id,
+        TLS10,
+    );
+    let without_session_id =
+        hello_msg_full(TLS12, &[TLS13], &["sub.example.org"], false, &[], TLS10);
+    let ch =
+        parse_one(&with_session_id).expect("a 32-byte legacy_session_id must not shift the parse");
+    let v = validate(&ch, &approved("sub.example.org"));
+    assert!(
+        v.is_ok(),
+        "valid TLS1.3 ClientHello with a session id: {v:?}"
+    );
+    assert_eq!(
+        ch.server_name(),
+        b"sub.example.org",
+        "the cipher list must be located after the session id, not inside it"
+    );
+    assert_eq!(ch.offered_versions(), &[TLS13]);
+    assert_eq!(ch.ja4().len(), 36);
+    let empty_session_id_ja4 = parse_one(&without_session_id)
+        .expect("the empty-session-id variant parses")
+        .ja4();
+    assert_eq!(
+        ch.ja4(),
+        empty_session_id_ja4,
+        "the legacy_session_id is not JA4 input: hellos differing only in session id must fingerprint identically"
+    );
+}
+
+#[test]
+fn accepts_record_version_0303() {
+    let msg = hello_msg_full(TLS12, &[TLS13], &["sub.example.org"], false, &[], TLS12);
+    let ch = parse_one(&msg).expect("a TLS1.2 record-layer version must be accepted");
+    assert_eq!(ch.record_version, TLS12);
+    let v = validate(&ch, &approved("sub.example.org"));
+    assert!(v.is_ok(), "valid ClientHello in a 0x0303 record: {v:?}");
+    assert_eq!(
+        &ch.ja4()[1..3],
+        b"13",
+        "the JA4 version token comes from supported_versions, not the record layer"
+    );
+}
+
+#[test]
 fn fragmented_records_are_boundary_independent() {
     let msg = hello_msg(TLS12, &[TLS13], &["sub.example.org"], false);
     let mut inspector = ChInspector::new();
@@ -236,6 +312,126 @@ fn handshake_split_across_records_completes() {
             assert_eq!(consumed, split.len(), "consumed ends at the hello");
         }
         Inspect::NeedMore => panic!("multi-record handshake must complete"),
+    }
+}
+
+/// A Chrome-shaped hello whose `key_share`, `supported_groups` and padding
+/// extensions carry real bodies, plus the offsets needed to split it inside
+/// extension data: `extension_blob_start` is the blob's offset in the
+/// `ClientHello` body and `sni_body` is the `server_name` body span within the
+/// blob. Every offset is derived from the same fixture bytes, so the split
+/// point cannot drift from the wire layout.
+struct NestedExtensionHello {
+    wire: Vec<u8>,
+    extension_blob_start: usize,
+    sni_body: (usize, usize),
+}
+
+fn extension_body_spans(exts: &[(u16, &[u8])]) -> Vec<(u16, usize, usize)> {
+    let mut spans = Vec::with_capacity(exts.len());
+    let mut at = 0;
+    for (ty, data) in exts {
+        let body_start = at + 4;
+        spans.push((*ty, body_start, body_start + data.len()));
+        at = body_start + data.len();
+    }
+    spans
+}
+
+fn nested_extension_hello() -> NestedExtensionHello {
+    let ciphers = [0x1301u16, 0x1302];
+    let sni = server_name_ext(&[(0, b"sub.example.org")]);
+    let mut key_share = Vec::new();
+    key_share.extend_from_slice(&[0x00, 0x1d, 0x00, 0x20]);
+    key_share.extend_from_slice(&[0xa5u8; 32]);
+    let groups = [0x00u8, 0x06, 0x00, 0x1d, 0x00, 0x17, 0x00, 0x18];
+    let padding = [0u8; 32];
+    let exts: [(u16, &[u8]); 5] = [
+        (SUPPORTED_VERSIONS, SV),
+        (SERVER_NAME, &sni),
+        (0x0033, &key_share),
+        (0x000a, &groups),
+        (0x0015, &padding),
+    ];
+    let wire = hello_with_ciphers_and_extensions(&ciphers, &exts);
+    let extension_blob_start = 2 + RANDOM_LEN + 1 + 2 + ciphers.len() * 2 + 2 + 2;
+    let spans = extension_body_spans(&exts);
+    let (_, sni_start, sni_end) = spans
+        .into_iter()
+        .find(|(ty, ..)| *ty == SERVER_NAME)
+        .expect("the fixture carries a server_name extension");
+    NestedExtensionHello {
+        wire,
+        extension_blob_start,
+        sni_body: (sni_start, sni_end),
+    }
+}
+
+#[test]
+fn skips_non_empty_extension_bodies_by_length() {
+    let fixture = nested_extension_hello();
+    let ch = parse_one(&fixture.wire)
+        .expect("non-empty extension bodies must be skipped by their declared length");
+    let v = validate(&ch, &approved("sub.example.org"));
+    assert!(v.is_ok(), "valid ClientHello with nested bodies: {v:?}");
+    assert_eq!(ch.offered_versions(), &[TLS13]);
+    assert_eq!(ch.sni_entries(), 1);
+    let ja4 = ch.ja4();
+    assert_eq!(ja4.len(), 36);
+    assert_eq!(&ja4[..2], b"t1", "transport tcp, TLS 1.x");
+    assert_eq!(&ja4[2..3], b"3", "supported_versions offers TLS 1.3");
+    assert_eq!(
+        &ja4[3..4],
+        b"d",
+        "the fixture carries a server_name extension"
+    );
+    assert_eq!(
+        &ja4[4..6],
+        b"02",
+        "the fixture offers exactly two non-GREASE cipher suites"
+    );
+    assert_eq!(
+        &ja4[6..8],
+        b"05",
+        "the fixture carries exactly five extensions"
+    );
+    assert_eq!(&ja4[8..10], b"00", "the fixture carries no ALPN");
+    assert_eq!(
+        &ja4[..10],
+        b"t13d020500",
+        "the expected prefix is derived from the fixture (two ciphers, five extensions, no ALPN), not from the implementation"
+    );
+}
+
+#[test]
+fn split_hello_inside_extension_data_completes() {
+    let fixture = nested_extension_hello();
+    let (sni_start, sni_end) = fixture.sni_body;
+    let split_body = sni_start + 4;
+    assert!(
+        sni_start < split_body && split_body < sni_end,
+        "the split point {split_body} must land inside the server_name body {sni_start}..{sni_end}"
+    );
+    let handshake = &fixture.wire[5..];
+    let split_at = 4 + fixture.extension_blob_start + split_body;
+    let unsplit_ja4 = parse_one(&record_with_version(handshake, TLS12))
+        .expect("the unsplit 0x0303 record parses")
+        .ja4();
+    let mut split = record_with_version(&handshake[..split_at], TLS12);
+    split.extend_from_slice(&record_with_version(&handshake[split_at..], TLS12));
+    let mut inspector = ChInspector::new();
+    match inspector.feed(&split).expect("feed") {
+        Inspect::Complete { consumed } => {
+            let hello = inspector.hello().expect("complete has hello");
+            validate(hello, &approved("sub.example.org")).expect("valid");
+            assert_eq!(consumed, split.len(), "consumed ends at the hello");
+            assert_eq!(
+                hello.ja4(),
+                unsplit_ja4,
+                "record boundaries inside extension data must not change the fingerprint"
+            );
+        }
+        Inspect::NeedMore => panic!("a hello split inside extension data must complete"),
     }
 }
 
