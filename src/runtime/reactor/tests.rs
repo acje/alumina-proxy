@@ -2949,17 +2949,32 @@ mod generation_tokens {
             "a saturated upstream generation reduces into the field"
         );
         let generation = 5u64;
+        let ct = client_token(generation, idx);
         assert_eq!(
-            client_token(generation, idx).0,
-            ((usize::try_from(generation).expect("test generation fits usize") << GEN_SHIFT)
-                | (idx + 1)),
-            "ordinary in-range generations must round-trip exactly unchanged"
+            decode_generation(ct.0, GEN_BITS),
+            generation,
+            "an ordinary client token decodes back to its generation"
         );
         assert_eq!(
-            upstream_token(generation, idx).0,
-            ((usize::try_from(generation).expect("test generation fits usize") << GEN_SHIFT)
-                | (UPSTREAM_BASE + idx)),
-            "ordinary in-range generations must round-trip exactly unchanged"
+            (ct.0 & LOCAL_MASK) - 1,
+            idx,
+            "an ordinary client token decodes back to its slot index"
+        );
+        let ut = upstream_token(generation, idx);
+        assert_eq!(
+            decode_generation(ut.0, GEN_BITS),
+            generation,
+            "an ordinary upstream token decodes back to its generation"
+        );
+        let local = ut.0 & LOCAL_MASK;
+        assert!(
+            local >= UPSTREAM_BASE,
+            "an ordinary upstream token's local id lives in the upstream range"
+        );
+        assert_eq!(
+            local - UPSTREAM_BASE,
+            idx,
+            "an ordinary upstream token decodes back to its slot index"
         );
     }
 
@@ -9218,8 +9233,12 @@ mod ja4_baseline {
             let entry = serving.ja4_baseline.entries[ordinal.get()][0];
             let ja4 = serving.slots[0].inspector.hello().expect("hello").ja4();
             assert_eq!(
+                entry.ja4, *b"t13d010200_0f2cb44170f4_b9a491fefe05",
+                "the full 36-byte JA4 literal for this fixture is stored at first-seen"
+            );
+            assert_eq!(
                 entry.ja4, ja4,
-                "the full 36-byte JA4 is stored at first-seen"
+                "and the stored bytes are what the inspector's own getter reports"
             );
             assert_eq!(
                 serving.storage().enforcement().counters().facts_ja4_seed(),
@@ -9836,6 +9855,10 @@ mod ja4_baseline {
             serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 2])));
             drive_hello(serving, &wire_b, "sub.example.org");
             let second = serving.ja4_baseline.entries[ordinal.get()][1].ja4;
+            assert_eq!(
+                second, *b"t13d0103h2_0f2cb44170f4_b9a491fefe05",
+                "the second baseline entry is the measured h2-fixture JA4 literal"
+            );
             let counters = serving.storage().enforcement().counters();
             assert_eq!(
                 counters.facts_ja4_change(ordinal),
@@ -9857,6 +9880,10 @@ mod ja4_baseline {
             serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 3])));
             drive_hello(serving, &wire_c, "sub.example.org");
             let third = serving.ja4_baseline.entries[ordinal.get()][2].ja4;
+            assert_eq!(
+                third, *b"t13d0103h3_0f2cb44170f4_b9a491fefe05",
+                "the third baseline entry is the measured h3-fixture JA4 literal"
+            );
             let counters = serving.storage().enforcement().counters();
             assert_eq!(
                 counters.facts_ja4_seed(),

@@ -214,6 +214,20 @@ fn f5_checked_in_corpus_completes_the_real_parser() {
     }
 }
 
+/// The deterministic campaign's expected generated-input verdict counts per
+/// target at the `ITER`/`MAX_LEN` used by
+/// `f5_deterministic_campaign_generates_inputs_panic_free_and_folds_into_ownership`:
+/// measured from the fixed seed, so a mismatch means the campaign or a parser
+/// changed — a deliberate campaign change, not a test fix.
+const fn expected_verdicts(target: ParserTarget) -> (u64, u64, u64) {
+    match target {
+        ParserTarget::ConnectHeaders => (0, 0, 2_000),
+        ParserTarget::ClientHello => (0, 1_992, 8),
+        ParserTarget::DnsWire => (0, 2_000, 0),
+        ParserTarget::LogRecord => (2_000, 0, 0),
+    }
+}
+
 #[test]
 fn f5_deterministic_campaign_generates_inputs_panic_free_and_folds_into_ownership() {
     const ITER: u64 = 2_000;
@@ -239,8 +253,15 @@ fn f5_deterministic_campaign_generates_inputs_panic_free_and_folds_into_ownershi
             "{target:?} campaign must complete its checked-in corpus at least once"
         );
         assert_eq!(
-            run.generated_inputs(),
-            run.generated_complete() + run.generated_rejected() + run.generated_need_more()
+            (
+                run.generated_complete(),
+                run.generated_rejected(),
+                run.generated_need_more()
+            ),
+            expected_verdicts(target),
+            "{target:?} generated-input verdict counts are the deterministic campaign's \
+             expected counts at ITER={ITER}/MAX_LEN={MAX_LEN}; a change here is a \
+             deliberate campaign change, not a test fix"
         );
         let record = ownership.record_mut(target).expect("registered target");
         record.set_corpus_checked_in(true);

@@ -114,6 +114,10 @@ fn each_dns_anomaly_kind_fires_its_own_index() {
     assert_eq!(m.facts_dns_anomaly(DnsAnomalyKind::ExtremeTtl), 1);
 }
 
+/// Saturation is reachable only through the `cfg(test)` seam
+/// (`Monitor::saturate_all_for_test`): `u32::MAX` real DNS-anomaly detections
+/// are infeasible, so the production path is covered by the non-saturated fold
+/// above. Production-path saturation options are tracked in bd `alumina-mxlil`.
 #[test]
 fn dns_anomalies_fold_into_facts_total_and_saturate() {
     let mut m = Monitor::new();
@@ -132,6 +136,11 @@ fn dns_anomalies_fold_into_facts_total_and_saturate() {
     assert!(m.facts_dns_anomaly_overflow());
 }
 
+/// Saturation is reachable only through the `cfg(test)` seam
+/// (`Monitor::saturate_all_for_test`): `u32::MAX` real JA4 seed/change
+/// detections are infeasible, so the production path is covered by the
+/// non-saturated folds above. Production-path saturation options are tracked in
+/// bd `alumina-mxlil`.
 #[test]
 fn ja4_facts_fold_into_facts_total_and_saturate() {
     let mut m = Monitor::new();
