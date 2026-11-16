@@ -141,58 +141,100 @@ pub(super) fn attach_serving_runtime(listener: MioListener, config: &Config) -> 
     Runtime::new(storage, listener, traffic).expect("preallocate + attach runtime")
 }
 
-/// The body of the non-allowlisted CONNECT refusal every 403 gate replays.
-pub(super) const REFUSAL_403: &str = "403 Forbidden";
+/// The status line suffix of the non-allowlisted CONNECT refusal every 403 gate
+/// replays.
+pub(super) const STATUS_403: &str = "403 Forbidden";
 
 /// The non-allowlisted CONNECT head every 403 gate replays.
 pub(super) const NON_ALLOWLISTED_CONNECT: &[u8] = b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n";
 
 /// One client exchange the gate replays against its own runtime: the head
-/// bytes written, the refusal body the first readable reply must carry, the
-/// settle turns that follow the close, and the failure text naming the case.
+/// bytes written, the exact status line suffix the refusal reply must carry,
+/// the settle turns that follow the close, and the failure text naming the
+/// case. The reply is read to close, and the body after the head terminator
+/// must be empty: `400`/`403` are the empty-body refusal classes.
 pub(super) struct Refusal<'a> {
     pub(super) head: &'a [u8],
-    pub(super) expected_body: &'a str,
+    pub(super) expected_status: &'a str,
     pub(super) settle_turns: usize,
     pub(super) failure: &'a str,
 }
 
 impl<'a> Refusal<'a> {
     /// The standard non-allowlisted CONNECT exchange: the shared head and 403
-    /// stop body, with the caller's settle count and failure text.
+    /// stop status, with the caller's settle count and failure text.
     pub(super) fn non_allowlisted_connect(settle_turns: usize, failure: &'a str) -> Refusal<'a> {
         Refusal {
             head: NON_ALLOWLISTED_CONNECT,
-            expected_body: REFUSAL_403,
+            expected_status: STATUS_403,
             settle_turns,
             failure,
         }
     }
 
-    /// Drives `runtime` for at most 100 two-millisecond turns, asserts the
-    /// first readable reply carried `expected_body`, then restores blocking
-    /// mode, closes the client, and settles `settle_turns` further turns.
+    /// Drives `runtime` for at most 100 two-millisecond turns, accumulating the
+    /// reply until the peer closes and asserting it carried the exact expected
+    /// status line over an empty body, then restores blocking mode, closes the
+    /// client, and settles `settle_turns` further turns.
     pub(super) fn drive(&self, runtime: &mut Runtime, port: u16) {
         let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect client");
         client.write_all(self.head).expect("write connect head");
-        let mut seen = false;
-        let mut buf = [0u8; 128];
+        let mut reply = Vec::new();
+        let mut closed = false;
+        let mut scratch = [0u8; 128];
         for _ in 0..100 {
             runtime
                 .turn(Some(Duration::from_millis(2)))
                 .expect("owner turn drives accept+refuse+close");
             client.set_nonblocking(true).expect("nonblocking client");
-            match client.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    if String::from_utf8_lossy(&buf[..n]).contains(self.expected_body) {
-                        seen = true;
+            loop {
+                match client.read(&mut scratch) {
+                    Ok(0) => {
+                        closed = true;
+                        break;
                     }
-                    break;
+                    Ok(n) => reply.extend_from_slice(&scratch[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) => panic!("read the refusal reply: {e}"),
                 }
-                _ => {}
+            }
+            if closed {
+                break;
             }
         }
-        assert!(seen, "{}", self.failure);
+        assert!(
+            closed,
+            "the refusal must close the connection: {}",
+            self.failure
+        );
+        let Some(head_end) = reply.windows(4).position(|w| w == b"\r\n\r\n") else {
+            panic!(
+                "{}: the refusal carried no head terminator; reply was {:?}",
+                self.failure,
+                String::from_utf8_lossy(&reply)
+            );
+        };
+        let (head, body) = reply.split_at(head_end + 4);
+        let status_end = head
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .expect("the refusal head carries a status-line terminator");
+        let status_line = String::from_utf8_lossy(&head[..status_end]);
+        let expected = format!("HTTP/1.1 {}", self.expected_status);
+        assert_eq!(
+            status_line.as_ref(),
+            expected.as_str(),
+            "{}: the reply must open with the exact status line `{expected}`",
+            self.failure
+        );
+        assert!(
+            body.is_empty(),
+            "{}: the refusal body must be empty after the head terminator, got {} byte(s) {:?} \
+             (spec: policy violations receive an empty body)",
+            self.failure,
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
         client.set_nonblocking(false).expect("blocking client");
         drop(client);
         for _ in 0..self.settle_turns {

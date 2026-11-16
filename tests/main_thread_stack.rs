@@ -13,7 +13,7 @@ use alumina::runtime::ServeStorage;
 const LOOPS: usize = 64;
 const OVERLONG_LOOPS: usize = 4;
 const SETTLE_TURNS: usize = 20;
-const BODY_400: &str = "400 Bad Request";
+const STATUS_400: &str = "400 Bad Request";
 
 fn rlimit_stack_readable() -> Option<String> {
     let contents = std::fs::read_to_string("/proc/self/limits").ok()?;
@@ -80,11 +80,11 @@ fn refuse_overlong_heads(runtime: &mut Runtime, port: u16) {
         let head = overlong_connect_head();
         Refusal {
             head: &head,
-            expected_body: BODY_400,
+            expected_status: STATUS_400,
             settle_turns: SETTLE_TURNS,
             failure: &format!(
                 "over-long iteration {i}: a CONNECT head with more than {MAX_HEADER_LINES} header \
-                 lines must be refused with the 400 body"
+                 lines must be refused with the 400 status and an empty body"
             ),
         }
         .drive(runtime, port);

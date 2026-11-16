@@ -474,21 +474,53 @@ fn dns_assurance_unknown_token_and_wrong_type_reject_78() {
     assert_eq!(wrong.exit_status(), 78);
 }
 
+/// The refusal an assurance selector is expected to meet for its resolver set:
+/// a pin-less `DoT` backup beside a pinned strict resolver reaches the
+/// declared-root rule, while a bare-IP backup is refused as a plain/`DoT` mix
+/// before that rule runs.
+#[derive(Debug, Clone, Copy)]
+enum RefusalRule {
+    DeclaredRootWeakBackup,
+    MixedTrust,
+}
+
 #[test]
 fn dns_assurance_strong_selector_cannot_weaken_resolver_set() {
     let strict = "9.9.9.9#dns.quad9.net#pin-sha256=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
-    for (selector, backup) in [
-        ("resolver_authenticated", "1.1.1.1#cloudflare-dns.com"),
-        ("delegated_dnssec", "1.1.1.1"),
+    for (selector, backup, expected) in [
+        (
+            "resolver_authenticated",
+            "1.1.1.1#cloudflare-dns.com",
+            RefusalRule::DeclaredRootWeakBackup,
+        ),
+        ("delegated_dnssec", "1.1.1.1", RefusalRule::MixedTrust),
     ] {
         let resolver = format!("[\"{strict}\", \"{backup}\"]");
         let value = format!("\"{selector}\"");
         let doc = policy_doc(&resolver, "root_validating_no_stale");
         let err = parse_config_document(&dns_assurance_line(&doc, &value)).unwrap_err();
-        assert_eq!(
-            err.exit_status(),
-            78,
-            "strong selector {selector} + {backup}"
-        );
+        match (expected, &err) {
+            (
+                RefusalRule::DeclaredRootWeakBackup,
+                ConfigError::RecursiveDeclaresWeakResolver {
+                    index,
+                    value: declared,
+                },
+            ) => {
+                assert_eq!(
+                    *index, 1,
+                    "strong selector {selector} leaves the weak backup {backup} at ordinal 1"
+                );
+                assert_eq!(
+                    declared.as_str(),
+                    backup,
+                    "strong selector {selector} must be stopped by the weak backup {backup} it names"
+                );
+            }
+            (RefusalRule::MixedTrust, ConfigError::MixedResolverTrust) => {}
+            (_, other) => panic!(
+                "strong selector {selector} + {backup} must be refused by {expected:?}, got {other:?}"
+            ),
+        }
     }
 }

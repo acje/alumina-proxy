@@ -1313,7 +1313,7 @@ mod exchange {
         );
     }
     #[test]
-    fn deadline_expiry_fails_exchange_without_publish_and_reconnects() {
+    fn peer_close_after_stall_fails_exchange_without_publish_and_reconnects() {
         let cfg = config();
         let responder = spawn_responder(vec![
             vec![Step::Stall(Duration::from_secs(3)), Step::Close],
@@ -1340,6 +1340,12 @@ mod exchange {
             .unwrap();
         assert_eq!(report.exchanges, 3);
         assert_eq!(report.failed, 1);
+        assert_eq!(
+            report.family_results[0][0],
+            Some(Err(FailureReason::Receive)),
+            "a FIN before the {EXCHANGE_DEADLINE_SECS} s exchange deadline settles as a receive \
+             failure, not a timeout"
+        );
         assert_eq!(bindings_of(&cache, 0, Family::A), []);
         assert_eq!(
             bindings_of(&cache, 1, Family::A),
@@ -1604,7 +1610,7 @@ mod exchange {
         drop(responder);
     }
     #[test]
-    fn stalled_responder_times_out_exchange_and_reconnects() {
+    fn stalled_responder_close_fails_exchange_and_reconnects() {
         let cfg = config();
         let responder = spawn_responder(vec![
             vec![Step::Stall(Duration::from_secs(1)), Step::Close],
@@ -1634,6 +1640,12 @@ mod exchange {
         assert!(
             responder.connections() >= 2,
             "a stalled-then-closed exchange must reconnect on a fresh connection"
+        );
+        assert_eq!(
+            report.family_results[0][0],
+            Some(Err(FailureReason::Receive)),
+            "a FIN before the {EXCHANGE_DEADLINE_SECS} s exchange deadline settles as a receive \
+             failure, not a timeout"
         );
         assert_eq!(bindings_of(&cache, 0, Family::A), []);
         assert_eq!(
@@ -1920,7 +1932,7 @@ mod startup {
         assert_eq!(report.exchanges, 3, "name0 A, name0 AAAA, name1 AAAA");
         assert_eq!(
             report.failed, 1,
-            "name1 A timed out on the stalled connection"
+            "name1 A failed when the peer closed the stalled connection"
         );
         assert_eq!(
             report.outcomes[0],
@@ -1930,9 +1942,14 @@ mod startup {
         assert_eq!(
             report.outcomes[1],
             NameOutcome::Negative,
-            "name1 AAAA NODATA is the latest concluded outcome, overriding the earlier timeout"
+            "name1 AAAA NODATA is the latest concluded outcome, overriding the earlier receive failure"
         );
-        assert!(matches!(report.family_results[1][0], Some(Err(_))));
+        assert_eq!(
+            report.family_results[1][0],
+            Some(Err(FailureReason::Receive)),
+            "name1 A ended on a peer FIN before the {EXCHANGE_DEADLINE_SECS} s exchange deadline, so \
+             its recorded reason is a receive failure, not a timeout"
+        );
         assert_eq!(
             report.family_results[1][1],
             Some(Ok(PublishedKind::Negative))
