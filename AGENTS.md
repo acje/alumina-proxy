@@ -81,9 +81,5 @@ because one side "wins".
   corresponding `sh scripts/verify.sh host-mid <scope>` Podman dispatch.
   `fixtures boot` and the `e2e` selectors are independently host-runnable with
   the prerequisites described in the QA package.
-- Behavioural changes run red→green and preserve the fixed profile: single
-  boot owner and single serving owner, two reused 128 KiB per-tunnel buffers,
-  no post-boot *first-party* heap alloc/dealloc (dependency allocations are a
-  bounded seam and the per-connect DoT setup seam is an authorised first-party
-  allocation point — §Design direction; `docs/alumina-proxy.md` §Zero-
-  Allocation Invariant) — no runtime-surface expansion.
+- Behavioural changes run red→green and preserve the fixed profile (§Design
+  direction; `docs/alumina-proxy.md` §Zero-Allocation Invariant).

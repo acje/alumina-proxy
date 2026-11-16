@@ -1,22 +1,15 @@
 #!/bin/sh
 # E2E CONNECT/SNI opaque-relay gate against the ACTUAL production binary.
-# Native Linux only: rootful podman connection on a harness image derived
-# from the pinned rust base, no-new-privileges, --network none (fully isolated:
-# the driver, DNS responder and all upstreams live on loopback aliases inside
-# the container network namespace; nothing can reach an external host). The
-# binary is dropped to uid 65534 with empty caps exactly as boot-fixtures does.
+# Native Linux only: rootful podman, harness image derived from the pinned rust
+# base, no-new-privileges, --network none (the driver, DNS responder and all
+# upstreams live on loopback aliases inside the container netns). The binary
+# runs as uid 65534 with empty caps, exactly as boot-fixtures does.
 #
-# The driver is run in the foreground and every fixture process/thread is
-# waited on with a deadline and reaped; RBI children are killed on exit and the
-# podman command owns the whole lifecycle (outer command stays foreground, no
-# leaked background servers).
-#
-# The harness image immutable ID (recorded by the verify.sh e2e receipt) is
-# re-verified against its mutable tag and its expected parent (the pinned base
-# sha) on the rootful connection; the gate fails closed if the image or its
-# parent identity is missing, or if the tag no longer resolves to the recorded
-# immutable ID, so the exact-base provenance of every executed run is receipted
-# and the executed image is the recorded immutable ID.
+# The python driver runs foreground under a deadline with every fixture child
+# reaped, so no background server outlives the podman command. The harness
+# image's immutable ID, its tag resolution, and its parent (the pinned base sha)
+# are re-verified on the rootful connection; the gate fails closed on any
+# missing or drifted identity, so every executed run is receipted to its base.
 set -eu
 
 # Local podman connection names (gitignored; never committed). Sourced when
@@ -35,18 +28,11 @@ BASE_ID="bf99d57d5849fd556734962fa0b62a46d1c3c23d9be5d20e52a9e3a8691d906e"
 E2E_IMAGE="${E2E_IMAGE:-localhost/alumina-e2e:e2e-20261011}"
 CONN="${PODMAN_ROOT_CONNECTION:?PODMAN_ROOT_CONNECTION must be set to your rootful podman connection}"
 
-# R1: the executed artifact PROFILE must be the same observed native triple the
-# build used. verify.sh exports E2E_TARGET (observed from the build owner); a
-# standalone invocation observes it from the pinned build image and fails
-# closed if no triple can be observed. --target-dir never selects the triple;
-# the triple is carried here into the consumer path.
-# N1: observe the build-owner native profile with the PRODUCER's own exit
-# checked before any parsing. stdout/stderr are captured together so a failing
-# producer (even one that wrote a plausible host line) is never masked by a
-# later filter's exit 0, and the reason is not swallowed by 2>/dev/null.
-# Parsing (`sed 's/^host: //p'`) runs only on the captured buffer of an exit-0
-# producer. The inner `sh -c 'rustc -vV'` (no sed pipe) lets podman propagate
-# the container's rustc exit directly.
+# R1/N1: the executed artifact must be the same observed native triple the build
+# used. verify.sh exports E2E_TARGET; a standalone invocation observes it from
+# the pinned build image and fails closed if no triple can be observed. The
+# producer's exit is checked before any parsing (all output captured, no
+# 2>/dev/null), so a failing probe is never masked by a later filter's exit 0.
 observe_build_target() {
     _probe_out="$("$@" 2>&1)" || _probe_rc=$?
     if [ "${_probe_rc:-0}" -ne 0 ]; then

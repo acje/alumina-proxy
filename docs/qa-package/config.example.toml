@@ -3,8 +3,8 @@
 listen = "127.0.0.1:5353"
 startup_unresolved_allowance = 0
 # Validated resolver set: 1..=5 numeric unicast IPv4/IPv6 addresses, no zone
-# identifiers, each in one of three forms (docs/alumina-proxy.md:567,616,651 /
-# the alumina-dot-chain amendment, Package 1 + Package 2):
+# identifiers, each in one of three forms (docs/alumina-proxy.md
+# §Configuration & DNS; §Directory — three resolver trust forms):
 #   IP                  -- plain DNS, port 53 (tolerated degraded trust; warns)
 #   IP#fqdn             -- DoT, port 853, CA-chain validation
 #   IP#fqdn#pin-sha256= -- DoT, port 853, STRICT SPKI pin + FQDN/SAN validation
@@ -18,18 +18,12 @@ startup_unresolved_allowance = 0
 #     the resolver operator). A wrong pin fails closed, so an un-replaced
 #     placeholder makes the entry unusable by design, never silently insecure.
 #
-# Common public DNS services with their documented DoT hostnames (deployment
-# picks 1..=5; IPv6 variants also valid):
-#   Cloudflare:        1.1.1.1 # cloudflare-dns.com  (2606:4700:4700::1111)
-#   Google Public DNS: 8.8.8.8 # dns.google          (2001:4860:4860::8888)
-#   Quad9:             9.9.9.9 # dns.quad9.net       (2620:fe::fe)
-#   Cisco OpenDNS:     208.67.222.222 # dns.opendns.com
-#   AdGuard DNS:       94.140.14.14 # dns.adguard.com (2a10:50c0::ad1:ff)
-# Bare-IP entries remain valid but each emits one startup warning (degraded
-# trust form).
+# Deployment picks 1..=5 entries from the public DNS services it trusts (each
+# has a documented DoT hostname; IPv6 forms are equally valid). Bare-IP entries
+# remain valid but each emits one startup warning (degraded trust form).
 resolver = ["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "8.8.8.8#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "9.9.9.9#dns.quad9.net#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "208.67.222.222#dns.opendns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "94.140.14.14#dns.adguard.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
-# Mandatory keyed allowlist tables (docs/alumina-proxy.md:729-853, alumina-cfgk
-# 2026-10-24): the [allowed_fqdn."<fqdn>:<port>"] table keys ARE the allowlist
+# Mandatory keyed allowlist tables (docs/alumina-proxy.md §Keyed configuration
+# schema): the [allowed_fqdn."<fqdn>:<port>"] table keys ARE the allowlist
 # (1..=32 tables, each a literal <fqdn>:<port>, unique after normalization);
 # [any_illegal] carries exactly the four per-control keys connect_parse,
 # host_not_allowlisted, tls_profile, ech, each an inline { action, scope } table
@@ -44,11 +38,12 @@ connect_parse = { action = "notify", scope = "connection" }
 host_not_allowlisted = { action = "notify", scope = "connection" }
 tls_profile = { action = "notify", scope = "connection" }
 ech = { action = "notify", scope = "connection" }
-# Optional SP-001 per-class all-scope gate bars (docs/alumina-proxy.md): each section
-# absent -> defaults threshold = 1 (the FIRST deviation of that class arms all-scope
-# block, sticky until restart), window_secs = 900. Raising a threshold is the
-# operator's deliberate choice to tolerate a bounded burst — never a hidden tolerated
-# rate. bad_handshake counts ConnectParse/TlsProfile/Ech facts; illegal_fqdn counts
+# Optional per-class all-scope gate bars (docs/alumina-proxy.md §Keyed
+# configuration schema): each section absent -> defaults threshold = 1 (the
+# FIRST deviation of that class arms all-scope block, sticky until restart),
+# window_secs = 900. Raising a threshold is the operator's deliberate choice to
+# tolerate a bounded burst — never a hidden tolerated rate. bad_handshake counts
+# ConnectParse/TlsProfile/Ech facts; illegal_fqdn counts
 # HostNotAllowlisted facts; ja4 counts only its Block-All facts. An [early_data] gate
 # section is rejected at load (exit 78): its all-scope block action is unreachable by
 # construction (early-data block scope is connection-only).

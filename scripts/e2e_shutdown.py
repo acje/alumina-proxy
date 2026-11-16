@@ -45,7 +45,7 @@ Cases (each exercises the ACTUAL shipped shutdown path):
     SILENT-DNS-REFRESH-DRAIN
                               stalled relay; the real current AAAA due-refresh
                               is served on the RETAINED startup connection
-                              (docs/alumina-proxy.md:603: the DoT connection
+                              (§Serving-lifetime warm reuse: the DoT connection
                               established during the startup window is retained
                               across serving refreshes and reused -- no rebuild,
                               so the refresh arrives on the same session 1) and
@@ -400,7 +400,7 @@ class DnsResponder:
         # publication is native-witness territory, src/runtime/owner.rs
         # sigterm_stops_due_refresh_flow). Session numbering is NOT the
         # discriminator: the startup window never attempts AAAA (its slots stay
-        # due) and the retained transport (docs/alumina-proxy.md:603) reuses the
+        # due) and the retained transport (§Serving-lifetime warm reuse) reuses the
         # startup connection across serving refreshes, so ANY served qtype=28 is
         # the post-bind serving due-refresh whether it arrives on session 1 or a
         # later session.
@@ -445,7 +445,7 @@ class DnsResponder:
                 self.session_times.append((session, time.monotonic()))
             # Connection-level silent status (used only by `silent_always`).
             # `silent_after_served_aaaa` is NOT a connection/session property:
-            # the retained transport (docs/alumina-proxy.md:603) reuses the
+            # the retained transport (§Serving-lifetime warm reuse) reuses the
             # startup connection for every serving exchange, so its silent
             # switch is query-sequence based and applied per-query in _serve,
             # never decided here.
@@ -522,7 +522,7 @@ class DnsResponder:
         # due-refresh, then accepts+reads but never answers from the
         # SECOND qtype=28 on -- that sibling is the next-due serving
         # refresh. Because the retained transport shares session 1 for
-        # every exchange (docs/alumina-proxy.md:603), the switch is
+        # every exchange (§Serving-lifetime warm reuse), the switch is
         # sequence-based here, never a session threshold.
         if self.silent_after_served_aaaa:
             return qtype == 28 and aaaa_served
@@ -570,7 +570,7 @@ class DnsResponder:
         # startup never attempts AAAA, its slot stays due and the
         # owner's due-refresh re-queries it right after the
         # listener binds) -- served on the RETAINED startup
-        # connection (docs/alumina-proxy.md:603: the DoT connection
+        # connection (§Serving-lifetime warm reuse: the DoT connection
         # established during the startup window is retained across
         # serving refreshes and reused -- no rebuild), not on a fresh
         # serving session. Type-specific absence: NOERROR with zero
@@ -1571,7 +1571,7 @@ def require_serving_dns_witnesses(name, proc, dns):
 def silent_dns_stage(name, log, silent, dns):
     """Stalled relay established and both serving-DNS witnesses observed before
     the signal. Session numbering never discriminates: the retained transport
-    (docs/alumina-proxy.md:603) brings the serving refresh over the startup
+    (§Serving-lifetime warm reuse) brings the serving refresh over the startup
     connection, so any served qtype=28 is the current refresh."""
     staged = stalled_relay_stage(name, log, silent, STALLED_RELAY_DETAILS)
     if staged is None:
@@ -1600,7 +1600,7 @@ def case_silent_dns(fixtures):
     Startup resolves both A families on session 1 and never attempts AAAA (their
     slots stay due), so the serving owner's due-refresh re-queries AAAA right
     after the listener binds -- ON THE SAME retained startup connection
-    (docs/alumina-proxy.md:603: the DoT connection established during the
+    (§Serving-lifetime warm reuse: the DoT connection established during the
     startup window is retained across serving refreshes and reused -- no
     rebuild), so every exchange shares session 1. The harness SERVES the first
     such refresh on that retained session (the responder-side TRANSMISSION

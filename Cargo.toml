@@ -158,8 +158,8 @@ path = "src/main.rs"
 # harness = false: this test supplies its own `main()`, which the kernel
 # enters on the true process main thread. It probes the main-order serving
 # path (preallocate -> accept -> reset) under the deployment stack rlimit,
-# evidence for M2: the inline serving workspaces must not overflow the
-# deployment main thread's RLIMIT_STACK (see tests/main_thread_stack.rs).
+# so the inline serving workspaces cannot overflow the deployment main
+# thread's RLIMIT_STACK (see tests/main_thread_stack.rs).
 [[test]]
 name = "main_thread_stack"
 path = "tests/main_thread_stack.rs"
@@ -168,7 +168,7 @@ harness = false
 # harness = false: this binary steals fd 1 onto an unconsumed pipe and proves
 # the native Linux serving loop keeps refusing connections (403) while the
 # log sink is stalled on a full stdout, with no panic and whole-record drops
-# bounded (R2 evidence for the nonblocking stdout sink).
+# bounded.
 [[test]]
 name = "stdout_stall"
 path = "tests/stdout_stall.rs"
@@ -182,8 +182,7 @@ harness = false
 # harness = false: this binary closes the child's stdout read end so the
 # nonblocking sink write fails on an unrecoverable closed pipe, and proves the
 # serving owner-turn exits EX_IOERR (74) once that fails the sink, instead of
-# continuing with observability permanently lost (F-09 evidence for the
-# sink-failure owner exit).
+# continuing with observability permanently lost.
 [[test]]
 name = "stdout_closed"
 path = "tests/stdout_closed.rs"
@@ -193,14 +192,14 @@ harness = false
 toml = { version = "=1.2.0", default-features = false, features = ["std", "parse", "serde"] }
 mio = { version = "=1.2.4", default-features = false, features = ["net", "os-poll", "os-ext"] }
 getrandom = { version = "=0.4.3" }
-# SIGTERM lifecycle: safe self-pipe route (oracle b3nx B18/B19, H1 selected).
-# default-features=false keeps only the ungated flag/low_level surfaces; the
-# `pipe` safe registration primitive writes into a pollable fd with no handler
-# allocation in the signal path (evidence jvlx). mio os-ext unlocks SourceFd so
-# the retained self-pipe read end registers on the single serving poll.
+# SIGTERM lifecycle: safe self-pipe route. default-features=false keeps only the
+# ungated flag/low_level surfaces; the `pipe` safe registration primitive writes
+# into a pollable fd with no handler allocation in the signal path. mio os-ext
+# unlocks SourceFd so the retained self-pipe read end registers on the single
+# serving poll.
 signal-hook = { version = "=0.4.6", default-features = false }
 # DoT (V1) TLS client + SPKI pinning (V5): rustls with the ring provider.
-# GATED behind rust-dep-intake (T3 build-time surface review) — no build/test
+# GATED behind rust-dep-intake (build-time surface review) — no build/test
 # before the closure's build-time surface is read. ring chosen over aws-lc-rs
 # for the minimal cc-only C build (no cmake) fitting the constrained-server
 # static-link profile. TLS 1.3 only (no tls12 feature): the DoT client shares
@@ -221,8 +220,8 @@ ring = "=0.17.14"
 [dev-dependencies]
 # Promoted from the already-resolved closure (mio/getrandom pull libc 0.2.191):
 # retained for test-only use; the production log sink no longer calls libc
-# directly (std write_vectored). Pinned to the exact resolved version; no new
-# closure node (contract intent 26l1.21.3).
+# directly (std write_vectored). Pinned to the exact resolved version, so this
+# adds no new closure node.
 libc = "=0.2.191"
 
 [features]

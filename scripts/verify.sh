@@ -4,39 +4,13 @@ set -eu
 # =============================================================================
 # verify.sh — native verification entry point (gate coordinator)
 #
-# This script is the single owner of the scoped gate ceremony: INNER (host
-# compile), MID (Linux-only behaviour proofs), BOUNDARY (candidate ceremony) and
-# the fixtures/e2e native gates. The governing spec is docs/alumina-proxy.md;
-# the verification instruction / command-set authority is docs/verification.md;
-# status and prerequisites are docs/qa-package/README.md.
+# Single owner of the gate ceremony: INNER (host compile), MID (Linux-only
+# behaviour proofs), BOUNDARY (candidate ceremony), and the fixtures/e2e native
+# gates. Governing spec: docs/alumina-proxy.md. Command set and gate ordering:
+# docs/verification.md. Status and prerequisites: docs/qa-package/README.md.
 #
-# COST STRUCTURE:
-#   I1  ONE Cargo test invocation per feature config (lib units + foundations +
-#       boot + the gate-only binaries together) instead of three per config,
-#       and one target dir per feature config (`$VERIFY_AW_TARGET_DIR`) so
-#       witness-on/off artifacts never share a fingerprint graph. `mid union`
-#       covers the gate-only surface; `mid full` remains available standalone.
-#   I2  both Cargo target trees (production release + the fixture-facts variant)
-#       live in a VM-native podman volume. The variant KEEPS its own target dir:
-#       sharing the production release dir would clobber target/release/alumina,
-#       and "production artifact untouched" is a semantics guarantee.
-#   I3  one derived, digest-identified image built once FROM the pinned rust base
-#       (which ships no git, no clippy, no rustfmt), so the dispatch path performs
-#       no `apk add` and no `rustup component add` per run.
-#   I4  container Cargo cache and CARGO_HOME live in named volumes; only consumed
-#       artifacts are copied out, with a two-sided digest assertion.
-#   I5  the host target/ tree is no longer a container build home; it holds only
-#       copied-out artifacts, receipts and temp files.
-#   I8  `inner test <target>` host-native iteration path; backs no done-claim.
-#
-# The `ALT_`-prefixed knobs and `alt` selectors are the A/B surface for this cost
-# structure (ALT = alternative cost structure). `ALT_NO_VOLUME=1` restores the
-# original host bind-mount behaviour so a run can be measured apples-to-apples
-# against the pre-I4 scheme. `alt image` / `alt smoke` warm and prove the
-# container plumbing and back no claim.
-#
-# Do not run build or fixture checks concurrently: they share target/release and
-# the fixture volumes.
+# Do not run build or fixture checks concurrently: they share target/release
+# and the fixture volumes.
 # =============================================================================
 
 # Local podman connection names (gitignored; never committed). Sourced when
@@ -299,45 +273,13 @@ mid_boot() {
     echo "BOOT-MID-OK"
 }
 
-# Boundary-only union of the `mid foundations` and `mid boot` command sets
-# (same input union), executed once each so the boundary never runs the
-# highest-value native common commands twice (release build, static gate,
-# foundations+boot tests with and without alloc-witness, fmt, clippy both
-# variants, whitespace gate). The standalone `mid foundations` / `mid boot`
-# selectors are the fast path (tests/fmt/whitespace only): clippy, the release
-# build, and the static gate are deferred to this union and to the dedicated
-# `mid clippy` selector; closure metadata runs only in this union. A quick
-# per-sub-mission mid run skips the slow native common commands.
-#
-# Ordering: the clippy pair keeps the exact adjacency proven green by this
-# union's clippy block (alloc-witness clippy immediately after production
-# clippy, with the alloc-witness lib last built by the witness tests). The
-# boot tests are intentionally deferred until AFTER the clippy
-# block (diverging from `mid boot`, which runs them before clippy) so the
-# alloc-witness boot tests never precede the alloc-witness clippy phase. That
-# deliberate reorder avoids an aw-clippy-after-aw-boot-test adjacency in one
-# cargo invocation, which can otherwise trip a clippy-per-target fingerprint
-# E0463 (can't find crate for `alumina`) on the alloc-witness-only mio_matrix
-# test over the shared persistent target dir.
-# I1: the union now owns the WHOLE test surface for the candidate, once per
-# feature config. previously: 4 `atest` invocations in this union (foundations
-# and boot, each witness-off then witness-on) plus 2 more in `mid full`
-# (gate-only suite), i.e. three invocations per feature config with cargo
-# re-resolving the unit graph each time and the witness-on/off graphs competing
-# for one target dir. now: one invocation per config covering lib units +
-# foundations + boot + the gate-only binaries (GATE_ONLY_TESTS), with a dedicated target dir per
-# config.
-#
-# Ordering is NOT free-form. The documented hazard (E0463 "can't find crate for
-# `alumina`" on an alloc-witness-only test target) is an aw-clippy-after-aw-test
-# adjacency. The proven-green sequence in verify.sh is: clippy pair adjacent,
-# with the aw test runs AFTER the aw clippy pass. That sequence is preserved
-# here (non-aw clippy -> aw clippy -> aw tests), and the dedicated
-# ${ALT_AW_TARGET_DIR} removes the shared-dir interference entirely.
-# The gate-only integration binaries (single-sourced here, F-04): eligibility,
-# mio_matrix, main_thread_stack, monitor_stdout, stdout_stall, stdout_closed.
-# Every gate selector that runs any of them references GATE_ONLY_TESTS, so the
-# list lives in exactly one place and `mid union` / `mid full` stay in lockstep.
+# Boundary-only union of the `mid foundations` and `mid boot` command sets,
+# executed once each so the boundary never runs the same native command twice.
+# `GATE_ONLY_TESTS` is the single source for the gate-only integration binaries,
+# so `mid union` and `mid full` stay in lockstep. The ordering below is binding
+# (clippy pair adjacent; alloc-witness tests only after the alloc-witness clippy
+# pass) — rationale and cost structure: docs/verification.md
+# § Gate ordering and cost structure.
 GATE_ONLY_TESTS="--test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed"
 
 # The whole-surface union: lib units + foundations + boot + the gate-only binaries.

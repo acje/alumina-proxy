@@ -1,15 +1,13 @@
 #!/bin/sh
 # Native foreground SIGTERM shutdown gate against the ACTUAL production binary.
-# Native Linux only: rootful podman connection on the harness image derived
-# from the pinned rust base (python3/setpriv/ip), no-new-privileges,
-# --network none (fully isolated: driver, DNS responder and all upstreams live
-# on loopback aliases inside the container network namespace). The binary is
-# dropped to uid 65534 with empty caps exactly as e2e_relay does.
+# Native Linux only: rootful podman, harness image derived from the pinned rust
+# base (python3/setpriv/ip), no-new-privileges, --network none (driver, DNS
+# responder and all upstreams live on loopback aliases inside the container
+# netns). The binary runs as uid 65534 with empty caps, exactly as e2e_relay.
 #
-# Every case binary is spawned and reaped FOREGROUND by the python driver with a
-# bounded deadline; the podman command owns the whole lifecycle (outer command
-# stays foreground, no leaked background servers). The driver is the sole child
-# of this script.
+# Every case binary is spawned and reaped FOREGROUND by the python driver under
+# a bounded deadline; the driver is this script's sole child, so no background
+# server outlives the podman command.
 set -eu
 
 # Local podman connection names (gitignored; never committed). Sourced when

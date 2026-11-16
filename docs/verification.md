@@ -46,18 +46,10 @@ does not establish that it was built or executed in the run.
 
 `atest`/`aclippy` are the fleet Cargo aliases (host config; each Linux MID
 dispatch writes the same aliases into its throwaway container config — the repo
-does not duplicate them). Most gate selectors run a filtered scope: their
-`verify.sh` `atest` invocations carry `--test foundations` or `--test boot`
-(optionally with `--features alloc-witness`). The `mid full` selector is a
-standalone gate-only selector: it runs lib unit tests plus the 6 gate-only
-integration binaries (eligibility, mio_matrix, main_thread_stack,
-monitor_stdout, stdout_stall, stdout_closed), witness-off then witness-on
-(alloc-witness, incl. the eligibility witness and the alloc-witness-only
-mio_matrix binary); atest-only (no clippy/fmt). `mid union` subsumes the whole
-gate-only surface — one dispatch
-runs lib plus all eight integration targets (foundations, boot, and those
-same 6) witness-off then witness-on (the `mid foundations` / `mid boot` inner
-loops additionally run the two during development).
+does not duplicate them). `mid foundations` and `mid boot` run a filtered
+scope; `mid full` is the standalone gate-only selector and `mid union` the
+whole-surface dispatch. Per-selector semantics and prerequisites are owned by
+the [QA package](qa-package/README.md#selector-host-context-sole-owner).
 
 ### Offline docs gate — the `docs` selector (not just links)
 
@@ -86,6 +78,39 @@ python3 scripts/ref_check.py
 Selector host context / prerequisites (incl. `mid` Linux-only fail-closed and
 `host-mid`/`fixtures`/`e2e` host-runnable details):
 sole owner is [docs/qa-package/README.md](qa-package/README.md).
+
+## Gate ordering and cost structure
+
+Why the dispatch structure looks the way it does. Nothing here changes a
+verdict; it explains the shapes `verify.sh` enforces.
+
+- **One gated test invocation per feature configuration.** The whole-surface
+  union runs lib units, `foundations`, `boot`, and the gate-only integration
+  binaries together, once witness-off and once witness-on, instead of three
+  invocations per configuration re-resolving the unit graph each time.
+- **One target directory per feature configuration**, so witness-on and
+  witness-off artifacts never share a Cargo fingerprint graph.
+- **Ordering is binding, not stylistic.** The clippy pair stays adjacent
+  (alloc-witness clippy immediately after production clippy, with the
+  alloc-witness lib last built by the witness tests), and the alloc-witness
+  tests run only *after* the alloc-witness clippy pass. The hazard this avoids
+  is an alloc-witness-clippy-after-alloc-witness-test adjacency producing a
+  clippy-per-target fingerprint `E0463` (cannot find crate `alumina`) on the
+  alloc-witness-only `mio_matrix` target over a shared target directory. That
+  is also why the union defers the boot tests until after the clippy block,
+  diverging from the standalone `mid boot` order.
+- **Container workspaces are separated.** Both Cargo target trees (production
+  release and the fixture-facts variant) live in VM-native volumes; the
+  variant keeps its own target directory so the production artifact is never
+  clobbered. The container Cargo cache and home are volumes, and only consumed
+  artifacts are copied out, under a two-sided digest assertion.
+- **One derived image.** A single digest-identified image is built once from
+  the pinned Rust base (which ships no git, clippy, or rustfmt), so a dispatch
+  performs no package or component installation per run.
+- **`ALT_` knobs are the A/B surface** for that cost structure.
+  `ALT_NO_VOLUME=1` restores host bind-mount behaviour for an
+  apples-to-apples baseline measurement; `alt image` / `alt smoke` warm and
+  prove the container plumbing and back no claim.
 
 ## Test suite navigation & ownership
 

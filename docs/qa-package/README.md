@@ -1,23 +1,16 @@
 # Alumina — local static native QA package (testQA candidate)
 
 This is the **local, isolated** static native QA package for the `alumina`
-resolver. The exercised fixture-facts variant is built from the exact current
+proxy. The exercised fixture-facts variant is built from the exact current
 source in-run by `validate.sh`. It bundles run/validation instructions, a
 non-secret example configuration, and an artifact/source identity record. It
 makes **no external deployment** and contains **no secrets**.
 
 The repository is a **scoped testQA-ready candidate**, not a
 production-qualified or externally-deployed system (qualification gates in
-[../verification.md](../verification.md)).
-
-Historically, on 2026-11-08, the local run for source revision
-`b1ff6909f215b860badec8f519349d7dc85f688c` completed its Linux union and
-boot-fixture children; the then-existing boundary wrapper's final marker remained
-**BLOCKED** with exit 1 by design. That wrapper has since been removed. Separate
-relay and shutdown E2E runs passed their selected
-local cases using a plain-DNS fixture, not a live validating-resolver matrix.
-Those receipts are scoped to that source revision and their respective
-artifacts; they do not establish deployment or release qualification.
+[../verification.md](../verification.md)). Receipts recorded against earlier
+source revisions are scoped to those revisions and establish no deployment or
+release qualification.
 
 ## Package contents
 
@@ -56,19 +49,10 @@ builds the fixture-facts variant from exact source, executes it under the
 approved privilege profile (uid 65534, `no_new_privs`, empty caps) with staged
 fixed inputs in a disposable container, bounds the child with real SIGTERM +
 10 s deadline, and asserts the typed records with guard-bitten predicates
-(plant/fail/revert/clean proven). The production release binary
-`target/release/alumina` must already be built; use `sh scripts/verify.sh mid
-union` on Linux or `sh scripts/verify.sh host-mid union` on macOS. The latter
-copies the release artifact to the host. Existing rootless **and** rootful
-Podman connections (`PODMAN_CONNECTION` / `PODMAN_ROOT_CONNECTION`) and the
-pinned base image on both are required. Connection names may be exported or set
-in the gitignored `.ooda/podman-connections.env` (sourced when present; an
-already-set environment variable wins). The derived `ALT_IMAGE` (also the
-fixture image by default) should already be present on both connections: if
-absent, the script attempts to build it, requiring network access. The harness
-does not provision VMs or connections; container runs use `--rm --pull=never`.
-No build or fixture checks should run concurrently because they share artifacts
-and volumes. The validator does not run MID, docs, audit/deny or E2E checks.
+(plant/fail/revert/clean proven). It requires a prebuilt
+`target/release/alumina` (it does not build it) and the Podman prerequisites
+listed under [Selector host context](#selector-host-context-sole-owner) below.
+The validator does not run MID, docs, audit/deny or E2E checks.
 
 ## Selector host context (sole owner)
 
@@ -144,29 +128,20 @@ missing derived image as described below.
 
 ## Example inputs are illustrative — never executed by any gate
 
-`config.example.toml` (`[allowed_fqdn."<fqdn>:<port>"]` keyed tables —
-`api.github.com:443`, `example.com:443`, `www.example.net:443`, each carrying
-`early_data = { action = "notify", scope = "connection" }` and
-`ja4 = { action = "notify", scope = "connection" }` plus a mandatory
-`dns_assurance = "resolver_trusted"` string key; `[any_illegal]` with
-the four per-control keys `connect_parse`, `host_not_allowlisted`, `tls_profile`,
-`ech`, and the three optional per-class SP-001 gate bars `[bad_handshake]`,
-`[illegal_fqdn]`, `[ja4]` (each `threshold = 1`, `window_secs = 900`,
-the SP-001 defaults); an `[early_data]` gate section is rejected at load (exit 78)
-instead of being accepted as an inert bar — resolver
-`["1.1.1.1#cloudflare-dns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-"8.8.8.8#dns.google#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-"9.9.9.9#dns.quad9.net#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-"208.67.222.222#dns.opendns.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-"94.140.14.14#dns.adguard.com#pin-sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]` —
-`IP#fqdn#pin-sha256=<b64>` strict-pin entries carrying each resolver's validated
-DoT hostname and SPKI pin (the V5 strict-pin form, null-pin syntax placeholders)
-documents a fixed, non-secret configuration shape; it is
-**illustrative only and executed by nothing**. The fixture runner stages its own
-fixed inputs; `validate.sh` never reads the example. Specifying it as a runnable
-input, or relabelling the fixture gate's inputs as the example, would be a false
-claim. The example's public resolver set is illustrative only — it is never
-executed, so nothing in this package dials any resolver it names.
+`config.example.toml` documents one fixed, non-secret configuration shape: the
+keyed `[allowed_fqdn."<fqdn>:<port>"]` allowlist with its mandatory per-entry
+controls, `[any_illegal]`, the three optional per-class gate bars, and a
+five-entry `IP#fqdn#pin-sha256=<b64>` resolver array. The schema itself is
+owned by the spec
+([§Keyed configuration schema](../alumina-proxy.md#keyed-configuration-schema));
+the `#pin-sha256=` values here are **null-pin syntax placeholders**, not
+usable credentials.
+
+The example is **illustrative only and executed by nothing**. The fixture
+runner stages its own fixed inputs and `validate.sh` never reads the example,
+so nothing in this package dials any resolver it names. Describing it as a
+runnable input, or relabelling the fixture gate's inputs as the example, would
+be a false claim.
 
 ## Protocol compatibility (workloads dialed through Alumina)
 

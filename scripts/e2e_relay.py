@@ -42,7 +42,7 @@ assertions):
                              then stays silent; echoed byte-exact across the
                              budget splits (multi-budget blackbox smoke; the
                              re-arm-resumption contract is proven by the Linux
-                             serving-seam unit tests, docs/alumina-proxy.md:146)
+                             serving-seam unit tests, §Architecture)
     POS-NO-NEW-EDGE-RETAINED a 256 KiB multi-budget up-flow (head + hello +
                              payload) sent in one burst before the 200 is read
                              and echoed byte-exact across >=3 complete-visit
@@ -820,7 +820,7 @@ def case_relay_tls13():
     OpenSSL 3.5.9 `s_client -proxy` hardcodes an HTTP/1.0 CONNECT
     (`CONNECT host:port HTTP/1.0`), which a spec-conformant HTTP/1.1-only
     CONNECT proxy correctly rejects (UnsupportedVersion -> 400,
-    docs/alumina-proxy.md:59,417), and `s_client -fd` (adopting an
+    §Protocol contract), and `s_client -fd` (adopting an
     already-connected fd) is absent from this OpenSSL line. So this case
     issues a spec-compliant HTTP/1.1 CONNECT on a raw socket and adopts the
     established tunnel via `s_client -unix` with a byte bridge, giving an
@@ -879,7 +879,7 @@ def recv_until_complete_eof(sock, rest, expected_len, *, name, timeout=20.0):
     failure and returns None. Stopping at the exact expected length would pass
     a stream that later duplicates bytes or never completes the tunnel, so EOF
     delivery is part of the completion contract (normal drain / byte
-    conservation, docs/alumina-proxy.md:191,220).
+    conservation, §The Byte-Conservation Invariant).
     """
     got = rest
     sock.settimeout(timeout)
@@ -1275,7 +1275,7 @@ def _run_positives():
     # A single lost retained edge would strand the relay tail at ~64 KiB;
     # this case exercises the reregister resumption path as blackbox
     # smoke, while the isolation contract itself is proven by the Linux
-    # serving-seam unit tests (docs/alumina-proxy.md:146 MEDIUM-3).
+    # serving-seam unit tests (§Architecture).
     case_raw_echo(
         "echo.example.org",
         {"head": None, "hello_chunks": [len(client_hello("echo.example.org"))]},
