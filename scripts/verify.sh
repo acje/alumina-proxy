@@ -248,7 +248,7 @@ mid_foundations() {
     }
     echo "WITNESS-TESTS (--features alloc-witness):"
     cargo atest -p alumina --locked --features alloc-witness --test foundations
-    echo "WITNESS-OFF-TESTS (F2/F4 subset):"
+    echo "WITNESS-OFF-TESTS (checked-in parser corpus + deterministic campaign/ownership + public-API availability; the F5/F4 remainder):"
     cargo atest -p alumina --locked --test foundations
     echo "FMT:"
     cargo fmt --check
@@ -2109,8 +2109,18 @@ inner_test() {
             exit 2
             ;;
     esac
-    echo "INNER-NO-CLAIM: host-native run of --test $_target backs no done-claim (MID/BOUNDARY own that)"
-    if cargo atest -p alumina --locked --test "$_target"; then
+    # `mio_matrix`'s crate root is `#![cfg(feature = "alloc-witness")]`, so a
+    # witness-off build compiles an EMPTY binary whose "pass" proves nothing.
+    # That one target therefore runs with the feature; every other target keeps
+    # the plain witness-off invocation.
+    _run_args="-p alumina --locked"
+    if [ "$_target" = "mio_matrix" ]; then
+        _run_args="$_run_args --features alloc-witness"
+    fi
+    _run_args="$_run_args --test $_target"
+    echo "INNER-NO-CLAIM: host-native run of cargo atest $_run_args backs no done-claim (MID/BOUNDARY own that)"
+    # shellcheck disable=SC2086
+    if cargo atest $_run_args; then
         echo "INNER-TEST-OK: $_target"
     else
         _itr=$?

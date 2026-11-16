@@ -1,3 +1,9 @@
+//! Drives the test/debug-only parser-fuzz harness (`qa::fuzz`), so this target
+//! is gated to debug builds: a release-profile build compiles it empty instead
+//! of failing on the module that the test/debug gate removes. The debug gates
+//! are its real home.
+#![cfg(debug_assertions)]
+
 #[cfg(feature = "alloc-witness")]
 use alumina::alloc::{self, Phase};
 use alumina::dns::{

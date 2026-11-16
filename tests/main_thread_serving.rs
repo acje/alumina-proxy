@@ -67,7 +67,7 @@ fn refuse_non_allowlisted_connects(runtime: &mut Runtime, port: u16) {
         Refusal::non_allowlisted_connect(
             SETTLE_TURNS,
             &format!(
-                "iteration {i}: the server must refuse a non-allowlisted CONNECT with the 403 body"
+                "iteration {i}: the server must refuse a non-allowlisted CONNECT with the 403 status and an empty body"
             ),
         )
         .drive(runtime, port);
