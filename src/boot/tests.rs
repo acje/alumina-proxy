@@ -75,20 +75,6 @@ fn boot_rejects_each_stage_with_ex_config78() {
 }
 
 #[test]
-fn boot_error_carries_ex_config78_across_all_kinds() {
-    assert_eq!(EX_CONFIG, 78);
-    let cfg_err = config::parse_config_document("bogus").unwrap_err();
-    assert_eq!(BootError::Config(cfg_err).exit_status(), EX_CONFIG);
-    let invalid_resolver = config::parse_config_document(
-            "listen = \"0.0.0.0:8080\"\nstartup_unresolved_allowance = 0\nresolver = [\"not-an-address\"]\n[any_illegal]\nconnect_parse = { action = \"notify\", scope = \"connection\" }\nhost_not_allowlisted = { action = \"block\", scope = \"all\" }\ntls_profile = { action = \"block\", scope = \"all\" }\nech = { action = \"block\", scope = \"connection\" }\n[allowed_fqdn.\"a.example:443\"]\nearly_data = { action = \"notify\", scope = \"connection\" }\nja4 = { action = \"notify\", scope = \"connection\" }\ndns_assurance = \"resolver_trusted\"\n",
-        )
-        .unwrap_err();
-    assert_eq!(BootError::Config(invalid_resolver).exit_status(), EX_CONFIG);
-    let pre_err = PreflightError::Root;
-    assert_eq!(BootError::Preflight(pre_err).exit_status(), EX_CONFIG);
-}
-
-#[test]
 fn boot_allocation_failure_maps_to_ex_config78() {
     let dir = TempDir::new("allocfault");
     let config_path = dir

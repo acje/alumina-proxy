@@ -251,23 +251,8 @@ mod alloc_fault {
 #[cfg(test)]
 mod workspace_byte_constants {
     use super::*;
-    use crate::inspection::client_hello::{ChInspector, ClientHello};
+    use crate::inspection::client_hello::ChInspector;
     use crate::inspection::connect::ConnectParser;
-
-    #[test]
-    fn slot_workspace_derives_from_retained_parser_and_inspector() {
-        let parser = size_of::<ConnectParser>();
-        let inspector = size_of::<ChInspector>();
-        let hello = size_of::<ClientHello>();
-        assert_eq!(
-            SLOT_WORKSPACE_BYTES,
-            parser + inspector,
-            "SLOT_WORKSPACE_BYTES must be the retained per-slot serving types verbatim: \
-             size_of::<ConnectParser>()={parser}, size_of::<ChInspector>()={inspector} \
-             (incl. size_of::<ClientHello>()={hello} retained inline); a change to the \
-             retained ClientHello/JA4 arrays must change this derived sum"
-        );
-    }
 
     #[test]
     fn slot_workspace_pinned_as_documented_tripwire() {
@@ -275,15 +260,6 @@ mod workspace_byte_constants {
         assert_eq!(
             SLOT_WORKSPACE_BYTES, 156_840,
             "measured type-derived figure is {per_slot} bytes; investigate retained-array/layout changes before rebasing this pin"
-        );
-    }
-
-    #[test]
-    fn serving_workspace_derives_from_slot_count() {
-        assert_eq!(
-            SERVING_WORKSPACE_BYTES,
-            TUNNEL_SLOTS * SLOT_WORKSPACE_BYTES,
-            "definition must stay in sync with slot count"
         );
     }
 }

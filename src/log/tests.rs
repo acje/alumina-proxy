@@ -564,7 +564,38 @@ mod startup_records {
     /// Every measured record must fit the shared slot and, for the monitor
     /// family, the tighter monitor-record bound.
     fn assert_worst_case_table(worst: &[(&'static str, usize)]) {
-        assert_eq!(worst.len(), 21, "every record kind is measured");
+        /// Every record kind the table must measure. The table LENGTH is not
+        /// pinned: a new kind gaining a bounded worst case is added here, and an
+        /// unrelated 22nd kind can never fail the 2 KiB-bound test.
+        const MEASURED_KINDS: [&str; 21] = [
+            "startup_warning",
+            "startup_name",
+            "startup_final",
+            "fatal",
+            "shutdown_final",
+            "reject",
+            "early_activity",
+            "capacity_high",
+            "capacity_low",
+            "queue_high",
+            "queue_low",
+            "monitor_summary",
+            "monitor_domain",
+            "monitor_capture",
+            "resolver_probe",
+            "exchange_failed",
+            "incident_open",
+            "incident_recovered",
+            "incident_summary",
+            "incident_eligible_loss",
+            "incident_eligible_recovered",
+        ];
+        for kind in MEASURED_KINDS {
+            assert!(
+                worst.iter().any(|(measured, _)| *measured == kind),
+                "the table must measure every record kind: {kind} is missing"
+            );
+        }
         for (kind_name, len) in worst {
             eprintln!(
                 "worst-case {kind_name:<16} {len:>5} B record, {:>5} B margin",

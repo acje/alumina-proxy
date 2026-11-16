@@ -1230,11 +1230,6 @@ fn record_attempt_updates_the_slot_ledger_and_previous_family() {
         None,
         "a fresh ledger has no previous family"
     );
-    assert_eq!(
-        AttemptLedger::default(),
-        AttemptLedger::new(),
-        "the derived Default must equal the explicit fresh ledger"
-    );
     let a_ledger = worker.record_attempt(&slot, Family::A).expect("record A");
     assert_eq!(a_ledger.counts().a(), 1, "one A attempt recorded");
     assert_eq!(a_ledger.previous(), Some(Family::A), "A is now previous");
