@@ -81,7 +81,7 @@ phase_mark() {
     printf 'PHASE1-TIMING: %s %s\n' "$1" "$2"
 }
 
-INTENDED="Cargo.toml Cargo.lock deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/qa/mod.rs src/qa/fuzz.rs src/config/fqdn_tests.rs src/config/mod.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/dns/resolver.rs src/dns/resolver/tests.rs src/boot/preflight.rs src/inventory.rs src/boot/mod.rs src/boot/tests.rs src/dns/cache.rs src/dns/cache/grade_key.rs src/dns/cache/grade_key/tests.rs src/dns/cache/tests.rs src/inspection/mod.rs src/inspection/connect.rs src/inspection/connect/tests.rs src/inspection/client_hello.rs src/inspection/client_hello/ja4.rs src/inspection/client_hello/tests.rs src/dns/mod.rs src/dns/outcome.rs src/dns/publication.rs src/dns/wire.rs src/dns/wire/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/dns/incident_report.rs src/dns/incident_report/tests.rs src/names/mod.rs src/names/hostname.rs src/names/hostname/tests.rs src/names/rules.rs src/log/mod.rs src/log/queue.rs src/log/sink.rs src/log/encoding.rs src/log/tests.rs src/runtime/gate.rs src/runtime/mod.rs src/runtime/owner.rs src/runtime/owner/tests.rs src/runtime/reactor.rs src/runtime/reactor/policy.rs src/runtime/reactor/reject.rs src/runtime/reactor/startup.rs src/runtime/reactor/tests.rs src/runtime/reactor/tests/refusals.rs src/runtime/storage.rs src/runtime/storage/startup_integration.rs src/runtime/storage/tests.rs src/runtime/tunnel.rs src/runtime/tunnel/tests.rs src/dns/schedule.rs src/dns/schedule/tests.rs src/dns/transport.rs src/dns/transport/registration.rs src/dns/transport/tests.rs src/dns/transport/tests/shared_armed_cache.rs src/dns/transport/dot_tests.rs tests/foundations.rs tests/boot.rs tests/support/temp_dir.rs tests/support/enforcement_tables.rs tests/support/dns_responder.rs tests/support/process_harness.rs tests/eligibility.rs tests/main_thread_serving.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
+INTENDED="Cargo.toml Cargo.lock deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/qa/mod.rs src/qa/fuzz.rs src/config/fqdn_tests.rs src/config/mod.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/dns/resolver.rs src/dns/resolver/tests.rs src/boot/preflight.rs src/inventory.rs src/boot/mod.rs src/boot/tests.rs src/dns/cache.rs src/dns/cache/grade_key.rs src/dns/cache/grade_key/tests.rs src/dns/cache/tests.rs src/inspection/mod.rs src/inspection/connect.rs src/inspection/connect/tests.rs src/inspection/client_hello.rs src/inspection/client_hello/ja4.rs src/inspection/client_hello/tests.rs src/dns/mod.rs src/dns/outcome.rs src/dns/publication.rs src/dns/wire.rs src/dns/wire/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/dns/incident_report.rs src/dns/incident_report/tests.rs src/names/mod.rs src/names/hostname.rs src/names/hostname/tests.rs src/names/rules.rs src/log/mod.rs src/log/queue.rs src/log/sink.rs src/log/encoding.rs src/log/tests.rs src/runtime/gate.rs src/runtime/mod.rs src/runtime/owner.rs src/runtime/owner/tests.rs src/runtime/reactor.rs src/runtime/reactor/policy.rs src/runtime/reactor/reject.rs src/runtime/reactor/startup.rs src/runtime/reactor/tests.rs src/runtime/reactor/tests/refusals.rs src/runtime/storage.rs src/runtime/storage/startup_integration.rs src/runtime/storage/tests.rs src/runtime/tunnel.rs src/runtime/tunnel/tests.rs src/dns/schedule.rs src/dns/schedule/tests.rs src/dns/transport.rs src/dns/transport/registration.rs src/dns/transport/tests.rs src/dns/transport/tests/shared_armed_cache.rs src/dns/transport/dot_tests.rs tests/foundations.rs tests/boot.rs tests/support/temp_dir.rs tests/support/enforcement_tables.rs tests/support/dns_responder.rs tests/support/process_harness.rs tests/eligibility.rs tests/binary_entry.rs tests/main_thread_serving.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
 
 # Doc-gate roots: the primary docs the identity snapshot covers. The Repowise
 # drift gate scans the full tracked corpus; this list keeps the boundary
@@ -282,7 +282,7 @@ mid_boot() {
 # docs/verification.md § Gate ordering and cost structure.
 # These binaries compile and assert in BOTH feature configurations, so each one
 # is a real proof in a witness-off run and in a witness-on run alike.
-GATE_ONLY_TESTS="--test eligibility --test main_thread_serving --test monitor_stdout --test stdout_stall --test stdout_closed"
+GATE_ONLY_TESTS="--test eligibility --test binary_entry --test main_thread_serving --test monitor_stdout --test stdout_stall --test stdout_closed"
 
 # Witness-on only. `mio_matrix`'s crate root is `#![cfg(feature =
 # "alloc-witness")]`, so a witness-off build compiles an EMPTY binary whose
@@ -344,7 +344,8 @@ mid_clippy() {
 
 # G8-C02 test-coverage closure: runs the gate-only test surface — lib unit tests
 # + the both-configuration gate-only integration binaries (GATE_ONLY_TESTS:
-# eligibility, main_thread_serving, monitor_stdout, stdout_stall, stdout_closed)
+# eligibility, binary_entry, main_thread_serving, monitor_stdout, stdout_stall,
+# stdout_closed; binary_entry is the only one that executes the real binary)
 # witness-off, then witness-on (which adds the alloc-witness-only mio_matrix) —
 # closing the gate coverage hole where lib units and these binaries never ran in
 # any gate selector (all prior atest invocations carried --test
@@ -2099,13 +2100,13 @@ alt_smoke() {
 inner_test() {
     _target="$1"
     case "$_target" in
-        foundations|boot|eligibility|mio_matrix|main_thread_serving|monitor_stdout|stdout_stall|stdout_closed) ;;
+        foundations|boot|eligibility|binary_entry|mio_matrix|main_thread_serving|monitor_stdout|stdout_stall|stdout_closed) ;;
         "")
             echo "INNER-TEST usage: verify.sh inner test <target>" >&2
             exit 2
             ;;
         *)
-            echo "INNER-TEST-UNKNOWN-TARGET: '$_target' is not a test target of this crate (whitelist: foundations boot eligibility mio_matrix main_thread_serving monitor_stdout stdout_stall stdout_closed)" >&2
+            echo "INNER-TEST-UNKNOWN-TARGET: '$_target' is not a test target of this crate (whitelist: foundations boot eligibility binary_entry mio_matrix main_thread_serving monitor_stdout stdout_stall stdout_closed)" >&2
             exit 2
             ;;
     esac

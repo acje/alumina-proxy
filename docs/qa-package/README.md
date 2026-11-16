@@ -67,15 +67,17 @@ missing derived image as described below.
   (atest foundations/boot tests, fmt, whitespace): the release build,
   static-ELF, clippy, and closure-metadata proofs live at `mid union`.
 - `mid full` — **Linux-only**; fail closed on any non-Linux host. Standalone
-  gate-only selector: runs the gate-only test surface (lib unit tests + the 5
+  gate-only selector: runs the gate-only test surface (lib unit tests + the 6
   both-configuration gate-only integration binaries: eligibility,
-  main_thread_serving, monitor_stdout, stdout_stall, stdout_closed)
-  witness-off, then witness-on (`--features alloc-witness`) over the same
-  surface plus the eligibility witness and the alloc-witness-only mio_matrix
-  binary (6 binaries); atest-only (no clippy/fmt). Its
-  surface is subsumed by `mid union` (one Linux dispatch, lib units +
-  foundations/boot + those 5 gate binaries witness-off, then the same surface
-  plus the alloc-witness-only mio_matrix witness-on).
+  binary_entry, main_thread_serving, monitor_stdout, stdout_stall,
+  stdout_closed) witness-off, then witness-on (`--features alloc-witness`) over
+  the same surface plus the eligibility witness and the alloc-witness-only
+  mio_matrix binary (7 binaries); atest-only (no clippy/fmt).
+  `binary_entry` is the only target that executes the real binary, pinning its
+  boot-failure arm (EX_CONFIG 78, stderr diagnostic, empty stdout); the serving
+  half is deferred. Its surface is subsumed by `mid union` (one Linux dispatch,
+  lib units + foundations/boot + those 6 gate binaries witness-off, then the
+  same surface plus the alloc-witness-only mio_matrix witness-on).
 - `host-mid foundations|boot|clippy|union|full` — host Podman dispatch of the
   corresponding Linux `mid` selector, including on macOS. Requires `podman`, a
   reachable rootless `PODMAN_CONNECTION` and the derived `ALT_IMAGE` (default

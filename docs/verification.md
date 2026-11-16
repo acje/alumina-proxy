@@ -16,16 +16,16 @@ the host's default toolchain, and container-dispatched gates resolve the pinned
 base image's default toolchain.
 
 ```
-RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --lib --test eligibility --test main_thread_serving --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, witness-off; mio_matrix is alloc-witness-only and appears in the next line
-RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_serving --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, alloc-witness — a manual reference (runs inside `mid union`)
+RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --lib --test eligibility --test binary_entry --test main_thread_serving --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, witness-off; mio_matrix is alloc-witness-only and appears in the next line
+RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --features alloc-witness --lib --test eligibility --test binary_entry --test mio_matrix --test main_thread_serving --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, alloc-witness — a manual reference (runs inside `mid union`)
 cargo fmt --check
 cargo aclippy -p alumina --locked --all-targets -- -D warnings
 sh scripts/verify.sh inner check                # INNER tier: cargo check only; host-runnable (compiles on macOS)
 sh scripts/verify.sh mid foundations            # MID tier (Linux-only, fail closed off-Linux): behavior-proof + fmt/whitespace (fast loop)
 sh scripts/verify.sh mid boot                   # MID tier (Linux-only): behavior-proof + fmt/whitespace (fast loop)
 sh scripts/verify.sh mid clippy                 # MID tier (Linux-only): clippy -D warnings (production + alloc-witness harness)
-sh scripts/verify.sh mid union                  # MID tier (Linux-only): release + static-ELF + closure metadata + clippy; runs lib units + foundations/boot + the five both-configuration gate binaries witness-off, then the same surface plus the alloc-witness-only mio_matrix witness-on
-sh scripts/verify.sh mid full                   # MID tier (Linux-only): standalone gate-only selector (lib units + the five both-configuration gate binaries witness-off, plus the alloc-witness-only mio_matrix witness-on); surface subsumed by mid union
+sh scripts/verify.sh mid union                  # MID tier (Linux-only): release + static-ELF + closure metadata + clippy; runs lib units + foundations/boot + the six both-configuration gate binaries witness-off, then the same surface plus the alloc-witness-only mio_matrix witness-on
+sh scripts/verify.sh mid full                   # MID tier (Linux-only): standalone gate-only selector (lib units + the six both-configuration gate binaries witness-off, plus the alloc-witness-only mio_matrix witness-on); surface subsumed by mid union
 sh scripts/verify.sh host-mid union             # host Podman dispatch of Linux mid union, including release artifact copy-out
 sh scripts/verify.sh host-mid foundations       # host Podman dispatch; also boot, clippy, full
 sh scripts/verify.sh docs                       # native offline docs gate: links + physical INTENDED + cfg-parentage + unsafe + spec digest
@@ -133,6 +133,11 @@ verdicts, or issue records here).
   cohesion.
 - **Shared test-only helpers** live under `tests/support/` as private `#[path]`
   modules — no Cargo target, no production export.
+- **`tests/binary_entry.rs` is the only target that executes the real binary**
+  (via `CARGO_BIN_EXE_alumina`, in a scratch working directory). It proves the
+  boot-failure arm — `EX_CONFIG` 78, the stderr diagnostic, empty stdout, and on
+  Linux that the config stage is reached only after the privilege preflight —
+  and it does not prove the serving path.
 - **Moving a suite MAY change qualified test names** (a topic child introduces a
   prefix; a same-name `#[cfg(test)]` externalization preserves it), so a move
   records its name/identity mapping.
