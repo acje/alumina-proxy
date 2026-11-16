@@ -81,7 +81,7 @@ phase_mark() {
     printf 'PHASE1-TIMING: %s %s\n' "$1" "$2"
 }
 
-INTENDED="Cargo.toml Cargo.lock deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/qa/mod.rs src/qa/fault.rs src/qa/fuzz.rs src/config/fqdn_tests.rs src/config/mod.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/dns/resolver.rs src/dns/resolver/tests.rs src/boot/preflight.rs src/inventory.rs src/boot/mod.rs src/boot/tests.rs src/dns/cache.rs src/dns/cache/grade_key.rs src/dns/cache/grade_key/tests.rs src/dns/cache/tests.rs src/inspection/mod.rs src/inspection/connect.rs src/inspection/connect/tests.rs src/inspection/client_hello.rs src/inspection/client_hello/ja4.rs src/inspection/client_hello/tests.rs src/dns/mod.rs src/dns/outcome.rs src/dns/publication.rs src/dns/wire.rs src/dns/wire/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/dns/incident_report.rs src/dns/incident_report/tests.rs src/names/mod.rs src/names/hostname.rs src/names/hostname/tests.rs src/names/rules.rs src/log/mod.rs src/log/queue.rs src/log/sink.rs src/log/encoding.rs src/log/tests.rs src/runtime/gate.rs src/runtime/mod.rs src/runtime/owner.rs src/runtime/owner/tests.rs src/runtime/reactor.rs src/runtime/reactor/policy.rs src/runtime/reactor/reject.rs src/runtime/reactor/startup.rs src/runtime/reactor/tests.rs src/runtime/reactor/tests/refusals.rs src/runtime/storage.rs src/runtime/storage/startup_integration.rs src/runtime/storage/tests.rs src/runtime/tunnel.rs src/runtime/tunnel/tests.rs src/dns/schedule.rs src/dns/schedule/tests.rs src/dns/transport.rs src/dns/transport/registration.rs src/dns/transport/tests.rs src/dns/transport/tests/shared_armed_cache.rs src/dns/transport/dot_tests.rs tests/foundations.rs tests/boot.rs tests/support/temp_dir.rs tests/support/enforcement_tables.rs tests/support/dns_responder.rs tests/support/process_harness.rs tests/eligibility.rs tests/main_thread_stack.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
+INTENDED="Cargo.toml Cargo.lock deny.toml scripts/verify.sh scripts/cargo_config_probe.py scripts/fixture_metadata_probe.py README.md src/lib.rs src/main.rs src/alloc.rs src/bin/parser_bench.rs src/qa/mod.rs src/qa/fault.rs src/qa/fuzz.rs src/config/fqdn_tests.rs src/config/mod.rs src/config/cname_bailiwick_config_tests.rs src/config/enforcement_config_tests.rs src/config/resolver_config_tests.rs src/dns/resolver.rs src/dns/resolver/tests.rs src/boot/preflight.rs src/inventory.rs src/boot/mod.rs src/boot/tests.rs src/dns/cache.rs src/dns/cache/grade_key.rs src/dns/cache/grade_key/tests.rs src/dns/cache/tests.rs src/inspection/mod.rs src/inspection/connect.rs src/inspection/connect/tests.rs src/inspection/client_hello.rs src/inspection/client_hello/ja4.rs src/inspection/client_hello/tests.rs src/dns/mod.rs src/dns/outcome.rs src/dns/publication.rs src/dns/wire.rs src/dns/wire/tests.rs src/eligibility.rs src/enforcement/action.rs src/enforcement/mod.rs src/enforcement/monitor.rs src/enforcement/monitor/tests.rs src/enforcement/policy.rs src/enforcement/policy/tests.rs src/enforcement/state.rs src/enforcement/state/tests.rs src/dns/incident_report.rs src/dns/incident_report/tests.rs src/names/mod.rs src/names/hostname.rs src/names/hostname/tests.rs src/names/rules.rs src/log/mod.rs src/log/queue.rs src/log/sink.rs src/log/encoding.rs src/log/tests.rs src/runtime/gate.rs src/runtime/mod.rs src/runtime/owner.rs src/runtime/owner/tests.rs src/runtime/reactor.rs src/runtime/reactor/policy.rs src/runtime/reactor/reject.rs src/runtime/reactor/startup.rs src/runtime/reactor/tests.rs src/runtime/reactor/tests/refusals.rs src/runtime/storage.rs src/runtime/storage/startup_integration.rs src/runtime/storage/tests.rs src/runtime/tunnel.rs src/runtime/tunnel/tests.rs src/dns/schedule.rs src/dns/schedule/tests.rs src/dns/transport.rs src/dns/transport/registration.rs src/dns/transport/tests.rs src/dns/transport/tests/shared_armed_cache.rs src/dns/transport/dot_tests.rs tests/foundations.rs tests/boot.rs tests/support/temp_dir.rs tests/support/enforcement_tables.rs tests/support/dns_responder.rs tests/support/process_harness.rs tests/eligibility.rs tests/main_thread_serving.rs tests/mio_matrix.rs tests/monitor_stdout.rs tests/stdout_stall.rs tests/stdout_closed.rs"
 
 # Doc-gate roots: the primary docs the identity snapshot covers. The Repowise
 # drift gate scans the full tracked corpus; this list keeps the boundary
@@ -275,14 +275,23 @@ mid_boot() {
 
 # Boundary-only union of the `mid foundations` and `mid boot` command sets,
 # executed once each so the boundary never runs the same native command twice.
-# `GATE_ONLY_TESTS` is the single source for the gate-only integration binaries,
-# so `mid union` and `mid full` stay in lockstep. The ordering below is binding
-# (clippy pair adjacent; alloc-witness tests only after the alloc-witness clippy
-# pass) — rationale and cost structure: docs/verification.md
-# § Gate ordering and cost structure.
-GATE_ONLY_TESTS="--test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed"
+# `GATE_ONLY_TESTS` and `ALLOC_WITNESS_ONLY_TESTS` are the single source for the
+# gate-only integration binaries, so `mid union` and `mid full` stay in lockstep.
+# The ordering below is binding (clippy pair adjacent; alloc-witness tests only
+# after the alloc-witness clippy pass) — rationale and cost structure:
+# docs/verification.md § Gate ordering and cost structure.
+# These binaries compile and assert in BOTH feature configurations, so each one
+# is a real proof in a witness-off run and in a witness-on run alike.
+GATE_ONLY_TESTS="--test eligibility --test main_thread_serving --test monitor_stdout --test stdout_stall --test stdout_closed"
 
-# The whole-surface union: lib units + foundations + boot + the gate-only binaries.
+# Witness-on only. `mio_matrix`'s crate root is `#![cfg(feature =
+# "alloc-witness")]`, so a witness-off build compiles an EMPTY binary whose
+# "pass" proves nothing — it is never evidence in a witness-off invocation and
+# is listed only in the alloc-witness one.
+ALLOC_WITNESS_ONLY_TESTS="--test mio_matrix"
+
+# The whole-surface union: lib units + foundations + boot + the both-configuration
+# gate-only binaries; the witness-on pass adds ALLOC_WITNESS_ONLY_TESTS.
 ALT_TEST_TARGETS="--test foundations --test boot $GATE_ONLY_TESTS"
 
 mid_union() {
@@ -296,7 +305,7 @@ mid_union() {
     static_gate "target/release/alumina"
     echo "FMT:"
     cargo fmt --check
-    echo "COMBINED-SUITE-WITNESS-OFF (lib units + foundations + boot + gate-only binaries):"
+    echo "COMBINED-SUITE-WITNESS-OFF (lib units + foundations + boot + both-configuration gate-only binaries):"
     # shellcheck disable=SC2086
     cargo atest -p alumina --locked --lib $ALT_TEST_TARGETS
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
@@ -304,9 +313,9 @@ mid_union() {
     cargo aclippy -p alumina --locked --all-targets -- -D warnings
     echo "CLIPPY (test-harness with alloc-witness; target dir ${ALT_AW_TARGET_DIR}):"
     cargo aclippy -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --all-targets --features alloc-witness -- -D warnings
-    echo "COMBINED-SUITE-WITNESS-ON (lib units + foundations + boot + gate-only binaries, alloc-witness):"
+    echo "COMBINED-SUITE-WITNESS-ON (same surface + alloc-witness-only mio_matrix, alloc-witness):"
     # shellcheck disable=SC2086
-    cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $ALT_TEST_TARGETS
+    cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $ALT_TEST_TARGETS $ALLOC_WITNESS_ONLY_TESTS
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"
     whitespace_gate
@@ -334,12 +343,13 @@ mid_clippy() {
 }
 
 # G8-C02 test-coverage closure: runs the gate-only test surface — lib unit tests
-# + the gate-only integration binaries (GATE_ONLY_TESTS: eligibility,
-# mio_matrix, main_thread_stack, monitor_stdout, stdout_stall, stdout_closed) —
-# witness-off then witness-on, closing the gate coverage hole where lib units
-# and these binaries never ran in any gate selector (all prior atest
-# invocations carried --test foundations|boot). foundations and boot are NOT
-# re-run here: they already run in mid union within the same BOUNDARY dispatch
+# + the both-configuration gate-only integration binaries (GATE_ONLY_TESTS:
+# eligibility, main_thread_serving, monitor_stdout, stdout_stall, stdout_closed)
+# witness-off, then witness-on (which adds the alloc-witness-only mio_matrix) —
+# closing the gate coverage hole where lib units and these binaries never ran in
+# any gate selector (all prior atest invocations carried --test
+# foundations|boot). foundations and boot are NOT re-run here: they already run
+# in mid union within the same BOUNDARY dispatch
 # (and in the mid foundations / mid boot inner loops), so re-running them here
 # would duplicate work without adding coverage.
 # atest-only — no clippy/fmt/whitespace (those are mid_union's job) — so there
@@ -358,13 +368,13 @@ mid_full() {
         echo "mid full requires Linux execution" >&2
         exit 1
     }
-    echo "GATE-ONLY-SUITE (lib units + gate-only binaries, witness-off):"
+    echo "GATE-ONLY-SUITE (lib units + both-configuration gate-only binaries, witness-off):"
     # shellcheck disable=SC2086
     cargo atest -p alumina --locked --lib $GATE_ONLY_TESTS
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
-    echo "GATE-ONLY-SUITE-WITNESS (lib units + gate-only binaries incl. mio_matrix + eligibility witness, alloc-witness):"
+    echo "GATE-ONLY-SUITE-WITNESS (the same surface + alloc-witness-only mio_matrix, alloc-witness):"
     # shellcheck disable=SC2086
-    cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $GATE_ONLY_TESTS
+    cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $GATE_ONLY_TESTS $ALLOC_WITNESS_ONLY_TESTS
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"
 }
@@ -2089,13 +2099,13 @@ alt_smoke() {
 inner_test() {
     _target="$1"
     case "$_target" in
-        foundations|boot|eligibility|mio_matrix|main_thread_stack|monitor_stdout|stdout_stall|stdout_closed) ;;
+        foundations|boot|eligibility|mio_matrix|main_thread_serving|monitor_stdout|stdout_stall|stdout_closed) ;;
         "")
             echo "INNER-TEST usage: verify.sh inner test <target>" >&2
             exit 2
             ;;
         *)
-            echo "INNER-TEST-UNKNOWN-TARGET: '$_target' is not a test target of this crate (whitelist: foundations boot eligibility mio_matrix main_thread_stack monitor_stdout stdout_stall stdout_closed)" >&2
+            echo "INNER-TEST-UNKNOWN-TARGET: '$_target' is not a test target of this crate (whitelist: foundations boot eligibility mio_matrix main_thread_serving monitor_stdout stdout_stall stdout_closed)" >&2
             exit 2
             ;;
     esac

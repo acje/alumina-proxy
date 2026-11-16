@@ -67,13 +67,15 @@ missing derived image as described below.
   (atest foundations/boot tests, fmt, whitespace): the release build,
   static-ELF, clippy, and closure-metadata proofs live at `mid union`.
 - `mid full` — **Linux-only**; fail closed on any non-Linux host. Standalone
-  gate-only selector: runs the gate-only test surface (lib unit tests + the 6
-  gate-only integration binaries: eligibility, mio_matrix, main_thread_stack,
-  monitor_stdout, stdout_stall, stdout_closed) witness-off then witness-on
-  (`--features alloc-witness`, incl. the eligibility witness and the
-  alloc-witness-only mio_matrix binary); atest-only (no clippy/fmt). Its
-  surface is subsumed by `mid union` (one Linux dispatch, lib + all eight
-  integration targets witness-off/on).
+  gate-only selector: runs the gate-only test surface (lib unit tests + the 5
+  both-configuration gate-only integration binaries: eligibility,
+  main_thread_serving, monitor_stdout, stdout_stall, stdout_closed)
+  witness-off, then witness-on (`--features alloc-witness`) over the same
+  surface plus the eligibility witness and the alloc-witness-only mio_matrix
+  binary (6 binaries); atest-only (no clippy/fmt). Its
+  surface is subsumed by `mid union` (one Linux dispatch, lib units +
+  foundations/boot + those 5 gate binaries witness-off, then the same surface
+  plus the alloc-witness-only mio_matrix witness-on).
 - `host-mid foundations|boot|clippy|union|full` — host Podman dispatch of the
   corresponding Linux `mid` selector, including on macOS. Requires `podman`, a
   reachable rootless `PODMAN_CONNECTION` and the derived `ALT_IMAGE` (default

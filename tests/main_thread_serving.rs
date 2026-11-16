@@ -1,3 +1,8 @@
+//! Proves the preallocate -> accept -> refuse -> reset serving path runs on the
+//! true process main thread without a panic. It prints `RLIMIT_STACK` as an
+//! informational fact and does NOT measure stack high-water; the real stack
+//! probe is deferred (bd `alumina-0heue`).
+
 #[path = "support/process_harness.rs"]
 mod process_harness;
 use process_harness::{Refusal, serving_config_document};
@@ -29,14 +34,18 @@ fn main() {
     refuse_non_allowlisted_connects(&mut runtime, port);
     refuse_overlong_heads(&mut runtime, port);
     println!(
-        "MAIN-THREAD-STACK-OK loops={LOOPS} accept+reset cycles on true main thread; over-long-head refusals={OVERLONG_LOOPS}"
+        "MAIN-THREAD-SERVING-OK loops={LOOPS} accept+reset cycles on true main thread; over-long-head refusals={OVERLONG_LOOPS}"
     );
 }
 
 fn report_stack_limit() {
     match rlimit_stack_readable() {
-        Some(line) => println!("RLIMIT_STACK {line}"),
-        None => println!("RLIMIT_STACK (not readable on this platform)"),
+        Some(line) => println!(
+            "RLIMIT_STACK {line} (informational; this binary does not measure stack high-water)"
+        ),
+        None => println!(
+            "RLIMIT_STACK (not readable on this platform) (informational; this binary does not measure stack high-water)"
+        ),
     }
 }
 

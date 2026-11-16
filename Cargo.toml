@@ -155,14 +155,15 @@ path = "src/lib.rs"
 name = "alumina"
 path = "src/main.rs"
 
-# harness = false: this test supplies its own `main()`, which the kernel
-# enters on the true process main thread. It probes the main-order serving
-# path (preallocate -> accept -> reset) under the deployment stack rlimit,
-# so the inline serving workspaces cannot overflow the deployment main
-# thread's RLIMIT_STACK (see tests/main_thread_stack.rs).
+# harness = false: this binary supplies its own `main()`, which the kernel
+# enters on the true process main thread, and it drives the preallocate ->
+# accept -> refuse -> reset serving path there without a panic (see
+# tests/main_thread_serving.rs). It prints RLIMIT_STACK as an informational
+# fact and does NOT measure stack high-water; the real stack probe is
+# deferred (bd `alumina-0heue`).
 [[test]]
-name = "main_thread_stack"
-path = "tests/main_thread_stack.rs"
+name = "main_thread_serving"
+path = "tests/main_thread_serving.rs"
 harness = false
 
 # harness = false: this binary steals fd 1 onto an unconsumed pipe and proves

@@ -16,16 +16,16 @@ the host's default toolchain, and container-dispatched gates resolve the pinned
 base image's default toolchain.
 
 ```
-cargo atest -p alumina --locked --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, witness-off; also covered by mid union
-cargo atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_stack --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, alloc-witness — a manual reference (runs inside `mid union`)
+RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --lib --test eligibility --test main_thread_serving --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, witness-off; mio_matrix is alloc-witness-only and appears in the next line
+RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --features alloc-witness --lib --test eligibility --test mio_matrix --test main_thread_serving --test monitor_stdout --test stdout_stall --test stdout_closed   # gate-only surface, alloc-witness — a manual reference (runs inside `mid union`)
 cargo fmt --check
 cargo aclippy -p alumina --locked --all-targets -- -D warnings
 sh scripts/verify.sh inner check                # INNER tier: cargo check only; host-runnable (compiles on macOS)
 sh scripts/verify.sh mid foundations            # MID tier (Linux-only, fail closed off-Linux): behavior-proof + fmt/whitespace (fast loop)
 sh scripts/verify.sh mid boot                   # MID tier (Linux-only): behavior-proof + fmt/whitespace (fast loop)
 sh scripts/verify.sh mid clippy                 # MID tier (Linux-only): clippy -D warnings (production + alloc-witness harness)
-sh scripts/verify.sh mid union                  # MID tier (Linux-only): release + static-ELF + closure metadata + clippy; runs the full test surface (lib + 8 integration targets) witness-off then witness-on
-sh scripts/verify.sh mid full                   # MID tier (Linux-only): standalone gate-only selector (lib units + 6 gate-only binaries) witness-off then witness-on; surface subsumed by mid union
+sh scripts/verify.sh mid union                  # MID tier (Linux-only): release + static-ELF + closure metadata + clippy; runs lib units + foundations/boot + the five both-configuration gate binaries witness-off, then the same surface plus the alloc-witness-only mio_matrix witness-on
+sh scripts/verify.sh mid full                   # MID tier (Linux-only): standalone gate-only selector (lib units + the five both-configuration gate binaries witness-off, plus the alloc-witness-only mio_matrix witness-on); surface subsumed by mid union
 sh scripts/verify.sh host-mid union             # host Podman dispatch of Linux mid union, including release artifact copy-out
 sh scripts/verify.sh host-mid foundations       # host Podman dispatch; also boot, clippy, full
 sh scripts/verify.sh docs                       # native offline docs gate: links + physical INTENDED + cfg-parentage + unsafe + spec digest
@@ -38,6 +38,11 @@ sh scripts/verify.sh identity artifact target/release/alumina
 sh scripts/verify.sh e2e relay                  # host-runnable; auto-dispatches Linux build on Darwin
 sh scripts/verify.sh e2e shutdown               # host-runnable via rootful harness
 ```
+
+The two gate-only `cargo atest` commands above carry `RUST_MIN_STACK=16777216`
+(the Linux dispatch sets the same value for the same suite in `scripts/verify.sh`):
+the lib surface overflows a smaller host default test-thread stack (observed on
+darwin), so a bare host run must carry it too.
 
 These are independent checks, not a required sequence. For an identity-stability
 check, take the before snapshot before the chosen work and the after snapshot
@@ -87,7 +92,10 @@ verdict; it explains the shapes `verify.sh` enforces.
 - **One gated test invocation per feature configuration.** The whole-surface
   union runs lib units, `foundations`, `boot`, and the gate-only integration
   binaries together, once witness-off and once witness-on, instead of three
-  invocations per configuration re-resolving the unit graph each time.
+  invocations per configuration re-resolving the unit graph each time. The
+  witness-off pass carries only the binaries that assert in both
+  configurations; the witness-on pass adds the alloc-witness-only
+  `mio_matrix`.
 - **One target directory per feature configuration**, so witness-on and
   witness-off artifacts never share a Cargo fingerprint graph.
 - **Ordering is binding, not stylistic.** The clippy pair stays adjacent
