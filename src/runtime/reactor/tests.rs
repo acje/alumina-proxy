@@ -10468,7 +10468,7 @@ fn witnessed_idle_storage(
 fn seeded_idle_expiry_case(dual_family: bool) -> IdleExpiryCase {
     use crate::dns::transport::StartupReport;
 
-    let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+    let config = config(1).with_kernel_assigned_test_listener();
     let (mut storage, mut reader) = witnessed_idle_storage(&config);
     publish_idle_expiry_a(&mut storage);
     if dual_family {
@@ -11166,7 +11166,7 @@ fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
                     octets: [9, 9, 9, 9],
                 },
             ]]);
-            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let config = config(1).with_kernel_assigned_test_listener();
             let mut storage = ServeStorage::boot(&config).unwrap();
             let (mut reader, writer) = UnixStream::pair().unwrap();
             reader.set_nonblocking(true).unwrap();
@@ -11280,7 +11280,7 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
             use crate::dns::transport::StartupReport;
 
             for full_queue in [false, true] {
-                let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+                let config = config(1).with_kernel_assigned_test_listener();
                 let (mut storage, mut reader) = witnessed_idle_storage(&config);
                 publish_idle_expiry_a_with_ttl(&mut storage, RELAY_PROOF_TTL_SECS);
                 let outcome = storage
@@ -11453,7 +11453,7 @@ fn actual_client_setup_deadline_precedes_idle_proof_expiry() {
             use crate::eligibility::NumericAddr;
             use std::os::unix::net::UnixStream;
 
-            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let config = config(1).with_kernel_assigned_test_listener();
             let mut storage = ServeStorage::boot(&config).unwrap();
             let (mut reader, writer) = UnixStream::pair().unwrap();
             reader.set_nonblocking(true).unwrap();
@@ -11597,7 +11597,7 @@ fn synthetic_expiry_clock_fault_is_reported_without_losing_poll_buffer() {
             use crate::runtime::storage::AssuranceObservation;
             use std::os::unix::net::UnixStream;
 
-            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let config = config(1).with_kernel_assigned_test_listener();
             let mut storage = ServeStorage::boot(&config).unwrap();
             let (mut reader, writer) = UnixStream::pair().unwrap();
             reader.set_nonblocking(true).unwrap();

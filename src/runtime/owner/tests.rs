@@ -2998,7 +2998,7 @@ mod startup_warning {
                 use crate::runtime::storage::AssuranceObservation;
                 use std::os::unix::net::UnixStream;
 
-                let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+                let config = config(1).with_kernel_assigned_test_listener();
                 let mut storage = ServeStorage::boot(&config).unwrap();
                 storage.publish_test_a(0);
                 let (_reader, writer) = UnixStream::pair().unwrap();
@@ -3937,7 +3937,7 @@ fn populated_seeded_owner_corroboration_probe_preserves_authorization_and_report
 
     let responder =
         spawn_bounded_responder(vec![vec![Step::NxdomainWithSoa { ttl: 300, min: 60 }]]);
-    let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+    let config = config(1).with_kernel_assigned_test_listener();
     let fqdn = config.allowlist().get(0).unwrap().clone();
     let mut storage = ServeStorage::boot(&config).unwrap();
     let name = seed_populated_families(&mut storage);
@@ -4031,7 +4031,7 @@ fn post_startup_listener_registration_failure_retains_boot_owner() {
         .spawn(|| {
             use std::os::unix::net::UnixStream;
 
-            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let config = config(1).with_kernel_assigned_test_listener();
             let mut storage = ServeStorage::boot(&config).unwrap();
             storage.publish_test_a(0);
             let (_reader, writer) = UnixStream::pair().unwrap();
@@ -4114,7 +4114,7 @@ fn post_startup_attachment_success_transfers_the_same_boot_owner() {
         .spawn(|| {
             use std::os::unix::net::UnixStream;
 
-            let config = config(ephemeral_port()).with_kernel_assigned_test_listener();
+            let config = config(1).with_kernel_assigned_test_listener();
             let mut storage = ServeStorage::boot(&config).unwrap();
             storage.publish_test_a(0);
             let (_reader, writer) = UnixStream::pair().unwrap();

@@ -1470,6 +1470,13 @@ mod hostname_rules {
 
 #[cfg(test)]
 impl Config {
+    /// Replace the configured listen endpoint with a kernel-assigned one
+    /// (`127.0.0.1:0`), so the bind picks a free port at bind time and the test
+    /// reads it back from the bound listener instead of pre-probing a port it
+    /// then has to drop (a probe-then-bind race).
+    ///
+    /// Callers first build a `Config` with any parseable port — port 0 is
+    /// rejected by validation — and this override discards it.
     pub(crate) fn with_kernel_assigned_test_listener(mut self) -> Self {
         self.listen = ListenAddr {
             ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
