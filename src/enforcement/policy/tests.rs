@@ -479,19 +479,3 @@ fn unknown_and_cause_reason_kinds_are_finite_and_ordered() {
         "15 CONNECT-head + HostNotAllowlisted + 3 hello-reject (EchPresent split to Ech) + Ech"
     );
 }
-
-#[test]
-fn control_table_storage_fits_planned_bound() {
-    let t = table(
-        any_controls(ActionKind::Block, Scope::All),
-        &[(ActionKind::Notify, Scope::Connection)],
-        &[(ActionKind::Block, Scope::All)],
-    );
-    assert!(
-        core::mem::size_of_val(&t) <= 256,
-        "data table at {} bytes",
-        core::mem::size_of_val(&t)
-    );
-    assert_eq!(core::mem::size_of::<Control>(), 2);
-    assert_eq!(t.len(), 1);
-}

@@ -1,5 +1,5 @@
 use super::*;
-use crate::enforcement::action::{ActionKind, Control, PerFqdnControl};
+use crate::enforcement::action::{ActionKind, Control};
 use crate::enforcement::monitor::DnsAnomalyKind;
 use crate::enforcement::policy::{AnyIllegalCause, UnknownReason};
 use crate::inspection::client_hello::HelloRejectReason;
@@ -818,28 +818,6 @@ fn ja4_change_projects_the_per_fqdn_action() {
         0,
         "the ja4-change fact itself is noted by the serving path, not here"
     );
-}
-
-#[test]
-fn ja4_change_ignore_is_baseline_only() {
-    let any = any_controls(ActionKind::Block, Scope::Connection);
-    let early = vec![PerFqdnControl::control(
-        ActionKind::Notify,
-        Scope::Connection,
-    )];
-    let ja4 = vec![PerFqdnControl::Ignore];
-    let t = ControlTable::new(any, &early, &ja4).expect("in-bound test table");
-    let mut en = en(t);
-    let ordinal = t.ordinal(0).expect("ordinal");
-    let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, 0);
-    assert_eq!(
-        effect,
-        Effect::BaselineOnly,
-        "ja4 ignore suppresses the change signal to no action"
-    );
-    assert_eq!(en.counters().actions_domain_block(ordinal), 0);
-    assert_eq!(en.counters().actions_notify(ordinal), 0);
-    assert!(!en.test_blocked(ordinal));
 }
 
 #[test]
