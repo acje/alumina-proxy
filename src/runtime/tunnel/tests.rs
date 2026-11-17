@@ -1518,21 +1518,26 @@ mod slot_table_machine {
         /// `occupied()` by up to 64 without the pending counter accumulating
         /// until the table is full.
         ///
-        /// The full-table [`AdmissionError::SlotCapacity`] path is reached only
-        /// from a fresh seat: when `occupied()` is at [`MAX_TUNNELS`] no seat is
-        /// left to admit, so no admitted seat is graduated and the table stays
-        /// full for the rest of the burst.
+        /// The burst admits and graduates only, so it never frees an occupied
+        /// seat and whatever `occupied()` it enters with is a floor for the
+        /// rest of the burst. The full-table [`AdmissionError::SlotCapacity`]
+        /// path is reached when `occupied()` is already [`MAX_TUNNELS`] at that
+        /// attempt: a burst entered with a full table refuses from its first
+        /// attempt with zero admissions, and the table stays full for the rest
+        /// of the burst.
         ///
-        /// [`AdmissionError::PendingCapacity`] is returned on any attempt whose
-        /// drawn peer is gated. The global [`MAX_PENDING_SETUPS`] budget gates
-        /// an attempt whose `pending()` is already at the cap; the burst cannot
-        /// spend that budget itself, because each admitted seat is graduated,
-        /// but interleaved admits from the other rules can. The per-peer
-        /// [`MAX_PENDING_PER_PEER`] budget gates an attempt that draws a peer
-        /// already holding its cap; graduating the admitted seat frees the
-        /// pending seat of that peer only, so the other peers' counts are
-        /// unchanged across attempts and a later attempt can still be refused.
-        /// Every refusal is checked against the model's own capacity state: the
+        /// The full-table check precedes every other refusal, so
+        /// [`AdmissionError::PendingCapacity`] can only be returned by an
+        /// attempt that passes it. The global [`MAX_PENDING_SETUPS`] budget
+        /// gates an attempt whose `pending()` is already at the cap; the burst
+        /// cannot spend that budget itself, because each admitted seat is
+        /// graduated, but interleaved admits from the other rules can. The
+        /// per-peer [`MAX_PENDING_PER_PEER`] budget gates such an attempt when
+        /// the drawn peer already holds its cap: graduation frees only the
+        /// drawn peer's pending seat, so the attempt restores that peer to its
+        /// entry count and every peer's count is unchanged across attempts.
+        ///
+        /// Refusals are checked against the model's own capacity state: the
         /// `occupied_at_slot_capacity` and `slot_capacity_refusal` events mark
         /// the full-table path, and `per_peer_capacity_refusal` marks a refusal
         /// gated by the drawn peer's own budget.
@@ -2750,10 +2755,6 @@ mod concurrent_admission_machine {
     )]
     #[hegel::concurrent_state_machine]
     impl Admission {
-        /// Admits a drawn peer. The capacity prediction and the admit call
-        /// share one guard, so the refusal reason is compared against the exact
-        /// state the subject decided on, never a stale pre-lock snapshot.
-        #[rule(groups = ["ops"], weight = 12.0)]
         /// Admits a drawn peer spelling. The capacity prediction and the admit
         /// call share one guard, so the refusal reason is compared against the
         /// exact state the subject decided on, never a stale pre-lock snapshot.
