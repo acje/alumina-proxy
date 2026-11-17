@@ -1410,12 +1410,23 @@ class BoundedSuite(unittest.TestCase):
         # knobs are scrubbed from the host environment so a developer's export
         # cannot stand in for the shipped default.
         inherited = {key: value for key, value in os.environ.items()
-                     if key not in ("GATE_SUITE_MIN_STACK", "RUST_MIN_STACK")}
+                     if key not in ("GATE_SUITE_BUDGET_SECS", "GATE_SUITE_MIN_STACK",
+                                    "RUST_MIN_STACK")}
         return subprocess.run(
             [shutil.which("sh") or "/bin/sh", str(self.driver), *map(str, args)],
             cwd=self.temp, text=True, capture_output=True,
             env={**inherited, "CALLS": str(self.calls),
                  "STACK_SEEN": str(self.stack_seen), **(env or {})})
+
+    def describe(self, result):
+        """The observed behaviour, so a refusal assertion reports what actually
+        happened (including a wrapper argv the helper should never have
+        assembled) rather than only that a number differed."""
+        calls = (self.calls.read_text().strip() if self.calls.exists()
+                 else "<wrapper never invoked>")
+        return (f"wrapper argv: {calls}\n"
+                f"exit: {result.returncode}\n"
+                f"stdout: {result.stdout}stderr: {result.stderr}")
 
     def test_an_absent_wrapper_fails_closed(self):
         result = self.run_bounded("suite", env={"PATH": str(self.tools)})
@@ -1429,6 +1440,15 @@ class BoundedSuite(unittest.TestCase):
         self.assertIn("GATE-SUITE-TIMEOUT-FAIL", result.stderr)
         self.assertIn("GATE-SUITE-BOUND", result.stdout)
         self.assertEqual(self.calls.read_text().strip(), "-s KILL 600 suite")
+
+    def test_a_sigkilled_suite_reports_the_137_status_as_a_timeout(self):
+        # 137 is what a `-s KILL` wrapper returns for a KILLed child (measured on
+        # GNU coreutils); its own stub makes the arm reachable on any host, so
+        # dropping 137 from the case cannot pass here.
+        self.stub("timeout", 137)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools)})
+        self.assertEqual(result.returncode, 137, self.describe(result))
+        self.assertIn("GATE-SUITE-TIMEOUT-FAIL", result.stderr)
 
     def test_a_green_suite_passes(self):
         self.stub("timeout", 0)
@@ -1460,11 +1480,63 @@ class BoundedSuite(unittest.TestCase):
         self.assertLess(elapsed, 10, f"the bound did not stop the suite: {elapsed:.1f}s")
 
     def test_the_budget_and_the_portable_kill_form_are_pinned(self):
-        self.assertIn('GATE_SUITE_BUDGET_SECS="${GATE_SUITE_BUDGET_SECS:-600}"',
+        # The `${VAR-600}` spelling (no colon) is load-bearing: unset must take
+        # the default, while an explicitly EMPTY value must stay empty and be
+        # refused below. `:-` would silently turn empty into the default, so a
+        # knob set to nothing would run at 600 s with no refusal to record.
+        self.assertIn('GATE_SUITE_BUDGET_SECS="${GATE_SUITE_BUDGET_SECS-600}"',
                       extract_budget_default().group(0))
         body = extract_function("bounded_suite")
-        self.assertIn('-s KILL "$GATE_SUITE_BUDGET_SECS" "$@"', body)
+        self.assertIn('-s KILL "$_bs_budget_secs" "$@"', body)
         self.assertNotIn("-k ", body)
+
+    def assert_budget_refused(self, value):
+        """A refused budget is refused BEFORE the wrapper: no argv assembled, no
+        GATE-SUITE-BOUND line, nothing executed. A stub that would exit 0 stands
+        in, so nothing but the refusal can produce a non-zero status here."""
+        self.stub("timeout", 0)
+        self.stub("gtimeout", 0)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools),
+                                                "GATE_SUITE_BUDGET_SECS": value})
+        note = self.describe(result)
+        self.assertNotEqual(result.returncode, 0, note)
+        self.assertIn("GATE-SUITE-TIMEOUT-UNKNOWN", result.stderr, note)
+        self.assertNotIn("GATE-SUITE-BOUND", result.stdout, note)
+        self.assertFalse(self.calls.exists(),
+                         f"the wrapper ran despite a refused budget {value!r}: {note}")
+
+    def test_a_zero_budget_is_refused_before_the_wrapper(self):
+        # A wrapper's duration 0 is "no limit" (BSD `man timeout`: "The special
+        # duration, zero, signifies no limit"; GNU behaves the same), so a zero
+        # budget is an absent bound, not a tight one - and the receipt line must
+        # never affirm a bound of 0.
+        self.assert_budget_refused("0")
+        self.assert_budget_refused("00")
+        self.assert_budget_refused("0000")
+
+    def test_an_empty_or_non_numeric_budget_is_refused_before_the_wrapper(self):
+        self.assert_budget_refused("")
+        for value in ("-600", "+600", "600.0", "600s", " 600", "600 ", "6e2",
+                      "0x258", "six hundred", "600 601"):
+            self.assert_budget_refused(value)
+
+    def test_an_unset_budget_resolves_to_the_shipped_default(self):
+        # No GATE_SUITE_BUDGET_SECS in the environment at all: the shipped
+        # default is what the wrapper is handed, and no refusal marker appears.
+        self.stub("timeout", 0)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools)})
+        self.assertEqual(result.returncode, 0, self.describe(result))
+        self.assertEqual(self.calls.read_text().strip(), "-s KILL 600 suite")
+        self.assertNotIn("GATE-SUITE-TIMEOUT", result.stderr)
+
+    def test_a_leading_zero_budget_is_accepted_as_its_value(self):
+        # "0600" is the same bound as "600"; it is accepted and handed over as
+        # 600, so no parser can read it as octal 384 or as zero.
+        self.stub("timeout", 0)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools),
+                                                "GATE_SUITE_BUDGET_SECS": "0600"})
+        self.assertEqual(result.returncode, 0, self.describe(result))
+        self.assertEqual(self.calls.read_text().strip(), "-s KILL 600 suite")
 
     def test_the_child_observes_the_shipped_stack_budget(self):
         self.stub("timeout", 0)

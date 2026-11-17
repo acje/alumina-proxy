@@ -651,12 +651,19 @@ ALT_TEST_TARGETS="--test foundations --test boot $GATE_ONLY_TESTS"
 # --- lib-suite budget --------------------------------------------------------
 # libtest has no timeout of its own, so a suite that deadlocks on a read is
 # indistinguishable from a slow one and consumes the whole gate window.
-# Measured here: the green bracketed lib run took 22.67 s for 1181 tests, while
-# the wedged one showed no progress past 60 s and was still wedged at 9 minutes.
-# 600 s is ~26x the green run and well under the window the wedge consumed. The
-# environment knob exists so the bound can be proven behaviourally (a 1 s budget
-# against `sleep 30`), not to be tuned day to day.
-GATE_SUITE_BUDGET_SECS="${GATE_SUITE_BUDGET_SECS:-600}"
+# Measured here: the green bracketed lib run reports its test execution at ~38 s
+# (35.8-39.7 s over the recorded union runs), while the wedged one showed no
+# progress past 60 s and was still wedged at 9 minutes. The bound covers the
+# WHOLE `cargo atest` invocation, so a cold build sits inside the same 600 s
+# (that cost is unmeasured). The environment knob exists so the bound can be
+# proven behaviourally (a 1 s budget against `sleep 30`), not to be tuned day to
+# day. 600 is a default, never a switch: a value that cannot bound anything --
+# empty, zero, signed, fractional, or otherwise non-decimal -- is refused by the
+# helper below, because both wrappers this repo resolves read a duration of 0 as
+# "no limit" and a receipt line must never name a bound that is not enforced.
+# The `${VAR-default}` spelling (no colon) is deliberate -- unset takes 600,
+# while an explicitly empty value stays empty and fails closed below.
+GATE_SUITE_BUDGET_SECS="${GATE_SUITE_BUDGET_SECS-600}"
 
 # The stack budget is this helper's to own, not its callers'. The lib surface
 # overflows a smaller default test-thread stack (observed on darwin, where the
@@ -671,17 +678,20 @@ GATE_SUITE_BUDGET_SECS="${GATE_SUITE_BUDGET_SECS:-600}"
 GATE_SUITE_MIN_STACK_FLOOR=16777216
 GATE_SUITE_MIN_STACK="${GATE_SUITE_MIN_STACK-$GATE_SUITE_MIN_STACK_FLOOR}"
 
-# bounded_suite <command...>: run one lib suite under that budget. The stack
-# budget is validated first, so neither an unknown-length nor an under-budgeted
-# run reaches a wrapper; the validated value is exported as RUST_MIN_STACK for
-# the invocation this helper wraps. `timeout` is resolved next, then `gtimeout`
-# (the coreutils spelling); with neither on PATH the run is refused, because an
-# unavailable bound is not an unbounded pass. The budget is enforced with
-# SIGKILL in the portable `-s KILL` form that both GNU and busybox timeout
-# accept, so a suite cannot ignore the bound. Timeout statuses are 124
-# (conventional) and 137 (measured for a KILLed child under GNU coreutils);
-# libtest's own failure exit 101 passes through unchanged and is never labelled
-# a timeout.
+# bounded_suite <command...>: run one lib suite under that budget. Both knobs are
+# validated first, so neither an unbounded, unknown-length nor under-budgeted run
+# reaches a wrapper: the stack value is exported as RUST_MIN_STACK for the
+# invocation this helper wraps, and the budget is normalised to a strictly
+# positive decimal integer. A budget is a bound or it is a refusal -- a duration
+# of 0 is "no limit" to both wrappers, so zero is refused rather than passed on,
+# and leading zeros are stripped so no parser can read `0600` as octal or as 0.
+# `timeout` is resolved next, then `gtimeout` (the coreutils spelling); with
+# neither on PATH the run is refused, because an unavailable bound is not an
+# unbounded pass. The budget is enforced with SIGKILL in the portable `-s KILL`
+# form that both GNU and busybox timeout accept, so a suite cannot ignore the
+# bound. Timeout statuses are 124 (conventional) and 137 (measured for a KILLed
+# child under GNU coreutils); libtest's own failure exit 101 passes through
+# unchanged and is never labelled a timeout.
 bounded_suite() {
     case "$GATE_SUITE_MIN_STACK" in
         "" | *[!0-9]*)
@@ -691,6 +701,23 @@ bounded_suite() {
     esac
     if [ "$GATE_SUITE_MIN_STACK" -lt "$GATE_SUITE_MIN_STACK_FLOOR" ]; then
         echo "GATE-SUITE-STACK-UNKNOWN: GATE_SUITE_MIN_STACK=${GATE_SUITE_MIN_STACK} is below the ${GATE_SUITE_MIN_STACK_FLOOR}-byte floor; refusing to run an under-budgeted lib suite" >&2
+        return 1
+    fi
+    case "$GATE_SUITE_BUDGET_SECS" in
+        "" | *[!0-9]*)
+            echo "GATE-SUITE-TIMEOUT-UNKNOWN: GATE_SUITE_BUDGET_SECS is '${GATE_SUITE_BUDGET_SECS}' -- not a decimal integer; refusing to run a lib suite under a budget that cannot bound it" >&2
+            return 1
+            ;;
+    esac
+    _bs_budget_secs="$GATE_SUITE_BUDGET_SECS"
+    while :; do
+        case "$_bs_budget_secs" in
+            0?*) _bs_budget_secs="${_bs_budget_secs#0}" ;;
+            *) break ;;
+        esac
+    done
+    if [ "$_bs_budget_secs" = 0 ]; then
+        echo "GATE-SUITE-TIMEOUT-UNKNOWN: GATE_SUITE_BUDGET_SECS=0 is a duration of zero, which both timeout and gtimeout read as 'no limit'; refusing to run a lib suite under a bound of zero" >&2
         return 1
     fi
     export RUST_MIN_STACK="$GATE_SUITE_MIN_STACK"
@@ -705,13 +732,13 @@ bounded_suite() {
         echo "GATE-SUITE-TIMEOUT-UNKNOWN: neither timeout nor gtimeout is on PATH; refusing to run a lib suite unbounded (operational absence is never a pass)" >&2
         return 1
     fi
-    echo "GATE-SUITE-BOUND: $_bs_wrapper -s KILL ${GATE_SUITE_BUDGET_SECS}s RUST_MIN_STACK=${RUST_MIN_STACK}: $*"
+    echo "GATE-SUITE-BOUND: $_bs_wrapper -s KILL ${_bs_budget_secs}s RUST_MIN_STACK=${RUST_MIN_STACK}: $*"
     _bs_rc=0
-    "$_bs_wrapper" -s KILL "$GATE_SUITE_BUDGET_SECS" "$@" || _bs_rc=$?
+    "$_bs_wrapper" -s KILL "$_bs_budget_secs" "$@" || _bs_rc=$?
     case "$_bs_rc" in
         0) ;;
         124 | 137)
-            echo "GATE-SUITE-TIMEOUT-FAIL: lib suite exceeded the ${GATE_SUITE_BUDGET_SECS}s budget and was killed ($_bs_wrapper exit $_bs_rc); a wedged suite is a failure, not a slow run" >&2
+            echo "GATE-SUITE-TIMEOUT-FAIL: lib suite exceeded the ${_bs_budget_secs}s budget and was killed ($_bs_wrapper exit $_bs_rc); a wedged suite is a failure, not a slow run" >&2
             ;;
     esac
     return "$_bs_rc"

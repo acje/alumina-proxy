@@ -261,14 +261,26 @@ Negative-control shape — the failure path is exercised, not just the clean pat
 ### The lib-suite budget
 
 Every lib-suite invocation in `mid union` and `mid full` runs under one helper,
-`bounded_suite`, with a fixed `GATE_SUITE_BUDGET_SECS` of **600 s**. libtest has
+`bounded_suite`, with a `GATE_SUITE_BUDGET_SECS` default of **600 s**. libtest has
 no timeout of its own, so a suite blocked in a read is indistinguishable from a
 slow one and consumes the whole window.
 
-The budget's evidence, measured on this repository: a green bracketed lib run
-passed 1181 tests in 22.67 s, while a wedged run printed no progress past 60 s
-and was still wedged at 9 minutes on a test blocked in `read_until`. 600 s is
-about 26x the green run and far below the window the wedge consumed.
+The bound covers the **whole `cargo atest` invocation**, not the test run: the
+command fingerprints, may relink and compiles before any test starts, so a cold
+build sits inside the same 600 s. The measured warm run reports its test
+execution at about 38 s (35.8-39.7 s over the recorded union runs), which 600 s
+admits with room; the cold-build cost on the dispatch image is **unmeasured**, so
+on a cold target directory the build is charged to the same budget. For scale, a
+wedged run printed no progress past 60 s and was still wedged at 9 minutes.
+
+The value is validated, never trusted. It must be a strictly positive decimal
+integer: unset takes 600, while empty, `0`, a sign, a decimal point, whitespace or
+any other non-digit is **refused** before a wrapper is resolved, so no
+`GATE-SUITE-BOUND` line is emitted and no command is executed. Zero is refused in
+particular because a duration of 0 means *no limit* to both implementations this
+repository resolves (BSD `timeout`, the default on macOS 15+, and GNU
+`gtimeout`): a zero budget would remove the bound while the receipt affirmed it.
+Leading zeros are stripped, so `0600` is the 600 s bound.
 
 The helper also owns the stack budget the suite runs at. The lib surface
 overflows a smaller default test-thread stack (on darwin the suite dies at
@@ -279,23 +291,41 @@ suite is not evidence either.
 
 The helper resolves `timeout`, then `gtimeout` (the coreutils spelling), and
 runs `-s KILL` at the budget: the form GNU and busybox `timeout` both accept, so
-the gate never waits past it. One receipt line and three failure markers:
+the bounded suite never waits past it. One receipt line and three failure markers:
 
 - `GATE-SUITE-BOUND` on every invocation, naming the resolved wrapper, the
   budget, the exported stack size and the command, so the receipt records the
   bound that was applied;
 - `GATE-SUITE-TIMEOUT-FAIL` when the wrapper kills the suite, with a non-zero
   exit (124 conventional, or 137 as measured for a KILLed child);
-- `GATE-SUITE-TIMEOUT-UNKNOWN` when neither wrapper is on `PATH`: the helper
-  refuses to run, because an unavailable bound is never an unbounded pass;
+- `GATE-SUITE-TIMEOUT-UNKNOWN` for the two refusals that keep a bound real:
+  neither wrapper on `PATH` (an unavailable bound is never an unbounded pass),
+  and a budget that is not a strictly positive decimal integer (a value that
+  cannot bound is refused, never handed to a wrapper that would read it as "no
+  limit");
 - `GATE-SUITE-STACK-UNKNOWN` when the stack budget is empty, non-numeric, or
   below the floor: the helper refuses before resolving a wrapper, so the suite
   runs neither unbounded nor under-budgeted.
 
 A genuine test failure is not a timeout: libtest's own exit 101 passes through
-unchanged with no timeout marker. The bound releases the gate window; it cannot
-reap a test binary cargo had already spawned, so the bracket above still owns a
-process that outlives its parent.
+unchanged with no timeout marker.
+
+The bound releases the gate window; it is not a reaper, and it does not extend
+the bracket's reach. On the timeout path `bounded_suite` returns the wrapper's
+non-zero status and `set -eu` ends the run, so the post-suite scans of *that* run
+never execute: a survivor is left to the next invocation's pre-suite (and
+pre-dispatch) scan. What `-s KILL` signals also differs by implementation. BSD
+`timeout` and GNU `timeout` signal the whole process group of the command by
+default (GNU documents the contrast under `--foreground`), so cargo and the
+lib-test binary it spawned are signalled together and leave no lib-test orphan.
+busybox `timeout` is direct-child-only -- **Unknown** here, because no busybox
+was available to measure it. Under a direct-child-only signal the lib-test binary
+survives, and it is `deps/`-shaped: the scan matches only
+`<target>/debug/build/alumina/<hash>/out/<name>-<hash>`, the shape cargo execs
+this crate's lib and gate binaries from, so a `target/debug/deps/<name>-<hash>`
+binary is never matched -- not by the post-suite scan, and not by the next
+invocation's pre-scan. A survivor of that shape is met as the wait the pre-scan
+note above describes, never as a caught leak.
 
 ## Test suite navigation & ownership
 
