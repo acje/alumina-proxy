@@ -2764,11 +2764,13 @@ alt_smoke() {
 
 # I8: host-native single-target test run for iteration speed — the inner loop for
 # someone working on one test, without a container round-trip. It backs NO
-# done-claim: MID and BOUNDARY own that. Host incompatibility is reported
-# honestly: a Linux-only assertion (epoll matrix, main-thread rlimit, stdout
-# stall) may fail on macOS/darwin, and that surfaces as
-# INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL with a pointer to the MID tier — never as
-# a pass and never as a silent skip.
+# done-claim: MID and BOUNDARY own that. The target runs as an argument to the
+# stack-owning `bounded_suite`, so this loop carries the same floor and budget as
+# the gate suites; a refused budget is reported as a budget fact (its own marker)
+# and never as a failing assertion. Host incompatibility is reported honestly: a
+# Linux-only assertion (epoll matrix, main-thread rlimit, stdout stall) may fail
+# on macOS/darwin, and that surfaces as INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL with
+# a pointer to the MID tier — never as a pass and never as a silent skip.
 inner_test() {
     _target="$1"
     case "$_target" in
@@ -2793,13 +2795,24 @@ inner_test() {
     _run_args="$_run_args --test $_target"
     echo "INNER-NO-CLAIM: host-native run of cargo atest $_run_args backs no done-claim (MID/BOUNDARY own that)"
     # shellcheck disable=SC2086
-    if cargo atest $_run_args; then
+    if bounded_suite cargo atest $_run_args; then
         echo "INNER-TEST-OK: $_target"
+        return 0
     else
         _itr=$?
-        echo "INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL: $_target exit $_itr — if this is a Linux-only assertion, run the MID tier (verify.sh mid foundations|boot|union|full) instead; this is not a pass" >&2
-        exit "$_itr"
     fi
+    case "$_itr" in
+        1)
+            echo "INNER-TEST-BUDGET-REFUSED: $_target — bounded_suite refused before a test binary ran; the GATE-SUITE-STACK-UNKNOWN or GATE-SUITE-TIMEOUT-UNKNOWN line above names the missing budget, so this is a budget fact and not a Linux-only assertion" >&2
+            ;;
+        124 | 137)
+            echo "INNER-TEST-TIMEOUT-FAIL: $_target exit $_itr — the suite was killed at GATE_SUITE_BUDGET_SECS (GATE-SUITE-TIMEOUT-FAIL above); a wedged run is a failure, not a slow pass" >&2
+            ;;
+        *)
+            echo "INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL: $_target exit $_itr — if this is a Linux-only assertion, run the MID tier (verify.sh mid foundations|boot|union|full) instead; this is not a pass" >&2
+            ;;
+    esac
+    exit "$_itr"
 }
 
 case "$TIER/$SCOPE" in

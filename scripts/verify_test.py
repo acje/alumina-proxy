@@ -1854,6 +1854,143 @@ class BoundedSuite(unittest.TestCase):
                                  f"the helper owns it: {line}")
 
 
+class InnerTest(unittest.TestCase):
+    """The seventh `cargo atest` site: `inner test <target>` is an argument to
+    the shipped `bounded_suite`, not a second stack owner with its own prefix.
+
+    The fastest loop is where the 22144 class costs most (a lib surface run at a
+    smaller host default dies at libtest exit 101 with no failing test), so the
+    pin drives the shipped `inner_test` body against a stub `cargo` and a stub
+    `timeout` on PATH: the wrapper hands the command over, and the cargo child's
+    own environment shows the floor it actually ran at."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.temp = Path(self._temp.name)
+        self.tools = self.temp / "tools"
+        self.tools.mkdir()
+        self.calls = self.temp / "cargo-calls"
+        self.stack_seen = self.temp / "stack-seen"
+        self.wrapper_calls = self.temp / "wrapper-calls"
+        self.stub("cargo",
+                  'printf "%s\\n" "$*" >> "$CARGO_CALLS"\n'
+                  'printf "%s\\n" "${RUST_MIN_STACK-<unset>}" > "$STACK_SEEN"\n'
+                  'exit "${CARGO_RC-0}"\n')
+        # The wrapper records the argv the helper assembled, then hands the
+        # command over, so the cargo stub runs as the wrapper's child exactly as
+        # a real suite would.
+        self.stub("timeout",
+                  'printf "%s\\n" "$*" >> "$WRAPPER_CALLS"\n'
+                  'shift 3\n'
+                  'exec "$@"\n')
+        self.driver = self.write_driver("inner.sh", extract_function("inner_test"))
+
+    def stub(self, name, body):
+        path = self.tools / name
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+
+    def write_driver(self, name, inner_body):
+        """Every shipped knob assignment the helper reads, the shipped helper,
+        then the shipped `inner_test` body under the interpreter options
+        scripts/verify.sh itself runs with."""
+        path = self.temp / name
+        path.write_text(
+            "set -eu\n" + "\n".join(shipped_knob_lines()) + "\n\n"
+            + extract_function("bounded_suite") + "\n\n" + inner_body
+            + '\n\ninner_test "$@"\n')
+        return path
+
+    def run_inner(self, *args, env=None, driver=None):
+        inherited = {key: value for key, value in os.environ.items()
+                     if key not in ("GATE_SUITE_BUDGET_SECS", "GATE_SUITE_MIN_STACK",
+                                    "RUST_MIN_STACK")}
+        return subprocess.run(
+            [shutil.which("sh") or "/bin/sh",
+             str(driver or self.driver), *map(str, args)],
+            cwd=self.temp, text=True, capture_output=True,
+            env={**inherited, "PATH": str(self.tools),
+                 "CARGO_CALLS": str(self.calls),
+                 "STACK_SEEN": str(self.stack_seen),
+                 "WRAPPER_CALLS": str(self.wrapper_calls), **(env or {})})
+
+    def describe(self, result):
+        calls = (self.calls.read_text().strip() if self.calls.exists()
+                 else "<cargo never invoked>")
+        wrapper = (self.wrapper_calls.read_text().strip()
+                   if self.wrapper_calls.exists() else "<wrapper never invoked>")
+        return (f"cargo argv: {calls}\nwrapper argv: {wrapper}\n"
+                f"exit: {result.returncode}\n"
+                f"stdout: {result.stdout}stderr: {result.stderr}")
+
+    def test_the_target_is_an_argument_to_the_bound_helper(self):
+        body = extract_function("inner_test")
+        self.assertEqual(body.count("bounded_suite cargo atest"), 1, body)
+        bare = [line.strip() for line in body.splitlines()
+                if line.strip().startswith("cargo atest")]
+        self.assertEqual(bare, [], f"inner_test still runs a bare cargo atest: {bare}")
+
+    def test_the_target_runs_at_the_shipped_stack_floor(self):
+        result = self.run_inner("foundations")
+        note = self.describe(result)
+        self.assertEqual(result.returncode, 0, note)
+        self.assertIn("INNER-TEST-OK: foundations", result.stdout, note)
+        shipped = shipped_min_stack()
+        self.assertEqual(self.stack_seen.read_text().strip(), shipped, note)
+        self.assertIn(f"RUST_MIN_STACK={shipped}", result.stdout, note)
+        self.assertEqual(self.calls.read_text().strip(),
+                         "atest -p alumina --locked --test foundations", note)
+        # The budget wraps the cargo invocation from this site too, in the
+        # shipped portable form the helper owns.
+        self.assertEqual(self.wrapper_calls.read_text().strip(),
+                         "-s KILL 600 cargo atest -p alumina --locked "
+                         "--test foundations", note)
+
+    def test_an_under_floor_budget_is_refused_and_never_misattributed(self):
+        result = self.run_inner("foundations", env={"GATE_SUITE_MIN_STACK": "1048576"})
+        note = self.describe(result)
+        self.assertNotEqual(result.returncode, 0, note)
+        self.assertIn("GATE-SUITE-STACK-UNKNOWN", result.stderr, note)
+        self.assertIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+        self.assertNotIn("INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL", result.stderr, note)
+        self.assertFalse(self.calls.exists(),
+                         f"cargo ran under a refused stack budget: {note}")
+        self.assertFalse(self.wrapper_calls.exists(),
+                         f"the wrapper was resolved under a refused stack budget: {note}")
+
+    def test_a_killed_run_reports_the_budget_not_an_assertion(self):
+        result = self.run_inner("foundations", env={"CARGO_RC": "124"})
+        note = self.describe(result)
+        self.assertEqual(result.returncode, 124, note)
+        self.assertIn("INNER-TEST-TIMEOUT-FAIL", result.stderr, note)
+        self.assertNotIn("INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL", result.stderr, note)
+
+    def test_a_genuine_failing_assertion_still_points_at_the_mid_tier(self):
+        result = self.run_inner("foundations", env={"CARGO_RC": "101"})
+        note = self.describe(result)
+        self.assertEqual(result.returncode, 101, note)
+        self.assertIn("INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL", result.stderr, note)
+        self.assertNotIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+
+    def test_a_bare_cargo_atest_call_turns_the_stack_pin_red(self):
+        # Plant: the routing removed, every other shipped line intact. The same
+        # driver then runs cargo with no helper, so the cargo child's
+        # RUST_MIN_STACK is unset and the floor assertion above fails -- the pin
+        # is behavioural, not a textual match on the call site.
+        shipped_body = extract_function("inner_test")
+        planted_body = shipped_body.replace(
+            "if bounded_suite cargo atest $_run_args; then",
+            "if cargo atest $_run_args; then", 1)
+        self.assertNotEqual(planted_body, shipped_body)
+        planted = self.write_driver("planted.sh", planted_body)
+        result = self.run_inner("foundations", driver=planted)
+        self.assertEqual(result.returncode, 0, self.describe(result))
+        self.assertEqual(self.stack_seen.read_text().strip(), "<unset>",
+                         "the plant still ran at a stack budget; the pin proves "
+                         "nothing: " + self.describe(result))
+
+
 class IdentityEnvRecord(unittest.TestCase):
     """L5: the declared-env record must name the stack input the helper actually
     resolves from, so a snapshot can never describe a knob nothing reads -- and it
