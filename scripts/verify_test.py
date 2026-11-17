@@ -1999,6 +1999,18 @@ def shipped_min_stack():
     return value
 
 
+def bounded_suite_source():
+    """The shipped declaration writer and the shipped helper, in the order the
+    real script defines them.
+
+    The helper calls `_bs_declare` on every return path, so a driver carrying the
+    helper without the writer does not test a channel at all: it exits with
+    'command not found' under `set -e`. One helper here keeps that pairing true
+    for both drivers."""
+    return (extract_function("_bs_declare") + "\n\n"
+            + extract_function("bounded_suite"))
+
+
 class BoundedSuite(unittest.TestCase):
     """Every lib-suite invocation runs under the shipped `bounded_suite` owner,
     text-extracted from scripts/verify.sh (never a Python re-implementation):
@@ -2017,29 +2029,47 @@ class BoundedSuite(unittest.TestCase):
         self.temp = Path(self._temp.name)
         self.tools = self.temp / "tools"
         self.tools.mkdir()
+        # The per-run channel's own prerequisites, reached exactly as InnerTest
+        # reaches them (see the note there): a directory of real utilities beside
+        # the stub directory, never a widened PATH.
+        self.util = self.temp / "util"
+        self.util.mkdir()
+        for name in ("mktemp", "cp", "rm"):
+            found = shutil.which(name)
+            self.assertIsNotNone(found,
+                                 f"{name} is a prerequisite of the per-run channel")
+            (self.util / name).symlink_to(found)
         self.calls = self.temp / "calls"
         self.stack_seen = self.temp / "stack-seen"
         self.declared = self.temp / "declared"
         # The driver is every shipped knob assignment the helper reads (in file
-        # order) plus the shipped body, under the interpreter options
+        # order) plus the shipped source, under the interpreter options
         # scripts/verify.sh itself runs with.
         self.driver = self.temp / "bounded.sh"
         self.driver.write_text(
             "set -eu\n" + "\n".join(shipped_knob_lines()) + "\n\n"
-            + extract_function("bounded_suite") + '\n\nbounded_suite "$@"\n')
+            + bounded_suite_source() + '\n\nbounded_suite "$@"\n')
+
+    # The shipped reader's shape: one declaration path per run, exported BEFORE
+    # the call and read AFTER it. `$DECLARED` stands in for the mktemp file
+    # inner_test creates, so what is left at that path is the declaration the
+    # helper's own process wrote.
+    READER = ('GATE_SUITE_DECLARATION_FILE="$DECLARED"\n'
+              'export GATE_SUITE_DECLARATION_FILE\n'
+              '_rc=0\n'
+              'bounded_suite "$@" || _rc=$?\n'
+              'exit "$_rc"\n')
 
     def declared_driver(self, name="declared.sh", body=None):
-        """The shipped helper plus a call, then the shipped DECLARATION written
-        out: the channel is read after the call, exactly as the shipped reader
-        reads it, so a helper that sets nothing is observable here."""
+        """The shipped source plus a call, then the shipped declaration left at
+        the path the caller exported: the channel is read after the call, exactly
+        as the shipped reader reads it, so a helper that writes nothing is
+        observable here as an empty (or absent) file."""
         path = self.temp / name
         path.write_text(
             "set -eu\n" + "\n".join(shipped_knob_lines()) + "\n\n"
-            + extract_function("bounded_suite") + "\n\n"
-            + (body if body is not None
-               else 'bounded_suite "$@" || _rc=$?\n'
-                    'printf "%s\\n" "${_bs_outcome-<unset>}" > "$DECLARED"\n'
-                    'exit "${_rc-0}"\n'))
+            + bounded_suite_source() + "\n\n"
+            + (body if body is not None else self.READER))
         return path
 
     def stub(self, name, rc):
@@ -2057,7 +2087,7 @@ class BoundedSuite(unittest.TestCase):
         # cannot stand in for the shipped default.
         inherited = {key: value for key, value in os.environ.items()
                      if key not in ("GATE_SUITE_BUDGET_SECS", "GATE_SUITE_MIN_STACK",
-                                    "RUST_MIN_STACK")}
+                                    "RUST_MIN_STACK", "GATE_SUITE_DECLARATION_FILE")}
         return subprocess.run(
             [shutil.which("sh") or "/bin/sh",
              str(driver or self.driver), *map(str, args)],
@@ -2065,6 +2095,13 @@ class BoundedSuite(unittest.TestCase):
             env={**inherited, "CALLS": str(self.calls),
                  "STACK_SEEN": str(self.stack_seen),
                  "DECLARED": str(self.declared), **(env or {})})
+
+    def scoped_path(self, *directories):
+        """The stub directories searched FIRST, then the driver's own utilities --
+        the shape InnerTest's reader uses, and nothing is resolved from the host
+        PATH."""
+        return ":".join([*(str(directory) for directory in directories),
+                         str(self.util)])
 
     def describe(self, result):
         """The observed behaviour, so a refusal assertion reports what actually
@@ -2317,22 +2354,27 @@ class BoundedSuite(unittest.TestCase):
         self.assertEqual(self.stack_seen.read_text().strip(), "33554432",
                          "the gate knob must win over RUST_MIN_STACK")
 
-    # The helper's own run is DECLARED, not encoded in the status it returns:
-    # the wrapped command owns that status, so no number can carry a refusal.
+    # The helper's own run is DECLARED on a separate channel, not encoded in the
+    # status it returns: the wrapped command owns that status, so no number can
+    # carry a refusal. The channel is the declaration FILE, so it survives the
+    # helper running in a subshell.
     REFUSALS = (
-        ("stack non-numeric", {"GATE_SUITE_MIN_STACK": "16M"}, "stack-unknown"),
+        ("stack non-numeric", {"GATE_SUITE_MIN_STACK": "16M"},
+         "refused:stack-unknown"),
         ("stack over the digit ceiling", {"GATE_SUITE_MIN_STACK": "9" * 19},
-         "stack-unknown"),
+         "refused:stack-unknown"),
         ("stack below the floor", {"GATE_SUITE_MIN_STACK": "1048576"},
-         "stack-unknown"),
-        ("budget non-numeric", {"GATE_SUITE_BUDGET_SECS": "600s"}, "budget-unknown"),
-        ("budget of zero", {"GATE_SUITE_BUDGET_SECS": "0"}, "budget-unknown"),
-        ("no wrapper on PATH", {"PATH": "tools"}, "wrapper-absent"),
+         "refused:stack-unknown"),
+        ("budget non-numeric", {"GATE_SUITE_BUDGET_SECS": "600s"},
+         "refused:budget-unknown"),
+        ("budget of zero", {"GATE_SUITE_BUDGET_SECS": "0"},
+         "refused:budget-unknown"),
+        ("no wrapper on PATH", {"PATH": "tools"}, "refused:wrapper-absent"),
     )
 
     def declared_after(self):
         return (self.declared.read_text().strip()
-                if self.declared.exists() else "<the driver never wrote it>")
+                if self.declared.exists() else "<no declaration file was written>")
 
     def test_every_refusal_path_declares_the_refused_check(self):
         """SIX refusal paths, and each one declares itself BY NAME.
@@ -2354,13 +2396,15 @@ class BoundedSuite(unittest.TestCase):
                 self.assertFalse(self.calls.exists(),
                                  f"the wrapper ran on a refused {name}: {note}")
 
-    def test_a_green_run_leaves_the_declaration_empty(self):
+    def test_a_green_run_declares_ok(self):
+        # `ok` means "the helper's own run is sound", not "the command passed":
+        # that is the reading the reader's 101 and operational arms depend on.
         self.stub("timeout", 0)
         result = self.run_bounded("suite", env={"PATH": str(self.tools)},
                                   driver=self.declared_driver())
         note = self.describe(result)
         self.assertEqual(result.returncode, 0, note)
-        self.assertEqual(self.declared_after(), "", note)
+        self.assertEqual(self.declared_after(), "ok", note)
 
     def test_a_killed_run_declares_the_kill_and_not_a_refusal(self):
         # 124 and 137 are the only statuses the helper itself labels a kill, so
@@ -2373,49 +2417,96 @@ class BoundedSuite(unittest.TestCase):
         self.assertEqual(self.declared_after(), "killed", note)
         self.assertIn("GATE-SUITE-TIMEOUT-FAIL", result.stderr, note)
 
-    def test_a_wrapped_failure_declares_nothing(self):
-        # The wrapped command's own status must leave the channel empty: an
-        # inherited declaration would let this run read as a refusal, and the
-        # caller would report a budget fact it never observed.
+    def test_a_wrapped_failure_declares_ok_and_never_a_refusal(self):
+        # The wrapped command's own status must leave the declaration at `ok`: a
+        # refusal would let this run read as a budget fact nobody observed, and
+        # an inherited declaration would let it read as the previous run's.
         self.stub("timeout", 101)
         result = self.run_bounded("suite", env={"PATH": str(self.tools)},
                                   driver=self.declared_driver())
         note = self.describe(result)
         self.assertEqual(result.returncode, 101, note)
-        self.assertEqual(self.declared_after(), "", note)
+        self.assertEqual(self.declared_after(), "ok", note)
 
-    def test_the_declaration_is_cleared_at_entry_by_a_later_green_run(self):
-        """A stale declaration is the failure mode a per-process assertion
-        cannot see: two calls in ONE shell, a refusal then a green run. The
-        clear must be at entry, not only on the success path, or the second
-        call inherits the first one's refusal."""
+    def test_each_run_gets_its_own_declaration_file(self):
+        """A stale declaration is the failure mode a per-process assertion cannot
+        see: two calls in ONE shell, a refusal then a green run. The per-run file
+        makes it true by construction -- each run writes only its own file -- so
+        the pin is the two DISTINCT paths and the second file's own content."""
         self.stub("timeout", 0)
-        driver = self.declared_driver("stale.sh", body=(
-            'printf "%s\\n" "${_bs_outcome-<unset>}" > "$DECLARED"\n'
+        driver = self.declared_driver("per-run.sh", body=(
             '_shipped_stack="$GATE_SUITE_MIN_STACK"\n'
             'GATE_SUITE_MIN_STACK=16M\n'
+            '_first=$(mktemp "$DECLARED_DIR/one.XXXXXX")\n'
+            'printf "%s\\n" "$_first" > "$DECLARED_FIRST_NAME"\n'
+            'GATE_SUITE_DECLARATION_FILE="$_first"\n'
+            'export GATE_SUITE_DECLARATION_FILE\n'
             'bounded_suite suite || :\n'
-            'printf "%s\\n" "${_bs_outcome-<unset>}" > "$DECLARED_REFUSED"\n'
+            'cp "$_first" "$DECLARED_REFUSED"\n'
+            'rm -f "$_first"\n'
             'GATE_SUITE_MIN_STACK="$_shipped_stack"\n'
+            '_second=$(mktemp "$DECLARED_DIR/two.XXXXXX")\n'
+            'printf "%s\\n" "$_second" > "$DECLARED_SECOND_NAME"\n'
+            'GATE_SUITE_DECLARATION_FILE="$_second"\n'
+            'export GATE_SUITE_DECLARATION_FILE\n'
             'bounded_suite suite || :\n'
-            'printf "%s\\n" "${_bs_outcome-<unset>}" > "$DECLARED_LATER"\n'
+            'cp "$_second" "$DECLARED_LATER"\n'
+            'rm -f "$_second"\n'
             'exit 0\n'))
-        before = self.temp / "before"
         refused = self.temp / "refused"
         later = self.temp / "later"
-        result = self.run_bounded(env={"PATH": str(self.tools), "DECLARED": str(before),
+        first_name = self.temp / "first-name"
+        second_name = self.temp / "second-name"
+        result = self.run_bounded(env={"PATH": self.scoped_path(self.tools),
+                                       "DECLARED_DIR": str(self.temp),
                                        "DECLARED_REFUSED": str(refused),
-                                       "DECLARED_LATER": str(later)},
+                                       "DECLARED_LATER": str(later),
+                                       "DECLARED_FIRST_NAME": str(first_name),
+                                       "DECLARED_SECOND_NAME": str(second_name)},
                                   driver=driver)
-        self.assertEqual(result.returncode, 0, self.describe(result))
-        # Before the first call the name is absent, and the reader's
-        # `${_bs_outcome-}` spelling is what keeps `set -u` from turning an
-        # absent declaration into an error.
-        self.assertEqual(before.read_text().strip(), "<unset>")
-        self.assertEqual(refused.read_text().strip(), "stack-unknown")
-        self.assertEqual(later.read_text().strip(), "",
-                         "the refusal survived into a later green run in the "
-                         "same shell: " + self.describe(result))
+        note = self.describe(result)
+        self.assertEqual(result.returncode, 0, note)
+        self.assertEqual(refused.read_text().strip(), "refused:stack-unknown", note)
+        self.assertEqual(later.read_text().strip(), "ok",
+                         "the refusal survived into a later green run in the same "
+                         "shell: " + note)
+        self.assertNotEqual(first_name.read_text().strip(),
+                            second_name.read_text().strip(),
+                            "both runs declared into ONE file, so the second run's "
+                            "content cannot be a fact about the second run: " + note)
+
+    def test_without_a_declaration_path_the_helper_writes_nothing(self):
+        """The path is the caller's to export. Unset or empty, the helper does
+        not attempt a write at all -- an announcement here would be the failed
+        write this test is looking for the absence of."""
+        self.stub("timeout", 0)
+        driver = self.declared_driver("unset.sh", body=(
+            '[ -z "${GATE_SUITE_DECLARATION_FILE-}" ] || {\n'
+            '    echo "PATH-WAS-SET: $GATE_SUITE_DECLARATION_FILE" >&2\n'
+            '    exit 9\n'
+            '}\n'
+            'bounded_suite "$@"\n'))
+        result = self.run_bounded("suite", env={"PATH": str(self.tools),
+                                                "GATE_SUITE_DECLARATION_FILE": ""},
+                                  driver=driver)
+        note = self.describe(result)
+        self.assertEqual(result.returncode, 0, note)
+        self.assertNotIn("PATH-WAS-SET", result.stderr, note)
+        self.assertNotIn("GATE-SUITE-DECLARATION-UNKNOWN", result.stderr, note)
+
+    def test_a_failed_declaration_write_is_announced_and_never_changes_the_status(self):
+        # `set -e` must never turn a channel failure into a suite failure, and a
+        # silent channel is the failure mode this file exists to remove: the
+        # write is announced and the status is the wrapped command's.
+        self.stub("timeout", 0)
+        unwritable = self.temp / "no-such-dir" / "declared"
+        result = self.run_bounded("suite", env={"PATH": str(self.tools),
+                                                "DECLARED": str(unwritable)},
+                                  driver=self.declared_driver())
+        note = self.describe(result)
+        self.assertEqual(result.returncode, 0, note)
+        self.assertIn("GATE-SUITE-DECLARATION-UNKNOWN", result.stderr, note)
+        self.assertFalse(unwritable.exists(), note)
 
     def test_every_lib_suite_call_site_goes_through_the_bound(self):
         for name in ("mid_union", "mid_full"):
@@ -2438,7 +2529,12 @@ class InnerTest(unittest.TestCase):
     smaller host default dies at libtest exit 101 with no failing test), so the
     pin drives the shipped `inner_test` body against a stub `cargo` and a stub
     `timeout` on PATH: the wrapper hands the command over, and the cargo child's
-    own environment shows the floor it actually ran at."""
+    own environment shows the floor it actually ran at.
+
+    The declaration channel is a FILE per run, so these tests can also see it:
+    the wrapper stub records the path and its mode while the run is in flight,
+    TMPDIR points at a scratch directory, and every exit path must leave that
+    directory empty."""
 
     def setUp(self):
         self._temp = tempfile.TemporaryDirectory()
@@ -2449,15 +2545,40 @@ class InnerTest(unittest.TestCase):
         self.calls = self.temp / "cargo-calls"
         self.stack_seen = self.temp / "stack-seen"
         self.wrapper_calls = self.temp / "wrapper-calls"
+        self.declaration_path = self.temp / "declaration-path"
+        self.declaration_mode = self.temp / "declaration-mode"
+        self.scratch = self.temp / "tmp"
+        self.scratch.mkdir()
+        # The reader's own prerequisites are not what these tests vary -- the
+        # wrapper's presence is. So they are reached through a directory of real
+        # utilities placed BESIDE the stub directory, never by widening PATH to
+        # /usr/bin: a host `timeout` on PATH would resurrect the wrapper a case
+        # meant to withhold and silently defeat the absent-wrapper refusal, while
+        # `mktemp`, `cat`, `rm` and `stat` here behave exactly as in a real run.
+        self.util = self.temp / "util"
+        self.util.mkdir()
+        for name in ("mktemp", "cat", "rm", "stat"):
+            found = shutil.which(name)
+            self.assertIsNotNone(found, f"{name} is a prerequisite of this reader")
+            (self.util / name).symlink_to(found)
         self.stub("cargo",
                   'printf "%s\\n" "$*" >> "$CARGO_CALLS"\n'
                   'printf "%s\\n" "${RUST_MIN_STACK-<unset>}" > "$STACK_SEEN"\n'
                   'exit "${CARGO_RC-0}"\n')
         # The wrapper records the argv the helper assembled, then hands the
         # command over, so the cargo stub runs as the wrapper's child exactly as
-        # a real suite would.
+        # a real suite would. It also records the declaration path it inherited
+        # and that file's mode WHILE IT EXISTS -- the reader removes it after the
+        # run, so the mode can only be observed from inside the run. Both `stat`
+        # spellings are supported: GNU `-c %a` first, BSD `-f %Lp` second.
         self.stub("timeout",
                   'printf "%s\\n" "$*" >> "$WRAPPER_CALLS"\n'
+                  'printf "%s\\n" "${GATE_SUITE_DECLARATION_FILE-<unset>}" '
+                  '> "$DECLARATION_PATH"\n'
+                  'if [ -n "${GATE_SUITE_DECLARATION_FILE-}" ]; then\n'
+                  '    stat -c %a "$GATE_SUITE_DECLARATION_FILE" 2>/dev/null '
+                  '|| stat -f %Lp "$GATE_SUITE_DECLARATION_FILE" 2>/dev/null\n'
+                  'fi > "$DECLARATION_MODE"\n'
                   'shift 3\n'
                   'exec "$@"\n')
         # A PATH carrying the cargo stub but no wrapper at all: the
@@ -2476,28 +2597,39 @@ class InnerTest(unittest.TestCase):
         path.chmod(0o755)
 
     def write_driver(self, name, inner_body):
-        """Every shipped knob assignment the helper reads, the shipped helper,
+        """Every shipped knob assignment the helper reads, the shipped source,
         then the shipped `inner_test` body under the interpreter options
         scripts/verify.sh itself runs with."""
         path = self.temp / name
         path.write_text(
             "set -eu\n" + "\n".join(shipped_knob_lines()) + "\n\n"
-            + extract_function("bounded_suite") + "\n\n" + inner_body
+            + bounded_suite_source() + "\n\n" + inner_body
             + '\n\ninner_test "$@"\n')
         return path
 
     def run_inner(self, *args, env=None, driver=None):
         inherited = {key: value for key, value in os.environ.items()
                      if key not in ("GATE_SUITE_BUDGET_SECS", "GATE_SUITE_MIN_STACK",
-                                    "RUST_MIN_STACK")}
+                                    "RUST_MIN_STACK", "GATE_SUITE_DECLARATION_FILE",
+                                    "TMPDIR")}
         return subprocess.run(
             [shutil.which("sh") or "/bin/sh",
              str(driver or self.driver), *map(str, args)],
             cwd=self.temp, text=True, capture_output=True,
-            env={**inherited, "PATH": str(self.tools),
+            env={**inherited, "PATH": self.scoped_path(self.tools),
                  "CARGO_CALLS": str(self.calls),
                  "STACK_SEEN": str(self.stack_seen),
-                 "WRAPPER_CALLS": str(self.wrapper_calls), **(env or {})})
+                 "WRAPPER_CALLS": str(self.wrapper_calls),
+                 "DECLARATION_PATH": str(self.declaration_path),
+                 "DECLARATION_MODE": str(self.declaration_mode),
+                 "TMPDIR": str(self.scratch), **(env or {})})
+
+    def scoped_path(self, *directories):
+        """The stub directories searched FIRST, then the reader's own utilities.
+        The host PATH is absent, so a wrapper this run means to withhold stays
+        withheld."""
+        return ":".join([*(str(directory) for directory in directories),
+                         str(self.util)])
 
     def describe(self, result):
         calls = (self.calls.read_text().strip() if self.calls.exists()
@@ -2568,7 +2700,7 @@ class InnerTest(unittest.TestCase):
              "GATE-SUITE-TIMEOUT-UNKNOWN"),
             ("budget of zero", {"GATE_SUITE_BUDGET_SECS": "0"},
              "GATE-SUITE-TIMEOUT-UNKNOWN"),
-            ("no wrapper on PATH", {"PATH": str(self.cargo_only)},
+            ("no wrapper on PATH", {"PATH": self.scoped_path(self.cargo_only)},
              "GATE-SUITE-TIMEOUT-UNKNOWN"),
         )
         for name, env, marker in cases:
@@ -2632,17 +2764,15 @@ class InnerTest(unittest.TestCase):
 
     def test_the_assertion_arm_is_pinned_by_plant_not_by_a3cce49(self):
         """101 is the ONE status this triage keeps from the old code, so it
-        cannot be red on a3cce49 -- the honest falsification is a plant: remove
-        the arm and 101 falls into the operational class, which is exactly the
+        cannot be red on a3cce49 -- the honest falsification is a plant: move the
+        arm and 101 falls into the operational class, which is exactly the
         regression (an assertion verdict turned into an unknown) this pin
         exists to refuse."""
         shipped_body = extract_function("inner_test")
-        if 'elif [ "$_itr" -eq 101 ]; then' not in shipped_body:
-            self.skipTest("this revision has no dedicated 101 arm to plant against; "
-                          "the plant is only constructible once the arm exists")
-        planted_body = shipped_body.replace(
-            'elif [ "$_itr" -eq 101 ]; then', 'elif [ "$_itr" -eq 100 ]; then', 1)
-        self.assertNotEqual(planted_body, shipped_body)
+        planted_body = shipped_body.replace("\n                101)\n",
+                                            "\n                100)\n", 1)
+        self.assertNotEqual(planted_body, shipped_body,
+                            "the shipped reader has no 101 arm to plant against")
         planted = self.write_driver("planted-101.sh", planted_body)
         result = self.run_inner("foundations", env={"CARGO_RC": "101"},
                                 driver=planted)
@@ -2655,8 +2785,9 @@ class InnerTest(unittest.TestCase):
     def test_a_bare_cargo_atest_call_turns_the_stack_pin_red(self):
         # Plant: the routing removed, every other shipped line intact. The same
         # driver then runs cargo with no helper, so the cargo child's
-        # RUST_MIN_STACK is unset and the floor assertion above fails -- the pin
-        # is behavioural, not a textual match on the call site.
+        # RUST_MIN_STACK is unset and no declaration is written at all -- the pin
+        # is behavioural, not a textual match on the call site, and the missing
+        # declaration is reported as UNKNOWN rather than as a pass.
         shipped_body = extract_function("inner_test")
         planted_body = shipped_body.replace(
             "if bounded_suite cargo atest $_run_args; then",
@@ -2664,10 +2795,150 @@ class InnerTest(unittest.TestCase):
         self.assertNotEqual(planted_body, shipped_body)
         planted = self.write_driver("planted.sh", planted_body)
         result = self.run_inner("foundations", driver=planted)
-        self.assertEqual(result.returncode, 0, self.describe(result))
+        note = self.describe(result)
         self.assertEqual(self.stack_seen.read_text().strip(), "<unset>",
                          "the plant still ran at a stack budget; the pin proves "
-                         "nothing: " + self.describe(result))
+                         "nothing: " + note)
+        self.assertIn("INNER-TEST-UNKNOWN", result.stderr, note)
+        self.assertNotIn("INNER-TEST-OK", result.stdout + result.stderr, note)
+
+    # --- the declaration channel is a file the running process writes --------
+
+    def test_a_blocked_declaration_channel_refuses_before_any_run(self):
+        """A channel that cannot be created is its own refusal: no suite run
+        starts without somewhere to report it, so cargo and the wrapper both stay
+        uninvoked and nothing is claimed. It is NOT a budget fact -- no check was
+        refused, so the reader must not report one. Both shapes are pinned: an
+        `mktemp` that runs and fails, and one that is absent altogether."""
+        failing = self.temp / "mktemp-fails"
+        failing.mkdir()
+        self.stub("mktemp", "exit 1\n", directory=failing)
+        for name, path in (
+                ("mktemp fails", self.scoped_path(failing, self.tools)),
+                ("mktemp absent", str(self.tools))):
+            with self.subTest(channel=name):
+                # Neither log may survive a previous subTest, so each shape
+                # proves cargo and the wrapper stayed uninvoked by itself.
+                self.calls.unlink(missing_ok=True)
+                self.wrapper_calls.unlink(missing_ok=True)
+                result = self.run_inner("foundations", env={"PATH": path})
+                note = self.describe(result)
+                self.assertEqual(result.returncode, 1, note)
+                self.assertIn("INNER-TEST-CHANNEL-BLOCKED", result.stderr, note)
+                self.assertFalse(self.calls.exists(),
+                                 f"cargo ran without a declaration channel "
+                                 f"({name}): {note}")
+                self.assertFalse(self.wrapper_calls.exists(),
+                                 f"the wrapper ran without a declaration channel "
+                                 f"({name}): {note}")
+                self.assertNotIn("INNER-TEST-OK", result.stdout + result.stderr, note)
+                self.assertNotIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+
+    def test_a_pipeline_call_site_still_reports_the_refusal(self):
+        """The seam: the helper runs in a subshell here, so a shell-variable
+        declaration dies with that subshell and the reader is left with its
+        operational arm -- over a run that never started. The file is written by
+        the process that ran, so the refusal arrives anyway, and the piped status
+        (0) cannot be read as a pass."""
+        shipped_body = extract_function("inner_test")
+        planted_body = shipped_body.replace(
+            "if bounded_suite cargo atest $_run_args; then",
+            "if bounded_suite cargo atest $_run_args | cat; then", 1)
+        self.assertNotEqual(planted_body, shipped_body,
+                            "the shipped reader has no single-line helper call to "
+                            "pipe")
+        planted = self.write_driver("planted-pipeline.sh", planted_body)
+        result = self.run_inner("foundations",
+                                env={"GATE_SUITE_MIN_STACK": "1048576"},
+                                driver=planted)
+        note = self.describe(result)
+        self.assertIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+        self.assertIn("declared 'stack-unknown'", result.stderr, note)
+        self.assertIn("INNER-TEST-STATUS-CONTRADICTS-DECLARATION", result.stderr,
+                      "the piped status 0 was not named as impossible against a "
+                      "refusal: " + note)
+        self.assertNotIn("INNER-TEST-OK", result.stdout + result.stderr, note)
+        self.assertNotIn("INNER-TEST-OPERATIONAL-FAIL", result.stderr, note)
+        self.assertFalse(self.calls.exists(),
+                         f"cargo ran under a refused stack budget: {note}")
+        self.assertFalse(self.wrapper_calls.exists(),
+                         f"the wrapper ran under a refused stack budget: {note}")
+        # The same plant on a green run is still a pass, so the test above shows
+        # the channel carries the refusal rather than refusing everything.
+        self.calls.unlink(missing_ok=True)
+        self.wrapper_calls.unlink(missing_ok=True)
+        green = self.run_inner("foundations", driver=planted)
+        self.assertIn("INNER-TEST-OK: foundations", green.stdout,
+                      self.describe(green))
+
+    def test_a_missing_or_garbled_declaration_is_unknown_and_never_ok(self):
+        """Every shape that is not a recognised declaration is UNKNOWN: a green
+        status with nothing behind it is exactly the false PASS this channel
+        replaced, so it must neither read as OK nor exit 0."""
+        shipped_body = extract_function("inner_test")
+        reader = ('_itr_declared=$(cat "$_it_declaration" 2>/dev/null) '
+                  '|| _itr_declared=""')
+        self.assertIn(reader, shipped_body,
+                      "the shipped reader does not read the declaration file")
+        # (a) absent: the reader exports no path, so the helper writes nothing
+        # and the per-run file stays empty.
+        absent_body = shipped_body.replace(
+            'GATE_SUITE_DECLARATION_FILE="$_it_declaration"',
+            'GATE_SUITE_DECLARATION_FILE=""', 1)
+        self.assertNotEqual(absent_body, shipped_body)
+        cases = [("absent", absent_body)]
+        for value in ("gibberish", "refused:"):
+            garbled_body = shipped_body.replace(
+                reader, f'_itr_declared="{value}"', 1)
+            self.assertNotEqual(garbled_body, shipped_body)
+            cases.append((value, garbled_body))
+        for name, body in cases:
+            with self.subTest(declaration=name):
+                planted = self.write_driver(f"planted-{name}.sh", body)
+                result = self.run_inner("foundations", driver=planted)
+                note = self.describe(result)
+                self.assertIn("INNER-TEST-UNKNOWN", result.stderr, note)
+                self.assertNotIn("INNER-TEST-OK", result.stdout + result.stderr,
+                                 note)
+                self.assertNotEqual(result.returncode, 0,
+                                    f"a run whose declaration was {name} exited "
+                                    f"0, which is a false PASS: {note}")
+
+    def test_the_declaration_file_is_private_and_removed_on_every_exit_path(self):
+        """One fresh file per run, mode 0600 while the run is in flight, and gone
+        afterwards -- including the refusal, kill, wrapped-failure and unknown
+        paths, so no run can leave a declaration for the next one to read."""
+        reader = ('_itr_declared=$(cat "$_it_declaration" 2>/dev/null) '
+                  '|| _itr_declared=""')
+        shipped_body = extract_function("inner_test")
+        unknown = self.write_driver(
+            "planted-unknown-cleanup.sh",
+            shipped_body.replace(reader, '_itr_declared="gibberish"', 1))
+        for name, env, driver in (
+                ("green", {}, None),
+                ("wrapped failure", {"CARGO_RC": "1"}, None),
+                ("killed", {"CARGO_RC": "124"}, None),
+                ("refused", {"GATE_SUITE_MIN_STACK": "1048576"}, None),
+                ("unknown", {}, unknown)):
+            with self.subTest(exit_path=name):
+                for path in (self.declaration_path, self.declaration_mode):
+                    path.unlink(missing_ok=True)
+                result = self.run_inner("foundations", env=env, driver=driver)
+                note = self.describe(result)
+                self.assertEqual(
+                    sorted(path.name for path in self.scratch.iterdir()), [],
+                    f"the {name} path left a declaration file behind: {note}")
+                if name == "refused":
+                    # No wrapper ran, so no mode was observed; the isolation
+                    # above is the whole claim there.
+                    continue
+                recorded = self.declaration_path.read_text().strip()
+                self.assertTrue(recorded.startswith(str(self.scratch)),
+                                f"the declaration file was not created under "
+                                f"TMPDIR: {note}")
+                self.assertEqual(self.declaration_mode.read_text().strip(), "600",
+                                 f"the declaration file was not private while the "
+                                 f"run was in flight: {note}")
 
 
 BOUNDED_SUITE_TOKEN = re.compile(r"\bbounded_suite\b")
@@ -2949,15 +3220,31 @@ def carried_span_shapes(units, bodies):
     return carried
 
 
+def lint_bounded_suite_call_sites(text):
+    """The lint entry point: (accepted, warnings) for every call site in a script.
+
+    LINT SEMANTICS: it may warn, it may not certify. A hazard it names is worth
+    reading; a clean report is NOT evidence that the declaration survives, because
+    the property (which shell ran the helper) is dynamic and this is text. The
+    declaration itself is carried in a file the running process writes, so no
+    caller's correctness depends on this report -- including the shipped script's.
+    """
+    accepted, refused = scan_bounded_suite_call_sites(text)
+    return accepted, refused
+
+
 def scan_bounded_suite_call_sites(text):
     """(accepted, refused) for every `bounded_suite` occurrence in a script.
 
-    A declaration only exists if it survives to the reader, so every call must
-    run in the CURRENT shell. The hazard layer runs FIRST and the diagnostic
-    allowance is applied only to what survives it, so an allowance can never
-    act as a line filter over a raw span. Every occurrence is examined, not just
-    the first, because a second call on a known unit is exactly where a lossy
-    shape hides.
+    A call written in a child shell cannot declare anything to a reader in this
+    one, so the interesting question is which shell runs it. This classifier
+    answers that from the text, which is why it can only ever be a lint: the file
+    channel is what actually survives a subshell call site.
+
+    The hazard layer runs FIRST and the diagnostic allowance is applied only to
+    what survives it, so an allowance can never act as a line filter over a raw
+    span. Every occurrence is examined, not just the first, because a second call
+    on a known unit is exactly where a lossy shape hides.
 
     The scan unit is the shell command unit, not the physical line: POSIX
     removes an unquoted backslash-newline before tokenizing, so an operator
@@ -2968,8 +3255,7 @@ def scan_bounded_suite_call_sites(text):
     Each entry is `(line_number, shape, line)`, where the line number is the
     FIRST physical line of the unit and the text is that line's stripped text,
     never the joined text. Refusals name the line and the shape; accepted
-    entries carry the shape too, so a count mismatch has something readable to
-    report and the anchor is never the only witness."""
+    entries carry the shape too, so a report has something readable to say."""
     accepted, refused = [], []
     bodies = heredoc_body_lines(text)
     units = joined_command_units(text, bodies)
@@ -2999,41 +3285,65 @@ def scan_bounded_suite_call_sites(text):
     return accepted, refused
 
 
-class ChannelSoundness(unittest.TestCase):
-    """The declaration is a channel, so its soundness condition is that every
-    call site runs in the CURRENT shell. A subshell call loses it silently: the
-    reader sees an empty channel, takes the operational arm, and every message
-    stays literally true while the budget fact disappears -- a control whose
-    failure mode is silence. So the shape is PINNED, not assumed.
+class CallSiteLint(unittest.TestCase):
+    """LINT: it may warn, it may not certify.
 
-    Falsified BY PLANT, not against a3cce49: a3cce49 has no subshell call site,
-    so green there is correct and would prove nothing."""
+    This layer used to be a named pin: `ChannelSoundness` claimed to prove every
+    call site ran the helper in the current shell, so a subshell call could not
+    lose the declaration silently. It could -- three adversarial rounds found a
+    new blind spot each time (an echo-prefixed line, a trailing `&`, a
+    continuation line), because the property is DYNAMIC and the analysis was
+    textual. The declaration is now a file the running process writes, so no test
+    here needs to be right about the shell: what remains is a lint over the call
+    sites, reported for a reader.
+
+    What still holds as a test is the lint's OWN shape-naming: every shape it
+    claims to recognise is planted here, and a classifier change that stops
+    naming one turns its plant red. Nothing in this class may fail because
+    scripts/verify.sh contains a hazard -- that is a warning for a reader, not a
+    gate."""
+
+    # A hazard-free baseline the plant tests build on. The shipped script is the
+    # lint's SUBJECT, never a plant's baseline: a test here must not be able to
+    # fail on a hazard that lives in scripts/verify.sh.
+    BASELINE = ("#!/bin/sh\n"
+                "bounded_suite cargo atest -p alumina --lib\n")
 
     def shipped(self):
         return (ROOT / "scripts/verify.sh").read_text()
 
     def planted(self, plant):
-        """The shipped text with one plant appended, and the plant's line number."""
-        text = self.shipped().rstrip("\n")
+        """The baseline with one plant appended, and the plant's line number."""
+        text = self.BASELINE.rstrip("\n")
         return text + "\n" + plant + "\n", len(text.splitlines()) + 1
 
-    def test_every_call_site_invokes_the_helper_in_the_current_shell(self):
+    def test_the_shipped_report_names_a_line_and_a_shape_for_every_warning(self):
+        """Report quality only: a warning a reader cannot act on is noise, so
+        every one carries a 1-based line number, a shape name and the text of
+        the line it is about. The list itself is NOT asserted empty -- a hazard
+        in scripts/verify.sh is not this layer's verdict to fail."""
+        _accepted, warnings = lint_bounded_suite_call_sites(self.shipped())
+        for entry in warnings:
+            self.assertEqual(len(entry), 3,
+                             f"a warning is not (line, shape, line): {entry}")
+            number, shape, line = entry
+            self.assertIsInstance(number, int, f"warning carries no line: {entry}")
+            self.assertGreaterEqual(number, 1, f"warning line is not 1-based: {entry}")
+            self.assertIsInstance(shape, str, f"warning names no shape: {entry}")
+            self.assertTrue(shape.strip(), f"warning names an empty shape: {entry}")
+            self.assertIsInstance(line, str, f"warning carries no line text: {entry}")
+
+    def test_the_shipped_path_reports_a_planted_hazard_readably(self):
+        """The same report, on the real document: a legal-or-lossy call appended
+        to scripts/verify.sh is named at its own line with its own shape. This is
+        what a reader gets; it is not a verdict on what was already there."""
         text = self.shipped()
-        accepted, refused = scan_bounded_suite_call_sites(text)
-        self.assertEqual(refused, [], "\n".join(
-            f"scripts/verify.sh:{number}: {shape} -- {line}"
-            for number, shape, line in refused))
-        self.assertTrue(accepted, "no bounded_suite call site found at all")
-        # The count anchor is an anti-vacuity backstop, not a detector: every
-        # hazard shape has its own named refusal above, so a mismatch here means
-        # the guarded set moved for a reason no shape names. It must still be
-        # readable, so it names each accepted site with its line and its shape.
-        anchored = text.count("bounded_suite cargo atest")
-        self.assertEqual(len(accepted), anchored, "\n".join(
-            [f"accepted call sites {len(accepted)} and anchored call sites "
-             f"{anchored} disagree"]
-            + [f"scripts/verify.sh:{number}: {shape} -- {line}"
-               for number, shape, line in accepted]))
+        first_planted = len(text.splitlines()) + 1
+        _accepted, warnings = lint_bounded_suite_call_sites(
+            text + "\n" + "bounded_suite cargo atest -p alumina --lib | cat\n")
+        planted = [entry for entry in warnings if entry[0] >= first_planted]
+        self.assertEqual([shape for _, shape, _ in planted], ["pipeline"])
+        self.assertIn("bounded_suite cargo atest", planted[0][2])
 
     # One line per shape, each carrying the anchored spelling so the count stays
     # constant and only the shape check can catch it.
@@ -3054,16 +3364,18 @@ class ChannelSoundness(unittest.TestCase):
          'env FOO=1 bounded_suite cargo atest -p alumina --lib'),
     )
 
-    def test_each_lossy_shape_turns_the_pin_red(self):
-        """A pin that cannot be made red is decorative, so every shape this
-        scanner claims to refuse is planted here and must be named."""
+    def test_each_lossy_shape_is_named_by_the_lint(self):
+        """A lint that cannot name the shape it claims to know is decoration, so
+        every shape is planted here and must be named. This is a test of the
+        classifier, not of any script it is run over."""
         for expected, planted in self.PLANTS:
             with self.subTest(shape=expected):
-                accepted, refused = scan_bounded_suite_call_sites(
-                    self.shipped() + "\n" + planted + "\n")
+                text, first_planted = self.planted(planted)
+                accepted, warnings = lint_bounded_suite_call_sites(text)
                 self.assertEqual(
-                    [shape for _, shape, _ in refused], [expected],
-                    f"the planted {expected} line was not refused: {refused}")
+                    [(number, shape) for number, shape, _ in warnings],
+                    [(first_planted, expected)],
+                    f"the planted {expected} line was not named: {warnings}")
                 self.assertNotIn(planted, [line for _, _, line in accepted])
 
     # The permanent probes: the three forms that were accepted in silence plus
@@ -3232,33 +3544,17 @@ class ChannelSoundness(unittest.TestCase):
                                  f"lossy shape: {refused}")
                 self.assertEqual(accepted, [(1, "current-shell call", probe)])
 
-    def test_the_anchor_is_a_backstop_and_names_the_line_it_cannot_count(self):
-        """`bounded_suite "$@"` is a legitimate current-shell call, so no shape
-        check can catch it -- the anchor is the anti-vacuity backstop for the
-        guarded set itself. Demoted, not decorative: when it fires it also
-        names the line and the shape it saw."""
-        text = self.shipped()
-        accepted, refused = scan_bounded_suite_call_sites(text)
-        self.assertEqual(refused, [])
-        anchored = text.count("bounded_suite cargo atest")
-        self.assertEqual(len(accepted), anchored, "the shipped text is the baseline")
-        planted = text + '\nbounded_suite "$@"\n'
-        accepted_planted, refused_planted = scan_bounded_suite_call_sites(planted)
-        self.assertEqual(refused_planted, [],
-                         "the planted call is current-shell, so the shape layer "
-                         f"must leave it alone: {refused_planted}")
-        self.assertEqual(len(accepted_planted), anchored + 1)
-        self.assertNotEqual(len(accepted_planted),
-                            planted.count("bounded_suite cargo atest"),
-                            "the count anchor did not notice an unanchored call site")
-        named = [entry for entry in accepted_planted
-                 if entry[1:] == ("current-shell call", 'bounded_suite "$@"')]
-        self.assertEqual(len(named), 1, accepted_planted)
-        number, shape, line = named[0]
-        self.assertGreater(number, len(text.splitlines()),
-                           "the anchor named no planted line")
-        self.assertEqual(shape, "current-shell call")
-        self.assertEqual(line, 'bounded_suite "$@"')
+    def test_an_unanchored_current_shell_call_is_accepted_and_named(self):
+        """`bounded_suite "$@"` is a legitimate current-shell call that no shape
+        check can object to, and nothing counts it any more: the lint names it as
+        accepted at its own line, which is all a lint owes a reader."""
+        text = self.BASELINE.rstrip("\n") + '\nbounded_suite "$@"\n'
+        accepted, warnings = lint_bounded_suite_call_sites(text)
+        self.assertEqual(warnings, [],
+                         f"a current-shell call is not a warning: {warnings}")
+        self.assertEqual([entry[1:] for entry in accepted],
+                         [("current-shell call", "bounded_suite cargo atest -p alumina --lib"),
+                          ("current-shell call", 'bounded_suite "$@"')])
 
 
 class IdentityEnvRecord(unittest.TestCase):

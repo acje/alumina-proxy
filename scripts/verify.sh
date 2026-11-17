@@ -709,26 +709,45 @@ GATE_SUITE_MIN_STACK="${GATE_SUITE_MIN_STACK-${RUST_MIN_STACK-$GATE_SUITE_MIN_ST
 # number, 125|126|127 are the wrapper's operational vocabulary while a
 # `harness = false` binary owns numbers of its own, and a command that exits 124
 # by itself is indistinguishable, by number, from one the bound killed. What the
-# helper knows about its own run is therefore DECLARED, not encoded:
-# `_bs_outcome` is cleared at entry, carries the refused check's name on every
-# path that returns before a wrapper runs (`stack-unknown` x3, `budget-unknown`
-# x2, `wrapper-absent`), and carries `killed` on the path that printed
-# GATE-SUITE-TIMEOUT-FAIL. A caller that triages reads that declaration; no exit
-# status is minted and no number means two things.
+# helper knows about its own run is therefore DECLARED on a separate channel, not
+# encoded: exactly one line -- `ok`, `refused:<check>` or `killed` -- is written
+# to the path the caller exported as GATE_SUITE_DECLARATION_FILE. `ok` means the
+# helper's own run is sound (a wrapper ran and reported no kill) and the status
+# belongs to the command; `refused:<check>` names the check that ran nothing; and
+# `killed` is the path that printed GATE-SUITE-TIMEOUT-FAIL. A caller that
+# triages reads that file; no exit status is minted and no number means two
+# things.
+# The channel is a FILE and not a shell variable, because a variable dies with
+# the shell that sets it: any call site that runs this helper in a subshell -- a
+# pipeline, command substitution, backticks, `&` -- left the reader with an empty
+# channel and so the operational arm, where every message stayed literally true
+# while the budget fact disappeared. The process that ran is the process that
+# writes, so the declaration arrives whichever shell ran the helper. Textual
+# analysis of the call sites could only ever approximate that dynamic property,
+# and three rounds of it each opened a new blind spot; the file answers the
+# question instead of approximating it. Nothing is written when the path is unset
+# or empty, and a failed write is ANNOUNCED (GATE-SUITE-DECLARATION-UNKNOWN)
+# without ever changing the status.
 # Considered and rejected: a dedicated refusal status (69, EX_UNAVAILABLE),
 # whose census proved the number free across scripts/ and tests/ on 2026-11-17
 # (bd alumina-6la92, evidence in .ooda/tmp/69-standdown-20261117T150858Z/). It
 # is rejected because a wrapped command that itself exits 69 is indistinguishable
 # from the refusal by status alone: that residual can be documented but never
-# pinned, while the channel's own failure mode -- a call site inside a subshell --
-# is pinned by ChannelSoundness in scripts/verify_test.py.
+# pinned, which is why the declaration is carried out of band.
+_bs_declare() {
+    [ -n "${GATE_SUITE_DECLARATION_FILE-}" ] || return 0
+    if ! printf '%s\n' "$1" >"$GATE_SUITE_DECLARATION_FILE" 2>/dev/null; then
+        echo "GATE-SUITE-DECLARATION-UNKNOWN: could not write '$1' to GATE_SUITE_DECLARATION_FILE='${GATE_SUITE_DECLARATION_FILE}'; the run still happened, but its declaration is lost, so a reader must report an unknown outcome rather than a pass" >&2
+    fi
+    return 0
+}
+
 bounded_suite() {
-    _bs_outcome=""
     _bs_stack="$GATE_SUITE_MIN_STACK"
     case "$_bs_stack" in
         "" | *[!0-9]*)
             echo "GATE-SUITE-STACK-UNKNOWN: the test-thread stack resolved to '${_bs_stack}' (GATE_SUITE_MIN_STACK, else RUST_MIN_STACK, else the floor) -- not a byte count; refusing to run a lib suite at an unknown test-thread stack" >&2
-            _bs_outcome="stack-unknown"
+            _bs_declare "refused:stack-unknown"
             return 1
             ;;
     esac
@@ -741,18 +760,18 @@ bounded_suite() {
     [ -n "$_bs_stack" ] || _bs_stack=0
     if [ "${#_bs_stack}" -gt "$GATE_SUITE_MIN_STACK_MAX_DIGITS" ]; then
         echo "GATE-SUITE-STACK-UNKNOWN: the test-thread stack resolved to ${_bs_stack}, ${#_bs_stack} digits -- above the ${GATE_SUITE_MIN_STACK_MAX_DIGITS}-digit ceiling a shell comparison can represent; refusing to run a lib suite at an unknown test-thread stack" >&2
-        _bs_outcome="stack-unknown"
+        _bs_declare "refused:stack-unknown"
         return 1
     fi
     if [ "$_bs_stack" -lt "$GATE_SUITE_MIN_STACK_FLOOR" ]; then
         echo "GATE-SUITE-STACK-UNKNOWN: the test-thread stack resolved to ${_bs_stack} (GATE_SUITE_MIN_STACK, else RUST_MIN_STACK, else the floor) -- below the ${GATE_SUITE_MIN_STACK_FLOOR}-byte floor; refusing to run an under-budgeted lib suite" >&2
-        _bs_outcome="stack-unknown"
+        _bs_declare "refused:stack-unknown"
         return 1
     fi
     case "$GATE_SUITE_BUDGET_SECS" in
         "" | *[!0-9]*)
             echo "GATE-SUITE-TIMEOUT-UNKNOWN: GATE_SUITE_BUDGET_SECS is '${GATE_SUITE_BUDGET_SECS}' -- not a decimal integer; refusing to run a lib suite under a budget that cannot bound it" >&2
-            _bs_outcome="budget-unknown"
+            _bs_declare "refused:budget-unknown"
             return 1
             ;;
     esac
@@ -765,7 +784,7 @@ bounded_suite() {
     done
     if [ "$_bs_budget_secs" = 0 ]; then
         echo "GATE-SUITE-TIMEOUT-UNKNOWN: GATE_SUITE_BUDGET_SECS=0 is a duration of zero, which both timeout and gtimeout read as 'no limit'; refusing to run a lib suite under a bound of zero" >&2
-        _bs_outcome="budget-unknown"
+        _bs_declare "refused:budget-unknown"
         return 1
     fi
     export RUST_MIN_STACK="$_bs_stack"
@@ -778,17 +797,22 @@ bounded_suite() {
     done
     if [ -z "$_bs_wrapper" ]; then
         echo "GATE-SUITE-TIMEOUT-UNKNOWN: neither timeout nor gtimeout is on PATH; refusing to run a lib suite unbounded (operational absence is never a pass)" >&2
-        _bs_outcome="wrapper-absent"
+        _bs_declare "refused:wrapper-absent"
         return 1
     fi
     echo "GATE-SUITE-BOUND: $_bs_wrapper -s KILL ${_bs_budget_secs}s RUST_MIN_STACK=${RUST_MIN_STACK}: $*"
     _bs_rc=0
     "$_bs_wrapper" -s KILL "$_bs_budget_secs" "$@" || _bs_rc=$?
     case "$_bs_rc" in
-        0) ;;
         124 | 137)
             echo "GATE-SUITE-TIMEOUT-FAIL: lib suite exceeded the ${_bs_budget_secs}s budget and was killed ($_bs_wrapper exit $_bs_rc); a wedged suite is a failure, not a slow run" >&2
-            _bs_outcome="killed"
+            _bs_declare "killed"
+            ;;
+        *)
+            # The wrapper ran and reported no kill, so the helper's own run is
+            # sound: a nonzero status here belongs to the command, and a reader
+            # that saw `refused` would report a budget fact nobody observed.
+            _bs_declare "ok"
             ;;
     esac
     return "$_bs_rc"
@@ -2960,15 +2984,24 @@ alt_smoke() {
 # someone working on one test, without a container round-trip. It backs NO
 # done-claim: MID and BOUNDARY own that. The target runs as an argument to the
 # stack-owning `bounded_suite`, so this loop carries the same floor and budget as
-# the gate suites. Triage reads the helper's own declaration, never the number:
+# the gate suites. Triage reads the helper's own DECLARATION, never the number:
 # the helper returns the wrapped command's status verbatim, so the same 1 is both
 # its refusal and any command's own failure, 125|126|127 are the wrapper's
 # operational vocabulary, and a `harness = false` target owns its exit namespace
-# outright (`tests/stdout_closed.rs` uses 125). So: a declared refusal is
-# reported as a budget fact (nothing ran, its marker names the budget), a
-# declared kill as the budget it hit, 101 as libtest's failure status with the
-# MID pointer, and every other status as observed -- no cause attached, no
-# assertion verdict claimed. Never a pass, never a silent skip.
+# outright (`tests/stdout_closed.rs` uses 125).
+# The declaration arrives in a fresh file per run -- `mktemp` under ${TMPDIR:-/tmp},
+# file mode 0600, removed on every exit path here -- and not in a shell variable,
+# because a variable dies with the shell that set it: a call site that runs the
+# helper in a subshell (a pipeline, command substitution, backticks, `&`) still
+# delivers the declaration, since the process that ran is the one that writes it.
+# So: `refused:<check>` is a budget fact (nothing ran, the check is named),
+# `killed` is the budget it hit, a consistent `ok` is success at status 0 and the
+# 101 / operational arms otherwise (no cause attached, no assertion verdict
+# claimed), and anything absent, empty, unreadable or unrecognised is an UNKNOWN
+# -- never a pass, never a guess, never a silent skip. A declaration that cannot
+# co-exist with the observed status (`refused:<check>` or `killed` with 0, which
+# is what a pipeline does to the helper's own refusal) is reported as a
+# contradiction and never read as OK.
 inner_test() {
     _target="$1"
     case "$_target" in
@@ -2992,30 +3025,66 @@ inner_test() {
     fi
     _run_args="$_run_args --test $_target"
     echo "INNER-NO-CLAIM: host-native run of cargo atest $_run_args backs no done-claim (MID/BOUNDARY own that)"
+    # One fresh declaration file per run, private to it: a reused path would let
+    # one run's refusal sit in the file the next run reads, and the 0600 mode
+    # `mktemp` creates keeps the channel out of every other process's reach.
+    _it_declaration=$(mktemp "${TMPDIR:-/tmp}/alumina-suite-outcome.XXXXXX") || _it_declaration=""
+    if [ -z "$_it_declaration" ]; then
+        echo "INNER-TEST-CHANNEL-BLOCKED: $_target — mktemp could not create a declaration file under ${TMPDIR:-/tmp}; no suite run is started without a channel to report it, so nothing above ran and this is not a pass" >&2
+        exit 1
+    fi
+    GATE_SUITE_DECLARATION_FILE="$_it_declaration"
+    export GATE_SUITE_DECLARATION_FILE
     # shellcheck disable=SC2086
+    _itr=0
     if bounded_suite cargo atest $_run_args; then
-        echo "INNER-TEST-OK: $_target"
-        return 0
+        _itr=0
     else
         _itr=$?
     fi
-    # The declaration is the helper's, not this reader's: an empty channel says
-    # "no refusal and no kill", which is a fact about the helper's own run and
-    # not an inference from the status it passed through.
-    _itr_outcome="${_bs_outcome-}"
-    if [ -n "$_itr_outcome" ]; then
-        case "$_itr_outcome" in
-            killed)
-                echo "INNER-TEST-TIMEOUT-FAIL: $_target exit $_itr — bounded_suite declared 'killed' and printed GATE-SUITE-TIMEOUT-FAIL above: the suite was killed at GATE_SUITE_BUDGET_SECS; a wedged run is a failure, not a slow pass" >&2
-                ;;
-            *)
-                echo "INNER-TEST-BUDGET-REFUSED: $_target — bounded_suite declared '${_itr_outcome}' and ran no command; the GATE-SUITE-STACK-UNKNOWN or GATE-SUITE-TIMEOUT-UNKNOWN line above names the budget it refused, so this is a budget fact and not a Linux-only assertion" >&2
-                ;;
-        esac
-    elif [ "$_itr" -eq 101 ]; then
-        echo "INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL: $_target exit $_itr — if this is a Linux-only assertion, run the MID tier (verify.sh mid foundations|boot|union|full) instead; this is not a pass" >&2
-    else
-        echo "INNER-TEST-OPERATIONAL-FAIL: $_target exit $_itr — bounded_suite declared no refusal and no kill, so this status belongs to the command or the wrapper (125|126|127 are the wrapper's own operational vocabulary, and a harness = false target owns its numbers); no assertion verdict is claimed here, so read the run output above, and if a Linux-only assertion is the suspect the MID tier (verify.sh mid foundations|boot|union|full) is the authoritative run" >&2
+    # The declaration is the helper's, not this reader's. A `cat` that fails
+    # leaves the channel EMPTY (which is UNKNOWN, never OK), and the `||` keeps
+    # `set -e` from turning a missing file into an exit before the triage below
+    # can report it. The file is removed on every one of the reader's exits.
+    _itr_declared=$(cat "$_it_declaration" 2>/dev/null) || _itr_declared=""
+    rm -f "$_it_declaration"
+    case "$_itr_declared" in
+        ok)
+            case "$_itr" in
+                0)
+                    echo "INNER-TEST-OK: $_target"
+                    return 0
+                    ;;
+                101)
+                    echo "INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL: $_target exit $_itr — if this is a Linux-only assertion, run the MID tier (verify.sh mid foundations|boot|union|full) instead; this is not a pass" >&2
+                    ;;
+                *)
+                    echo "INNER-TEST-OPERATIONAL-FAIL: $_target exit $_itr — bounded_suite declared 'ok' (it ran, and reported no kill), so this status belongs to the command or the wrapper (125|126|127 are the wrapper's own operational vocabulary, and a harness = false target owns its numbers); no assertion verdict is claimed here, so read the run output above, and if a Linux-only assertion is the suspect the MID tier (verify.sh mid foundations|boot|union|full) is the authoritative run" >&2
+                    ;;
+            esac
+            ;;
+        refused:?*)
+            _itr_check="${_itr_declared#refused:}"
+            if [ "$_itr" -eq 0 ]; then
+                echo "INNER-TEST-STATUS-CONTRADICTS-DECLARATION: $_target exit 0 while bounded_suite declared '${_itr_declared}' — a refusal runs no command, so that 0 cannot be the helper's: the call site lost the status, and this run backs no pass" >&2
+            fi
+            echo "INNER-TEST-BUDGET-REFUSED: $_target — bounded_suite declared '${_itr_check}' and ran no command; the GATE-SUITE-STACK-UNKNOWN or GATE-SUITE-TIMEOUT-UNKNOWN line above names the budget it refused, so this is a budget fact and not a Linux-only assertion" >&2
+            ;;
+        killed)
+            if [ "$_itr" -eq 0 ]; then
+                echo "INNER-TEST-STATUS-CONTRADICTS-DECLARATION: $_target exit 0 while bounded_suite declared 'killed' — a killed run cannot succeed, so that 0 cannot be the helper's: the call site lost the status, and this run backs no pass" >&2
+            fi
+            echo "INNER-TEST-TIMEOUT-FAIL: $_target exit $_itr — bounded_suite declared 'killed' and printed GATE-SUITE-TIMEOUT-FAIL above: the suite was killed at GATE_SUITE_BUDGET_SECS; a wedged run is a failure, not a slow pass" >&2
+            ;;
+        *)
+            echo "INNER-TEST-UNKNOWN: $_target — the declaration file was absent, unreadable, empty or unrecognised (read '${_itr_declared}'), so bounded_suite's own run is unknown and this status proves nothing about it; this is not a pass" >&2
+            ;;
+    esac
+    # Only a consistent `ok` hands the status through unchanged. Every other
+    # declaration backs no success, so a 0 reaching here was not the helper's --
+    # passing it on would re-create exactly the false PASS this channel replaces.
+    if [ "$_itr_declared" != "ok" ] && [ "$_itr" -eq 0 ]; then
+        exit 1
     fi
     exit "$_itr"
 }
