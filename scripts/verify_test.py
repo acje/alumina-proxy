@@ -2672,56 +2672,166 @@ class InnerTest(unittest.TestCase):
 
 BOUNDED_SUITE_TOKEN = re.compile(r"\bbounded_suite\b")
 CURRENT_SHELL_KEYWORDS = ("", "if", "elif", "while", "until", "!")
+CALL_WORD = "bounded_suite"
 NESTED_SHELL = re.compile(r"\b(?:sh|bash|zsh|dash|ksh)\s+-c\b")
-PIPELINE = re.compile(r"(?<!\|)\|(?!\|)")
-BACKGROUND = re.compile(r"&\s*$")
+# A here-document's body is read by a child shell (or by a consumer that never
+# evaluates it), never by the shell that parses the script, so a call written
+# there cannot declare anything that survives to this reader.
+HEREDOC_OPENER = re.compile(
+    r"<<-?\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|\"([A-Za-z_][A-Za-z0-9_]*)\""
+    r"|([A-Za-z_][A-Za-z0-9_]*))")
+# `&`, `&&`, `||`, `;` and `;;` each terminate a command and introduce the one
+# that follows, so the text after the last one is the region that decides the
+# command word: `true & bounded_suite ...` runs the helper in this shell.
+INTRODUCER = re.compile(r"&&|\|\||;;|;&|[&|;]")
+
+
+def quote_states(line):
+    """Per-character shell quoting: 'plain', 'single' or 'double'.
+
+    A backslash escapes the next character outside single quotes, so the
+    escaped character keeps the current state instead of opening a quote. The
+    scanner needs this because an operator inside quotes is literal text, while
+    `$(` and a backtick still execute inside double quotes."""
+    states = []
+    state = "plain"
+    escaped = False
+    for character in line:
+        if escaped:
+            states.append(state)
+            escaped = False
+            continue
+        if state == "plain":
+            if character == "\\":
+                states.append(state)
+                escaped = True
+                continue
+            if character in "'\"":
+                state = "single" if character == "'" else "double"
+                states.append(state)
+                continue
+        elif state == "single":
+            if character == "'":
+                state = "plain"
+                states.append(state)
+                continue
+        else:
+            if character == "\\":
+                states.append(state)
+                escaped = True
+                continue
+            if character == '"':
+                state = "plain"
+                states.append(state)
+                continue
+        states.append(state)
+    return states
+
+
+def command_word(line, at):
+    """The command-word region before a call, after the last introducer."""
+    states = quote_states(line)
+    cut = 0
+    for match in INTRODUCER.finditer(line, 0, at):
+        if states[match.start()] not in ("single", "double"):
+            cut = match.end()
+    return line[cut:at].strip()
 
 
 def lossy_call_shape(line, at):
-    """The shape name for a call whose declaration dies with a child shell."""
-    before, after = line[:at], line[at:]
-    if "$(" in before:
-        return "command substitution"
-    if "`" in line:
-        return "backticks"
-    if before.strip().startswith("(") or before.strip().endswith("("):
-        return "subshell"
-    if NESTED_SHELL.search(line):
+    """The shape name for a call whose declaration dies with a child shell.
+
+    This is the ordered HAZARD layer, and it runs before every allowance: a
+    diagnostic on an `echo`/`printf` line must never filter a raw span out of
+    the scan. `$(` and a backtick execute even inside double quotes, so only
+    single quotes excuse them; an operator inside either quote is literal text.
+    A bare `&` is a FORWARD terminator, so it is read where it appears rather
+    than only at end of line."""
+    states = quote_states(line)
+    for index in range(at):
+        if states[index] == "single":
+            continue
+        if line.startswith("$(", index):
+            return "command substitution"
+        if line[index] == "`":
+            return "backticks"
+    if NESTED_SHELL.search(line[:at]):
         return "nested shell"
-    if PIPELINE.search(after):
-        return "pipeline"
-    if BACKGROUND.search(after):
-        return "background"
+    if command_word(line, at).startswith("("):
+        return "subshell"
+    for index in range(at + len(CALL_WORD), len(line)):
+        if states[index] in ("single", "double"):
+            continue
+        character = line[index]
+        previous = line[index - 1] if index else ""
+        following = line[index + 1] if index + 1 < len(line) else ""
+        # The call's own command span ends at its first terminator, so a later
+        # command on the same line cannot decide this call's fate.
+        if character == "&" and previous == ">":
+            continue                     # `>&2` is a redirection, not a job
+        if character == "&" and following == ">":
+            continue                     # `&>` is a redirection too
+        if character == ";":
+            return None                  # the call's command ends in this shell
+        if character == "&" and following == "&":
+            return None                  # `&&` introduces a separate command
+        if character == "&":
+            return "background"
+        if character == "|" and following == "|":
+            return None                  # `||` introduces a separate command
+        if character == "|":
+            return "pipeline"
     return None
+
+
+def heredoc_body_lines(text):
+    """The 1-based line numbers that hold a here-document body."""
+    bodies, pending = set(), []
+    for number, line in enumerate(text.splitlines(), 1):
+        if pending:
+            bodies.add(number)
+            if line.strip() == pending[0]:
+                pending.pop(0)
+            continue
+        for match in HEREDOC_OPENER.finditer(line):
+            pending.append(next(group for group in match.groups() if group))
+    return bodies
 
 
 def scan_bounded_suite_call_sites(text):
     """(accepted, refused) for every `bounded_suite` occurrence in a script.
 
     A declaration only exists if it survives to the reader, so every call must
-    run in the CURRENT shell. Permitted occurrences are the definition, a
-    comment line, a quoted diagnostic on an echo/printf line, and a call whose
-    command word is the helper itself (optionally after a shell keyword). Any
-    other shape is refused BY NAME, so the failure names the line it is on."""
+    run in the CURRENT shell. The hazard layer runs FIRST and the diagnostic
+    allowance is applied only to what survives it, so an allowance can never
+    act as a line filter over a raw span. Every occurrence on a line is
+    examined, not just the first, because a second call on a known line is
+    exactly where a lossy shape hides.
+
+    Each entry is `(line_number, shape, line)`. Refusals name the line and the
+    shape; accepted entries carry the shape too, so a count mismatch has
+    something readable to report and the anchor is never the only witness."""
     accepted, refused = [], []
+    bodies = heredoc_body_lines(text)
     for number, line in enumerate(text.splitlines(), 1):
-        match = BOUNDED_SUITE_TOKEN.search(line)
-        if match is None:
-            continue
         stripped = line.strip()
         if stripped.startswith("#") or stripped.startswith("bounded_suite() {"):
             continue
-        if stripped.startswith(("echo ", "printf ")):
+        if number in bodies:
+            for _match in BOUNDED_SUITE_TOKEN.finditer(line):
+                refused.append((number, "heredoc body", stripped))
             continue
-        shape = lossy_call_shape(line, match.start())
-        if shape is not None:
-            refused.append((number, shape, stripped))
-            continue
-        word = line[:match.start()].strip()
-        if word not in CURRENT_SHELL_KEYWORDS:
-            refused.append((number, "not a current-shell command word", stripped))
-            continue
-        accepted.append((number, stripped))
+        for match in BOUNDED_SUITE_TOKEN.finditer(line):
+            shape = lossy_call_shape(line, match.start())
+            if shape is not None:
+                refused.append((number, shape, stripped))
+                continue
+            if stripped.startswith(("echo ", "printf ")):
+                continue
+            if command_word(line, match.start()) not in CURRENT_SHELL_KEYWORDS:
+                refused.append((number, "not a current-shell command word", stripped))
+                continue
+            accepted.append((number, "current-shell call", stripped))
     return accepted, refused
 
 
@@ -2738,6 +2848,11 @@ class ChannelSoundness(unittest.TestCase):
     def shipped(self):
         return (ROOT / "scripts/verify.sh").read_text()
 
+    def planted(self, plant):
+        """The shipped text with one plant appended, and the plant's line number."""
+        text = self.shipped().rstrip("\n")
+        return text + "\n" + plant + "\n", len(text.splitlines()) + 1
+
     def test_every_call_site_invokes_the_helper_in_the_current_shell(self):
         text = self.shipped()
         accepted, refused = scan_bounded_suite_call_sites(text)
@@ -2745,11 +2860,16 @@ class ChannelSoundness(unittest.TestCase):
             f"scripts/verify.sh:{number}: {shape} -- {line}"
             for number, shape, line in refused))
         self.assertTrue(accepted, "no bounded_suite call site found at all")
-        # The count anchor: a scanner that stops recognising a shape must fail
-        # here instead of quietly shrinking the set it claims to guard.
-        self.assertEqual(len(accepted), text.count("bounded_suite cargo atest"),
-                         "accepted call sites and anchored call sites disagree: "
-                         f"{accepted}")
+        # The count anchor is an anti-vacuity backstop, not a detector: every
+        # hazard shape has its own named refusal above, so a mismatch here means
+        # the guarded set moved for a reason no shape names. It must still be
+        # readable, so it names each accepted site with its line and its shape.
+        anchored = text.count("bounded_suite cargo atest")
+        self.assertEqual(len(accepted), anchored, "\n".join(
+            [f"accepted call sites {len(accepted)} and anchored call sites "
+             f"{anchored} disagree"]
+            + [f"scripts/verify.sh:{number}: {shape} -- {line}"
+               for number, shape, line in accepted]))
 
     # One line per shape, each carrying the anchored spelling so the count stays
     # constant and only the shape check can catch it.
@@ -2780,12 +2900,72 @@ class ChannelSoundness(unittest.TestCase):
                 self.assertEqual(
                     [shape for _, shape, _ in refused], [expected],
                     f"the planted {expected} line was not refused: {refused}")
-                self.assertNotIn(planted, [line for _, line in accepted])
+                self.assertNotIn(planted, [line for _, _, line in accepted])
 
-    def test_a_call_the_scanner_does_not_recognise_turns_the_anchor_red(self):
-        """The count anchor, planted separately: `bounded_suite "$@"` is a
-        legitimate current-shell call, so no shape check can catch it -- only
-        the anchor notices that the guarded set grew."""
+    # The permanent probes: the three forms that were accepted in silence plus
+    # the second call on an already-known line. The current-shell call a
+    # separator introduces is the green case in the test below.
+    SILENT_ACCEPTS = (
+        ("heredoc body",
+         "sh <<'PLANT'\nbounded_suite cargo atest -p alumina --lib\nPLANT"),
+        ("background",
+         "bounded_suite cargo atest -p alumina --lib & wait"),
+        ("background",
+         'echo done; bounded_suite "$@" &'),
+        ("background",
+         "bounded_suite cargo atest -p alumina --lib; "
+         "bounded_suite cargo atest -p alumina --lib & wait"),
+    )
+
+    def test_the_hazard_layer_runs_before_every_diagnostic_allowance(self):
+        """Red on 47df36a for all four: the allowance was a line filter, the
+        here-document body read as a current-shell line, `&` was only read at
+        end of line, and only the first call on a line was examined."""
+        for expected, planted in self.SILENT_ACCEPTS:
+            with self.subTest(shape=expected, plant=planted):
+                document, first_planted = self.planted(planted)
+                _accepted, refused = scan_bounded_suite_call_sites(document)
+                self.assertEqual(
+                    [shape for _, shape, _ in refused], [expected],
+                    f"the permanent {expected} probe was not refused: {refused}")
+                number, _shape, line = refused[0]
+                self.assertGreaterEqual(number, first_planted,
+                                        "the refusal named no planted line")
+                self.assertIn(line, planted,
+                              "the refusal named a line other than the probe's")
+
+    def test_a_separator_introduces_the_call_that_follows_it(self):
+        """Red on 47df36a: the introducer was read as part of the command word,
+        so a legitimate `true & bounded_suite ...` was refused as lossy."""
+        call = "bounded_suite cargo atest -p alumina --lib"
+        for introducer in ("&", "&&", "||", ";", ";;"):
+            with self.subTest(introducer=introducer):
+                document, first_planted = self.planted(f"true {introducer} {call}")
+                accepted, refused = scan_bounded_suite_call_sites(document)
+                self.assertEqual(
+                    refused, [],
+                    f"`{introducer}` introduces the call that follows it, so "
+                    f"nothing is lossy here: {refused}")
+                planted = [entry for entry in accepted
+                           if entry[0] >= first_planted]
+                self.assertEqual(
+                    planted,
+                    [(first_planted, "current-shell call",
+                      f"true {introducer} {call}")],
+                    "the introduced call is not an accepted call site")
+        # The forward terminator stays a refusal: it is the same separator, but
+        # after the call it backgrounds it.
+        document, first_planted = self.planted(call + " &")
+        _accepted, refused = scan_bounded_suite_call_sites(document)
+        self.assertEqual([shape for _, shape, _ in refused], ["background"],
+                         f"a trailing `&` still backgrounds the call: {refused}")
+        self.assertEqual(refused[0][0], first_planted)
+
+    def test_the_anchor_is_a_backstop_and_names_the_line_it_cannot_count(self):
+        """`bounded_suite "$@"` is a legitimate current-shell call, so no shape
+        check can catch it -- the anchor is the anti-vacuity backstop for the
+        guarded set itself. Demoted, not decorative: when it fires it also
+        names the line and the shape it saw."""
         text = self.shipped()
         accepted, refused = scan_bounded_suite_call_sites(text)
         self.assertEqual(refused, [])
@@ -2794,12 +2974,20 @@ class ChannelSoundness(unittest.TestCase):
         planted = text + '\nbounded_suite "$@"\n'
         accepted_planted, refused_planted = scan_bounded_suite_call_sites(planted)
         self.assertEqual(refused_planted, [],
-                         "the planted call is current-shell, so only the anchor "
-                         f"can catch it: {refused_planted}")
+                         "the planted call is current-shell, so the shape layer "
+                         f"must leave it alone: {refused_planted}")
         self.assertEqual(len(accepted_planted), anchored + 1)
         self.assertNotEqual(len(accepted_planted),
                             planted.count("bounded_suite cargo atest"),
                             "the count anchor did not notice an unanchored call site")
+        named = [entry for entry in accepted_planted
+                 if entry[1:] == ("current-shell call", 'bounded_suite "$@"')]
+        self.assertEqual(len(named), 1, accepted_planted)
+        number, shape, line = named[0]
+        self.assertGreater(number, len(text.splitlines()),
+                           "the anchor named no planted line")
+        self.assertEqual(shape, "current-shell call")
+        self.assertEqual(line, 'bounded_suite "$@"')
 
 
 class IdentityEnvRecord(unittest.TestCase):
