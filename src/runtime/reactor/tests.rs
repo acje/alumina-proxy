@@ -177,16 +177,15 @@ fn read_until_within(stream: &mut TcpStream, marker: &[u8], deadline: Duration) 
     let mut buf = [0u8; 64];
     loop {
         let remaining = deadline.saturating_sub(start.elapsed());
-        if remaining.is_zero() {
-            panic!(
-                "read_until on thread {} timed out after {:?} waiting for marker {:?}: received {} bytes {:?}",
-                current_thread_name(),
-                deadline,
-                String::from_utf8_lossy(marker),
-                out.len(),
-                String::from_utf8_lossy(&out[out.len().saturating_sub(64)..]),
-            );
-        }
+        assert!(
+            !remaining.is_zero(),
+            "read_until on thread {} timed out after {:?} waiting for marker {:?}: received {} bytes {:?}",
+            current_thread_name(),
+            deadline,
+            String::from_utf8_lossy(marker),
+            out.len(),
+            String::from_utf8_lossy(&out[out.len().saturating_sub(64)..]),
+        );
         stream
             .set_read_timeout(Some(remaining.max(MIN_READ_WAIT)))
             .expect("arm read deadline");
