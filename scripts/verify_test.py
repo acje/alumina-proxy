@@ -2428,41 +2428,30 @@ class BoundedSuite(unittest.TestCase):
         self.assertEqual(result.returncode, 101, note)
         self.assertEqual(self.declared_after(), "ok", note)
 
-    def test_each_run_gets_its_own_declaration_file(self):
+    def test_a_refusal_does_not_survive_into_a_later_green_run_in_one_shell(self):
         """A stale declaration is the failure mode a per-process assertion cannot
-        see: two calls in ONE shell, a refusal then a green run. The per-run file
-        makes it true by construction -- each run writes only its own file -- so
-        the pin is the two DISTINCT paths and the second file's own content."""
+        see: two calls in ONE shell, a refusal then a green run. The helper
+        truncates the path it is handed, so the second run's declaration replaces
+        the first and a reader can never see the earlier refusal. Which file the
+        reader creates per run is not this driver's to invent -- the shipped
+        reader owns that, and InnerTest observes it end to end."""
         self.stub("timeout", 0)
         driver = self.declared_driver("per-run.sh", body=(
             '_shipped_stack="$GATE_SUITE_MIN_STACK"\n'
             'GATE_SUITE_MIN_STACK=16M\n'
-            '_first=$(mktemp "$DECLARED_DIR/one.XXXXXX")\n'
-            'printf "%s\\n" "$_first" > "$DECLARED_FIRST_NAME"\n'
-            'GATE_SUITE_DECLARATION_FILE="$_first"\n'
+            'GATE_SUITE_DECLARATION_FILE="$DECLARED"\n'
             'export GATE_SUITE_DECLARATION_FILE\n'
             'bounded_suite suite || :\n'
-            'cp "$_first" "$DECLARED_REFUSED"\n'
-            'rm -f "$_first"\n'
+            'cp "$DECLARED" "$DECLARED_REFUSED"\n'
             'GATE_SUITE_MIN_STACK="$_shipped_stack"\n'
-            '_second=$(mktemp "$DECLARED_DIR/two.XXXXXX")\n'
-            'printf "%s\\n" "$_second" > "$DECLARED_SECOND_NAME"\n'
-            'GATE_SUITE_DECLARATION_FILE="$_second"\n'
-            'export GATE_SUITE_DECLARATION_FILE\n'
             'bounded_suite suite || :\n'
-            'cp "$_second" "$DECLARED_LATER"\n'
-            'rm -f "$_second"\n'
+            'cp "$DECLARED" "$DECLARED_LATER"\n'
             'exit 0\n'))
         refused = self.temp / "refused"
         later = self.temp / "later"
-        first_name = self.temp / "first-name"
-        second_name = self.temp / "second-name"
         result = self.run_bounded(env={"PATH": self.scoped_path(self.tools),
-                                       "DECLARED_DIR": str(self.temp),
                                        "DECLARED_REFUSED": str(refused),
-                                       "DECLARED_LATER": str(later),
-                                       "DECLARED_FIRST_NAME": str(first_name),
-                                       "DECLARED_SECOND_NAME": str(second_name)},
+                                       "DECLARED_LATER": str(later)},
                                   driver=driver)
         note = self.describe(result)
         self.assertEqual(result.returncode, 0, note)
@@ -2470,10 +2459,6 @@ class BoundedSuite(unittest.TestCase):
         self.assertEqual(later.read_text().strip(), "ok",
                          "the refusal survived into a later green run in the same "
                          "shell: " + note)
-        self.assertNotEqual(first_name.read_text().strip(),
-                            second_name.read_text().strip(),
-                            "both runs declared into ONE file, so the second run's "
-                            "content cannot be a fact about the second run: " + note)
 
     def test_without_a_declaration_path_the_helper_writes_nothing(self):
         """The path is the caller's to export. Unset or empty, the helper does
@@ -2561,6 +2546,14 @@ class InnerTest(unittest.TestCase):
             found = shutil.which(name)
             self.assertIsNotNone(found, f"{name} is a prerequisite of this reader")
             (self.util / name).symlink_to(found)
+        # The "mktemp absent" shape removes ONE prerequisite, so it gets its own
+        # directory rather than a PATH that silently drops `cat` and `rm` too: a
+        # regression in either would otherwise be reported under a label naming
+        # only mktemp.
+        self.no_mktemp = self.temp / "no-mktemp"
+        self.no_mktemp.mkdir()
+        for name in ("cat", "rm", "stat"):
+            (self.no_mktemp / name).symlink_to(self.util / name)
         self.stub("cargo",
                   'printf "%s\\n" "$*" >> "$CARGO_CALLS"\n'
                   'printf "%s\\n" "${RUST_MIN_STACK-<unset>}" > "$STACK_SEEN"\n'
@@ -2817,7 +2810,9 @@ class InnerTest(unittest.TestCase):
         self.stub("mktemp", "exit 1\n", directory=failing)
         for name, path in (
                 ("mktemp fails", self.scoped_path(failing, self.tools)),
-                ("mktemp absent", str(self.tools))):
+                # Only mktemp is withheld: `cat`, `rm` and `stat` are the real
+                # ones, so this shape isolates the prerequisite it names.
+                ("mktemp absent", f"{self.tools}:{self.no_mktemp}")):
             with self.subTest(channel=name):
                 # Neither log may survive a previous subTest, so each shape
                 # proves cargo and the wrapper DID run by itself.
@@ -2884,6 +2879,10 @@ class InnerTest(unittest.TestCase):
                                 env={"GATE_SUITE_MIN_STACK": "1048576"},
                                 driver=planted)
         note = self.describe(result)
+        # The trailing guard is the only thing that turns the pipeline's 0 into a
+        # non-zero, so the pin for this call site observes the status itself: the
+        # message alone would stay green with the guard deleted.
+        self.assertEqual(result.returncode, 1, note)
         # ONE line carrying both observations, and neither a budget fact (the
         # declaration is not trusted while the status contradicts it) nor a pass.
         self.assertEqual(
@@ -2939,6 +2938,30 @@ class InnerTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0,
                                     f"a run whose declaration was {name} exited "
                                     f"0, which is a false PASS: {note}")
+
+    def test_each_run_gets_its_own_declaration_file(self):
+        """Observed, not assumed: the reader creates the path with `mktemp`, so
+        only a real invocation can show WHICH file it used. Two runs in the same
+        TMPDIR report two distinct paths through the wrapper's own view of the
+        inherited channel, and neither file survives the run that made it."""
+        seen = []
+        for run in (1, 2):
+            self.declaration_path.unlink(missing_ok=True)
+            result = self.run_inner("foundations")
+            note = self.describe(result)
+            self.assertEqual(result.returncode, 0, note)
+            recorded = self.declaration_path.read_text().strip()
+            self.assertTrue(recorded.startswith(str(self.scratch)),
+                            f"run {run} declared outside TMPDIR: {note}")
+            self.assertIn("alumina-suite-outcome.", recorded,
+                          f"run {run} did not use the per-run template: {note}")
+            self.assertEqual(sorted(path.name for path in self.scratch.iterdir()),
+                             [], f"run {run} left its declaration behind: {note}")
+            seen.append(recorded)
+        self.assertNotEqual(seen[0], seen[1],
+                            "both runs declared into ONE file, so a stale "
+                            "declaration could be read as the second run's: "
+                            f"{seen}")
 
     def test_the_declaration_file_is_private_and_removed_on_every_exit_path(self):
         """One fresh file per run, mode 0600 while the run is in flight, and gone
@@ -3256,15 +3279,31 @@ def carried_span_shapes(units, bodies):
     return carried
 
 
+def lint_bounded_suite_call_sites(text):
+    """The lint entry point: (accepted, warnings) for every call site in a script.
+
+    LINT SEMANTICS: it may warn, it may not certify. A hazard it names is worth
+    reading; a clean report is NOT evidence that the declaration survives, because
+    the property (which shell ran the helper) is dynamic and this is text. The
+    declaration itself is carried in a file the running process writes, so no
+    caller's correctness depends on this report -- including the shipped script's.
+    """
+    accepted, refused = scan_bounded_suite_call_sites(text)
+    return accepted, refused
+
+
 def scan_bounded_suite_call_sites(text):
     """(accepted, refused) for every `bounded_suite` occurrence in a script.
 
-    A declaration only exists if it survives to the reader, so every call must
-    run in the CURRENT shell. The hazard layer runs FIRST and the diagnostic
-    allowance is applied only to what survives it, so an allowance can never
-    act as a line filter over a raw span. Every occurrence is examined, not just
-    the first, because a second call on a known unit is exactly where a lossy
-    shape hides.
+    A call written in a child shell cannot declare anything to a reader in this
+    one, so the interesting question is which shell runs it. This classifier
+    answers that from the text, which is why it can only ever be a lint: the file
+    channel is what actually survives a subshell call site.
+
+    The hazard layer runs FIRST and the diagnostic allowance is applied only to
+    what survives it, so an allowance can never act as a line filter over a raw
+    span. Every occurrence is examined, not just the first, because a second call
+    on a known unit is exactly where a lossy shape hides.
 
     The scan unit is the shell command unit, not the physical line: POSIX
     removes an unquoted backslash-newline before tokenizing, so an operator
@@ -3275,8 +3314,7 @@ def scan_bounded_suite_call_sites(text):
     Each entry is `(line_number, shape, line)`, where the line number is the
     FIRST physical line of the unit and the text is that line's stripped text,
     never the joined text. Refusals name the line and the shape; accepted
-    entries carry the shape too, so a count mismatch has something readable to
-    report and the anchor is never the only witness."""
+    entries carry the shape too, so a report has something readable to say."""
     accepted, refused = [], []
     bodies = heredoc_body_lines(text)
     units = joined_command_units(text, bodies)
@@ -3306,44 +3344,68 @@ def scan_bounded_suite_call_sites(text):
     return accepted, refused
 
 
-class ChannelSoundness(unittest.TestCase):
-    """The declaration is a channel, so its soundness condition is that every
-    call site runs in the CURRENT shell. A subshell call loses it silently: the
-    reader sees an empty channel, takes the operational arm, and every message
-    stays literally true while the budget fact disappears -- a control whose
-    failure mode is silence. So the shape is PINNED, not assumed.
+class CallSiteLint(unittest.TestCase):
+    """LINT: it may warn, it may not certify.
 
-    Falsified BY PLANT, not against a3cce49: a3cce49 has no subshell call site,
-    so green there is correct and would prove nothing."""
+    This layer used to be a named pin: `ChannelSoundness` claimed to prove every
+    call site ran the helper in the current shell, so a subshell call could not
+    lose the declaration silently. It could -- three adversarial rounds found a
+    new blind spot each time (an echo-prefixed line, a trailing `&`, a
+    continuation line), because the property is DYNAMIC and the analysis was
+    textual. The declaration is now a file the running process writes, so no test
+    here needs to be right about the shell: what remains is a lint over the call
+    sites, reported for a reader.
+
+    What still holds as a test is the lint's OWN shape-naming: every shape it
+    claims to recognise is planted here, and a classifier change that stops
+    naming one turns its plant red. Nothing in this class may fail because
+    scripts/verify.sh contains a hazard -- that is a warning for a reader, not a
+    gate."""
+
+    # A hazard-free baseline the plant tests build on. The shipped script is the
+    # lint's SUBJECT, never a plant's baseline: a test here must not be able to
+    # fail on a hazard that lives in scripts/verify.sh.
+    BASELINE = ("#!/bin/sh\n"
+                "bounded_suite cargo atest -p alumina --lib\n")
 
     def shipped(self):
         return (ROOT / "scripts/verify.sh").read_text()
 
     def planted(self, plant):
-        """The shipped text with one plant appended, and the plant's line number."""
-        text = self.shipped().rstrip("\n")
+        """The baseline with one plant appended, and the plant's line number."""
+        text = self.BASELINE.rstrip("\n")
         return text + "\n" + plant + "\n", len(text.splitlines()) + 1
 
-    def test_every_call_site_invokes_the_helper_in_the_current_shell(self):
-        text = self.shipped()
-        accepted, refused = scan_bounded_suite_call_sites(text)
-        self.assertEqual(refused, [], "\n".join(
-            f"scripts/verify.sh:{number}: {shape} -- {line}"
-            for number, shape, line in refused))
-        self.assertTrue(accepted, "no bounded_suite call site found at all")
-        # The count anchor is an anti-vacuity backstop, not a detector: every
-        # hazard shape has its own named refusal above, so a mismatch here means
-        # the guarded set moved for a reason no shape names. It must still be
-        # readable, so it names each accepted site with its line and its shape.
-        anchored = text.count("bounded_suite cargo atest")
-        self.assertEqual(len(accepted), anchored, "\n".join(
-            [f"accepted call sites {len(accepted)} and anchored call sites "
-             f"{anchored} disagree"]
-            + [f"scripts/verify.sh:{number}: {shape} -- {line}"
-               for number, shape, line in accepted]))
+    def test_the_shipped_report_names_a_line_and_a_shape_for_every_warning(self):
+        """Report quality only: a warning a reader cannot act on is noise, so
+        every one carries a 1-based line number, a shape name and the text of
+        the line it is about. The list itself is NOT asserted empty -- a hazard
+        in scripts/verify.sh is not this layer's verdict to fail."""
+        _accepted, warnings = lint_bounded_suite_call_sites(self.shipped())
+        for entry in warnings:
+            self.assertEqual(len(entry), 3,
+                             f"a warning is not (line, shape, line): {entry}")
+            number, shape, line = entry
+            self.assertIsInstance(number, int, f"warning carries no line: {entry}")
+            self.assertGreaterEqual(number, 1, f"warning line is not 1-based: {entry}")
+            self.assertIsInstance(shape, str, f"warning names no shape: {entry}")
+            self.assertTrue(shape.strip(), f"warning names an empty shape: {entry}")
+            self.assertIsInstance(line, str, f"warning carries no line text: {entry}")
 
-    # One line per shape, each carrying the anchored spelling so the count stays
-    # constant and only the shape check can catch it.
+    def test_the_shipped_path_reports_a_planted_hazard_readably(self):
+        """The same report, on the real document: a legal-or-lossy call appended
+        to scripts/verify.sh is named at its own line with its own shape. This is
+        what a reader gets; it is not a verdict on what was already there."""
+        text = self.shipped()
+        first_planted = len(text.splitlines()) + 1
+        _accepted, warnings = lint_bounded_suite_call_sites(
+            text + "\n" + "bounded_suite cargo atest -p alumina --lib | cat\n")
+        planted = [entry for entry in warnings if entry[0] >= first_planted]
+        self.assertEqual([shape for _, shape, _ in planted], ["pipeline"])
+        self.assertIn("bounded_suite cargo atest", planted[0][2])
+
+    # One line per shape, each carrying the ordinary anchored spelling so the
+    # only thing that differs from the baseline call is the shape itself.
     PLANTS = (
         ("command substitution",
          'x=$(bounded_suite cargo atest -p alumina --lib)'),
@@ -3361,16 +3423,21 @@ class ChannelSoundness(unittest.TestCase):
          'env FOO=1 bounded_suite cargo atest -p alumina --lib'),
     )
 
-    def test_each_lossy_shape_turns_the_pin_red(self):
-        """A pin that cannot be made red is decorative, so every shape this
-        scanner claims to refuse is planted here and must be named."""
+    def test_each_lossy_shape_is_named_by_the_lint(self):
+        """A lint that cannot name the shape it claims to know is decoration, so
+        every shape is planted here and must be named at its own line in the
+        synthetic baseline. This is a test of the classifier, not of any script
+        it is run over."""
         for expected, planted in self.PLANTS:
             with self.subTest(shape=expected):
-                accepted, refused = scan_bounded_suite_call_sites(
-                    self.shipped() + "\n" + planted + "\n")
+                text, first_planted = self.planted(planted)
+                accepted, warnings = lint_bounded_suite_call_sites(text)
                 self.assertEqual(
-                    [shape for _, shape, _ in refused], [expected],
-                    f"the planted {expected} line was not refused: {refused}")
+                    [(number, shape) for number, shape, _ in warnings],
+                    [(first_planted, expected)],
+                    f"the planted {expected} line was not named: {warnings}")
+                self.assertIn(planted, warnings[0][2],
+                              "the warning did not carry the planted line")
                 self.assertNotIn(planted, [line for _, _, line in accepted])
 
     # The permanent probes: the three forms that were accepted in silence plus
@@ -3539,33 +3606,17 @@ class ChannelSoundness(unittest.TestCase):
                                  f"lossy shape: {refused}")
                 self.assertEqual(accepted, [(1, "current-shell call", probe)])
 
-    def test_the_anchor_is_a_backstop_and_names_the_line_it_cannot_count(self):
-        """`bounded_suite "$@"` is a legitimate current-shell call, so no shape
-        check can catch it -- the anchor is the anti-vacuity backstop for the
-        guarded set itself. Demoted, not decorative: when it fires it also
-        names the line and the shape it saw."""
-        text = self.shipped()
-        accepted, refused = scan_bounded_suite_call_sites(text)
-        self.assertEqual(refused, [])
-        anchored = text.count("bounded_suite cargo atest")
-        self.assertEqual(len(accepted), anchored, "the shipped text is the baseline")
-        planted = text + '\nbounded_suite "$@"\n'
-        accepted_planted, refused_planted = scan_bounded_suite_call_sites(planted)
-        self.assertEqual(refused_planted, [],
-                         "the planted call is current-shell, so the shape layer "
-                         f"must leave it alone: {refused_planted}")
-        self.assertEqual(len(accepted_planted), anchored + 1)
-        self.assertNotEqual(len(accepted_planted),
-                            planted.count("bounded_suite cargo atest"),
-                            "the count anchor did not notice an unanchored call site")
-        named = [entry for entry in accepted_planted
-                 if entry[1:] == ("current-shell call", 'bounded_suite "$@"')]
-        self.assertEqual(len(named), 1, accepted_planted)
-        number, shape, line = named[0]
-        self.assertGreater(number, len(text.splitlines()),
-                           "the anchor named no planted line")
-        self.assertEqual(shape, "current-shell call")
-        self.assertEqual(line, 'bounded_suite "$@"')
+    def test_an_unanchored_current_shell_call_is_accepted_and_named(self):
+        """`bounded_suite "$@"` is a legitimate current-shell call that no shape
+        check can object to, and nothing counts it any more: the lint names it as
+        accepted at its own line, which is all a lint owes a reader."""
+        text = self.BASELINE.rstrip("\n") + '\nbounded_suite "$@"\n'
+        accepted, warnings = lint_bounded_suite_call_sites(text)
+        self.assertEqual(warnings, [],
+                         f"a current-shell call is not a warning: {warnings}")
+        self.assertEqual([entry[1:] for entry in accepted],
+                         [("current-shell call", "bounded_suite cargo atest -p alumina --lib"),
+                          ("current-shell call", 'bounded_suite "$@"')])
 
 
 class IdentityEnvRecord(unittest.TestCase):

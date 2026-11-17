@@ -3046,7 +3046,6 @@ inner_test() {
         export GATE_SUITE_DECLARATION_FILE
     fi
     # shellcheck disable=SC2086
-    _itr=0
     if bounded_suite cargo atest $_run_args; then
         _itr=0
     else
