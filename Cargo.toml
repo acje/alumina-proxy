@@ -224,6 +224,11 @@ ring = "=0.17.14"
 # directly (std write_vectored). Pinned to the exact resolved version, so this
 # adds no new closure node.
 libc = "=0.2.191"
+# Property tests need `static-engine` (bd `alumina-l42go`): default features
+# spawn a nested `cargo build` of an out-of-lock engine graph, while
+# `static-engine` pins hegeltest-c 0.51.6 into Cargo.lock as a normal
+# dependency and makes build.rs return early (no nested build, no dlopen).
+hegeltest = { version = "=0.52.7", features = ["static-engine"] }
 
 [features]
 # F1 counting allocator is opt-in so normal production releases are never

@@ -3,6 +3,10 @@
 # Cargo build artifacts
 target/
 
+# Hegel example database (database = "disabled" in hegel.toml; ignore the
+# directory anyway so a default-settings local run never adds a tracked file)
+.hegel/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

@@ -1,0 +1,9 @@
+# Gate runs are exact-input: no on-disk example database, and a per-test
+# derived seed so a failing gate run is reproducible. A committed
+# #[hegel::reproduce_failure] blob replays only that capture (generation is
+# skipped) and panics once the fault is fixed, so a durable corpus entry is a
+# deliberate separate replay, not a gate attribute.
+[profiles.development]
+derandomize = true
+database = "disabled"
+test_cases = 64
