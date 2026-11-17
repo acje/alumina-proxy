@@ -2,6 +2,8 @@ pub(crate) mod gate;
 pub(crate) mod owner;
 pub(crate) mod reactor;
 pub(crate) mod storage;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod tunnel;
 
 pub use owner::{AttachFailure, Preallocated, Runtime, RuntimeBuildError};

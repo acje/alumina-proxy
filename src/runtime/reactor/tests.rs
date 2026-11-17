@@ -3,6 +3,7 @@ use std::net::{Ipv4Addr, TcpListener as StdListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use crate::enforcement::policy::UnknownReason;
+use crate::runtime::test_support::ephemeral_port;
 use crate::runtime::tunnel::{MAX_PENDING_PER_PEER, MAX_PENDING_SETUPS, SETUP_DEADLINE_SECS};
 
 const RETAINED_OFFSET: usize = 137;
@@ -14,37 +15,49 @@ fn config(port: u16) -> crate::config::Config {
     crate::config::parse_config_document(&doc).expect("valid test config")
 }
 
-/// Ports already handed out in this process. Two tests that probe
-/// `127.0.0.1:0`, drop the probe and bind later can be handed the same port in
-/// between, which surfaced as a spurious `AddrInUse`. Issuing
-/// each port once removes that inter-test collision. It does not guard against
-/// a non-test process taking the port, so fixtures that must connect prefer
-/// `Config::with_kernel_assigned_test_listener`.
-static ISSUED_PORTS: std::sync::Mutex<std::collections::BTreeSet<u16>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
-
-fn ephemeral_port() -> u16 {
-    for _ in 0..64 {
-        let probe = StdListener::bind("127.0.0.1:0").expect("bind probe");
-        let port = probe.local_addr().expect("probe addr").port();
-        drop(probe);
-        if ISSUED_PORTS.lock().expect("issued-port lock").insert(port) {
-            return port;
-        }
-    }
-    panic!("no unissued ephemeral port after 64 probes");
+fn with_serving_stack(port: u16, body: impl FnOnce(&mut Serving) + Send + 'static) {
+    with_serving_stack_within(port, SERVING_JOIN_DEADLINE, body);
 }
 
-fn with_serving_stack(port: u16, body: impl FnOnce(&mut Serving) + Send + 'static) {
-    let t = std::thread::Builder::new()
+fn with_serving_stack_within(
+    port: u16,
+    deadline: Duration,
+    body: impl FnOnce(&mut Serving) + Send + 'static,
+) {
+    run_serving_thread(deadline, move || serve_on(port), body);
+}
+
+/// Runs a serving body on its own thread and bounds the harness wait: a body
+/// still running past `deadline` fails the test naming the thread and the
+/// deadline instead of joining forever, while a body panic is re-raised
+/// unchanged in the test thread. Both paths are planted by
+/// `serving_body_past_the_join_deadline_fails_naming_the_thread` and
+/// `serving_body_panic_still_reaches_the_test`.
+fn run_serving_thread(
+    deadline: Duration,
+    build: impl FnOnce() -> Serving + Send + 'static,
+    body: impl FnOnce(&mut Serving) + Send + 'static,
+) {
+    let (finished, done) = std::sync::mpsc::channel();
+    let handle = std::thread::Builder::new()
         .name("serving-test".into())
         .stack_size(8 * 1024 * 1024)
         .spawn(move || {
-            let mut serving = serve_on(port);
+            let mut serving = build();
             body(&mut serving);
+            let _ = finished.send(());
         })
         .expect("spawn serving thread");
-    t.join().expect("serving thread");
+    match done.recv_timeout(deadline) {
+        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match handle.join() {
+            Ok(()) => {}
+            Err(payload) => std::panic::resume_unwind(payload),
+        },
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+            "serving-test thread still running after {deadline:?} (harness thread {}): a wedged serving body must fail the test by name instead of parking the suite",
+            current_thread_name(),
+        ),
+    }
 }
 
 fn serve_on(port: u16) -> Serving {
@@ -138,18 +151,75 @@ fn wait_upstream_connected(up: &mio::net::TcpStream) {
     assert!(connected, "the nonblocking upstream connect never resolved");
 }
 
+/// A normal reactor test finishes far under a second, so 30 s is more than 100x
+/// a normal test, and 60 s is ~10x below the 600 s gate budget measured against
+/// the full lib suite's 22.67 s / 38.49 s green runs. The read deadline stays
+/// below the join deadline so a silent listener fails inside `read_until`,
+/// naming the marker and the bytes received, rather than being masked by the
+/// outer serving-thread join.
+const READ_DEADLINE: Duration = Duration::from_secs(30);
+const SERVING_JOIN_DEADLINE: Duration = Duration::from_secs(60);
+const QUIET_WINDOW: Duration = Duration::from_millis(50);
+const MIN_READ_WAIT: Duration = Duration::from_millis(1);
+
+/// Reads until `marker` arrives or the peer closes. Expiry is a failure, not an
+/// answer: a silent listener panics naming the marker, the bytes received, the
+/// deadline and the thread, so a wedged conversation cannot return empty and
+/// park the suite. EOF and non-timeout I/O errors remain domain answers that
+/// return the bytes read so far.
 fn read_until(stream: &mut TcpStream, marker: &[u8]) -> Vec<u8> {
+    read_until_within(stream, marker, READ_DEADLINE)
+}
+
+fn read_until_within(stream: &mut TcpStream, marker: &[u8], deadline: Duration) -> Vec<u8> {
+    let start = Instant::now();
     let mut out = Vec::new();
     let mut buf = [0u8; 64];
     loop {
+        let remaining = deadline.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            panic!(
+                "read_until on thread {} timed out after {:?} waiting for marker {:?}: received {} bytes {:?}",
+                current_thread_name(),
+                deadline,
+                String::from_utf8_lossy(marker),
+                out.len(),
+                String::from_utf8_lossy(&out[out.len().saturating_sub(64)..]),
+            );
+        }
+        stream
+            .set_read_timeout(Some(remaining.max(MIN_READ_WAIT)))
+            .expect("arm read deadline");
         match stream.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(n) => {
                 out.extend_from_slice(&buf[..n]);
                 if out.windows(marker.len()).any(|w| w == marker) {
                     break;
                 }
             }
+            Err(ref err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// Reads for a fixed quiet window and returns whatever arrived: the explicit
+/// form for negative assertions whose answer is "no bytes", where expiry is the
+/// expected domain outcome rather than a failure.
+fn read_quiet_window(stream: &mut TcpStream, window: Duration) -> Vec<u8> {
+    stream
+        .set_read_timeout(Some(window))
+        .expect("arm quiet window");
+    let mut out = Vec::new();
+    let mut buf = [0u8; 64];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
         }
     }
     out
@@ -721,15 +791,16 @@ fn with_serving_stack_cfg(
     cfg: crate::config::Config,
     body: impl FnOnce(&mut Serving) + Send + 'static,
 ) {
-    let t = std::thread::Builder::new()
-        .name("serving-test".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let mut serving = serve_on_cfg(port, &cfg);
-            body(&mut serving);
-        })
-        .expect("spawn serving thread");
-    t.join().expect("serving thread");
+    with_serving_stack_cfg_within(port, cfg, SERVING_JOIN_DEADLINE, body);
+}
+
+fn with_serving_stack_cfg_within(
+    port: u16,
+    cfg: crate::config::Config,
+    deadline: Duration,
+    body: impl FnOnce(&mut Serving) + Send + 'static,
+) {
+    run_serving_thread(deadline, move || serve_on_cfg(port, &cfg), body);
 }
 
 fn fabric_validated_early_data(serving: &mut Serving, test_data: Option<usize>) {
@@ -1011,6 +1082,77 @@ fn config_pair(port: u16, upstream_port: u16) -> crate::config::Config {
         "listen = \"127.0.0.1:{port}\"\nstartup_unresolved_allowance = 0\nresolver = [\"1.1.1.1\"]\n[any_illegal]\nconnect_parse = {{ action = \"notify\", scope = \"connection\" }}\nhost_not_allowlisted = {{ action = \"block\", scope = \"all\" }}\ntls_profile = {{ action = \"block\", scope = \"all\" }}\nech = {{ action = \"block\", scope = \"connection\" }}\n[allowed_fqdn.\"sub.example.org:{upstream_port}\"]\nearly_data = {{ action = \"notify\", scope = \"connection\" }}\nja4 = {{ action = \"notify\", scope = \"connection\" }}\ndns_assurance = \"resolver_trusted\"\n"
     );
     crate::config::parse_config_document(&doc).expect("valid retry test config")
+}
+
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&'static str>()
+                .map(|text| (*text).to_string())
+        })
+        .unwrap_or_else(|| "<non-string panic payload>".to_string())
+}
+
+fn current_thread_name() -> String {
+    std::thread::current()
+        .name()
+        .unwrap_or("<unnamed>")
+        .to_string()
+}
+
+#[test]
+fn silent_listener_fails_read_until_by_name() {
+    let listener = StdListener::bind("127.0.0.1:0").expect("silent listener bind");
+    let addr = listener.local_addr().expect("silent listener addr");
+    let mut client = TcpStream::connect(addr).expect("client connect");
+    let (_silent, _) = listener.accept().expect("accept silent peer");
+    let thread = current_thread_name();
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        read_until_within(&mut client, b"READY", Duration::from_millis(50))
+    }))
+    .expect_err("a silent listener must fail read_until by name, not return empty");
+    let message = panic_text(payload.as_ref());
+    assert!(
+        message.contains("READY") && message.contains("50ms"),
+        "the failure must name the marker and the deadline: {message}"
+    );
+    assert!(
+        message.contains("0 bytes") && message.contains(&thread),
+        "the failure must name the bytes received and the thread: {message}"
+    );
+}
+
+#[test]
+fn serving_body_past_the_join_deadline_fails_naming_the_thread() {
+    let payload = std::panic::catch_unwind(|| {
+        with_serving_stack_within(ephemeral_port(), Duration::from_millis(20), |_serving| {
+            std::thread::sleep(Duration::from_millis(300));
+        });
+    })
+    .expect_err("a serving body past the join deadline must fail the test, not park the suite");
+    let message = panic_text(payload.as_ref());
+    assert!(
+        message.contains("serving-test") && message.contains("20ms"),
+        "the join failure must name the wedged thread and the deadline: {message}"
+    );
+}
+
+#[test]
+fn serving_body_panic_still_reaches_the_test() {
+    let payload = std::panic::catch_unwind(|| {
+        with_serving_stack_within(ephemeral_port(), Duration::from_secs(5), |_serving| {
+            panic!("planted serving-body panic")
+        });
+    })
+    .expect_err("a serving body panic must fail the test");
+    let message = panic_text(payload.as_ref());
+    assert!(
+        message.contains("planted serving-body panic"),
+        "the body panic payload must reach the test unchanged: {message}"
+    );
 }
 
 mod poll_timeout {
@@ -3290,7 +3432,7 @@ mod dialing {
                 "the slot must close after the pre-gate read"
             );
             assert!(
-                read_until(&mut client, b"\r\n\r\n").is_empty(),
+                read_quiet_window(&mut client, QUIET_WINDOW).is_empty(),
                 "detection telemetry must never forward a byte to the client"
             );
         });
@@ -3358,7 +3500,7 @@ mod dialing {
                 "the slot must close on the observed activity, not advance to send the 200"
             );
             assert!(
-                read_until(&mut client, b"\r\n\r\n").is_empty(),
+                read_quiet_window(&mut client, QUIET_WINDOW).is_empty(),
                 "the connected-dial flush must not emit a 200 for a slot that closes on the same event"
             );
         });
@@ -3487,7 +3629,7 @@ mod dialing {
                 serving.slots[index].stage == Stage::Dialing,
                 "an interrupted burst must not advance or terminate the setup"
             );
-            let early = read_until(&mut client, b"\r\n\r\n");
+            let early = read_quiet_window(&mut client, QUIET_WINDOW);
             assert!(
                 early.is_empty(),
                 "no 200/502/504 may be sent while the interrupted burst is still draining"
