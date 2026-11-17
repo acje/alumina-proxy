@@ -354,7 +354,7 @@ All added enforcement and monitoring storage is boot-time allocated from the exi
 | Per-slot latched tripwire fact (phase, class, validated ordinal, generation) | 512 | 8 B | 4096 B |
 | Per-ordinal saturated aggregate counters + overflow + window state | 32 | 32 B | 1024 B |
 | Per-slot last-counted window marker | 512 | 8 B | 4096 B |
-| First-seen JA4 baseline table (36-byte JA4 per entry; per-ordinal, no per-IP element) | 512 | 36 B | 18432 B (~18 KiB) |
+| First-seen JA4 baseline table (36-byte JA4 per entry; per-ordinal, no per-IP element) | 512 | 36 B | 18,432 B (18 KiB) |
 | ClientHello JA4 retention (`[u16; 8192]` ciphers + `[u8; 255]` ALPN + `[u16; 64]` extensions + `[u16; 64]` sigalgs in per-slot `ChInspector`) | 512 | ~16.5 KiB | ~8.2 MiB |
 
 The planned additional enforcement and monitoring control storage (the five non-JA4 rows above) totals approximately 9–10 KiB against the existing 128 MiB traffic storage and 512 KiB log queue. The two JA4 rows (first-seen baseline 18,432 B (18 KiB) and ClientHello retention ~8.2 MiB) are additional and separately accounted in the JA4 client-fingerprint tripwire amendment section. Exact sizes are fixed at implementation with `sizeof`-verified types. No pacing credit/burst storage is reserved or preallocated while Tarpit is deferred (no speculative reserved pacing allocation); it is added to this table only if a genuine trigger-catalog decision authorizes Tarpit. Per-turn enforcement work composes with the existing 16-op/64 KiB per-visit budget and at-most-256-visit timer recheck; the per-turn control-step count is a fixed value derived from that native per-visit I/O budget at implementation, not an invented range. Block All's bounded physical closure is the only path that walks the slot table.
@@ -435,9 +435,9 @@ The retained serving workspace is a fixed per-slot allocation, made once at boot
 | --- | --- | --- | --- |
 | Per-slot CONNECT parser head | 512 | 8 KiB | 4096 KiB |
 | Per-slot ClientHello inspector buffers (`buf` + `scratch`) | 512 × 2 | 64 KiB | 65 536 KiB |
-| **Retained serving workspace total** | 512 slots | 136 KiB | **68 MiB** |
+| **Retained serving workspace total** (incl. JA4 retention; type-derived `SLOT_WORKSPACE_BYTES`) | 512 slots | 153.2 KiB | **76.6 MiB** |
 
-This is the `SLOT_WORKSPACE_BYTES` / `SERVING_WORKSPACE_BYTES` accounting in `src/inventory.rs::SLOT_WORKSPACE_BYTES, src/inventory.rs::SERVING_WORKSPACE_BYTES` and the two `[u8; 64 KiB]` buffers (`buf`, `scratch`) in each `ChInspector` at `src/inspection/client_hello.rs::ChInspector`, preallocated for all 512 slots at boot (`src/runtime/reactor.rs::Serving::preallocate`). It is included in the boot inventory's named-fixed-buffer lower bound (`BootInventory::named_fixed_buffer_bytes` = 128 MiB traffic + 68 MiB serving workspace + DNS named buffers ≈ 196 MiB), consistent with the observed ≈ 211 MiB RSS in `docs/benchmarks/e2micro-suite.md#honest-readings-m-04-corrected`.
+This is the `SLOT_WORKSPACE_BYTES` / `SERVING_WORKSPACE_BYTES` accounting in `src/inventory.rs::SLOT_WORKSPACE_BYTES, src/inventory.rs::SERVING_WORKSPACE_BYTES` and the two `[u8; 64 KiB]` buffers (`buf`, `scratch`) in each `ChInspector` at `src/inspection/client_hello.rs::ChInspector`, preallocated for all 512 slots at boot (`src/runtime/reactor.rs::Serving::preallocate`). It is included in the boot inventory's named-fixed-buffer lower bound (`BootInventory::named_fixed_buffer_bytes` = 128 MiB traffic + 76.6 MiB serving workspace + DNS named buffers ≈ 205 MiB), consistent with the historically observed ≈ 211 MiB RSS in `docs/benchmarks/e2micro-suite.md#honest-readings-m-04-corrected`.
 
 The DNS transport's fixed 512-byte query buffer (`QUERY_BUF_LEN`, `src/dns/transport.rs::QUERY_BUF_LEN`) is likewise a retained named buffer and is accounted with the DNS named buffers.
 
@@ -543,7 +543,7 @@ Spec §Configuration & DNS govern the configuration document and resolver select
 - **FQDN validation (`Fqdn`, `src/dns/resolver.rs::Fqdn`).** Each label is 1–63 bytes of lowercase ASCII letters, digits, and hyphens, with no leading or trailing hyphen, and the total is at most `FQDN_MAX_LEN = 253` (`src/dns/resolver.rs::FQDN_MAX_LEN`). A wildcard `*` anywhere maps to `WildcardFqdn`; non-ASCII/IDN characters map to `IdnFqdn`; uppercase or otherwise non-DNS characters, and leading/trailing/empty labels (a leading or trailing dot), map to `InvalidFqdn` — the three new `ResolverError` discriminants live at `src/dns/resolver.rs::ResolverError::WildcardFqdn, src/dns/resolver.rs::ResolverError::IdnFqdn, src/dns/resolver.rs::ResolverError::InvalidFqdn` (Display `src/dns/resolver.rs::ResolverError::fmt`). Digit-leading labels are allowed (RFC 1123), matching the allowlist `config::Fqdn` label rule at `src/config/mod.rs::validate_label`. The validated name is stored inline as `[u8; FQDN_MAX_LEN]` with a `len: u8`, so `Nameserver` (`src/dns/resolver.rs::Nameserver`) and `ResolverSet` remain `Copy` and the fixed zero-alloc profile is preserved.
 - **Entry parse (`select`, `src/dns/resolver.rs::select`).** `select()` splits a token once on `#`: the IP half is validated exactly as before, and the FQDN half, when present, is validated as above. A bare IP yields `fqdn: None` (`is_ip_only()`, `src/dns/resolver.rs::Nameserver::is_ip_only`) and remains fully valid — IP-only is the tolerated degraded-trust form. A trailing `#pin-sha256=`-style suffix is rejected as `InvalidFqdn` through the non-DNS-characters rule.
 - **Carriage and accessors.** `Nameserver` and `ResolverSet` stay `Copy`; `build_resolver_set` (`src/config/mod.rs::build_resolver_set`) is structurally unchanged — the `fqdn` field rides the existing validated surface. The additions are `fqdn()` (`src/dns/resolver.rs::Nameserver::fqdn`), `is_ip_only()` (`src/dns/resolver.rs::Nameserver::is_ip_only`), and `ResolverSet::iter()` (`src/dns/resolver.rs::ResolverSet::iter`) for the boot scan. `src/dns/transport.rs` carries the copied set unchanged this package: the §Configuration & DNS resolver-peer assertion remains address-based (the DoT handshake on port 853 is implemented by the DoT transport section below), and both the single-resolver and failover/failback surfaces are otherwise untouched.
-- **Startup warning.** Every IP-only resolver entry emits one stdout startup warning — `BootReport::ip_only_resolvers()` (`src/boot/mod.rs::BootReport::ip_only_resolvers`) printed from `src/main.rs::print_resolver_warnings` — so a degraded-trust bare-IP deployment is operator-visible immediately.
+- **Startup warning.** Every IP-only resolver entry emits one stderr startup warning — `BootReport::ip_only_resolvers()` (`src/boot/mod.rs::BootReport::ip_only_resolvers`) printed from `src/main.rs::print_resolver_warnings` — so a degraded-trust bare-IP deployment is operator-visible immediately.
 - **Config diagnostics.** `ConfigError::InvalidResolver`'s diagnostic text now names the `IP#fqdn` form; a malformed FQDN fails the same discriminant with the established exit 78 (EX_CONFIG) and precedence (`build_resolver_set` runs last in `from_table`, so earlier invalid-config errors keep their order).
 
 #### 4 KiB document preflight (re-measured, V37 form)
@@ -583,7 +583,7 @@ TLS state and its heap allocations are confined to the per-connect DoT setup sea
 
 #### Verification
 
-Hermetic loopback tests (`src/dns/transport/dot_tests.rs`) drive a rustls `ServerConnection` responder over 127.0.0.1 with deterministic embedded certificates (self-signed EC P-256, CN/SAN `dot.test`, plus a same-SPKI SAN-mismatch variant) — no real resolver is dialed. They cover: pinned success for both names × A/AAAA over one warm connection; the handshake-before-send-before-receive stage order; wrong-pin rejection; SAN-mismatch rejection; and unpinned-vs-empty-root rejection — each negative path counts 4 failed exchanges, publishes nothing, and leaves zero bindings. `dot_tests` is wired into the native verification gate (`scripts/verify.sh` INTENDED set; `mid`/`boundary phase1` clippy and the full lib test suite).
+Hermetic loopback tests (`src/dns/transport/dot_tests.rs`) drive a rustls `ServerConnection` responder over 127.0.0.1 with deterministic embedded certificates (self-signed EC P-256, CN/SAN `dot.test`, plus a same-SPKI SAN-mismatch variant) — no real resolver is dialed. They cover: pinned success for both names × A/AAAA over one warm connection; the handshake-before-send-before-receive stage order; wrong-pin rejection; SAN-mismatch rejection; and unpinned-vs-empty-root rejection — each negative path counts 4 failed exchanges, publishes nothing, and leaves zero bindings. `dot_tests` is wired into the native verification gate (`scripts/verify.sh` INTENDED set; `mid` clippy and the full lib test suite).
 
 ## Hardening: serving-from-stale observability level bit
 
@@ -698,7 +698,7 @@ The spec mandates the hex-fallback; the FoxIO reference implementations (`python
 
 ### Reconciliation with the cipher/ALPN policy ban
 
-Spec §TLS ClientHello profile ("do not introduce cipher-suite or ALPN policy") is unchanged. The JA4 tripwire OBSERVES and RETAINS cipher-suite, extension, and ALPN data from the initial ClientHello for fingerprinting only: it introduces NO cipher-suite or ALPN policy, makes no acceptance/rejection decision on them, and exerts no negotiation influence. The prior "never action-selecting" clause is REVERSED (T4): the retained data is never used to admit, reject, or modify a connection on its own, but on a CHANGE signal — a JA4 that deviates from the per-ordinal+address baseline — the tripwire selects the configured per-FQDN `ja4` action (`notify` or `block`) through the unified `decide()` (§T6). First-seen JA4 values only establish the baseline (recording, never an action); `ignore` suppresses the change signal only, never the baseline recording. JA4 still introduces no cipher-suite or ALPN policy and exerts no negotiation influence.
+Spec §TLS ClientHello profile ("do not introduce cipher-suite or ALPN policy") is unchanged. The JA4 tripwire OBSERVES and RETAINS cipher-suite, extension, and ALPN data from the initial ClientHello for fingerprinting only: it introduces NO cipher-suite or ALPN policy, makes no acceptance/rejection decision on them, and exerts no negotiation influence. The prior "never action-selecting" clause is REVERSED (T4): the retained data is never used to admit, reject, or modify a connection on its own, but on a CHANGE signal — a JA4 that deviates from the per-ordinal+address baseline — the tripwire selects the configured per-FQDN `ja4` action (`notify` or `block`) through the unified `decide()` (§T6). The seed — the row-empty first distinct fingerprint — establishes the baseline (recording, never an action); every later distinct value is a change signal, and `ignore` suppresses the change signal only, never the baseline recording. JA4 still introduces no cipher-suite or ALPN policy and exerts no negotiation influence.
 
 ### Reconciliation with the inspection scope
 
@@ -1413,14 +1413,14 @@ allowlist order. Allocation profile unchanged (fixed-slot storage, no post-boot 
 #### Fixed-profile accounting follow-up
 
 The `BailiwickZones` change adds no heap, but the DNS named-buffer accounting figure at
-§Retained serving workspace (`BootInventory::named_fixed_buffer_bytes` ≈ 196 MiB lower bound) was re-measured once
+§Retained serving workspace (`BootInventory::named_fixed_buffer_bytes` ≈ 196 MiB lower bound at that time, before JA4 retention) was re-measured once
 the amendment was authorized: the fixed `[DnsName; ALLOWLIST_MAX]` zone storage measures
 `size_of::<BailiwickZones>()` = 17168 B (16.77 KiB) — zones 8448 B + suffixes 8448 B +
 `suffix_owner` 256 B + len/suffix_len 16 B — with `size_of::<DnsName>()` = 264 B (256-byte
 buffer + 8 B len) (`src/dns/wire.rs::DnsName`). One retained instance exists: the field of the
 single `StartupDns` transport (`src/dns/transport.rs::StartupDns::bailiwick`). `DNS_NAMED_BUFFER_BYTES` =
 `QUERY_BUF_LEN` (512) + `RECV_BUF_LEN` (`DNS_MSG_LIMIT` + 2 = 16386) + `size_of::<ResponseWorkspace>()`
-(`src/inventory.rs::DNS_NAMED_BUFFER_BYTES`); the re-measured total ≈ 196 MiB is unchanged within rounding
+(`src/inventory.rs::DNS_NAMED_BUFFER_BYTES`); the re-measured total ≈ 196 MiB was unchanged within rounding at that time (pre-JA4-retention; live figure per §Initial resource profile)
 (17168 B ≈ 0.0164 MiB), so the §Retained serving workspace note requires no textual edit.
 
 This supersedes the superseded §Configuration & DNS bailiwick sentence and the RT-005 note at §SP-013 — Latest-change value keyed per-ordinal with triggering peer source address; the
@@ -1758,7 +1758,7 @@ The proxy's facts are emitted only to the bounded stdout log. Its manager, `coru
 (https://github.com/acje/corundum — the managed-Alumina supervisor: signed image and config
 over NATS, warming standby, atomic host-level port swap, per-proxy metrics), carries **core
 NATS only** and lists JetStream or any NATS server-side feature as a non-goal (the corundum
-architecture document §2 Goals and non-goals, §7 Wire format). A durable events integration
+byte-canonical specification, §2 Goals and non-goals, §7 Wire format). A durable events integration
 therefore needs an explicit decision rather than an assumption: an event schema for proxy
 lifecycle (startup, promotion, refusal) and for tripwire/action facts, a delivery guarantee
 that survives process and host restart, and the anchor for durability (a store owned by the
