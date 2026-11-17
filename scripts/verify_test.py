@@ -64,9 +64,12 @@ def synthetic_identity_repo(temp):
         dest.write_text(f"synthetic input: {name}\n")
     (repo / "scripts/cargo_config_probe.py").write_text('print("absent")\n')
     git = tools / "git"
+    # The HEAD answer is a well-formed git object name because the compare types
+    # that record: a stub value the writer could not produce would make every
+    # synthetic pin fail for the wrong reason.
     git.write_text('''#!/bin/sh
 case "$*" in
-  'rev-parse --verify HEAD') printf 'fixture-head\\n';;
+  'rev-parse --verify HEAD') printf '3f786850e387550fdab836ed7e6dc881de23001b\\n';;
   'status --porcelain') [ "${FIXTURE_STATUS_FAIL:-0}" = 0 ] || exit 42; printf ' M %s\\n' "$FIXTURE_INPUT";;
   'hash-object --stdin-paths')
     [ "${FIXTURE_BLOB_FAIL:-0}" = 0 ] || exit 43
@@ -78,6 +81,19 @@ esac
     env = {"PATH": f"{tools}:{os.environ['PATH']}", "FIXTURE_INPUT": "AGENTS.md",
            "CARGO_HOME": str(temp / "cargo-home")}
     return repo, tools, env, files
+
+
+def rewrite_column(path, index, value):
+    """Replace one cell of every row in a witness record, keeping the key and
+    the row width. Applied to BOTH snapshots it makes an ill-typed record that
+    still compares equal, which is exactly the false-PASS shape a cell guard
+    exists to refuse."""
+    rows = []
+    for line in path.read_text().splitlines():
+        fields = line.split("\t")
+        fields[index] = value
+        rows.append("\t".join(fields))
+    path.write_bytes(("\n".join(rows) + "\n").encode())
 
 
 class Selectors(unittest.TestCase):
@@ -152,14 +168,16 @@ class Selectors(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             result = self.run_verify("identity", "compare", before, after)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            # Each record must reach the terminal class it means, so every case
-            # below is a READABLE difference: an unparseable inputs.sha256 is
-            # UNKNOWN, and pinning only the record line would let the terminal
+            # A READABLE difference must reach the CHANGED class, so every
+            # payload below is legal for its record's kind. An ill-typed record
+            # is UNKNOWN, so pinning only the record line would let the terminal
             # class move while this test stayed green.
-            for name, payload in (("head", b"changed-head\n"),
-                                  ("status", b"changed-status\n"),
-                                  ("env", b"changed-env\n")):
+            for name, payload in (
+                    ("head", b"1" * 40 + b"\n"),
+                    ("status", b" M synthetic/other-input\n"),
+                    ("env", b"hasher=fixture-other\n")):
                 original = (after / name).read_bytes()
+                self.assertNotEqual(original, payload, name)
                 (after / name).write_bytes(payload)
                 result = self.run_verify("identity", "compare", before, after)
                 self.assertNotEqual(result.returncode, 0, name)
@@ -167,8 +185,12 @@ class Selectors(unittest.TestCase):
                 self.assertIn("boundary inputs not stable", result.stderr)
                 self.assertNotIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
                 (after / name).write_bytes(original)
+            # inputs.sha256 stays parseable and keeps its path set, so this is a
+            # content difference the comparer can observe -- never an
+            # unobservable record.
             original = (after / "inputs.sha256").read_bytes()
             digest, paths = original.split(maxsplit=1)
+            self.assertEqual(len(digest), 64)
             other = b"0" * 64 if digest != b"0" * 64 else b"1" * 64
             (after / "inputs.sha256").write_bytes(other + b" " + paths)
             result = self.run_verify("identity", "compare", before, after)
@@ -201,6 +223,18 @@ class Selectors(unittest.TestCase):
                 result = self.run_verify(*args, env=env)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("SOURCE-IDENTITY FAIL", result.stderr)
+
+    def _identity_pair(self, temp):
+        """Two snapshots of one synthetic repo, both must succeed first: a pin
+        that starts from a failed snapshot is testing the harness, not the
+        comparer."""
+        repo, tools, env, _files = synthetic_identity_repo(temp)
+        before, after = temp / "before", temp / "after"
+        for snapshot in (before, after):
+            result = self.run_verify("identity", "snapshot", snapshot,
+                                     env=env, cwd=repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return repo, tools, env, before, after
 
     def _blob_sha(self, snapshot, name):
         for line in (snapshot / "inputs.blob").read_text().splitlines():
@@ -319,9 +353,10 @@ class Selectors(unittest.TestCase):
                                      env=env, cwd=repo)
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
-            # The zero-row guard's own message, not just the token: without the
-            # guard this path degrades to "misses inputs the snapshot record
-            # names", which the UNKNOWN token alone cannot distinguish.
+            # The zero-row refusal is load-bearing for the message an operator
+            # reads: without it this path degrades into the coverage refusal
+            # ("misses inputs ..."), which the UNKNOWN token alone cannot tell
+            # apart. load() reads before/inputs.blob first.
             self.assertIn("inputs.blob has zero rows", result.stderr)
             self.assertIn("boundary inputs not observable", result.stderr)
             self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
@@ -361,7 +396,6 @@ class Selectors(unittest.TestCase):
                 # One side emptied is unobservable. DRIFT-CONTENT would assert
                 # an input-set change that the witness never showed.
                 self.assertNotIn("SOURCE-IDENTITY-DRIFT-CONTENT", result.stderr)
-                self.assertIn("boundary inputs not observable", result.stderr)
                 self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
                 (after / witness).write_bytes(saved)
 
@@ -445,72 +479,155 @@ class Selectors(unittest.TestCase):
                 self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
                 (after / name).write_bytes(saved)
 
-    def test_identity_compare_refuses_an_evidence_free_witness(self):
+    def test_identity_compare_refuses_a_witness_row_with_no_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)
-            repo, _tools, env, _files = synthetic_identity_repo(temp)
-            before, after = temp / "before", temp / "after"
-            for snapshot in (before, after):
-                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            saved = {(snapshot, witness): (snapshot / witness).read_bytes()
-                     for snapshot in (before, after)
-                     for witness in ("inputs.blob", "inputs.stat")}
-            # Keys with no evidence: path\t (width 2) and path\t\t\t\t (width 5).
-            for (snapshot, witness), payload in saved.items():
-                rows = [row.split(b"\t")[0] + b"\t" * (len(row.split(b"\t")) - 1)
-                        for row in payload.splitlines()]
-                (snapshot / witness).write_bytes(b"\n".join(rows) + b"\n")
-            # Two empty-cell witnesses compared equal and certified STABLE-OK
-            # with nothing observed: that is the false PASS this pin keeps shut.
-            result = self.run_verify("identity", "compare", before, after,
-                                     env=env, cwd=repo)
-            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
-            self.assertIn("incomplete", result.stderr)
-            self.assertIn("boundary inputs not observable", result.stderr)
-            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
-            for (snapshot, witness), payload in saved.items():
-                (snapshot / witness).write_bytes(payload)
-
-    def test_identity_compare_refuses_an_empty_head_or_env_record(self):
-        with tempfile.TemporaryDirectory() as temp:
-            temp = Path(temp)
-            repo, _tools, env, _files = synthetic_identity_repo(temp)
-            before, after = temp / "before", temp / "after"
-            for snapshot in (before, after):
-                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            for name in ("head", "env"):
-                saved = {snapshot: (snapshot / name).read_bytes()
+            repo, _tools, env, before, after = self._identity_pair(temp)
+            # A key with no evidence: '<path><TAB>' (blob, width 2) and
+            # '<path><TAB><TAB><TAB><TAB>' (stat, width 5). Two such rows compare
+            # equal, so without the cell rule this pair certified STABLE-OK with
+            # nothing observed.
+            for witness in ("inputs.blob", "inputs.stat"):
+                saved = {snapshot: (snapshot / witness).read_bytes()
                          for snapshot in (before, after)}
-                # Zero bytes on BOTH sides: presence alone compared them equal
-                # and claimed the record identical without a value.
                 for snapshot in (before, after):
-                    (snapshot / name).write_bytes(b"")
+                    rows = []
+                    for line in (snapshot / witness).read_text().splitlines():
+                        fields = line.split("\t")
+                        rows.append(fields[0] + "\t" * (len(fields) - 1))
+                    (snapshot / witness).write_bytes(
+                        ("\n".join(rows) + "\n").encode())
                 result = self.run_verify("identity", "compare", before, after,
                                          env=env, cwd=repo)
-                self.assertNotEqual(result.returncode, 0, name)
+                self.assertNotEqual(result.returncode, 0, witness)
                 self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
-                self.assertIn(f"{name} empty", result.stderr)
+                # The refusal names the record and the row, so the operator can
+                # find the row rather than re-derive which record failed.
+                self.assertIn(witness, result.stderr)
+                self.assertIn("line 1", result.stderr)
                 self.assertIn("boundary inputs not observable", result.stderr)
+                self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
                 self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
                 for snapshot, payload in saved.items():
-                    (snapshot / name).write_bytes(payload)
+                    (snapshot / witness).write_bytes(payload)
 
-    def test_identity_compare_refuses_a_witness_that_invents_an_input(self):
+    def test_identity_compare_refuses_an_untypable_stat_cell(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)
-            repo, _tools, env, _files = synthetic_identity_repo(temp)
-            before, after = temp / "before", temp / "after"
+            repo, _tools, env, before, after = self._identity_pair(temp)
+            saved = {snapshot: (snapshot / "inputs.stat").read_bytes()
+                     for snapshot in (before, after)}
+            # The stat writer renders %d: 'abc' is not an observation, and '007'
+            # is not the rendering int() produces. Both sides carry the same
+            # value, so a presence-only guard sees an equal tuple and certifies
+            # the byte-identical detection the stat witness exists for.
+            for payload in ("abc", "007"):
+                for snapshot in (before, after):
+                    rewrite_column(snapshot / "inputs.stat", 3, payload)
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+                self.assertNotEqual(result.returncode, 0, payload)
+                self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                self.assertIn("inputs.stat", result.stderr)
+                self.assertIn("boundary inputs not observable", result.stderr)
+                self.assertNotIn("DRIFT-BYTE-IDENTICAL", result.stderr)
+                self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+            for snapshot, payload in saved.items():
+                (snapshot / "inputs.stat").write_bytes(payload)
+
+    def test_identity_compare_refuses_an_untypable_blob_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, before, after = self._identity_pair(temp)
+            saved = {snapshot: (snapshot / "inputs.blob").read_bytes()
+                     for snapshot in (before, after)}
+            # `git hash-object` emits a lowercase object name: 40 hex for a sha1
+            # repository, 64 for a sha256 one. A short name, or upper case (which
+            # git never prints), is not evidence about the input.
+            for payload in ("deadbeef", "A" * 64):
+                for snapshot in (before, after):
+                    rewrite_column(snapshot / "inputs.blob", 1, payload)
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+                self.assertNotEqual(result.returncode, 0, payload)
+                self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                self.assertIn("inputs.blob", result.stderr)
+                self.assertIn("boundary inputs not observable", result.stderr)
+                self.assertNotIn("SOURCE-IDENTITY-DRIFT-CONTENT", result.stderr)
+                self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+            for snapshot, payload in saved.items():
+                (snapshot / "inputs.blob").write_bytes(payload)
+
+    def test_identity_compare_refuses_a_head_that_is_not_one_git_object_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, before, after = self._identity_pair(temp)
+            saved = {snapshot: (snapshot / "head").read_bytes()
+                     for snapshot in (before, after)}
+            # The writer records `git rev-parse --verify HEAD`: one lowercase
+            # object name and one newline. An empty file, prose, a truncated
+            # name and an extra line are all records the comparer cannot
+            # interpret, and none may be compared as if they were the same value.
+            for payload in (b"", b"notasha\n", b"0" * 39 + b"\n",
+                            b"0" * 40 + b"\n\n"):
+                for snapshot in (before, after):
+                    (snapshot / "head").write_bytes(payload)
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+                self.assertNotEqual(result.returncode, 0, payload)
+                self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                self.assertIn("head", result.stderr)
+                self.assertIn("boundary inputs not observable", result.stderr)
+                self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+                self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+            for snapshot, payload in saved.items():
+                (snapshot / "head").write_bytes(payload)
+
+    def test_identity_compare_refuses_an_empty_env_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, before, after = self._identity_pair(temp)
+            saved = {snapshot: (snapshot / "env").read_bytes()
+                     for snapshot in (before, after)}
+            # An env record carries its evidence in its bytes: two zero-byte
+            # records are an empty claim, not an agreement about the build
+            # environment.
             for snapshot in (before, after):
-                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                (snapshot / "env").write_bytes(b"")
+            result = self.run_verify("identity", "compare", before, after,
+                                     env=env, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertIn("env empty", result.stderr)
+            self.assertIn("boundary inputs not observable", result.stderr)
+            self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+            for snapshot, payload in saved.items():
+                (snapshot / "env").write_bytes(payload)
+
+    def test_identity_compare_accepts_an_empty_status_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, before, after = self._identity_pair(temp)
+            # The per-record emptiness rule is named, not a blanket "no empty
+            # files" sweep: an empty status IS the clean-tree observation, so
+            # refusing it would be a false UNKNOWN on correct input.
+            for snapshot in (before, after):
+                (snapshot / "status").write_bytes(b"")
+            result = self.run_verify("identity", "compare", before, after,
+                                     env=env, cwd=repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("SOURCE-IDENTITY-STABLE-OK", result.stdout)
+
+    def test_identity_compare_refuses_a_witness_row_the_record_never_named(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, before, after = self._identity_pair(temp)
             saved = (after / "inputs.blob").read_bytes()
-            (after / "inputs.blob").write_bytes(
-                saved + b"invented/input\t" + b"0" * 64 + b"\n")
             # A row the snapshot's own content record never named is invented
             # evidence: it must be refused by name, not diffed as a drift.
+            (after / "inputs.blob").write_bytes(
+                saved + b"invented/input\t" + b"0" * 64 + b"\n")
             result = self.run_verify("identity", "compare", before, after,
                                      env=env, cwd=repo)
             self.assertNotEqual(result.returncode, 0)
@@ -521,14 +638,10 @@ class Selectors(unittest.TestCase):
             self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
             (after / "inputs.blob").write_bytes(saved)
 
-    def test_identity_compare_refuses_a_non_utf8_record(self):
+    def test_identity_compare_refuses_a_record_that_is_not_utf8(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)
-            repo, _tools, env, _files = synthetic_identity_repo(temp)
-            before, after = temp / "before", temp / "after"
-            for snapshot in (before, after):
-                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            repo, _tools, env, before, after = self._identity_pair(temp)
             for name in ("inputs.blob", "inputs.stat", "inputs.sha256"):
                 saved = (after / name).read_bytes()
                 # A record that is not UTF-8 cannot be observed. An uncaught
@@ -546,51 +659,83 @@ class Selectors(unittest.TestCase):
 
     @unittest.skipIf(os.geteuid() == 0,
                      "root can read a mode-000 record; the unreadable shape is unavailable")
-    def test_identity_compare_refuses_an_unreadable_record(self):
+    def test_identity_compare_keeps_an_unreadable_record_unknown(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)
-            repo, _tools, env, _files = synthetic_identity_repo(temp)
-            before, after = temp / "before", temp / "after"
-            for snapshot in (before, after):
-                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            repo, _tools, env, before, after = self._identity_pair(temp)
             record = after / "head"
             saved = record.read_bytes()
             record.chmod(0o000)
             try:
-                # cmp refuses to read the operand (exit 2). That is an
-                # unobservable record, never a CHANGED verdict about its value.
                 result = self.run_verify("identity", "compare", before, after,
                                          env=env, cwd=repo)
             finally:
                 record.chmod(0o644)
             self.assertEqual(record.read_bytes(), saved)
+            # A record the comparer cannot read is unobservable: it is never a
+            # CHANGED verdict about the value it was supposed to carry.
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
-            self.assertIn("head uncomparable", result.stderr)
-            self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+            self.assertIn("head", result.stderr)
             self.assertIn("boundary inputs not observable", result.stderr)
+            self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
             self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
 
-    def test_identity_compare_refuses_an_absent_python3_as_unknown(self):
+    def _compare_path_tools(self, temp, name, missing):
+        """A PATH holding only the compare path's prerequisites, minus one."""
+        tools = temp / name
+        tools.mkdir()
+        for tool in ("sh", "cat", "cmp", "python3"):
+            if tool in missing:
+                continue
+            found = shutil.which(tool)
+            self.assertIsNotNone(found, tool)
+            (tools / tool).symlink_to(found)
+        return tools
+
+    def test_identity_compare_keeps_a_cmp_failure_unknown(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)
-            repo, tools, env, _files = synthetic_identity_repo(temp)
-            before, after = temp / "before", temp / "after"
-            for snapshot in (before, after):
-                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            for name in ("sh", "cmp"):
-                found = shutil.which(name)
-                self.assertIsNotNone(found, name)
-                (tools / name).symlink_to(found)
+            repo, _tools, env, before, after = self._identity_pair(temp)
+            tools = self._compare_path_tools(temp, "tools-cmp-error", ())
+            (tools / "cmp").unlink()
+            # cmp refuses to read an operand (exit 2). That is an operational
+            # failure about the probe, never a CHANGED verdict about the value.
+            (tools / "cmp").write_text("#!/bin/sh\nexit 2\n")
+            (tools / "cmp").chmod(0o755)
+            result = self.run_verify("identity", "compare", before, after,
+                                     env={**env, "PATH": str(tools)}, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertIn("boundary inputs not observable", result.stderr)
+            self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+
+    def test_identity_compare_keeps_an_absent_cmp_unknown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, before, after = self._identity_pair(temp)
+            tools = self._compare_path_tools(temp, "tools-no-cmp", ("cmp",))
+            result = self.run_verify("identity", "compare", before, after,
+                                     env={**env, "PATH": str(tools)}, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertIn("boundary inputs not observable", result.stderr)
+            self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+
+    def test_identity_compare_keeps_an_absent_interpreter_unknown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, before, after = self._identity_pair(temp)
+            tools = self._compare_path_tools(temp, "tools-no-python", ("python3",))
             # No interpreter means the witness was never examined: an absent
             # tool is unobservable, never a drift about the inputs themselves.
             result = self.run_verify("identity", "compare", before, after,
                                      env={**env, "PATH": str(tools)}, cwd=repo)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("python3 required", result.stderr)
             self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertIn("python3", result.stderr)
             self.assertIn("boundary inputs not observable", result.stderr)
             self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
             self.assertNotIn("STABLE-OK", result.stdout + result.stderr)

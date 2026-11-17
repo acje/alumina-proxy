@@ -2046,13 +2046,15 @@ identity_snapshot() {
 # silently.
 #
 # Three facts are UNOBSERVED, never agreement: a witness with zero rows (two
-# empty maps are not evidence), a row with an empty field (a key with no
-# evidence says nothing about the input it names), and a witness that does not
-# cover its own snapshot's inputs.sha256 input set (the record defines the set;
-# a witness never certifies the subset it happens to contain). Exit is
-# tri-state -- 0 identical, 1 genuine drift, 2 unobservable -- so the caller
-# can print an UNKNOWN-shaped terminal line rather than a drift it never
-# observed. An absent interpreter is unobservable too, never drift.
+# empty maps are not evidence), a row that is not what the shipped writer
+# emits (an empty cell, a blob name that is not a git object name, a stat field
+# that is not the canonical decimal rendering -- a cell with no observation
+# says nothing about the input it names), and a witness that does not cover its
+# own snapshot's inputs.sha256 input set (the record defines the set; a witness
+# never certifies the subset it happens to contain). Exit is tri-state -- 0
+# identical, 1 genuine drift, 2 unobservable -- so the caller can print an
+# UNKNOWN-shaped terminal line rather than a drift it never observed. An absent
+# interpreter is unobservable too, never drift.
 identity_compare_witness() {
     _before="$1"
     _after="$2"
@@ -2061,9 +2063,23 @@ identity_compare_witness() {
         return 2
     }
     python3 - "$_before" "$_after" <<'PY'
+import re
 import sys
 
 FIELDS = ("ino", "size", "mtime_ns", "ctime_ns")
+
+# What the shipped writer can emit in one witness cell. `git hash-object`
+# prints a lowercase object name (40 hex for a sha1 repository, 64 for a sha256
+# one); the stat pass prints %d, whose canonical rendering is decimal with no
+# sign, padding or leading zero. A cell outside its kind's shape is not an
+# observation, so it can neither be compared nor certify identity.
+GIT_NAME = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+DECIMAL = re.compile(r"\A(?:0|[1-9][0-9]*)\Z")
+CELLS = {
+    "blob": (("object name", GIT_NAME),),
+    "stat": tuple((label, DECIMAL) for label in FIELDS),
+}
+WIDTHS = {"blob": 1 + len(CELLS["blob"]), "stat": 1 + len(CELLS["stat"])}
 
 
 def unobserved(message):
@@ -2097,7 +2113,15 @@ def expected_inputs(snapshot):
     return paths
 
 
-def load(path, width):
+def canonical_rows(path, kind):
+    """The single owner of what a witness row is.
+
+    Presence, width, duplicate paths and cell typing are decided here; coverage
+    is the sibling require_coverage over these rows. No call site admits a
+    record this canonicaliser would refuse, and no partially validated row
+    reaches the comparer.
+    """
+    cells = CELLS[kind]
     rows = {}
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -2106,12 +2130,16 @@ def load(path, width):
                 if not line:
                     continue
                 parts = line.split("\t")
-                # A key with no evidence is not a comparison: path\t (width 2)
-                # and path\t\t\t\t (width 5) would otherwise compare equal and
-                # certify STABLE-OK with nothing observed.
-                if len(parts) != width or not all(parts):
-                    unobserved("incomplete %s line %d: a witness row with an "
-                               "empty field is unobserved" % (path, lineno))
+                if len(parts) != WIDTHS[kind]:
+                    unobserved("%s line %d: %d fields where the writer emits %d"
+                               % (path, lineno, len(parts), WIDTHS[kind]))
+                if not all(parts):
+                    unobserved("%s line %d: an empty cell is not evidence"
+                               % (path, lineno))
+                for (label, pattern), value in zip(cells, parts[1:]):
+                    if pattern.match(value) is None:
+                        unobserved("%s line %d: the %s cell is outside what "
+                                   "the writer emits" % (path, lineno, label))
                 if parts[0] in rows:
                     unobserved("duplicate %s in %s" % (parts[0], path))
                 rows[parts[0]] = tuple(parts[1:])
@@ -2137,10 +2165,10 @@ def require_coverage(path, expected, rows):
 before_dir, after_dir = sys.argv[1], sys.argv[2]
 before_expected = expected_inputs(before_dir)
 after_expected = expected_inputs(after_dir)
-before_blob = load(before_dir + "/inputs.blob", 2)
-after_blob = load(after_dir + "/inputs.blob", 2)
-before_stat = load(before_dir + "/inputs.stat", 5)
-after_stat = load(after_dir + "/inputs.stat", 5)
+before_blob = canonical_rows(before_dir + "/inputs.blob", "blob")
+after_blob = canonical_rows(after_dir + "/inputs.blob", "blob")
+before_stat = canonical_rows(before_dir + "/inputs.stat", "stat")
+after_stat = canonical_rows(after_dir + "/inputs.stat", "stat")
 
 for path, expected, rows in (
         (before_dir + "/inputs.blob", before_expected, before_blob),
@@ -2181,13 +2209,41 @@ PY
 
 # One record, one decision: a record absent on either side is UNOBSERVED
 # (UNKNOWN), never a difference between two readable values. The witness
-# records are not checked here; the loader is their single presence owner.
+# records are not checked here; the canonicaliser is their single presence and
+# shape owner.
 #
 # HEAD and env carry their evidence in their bytes, so a zero-byte file is an
 # empty claim, not an agreement: presence alone cannot tell "nothing was
-# recorded" from "the recorded value was empty". status is legitimately empty
-# on a clean tree, so it stays presence-only. cmp's own refusal to read an
-# operand is unobservable too, never a CHANGED verdict.
+# recorded" from "the recorded value was empty". HEAD is typed as well: the
+# writer records `git rev-parse --verify HEAD`, so the record must be exactly
+# one git object name and nothing else -- a zero-byte file is not one. status is
+# legitimately empty on a clean tree and is opaque porcelain text, so it stays presence-only -- the rule is
+# per record and named, never a blanket "no empty files" sweep. cmp's own
+# refusal to read an operand is unobservable too, never a CHANGED verdict.
+#
+# identity_git_name_record <path>: true only when the record is exactly one git
+# object name -- 40 (sha1) or 64 (sha256) lowercase hex characters -- plus the
+# writer's terminating newline. `cat; printf x` keeps the trailing newline a
+# bare command substitution would strip, so a second line, an extra blank line
+# or a missing newline is refused instead of being trimmed into a valid name.
+identity_git_name_record() {
+    _gn_name=$( { cat "$1"; printf x; } 2>/dev/null ) || return 1
+    _gn_name=${_gn_name%x}
+    _gn_newline=$(printf '\nx')
+    _gn_newline=${_gn_newline%x}
+    case "$_gn_name" in
+        *"$_gn_newline") _gn_name=${_gn_name%"$_gn_newline"} ;;
+        *) return 1 ;;
+    esac
+    case "$_gn_name" in
+        *[!0-9a-f]*) return 1 ;;
+    esac
+    case "${#_gn_name}" in
+        40 | 64) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 identity_compare_record() {
     _before="$1"
     _after="$2"
@@ -2200,10 +2256,18 @@ identity_compare_record() {
         }
     done
     case "$_record" in
-        head | env)
+        head)
             for _dir in "$_before" "$_after"; do
-                [ -s "$_dir/$_record" ] || {
-                    echo "SOURCE-IDENTITY-UNKNOWN FAIL: $_record empty in $_dir (record unobservable, not PASS)" >&2
+                identity_git_name_record "$_dir/head" || {
+                    echo "SOURCE-IDENTITY-UNKNOWN FAIL: head in $_dir is not one git object name (40 or 64 lowercase hex); the record is unobservable, not a difference" >&2
+                    return 2
+                }
+            done
+            ;;
+        env)
+            for _dir in "$_before" "$_after"; do
+                [ -s "$_dir/env" ] || {
+                    echo "SOURCE-IDENTITY-UNKNOWN FAIL: env empty in $_dir (record unobservable, not PASS)" >&2
                     return 2
                 }
             done
