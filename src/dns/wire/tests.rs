@@ -4500,15 +4500,16 @@ struct ObservedParse {
 }
 
 /// Parses one reply through the same entry the reply tests use, keeping the
-/// observation facts bound to that same parse.
-fn parse_with_observation(msg: &[u8]) -> ObservedParse {
-    let cfg = config();
-    let zones = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick())
-        .expect("validated config keeps suffix count within ALLOWLIST_MAX");
-    let mut ws = ResponseWorkspace::default();
+/// observation facts bound to that same parse. The caller owns the workspace so
+/// a property can prove determinism across a reused, already-dirtied one.
+fn parse_with_observation(
+    ws: &mut ResponseWorkspace,
+    zones: &BailiwickZones,
+    msg: &[u8],
+) -> ObservedParse {
     match ParsedReply::parse_reply(
-        &mut ws,
-        &zones,
+        ws,
+        zones,
         &fqdn("sub.example.org"),
         Family::A,
         PROPERTY_TID,
@@ -4532,10 +4533,29 @@ fn parse_with_observation(msg: &[u8]) -> ObservedParse {
     }
 }
 
-/// Parses `msg` twice and asserts both parses classify and observe identically.
+/// Parses `msg` twice through one workspace that has already parsed an
+/// unrelated valid reply, and asserts both parses classify and observe
+/// identically. Neither parse starts from a pristine workspace, so determinism
+/// cannot rest on a scratch buffer that only ever saw clean state: whatever the
+/// primer left behind must not leak into either parse of `msg`.
 fn assert_stable_parse(msg: &[u8]) {
-    let first = parse_with_observation(msg);
-    let second = parse_with_observation(msg);
+    let cfg = config();
+    let zones = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick())
+        .expect("validated config keeps suffix count within ALLOWLIST_MAX");
+    let primer = direct_a("other.test", 0x7777, [198, 51, 100, 9], 60);
+    let mut ws = ResponseWorkspace::default();
+    ParsedReply::parse_reply(
+        &mut ws,
+        &zones,
+        &fqdn("other.test"),
+        Family::A,
+        0x7777,
+        &primer,
+    )
+    .expect("the unrelated primer reply is valid");
+
+    let first = parse_with_observation(&mut ws, &zones, msg);
+    let second = parse_with_observation(&mut ws, &zones, msg);
     let (first_outcome, second_outcome) = (first.outcome, second.outcome);
     assert_eq!(
         format!("{first_outcome:?}"),

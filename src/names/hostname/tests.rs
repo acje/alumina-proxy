@@ -112,13 +112,24 @@ fn hostname_regression_replays_the_minimised_counterexample() {
 
 /// Totality and idempotence: arbitrary attacker bytes never panic the
 /// normaliser, and every accepted name is a fixed point of normalisation. The
-/// second, hostname-shaped draw keeps the accept branch reachable: arbitrary
-/// bytes essentially never form a legal FQDN, so a raw-only property would
-/// never test idempotence at all (measured: zero accepted inputs in 64 cases).
+/// second, hostname-shaped draw keeps the accept branch mandatory rather than
+/// merely reachable: arbitrary bytes essentially never form a legal FQDN, so a
+/// raw-only property would never test idempotence at all (measured: zero
+/// accepted inputs in 64 cases). `domains()` draws RFC 1035 names — dot
+/// separated labels that each start and end alphanumeric, no leading or
+/// trailing dot, no port, and total length at most `max_length` — so at 253
+/// bytes, this crate's `FQDN_MAX_LEN`, every draw is an accepted name and the
+/// assertion below fails the property if that ever stops holding.
 #[hegel::test(test_cases = 64, derandomize = true)]
 fn hostname_normalisation_is_total_and_idempotent(tc: hegel::TestCase) {
     let raw = tc.draw(hegel::generators::binary().max_size(300));
     assert_normalised_fixed_point(&raw);
-    let shaped = tc.draw(hegel::generators::domains().max_length(255));
+    let shaped = tc.draw(hegel::generators::domains().max_length(253));
+    assert!(
+        FixedHostname::normalize(shaped.as_bytes()).is_some(),
+        "domains() with max_length 253 guarantees an RFC 1035 name of at most \
+         FQDN_MAX_LEN bytes with letter-initial dot-separated labels and no \
+         trailing dot, so {shaped:?} must normalise"
+    );
     assert_normalised_fixed_point(shaped.as_bytes());
 }
