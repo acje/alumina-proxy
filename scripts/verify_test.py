@@ -224,6 +224,76 @@ esac
             self.assertIn("ALT-COPY-FAIL", result.stderr)
             self.assertEqual(self.run_verify("host-mid", "unknown", env=env, cwd=repo).returncode, 2)
 
+    def gate_child_scan(self, temp, synthetic, env=None):
+        """Runs the shipped gate-child scan in a temp repo whose `ps` prints the
+        real listing plus the planted lines: the real listing satisfies the
+        scan's self-listing precondition, so only the planted lines are tested.
+        `PWD` pins the logical checkout spelling; `pwd -P` supplies the physical
+        one, so on a host whose temp root is a symlink both are covered."""
+        repo, tools = temp / "repo", temp / "tools"
+        (repo / "scripts").mkdir(parents=True)
+        tools.mkdir()
+        shutil.copyfile(ROOT / "scripts/verify.sh", repo / "scripts/verify.sh")
+        listing = temp / "synthetic-ps.txt"
+        listing.write_text("".join(f"{line}\n" for line in synthetic))
+        ps = tools / "ps"
+        ps.write_text(f'#!/bin/sh\n"{shutil.which("ps")}" -ww -eo pid=,ppid=,args=\ncat "{listing}"\n')
+        ps.chmod(0o755)
+        result = self.run_verify(
+            "gate-children", "scan", cwd=repo,
+            env={"PATH": f"{tools}:{os.environ['PATH']}", "PWD": str(repo), **(env or {})})
+        return repo, result
+
+    def test_gate_child_leak_under_the_alloc_witness_root_fails(self):
+        # The witness-on gate binaries are built with --target-dir
+        # $ALT_AW_TARGET_DIR, so an unscanned aw root reports a real leak clean.
+        hash_dir, suffix = "0" * 16, "1" * 16
+        name = f"main_thread_serving-{suffix}"
+        for case in ("logical", "physical", "absolute"):
+            with self.subTest(case), tempfile.TemporaryDirectory() as temp:
+                temp = Path(temp)
+                repo = temp / "repo"
+                physical = Path(os.path.realpath(repo))
+                if case == "absolute":
+                    absolute = temp / "aw-absolute"
+                    env = {"ALT_AW_TARGET_DIR": str(absolute)}
+                    root = absolute / "debug/build/alumina"
+                else:
+                    env = {}
+                    checkout = repo if case == "logical" else physical
+                    root = checkout / "target/aw/debug/build/alumina"
+                aw = root / hash_dir / "out" / name
+                repo, result = self.gate_child_scan(temp, [f"991001 1 {aw}"], env=env)
+                self.assertNotEqual(result.returncode, 0, case + result.stdout + result.stderr)
+                self.assertIn("GATE-CHILD-LEAK-FAIL", result.stderr, case)
+                self.assertIn(str(aw), result.stderr, case)
+
+    def test_gate_child_scan_fails_closed_on_a_whitespace_build_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo, result = self.gate_child_scan(
+                Path(temp), [], env={"ALT_AW_TARGET_DIR": "aw root"})
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr)
+            self.assertIn("aw root/debug/build/alumina", result.stderr)
+
+    def test_gate_child_scan_ignores_non_matches_and_names_its_roots(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo = temp / "repo"
+            inside = (repo / "target/aw/debug/build/alumina" / ("0" * 16) / "out"
+                      / f"gate_child-{'1' * 16}")
+            lines = [
+                f"991003 1 /bin/sh -c cc -o {inside}",  # the path only among the args
+                f"991004 4242 {inside}",                # argv0 inside a root, not reparented
+                f"991005 1 /usr/bin/sleep 30",          # reparented, outside every root
+            ]
+            repo, result = self.gate_child_scan(temp, lines)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-OK", result.stdout)
+            for checkout in {str(repo), os.path.realpath(repo)}:
+                for room in ("target", "target/aw"):
+                    self.assertIn(f"{checkout}/{room}/debug/build/alumina", result.stdout)
+
     def test_fixture_artifact_provenance_across_connections(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)

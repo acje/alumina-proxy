@@ -27,7 +27,7 @@ usage() {
     echo "usage: verify.sh {inner|mid|host-mid|fixtures|e2e|supply-chain|identity|gate-children} <scope> [args] | verify.sh docs" >&2
     echo "       inner test <target> runs ONE integration target host-natively; backs no done-claim." >&2
     echo "       host-mid {foundations|boot|union|full|clippy}; supply-chain audit-deny" >&2
-    echo "       gate-children scan asserts no reparented gate child survives under target/debug/build/alumina" >&2
+    echo "       gate-children scan asserts no reparented gate child survives under this checkout's debug build roots (target/debug and ALT_AW_TARGET_DIR)" >&2
     echo "       identity snapshot <directory> | identity compare <before> <after> | identity artifact <path>" >&2
     exit 2
 }
@@ -239,14 +239,19 @@ whitespace_gate() {
 # A gate-spawned child, or a cargo lib-test child, that outlives its parent
 # keeps a loopback listener alive, so every later gate receipt is
 # chain-ambiguous. The scan matches the EXECUTED program (argv[0]) of a
-# reparented process (ppid 1) against this checkout's debug build tree:
-# <root>/target/debug/build/alumina/<hash>/out/<gate-binary>-<hash>. A path that
+# reparented process (ppid 1) against EVERY debug build root this gate builds
+# into: <checkout>/target/debug/build/alumina (witness-off) and
+# <checkout>/<ALT_AW_TARGET_DIR>/debug/build/alumina (witness-on; the default
+# target/aw, or the absolute directory itself when the knob is absolute), for
+# both the logical and physical checkout spelling where they differ, deduped.
+# Within a root the shape is <hash>/out/<gate-binary>-<hash>. A path that
 # merely appears among a process's arguments (a compiler writing into that
-# directory, `ld -o .../out/...`) is not a match. Both the logical and physical
-# checkout spellings are matched, against the procps and busybox `ps` forms.
-# An operational failure - no usable `ps`, an unparsable listing, or a listing
-# that cannot see this shell - is GATE-CHILD-LEAK-UNKNOWN and fails: an
-# observation failure is never a clean gate.
+# directory, `ld -o .../out/...`) is not a match. Both the procps and busybox
+# `ps` forms are tried.
+# An operational failure - no usable `ps`, a build root the scan cannot
+# separate from the arguments, an unparsable listing, or a listing that cannot
+# see this shell - is GATE-CHILD-LEAK-UNKNOWN and fails: an observation
+# failure is never a clean gate.
 assert_no_leaked_gate_children() {
     _gl_ps=""
     for _gl_form in "-ww -eo pid=,ppid=,args=" "-eo pid=,ppid=,args=" "-o pid=,ppid=,args=" "-ww -o pid=,ppid=,args="; do
@@ -260,20 +265,39 @@ assert_no_leaked_gate_children() {
         echo "GATE-CHILD-LEAK-UNKNOWN: ps produced no process listing (procps and busybox forms both failed; operational error is never clean)" >&2
         return 1
     fi
-    _gl_roots="$(pwd)"
-    _gl_phys="$(pwd -P)"
-    [ "$_gl_phys" = "$_gl_roots" ] || _gl_roots="$_gl_roots $_gl_phys"
-    for _gl_root in $_gl_roots; do
-        case "$_gl_root" in
-            *[[:space:]]*)
-                echo "GATE-CHILD-LEAK-UNKNOWN: checkout path contains whitespace, argv[0] is not separable from the arguments: $_gl_root" >&2
-                return 1
-                ;;
-        esac
+    # Candidate roots, one per line: both debug build roots for both checkout
+    # spellings. Keeping them line-separated means a root is never re-split into
+    # pieces before the whitespace check sees it.
+    _gl_candidates=""
+    for _gl_checkout in "$(pwd)" "$(pwd -P)"; do
+        for _gl_target in target "$ALT_AW_TARGET_DIR"; do
+            case "$_gl_target" in
+                /*) _gl_root="$_gl_target/debug/build/alumina" ;;
+                *) _gl_root="$_gl_checkout/$_gl_target/debug/build/alumina" ;;
+            esac
+            case "$_gl_root" in
+                *[[:space:]]*)
+                    echo "GATE-CHILD-LEAK-UNKNOWN: build root contains whitespace, argv[0] is not separable from the arguments: $_gl_root" >&2
+                    return 1
+                    ;;
+            esac
+            _gl_candidates="$_gl_candidates$_gl_root
+"
+        done
     done
+    # Dedupe and name in awk: exact string comparison, so a checkout path
+    # carrying glob metacharacters can never drop a root from the scan.
+    _gl_roots=$(printf '%s\n' "$_gl_candidates" | awk '$0 != "" && !seen[$0]++')
+    # The OK line must name every root the scan covered, so a missing root is
+    # visible in the receipt rather than implied.
+    _gl_named=$(printf '%s\n' "$_gl_roots" | awk '$0 != "" { printf "%s%s", sep, $0; sep = ", " }')
     _gl_rc=0
-    _gl_out=$(printf '%s\n' "$_gl_ps" | awk -v self="$$" -v roots="$_gl_roots" '
-        BEGIN { n = split(roots, root, " ") }
+    _gl_out=$(printf '%s\n' "$_gl_ps" | GL_ROOTS="$_gl_roots" awk -v self="$$" '
+        BEGIN {
+            n = split(ENVIRON["GL_ROOTS"], all, "\n")
+            roots = 0
+            for (i = 1; i <= n; i++) if (all[i] != "") root[++roots] = all[i]
+        }
         NF >= 3 {
             pid = $1 + 0
             if (pid == self) seen_self = 1
@@ -282,8 +306,8 @@ assert_no_leaked_gate_children() {
             sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", rest)
             argv0 = rest
             sub(/[ \t].*$/, "", argv0)
-            for (i = 1; i <= n; i++) {
-                prefix = root[i] "/target/debug/build/alumina/"
+            for (i = 1; i <= roots; i++) {
+                prefix = root[i] "/"
                 if (index(argv0, prefix) != 1) continue
                 tail = substr(argv0, length(prefix) + 1)
                 if (tail ~ /^[0-9a-f]+\/out\/[A-Za-z0-9_]+-[0-9a-f]+$/) {
@@ -293,12 +317,13 @@ assert_no_leaked_gate_children() {
             }
         }
         END {
+            if (roots == 0) exit 3
             if (!seen_self) { print "SELF-NOT-LISTED"; exit 2 }
             exit (bad ? 1 : 0)
         }
     ') || _gl_rc=$?
     case "$_gl_rc" in
-        0) echo "GATE-CHILD-LEAK-OK: no reparented gate child under $(pwd)/target/debug/build/alumina" ;;
+        0) echo "GATE-CHILD-LEAK-OK: no reparented gate child under $_gl_named" ;;
         1)
             printf '%s\n' "$_gl_out" | sed 's/^/  /' >&2
             echo "GATE-CHILD-LEAK-FAIL: a gate child outlived its parent (ppid 1); it keeps a loopback listener alive and makes every later gate receipt chain-ambiguous" >&2
@@ -306,6 +331,10 @@ assert_no_leaked_gate_children() {
             ;;
         2)
             echo "GATE-CHILD-LEAK-UNKNOWN: ps listing does not contain this shell (pid $$); the observation is unusable" >&2
+            return 1
+            ;;
+        3)
+            echo "GATE-CHILD-LEAK-UNKNOWN: the scan built no build root to match (operational error is never clean)" >&2
             return 1
             ;;
         *)
@@ -2229,12 +2258,13 @@ case "$TIER/$SCOPE" in
     mid/full) mid_full ;;
     host-mid/foundations|host-mid/boot|host-mid/clippy|host-mid/union|host-mid/full)
         [ "$#" -eq 2 ] || usage
-        # Scan BEFORE the dispatch: an orphan that predates this run holds its
-        # loopback listener for the whole suite, and a lib unit that binds or
-        # connects against it waits instead of failing (observed: a >30 minute
-        # host lib hang). A post-dispatch scan detects that state but cannot
-        # prevent the hang, so the pre-scan is what converts a stale orphan
-        # into a named failure.
+        # Scan BEFORE the dispatch: the pre-scan is a host-state precondition,
+        # not hang prevention for the container (the container has its own
+        # process namespace; a host orphan is not visible or waited on there).
+        # A stale host orphan still makes this host's receipt chain-ambiguous -
+        # its loopback listener belongs to no current gate - so it fails before
+        # the dispatch is recorded. The post-scan proves this dispatch left no
+        # new one.
         assert_no_leaked_gate_children || exit 1
         linux_dispatch "sh scripts/verify.sh mid $SCOPE"
         if [ "$SCOPE" = "union" ]; then

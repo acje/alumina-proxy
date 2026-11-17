@@ -28,7 +28,7 @@ sh scripts/verify.sh mid union                  # MID tier (Linux-only): release
 sh scripts/verify.sh mid full                   # MID tier (Linux-only): standalone gate-only selector (lib units + the six both-configuration gate binaries witness-off, plus the alloc-witness-only mio_matrix witness-on); surface subsumed by mid union
 sh scripts/verify.sh host-mid union             # host Podman dispatch of Linux mid union, including release artifact copy-out
 sh scripts/verify.sh host-mid foundations       # host Podman dispatch; also boot, clippy, full
-sh scripts/verify.sh gate-children scan         # gate-child leak assertion: no reparented gate child survives under target/debug/build/alumina
+sh scripts/verify.sh gate-children scan         # gate-child leak assertion: no reparented gate child survives under target/debug or $ALT_AW_TARGET_DIR debug build roots
 sh scripts/verify.sh docs                       # native offline docs gate: links + physical INTENDED + cfg-parentage + unsafe + spec digest
 sh scripts/verify.sh fixtures boot              # host Podman coordinator; Darwin allowed
 sh scripts/verify.sh supply-chain audit-deny    # host audit and deny, pinned tool versions
@@ -131,11 +131,19 @@ does not own and every receipt after it is chain-ambiguous.
 The scan reads the process table (the procps form, with a busybox fallback) and
 matches only the **executed program** — the first word of the process arguments,
 not a path that merely appears among them — of a reparented process (parent pid
-1) against this checkout's `target/debug/build/alumina` directory: a hash-named
-subdirectory, then its `out` subdirectory, then a gate-binary name carrying the
-same hash suffix. Both the logical and the physical checkout spelling are
-matched, so a running compiler or linker that writes into that directory is not
-a match.
+1) against every debug build root this gate builds into:
+
+- `target/debug/build/alumina` — the witness-off root;
+- `$ALT_AW_TARGET_DIR/debug/build/alumina` — the witness-on root, which holds
+  the alloc-witness gate binaries: the default `target/aw`, with a relative knob
+  resolved against the checkout and an absolute knob used as given.
+
+Within a root the shape is a hash-named subdirectory, then its `out`
+subdirectory, then a gate-binary name carrying the same hash suffix. Both the
+logical and the physical checkout spelling are matched, deduped where they
+coincide, so a running compiler or linker that writes into that directory is not
+a match. The `GATE-CHILD-LEAK-OK` line names every build root the scan covered,
+so a root missing from that line is visible rather than implied.
 
 The assertion runs **before and after the `host-mid` dispatch**, before and
 after each lib-suite invocation in `mid union` and `mid full`, and standalone as
@@ -153,18 +161,25 @@ RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --lib
 sh scripts/verify.sh gate-children scan
 ```
 
-The **pre-scan** is what makes the bracket load-bearing: an orphan that already
-existed before the run owns a loopback listener, so a lib unit that binds or
-connects against it *waits* rather than failing — observed as a host lib run
-hung for over 30 minutes on a listener it never created. The pre-scan converts a
-stale orphan into a fail instead of a hang, and the post-scan proves the run
-left no new one. `host-mid` applies the same ordering for the same reason: its
-scan runs before the container dispatch, not only after it.
+The **pre-scan** is what makes the bracket load-bearing for a host-native run:
+an orphan that already existed before the run owns a loopback listener, so a lib
+unit that binds or connects against it *waits* rather than failing — observed as
+a host lib run hung for over 30 minutes on a listener it never created. There
+the pre-scan converts a stale orphan into a fail instead of a hang, and the
+post-scan proves the run left no new one.
 
-An **unusable observation fails closed**: when `ps` is absent or fails, the
-listing cannot be parsed, or the listing does not contain the scanning shell, the
-gate prints `GATE-CHILD-LEAK-UNKNOWN` and exits non-zero. An operational error is
-never a clean scan.
+The `host-mid` pre-scan is a different claim: it is a **host-state
+precondition**, not hang prevention. The dispatch executes in its own process
+namespace, where a host orphan is neither visible nor waited on, so the pre-scan
+cannot stop a container hang. What it stops is a receipt recorded against an
+ambiguous host state: a stale orphan on the host holds a loopback listener no
+current gate owns, so the dispatch receipt that follows is chain-ambiguous.
+
+An **unusable observation fails closed**: when `ps` is absent or fails, a build
+root contains whitespace (argv[0] is then not separable from the process
+arguments), the listing cannot be parsed, or the listing does not contain the
+scanning shell, the gate prints `GATE-CHILD-LEAK-UNKNOWN` and exits non-zero. An
+operational error is never a clean scan.
 
 Platform limit: the parent-death signal is Linux-only (it is installed in the one
 guarded spawn in `tests/support/process_harness.rs`, which also refuses to exec a

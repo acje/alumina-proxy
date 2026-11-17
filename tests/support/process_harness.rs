@@ -122,10 +122,11 @@ impl std::ops::DerefMut for ChildGuard {
 }
 
 impl Drop for ChildGuard {
-    /// `Child` caches the exit status, so once a wait has completed the `kill`
-    /// fails with `InvalidInput` and `wait` returns the cached status without a
-    /// second `waitpid`: the guard is idempotent with `wait_for_success` and
-    /// `wait_for_exit`.
+    /// `Child::kill` is a no-op returning `Ok(())` once a wait has cached the
+    /// exit status (std's `Process::send_signal` returns `Ok` without signalling
+    /// a reaped pid), and `wait` returns the cached status: the guard is
+    /// idempotent with `wait_for_success` and `wait_for_exit` because of that
+    /// status cache, not because the kill reports an error.
     fn drop(&mut self) {
         let Some(mut child) = self.child.take() else {
             return;
