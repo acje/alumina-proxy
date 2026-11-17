@@ -599,18 +599,24 @@ fn incremental_scan_finds_delimiter_straddling_feed_boundary() {
 
 /// The terminal parse state after feeding `bytes` in `chunk`-byte pieces: the
 /// delimiter-consumed head length plus the parser's own settled result. `None`
-/// means no delimiter was ever fed.
+/// means no delimiter was ever fed; a completed state always carries the
+/// settled `Result` because `feed` only returns `Complete` once it is set.
 fn terminal_state(
     bytes: &[u8],
     chunk: usize,
-) -> Option<(usize, Option<Result<ConnectRequest, ConnectError>>)> {
+) -> Option<(usize, Result<ConnectRequest, ConnectError>)> {
     let mut parser = ConnectParser::new();
     for piece in bytes.chunks(chunk) {
         match parser
             .feed(piece)
             .expect("bounded input stays below the head limit")
         {
-            Feed::Complete { head_len } => return Some((head_len, parser.result().copied())),
+            Feed::Complete { head_len } => {
+                return Some((
+                    head_len,
+                    parser.result().copied().expect("complete has result"),
+                ));
+            }
             Feed::Incomplete => {}
         }
     }
@@ -634,9 +640,10 @@ fn connect_head_parser_is_total_and_incremental(tc: hegel::TestCase) {
         "completion must track the presence of the CRLFCRLF delimiter"
     );
     terminated.extend_from_slice(END_OF_HEAD);
-    let whole = terminal_state(&terminated, terminated.len());
-    let byte_at_a_time = terminal_state(&terminated, 1);
-    assert!(whole.is_some(), "a delimiter-terminated head must settle");
+    let whole = terminal_state(&terminated, terminated.len())
+        .expect("a delimiter-terminated head must settle");
+    let byte_at_a_time =
+        terminal_state(&terminated, 1).expect("a delimiter-terminated head must settle");
     assert_eq!(
         whole, byte_at_a_time,
         "the terminal parse must not depend on read boundaries"

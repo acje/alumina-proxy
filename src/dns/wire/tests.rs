@@ -933,6 +933,27 @@ mod workspace {
             }
             other => panic!("expected positives, got {other:?}"),
         }
+        let mut nxdomain = header(0x1332, true, 3, 1, 0, 1, 0);
+        nxdomain.extend_from_slice(&qname_bytes("sub.example.org"));
+        nxdomain.extend_from_slice(&1u16.to_be_bytes());
+        nxdomain.extend_from_slice(&1u16.to_be_bytes());
+        nxdomain.extend_from_slice(&root_soa_record(300, 60));
+        let negative = parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x1332, &nxdomain)
+            .expect("SOA-bearing NXDOMAIN");
+        assert!(matches!(
+            negative.outcome,
+            Outcome::NxDomain { soa: Some(_) }
+        ));
+        let mut empty = header(0x1333, true, 0, 1, 0, 0, 0);
+        empty.extend_from_slice(&qname_bytes("sub.example.org"));
+        empty.extend_from_slice(&1u16.to_be_bytes());
+        empty.extend_from_slice(&1u16.to_be_bytes());
+        assert_eq!(
+            parse_reply_into(&mut ws, "sub.example.org", Family::A, 0x1333, &empty)
+                .map(|reply| reply.outcome),
+            Err(DnsError::EmptyNoerrorWithoutSoa),
+            "a stale SOA must not make a following SOA-less empty NOERROR look like NODATA"
+        );
     }
 
     #[test]
@@ -4501,7 +4522,7 @@ struct ObservedParse {
 
 /// Parses one reply through the same entry the reply tests use, keeping the
 /// observation facts bound to that same parse. The caller owns the workspace so
-/// a property can prove determinism across a reused, already-dirtied one.
+/// a property can compare two parses through one reused workspace.
 fn parse_with_observation(
     ws: &mut ResponseWorkspace,
     zones: &BailiwickZones,
@@ -4535,9 +4556,10 @@ fn parse_with_observation(
 
 /// Parses `msg` twice through one workspace that has already parsed an
 /// unrelated valid reply, and asserts both parses classify and observe
-/// identically. Neither parse starts from a pristine workspace, so determinism
-/// cannot rest on a scratch buffer that only ever saw clean state: whatever the
-/// primer left behind must not leak into either parse of `msg`.
+/// identically. The reuse is structural: the claim is that determinism does not
+/// depend on a pristine workspace, not that any particular workspace field is
+/// reset. The per-field reset contract is pinned deterministically by
+/// `parse_reply_binds_its_own_flag_and_payload_across_workspace_reuse`.
 fn assert_stable_parse(msg: &[u8]) {
     let cfg = config();
     let zones = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick())
@@ -4556,10 +4578,8 @@ fn assert_stable_parse(msg: &[u8]) {
 
     let first = parse_with_observation(&mut ws, &zones, msg);
     let second = parse_with_observation(&mut ws, &zones, msg);
-    let (first_outcome, second_outcome) = (first.outcome, second.outcome);
     assert_eq!(
-        format!("{first_outcome:?}"),
-        format!("{second_outcome:?}"),
+        first.outcome, second.outcome,
         "two parses of identical bytes must classify identically"
     );
     assert_eq!(
