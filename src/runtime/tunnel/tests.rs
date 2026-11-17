@@ -1814,6 +1814,742 @@ mod slot_table_machine {
     }
 }
 
+/// The CONNECT authorization and peer-selection decision as a model-based
+/// state machine over drawn cache states and drawn attempt sequences.
+///
+/// The subject is the production [`Worker`]: its `decide`, `record_attempt`,
+/// `finish_setup` and `release` transitions, with the decision itself made by
+/// the crate-internal `next_phase` from the slot's own setup deadline and
+/// attempt ledger. The model owns a [`Cache`] published through the same
+/// staged-positive route the production DNS adapter uses, the attempt counters
+/// it recorded, and the setup instant it admitted. Every invariant is computed
+/// from the model's own publication record and attempt ledger plus the
+/// subject's returned [`ConnectPhase`]; none re-calls `select_peer` or reads a
+/// selection cursor as an oracle.
+///
+/// The drawn address pools hold only eligible, pairwise-distinct addresses, so
+/// publication is the identity on a drawn binding set: the cache's own
+/// eligibility filter and dedup have nothing to remove. The publish rule
+/// asserts that identity against the cache, which makes "a binding the model
+/// published" and "a binding the cache holds" the same set without the
+/// invariants reading the cache.
+///
+/// One admitted setup slot is always live. The initial admit is anchored on
+/// the machine's clock origin so every rule starts from a decidable slot; the
+/// release and graduation rules draw a fresh setup instant on re-admission, so
+/// the setup deadline and a reset attempt budget are drawn state too.
+///
+/// Invariants (each `#[invariant(always_run)]`, evaluated over the snapshot
+/// captured at the decision):
+/// - P1 a `Forbidden` result holds exactly when the resolved ordinal is absent.
+///   The model knows the drawn request's allowlist position by construction
+///   (`auth_request` of an allowlisted name or an unlisted host), never by
+///   asking the subject.
+/// - P2 `DeadlineExhausted` holds exactly when the model's own clock has
+///   reached the setup deadline it derived from its drawn admit instant; it is
+///   never returned before that deadline.
+/// - P3 `CandidatesExhausted` holds exactly when the model's own recorded
+///   attempt total has reached `MAX_UPSTREAM_ATTEMPTS` and the deadline has not
+///   passed.
+/// - P4 a `Peer` names the binding the model published at the index equal to
+///   the model's earlier attempts in that family in the current generation, is
+///   eligible, and comes from a servable (never retired) publication. The
+///   generation cross-check reads the cache's publication tag, which is
+///   publication bookkeeping, not the selection cursor.
+/// - P5 after an attempt in family F, if the other family has a usable
+///   published binding at its cursor the next `Peer` is in the other family;
+///   otherwise it stays in F.
+/// - P6 `NoBinding` holds exactly when neither family has an unused,
+///   non-retired, eligible binding at its cursor and neither the deadline nor
+///   the attempt budget has terminated the decision.
+/// - P7 a `Peer`'s `connect_deadline` equals the model's own `now + 2 s` clip
+///   to the setup deadline and is never later than it.
+mod peer_selection_machine {
+    use super::*;
+    use crate::dns::cache::{STALE_GRACE, STALE_SERVING_WINDOW};
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
+    /// Clock advances that reach every modelled boundary exactly: before,
+    /// at, and just past the 10 s setup deadline; a whole minute for freshness
+    /// drift; and one full stale-grace jump to retire a publication without
+    /// spending thousands of steps on the cache clock.
+    const CLOCK_STEPS: [u64; 12] = [0, 1, 2, 3, 4, 5, 9, 10, 11, 60, 3_600, STALE_GRACE];
+
+    /// Three eligible IPv4 destinations, so a drawn mask enumerates every
+    /// distinct binding subset.
+    fn a_pool() -> [NumericAddr; 3] {
+        [v4([8, 8, 8, 8]), v4([1, 1, 1, 1]), v4([9, 9, 9, 9])]
+    }
+
+    /// Three eligible IPv6 destinations, disjoint from the IPv4 pool.
+    fn aaaa_pool() -> [NumericAddr; 3] {
+        [
+            pub_v6(),
+            second_v6(),
+            v6([
+                0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88,
+            ]),
+        ]
+    }
+
+    fn pool(family: Family) -> [NumericAddr; 3] {
+        match family {
+            Family::A => a_pool(),
+            Family::Aaaa => aaaa_pool(),
+        }
+    }
+
+    const fn fam_index(family: Family) -> usize {
+        match family {
+            Family::A => 0,
+            Family::Aaaa => 1,
+        }
+    }
+
+    const fn count_in(counts: AttemptCounts, family: Family) -> u8 {
+        match family {
+            Family::A => counts.a(),
+            Family::Aaaa => counts.aaaa(),
+        }
+    }
+
+    fn draw_family(tc: &TestCase) -> Family {
+        tc.draw(gs::sampled_from(&[Family::A, Family::Aaaa][..]))
+    }
+
+    /// The setup deadline the model derives from its drawn admit instant, using
+    /// the fixed setup budget and the same checked-add saturation as
+    /// `Deadline::setup`. Model-owned: the subject is never asked for it.
+    fn model_setup_limit(admit: Instant) -> Instant {
+        admit
+            .checked_add(Duration::from_secs(SETUP_DEADLINE_SECS))
+            .unwrap_or(admit)
+    }
+
+    /// The per-attempt connect deadline the model expects: `now + 2 s` clipped
+    /// to the setup limit, computed from the model's own instants rather than
+    /// by calling `Deadline::connect_attempt`.
+    fn model_connect_limit(now: Instant, setup_limit: Instant) -> Instant {
+        let fresh = now
+            .checked_add(Duration::from_secs(CONNECT_DEADLINE_SECS))
+            .unwrap_or(now);
+        fresh.min(setup_limit)
+    }
+
+    /// A handle naming a slot index. A probe mints no capacity (the table owns
+    /// the accounting), so it can only ask the subject what state an index is
+    /// in; the machine re-mints one to observe that a released or graduated
+    /// handle refuses to decide.
+    fn probe(index: usize) -> SlotIndex {
+        SlotIndex(u16::try_from(index).expect("a slot index fits u16"))
+    }
+
+    /// The model's record of one family's last publication: the exact binding
+    /// sequence the staged-positive route published and the freshness and
+    /// retirement limits derived from the drawn receipt and TTL. Servability
+    /// and the cursor candidate are computed from those drawn facts, never from
+    /// the cache's entry. The model only draws nonzero TTLs, so a stale entry
+    /// always admits stale serving; zero-TTL non-serving is covered by the
+    /// scripted examples.
+    #[derive(Clone)]
+    struct Published {
+        addrs: Vec<NumericAddr>,
+        generation: Generation,
+        fresh_deadline: u64,
+        retirement_deadline: u64,
+    }
+
+    impl Published {
+        fn servable(&self, now: u64) -> bool {
+            if self.addrs.is_empty() || now >= self.retirement_deadline {
+                return false;
+            }
+            if now < self.fresh_deadline {
+                return true;
+            }
+            now < self.fresh_deadline.saturating_add(STALE_SERVING_WINDOW)
+        }
+
+        /// The binding the documented selection rule uses for this family at
+        /// `cursor`: the entry must be servable and the cursor must name a
+        /// published binding. Candidates are drawn only from the eligible pool,
+        /// so eligibility and membership hold by construction, not by reading
+        /// the cache.
+        fn candidate(&self, cursor: u8, now: u64) -> Option<NumericAddr> {
+            if !self.servable(now) {
+                return None;
+            }
+            self.addrs.get(usize::from(cursor)).copied()
+        }
+    }
+
+    /// The model state captured at one decision: the model's own publication
+    /// records, attempt ledger, previous family, drawn allowlist ordinal and
+    /// clock, plus the subject's returned phase. The invariants read this
+    /// snapshot only, so a later rule that republishes or evicts cannot
+    /// retroactively reinterpret an earlier decision.
+    struct Snapshot {
+        ordinal: Option<usize>,
+        phase: ConnectPhase,
+        now: Instant,
+        cache_now: u64,
+        setup_limit: Instant,
+        counts: AttemptCounts,
+        previous: Option<Family>,
+        published: [Option<Published>; 2],
+        cache_generations: [Generation; 2],
+    }
+
+    impl Snapshot {
+        fn candidate(&self, family: Family) -> Option<NumericAddr> {
+            let published = self.published[fam_index(family)].as_ref()?;
+            published.candidate(count_in(self.counts, family), self.cache_now)
+        }
+
+        fn live_generation(&self, family: Family) -> Option<&Published> {
+            self.published[fam_index(family)].as_ref()
+        }
+    }
+
+    pub(super) struct PeerSelection {
+        cfg: Config,
+        cache: Cache,
+        worker: Worker,
+        clock: WorkerClock,
+        base: Instant,
+        now: Instant,
+        allowed_request: ConnectRequest,
+        forbidden_request: ConnectRequest,
+        slot: Option<SlotIndex>,
+        setup_limit: Instant,
+        attempts: AttemptCounts,
+        previous: Option<Family>,
+        published: [Option<Published>; 2],
+        generations: [Generation; 2],
+        last: Option<Snapshot>,
+        seen_phases: u8,
+    }
+
+    impl PeerSelection {
+        pub(super) fn start() -> PeerSelection {
+            let base = anchor();
+            let cfg = config();
+            let cache = Cache::for_config(&cfg).expect("a cache sized to the allowlist");
+            let clock = WorkerClock::new(base, DNS_EPOCH);
+            let mut worker = Worker::boot(clock);
+            let allowed_request = auth_request("sub.example.org");
+            let forbidden_request = auth_request("evil.example.net");
+            {
+                let view = view_of_clocked(&cfg, &cache, clock);
+                assert_eq!(
+                    view.resolve(&allowed_request).ordinal(),
+                    Some(0),
+                    "the drawn allowlisted request owns ordinal 0"
+                );
+                assert_eq!(
+                    view.resolve(&forbidden_request).ordinal(),
+                    None,
+                    "the drawn forbidden request owns no allowlist ordinal"
+                );
+            }
+            for addrs in [a_pool(), aaaa_pool()] {
+                for addr in addrs {
+                    assert!(
+                        addr.is_eligible(),
+                        "the drawn address pool must hold only eligible destinations"
+                    );
+                }
+            }
+            let slot = worker.admit(base, peer(0)).expect("a free setup seat");
+            PeerSelection {
+                cfg,
+                cache,
+                worker,
+                clock,
+                base,
+                now: base,
+                allowed_request,
+                forbidden_request,
+                slot: Some(slot),
+                setup_limit: model_setup_limit(base),
+                attempts: AttemptCounts::new(),
+                previous: None,
+                published: [None, None],
+                generations: [Generation::INITIAL; 2],
+                last: None,
+                seen_phases: 0,
+            }
+        }
+
+        fn name(&self) -> NameIndex {
+            self.cache.name_index(0).expect("ordinal 0 is admitted")
+        }
+
+        fn cache_now_at(&self, now: Instant) -> u64 {
+            DNS_EPOCH.saturating_add(now.saturating_duration_since(self.base).as_secs())
+        }
+
+        fn cache_now(&self) -> u64 {
+            self.cache_now_at(self.now)
+        }
+
+        /// Admits the fresh setup the model will decide from, drawing its
+        /// setup instant forward from the current clock, and resets the model's
+        /// attempt ledger to the fresh slot's empty one.
+        fn readmit(&mut self, tc: &TestCase) {
+            let delta = tc.draw(gs::integers::<u64>().min_value(0).max_value(5));
+            self.now = later(self.now, delta);
+            let slot = self
+                .worker
+                .admit(self.now, peer(0))
+                .expect("a free setup seat");
+            self.setup_limit = model_setup_limit(self.now);
+            self.attempts = AttemptCounts::new();
+            self.previous = None;
+            self.slot = Some(slot);
+        }
+
+        fn decide_probe(&self, index: usize) -> Result<ConnectPhase, DecideError> {
+            let view = view_of_clocked(&self.cfg, &self.cache, self.clock);
+            let resolved = view.resolve(&self.allowed_request);
+            self.worker.decide(&probe(index), &resolved, self.now)
+        }
+
+        /// Publishes a drawn eligible distinct binding set for one family,
+        /// advances the model's generation, and records the publication. The
+        /// identity assertion makes "the model published" and "the cache holds"
+        /// the same set, so the invariants need not read the cache.
+        fn publish_drawn(
+            &mut self,
+            family: Family,
+            addrs: Vec<NumericAddr>,
+            receipt: u64,
+            ttl: u64,
+        ) {
+            let family_index = fam_index(family);
+            let generation = self.generations[family_index];
+            let staged =
+                StagedPositive::stage(self.name(), family, generation, &addrs, receipt, ttl)
+                    .expect("a drawn eligible distinct set stages");
+            self.cache
+                .publish_positive(&staged)
+                .expect("the drawn generation publishes");
+            let next = generation.checked_next().expect("generation has room");
+            self.generations[family_index] = next;
+            let entry = self
+                .cache
+                .entry(self.name(), family)
+                .expect("admitted entry");
+            assert_eq!(
+                entry.bindings(),
+                &addrs[..],
+                "publication must be the identity on the drawn eligible distinct set"
+            );
+            assert_eq!(
+                entry.generation(),
+                next,
+                "publication must advance the family generation by one"
+            );
+            self.published[family_index] = Some(Published {
+                addrs,
+                generation: next,
+                fresh_deadline: receipt + ttl,
+                retirement_deadline: receipt + ttl + STALE_GRACE,
+            });
+        }
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the hegel state-machine macro hands each rule its own TestCase by value"
+    )]
+    #[hegel::state_machine]
+    impl PeerSelection {
+        #[rule(weight = 14.0)]
+        fn decide(&mut self, tc: TestCase) {
+            let Some(slot) = self.slot.as_ref() else {
+                return;
+            };
+            let allowlisted = tc.draw(gs::booleans());
+            let (request, ordinal) = if allowlisted {
+                (&self.allowed_request, Some(0usize))
+            } else {
+                (&self.forbidden_request, None)
+            };
+            let view = view_of_clocked(&self.cfg, &self.cache, self.clock);
+            let resolved = view.resolve(request);
+            assert_eq!(
+                resolved.ordinal(),
+                ordinal,
+                "the model's drawn allowlist ordinal must match the resolution"
+            );
+            let published = self.published.clone();
+            let cache_generations = [
+                self.cache
+                    .entry(self.name(), Family::A)
+                    .expect("admitted entry")
+                    .generation(),
+                self.cache
+                    .entry(self.name(), Family::Aaaa)
+                    .expect("admitted entry")
+                    .generation(),
+            ];
+            let phase = self
+                .worker
+                .decide(slot, &resolved, self.now)
+                .expect("a live setup decides");
+            let (bit, label) = match phase {
+                ConnectPhase::Forbidden => (0b000_001u8, "decide_forbidden"),
+                ConnectPhase::NoBinding => (0b000_010u8, "decide_no_binding"),
+                ConnectPhase::DeadlineExhausted => (0b000_100u8, "decide_deadline_exhausted"),
+                ConnectPhase::CandidatesExhausted => (0b001_000u8, "decide_candidates_exhausted"),
+                ConnectPhase::Peer {
+                    family: Family::A, ..
+                } => (0b010_000u8, "decide_peer_ipv4"),
+                ConnectPhase::Peer {
+                    family: Family::Aaaa,
+                    ..
+                } => (0b100_000u8, "decide_peer_ipv6"),
+            };
+            if self.seen_phases & bit == 0 {
+                self.seen_phases |= bit;
+                tc.event(label);
+            }
+            self.last = Some(Snapshot {
+                ordinal,
+                phase,
+                now: self.now,
+                cache_now: self.cache_now(),
+                setup_limit: self.setup_limit,
+                counts: self.attempts,
+                previous: self.previous,
+                published,
+                cache_generations,
+            });
+        }
+
+        #[rule(weight = 9.0)]
+        fn record_attempt(&mut self, tc: TestCase) {
+            let Some(slot) = self.slot.as_ref() else {
+                return;
+            };
+            let family = draw_family(&tc);
+            let ledger = self
+                .worker
+                .record_attempt(slot, family)
+                .expect("a live setup records an attempt");
+            self.attempts = self.attempts.record(family);
+            self.previous = Some(family);
+            assert_eq!(
+                ledger.counts(),
+                self.attempts,
+                "the subject ledger must agree with the model's recorded attempts"
+            );
+            assert_eq!(
+                ledger.previous(),
+                self.previous,
+                "the subject ledger must remember the model's previous family"
+            );
+            tc.event("rule_record_attempt");
+        }
+
+        #[rule(weight = 6.0)]
+        fn advance_clock(&mut self, tc: TestCase) {
+            let delta = tc.draw(gs::sampled_from(&CLOCK_STEPS[..]));
+            self.now = later(self.now, delta);
+            tc.event("rule_advance_clock");
+        }
+
+        #[rule(weight = 6.0)]
+        fn publish_bindings(&mut self, tc: TestCase) {
+            let family = draw_family(&tc);
+            let mask = tc.draw(gs::integers::<u8>().min_value(0).max_value(7));
+            let addrs: Vec<NumericAddr> = pool(family)
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1u8 << *bit) != 0)
+                .map(|(_, addr)| *addr)
+                .collect();
+            let ttl = tc.draw(gs::integers::<u64>().min_value(1).max_value(64));
+            let state_choice = tc.draw(gs::integers::<u8>().min_value(0).max_value(4));
+            let age = match state_choice {
+                0 => 0,
+                1 => ttl - 1,
+                2 => ttl + 1,
+                3 => ttl + STALE_SERVING_WINDOW,
+                _ => ttl + STALE_GRACE,
+            };
+            let receipt = self.cache_now().saturating_sub(age);
+            self.publish_drawn(family, addrs, receipt, ttl);
+            tc.event("rule_publish_bindings");
+        }
+
+        /// Publishes a fresh, non-empty binding set to both families in one
+        /// rule, so the both-families-usable alternation state is reached many
+        /// times per case rather than depending on the draw order of two
+        /// single-family publications.
+        #[rule(weight = 6.0)]
+        fn publish_both_bindings(&mut self, tc: TestCase) {
+            for family in [Family::A, Family::Aaaa] {
+                let count = tc.draw(gs::integers::<u8>().min_value(1).max_value(3));
+                let addrs: Vec<NumericAddr> = pool(family)
+                    .iter()
+                    .take(usize::from(count))
+                    .copied()
+                    .collect();
+                let ttl = tc.draw(gs::integers::<u64>().min_value(1).max_value(64));
+                let receipt = self.cache_now();
+                self.publish_drawn(family, addrs, receipt, ttl);
+            }
+            tc.event("rule_publish_both");
+        }
+
+        #[rule(weight = 3.0)]
+        fn evict(&mut self, tc: TestCase) {
+            if tc.draw(gs::booleans()) {
+                self.cache
+                    .evict_nxdomain(self.name())
+                    .expect("an admitted name evicts");
+                self.generations[0] = self.generations[0]
+                    .checked_next()
+                    .expect("generation has room");
+                self.generations[1] = self.generations[1]
+                    .checked_next()
+                    .expect("generation has room");
+                self.published[0] = None;
+                self.published[1] = None;
+                tc.event("rule_evict_name");
+            } else {
+                let family = draw_family(&tc);
+                let family_index = fam_index(family);
+                self.cache
+                    .evict_nodata(self.name(), family)
+                    .expect("an admitted family evicts");
+                self.generations[family_index] = self.generations[family_index]
+                    .checked_next()
+                    .expect("generation has room");
+                self.published[family_index] = None;
+                tc.event("rule_evict_family");
+            }
+        }
+
+        #[rule(weight = 2.0)]
+        fn release_and_readmit(&mut self, tc: TestCase) {
+            let Some(slot) = self.slot.take() else {
+                return;
+            };
+            let index = SlotIndex::index(&slot);
+            self.worker.release(slot);
+            assert!(
+                self.worker.attempt_ledger(&probe(index)).is_none(),
+                "a released setup exposes no attempt ledger"
+            );
+            assert_eq!(
+                self.decide_probe(index),
+                Err(DecideError::NotInSetup),
+                "a released handle must not decide"
+            );
+            self.readmit(&tc);
+            tc.event("rule_release_setup");
+        }
+
+        #[rule(weight = 2.0)]
+        fn graduate_and_readmit(&mut self, tc: TestCase) {
+            let Some(slot) = self.slot.take() else {
+                return;
+            };
+            let index = SlotIndex::index(&slot);
+            let tunnel = self.worker.finish_setup(slot);
+            assert_eq!(
+                TunnelIndex::index(&tunnel),
+                index,
+                "graduation keeps the physical slot"
+            );
+            assert!(
+                self.worker.attempt_ledger(&probe(index)).is_none(),
+                "an established tunnel exposes no setup ledger"
+            );
+            assert_eq!(
+                self.decide_probe(index),
+                Err(DecideError::NotInSetup),
+                "an established handle must not decide"
+            );
+            self.worker.release_tunnel(tunnel);
+            self.readmit(&tc);
+            tc.event("rule_graduate_setup");
+        }
+
+        #[invariant(always_run)]
+        fn p1_forbidden_iff_no_ordinal(&self, _: TestCase) {
+            let Some(snapshot) = &self.last else {
+                return;
+            };
+            assert_eq!(
+                snapshot.phase == ConnectPhase::Forbidden,
+                snapshot.ordinal.is_none(),
+                "P1: Forbidden must hold exactly when the resolved allowlist ordinal is absent"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn p2_deadline_exhausted_iff_setup_expired(&self, _: TestCase) {
+            let Some(snapshot) = &self.last else {
+                return;
+            };
+            if snapshot.ordinal.is_none() {
+                return;
+            }
+            assert_eq!(
+                snapshot.phase == ConnectPhase::DeadlineExhausted,
+                snapshot.now >= snapshot.setup_limit,
+                "P2: DeadlineExhausted must hold exactly when now has reached the model's setup deadline"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn p3_candidates_exhausted_iff_budget_spent(&self, _: TestCase) {
+            let Some(snapshot) = &self.last else {
+                return;
+            };
+            if snapshot.ordinal.is_none() {
+                return;
+            }
+            let budget_spent = usize::from(snapshot.counts.total()) >= MAX_UPSTREAM_ATTEMPTS;
+            assert_eq!(
+                snapshot.phase == ConnectPhase::CandidatesExhausted,
+                snapshot.now < snapshot.setup_limit && budget_spent,
+                "P3: CandidatesExhausted must hold exactly when the model's attempt total reached the fixed budget before the setup deadline"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn p4_peer_is_the_published_binding_at_the_family_cursor(&self, _: TestCase) {
+            let Some(snapshot) = &self.last else {
+                return;
+            };
+            let ConnectPhase::Peer { addr, family, .. } = snapshot.phase else {
+                return;
+            };
+            assert!(
+                snapshot.ordinal.is_some(),
+                "P4: a Peer must never follow an unauthorized request"
+            );
+            assert!(
+                addr.is_eligible(),
+                "P4: a selected peer must be an eligible destination"
+            );
+            let published = snapshot
+                .live_generation(family)
+                .expect("a Peer requires a published family record");
+            let cursor = count_in(snapshot.counts, family);
+            assert_eq!(
+                published.addrs.get(usize::from(cursor)).copied(),
+                Some(addr),
+                "P4: the Peer must be the binding published at index {cursor} of {family:?}, the model's earlier attempt count"
+            );
+            assert!(
+                published.servable(snapshot.cache_now),
+                "P4: a selected peer must come from a non-retired, servable publication"
+            );
+            assert_eq!(
+                snapshot.cache_generations[fam_index(family)],
+                published.generation,
+                "P4: the model's published record must be the family's current generation"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn p5_alternates_only_while_the_other_family_remains(&self, _: TestCase) {
+            let Some(snapshot) = &self.last else {
+                return;
+            };
+            let ConnectPhase::Peer { family, .. } = snapshot.phase else {
+                return;
+            };
+            if snapshot.ordinal.is_none() {
+                return;
+            }
+            let Some(previous) = snapshot.previous else {
+                return;
+            };
+            let other = match previous {
+                Family::A => Family::Aaaa,
+                Family::Aaaa => Family::A,
+            };
+            if snapshot.candidate(other).is_some() {
+                assert_eq!(
+                    family, other,
+                    "P5: after an attempt in {previous:?}, the next Peer must use the other family while it has a usable binding"
+                );
+            } else {
+                assert_eq!(
+                    family, previous,
+                    "P5: after an attempt in {previous:?} with no usable {other:?} binding, the next Peer must stay in {previous:?}"
+                );
+            }
+        }
+
+        #[invariant(always_run)]
+        fn p6_no_binding_iff_no_usable_cursor(&self, _: TestCase) {
+            let Some(snapshot) = &self.last else {
+                return;
+            };
+            if snapshot.ordinal.is_none() {
+                return;
+            }
+            let cursor_blocked = snapshot.now < snapshot.setup_limit
+                && usize::from(snapshot.counts.total()) < MAX_UPSTREAM_ATTEMPTS
+                && snapshot.candidate(Family::A).is_none()
+                && snapshot.candidate(Family::Aaaa).is_none();
+            assert_eq!(
+                snapshot.phase == ConnectPhase::NoBinding,
+                cursor_blocked,
+                "P6: NoBinding must hold exactly when neither family has a usable published binding at its attempt cursor"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn p7_connect_deadline_is_clipped(&self, _: TestCase) {
+            let Some(snapshot) = &self.last else {
+                return;
+            };
+            let ConnectPhase::Peer {
+                connect_deadline, ..
+            } = snapshot.phase
+            else {
+                return;
+            };
+            if snapshot.ordinal.is_none() {
+                return;
+            }
+            let expected = model_connect_limit(snapshot.now, snapshot.setup_limit);
+            assert_eq!(
+                connect_deadline.limit(),
+                expected,
+                "P7: the connect deadline must be now + 2 s clipped to the model's setup deadline"
+            );
+            assert!(
+                connect_deadline.limit() <= snapshot.setup_limit,
+                "P7: the connect deadline must never outlive the setup deadline"
+            );
+        }
+    }
+}
+
+/// The CONNECT authorization and peer-selection decision as a state machine
+/// over drawn cache states and drawn attempt sequences: model-based coverage of
+/// the selection invariants the scripted examples pin one scenario at a time,
+/// driving the same production [`Worker`] those examples drive. Its invariant
+/// list and independence arguments are on [`peer_selection_machine`];
+/// `hegel.toml` owns the case count.
+#[hegel::test(derandomize = true)]
+fn worker_connect_peer_selection_holds_its_invariants(tc: hegel::TestCase) {
+    hegel::stateful::machine(peer_selection_machine::PeerSelection::start())
+        .steps(120)
+        .run(tc);
+}
+
 /// The slot table as a state machine: model-based coverage of admission,
 /// graduation, release and re-admission under the fixed caps, driving the same
 /// production [`Worker`] the scripted tests above drive. Its invariant list and
