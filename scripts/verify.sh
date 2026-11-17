@@ -3000,8 +3000,13 @@ alt_smoke() {
 # claimed), and anything absent, empty, unreadable or unrecognised is an UNKNOWN
 # -- never a pass, never a guess, never a silent skip. A declaration that cannot
 # co-exist with the observed status (`refused:<check>` or `killed` with 0, which
-# is what a pipeline does to the helper's own refusal) is reported as a
-# contradiction and never read as OK.
+# is what a pipeline does to the helper's own refusal) makes the run
+# UNCLASSIFIABLE: one line says so and names both observations, because two
+# observations that disagree support neither a budget fact nor a pass.
+# A channel that cannot be created at all (`mktemp` absent or failing) withholds
+# only the classification: the suite still runs, its status still stands, and the
+# reader reports the unknown instead of refusing the run. Fail-closed on the
+# CLAIM, not on the RUN.
 inner_test() {
     _target="$1"
     case "$_target" in
@@ -3030,11 +3035,16 @@ inner_test() {
     # `mktemp` creates keeps the channel out of every other process's reach.
     _it_declaration=$(mktemp "${TMPDIR:-/tmp}/alumina-suite-outcome.XXXXXX") || _it_declaration=""
     if [ -z "$_it_declaration" ]; then
-        echo "INNER-TEST-CHANNEL-BLOCKED: $_target — mktemp could not create a declaration file under ${TMPDIR:-/tmp}; no suite run is started without a channel to report it, so nothing above ran and this is not a pass" >&2
-        exit 1
+        # No channel, but not no run: announce the lost declaration exactly once,
+        # then clear the inherited path so no child can write one this reader will
+        # never read. The status captured below is still the suite's own.
+        echo "GATE-SUITE-DECLARATION-UNKNOWN: $_target — no per-run declaration file could be created under ${TMPDIR:-/tmp}; the suite still runs and its status stands, but the declaration is lost, so the classification will be unknown" >&2
+        GATE_SUITE_DECLARATION_FILE=""
+        export GATE_SUITE_DECLARATION_FILE
+    else
+        GATE_SUITE_DECLARATION_FILE="$_it_declaration"
+        export GATE_SUITE_DECLARATION_FILE
     fi
-    GATE_SUITE_DECLARATION_FILE="$_it_declaration"
-    export GATE_SUITE_DECLARATION_FILE
     # shellcheck disable=SC2086
     _itr=0
     if bounded_suite cargo atest $_run_args; then
@@ -3045,41 +3055,50 @@ inner_test() {
     # The declaration is the helper's, not this reader's. A `cat` that fails
     # leaves the channel EMPTY (which is UNKNOWN, never OK), and the `||` keeps
     # `set -e` from turning a missing file into an exit before the triage below
-    # can report it. The file is removed on every one of the reader's exits.
-    _itr_declared=$(cat "$_it_declaration" 2>/dev/null) || _itr_declared=""
-    rm -f "$_it_declaration"
-    case "$_itr_declared" in
-        ok)
-            case "$_itr" in
-                0)
-                    echo "INNER-TEST-OK: $_target"
-                    return 0
-                    ;;
-                101)
-                    echo "INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL: $_target exit $_itr — if this is a Linux-only assertion, run the MID tier (verify.sh mid foundations|boot|union|full) instead; this is not a pass" >&2
-                    ;;
-                *)
-                    echo "INNER-TEST-OPERATIONAL-FAIL: $_target exit $_itr — bounded_suite declared 'ok' (it ran, and reported no kill), so this status belongs to the command or the wrapper (125|126|127 are the wrapper's own operational vocabulary, and a harness = false target owns its numbers); no assertion verdict is claimed here, so read the run output above, and if a Linux-only assertion is the suspect the MID tier (verify.sh mid foundations|boot|union|full) is the authoritative run" >&2
-                    ;;
-            esac
-            ;;
-        refused:?*)
-            _itr_check="${_itr_declared#refused:}"
-            if [ "$_itr" -eq 0 ]; then
-                echo "INNER-TEST-STATUS-CONTRADICTS-DECLARATION: $_target exit 0 while bounded_suite declared '${_itr_declared}' — a refusal runs no command, so that 0 cannot be the helper's: the call site lost the status, and this run backs no pass" >&2
-            fi
-            echo "INNER-TEST-BUDGET-REFUSED: $_target — bounded_suite declared '${_itr_check}' and ran no command; the GATE-SUITE-STACK-UNKNOWN or GATE-SUITE-TIMEOUT-UNKNOWN line above names the budget it refused, so this is a budget fact and not a Linux-only assertion" >&2
-            ;;
-        killed)
-            if [ "$_itr" -eq 0 ]; then
-                echo "INNER-TEST-STATUS-CONTRADICTS-DECLARATION: $_target exit 0 while bounded_suite declared 'killed' — a killed run cannot succeed, so that 0 cannot be the helper's: the call site lost the status, and this run backs no pass" >&2
-            fi
-            echo "INNER-TEST-TIMEOUT-FAIL: $_target exit $_itr — bounded_suite declared 'killed' and printed GATE-SUITE-TIMEOUT-FAIL above: the suite was killed at GATE_SUITE_BUDGET_SECS; a wedged run is a failure, not a slow pass" >&2
-            ;;
-        *)
-            echo "INNER-TEST-UNKNOWN: $_target — the declaration file was absent, unreadable, empty or unrecognised (read '${_itr_declared}'), so bounded_suite's own run is unknown and this status proves nothing about it; this is not a pass" >&2
-            ;;
-    esac
+    # can report it. The file is removed on every one of the reader's exits --
+    # and a blocked channel has no file to read or remove: the run above was
+    # still a run, so only its classification is unknown.
+    if [ -z "$_it_declaration" ]; then
+        _itr_declared=""
+        echo "INNER-TEST-CLASSIFICATION-UNKNOWN: $_target exit $_itr — no per-run declaration file could be created under ${TMPDIR:-/tmp} (announced above), so the suite ran and its status stands, but nothing about it can be classified; this backs no pass" >&2
+    else
+        _itr_declared=$(cat "$_it_declaration" 2>/dev/null) || _itr_declared=""
+        rm -f "$_it_declaration"
+        case "$_itr_declared" in
+            ok)
+                case "$_itr" in
+                    0)
+                        echo "INNER-TEST-OK: $_target"
+                        return 0
+                        ;;
+                    101)
+                        echo "INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL: $_target exit $_itr — if this is a Linux-only assertion, run the MID tier (verify.sh mid foundations|boot|union|full) instead; this is not a pass" >&2
+                        ;;
+                    *)
+                        echo "INNER-TEST-OPERATIONAL-FAIL: $_target exit $_itr — bounded_suite declared 'ok' (it ran, and reported no kill), so this status belongs to the command or the wrapper (125|126|127 are the wrapper's own operational vocabulary, and a harness = false target owns its numbers); no assertion verdict is claimed here, so read the run output above, and if a Linux-only assertion is the suspect the MID tier (verify.sh mid foundations|boot|union|full) is the authoritative run" >&2
+                        ;;
+                esac
+                ;;
+            refused:?*)
+                _itr_check="${_itr_declared#refused:}"
+                if [ "$_itr" -eq 0 ]; then
+                    echo "INNER-TEST-CLASSIFICATION-UNKNOWN: $_target exit 0 while bounded_suite declared '${_itr_declared}' — a refusal runs no command, so that 0 cannot be the helper's: the two observations disagree, and neither a budget fact nor a pass can be read from them" >&2
+                else
+                    echo "INNER-TEST-BUDGET-REFUSED: $_target — bounded_suite declared '${_itr_check}' and ran no command; the GATE-SUITE-STACK-UNKNOWN or GATE-SUITE-TIMEOUT-UNKNOWN line above names the budget it refused, so this is a budget fact and not a Linux-only assertion" >&2
+                fi
+                ;;
+            killed)
+                if [ "$_itr" -eq 0 ]; then
+                    echo "INNER-TEST-CLASSIFICATION-UNKNOWN: $_target exit 0 while bounded_suite declared 'killed' — a killed run cannot succeed, so that 0 cannot be the helper's: the two observations disagree, and neither a timeout nor a pass can be read from them" >&2
+                else
+                    echo "INNER-TEST-TIMEOUT-FAIL: $_target exit $_itr — bounded_suite declared 'killed' and printed GATE-SUITE-TIMEOUT-FAIL above: the suite was killed at GATE_SUITE_BUDGET_SECS; a wedged run is a failure, not a slow pass" >&2
+                fi
+                ;;
+            *)
+                echo "INNER-TEST-UNKNOWN: $_target — the declaration file was absent, unreadable, empty or unrecognised (read '${_itr_declared}'), so bounded_suite's own run is unknown and this status proves nothing about it; this is not a pass" >&2
+                ;;
+        esac
+    fi
     # Only a consistent `ok` hands the status through unchanged. Every other
     # declaration backs no success, so a 0 reaching here was not the helper's --
     # passing it on would re-create exactly the false PASS this channel replaces.

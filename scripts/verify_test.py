@@ -2769,8 +2769,8 @@ class InnerTest(unittest.TestCase):
         regression (an assertion verdict turned into an unknown) this pin
         exists to refuse."""
         shipped_body = extract_function("inner_test")
-        planted_body = shipped_body.replace("\n                101)\n",
-                                            "\n                100)\n", 1)
+        planted_body = shipped_body.replace("\n                    101)\n",
+                                            "\n                    100)\n", 1)
         self.assertNotEqual(planted_body, shipped_body,
                             "the shipped reader has no 101 arm to plant against")
         planted = self.write_driver("planted-101.sh", planted_body)
@@ -2804,12 +2804,14 @@ class InnerTest(unittest.TestCase):
 
     # --- the declaration channel is a file the running process writes --------
 
-    def test_a_blocked_declaration_channel_refuses_before_any_run(self):
-        """A channel that cannot be created is its own refusal: no suite run
-        starts without somewhere to report it, so cargo and the wrapper both stay
-        uninvoked and nothing is claimed. It is NOT a budget fact -- no check was
-        refused, so the reader must not report one. Both shapes are pinned: an
-        `mktemp` that runs and fails, and one that is absent altogether."""
+    def test_a_blocked_declaration_channel_runs_the_suite_and_classifies_unknown(
+            self):
+        """A channel that cannot be created withholds the CLAIM, never the RUN:
+        the suite runs, its status stands, and the reader says so once. The
+        declaration was lost, so nothing about the run can be classified -- but
+        that is one unknown line, not a refusal, and not a budget fact (no check
+        ran nothing). Both shapes are pinned: an `mktemp` that runs and fails,
+        and one that is absent altogether."""
         failing = self.temp / "mktemp-fails"
         failing.mkdir()
         self.stub("mktemp", "exit 1\n", directory=failing)
@@ -2818,28 +2820,58 @@ class InnerTest(unittest.TestCase):
                 ("mktemp absent", str(self.tools))):
             with self.subTest(channel=name):
                 # Neither log may survive a previous subTest, so each shape
-                # proves cargo and the wrapper stayed uninvoked by itself.
+                # proves cargo and the wrapper DID run by itself.
                 self.calls.unlink(missing_ok=True)
                 self.wrapper_calls.unlink(missing_ok=True)
                 result = self.run_inner("foundations", env={"PATH": path})
                 note = self.describe(result)
+                self.assertEqual(
+                    self.calls.read_text().strip(),
+                    "atest -p alumina --locked --test foundations",
+                    f"cargo did not run on a blocked channel ({name}): {note}")
+                self.assertEqual(
+                    self.wrapper_calls.read_text().strip(),
+                    "-s KILL 600 cargo atest -p alumina --locked "
+                    "--test foundations",
+                    f"the wrapper did not run on a blocked channel "
+                    f"({name}): {note}")
+                # The lost channel is announced exactly once: the reader clears
+                # the inherited path before the run, so the helper cannot
+                # announce the same loss a second time.
+                self.assertEqual(
+                    result.stderr.count("GATE-SUITE-DECLARATION-UNKNOWN"), 1,
+                    f"the lost channel was not announced exactly once "
+                    f"({name}): {note}")
+                self.assertEqual(
+                    result.stderr.count("INNER-TEST-CLASSIFICATION-UNKNOWN"), 1,
+                    f"the unclassifiable run was not reported exactly once "
+                    f"({name}): {note}")
+                for absent in ("INNER-TEST-OK", "INNER-TEST-BUDGET-REFUSED",
+                               "INNER-TEST-UNKNOWN",
+                               "INNER-TEST-OPERATIONAL-FAIL"):
+                    self.assertNotIn(
+                        absent, result.stdout + result.stderr,
+                        f"{absent} was claimed on a blocked channel "
+                        f"({name}): {note}")
+                # A 0 status cannot be classified, so it is never a pass.
                 self.assertEqual(result.returncode, 1, note)
-                self.assertIn("INNER-TEST-CHANNEL-BLOCKED", result.stderr, note)
-                self.assertFalse(self.calls.exists(),
-                                 f"cargo ran without a declaration channel "
-                                 f"({name}): {note}")
-                self.assertFalse(self.wrapper_calls.exists(),
-                                 f"the wrapper ran without a declaration channel "
-                                 f"({name}): {note}")
-                self.assertNotIn("INNER-TEST-OK", result.stdout + result.stderr, note)
-                self.assertNotIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+                # The wrapped status itself is untouched by the lost channel: a
+                # red suite stays red.
+                self.calls.unlink(missing_ok=True)
+                self.wrapper_calls.unlink(missing_ok=True)
+                red = self.run_inner("foundations",
+                                     env={"PATH": path, "CARGO_RC": "101"})
+                self.assertEqual(red.returncode, 101, self.describe(red))
+                self.assertIn("INNER-TEST-CLASSIFICATION-UNKNOWN", red.stderr,
+                              self.describe(red))
 
     def test_a_pipeline_call_site_still_reports_the_refusal(self):
         """The seam: the helper runs in a subshell here, so a shell-variable
-        declaration dies with that subshell and the reader is left with its
-        operational arm -- over a run that never started. The file is written by
-        the process that ran, so the refusal arrives anyway, and the piped status
-        (0) cannot be read as a pass."""
+        declaration dies with that subshell and the reader is left with the
+        status the pipeline hands it. The file is written by the process that
+        ran, so the refusal arrives anyway -- and a refusal beside a status of 0
+        is two observations that disagree, which is unclassifiable rather than a
+        budget fact or a pass."""
         shipped_body = extract_function("inner_test")
         planted_body = shipped_body.replace(
             "if bounded_suite cargo atest $_run_args; then",
@@ -2852,11 +2884,15 @@ class InnerTest(unittest.TestCase):
                                 env={"GATE_SUITE_MIN_STACK": "1048576"},
                                 driver=planted)
         note = self.describe(result)
-        self.assertIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
-        self.assertIn("declared 'stack-unknown'", result.stderr, note)
-        self.assertIn("INNER-TEST-STATUS-CONTRADICTS-DECLARATION", result.stderr,
-                      "the piped status 0 was not named as impossible against a "
-                      "refusal: " + note)
+        # ONE line carrying both observations, and neither a budget fact (the
+        # declaration is not trusted while the status contradicts it) nor a pass.
+        self.assertEqual(
+            result.stderr.count("INNER-TEST-CLASSIFICATION-UNKNOWN"), 1,
+            "the contradiction was not reported exactly once: " + note)
+        self.assertIn("declared 'refused:stack-unknown'", result.stderr, note)
+        self.assertIn("exit 0", result.stderr, note)
+        self.assertNotIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+        self.assertNotIn("INNER-TEST-TIMEOUT-FAIL", result.stderr, note)
         self.assertNotIn("INNER-TEST-OK", result.stdout + result.stderr, note)
         self.assertNotIn("INNER-TEST-OPERATIONAL-FAIL", result.stderr, note)
         self.assertFalse(self.calls.exists(),
