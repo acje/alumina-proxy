@@ -91,6 +91,25 @@ fn assert_normalised_fixed_point(input: &[u8]) {
     }
 }
 
+/// Checked-in regression corpus for the property below. These are the
+/// minimised inputs captured from a deliberately faulted twin of
+/// `hostname_normalisation_is_total_and_idempotent` running under
+/// `HEGEL_SEED=7`: the raw draw minimised to `[]` and the shaped draw to
+/// `"a.AC"`. The replay is a plain `#[test]` rather than a
+/// `#[hegel::reproduce_failure]` attribute: hegeltest 0.52.7 skips generation
+/// whenever a blob is present and then panics once the fault is fixed, so the
+/// attribute cannot hold a corpus in a green gate (bd alumina-dvgoj). This test
+/// instead replays the same inputs through the same property body on every run,
+/// while the property keeps generating its own 64 cases.
+#[test]
+fn hostname_regression_replays_the_minimised_counterexample() {
+    assert_normalised_fixed_point(&[]);
+    assert_normalised_fixed_point(b"a.AC");
+    let normalised =
+        FixedHostname::normalize(b"a.AC").expect("minimised counterexample normalizes");
+    assert_eq!(normalised.as_str(), "a.ac");
+}
+
 /// Totality and idempotence: arbitrary attacker bytes never panic the
 /// normaliser, and every accepted name is a fixed point of normalisation. The
 /// second, hostname-shaped draw keeps the accept branch reachable: arbitrary
