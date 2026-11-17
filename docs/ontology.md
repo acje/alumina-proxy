@@ -137,14 +137,51 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 
 `vq-proto`, `vq-gate`, `vq-life`, `vq-dnsclass`, `vq-dnsobs`, `vq-resource`, `vq-log`, `vq-startup`, `vq-confinement`, `vq-surface`, `vq-perf` — one per bullet in [Verification requirements](alumina-proxy.md#verification-requirements). `inv-nodecrypt`, `inv-fail-stop`, `inv-operator` have no obligation.
 
-## Views
+## Relations
 
-Rendered subsets of the relation list below; `_` encodes `-`. The list is authoritative.
+The diagrams below are the relation set. Node IDs encode `-` as `_`; edge labels are the predicates `covers`, `excludes`, `implements`, `enforces`, `owns`, `produces`, `configured-by`, `verified-by`, `precedes`.
 
-### Admission pipeline
+### Scope and refusals
 
 ```mermaid
 flowchart LR
+    egress -->|covers| admission_verdict
+    egress -->|covers| approved_hostname
+    egress -->|covers| forwarding_gate
+    allowlist -->|covers| ordinal
+    allowlist -->|covers| control
+    hello_profile -->|covers| client_hello
+    hello_profile -->|covers| ja4_baseline
+    dns -->|covers| resolver
+    dns -->|covers| cache_entry
+    dns -->|covers| binding
+    dns -->|covers| assurance
+    dns -->|covers| incident
+    tripwire -->|covers| fact
+    tripwire -->|covers| effect
+    resource -->|covers| slot
+    resource -->|covers| turn
+    resource -->|covers| preallocation
+    observability -->|covers| record
+    boot -->|covers| startup_window
+    boot -->|covers| startup_decision
+    egress -.->|excludes| out_payload
+    egress -.->|excludes| out_ingress
+    egress -.->|excludes| out_upstream_auth
+    egress -.->|excludes| out_confinement
+    egress -.->|excludes| out_control_plane
+    egress -.->|excludes| out_endpoint_abuse
+    dns -.->|excludes| out_local_dnssec
+```
+
+### Ordering
+
+```mermaid
+flowchart LR
+    boot -->|precedes| startup_window
+    startup_window -->|precedes| setup
+    setup -->|precedes| relay
+    relay -->|precedes| close
     startup_decision -->|precedes| connect_head
     connect_head -->|precedes| approved_hostname
     approved_hostname -->|precedes| client_hello
@@ -157,117 +194,119 @@ flowchart LR
     early_data -->|precedes| forwarding_gate
 ```
 
-### Resolution
+### Realisation
 
 ```mermaid
 flowchart LR
-    transport -->|implements| resolver
-    transport -->|configured-by| ctl_resolvers
-    wire -->|implements| exchange_outcome
-    wire -->|configured-by| ctl_bailiwick
+    parser -->|implements| connect_head
+    parser -->|implements| admission_verdict
+    hello_validator -->|implements| hello_profile
+    ja4 -->|implements| ja4_baseline
+    gate -->|implements| forwarding_gate
+    worker -->|implements| peer
+    worker -->|implements| capacity_refusal
+    eligibility -->|implements| binding
     cache -->|implements| assurance
-    cache -->|configured-by| ctl_assurance
-    cache -->|owns| cache_entry
-    cache -->|owns| generation
-    schedule -->|owns| refresh
-    cache -->|produces| rec_assurance
+    transport -->|implements| resolver
+    wire -->|implements| exchange_outcome
+    policy -->|implements| effect
+    all_gate -->|implements| all_scope_gate
+    schedule -->|implements| refresh
+    incident -->|implements| incident
+    monitor -->|implements| monitor
+    log -->|implements| record
 ```
 
 ### Enforcement
 
 ```mermaid
 flowchart LR
-    policy -->|implements| effect
-    policy -->|configured-by| ctl_any
-    policy -->|configured-by| ctl_fqdn
-    all_gate -->|implements| all_scope_gate
-    all_gate -->|configured-by| ctl_gates
-    all_gate -->|owns| latch
-    all_gate -->|owns| block_state
-    monitor -->|owns| ja4_baseline
-    monitor -->|produces| rec_monitor
-    reactor -->|produces| rec_refusal
-    gate -->|produces| rec_early
+    gate -->|enforces| inv_auth
+    gate -->|enforces| inv_bytes
+    worker -->|enforces| inv_binding
+    eligibility -->|enforces| inv_binding
+    cache -->|enforces| inv_generation
+    slot_table -->|enforces| inv_ownership
+    reactor -->|enforces| inv_work
+    reactor -->|enforces| inv_transition
+    deadline -->|enforces| inv_deadline
+    parser -->|enforces| inv_parse
+    hello_validator -->|enforces| inv_parse
+    wire -->|enforces| inv_fail_closed
+    policy -->|enforces| inv_operator
+    policy -->|enforces| inv_silent
+    inventory -->|enforces| inv_bounds
+    alloc -->|enforces| inv_zalloc
+    boot -->|enforces| inv_config_once
 ```
 
-### Refusals
+### Ownership
 
 ```mermaid
 flowchart LR
-    egress -.->|excludes| out_payload
-    egress -.->|excludes| out_ingress
-    egress -.->|excludes| out_upstream_auth
-    egress -.->|excludes| out_confinement
-    egress -.->|excludes| out_control_plane
-    egress -.->|excludes| out_endpoint_abuse
-    dns -.->|excludes| out_local_dnssec
+    worker -->|owns| tunnel
+    slot_table -->|owns| slot
+    cache -->|owns| cache_entry
+    cache -->|owns| generation
+    schedule -->|owns| refresh
+    incident -->|owns| incident
+    all_gate -->|owns| latch
+    all_gate -->|owns| block_state
+    monitor -->|owns| ja4_baseline
+    storage -->|owns| slot
 ```
 
-## Relations
+### Observations
 
-Predicates: `covers`, `excludes`, `implements`, `enforces`, `owns`, `produces`, `configured-by`, `verified-by`, `precedes`.
+```mermaid
+flowchart LR
+    boot -->|produces| rec_startup
+    incident -->|produces| rec_dns
+    cache -->|produces| rec_assurance
+    reactor -->|produces| rec_refusal
+    reactor -->|produces| rec_capacity
+    gate -->|produces| rec_early
+    monitor -->|produces| rec_monitor
+    owner -->|produces| rec_terminal
+```
 
-```text
-# scope
-egress covers admission-verdict ; egress covers approved-hostname ; egress covers forwarding-gate
-allowlist covers ordinal ; allowlist covers control
-hello-profile covers client-hello ; hello-profile covers ja4-baseline
-dns covers resolver ; dns covers cache-entry ; dns covers binding ; dns covers assurance ; dns covers incident
-tripwire covers fact ; tripwire covers effect
-resource covers slot ; resource covers turn ; resource covers preallocation
-observability covers record ; boot covers startup-window ; boot covers startup-decision
-egress excludes out-payload ; egress excludes out-ingress ; egress excludes out-upstream-auth
-egress excludes out-confinement ; egress excludes out-control-plane ; egress excludes out-endpoint-abuse
-dns excludes out-local-dnssec
+### Operator surface
 
-# realisation
-parser implements connect-head ; parser implements admission-verdict
-hello-validator implements hello-profile ; ja4 implements ja4-baseline
-gate implements forwarding-gate ; worker implements peer ; worker implements capacity-refusal
-eligibility implements binding ; cache implements assurance ; transport implements resolver
-wire implements exchange-outcome ; policy implements effect ; all-gate implements all-scope-gate
-schedule implements refresh ; incident implements incident ; monitor implements monitor ; log implements record
+```mermaid
+flowchart LR
+    config -->|configured-by| ctl_any
+    config -->|configured-by| ctl_fqdn
+    config -->|configured-by| ctl_gates
+    config -->|configured-by| ctl_assurance
+    config -->|configured-by| ctl_bailiwick
+    config -->|configured-by| ctl_listen
+    config -->|configured-by| ctl_resolvers
+    config -->|configured-by| ctl_allowance
+    policy -->|configured-by| ctl_any
+    policy -->|configured-by| ctl_fqdn
+    all_gate -->|configured-by| ctl_gates
+    cache -->|configured-by| ctl_assurance
+    wire -->|configured-by| ctl_bailiwick
+    transport -->|configured-by| ctl_resolvers
+```
 
-# enforcement
-gate enforces inv-auth ; gate enforces inv-bytes
-worker enforces inv-binding ; eligibility enforces inv-binding
-cache enforces inv-generation ; slot-table enforces inv-ownership
-reactor enforces inv-work ; reactor enforces inv-transition ; deadline enforces inv-deadline
-parser enforces inv-parse ; hello-validator enforces inv-parse
-wire enforces inv-fail-closed ; policy enforces inv-operator ; policy enforces inv-silent
-inventory enforces inv-bounds ; alloc enforces inv-zalloc ; boot enforces inv-config-once
+### Proof
 
-# ownership
-worker owns tunnel ; slot-table owns slot ; cache owns cache-entry ; cache owns generation
-schedule owns refresh ; incident owns incident ; all-gate owns latch ; all-gate owns block-state
-monitor owns ja4-baseline ; storage owns slot
-
-# observations
-boot produces rec-startup ; incident produces rec-dns ; cache produces rec-assurance
-reactor produces rec-refusal ; reactor produces rec-capacity ; gate produces rec-early
-monitor produces rec-monitor ; owner produces rec-terminal
-
-# operator
-config configured-by ctl-any ; config configured-by ctl-fqdn ; config configured-by ctl-gates
-config configured-by ctl-assurance ; config configured-by ctl-bailiwick ; config configured-by ctl-listen
-config configured-by ctl-resolvers ; config configured-by ctl-allowance
-policy configured-by ctl-any ; policy configured-by ctl-fqdn ; all-gate configured-by ctl-gates
-cache configured-by ctl-assurance ; wire configured-by ctl-bailiwick ; transport configured-by ctl-resolvers
-
-# ordering
-boot precedes startup-window ; startup-window precedes setup ; setup precedes relay ; relay precedes close
-startup-decision precedes connect-head ; connect-head precedes approved-hostname
-approved-hostname precedes client-hello ; client-hello precedes ja4-baseline
-client-hello precedes forwarding-gate ; binding precedes admission-verdict ; assurance precedes admission-verdict
-admission-verdict precedes peer ; peer precedes forwarding-gate ; early-data precedes forwarding-gate
-
-# proof
-inv-binding verified-by vq-proto ; inv-auth verified-by vq-gate ; inv-fail-closed verified-by vq-proto
-inv-zalloc verified-by vq-resource ; inv-bounds verified-by vq-resource
-inv-generation verified-by vq-proto ; inv-parse verified-by vq-proto
-inv-transition verified-by vq-gate ; inv-deadline verified-by vq-life ; inv-bytes verified-by vq-life
-inv-config-once verified-by vq-surface ; inv-ownership verified-by vq-surface
-inv-work verified-by vq-resource
+```mermaid
+flowchart LR
+    inv_binding -->|verified-by| vq_proto
+    inv_auth -->|verified-by| vq_gate
+    inv_fail_closed -->|verified-by| vq_proto
+    inv_zalloc -->|verified-by| vq_resource
+    inv_bounds -->|verified-by| vq_resource
+    inv_generation -->|verified-by| vq_proto
+    inv_parse -->|verified-by| vq_proto
+    inv_transition -->|verified-by| vq_gate
+    inv_deadline -->|verified-by| vq_life
+    inv_bytes -->|verified-by| vq_life
+    inv_config_once -->|verified-by| vq_surface
+    inv_ownership -->|verified-by| vq_surface
+    inv_work -->|verified-by| vq_resource
 ```
 
 ## Naming debt
