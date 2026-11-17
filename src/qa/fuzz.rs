@@ -9,7 +9,7 @@ use crate::config::Fqdn;
 use crate::dns::cache::Family;
 use crate::dns::wire::{BailiwickZones, DNS_MSG_LIMIT, ResponseWorkspace, parse_response};
 use crate::inspection::client_hello::{ClientHelloInspector, HelloParseStep};
-use crate::inspection::connect::{ConnectParser, ConnectParseStep};
+use crate::inspection::connect::{ConnectParseStep, ConnectParser};
 
 /// The fixed transaction id every DNS-wire input is anchored on: the corpus
 /// message answers `(sub.example.org, A, tid 0x0ded)`.

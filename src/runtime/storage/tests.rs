@@ -444,7 +444,7 @@ fn serve_storage_boot_corresponds_allowlist_at_boundary() {
 
 #[test]
 fn work_view_is_bound_to_the_owning_storages_state() {
-    use crate::inspection::connect::{ConnectParser, ConnectParseStep};
+    use crate::inspection::connect::{ConnectParseStep, ConnectParser};
     use crate::runtime::tunnel::{AdmissionVerdict, Deadline};
     use std::time::Instant;
     let mut storage = booted(1, 0);
@@ -511,7 +511,7 @@ fn storage_cache_secs_is_mounted_on_the_dns_epoch() {
 
 #[test]
 fn storage_decide_reads_slot_deadline_and_epoch_scale() {
-    use crate::inspection::connect::{ConnectParser, ConnectParseStep};
+    use crate::inspection::connect::{ConnectParseStep, ConnectParser};
     use crate::runtime::tunnel::AdmissionVerdict;
     use std::time::Instant;
     const DNS_EPOCH: u64 = 1_700_000_000;
@@ -768,7 +768,7 @@ fn monitor_nonempty_detail_ring_report_and_drain_spend_zero_allocations() {
 }
 
 fn connect_request(head: &[u8]) -> crate::inspection::connect::ConnectRequest {
-    use crate::inspection::connect::{ConnectParser, ConnectParseStep};
+    use crate::inspection::connect::{ConnectParseStep, ConnectParser};
     let mut parser = ConnectParser::new();
     match parser.feed(head).expect("valid connect head") {
         ConnectParseStep::Complete { .. } => {}

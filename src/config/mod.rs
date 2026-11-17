@@ -14,7 +14,7 @@ use crate::enforcement::action::{
     ActionKind, AnyIllegalControl, Control, ControlTable, PerFqdnControl, Scope,
 };
 use crate::enforcement::state::{AllScopeGate, GateSet};
-use crate::names::hostname::{FQDN_MAX_LEN, ApprovedHostname};
+use crate::names::hostname::{ApprovedHostname, FQDN_MAX_LEN};
 
 pub const CONFIG_DOC_LIMIT: usize = 16384;
 pub const ALLOWLIST_MIN: usize = 1;

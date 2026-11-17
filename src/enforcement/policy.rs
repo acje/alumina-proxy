@@ -1,6 +1,6 @@
 use super::action::{
-    ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstIllegalLatch, PerFqdnControl,
-    Scope,
+    ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstIllegalLatch,
+    PerFqdnControl, Scope,
 };
 use crate::inspection::client_hello::HelloRejectReason;
 use crate::inspection::connect::ConnectHeadReason;

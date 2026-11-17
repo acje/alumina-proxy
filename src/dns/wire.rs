@@ -1011,7 +1011,9 @@ pub(crate) fn classify_published(outcome: &ExchangeOutcome) -> PublishedKind {
             PublishedKind::ResolvedPositive
         }
         ExchangeOutcome::Positive { .. } => PublishedKind::NoEligible,
-        ExchangeOutcome::NxDomain { .. } | ExchangeOutcome::NoData { .. } => PublishedKind::Negative,
+        ExchangeOutcome::NxDomain { .. } | ExchangeOutcome::NoData { .. } => {
+            PublishedKind::Negative
+        }
     }
 }
 
@@ -1227,7 +1229,9 @@ impl<'a> ObservedReply<'a> {
         F: FnMut(publication::ObservationPhase, &Cache, crate::dns::cache::NameIndex, u64),
     {
         let evidence = match &self.reply.outcome {
-            ExchangeOutcome::Positive { .. } | ExchangeOutcome::NxDomain { .. } | ExchangeOutcome::NoData { .. } => Some(
+            ExchangeOutcome::Positive { .. }
+            | ExchangeOutcome::NxDomain { .. }
+            | ExchangeOutcome::NoData { .. } => Some(
                 Evidence::new(
                     self.ad_fact(),
                     origin.origin_authenticated,

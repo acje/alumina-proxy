@@ -1,4 +1,4 @@
 pub(crate) mod hostname;
 pub(crate) mod rules;
 
-pub use hostname::{FQDN_MAX_LEN, ApprovedHostname};
+pub use hostname::{ApprovedHostname, FQDN_MAX_LEN};

@@ -682,7 +682,10 @@ fn worker_binds_slot_capacity_at_512_occupied_tunnels() {
         let slot = worker.admit(t0, peer(0)).expect("admitted to a free slot");
         tunnels.push(worker.finish_setup(slot));
     }
-    assert_eq!(worker.admit(t0, peer(0)), Err(CapacityRefusal::SlotCapacity));
+    assert_eq!(
+        worker.admit(t0, peer(0)),
+        Err(CapacityRefusal::SlotCapacity)
+    );
     assert_eq!(worker.pending(), 0);
     assert_eq!(worker.occupied(), MAX_TUNNELS);
     for tunnel in tunnels {
@@ -2276,7 +2279,9 @@ mod peer_selection_machine {
                 AdmissionVerdict::Forbidden => (0b000_001u8, "decide_forbidden"),
                 AdmissionVerdict::NoBinding => (0b000_010u8, "decide_no_binding"),
                 AdmissionVerdict::DeadlineExhausted => (0b000_100u8, "decide_deadline_exhausted"),
-                AdmissionVerdict::CandidatesExhausted => (0b001_000u8, "decide_candidates_exhausted"),
+                AdmissionVerdict::CandidatesExhausted => {
+                    (0b001_000u8, "decide_candidates_exhausted")
+                }
                 AdmissionVerdict::Peer {
                     family: Family::A, ..
                 } => (0b010_000u8, "decide_peer_ipv4"),

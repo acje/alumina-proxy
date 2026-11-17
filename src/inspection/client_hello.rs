@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::names::hostname::{FQDN_MAX_LEN, ApprovedHostname};
+use crate::names::hostname::{ApprovedHostname, FQDN_MAX_LEN};
 
 mod ja4;
 
@@ -280,7 +280,9 @@ impl fmt::Display for ClientHelloError {
             ClientHelloError::RecordTooLarge { got } => {
                 write!(f, "TLS record payload {got} exceeds 16 KiB")
             }
-            ClientHelloError::ZeroLengthRecord => write!(f, "TLS handshake record has zero payload"),
+            ClientHelloError::ZeroLengthRecord => {
+                write!(f, "TLS handshake record has zero payload")
+            }
             ClientHelloError::NotHandshake { content_type } => {
                 write!(
                     f,
@@ -298,7 +300,9 @@ impl fmt::Display for ClientHelloError {
                 write!(f, "handshake type {handshake_type} is not ClientHello")
             }
             ClientHelloError::TruncatedHandshake => write!(f, "handshake message truncated"),
-            ClientHelloError::MalformedBody { detail } => write!(f, "ClientHello body malformed: {detail}"),
+            ClientHelloError::MalformedBody { detail } => {
+                write!(f, "ClientHello body malformed: {detail}")
+            }
             ClientHelloError::UnsupportedLegacyVersion { got } => {
                 write!(
                     f,
@@ -344,7 +348,9 @@ impl fmt::Display for ClientHelloError {
             ClientHelloError::InvalidServerName { detail } => {
                 write!(f, "server_name extension invalid: {detail}")
             }
-            ClientHelloError::ServerNameMismatch => write!(f, "SNI does not match the approved hostname"),
+            ClientHelloError::ServerNameMismatch => {
+                write!(f, "SNI does not match the approved hostname")
+            }
         }
     }
 }
@@ -618,7 +624,10 @@ fn u8_at(buf: &[u8], at: usize) -> Result<u8, ClientHelloError> {
 ///
 /// Returns `MalformedBody` when the list length is odd, when it exceeds
 /// `MAX_CIPHERS` suites, or when the list overruns the body.
-fn parse_cipher_list(body: &[u8], at: usize) -> Result<(usize, [u16; MAX_CIPHERS]), ClientHelloError> {
+fn parse_cipher_list(
+    body: &[u8],
+    at: usize,
+) -> Result<(usize, [u16; MAX_CIPHERS]), ClientHelloError> {
     let list_len = usize::from(u16_at(body, at)?);
     if list_len % 2 != 0 {
         return Err(ClientHelloError::MalformedBody {
@@ -832,7 +841,10 @@ const fn is_grease(value: u16) -> bool {
         )
 }
 
-fn parse_supported_versions(data: &[u8], out: &mut [u16; MAX_VERSIONS]) -> Result<usize, ClientHelloError> {
+fn parse_supported_versions(
+    data: &[u8],
+    out: &mut [u16; MAX_VERSIONS],
+) -> Result<usize, ClientHelloError> {
     if data.is_empty() || usize::from(data[0]) + 1 != data.len() {
         return Err(ClientHelloError::MalformedExtension {
             ext: SUPPORTED_VERSIONS,
@@ -881,14 +893,17 @@ fn parse_server_names(
                 detail: "non-host_name name type",
             });
         }
-        *entries = entries.checked_add(1).ok_or(ClientHelloError::InvalidServerName {
-            detail: "too many host_name entries",
-        })?;
+        *entries = entries
+            .checked_add(1)
+            .ok_or(ClientHelloError::InvalidServerName {
+                detail: "too many host_name entries",
+            })?;
         if *entries == 1 {
             let raw = &data[start..end];
-            let normalized = ApprovedHostname::normalize(raw).ok_or(ClientHelloError::InvalidServerName {
-                detail: "host_name is not a legal FQDN",
-            })?;
+            let normalized =
+                ApprovedHostname::normalize(raw).ok_or(ClientHelloError::InvalidServerName {
+                    detail: "host_name is not a legal FQDN",
+                })?;
             let bytes = normalized.as_bytes();
             sni[..bytes.len()].copy_from_slice(bytes);
             *sni_len = bytes.len();
@@ -965,7 +980,10 @@ fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> Result<usize, Cl
 ///
 /// Returns `ServerNameMismatch` when the SNI does not equal `approved`, and
 /// the profile errors above when the ECH or identity rules fail.
-pub fn validate(ch: &ClientHello, approved: &ApprovedHostname) -> Result<HelloAccepted, ClientHelloError> {
+pub fn validate(
+    ch: &ClientHello,
+    approved: &ApprovedHostname,
+) -> Result<HelloAccepted, ClientHelloError> {
     if ch.has_ech {
         return Err(ClientHelloError::EchPresent);
     }

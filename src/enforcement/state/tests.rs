@@ -803,7 +803,11 @@ fn ja4_change_projects_the_per_fqdn_action() {
     );
     let mut en = en(t);
     let ordinal = t.ordinal(0).expect("ordinal");
-    let effect = en.decide(&mut FirstIllegalLatch::new(), Violation::Ja4Change { ordinal }, 0);
+    let effect = en.decide(
+        &mut FirstIllegalLatch::new(),
+        Violation::Ja4Change { ordinal },
+        0,
+    );
     assert_eq!(
         effect,
         Effect::Block {
@@ -915,7 +919,11 @@ fn early_data_and_ja4_gates_are_isolated() {
     let (t, mut en) = isolated_gate_arrangement(gate(3, 60), gate(10, 60));
     let ordinal = t.ordinal(0).expect("ordinal");
     for i in 0..3u64 {
-        let effect = en.decide(&mut FirstIllegalLatch::new(), Violation::Ja4Change { ordinal }, i);
+        let effect = en.decide(
+            &mut FirstIllegalLatch::new(),
+            Violation::Ja4Change { ordinal },
+            i,
+        );
         assert_eq!(
             effect,
             Effect::BaselineOnly,
@@ -1148,7 +1156,8 @@ mod hegel_machine {
     use super::enforcement_tables::table;
     use super::gate;
     use crate::enforcement::action::{
-        ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstIllegalLatch, Scope,
+        ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstIllegalLatch,
+        Scope,
     };
     use crate::enforcement::policy::{
         AnyIllegalCause, Effect, UnknownReason, Violation, decide as pure_decide,
@@ -1755,7 +1764,8 @@ mod hegel_machine {
 
     impl GateModel {
         const fn prev_latch_is_spent_with_armed_latch(&self) -> bool {
-            matches!(self.prev_latch, FirstIllegalLatch::Spent) && matches!(self.latch, FirstIllegalLatch::Armed)
+            matches!(self.prev_latch, FirstIllegalLatch::Spent)
+                && matches!(self.latch, FirstIllegalLatch::Armed)
         }
     }
 

@@ -4,8 +4,8 @@ pub(crate) use publication::ObservationPhase;
 pub use publication::apply_outcome;
 pub use resolver::{MAX_RESOLVERS, RESOLVER_PORT};
 pub use wire::{
-    BailiwickZones, BindingList, DNS_MSG_LIMIT, DnsError, EXTREME_TTL_THRESHOLD, MAX_CNAME_LINKS,
-    MAX_TOTAL_RR, ExchangeOutcome, ResponseWorkspace, build_query, parse_response,
+    BailiwickZones, BindingList, DNS_MSG_LIMIT, DnsError, EXTREME_TTL_THRESHOLD, ExchangeOutcome,
+    MAX_CNAME_LINKS, MAX_TOTAL_RR, ResponseWorkspace, build_query, parse_response,
 };
 
 pub(crate) mod cache;

@@ -131,7 +131,9 @@ fn record(payload: &[u8]) -> Vec<u8> {
 fn parse_one(bytes: &[u8]) -> Result<ClientHello, ClientHelloError> {
     let mut inspector = ClientHelloInspector::new();
     match inspector.feed(bytes)? {
-        HelloParseStep::Complete { .. } => Ok(inspector.hello().expect("complete has hello").clone()),
+        HelloParseStep::Complete { .. } => {
+            Ok(inspector.hello().expect("complete has hello").clone())
+        }
         HelloParseStep::NeedMore => panic!("test message must complete within a single feed"),
     }
 }
@@ -485,7 +487,10 @@ fn rejects_missing_supported_versions() {
     handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
     handshake.extend_from_slice(&body);
     let record = record(&handshake);
-    assert_eq!(parse_one(&record), Err(ClientHelloError::MissingSupportedVersions));
+    assert_eq!(
+        parse_one(&record),
+        Err(ClientHelloError::MissingSupportedVersions)
+    );
 }
 
 #[test]
@@ -508,7 +513,10 @@ fn rejects_multiple_compression_methods() {
     multi.push(1);
     multi.extend_from_slice(&body[44..]);
     let record = record(&multi);
-    assert_eq!(parse_one(&record), Err(ClientHelloError::NonNullCompression));
+    assert_eq!(
+        parse_one(&record),
+        Err(ClientHelloError::NonNullCompression)
+    );
 }
 
 #[test]
@@ -821,7 +829,10 @@ fn absent_sni_is_missing_identity() {
 #[test]
 fn fragmented_short_first_record_is_rejected() {
     let mut inspector = ClientHelloInspector::new();
-    assert_eq!(inspector.feed(&[22, 3, 1, 0, 2]), Ok(HelloParseStep::NeedMore));
+    assert_eq!(
+        inspector.feed(&[22, 3, 1, 0, 2]),
+        Ok(HelloParseStep::NeedMore)
+    );
     assert_eq!(
         inspector.feed(&[1, 0]),
         Err(ClientHelloError::TruncatedHandshake),
@@ -1399,7 +1410,10 @@ fn rejects_bad_record_version() {
         let mut msg = hello_msg(TLS12, &[TLS13], &["sub.example.org"], false);
         msg[1] = (bad >> 8) as u8;
         msg[2] = (bad & 0xff) as u8;
-        assert_eq!(parse_one(&msg), Err(ClientHelloError::BadRecordVersion { got: bad }));
+        assert_eq!(
+            parse_one(&msg),
+            Err(ClientHelloError::BadRecordVersion { got: bad })
+        );
     }
 }
 
@@ -1428,7 +1442,10 @@ fn rejects_missing_compression_methods() {
     no_comp.extend_from_slice(&hl.to_be_bytes()[1..]);
     no_comp.extend_from_slice(&new_body);
     let record = record(&no_comp);
-    assert_eq!(parse_one(&record), Err(ClientHelloError::MissingCompressionMethods));
+    assert_eq!(
+        parse_one(&record),
+        Err(ClientHelloError::MissingCompressionMethods)
+    );
 }
 
 #[test]
@@ -1475,5 +1492,8 @@ fn client_hello_inspector_is_total_and_completion_is_inspector_independent(tc: h
         panic!("a generated well-formed ClientHello must complete");
     };
     let mut second = ClientHelloInspector::new();
-    assert_eq!(second.feed(&wire), Ok(HelloParseStep::Complete { consumed }));
+    assert_eq!(
+        second.feed(&wire),
+        Ok(HelloParseStep::Complete { consumed })
+    );
 }

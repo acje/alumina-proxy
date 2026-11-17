@@ -50,8 +50,12 @@ use crate::eligibility::NumericAddr;
 use crate::enforcement::action::{DomainOrdinal, FirstIllegalLatch, PerFqdnControl, Scope};
 use crate::enforcement::monitor::{CapturedDetail, CapturedFact, SlotCapture};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason, Violation};
-use crate::inspection::client_hello::{self, ClientHelloInspector, HelloRejectReason, HelloParseStep};
-use crate::inspection::connect::{ConnectHeadReason, ConnectParser, ConnectRequest, ConnectParseStep};
+use crate::inspection::client_hello::{
+    self, ClientHelloInspector, HelloParseStep, HelloRejectReason,
+};
+use crate::inspection::connect::{
+    ConnectHeadReason, ConnectParseStep, ConnectParser, ConnectRequest,
+};
 use crate::log::{ActivityKind, RejectReason};
 use crate::names::hostname::ApprovedHostname;
 use crate::runtime::gate::{Activity, ForwardingGate, UpstreamWrite, ValidatedHello};
@@ -1439,7 +1443,11 @@ fn arm_tunnel_idle(ws: &mut SlotWorkspace) -> bool {
     expired
 }
 
-fn upstream_write_once(serving: &mut ServingLoop, index: usize, room: usize) -> (WriteOutcome, bool) {
+fn upstream_write_once(
+    serving: &mut ServingLoop,
+    index: usize,
+    room: usize,
+) -> (WriteOutcome, bool) {
     let ws = &mut serving.slots[index];
     if ws.fwd >= ws.buf_len {
         return (WriteOutcome::None, false);
@@ -2886,7 +2894,9 @@ impl ServingLoop {
         if !self.block_all_latched() {
             return false;
         }
-        if self.slots[index].stage != SlotStage::Idle && self.slots[index].stage != SlotStage::Closing {
+        if self.slots[index].stage != SlotStage::Idle
+            && self.slots[index].stage != SlotStage::Closing
+        {
             self.close_slot(index);
         }
         true
@@ -2898,7 +2908,9 @@ impl ServingLoop {
         }
         self.stop_admission_latched();
         for index in 0..self.slots.len() {
-            if self.slots[index].stage != SlotStage::Idle && self.slots[index].stage != SlotStage::Closing {
+            if self.slots[index].stage != SlotStage::Idle
+                && self.slots[index].stage != SlotStage::Closing
+            {
                 self.close_slot(index);
             }
         }

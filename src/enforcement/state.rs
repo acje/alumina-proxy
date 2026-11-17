@@ -261,7 +261,12 @@ impl EnforcementState {
         (self.blocked >> ordinal.get()) & 1 == 1
     }
 
-    pub fn decide(&mut self, latch: &mut FirstIllegalLatch, violation: Violation, secs: u64) -> Effect {
+    pub fn decide(
+        &mut self,
+        latch: &mut FirstIllegalLatch,
+        violation: Violation,
+        secs: u64,
+    ) -> Effect {
         let effect = self.select_gated_effect(latch, violation, secs);
         match violation {
             Violation::AnyIllegal { cause } => {

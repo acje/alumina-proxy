@@ -807,7 +807,11 @@ fn fabric_validated_early_data(serving: &mut ServingLoop, test_data: Option<usiz
     fabric_validated_early_data_at(serving, 0, test_data);
 }
 
-fn fabric_validated_early_data_at(serving: &mut ServingLoop, index: usize, test_data: Option<usize>) {
+fn fabric_validated_early_data_at(
+    serving: &mut ServingLoop,
+    index: usize,
+    test_data: Option<usize>,
+) {
     let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
     let origin_addr = origin.local_addr().expect("origin addr");
     let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
@@ -838,7 +842,12 @@ fn fabric_validated_early_data_at(serving: &mut ServingLoop, index: usize, test_
     }
 }
 
-fn fabric_relay_slot(serving: &mut ServingLoop, index: usize, approved: &[u8], pending_down: &[u8]) {
+fn fabric_relay_slot(
+    serving: &mut ServingLoop,
+    index: usize,
+    approved: &[u8],
+    pending_down: &[u8],
+) {
     let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
     let sink_addr = sink.local_addr().expect("sink addr");
     let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
@@ -986,7 +995,11 @@ fn wait_readable(stream: &mio::net::TcpStream, label: &str) {
     assert!(readable, "{label} never became readable on the proxy side");
 }
 
-fn stage_relay_slot(serving: &mut ServingLoop, up: mio::net::TcpStream, client: mio::net::TcpStream) {
+fn stage_relay_slot(
+    serving: &mut ServingLoop,
+    up: mio::net::TcpStream,
+    client: mio::net::TcpStream,
+) {
     {
         let ws = &mut serving.slots[0];
         ws.upstream = Some(up);
@@ -1570,7 +1583,10 @@ mod connect_setup {
         with_serving_stack(port, move |serving| {
             let wire = hello_wire(b"evil.example.net", false);
             let mut insp = ClientHelloInspector::new();
-            assert!(matches!(insp.feed(&wire), Ok(HelloParseStep::Complete { .. })));
+            assert!(matches!(
+                insp.feed(&wire),
+                Ok(HelloParseStep::Complete { .. })
+            ));
             let approved = ApprovedHostname::normalize(b"sub.example.org");
             assert_eq!(
                 client_hello::validate(insp.hello().expect("parsed hello"), &approved.unwrap()),
@@ -1596,7 +1612,10 @@ mod connect_setup {
         with_serving_stack(port, move |serving| {
             let wire = hello_wire(b"sub.example.org", true);
             let mut insp = ClientHelloInspector::new();
-            assert!(matches!(insp.feed(&wire), Ok(HelloParseStep::Complete { .. })));
+            assert!(matches!(
+                insp.feed(&wire),
+                Ok(HelloParseStep::Complete { .. })
+            ));
             let approved = ApprovedHostname::normalize(b"sub.example.org");
             assert_eq!(
                 client_hello::validate(insp.hello().expect("parsed hello"), &approved.unwrap()),
@@ -2657,7 +2676,11 @@ mod generation_tokens {
         }
     }
 
-    fn assert_stale_pre_reuse_token_inert(serving: &mut ServingLoop, old_gen: u64, partial_len: usize) {
+    fn assert_stale_pre_reuse_token_inert(
+        serving: &mut ServingLoop,
+        old_gen: u64,
+        partial_len: usize,
+    ) {
         // The stale pre-reuse token, re-dispatched after the batch, is still
         // inert (dirty work never resurrects the prior generation). The visit
         // count is the strong witness: an unguarded dispatch would pass the
@@ -5107,7 +5130,10 @@ mod relay {
         (sink_stream, peer_stream)
     }
 
-    fn drain_pending_to_sink_eof(serving: &mut ServingLoop, sink_stream: &mut TcpStream) -> Vec<u8> {
+    fn drain_pending_to_sink_eof(
+        serving: &mut ServingLoop,
+        sink_stream: &mut TcpStream,
+    ) -> Vec<u8> {
         let mut pending = Vec::new();
         let mut tmp = [0u8; 64];
         let mut eof_seen = false;
@@ -6376,7 +6402,11 @@ mod visit_budget {
         });
     }
 
-    fn stage_pending_upstream_relay(serving: &mut ServingLoop, pending: usize, seed: u32) -> TcpStream {
+    fn stage_pending_upstream_relay(
+        serving: &mut ServingLoop,
+        pending: usize,
+        seed: u32,
+    ) -> TcpStream {
         let (sink_stream, up) = sink_pair();
         let _ = sink_stream.set_read_timeout(Some(Duration::from_millis(50)));
         {
@@ -6919,7 +6949,10 @@ mod visit_budget {
         received: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     }
 
-    fn stage_four_mib_relay(serving: &mut ServingLoop, direction: RelayBudgetDirection) -> RelayBurst {
+    fn stage_four_mib_relay(
+        serving: &mut ServingLoop,
+        direction: RelayBudgetDirection,
+    ) -> RelayBurst {
         let (upstream_peer, up) = sink_pair();
         let (client, client_peer) = relay_peer_pair();
         stage_relay_slot(serving, up, client);
@@ -7667,7 +7700,11 @@ mod enforcement {
         }
     }
 
-    fn assert_ja4_domain_latch(serving: &ServingLoop, blocked: DomainOrdinal, sibling: DomainOrdinal) {
+    fn assert_ja4_domain_latch(
+        serving: &ServingLoop,
+        blocked: DomainOrdinal,
+        sibling: DomainOrdinal,
+    ) {
         assert!(
             serving.storage().enforcement().is_blocked(blocked),
             "the Domain-scope ja4 decision must latch the exact 443 pair blocked"
@@ -7946,7 +7983,8 @@ mod enforcement {
             let (client, mut reader) = relay_peer_pair();
             arm_latch_relay_slot(serving, client);
             assert!(
-                serving.slots[0].client.is_some() && matches!(serving.slots[0].stage, SlotStage::Relay),
+                serving.slots[0].client.is_some()
+                    && matches!(serving.slots[0].stage, SlotStage::Relay),
                 "the fault-injected relay slot is live after the sweep"
             );
 
@@ -8136,7 +8174,10 @@ mod enforcement {
         with_serving_stack_cfg(port, cfg, move |serving| {
             let wire = hello_wire(b"evil.example.net", false);
             let mut insp = ClientHelloInspector::new();
-            assert!(matches!(insp.feed(&wire), Ok(HelloParseStep::Complete { .. })));
+            assert!(matches!(
+                insp.feed(&wire),
+                Ok(HelloParseStep::Complete { .. })
+            ));
             let approved = ApprovedHostname::normalize(b"sub.example.org");
             assert_eq!(
                 client_hello::validate(
@@ -10695,7 +10736,8 @@ fn seeded_idle_expiry_case(dual_family: bool) -> IdleExpiryCase {
     assert!(reader.read(&mut boot).unwrap() > 0);
     assert_eq!(storage.logs().len(), 0);
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic storage");
-    let serving = ServingLoop::new(storage, listener, traffic).expect("serving on the seeded storage");
+    let serving =
+        ServingLoop::new(storage, listener, traffic).expect("serving on the seeded storage");
     // Mounted at the DNS window origin: cache_secs at the origin reads now0.
     let origin = serving.storage().dns().window_start();
     assert_eq!(serving.storage().cache_secs(origin), 1000);
@@ -11589,7 +11631,11 @@ fn advance_to_proof_expiry(serving: &mut ServingLoop) -> Instant {
 }
 
 #[cfg(feature = "alloc-witness")]
-fn prime_expiry_relay(serving: &mut ServingLoop, up: mio::net::TcpStream, client: mio::net::TcpStream) {
+fn prime_expiry_relay(
+    serving: &mut ServingLoop,
+    up: mio::net::TcpStream,
+    client: mio::net::TcpStream,
+) {
     let slot = &mut serving.slots[0];
     slot.upstream = Some(up);
     slot.client = Some(client);

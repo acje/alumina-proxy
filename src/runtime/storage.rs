@@ -28,8 +28,8 @@ use crate::log::{Level, LogStore, ResolverProbeSegment, StartupStatus};
 #[cfg(test)]
 use crate::names::hostname::ApprovedHostname;
 use crate::runtime::tunnel::{
-    CapacityRefusal, AttemptLedger, AdmissionVerdict, Deadline, DecideError, ResolvedRequest, SlotIndex,
-    TunnelIndex, Worker, WorkerClock, WorkerView,
+    AdmissionVerdict, AttemptLedger, CapacityRefusal, Deadline, DecideError, ResolvedRequest,
+    SlotIndex, TunnelIndex, Worker, WorkerClock, WorkerView,
 };
 
 /// The explicit far-future boundary for [`ServeStorage::schedule_due_instant`].

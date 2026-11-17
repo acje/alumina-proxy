@@ -47,7 +47,9 @@ fn coalesced_tunnel_bytes_do_not_block_completion() {
             assert_eq!(req.expect("parse").hostname(), "sub.example.org");
             assert_eq!(head_len, head.len(), "consumed must stop at the delimiter");
         }
-        ConnectParseStep::Incomplete => panic!("coalesced ClientHello must not block the CONNECT head"),
+        ConnectParseStep::Incomplete => {
+            panic!("coalesced ClientHello must not block the CONNECT head")
+        }
     }
 }
 
@@ -359,7 +361,9 @@ fn over_limit_applies_to_head_not_trailing() {
             let req = parser.result().copied().expect("settled");
             assert_eq!(req.expect("parse").hostname(), "sub.example.org");
         }
-        ConnectParseStep::Incomplete => panic!("trailing bytes must not count toward the head bound"),
+        ConnectParseStep::Incomplete => {
+            panic!("trailing bytes must not count toward the head bound")
+        }
     }
 }
 

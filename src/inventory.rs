@@ -27,7 +27,8 @@ pub const CONFIG_DOC_BUFFER_BYTES: usize = CONFIG_DOC_LIMIT + 1;
 /// bound on the slot's retained bytes: the per-slot serving workspace also
 /// carries gate, capture, cursors, and the approved hostname, which are
 /// deliberately not folded in here.
-pub const SLOT_WORKSPACE_BYTES: usize = size_of::<ConnectParser>() + size_of::<ClientHelloInspector>();
+pub const SLOT_WORKSPACE_BYTES: usize =
+    size_of::<ConnectParser>() + size_of::<ClientHelloInspector>();
 
 /// The total retained serving-workspace bytes across all 512 tunnel slots:
 /// every slot carries its own parser + inspector (incl. the retained JA4
