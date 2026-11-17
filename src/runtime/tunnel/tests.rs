@@ -2562,6 +2562,432 @@ fn worker_slot_table_keeps_capacity_and_ownership(tc: hegel::TestCase) {
         .run(tc);
 }
 
+/// The multi-client admission surface as a concurrent model-based machine.
+///
+/// The subject is the production [`Worker`] slot table. One [`Mutex`] guards
+/// the subject and the model's handle/peer accounting together, so every
+/// invariant reads exactly one consistent snapshot; all rules share the single
+/// `ops` group, so worker threads really interleave them on that lock. The
+/// model keeps only the handles the subject handed out, never a second scan of
+/// the subject's slot array.
+///
+/// Invariants (each `#[invariant(always_run)]`, evaluated on the main thread
+/// between rounds after every worker has joined):
+/// - CH1 `occupied() <= MAX_TUNNELS`, `pending() <= MAX_PENDING_SETUPS`, and
+///   each peer's pending setups `<= MAX_PENDING_PER_PEER`.
+/// - CH2 `occupied()` equals the model's live-handle count and `pending()`
+///   equals its setup-handle count.
+/// - CH3 live slot indices are pairwise distinct and inside `0..MAX_TUNNELS`.
+/// - CH4 an admitted index was not live when it was handed out, so an index is
+///   only ever reused after its release.
+///
+/// Independence: CH2 is a cross-check of the subject's cached counters against
+/// the model's handle list, not a restatement of a slot-array scan; CH3 is a
+/// set property over those handles; CH4 is evidence recorded at admit time from
+/// the live set observed under the same lock as the admit, so it is not implied
+/// by the snapshot CH3 reads. The per-peer cap is checked from the model's own
+/// peer record because the subject exposes no per-peer counter.
+///
+/// Documented non-claims (covered elsewhere, never by this machine): a refused
+/// client's bytes never reach an upstream (the byte-pinned 400/403/502 reactor
+/// tests); shutdown observed by every live tunnel (the owner/runtime
+/// alloc-witness turns and the e2e shutdown gate); no peer buffer is reused
+/// while live (the buffer is boot-transferred and cursor-managed, and only the
+/// stale-generation token hazard is covered by the reactor coalescer machine).
+mod concurrent_admission_machine {
+    use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// Five distinct peers: with the per-peer cap at 32 the global pending cap
+    /// (128) and the per-peer cap stay independently reachable, so neither cap
+    /// check can hide entirely behind the other.
+    const PEERS: [IpAddr; 5] = [
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3)),
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 4)),
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 5)),
+    ];
+
+    /// The handles the subject handed out, in no particular order. Each variant
+    /// carries the live handle of its class, so a rule can only apply the
+    /// transition that handle type permits.
+    enum Live {
+        Setup { slot: SlotIndex, peer: usize },
+        Established(TunnelIndex),
+    }
+
+    impl Live {
+        const fn index(&self) -> usize {
+            match self {
+                Live::Setup { slot, .. } => SlotIndex::index(slot),
+                Live::Established(tunnel) => TunnelIndex::index(tunnel),
+            }
+        }
+
+        const fn is_setup(&self) -> bool {
+            matches!(self, Live::Setup { .. })
+        }
+    }
+
+    /// One admit's reuse evidence: whether the index the subject returned was
+    /// already live when it was handed out.
+    struct ReuseEvidence {
+        index: usize,
+        was_live: bool,
+    }
+
+    struct Inner {
+        worker: Worker,
+        live: Vec<Live>,
+        reuses: Vec<ReuseEvidence>,
+    }
+
+    impl Inner {
+        /// The position of the `wanted`-th live handle of the drawn class; the
+        /// pick is a fixed-range draw taken before the lock, so no draw depends
+        /// on lock state.
+        fn position(&self, pick: usize, setup: bool) -> Option<usize> {
+            let candidates = self
+                .live
+                .iter()
+                .filter(|live| live.is_setup() == setup)
+                .count();
+            if candidates == 0 {
+                return None;
+            }
+            let wanted = pick % candidates;
+            let mut seen = 0;
+            for (position, live) in self.live.iter().enumerate() {
+                if live.is_setup() == setup {
+                    if seen == wanted {
+                        return Some(position);
+                    }
+                    seen += 1;
+                }
+            }
+            None
+        }
+    }
+
+    fn peer_pending(live: &[Live], peer: usize) -> usize {
+        live.iter()
+            .filter(|live| matches!(live, Live::Setup { peer: p, .. } if *p == peer))
+            .count()
+    }
+
+    fn guard(inner: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
+        inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) struct Admission {
+        inner: Mutex<Inner>,
+        now: Instant,
+    }
+
+    impl Admission {
+        pub(super) fn start() -> Admission {
+            let now = anchor();
+            Admission {
+                inner: Mutex::new(Inner {
+                    worker: Worker::boot(clock(now)),
+                    live: Vec::new(),
+                    reuses: Vec::new(),
+                }),
+                now,
+            }
+        }
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the hegel concurrent state-machine macro hands each rule its own TestCase by value"
+    )]
+    #[hegel::concurrent_state_machine]
+    impl Admission {
+        /// Admits a drawn peer. The capacity prediction and the admit call
+        /// share one guard, so the refusal reason is compared against the exact
+        /// state the subject decided on, never a stale pre-lock snapshot.
+        #[rule(groups = ["ops"], weight = 12.0)]
+        fn admit(&self, tc: TestCase) {
+            let peer = tc.draw(
+                gs::integers::<usize>()
+                    .min_value(0)
+                    .max_value(PEERS.len() - 1),
+            );
+            let mut inner = guard(&self.inner);
+            let per_peer = peer_pending(&inner.live, peer);
+            let gated_by_peer = per_peer >= MAX_PENDING_PER_PEER;
+            let expected = if inner.worker.occupied() >= MAX_TUNNELS {
+                Err(AdmissionError::SlotCapacity)
+            } else if inner.worker.pending() >= MAX_PENDING_SETUPS || gated_by_peer {
+                Err(AdmissionError::PendingCapacity)
+            } else {
+                Ok(())
+            };
+            match (expected, inner.worker.admit(self.now, PEERS[peer])) {
+                (Ok(()), Ok(slot)) => {
+                    tc.event("admitted");
+                    let index = SlotIndex::index(&slot);
+                    let occupied = inner.live.len() + 1;
+                    if occupied >= MAX_TUNNELS / 2 {
+                        tc.event("occupied_at_least_256");
+                    }
+                    if occupied >= MAX_TUNNELS {
+                        tc.event("occupied_at_slot_capacity");
+                    }
+                    let was_live = inner.live.iter().any(|live| live.index() == index);
+                    inner.reuses.push(ReuseEvidence { index, was_live });
+                    inner.live.push(Live::Setup { slot, peer });
+                }
+                (Ok(()), Err(actual)) => {
+                    panic!("the model predicted a free seat, the worker refused: {actual:?}");
+                }
+                (Err(predicted), Ok(slot)) => {
+                    panic!(
+                        "the model predicted {predicted:?}, the worker admitted slot {}",
+                        SlotIndex::index(&slot)
+                    );
+                }
+                (Err(predicted), Err(actual)) => {
+                    tc.event(match predicted {
+                        AdmissionError::SlotCapacity => "refusal_slot_capacity",
+                        AdmissionError::PendingCapacity if gated_by_peer => {
+                            "refusal_per_peer_capacity"
+                        }
+                        AdmissionError::PendingCapacity => "refusal_pending_capacity",
+                    });
+                    assert_eq!(
+                        actual, predicted,
+                        "the worker's refusal reason disagrees with the model's capacity state"
+                    );
+                }
+            }
+        }
+
+        /// Records one drawn family on a live setup.
+        #[rule(groups = ["ops"], weight = 1.0)]
+        fn record_attempt(&self, tc: TestCase) {
+            let family = tc.draw(gs::sampled_from(&[Family::A, Family::Aaaa][..]));
+            let pick = tc.draw(
+                gs::integers::<usize>()
+                    .min_value(0)
+                    .max_value(MAX_TUNNELS - 1),
+            );
+            let mut inner = guard(&self.inner);
+            let Some(position) = inner.position(pick, true) else {
+                return;
+            };
+            let Inner { worker, live, .. } = &mut *inner;
+            let Live::Setup { slot, .. } = &live[position] else {
+                panic!("the model picked a non-setup handle for an attempt record");
+            };
+            let after = worker
+                .record_attempt(slot, family)
+                .expect("a live setup records an attempt");
+            assert_eq!(
+                after.previous(),
+                Some(family),
+                "the recorded attempt is the ledger's previous family"
+            );
+        }
+
+        /// Graduates a live setup: the seat stays occupied, one pending seat is
+        /// freed, and the physical slot is unchanged.
+        #[rule(groups = ["ops"], weight = 8.0)]
+        fn finish_setup(&self, tc: TestCase) {
+            let pick = tc.draw(
+                gs::integers::<usize>()
+                    .min_value(0)
+                    .max_value(MAX_TUNNELS - 1),
+            );
+            let mut inner = guard(&self.inner);
+            let Some(position) = inner.position(pick, true) else {
+                return;
+            };
+            let occupied_before = inner.worker.occupied();
+            let pending_before = inner.worker.pending();
+            let Live::Setup { slot, .. } = inner.live.swap_remove(position) else {
+                panic!("the model picked a non-setup handle for graduation");
+            };
+            let index = SlotIndex::index(&slot);
+            let tunnel = inner.worker.finish_setup(slot);
+            tc.event("graduated_seat");
+            assert_eq!(
+                TunnelIndex::index(&tunnel),
+                index,
+                "graduating an admitted seat keeps its physical slot"
+            );
+            assert_eq!(
+                inner.worker.occupied(),
+                occupied_before,
+                "graduation keeps the seat occupied"
+            );
+            assert_eq!(
+                inner.worker.pending(),
+                pending_before - 1,
+                "graduation frees exactly one pending seat"
+            );
+            inner.live.push(Live::Established(tunnel));
+        }
+
+        /// Releases a live setup, freeing one occupied and one pending seat.
+        #[rule(groups = ["ops"], weight = 2.0)]
+        fn release(&self, tc: TestCase) {
+            let pick = tc.draw(
+                gs::integers::<usize>()
+                    .min_value(0)
+                    .max_value(MAX_TUNNELS - 1),
+            );
+            let mut inner = guard(&self.inner);
+            let Some(position) = inner.position(pick, true) else {
+                return;
+            };
+            let occupied_before = inner.worker.occupied();
+            let pending_before = inner.worker.pending();
+            let Live::Setup { slot, .. } = inner.live.swap_remove(position) else {
+                panic!("the model picked a non-setup handle for release");
+            };
+            let index = SlotIndex::index(&slot);
+            inner.worker.release(slot);
+            tc.event("released_setup");
+            assert_eq!(
+                inner.worker.occupied(),
+                occupied_before - 1,
+                "release frees the occupied seat"
+            );
+            assert_eq!(
+                inner.worker.pending(),
+                pending_before - 1,
+                "release frees the pending seat"
+            );
+            assert!(
+                matches!(inner.worker.slots[index], SlotState::Free),
+                "a released slot must be free in the table"
+            );
+        }
+
+        /// Releases a live established tunnel: one occupied seat is freed and
+        /// the pending count is untouched.
+        #[rule(groups = ["ops"], weight = 2.0)]
+        fn release_tunnel(&self, tc: TestCase) {
+            let pick = tc.draw(
+                gs::integers::<usize>()
+                    .min_value(0)
+                    .max_value(MAX_TUNNELS - 1),
+            );
+            let mut inner = guard(&self.inner);
+            let Some(position) = inner.position(pick, false) else {
+                return;
+            };
+            let occupied_before = inner.worker.occupied();
+            let pending_before = inner.worker.pending();
+            let Live::Established(tunnel) = inner.live.swap_remove(position) else {
+                panic!("the model picked a non-established handle for release");
+            };
+            let index = TunnelIndex::index(&tunnel);
+            inner.worker.release_tunnel(tunnel);
+            tc.event("released_tunnel");
+            assert_eq!(
+                inner.worker.occupied(),
+                occupied_before - 1,
+                "releasing an established tunnel frees its occupied seat"
+            );
+            assert_eq!(
+                inner.worker.pending(),
+                pending_before,
+                "releasing an established tunnel leaves the pending count alone"
+            );
+            assert!(
+                matches!(inner.worker.slots[index], SlotState::Free),
+                "a released slot must be free in the table"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn ch1_fixed_caps_hold(&self, _: TestCase) {
+            let inner = guard(&self.inner);
+            let occupied = inner.worker.occupied();
+            let pending = inner.worker.pending();
+            assert!(
+                occupied <= MAX_TUNNELS,
+                "occupied {occupied} exceeds the fixed slot budget"
+            );
+            assert!(
+                pending <= MAX_PENDING_SETUPS,
+                "pending {pending} exceeds the fixed pending budget"
+            );
+            for peer in 0..PEERS.len() {
+                let held = peer_pending(&inner.live, peer);
+                assert!(
+                    held <= MAX_PENDING_PER_PEER,
+                    "peer {peer} holds {held} pending setups, above the per-peer cap"
+                );
+            }
+        }
+
+        #[invariant(always_run)]
+        fn ch2_counters_match_the_model_handles(&self, _: TestCase) {
+            let inner = guard(&self.inner);
+            let setups = inner.live.iter().filter(|live| live.is_setup()).count();
+            assert_eq!(
+                inner.worker.occupied(),
+                inner.live.len(),
+                "the occupied counter disagrees with the model's live handles"
+            );
+            assert_eq!(
+                inner.worker.pending(),
+                setups,
+                "the pending counter disagrees with the model's setup handles"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn ch3_live_indices_are_distinct_and_in_range(&self, _: TestCase) {
+            let inner = guard(&self.inner);
+            let mut seen = [false; MAX_TUNNELS];
+            for live in &inner.live {
+                let index = live.index();
+                assert!(
+                    index < MAX_TUNNELS,
+                    "live slot index {index} is outside the fixed table"
+                );
+                assert!(!seen[index], "slot index {index} is live more than once");
+                seen[index] = true;
+            }
+        }
+
+        #[invariant(always_run)]
+        fn ch4_admit_never_hands_out_a_live_index(&self, _: TestCase) {
+            let inner = guard(&self.inner);
+            for reuse in &inner.reuses {
+                assert!(
+                    !reuse.was_live,
+                    "CH4: admit handed out slot {} while it was already live",
+                    reuse.index
+                );
+            }
+        }
+    }
+}
+
+/// The multi-client admission surface as a concurrent state machine: model-based
+/// coverage of the fixed capacity caps, handle/peer accounting and index
+/// ownership under real thread interleaving on one lock, driving the same
+/// production [`Worker`] the scripted tests above drive. Its invariant list,
+/// independence argument and documented non-claims are on
+/// [`concurrent_admission_machine`]; `hegel.toml` owns the case count.
+#[hegel::test(derandomize = true)]
+fn worker_concurrent_admission_keeps_capacity_and_ownership(tc: hegel::TestCase) {
+    hegel::stateful::machine(concurrent_admission_machine::Admission::start())
+        .steps(250)
+        .min_concurrency(2)
+        .max_concurrency(4)
+        .run_concurrent(tc);
+}
+
 #[test]
 fn each_view_binds_the_same_request_to_its_own_config_position() {
     let cfg_a = parse_config_document(ALLOWLIST_XY).expect("cfg_a");

@@ -11779,3 +11779,499 @@ fn assert_expiry_clock_fault_preserves_poll_buffer(serving: &mut Serving) {
         "fault path must retain the poll batch: {counts:?}"
     );
 }
+
+/// The multi-client poll-batch coalescer as a stateful model-based machine.
+///
+/// The subject is the production [`CoalescedBatch`]: Pass 1's `fold` merges
+/// every drawn `(index, generation, direction, readiness)` token into per-index
+/// accumulation in first-arrival order, and Pass 2's `next` pops the
+/// arrival-order chain. The model keeps its own record of the first token of
+/// each fold epoch, the expected per-direction accumulation, and the full
+/// arrival sequence; every invariant compares the subject's observations
+/// against that record instead of re-walking the chain as an oracle.
+///
+/// Invariants (each `#[invariant(always_run)]`):
+/// - Q1 `next()` dispatches the folded indices in exact first-arrival order and
+///   each folded `(index, generation)` epoch exactly once.
+/// - Q2 a token whose generation differs from the epoch's first generation
+///   contributes no readiness bit: the subject's per-direction accumulation is
+///   unchanged across such a fold.
+/// - Q3 the merged readiness observed for a dispatched index is the union of
+///   every accepted token the model folded at that index (the subject never
+///   clears accumulation on a pop, and the model mirrors that), per direction,
+///   and `client_first` is the direction of that epoch's first arrival.
+/// - Q4 a dispatched index is unseen again, and a `next()` call the model
+///   already knows to be exhausted returns `None`.
+/// - Q5 a fresh batch exposes no chain and no folded readiness.
+///
+/// Independence: Q1's expectation is the model's own `(epoch, index)` fold
+/// history, not a second chain walk; Q2 is evidence captured across one fold
+/// (before and after accumulation); Q3 compares the subject's exposed
+/// accumulation against the model's union, with `client_first` read from the
+/// subject and compared to the model's first-arrival direction; Q4 is evidence
+/// captured at each pop; Q5 is structural evidence sampled right after the
+/// batch swap. No invariant re-calls `fold`/`next` to derive its expectation.
+///
+/// Interleaving restriction: the machine models the caller's documented
+/// two-pass protocol — every token is folded in Pass 1 and the chain is popped
+/// only afterwards — so a `fold` drawn after a successful pop in the same
+/// batch is skipped. That order is unreachable through
+/// [`Serving::dispatch_coalesced_batch`], which folds the whole token snapshot
+/// before it pops any slot, and it is deliberately not modelled because a
+/// re-folded index would reuse its stale `next` link. Token order, generation
+/// changes, directions and readiness values themselves stay fully drawn.
+///
+/// Documented non-claims (covered elsewhere, never by this machine): a refused
+/// client's bytes never reach an upstream (the byte-pinned 400/403/502 reactor
+/// tests); shutdown observed by every live tunnel (the owner/runtime
+/// alloc-witness turns and the e2e shutdown gate); no peer buffer is reused
+/// while live (the buffer is boot-transferred and cursor-managed, so only the
+/// stale-generation token hazard is machine-covered here).
+mod coalescer_machine {
+    use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
+    /// Generations a rule may draw: two values make a stale token (one whose
+    /// generation differs from the epoch's first) exactly as likely as a merge,
+    /// so both the drop and the union paths are exercised in every case.
+    const GENERATIONS: [u64; 2] = [0, 1];
+
+    /// The five readiness bits as a plain comparable value, so the model can
+    /// state the expected union without depending on the subject's type.
+    #[expect(
+        clippy::struct_excessive_bools,
+        reason = "the five bits are the subject's own readiness register mirrored for comparison; a bitfield would obscure which bit a failure names"
+    )]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct Ready {
+        readable: bool,
+        writable: bool,
+        error: bool,
+        read_closed: bool,
+        write_closed: bool,
+    }
+
+    impl Ready {
+        const fn of(ready: Readiness) -> Ready {
+            Ready {
+                readable: ready.readable,
+                writable: ready.writable,
+                error: ready.error,
+                read_closed: ready.read_closed,
+                write_closed: ready.write_closed,
+            }
+        }
+
+        const fn union(self, other: Ready) -> Ready {
+            Ready {
+                readable: self.readable || other.readable,
+                writable: self.writable || other.writable,
+                error: self.error || other.error,
+                read_closed: self.read_closed || other.read_closed,
+                write_closed: self.write_closed || other.write_closed,
+            }
+        }
+
+        const fn from_bits(bits: u8) -> Ready {
+            Ready {
+                readable: bits & 1 != 0,
+                writable: bits & 2 != 0,
+                error: bits & 4 != 0,
+                read_closed: bits & 8 != 0,
+                write_closed: bits & 16 != 0,
+            }
+        }
+
+        const fn into_readiness(self) -> Readiness {
+            Readiness {
+                readable: self.readable,
+                writable: self.writable,
+                error: self.error,
+                read_closed: self.read_closed,
+                write_closed: self.write_closed,
+            }
+        }
+    }
+
+    /// One index as the model remembers it: the per-direction accumulation the
+    /// subject also never clears on a pop, the generation of the first token
+    /// folded since the last dispatch (`None` while the index is unseen), and
+    /// whether that first token was the client arm.
+    #[derive(Clone)]
+    struct Slot {
+        client: Option<Ready>,
+        upstream: Option<Ready>,
+        epoch: Option<u64>,
+        client_first: bool,
+    }
+
+    impl Slot {
+        const fn fresh() -> Slot {
+            Slot {
+                client: None,
+                upstream: None,
+                epoch: None,
+                client_first: false,
+            }
+        }
+
+        fn accumulate(&mut self, upstream: bool, ready: Ready) {
+            let slot = if upstream {
+                &mut self.upstream
+            } else {
+                &mut self.client
+            };
+            let prior = *slot;
+            *slot = Some(prior.map_or(ready, |earlier| earlier.union(ready)));
+        }
+    }
+
+    /// The per-direction accumulation exactly as the subject exposes it.
+    type Accumulation = (Option<Ready>, Option<Ready>);
+
+    /// One fold's effect on the subject's accumulation. `stale` marks a token
+    /// whose generation differed from the epoch's first generation; Q2 reads
+    /// `before == after` for exactly those records.
+    struct FoldEvidence {
+        index: usize,
+        stale: bool,
+        before: Accumulation,
+        after: Accumulation,
+    }
+
+    /// One `next()` observation, with the model's expectation captured at the
+    /// same moment so the invariants can compare after the rule returns.
+    enum Pop {
+        Dispatched {
+            epoch: usize,
+            index: usize,
+            observed: Accumulation,
+            observed_client_first: bool,
+            still_seen: bool,
+            expected: Accumulation,
+            expected_client_first: bool,
+        },
+        /// `next()` returned `None`; `model_remaining` is how many arrivals the
+        /// model still expected at that moment.
+        Empty { model_remaining: usize },
+    }
+
+    /// A fresh batch's structural emptiness, sampled right after the swap.
+    #[expect(
+        clippy::struct_excessive_bools,
+        reason = "each independent structural claim about the fresh batch is its own named flag so a failure names the exact leak"
+    )]
+    struct ResetEvidence {
+        head_none: bool,
+        tail_none: bool,
+        seen_zero: bool,
+        no_slot_seen: bool,
+        no_readiness: bool,
+    }
+
+    pub(super) struct Coalescer {
+        batch: CoalescedBatch,
+        slots: Vec<Slot>,
+        epoch: usize,
+        /// True once the current epoch has dispatched (Pass 2 has begun), so no
+        /// further token can be folded into it.
+        pass_two: bool,
+        /// `(epoch, index)` for every fresh fold that opened an epoch.
+        arrivals: Vec<(usize, usize)>,
+        folds: Vec<FoldEvidence>,
+        pops: Vec<Pop>,
+        resets: Vec<ResetEvidence>,
+    }
+
+    impl Coalescer {
+        pub(super) fn start() -> Coalescer {
+            Coalescer {
+                batch: CoalescedBatch::new(),
+                slots: vec![Slot::fresh(); MAX_TUNNELS],
+                epoch: 0,
+                pass_two: false,
+                arrivals: Vec::new(),
+                folds: Vec::new(),
+                pops: Vec::new(),
+                resets: Vec::new(),
+            }
+        }
+
+        fn observe(batch: &CoalescedBatch, index: usize) -> Accumulation {
+            let slot = &batch.slots[index];
+            (slot.client.map(Ready::of), slot.upstream.map(Ready::of))
+        }
+
+        fn model_remaining(&self) -> usize {
+            let arrivals = self
+                .arrivals
+                .iter()
+                .filter(|(arrival_epoch, _)| *arrival_epoch == self.epoch)
+                .count();
+            let dispatched = self
+                .pops
+                .iter()
+                .filter(|pop| matches!(pop, Pop::Dispatched { epoch, .. } if *epoch == self.epoch))
+                .count();
+            arrivals.saturating_sub(dispatched)
+        }
+
+        /// Pops one dispatch and records the subject's observation against the
+        /// model's expectation, including the post-pop unseen state.
+        fn record_pop(&mut self, tc: &TestCase) {
+            let remaining = self.model_remaining();
+            let Some(index) = self.batch.next() else {
+                tc.event("exhausted_no_chain");
+                self.pops.push(Pop::Empty {
+                    model_remaining: remaining,
+                });
+                return;
+            };
+            let observed = Self::observe(&self.batch, index);
+            let still_seen = self.batch.slots[index].seen();
+            let observed_client_first = self.batch.slots[index].client_first;
+            self.pass_two = true;
+            let (expected, expected_client_first) =
+                self.slots
+                    .get_mut(index)
+                    .map_or(((None, None), false), |slot| {
+                        let expected = (slot.client, slot.upstream);
+                        slot.epoch = None;
+                        (expected, slot.client_first)
+                    });
+            if expected.0.is_some() && expected.1.is_some() {
+                tc.event("dispatch_both_directions");
+            }
+            if !expected_client_first {
+                tc.event("dispatch_upstream_first");
+            }
+            let dispatched = self
+                .pops
+                .iter()
+                .filter(|pop| matches!(pop, Pop::Dispatched { epoch, .. } if *epoch == self.epoch))
+                .count();
+            if dispatched > 1 {
+                tc.event("dispatch_multi_slot_epoch");
+            }
+            self.pops.push(Pop::Dispatched {
+                epoch: self.epoch,
+                index,
+                observed,
+                observed_client_first,
+                still_seen,
+                expected,
+                expected_client_first,
+            });
+        }
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the hegel state-machine macro hands each rule its own TestCase by value"
+    )]
+    #[hegel::state_machine]
+    impl Coalescer {
+        /// Folds one drawn token: index, generation, direction and the five
+        /// readiness bits are all drawn here, and the model records what the
+        /// subject did to that index's accumulation.
+        #[rule(weight = 40.0)]
+        fn fold(&mut self, tc: TestCase) {
+            if self.pass_two {
+                return;
+            }
+            let index = tc.draw(
+                gs::integers::<usize>()
+                    .min_value(0)
+                    .max_value(MAX_TUNNELS - 1),
+            );
+            let generation = tc.draw(gs::sampled_from(&GENERATIONS[..]));
+            let upstream = tc.draw(gs::booleans());
+            let bits = tc.draw(gs::integers::<usize>().min_value(0).max_value(31));
+            let ready = Ready::from_bits(u8::try_from(bits).expect("a five-bit readiness mask"));
+
+            let before = Self::observe(&self.batch, index);
+            let stale = self.slots[index]
+                .epoch
+                .is_some_and(|epoch_generation| epoch_generation != generation);
+            self.batch
+                .fold(index, generation, upstream, ready.into_readiness());
+
+            if stale {
+                tc.event("stale_generation_dropped");
+            } else {
+                let fresh = self.slots[index].epoch.is_none();
+                if fresh {
+                    tc.event("fresh_fold");
+                    self.slots[index].epoch = Some(generation);
+                    self.slots[index].client_first = !upstream;
+                    self.arrivals.push((self.epoch, index));
+                } else {
+                    tc.event("generation_merged");
+                }
+                self.slots[index].accumulate(upstream, ready);
+            }
+            let after = Self::observe(&self.batch, index);
+            self.folds.push(FoldEvidence {
+                index,
+                stale,
+                before,
+                after,
+            });
+        }
+
+        /// Pops one dispatch through the production `next`.
+        #[rule(weight = 6.0)]
+        fn next(&mut self, tc: TestCase) {
+            self.record_pop(&tc);
+        }
+
+        /// Replaces the batch with a fresh one and records its structural
+        /// emptiness, then probes the empty chain once so Q4 and Q5 see the
+        /// `None`.
+        #[rule(weight = 2.0)]
+        fn reset_to_fresh_batch(&mut self, tc: TestCase) {
+            self.batch = CoalescedBatch::new();
+            self.slots = vec![Slot::fresh(); MAX_TUNNELS];
+            self.epoch += 1;
+            self.pass_two = false;
+            let evidence = ResetEvidence {
+                head_none: self.batch.head == CoalescedBatch::NONE,
+                tail_none: self.batch.tail == CoalescedBatch::NONE,
+                seen_zero: self.batch.seen == 0,
+                no_slot_seen: self.batch.slots.iter().all(|slot| !slot.seen()),
+                no_readiness: self
+                    .batch
+                    .slots
+                    .iter()
+                    .all(|slot| slot.client.is_none() && slot.upstream.is_none()),
+            };
+            tc.event("fresh_batch_swap");
+            self.resets.push(evidence);
+            self.record_pop(&tc);
+        }
+
+        #[invariant(always_run)]
+        fn q1_dispatch_order_is_first_arrival_and_once(&self, _: TestCase) {
+            for epoch in 0..=self.epoch {
+                let expected: Vec<usize> = self
+                    .arrivals
+                    .iter()
+                    .filter(|(arrival_epoch, _)| *arrival_epoch == epoch)
+                    .map(|(_, index)| *index)
+                    .collect();
+                let observed: Vec<usize> = self
+                    .pops
+                    .iter()
+                    .filter_map(|pop| match pop {
+                        Pop::Dispatched {
+                            epoch: pop_epoch,
+                            index,
+                            ..
+                        } if *pop_epoch == epoch => Some(*index),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    observed.len() <= expected.len(),
+                    "Q1: epoch {epoch} dispatched {} slots but only {} were folded",
+                    observed.len(),
+                    expected.len()
+                );
+                assert_eq!(
+                    observed[..],
+                    expected[..observed.len()],
+                    "Q1: epoch {epoch} dispatch order must be the exact first-arrival order, each folded slot once"
+                );
+            }
+        }
+
+        #[invariant(always_run)]
+        fn q2_stale_generation_contributes_no_bit(&self, _: TestCase) {
+            for fold in &self.folds {
+                if fold.stale {
+                    assert_eq!(
+                        fold.before, fold.after,
+                        "Q2: a stale-generation token at index {} changed the merged readiness",
+                        fold.index
+                    );
+                }
+            }
+        }
+
+        #[invariant(always_run)]
+        fn q3_dispatch_merges_the_epoch_union(&self, _: TestCase) {
+            for pop in &self.pops {
+                if let Pop::Dispatched {
+                    index,
+                    observed,
+                    observed_client_first,
+                    expected,
+                    expected_client_first,
+                    ..
+                } = pop
+                {
+                    assert_eq!(
+                        observed, expected,
+                        "Q3: dispatched slot {index} merged readiness disagrees with the model union"
+                    );
+                    assert_eq!(
+                        observed_client_first, expected_client_first,
+                        "Q3: dispatched slot {index} direction order disagrees with its first arrival"
+                    );
+                }
+            }
+        }
+
+        #[invariant(always_run)]
+        fn q4_dispatch_consumes_and_exhaustion_is_none(&self, _: TestCase) {
+            for pop in &self.pops {
+                match pop {
+                    Pop::Dispatched {
+                        index, still_seen, ..
+                    } => {
+                        assert!(
+                            !still_seen,
+                            "Q4: slot {index} is still seen after it was dispatched"
+                        );
+                    }
+                    Pop::Empty {
+                        model_remaining, ..
+                    } => {
+                        assert_eq!(
+                            *model_remaining, 0,
+                            "Q4: next() returned None while the model still expected {model_remaining} arrivals"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[invariant(always_run)]
+        fn q5_fresh_batch_exposes_no_chain_or_readiness(&self, _: TestCase) {
+            for reset in &self.resets {
+                assert!(reset.head_none, "Q5: a fresh batch exposes a chain head");
+                assert!(reset.tail_none, "Q5: a fresh batch exposes a chain tail");
+                assert!(reset.seen_zero, "Q5: a fresh batch counts folded slots");
+                assert!(reset.no_slot_seen, "Q5: a fresh batch marks a slot seen");
+                assert!(
+                    reset.no_readiness,
+                    "Q5: a fresh batch carries folded readiness"
+                );
+            }
+        }
+    }
+}
+
+/// The multi-client poll-batch coalescer as a state machine over drawn token
+/// interleavings: model-based coverage of first-arrival dispatch order,
+/// once-only dispatch, stale-generation drop and per-direction readiness merge,
+/// driving the same production [`CoalescedBatch`] the scripted tests above
+/// drive. Its invariant list, independence argument and documented non-claims
+/// are on [`coalescer_machine`]; `hegel.toml` owns the case count.
+#[hegel::test(derandomize = true)]
+fn reactor_coalescer_keeps_first_arrival_dispatch_and_generation_wins(tc: hegel::TestCase) {
+    hegel::stateful::machine(coalescer_machine::Coalescer::start())
+        .steps(250)
+        .run(tc);
+}
