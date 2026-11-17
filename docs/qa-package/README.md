@@ -119,8 +119,16 @@ missing derived image as described below.
 - `identity snapshot <directory>` / `identity compare <before> <after>` —
   independent source/environment stability receipts. Snapshots require git,
   SHA256 and Python 3; they record HEAD, status, hashes of the fixed input set
-  and selected environment/config observations. Compare checks those four
-  records, not every possible input.
+  (`inputs.sha256`), selected environment/config observations, one blob sha per
+  input (`inputs.blob`) and one stat tuple per input (`inputs.stat`: inode,
+  size, `mtime_ns`, `ctime_ns`). Compare checks those six records — head,
+  status, `inputs.sha256`, env, `inputs.blob`, `inputs.stat` — not every
+  possible input, and refuses a snapshot that lacks either witness record
+  (`SOURCE-IDENTITY-UNKNOWN`) instead of comparing it. The byte-identical class
+  is why the stat witness exists: a rewrite to the same bytes leaves every
+  content hash unchanged and is caught only there. A capture observes its own
+  two edges and nothing between them, so a writer that starts and ends inside
+  one snapshot is out of reach.
   `identity artifact <path>` hashes an existing file; it does not prove that
   file was built or executed. Keep snapshots under `target/` to avoid changing
   the status list.
