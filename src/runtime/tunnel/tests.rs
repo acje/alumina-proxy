@@ -1510,14 +1510,22 @@ mod slot_table_machine {
         }
 
         /// A burst of up to 64 admissions. The pending budget
-        /// ([`MAX_PENDING_SETUPS`]) is smaller than the slot budget
-        /// ([`MAX_TUNNELS`]), so a burst of bare admits stops at
+        /// ([`MAX_PENDING_SETUPS`], 128) is smaller than the slot budget
+        /// ([`MAX_TUNNELS`], 512), so a burst of bare admits would stop at
         /// `PendingCapacity` with the table still below its slot budget. Each
-        /// admitted seat is graduated immediately: graduation keeps the
-        /// occupied seat and frees its pending seat, so the burst raises
-        /// `occupied()` by up to 64 and the only refusal it can reach is the
-        /// full-table [`AdmissionError::SlotCapacity`] that S1's first clause
-        /// exists to observe.
+        /// admitted seat is graduated immediately instead: graduation keeps the
+        /// occupied seat and frees its pending seat, so successive bursts raise
+        /// `occupied()` by up to 64 without the pending counter accumulating
+        /// until the table is full. The burst can therefore return either
+        /// refusal reason — the full-table [`AdmissionError::SlotCapacity`] that
+        /// S1's first clause exists to observe, and
+        /// [`AdmissionError::PendingCapacity`] when interleaved admits have
+        /// already spent the global [`MAX_PENDING_SETUPS`] budget or one peer's
+        /// [`MAX_PENDING_PER_PEER`] budget; only a first attempt can, because
+        /// each admitted seat is graduated and `pending()` cannot grow inside
+        /// the burst. Every refusal is checked against the model's own capacity
+        /// state, and the `occupied_at_slot_capacity` / `slot_capacity_refusal`
+        /// coverage events mark the full-table path.
         #[rule(weight = 8.0)]
         fn admit_burst(&mut self, tc: TestCase) {
             let attempts = tc.draw(gs::integers::<usize>().min_value(1).max_value(64));

@@ -609,10 +609,15 @@ mod tests {
     /// accumulator; G5 is an edge table the gate never materialises, checked
     /// against the model's own previous observation. G6 reads the payload
     /// channel the other invariants never inspect, and derives its hello length
-    /// from the model's own first-head record rather than from the gate's
-    /// private `head_len`/`hello_start`, so an off-by-one at H, a mis-based
-    /// `relay_from_open`, or a blocked write that records bytes cannot satisfy
-    /// its own check.
+    /// from the model's own head record rather than from the gate's private
+    /// `head_len`/`hello_start`: the model keeps the *last* head applied while
+    /// the phase was still `AwaitConnect`, exactly as production overwrites
+    /// `head_len` and `hello_start` on every `on_connect_head` in that phase and
+    /// records nothing in any other phase (so only a re-application after the
+    /// phase has left `AwaitConnect` is ignored). `hello_end - head_len` is
+    /// therefore the drawn validation offset, so an off-by-one at H, a
+    /// mis-based `relay_from_open`, or a blocked write that records bytes
+    /// cannot satisfy its own check.
     ///
     /// The rule weights keep both branches reachable in one walk: the progress
     /// rules outrank the terminators so the relay-open path is entered in the
@@ -631,10 +636,15 @@ mod tests {
         pub(super) struct GateLifecycle {
             gate: TunnelGate,
             /// The CONNECT head length the model applied, which anchors the
-            /// drawn validated-hello boundary. Only the first head applied in
-            /// `AwaitConnect` is recorded, mirroring production: a later
-            /// `on_connect_head` is ignored, so this stays the model's own
-            /// first-head record for G6's hello-length derivation.
+            /// drawn validated-hello boundary. This is the *last* head applied
+            /// while the phase was still `AwaitConnect`, mirroring production:
+            /// `on_connect_head` overwrites `head_len`/`hello_start` on every
+            /// call in that phase and records nothing in any other phase, so
+            /// only a re-application after the phase has left `AwaitConnect` is
+            /// ignored. The record is the model's own, never a read of the
+            /// gate's private `head_len`, and G6 derives its hello length as
+            /// `hello_end - head_len` — the drawn validation offset, because
+            /// `head_len` cannot move once the phase leaves `AwaitConnect`.
             head_len: usize,
             /// The drawn validated-hello end, when the model applied one.
             hello_end: Option<usize>,
