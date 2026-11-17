@@ -1,0 +1,32 @@
+name: gate
+
+# The same Linux boundary gate release.yml runs before it publishes, run on
+# every candidate: a push to main and every pull request. The candidate is
+# proved continuously instead of only in the tag moment, and a red gate here is
+# the same red gate that would block a release.
+#
+# Deliberately no package, attest, or publish step, and read-only permissions:
+# this workflow has nothing to publish and no secret to be given, so a pull
+# request from any source can run it safely.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A superseded candidate has nothing left to prove: cancel it rather than burn a
+# container build per intermediate push.
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Boundary gate
+        uses: ./.github/actions/boundary-gate

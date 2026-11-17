@@ -6,6 +6,17 @@ boundary gate (`sh scripts/verify.sh mid union`) in the same container run that
 publishes it, so the shipped binary is the exact file the gate proved static —
 no dynamic `NEEDED` entries, no `PT_INTERP`.
 
+## Unstripped by design
+
+The binary is published **unstripped**: 2.5 MB, `static-pie`, with its symbol
+table intact. That is a decision, not an oversight. Triaging a proxy failure
+starts from an address — a stack trace, a `dmesg` line, a core — and
+`addr2line -e alumina <pc>` answers it against the file the operator already
+has. Stripping would turn every such question into a rebuild of the exact
+release. A future size-optimised build, if one is ever justified, ships as an
+**additional** asset and never as a replacement, so the attested digest stays
+bound to the binary those symbols describe.
+
 ## Status
 
 A **scoped local QA candidate, not production-qualified** and not externally
