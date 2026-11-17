@@ -2,6 +2,7 @@
 """Focused tests for independent verification selectors; no real builds run."""
 
 import ast
+import collections
 import contextlib
 import hashlib
 import importlib.util
@@ -330,8 +331,7 @@ esac
         # value fragmented it into whitespace-free pieces that each passed the
         # per-root check and named roots cargo never execs from.
         for label, value in (
-            ("LF", "aw\nx"),
-            ("LF-pair", "a\nb"),
+            ("LF", "a\nb"),
             ("CR", "aw\rx"),
             ("tab", "aw\tx"),
             ("trailing-space", "aw "),
@@ -1459,34 +1459,72 @@ def iter_suite_tests(suite):
 
 
 def collected_test_ids(suite):
-    """Every collected test in the loader's own identity: `Class.method`."""
-    return {f"{type(test).__name__}.{test._testMethodName}"
-            for test in iter_suite_tests(suite)}
+    """Every collected test in the loader's own identity: `Class.method` counts."""
+    return collections.Counter(
+        f"{type(test).__name__}.{test._testMethodName}"
+        for test in iter_suite_tests(suite))
 
 
-def ast_defined_test_ids(source):
-    """Every `Class.test*` defined in a `TestCase` subclass in the source.
+def ast_test_definitions(source):
+    """Class-scope `def test*` definitions as a `Class.method` multiset.
 
-    Read from the AST rather than from the module objects, because the failure
-    this guards is a definition the loader never turned into a test object."""
-    defined = set()
-    for node in ast.parse(source).body:
-        if not isinstance(node, ast.ClassDef):
-            continue
-        bases = {base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
-                 for base in node.bases}
-        if "TestCase" not in bases:
-            continue
+    Returns `(defined, non_collectable)`. `defined` counts definitions, not
+    distinct names: a second `def test_x` in the same class shadows the first,
+    so two definitions must produce two collected tests. `non_collectable` names
+    the definitions whose class is not a `unittest.TestCase` subclass: they are
+    test-shaped definitions the loader can never run, and are reported by name
+    rather than silently matched against a set. String literals are out of scope
+    because the source is parsed as an AST."""
+    tree = ast.parse(source)
+    classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    bases = {
+        node.name: [base.attr if isinstance(base, ast.Attribute)
+                    else getattr(base, "id", "")
+                    for base in node.bases]
+        for node in classes
+    }
+
+    def is_test_case(name, seen=()):
+        if name in seen:
+            return False
+        for base in bases.get(name, ()):
+            if base == "TestCase" or is_test_case(base, seen + (name,)):
+                return True
+        return False
+
+    defined = collections.Counter()
+    non_collectable = set()
+    for node in classes:
+        test_case = is_test_case(node.name)
         for item in node.body:
             if (isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and item.name.startswith("test")):
-                defined.add(f"{node.name}.{item.name}")
-    return defined
+                name = f"{node.name}.{item.name}"
+                defined[name] += 1
+                if not test_case:
+                    non_collectable.add(name)
+    return defined, non_collectable
 
 
-def undiscovered_test_ids(defined, collected):
-    """Pure: the definitions the loader did not collect, in a stable order."""
-    return sorted(set(defined) - set(collected))
+def undiscovered_test_ids(defined, non_collectable, collected):
+    """Pure: every definition the run cannot execute, named with its counts.
+
+    `defined` and `collected` are `Class.method` multisets; `non_collectable`
+    names the definitions in a class the loader cannot collect. Counts are
+    compared, so N definitions require N collected tests."""
+    gaps = []
+    for name, count in sorted(defined.items()):
+        found = collected.get(name, 0)
+        if name in non_collectable:
+            gaps.append(f"{name} (defined {count}, collected {found}; the class "
+                        "is not a unittest.TestCase subclass, so the definition "
+                        "cannot run)")
+        elif found != count:
+            gaps.append(f"{name} (defined {count}, collected {found})")
+    for name, count in sorted(collected.items()):
+        if name not in defined:
+            gaps.append(f"{name} (defined 0, collected {count})")
+    return gaps
 
 
 class DiscoveryCompletenessLoader(unittest.TestLoader):
@@ -1504,11 +1542,12 @@ class DiscoveryCompletenessLoader(unittest.TestLoader):
             complete = super().loadTestsFromModule(module, *args, **kwargs)
         finally:
             self.testNamePatterns = patterns
-        missing = undiscovered_test_ids(ast_defined_test_ids(source),
+        defined, non_collectable = ast_test_definitions(source)
+        missing = undiscovered_test_ids(defined, non_collectable,
                                         collected_test_ids(complete))
         if missing:
             print("DISCOVERY-INCOMPLETE: defined in the source but not collected "
-                  f"({len(missing)}): " + ", ".join(missing), file=sys.stderr)
+                  f"({len(missing)}): " + "; ".join(missing), file=sys.stderr)
             raise SystemExit(1)
         return suite
 
@@ -1518,26 +1557,49 @@ class DiscoveryCompleteness(unittest.TestCase):
     shipped module's definitions against a real unfiltered load."""
 
     def test_the_pure_comparison_names_every_uncollected_definition(self):
-        defined = {"Alpha.test_one", "Alpha.test_two", "Beta.test_three"}
-        self.assertEqual(undiscovered_test_ids(defined, {"Alpha.test_one"}),
-                         ["Alpha.test_two", "Beta.test_three"])
-        self.assertEqual(undiscovered_test_ids(defined, defined), [])
+        defined = collections.Counter(
+            {"Alpha.test_one": 2, "Beta.test_three": 1, "Gamma.test_four": 1})
+        collected = collections.Counter({"Alpha.test_one": 1})
+        self.assertEqual(
+            undiscovered_test_ids(defined, {"Gamma.test_four"}, collected),
+            ["Alpha.test_one (defined 2, collected 1)",
+             "Beta.test_three (defined 1, collected 0)",
+             "Gamma.test_four (defined 1, collected 0; the class is not a "
+             "unittest.TestCase subclass, so the definition cannot run)"])
+        self.assertEqual(undiscovered_test_ids(defined, set(), defined), [])
+        self.assertEqual(
+            undiscovered_test_ids(collections.Counter({"A.test_x": 1}),
+                                  set(),
+                                  collections.Counter({"A.test_x": 2})),
+            ["A.test_x (defined 1, collected 2)"])
 
-    def test_the_ast_reader_sees_test_case_definitions_only(self):
+    def test_the_ast_reader_counts_definitions_and_flags_non_test_case_classes(self):
         source = (
             "import unittest\n"
             "class Samples(unittest.TestCase):\n"
             "    def test_one(self):\n        pass\n"
+            "    def test_one(self):\n        pass\n"
             "    def helper(self):\n        pass\n"
+            "class Derived(Samples):\n"
+            "    def test_two(self):\n        pass\n"
             "class Other:\n"
-            "    def test_not_a_case(self):\n        pass\n")
-        self.assertEqual(ast_defined_test_ids(source), {"Samples.test_one"})
+            "    def test_not_a_case(self):\n        pass\n"
+            "literal = 'def test_in_a_string(self): pass'\n")
+        defined, non_collectable = ast_test_definitions(source)
+        self.assertEqual(dict(defined),
+                         {"Samples.test_one": 2,
+                          "Derived.test_two": 1,
+                          "Other.test_not_a_case": 1})
+        self.assertEqual(non_collectable, {"Other.test_not_a_case"})
+        self.assertNotIn("literal.test_in_a_string", defined)
 
     def test_the_shipped_harness_collects_every_definition(self):
-        defined = ast_defined_test_ids(Path(__file__).read_text())
+        defined, non_collectable = ast_test_definitions(Path(__file__).read_text())
         complete = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
-        self.assertGreater(len(defined), 0)
-        self.assertEqual(undiscovered_test_ids(defined, collected_test_ids(complete)), [])
+        self.assertGreater(sum(defined.values()), 0)
+        self.assertEqual(undiscovered_test_ids(defined, non_collectable,
+                                              collected_test_ids(complete)), [])
+        self.assertEqual(sum(defined.values()), sum(collected_test_ids(complete).values()))
 
 
 if __name__ == "__main__":
