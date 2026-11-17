@@ -58,13 +58,17 @@ the value itself.
 
 The `inner test <target>` path is not one of those six: it runs its target
 through the same helper, so the fastest loop carries the stack floor and the
-600 s budget and cannot run at a smaller stack by omission. An unavailable or
-under-floor budget is refused with `GATE-SUITE-STACK-UNKNOWN` (or
+`GATE_SUITE_BUDGET_SECS` budget (default 600 s, which the caller may set) and
+cannot run at a smaller stack by omission. An unavailable or under-floor
+budget is refused with `GATE-SUITE-STACK-UNKNOWN` (or
 `GATE-SUITE-TIMEOUT-UNKNOWN`) before a test binary starts, and the outer
 diagnostic reports that refusal as the budget it is, not as a failing
 assertion; the historical libtest exit 101 with no failing test (the 22144
-class) was exactly that omission. A run killed at the budget is reported as
-the budget, and a genuine non-zero test exit reaches the MID-tier pointer.
+class) was exactly that omission. The helper passes the wrapped command's own
+status through, so the diagnostic reads the helper's declaration and never the
+number: a run killed at the budget is reported as the budget, libtest's 101 as
+the failure it is with the MID-tier pointer, and any other status as observed,
+with no cause attached to it.
 
 These are independent checks, not a required sequence. For an identity-stability
 check, take the before snapshot before the chosen work and the after snapshot

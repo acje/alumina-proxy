@@ -686,34 +686,6 @@ GATE_SUITE_MIN_STACK_FLOOR=16777216
 GATE_SUITE_MIN_STACK_MAX_DIGITS=18
 GATE_SUITE_MIN_STACK="${GATE_SUITE_MIN_STACK-${RUST_MIN_STACK-$GATE_SUITE_MIN_STACK_FLOOR}}"
 
-# Every refusal in `bounded_suite` returns this ONE status. The helper is the
-# only party that knows why it returned, so its caller never has to infer a
-# refusal from a number a wrapped command can also produce. 69 is
-# EX_UNAVAILABLE -- "a service is unavailable" -- which is exactly what these
-# refusals are: a required facility (a valid stack budget, a boundable time
-# budget, or a wrapper on PATH) is absent, so no suite was run. It is
-# deliberately not 1, which a wrapped command returns for its own generic
-# failure (cargo, a shell builtin, `exit 1`), and not 2, which this script
-# returns for its own usage errors: both already have an owner, and a shared
-# number would make the caller guess which party spoke.
-#
-# Census at introduction (2026-11-17): no other line in the repository returns
-# or exits 69 -- `git grep -nE '^[[:space:]]*(return|exit) 69'` matched nothing
-# before this change and still does, because the six refusal returns read this
-# constant -- and the number had no other owner: `git grep -n '\b69\b' --
-# scripts/ ':!scripts/verify.sh'` matched only the InnerTest pin of this status
-# in scripts/verify_test.py, while outside scripts/ the only other 69s were two
-# doc-comment source-line references (`src/runtime/gate.rs:540,580` citing
-# `reject.rs:69`), never a status. The six refusal returns were the helper's
-# only `return 1` sites, so nothing else moves when this number does.
-#
-# Named residual (recorded, not remapped): `bounded_suite` passes a wrapped
-# command's status through verbatim, so a wrapped command that itself exits 69
-# is indistinguishable from this refusal at the caller. cargo and libtest do not
-# use 69, and remapping a wrapped 69 would hide a real status, so the ambiguity
-# is accepted and kept visible here instead of being silently folded.
-GATE_SUITE_REFUSED_STATUS=69
-
 # bounded_suite <command...>: run one lib suite under that budget. Both knobs are
 # validated first, so neither an unbounded, unknown-length nor under-budgeted run
 # reaches a wrapper: the stack value is exported as RUST_MIN_STACK for the
@@ -731,17 +703,33 @@ GATE_SUITE_REFUSED_STATUS=69
 # form that both GNU and busybox timeout accept, so a suite cannot ignore the
 # bound. Timeout statuses are 124 (conventional) and 137 (measured for a KILLed
 # child under GNU coreutils); libtest's own failure exit 101 passes through
-# unchanged and is never labelled a timeout. Every refusal returns
-# GATE_SUITE_REFUSED_STATUS and nothing else in this helper does: the status says
-# the helper declined to run a suite, while the final line returns a wrapped
-# command's own status verbatim, so a caller can tell which party spoke without
-# parsing marker text.
+# unchanged and is never labelled a timeout.
+# The status this returns is the wrapped command's own, so the helper cannot
+# speak through it: a refusal and a command's own failure can carry the same
+# number, 125|126|127 are the wrapper's operational vocabulary while a
+# `harness = false` binary owns numbers of its own, and a command that exits 124
+# by itself is indistinguishable, by number, from one the bound killed. What the
+# helper knows about its own run is therefore DECLARED, not encoded:
+# `_bs_outcome` is cleared at entry, carries the refused check's name on every
+# path that returns before a wrapper runs (`stack-unknown` x3, `budget-unknown`
+# x2, `wrapper-absent`), and carries `killed` on the path that printed
+# GATE-SUITE-TIMEOUT-FAIL. A caller that triages reads that declaration; no exit
+# status is minted and no number means two things.
+# Considered and rejected: a dedicated refusal status (69, EX_UNAVAILABLE),
+# whose census proved the number free across scripts/ and tests/ on 2026-11-17
+# (bd alumina-6la92, evidence in .ooda/tmp/69-standdown-20261117T150858Z/). It
+# is rejected because a wrapped command that itself exits 69 is indistinguishable
+# from the refusal by status alone: that residual can be documented but never
+# pinned, while the channel's own failure mode -- a call site inside a subshell --
+# is pinned by ChannelSoundness in scripts/verify_test.py.
 bounded_suite() {
+    _bs_outcome=""
     _bs_stack="$GATE_SUITE_MIN_STACK"
     case "$_bs_stack" in
         "" | *[!0-9]*)
             echo "GATE-SUITE-STACK-UNKNOWN: the test-thread stack resolved to '${_bs_stack}' (GATE_SUITE_MIN_STACK, else RUST_MIN_STACK, else the floor) -- not a byte count; refusing to run a lib suite at an unknown test-thread stack" >&2
-            return "$GATE_SUITE_REFUSED_STATUS"
+            _bs_outcome="stack-unknown"
+            return 1
             ;;
     esac
     while :; do
@@ -753,16 +741,19 @@ bounded_suite() {
     [ -n "$_bs_stack" ] || _bs_stack=0
     if [ "${#_bs_stack}" -gt "$GATE_SUITE_MIN_STACK_MAX_DIGITS" ]; then
         echo "GATE-SUITE-STACK-UNKNOWN: the test-thread stack resolved to ${_bs_stack}, ${#_bs_stack} digits -- above the ${GATE_SUITE_MIN_STACK_MAX_DIGITS}-digit ceiling a shell comparison can represent; refusing to run a lib suite at an unknown test-thread stack" >&2
-        return "$GATE_SUITE_REFUSED_STATUS"
+        _bs_outcome="stack-unknown"
+        return 1
     fi
     if [ "$_bs_stack" -lt "$GATE_SUITE_MIN_STACK_FLOOR" ]; then
         echo "GATE-SUITE-STACK-UNKNOWN: the test-thread stack resolved to ${_bs_stack} (GATE_SUITE_MIN_STACK, else RUST_MIN_STACK, else the floor) -- below the ${GATE_SUITE_MIN_STACK_FLOOR}-byte floor; refusing to run an under-budgeted lib suite" >&2
-        return "$GATE_SUITE_REFUSED_STATUS"
+        _bs_outcome="stack-unknown"
+        return 1
     fi
     case "$GATE_SUITE_BUDGET_SECS" in
         "" | *[!0-9]*)
             echo "GATE-SUITE-TIMEOUT-UNKNOWN: GATE_SUITE_BUDGET_SECS is '${GATE_SUITE_BUDGET_SECS}' -- not a decimal integer; refusing to run a lib suite under a budget that cannot bound it" >&2
-            return "$GATE_SUITE_REFUSED_STATUS"
+            _bs_outcome="budget-unknown"
+            return 1
             ;;
     esac
     _bs_budget_secs="$GATE_SUITE_BUDGET_SECS"
@@ -774,7 +765,8 @@ bounded_suite() {
     done
     if [ "$_bs_budget_secs" = 0 ]; then
         echo "GATE-SUITE-TIMEOUT-UNKNOWN: GATE_SUITE_BUDGET_SECS=0 is a duration of zero, which both timeout and gtimeout read as 'no limit'; refusing to run a lib suite under a bound of zero" >&2
-        return "$GATE_SUITE_REFUSED_STATUS"
+        _bs_outcome="budget-unknown"
+        return 1
     fi
     export RUST_MIN_STACK="$_bs_stack"
     _bs_wrapper=""
@@ -786,7 +778,8 @@ bounded_suite() {
     done
     if [ -z "$_bs_wrapper" ]; then
         echo "GATE-SUITE-TIMEOUT-UNKNOWN: neither timeout nor gtimeout is on PATH; refusing to run a lib suite unbounded (operational absence is never a pass)" >&2
-        return "$GATE_SUITE_REFUSED_STATUS"
+        _bs_outcome="wrapper-absent"
+        return 1
     fi
     echo "GATE-SUITE-BOUND: $_bs_wrapper -s KILL ${_bs_budget_secs}s RUST_MIN_STACK=${RUST_MIN_STACK}: $*"
     _bs_rc=0
@@ -795,6 +788,7 @@ bounded_suite() {
         0) ;;
         124 | 137)
             echo "GATE-SUITE-TIMEOUT-FAIL: lib suite exceeded the ${_bs_budget_secs}s budget and was killed ($_bs_wrapper exit $_bs_rc); a wedged suite is a failure, not a slow run" >&2
+            _bs_outcome="killed"
             ;;
     esac
     return "$_bs_rc"
@@ -2870,14 +2864,15 @@ alt_smoke() {
 # someone working on one test, without a container round-trip. It backs NO
 # done-claim: MID and BOUNDARY own that. The target runs as an argument to the
 # stack-owning `bounded_suite`, so this loop carries the same floor and budget as
-# the gate suites. The partition below is by STATUS, not by text: the helper's own
-# refusal status is the only signal that no suite ran, a wrapped 124/137 is the
-# budget kill, a wrapped 101 is libtest's assertion failure, and every other
-# wrapped status is an operational/command failure that claims neither a refusal
-# nor an assertion verdict. Host incompatibility is reported honestly: a
-# Linux-only assertion (epoll matrix, main-thread rlimit, stdout stall) may fail
-# on macOS/darwin, and that surfaces as INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL with
-# a pointer to the MID tier — never as a pass and never as a silent skip.
+# the gate suites. Triage reads the helper's own declaration, never the number:
+# the helper returns the wrapped command's status verbatim, so the same 1 is both
+# its refusal and any command's own failure, 125|126|127 are the wrapper's
+# operational vocabulary, and a `harness = false` target owns its exit namespace
+# outright (`tests/stdout_closed.rs` uses 125). So: a declared refusal is
+# reported as a budget fact (nothing ran, its marker names the budget), a
+# declared kill as the budget it hit, 101 as libtest's failure status with the
+# MID pointer, and every other status as observed -- no cause attached, no
+# assertion verdict claimed. Never a pass, never a silent skip.
 inner_test() {
     _target="$1"
     case "$_target" in
@@ -2908,20 +2903,24 @@ inner_test() {
     else
         _itr=$?
     fi
-    case "$_itr" in
-        "$GATE_SUITE_REFUSED_STATUS")
-            echo "INNER-TEST-BUDGET-REFUSED: $_target — bounded_suite returned its refusal status $_itr, so no test binary ran; the GATE-SUITE-STACK-UNKNOWN or GATE-SUITE-TIMEOUT-UNKNOWN line above names the missing budget, so this is a budget fact and not a Linux-only assertion" >&2
-            ;;
-        124 | 137)
-            echo "INNER-TEST-TIMEOUT-FAIL: $_target exit $_itr — the suite was killed at GATE_SUITE_BUDGET_SECS (GATE-SUITE-TIMEOUT-FAIL above); a wedged run is a failure, not a slow pass" >&2
-            ;;
-        101)
-            echo "INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL: $_target exit $_itr — if this is a Linux-only assertion, run the MID tier (verify.sh mid foundations|boot|union|full) instead; this is not a pass" >&2
-            ;;
-        *)
-            echo "INNER-TEST-OPERATIONAL-FAIL: $_target exit $_itr — the bounded command failed without the helper's refusal status and is neither a killed suite nor a libtest assertion; this claims no refusal and no assertion verdict, so the marker above (if any) and this status are the evidence" >&2
-            ;;
-    esac
+    # The declaration is the helper's, not this reader's: an empty channel says
+    # "no refusal and no kill", which is a fact about the helper's own run and
+    # not an inference from the status it passed through.
+    _itr_outcome="${_bs_outcome-}"
+    if [ -n "$_itr_outcome" ]; then
+        case "$_itr_outcome" in
+            killed)
+                echo "INNER-TEST-TIMEOUT-FAIL: $_target exit $_itr — bounded_suite declared 'killed' and printed GATE-SUITE-TIMEOUT-FAIL above: the suite was killed at GATE_SUITE_BUDGET_SECS; a wedged run is a failure, not a slow pass" >&2
+                ;;
+            *)
+                echo "INNER-TEST-BUDGET-REFUSED: $_target — bounded_suite declared '${_itr_outcome}' and ran no command; the GATE-SUITE-STACK-UNKNOWN or GATE-SUITE-TIMEOUT-UNKNOWN line above names the budget it refused, so this is a budget fact and not a Linux-only assertion" >&2
+                ;;
+        esac
+    elif [ "$_itr" -eq 101 ]; then
+        echo "INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL: $_target exit $_itr — if this is a Linux-only assertion, run the MID tier (verify.sh mid foundations|boot|union|full) instead; this is not a pass" >&2
+    else
+        echo "INNER-TEST-OPERATIONAL-FAIL: $_target exit $_itr — bounded_suite declared no refusal and no kill, so this status belongs to the command or the wrapper (125|126|127 are the wrapper's own operational vocabulary, and a harness = false target owns its numbers); no assertion verdict is claimed here, so read the run output above, and if a Linux-only assertion is the suspect the MID tier (verify.sh mid foundations|boot|union|full) is the authoritative run" >&2
+    fi
     exit "$_itr"
 }
 
