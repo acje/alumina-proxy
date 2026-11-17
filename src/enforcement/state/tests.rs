@@ -1094,3 +1094,846 @@ fn early_data_and_ja4_count_only_on_block_all() {
     );
     assert!(!en.block_all());
 }
+
+/// A Hegel state machine over `Enforcement::decide`, asserting the gate and
+/// latch invariants after every rule.
+///
+/// The model draws its own `ControlTable` (an action/scope for each of the
+/// four `any_illegal` surfaces and for each of 1..=3 per-ordinal
+/// `early_data`/`ja4` entries) and its own `GateSet` (every class's threshold
+/// and window drawn from 1..=3, so a window rollover fits inside one case).
+/// Rules draw only their violation parameters; `secs` is the model's logical
+/// clock, advanced by a drawn step, so same-second facts increment a window
+/// and a clock step can roll it. The model keeps *its own* per-class window
+/// arithmetic and its own attribution of facts to classes; the subject's gate
+/// counters are read only as the comparison target of E5, never as the source
+/// of E4's crossing decision.
+///
+/// Invariants (each `always_run`, so every intermediate state is checked):
+///
+/// - **E1 monotonicity**: the All-scope block latch and the per-ordinal
+///   blocked bits only ever go false -> true. E1 also pins the blocked bitset
+///   to the model's own expectation, so a bit set by the wrong class fails.
+/// - **E2 first-slot latch**: `Armed -> Spent` only; a decision carrying an
+///   `AnyIllegal` leaves it `Spent`, and a per-FQDN or unknown decision leaves
+///   it untouched — a per-FQDN violation never consumes the per-connection
+///   latch.
+/// - **E3 action-after-fact**: every decision that notes a fact increments
+///   exactly that counter by one, and an effect is `Block`/`Notify` only when
+///   its fact was counted. `Ja4Change` is the documented exception: its fact
+///   is noted by the serving path, not by `decide`, so the machine instead
+///   asserts that a `Ja4Change` decision changes no fact total.
+/// - **E4 per-class gate independence**: `block_all` is true exactly when one
+///   class's own crossing has admitted an All-scope block, computed from the
+///   model's per-class window arithmetic and class attribution. This is
+///   deliberately *not* "`block_all` iff any gate is armed": a gate arms on the
+///   connection that noted its crossing fact even when that class's All-scope
+///   block cannot apply (for example the first-slot latch is already `Spent`,
+///   so every later `AnyIllegal` projects `BaselineOnly`). The model therefore
+///   records the crossing and the admission separately, which is why it is not
+///   a mirror of the subject's `block_all` field.
+/// - **E5 window arithmetic**: for every class the subject's `armed`, `count`,
+///   `window_start`, `threshold`, and `window_secs` equal the model's own
+///   re-derivation (`secs - window_start >= window_secs` rolls, otherwise
+///   increments; an armed counter freezes).
+/// - **E6 saturating counters never gate**: see `SaturationModel`.
+///
+/// bd `alumina-mxlil` disposition: the production overflow path needs
+/// `u32::MAX` increments (infeasible), there is no production-blessed near-max
+/// seed, and adding a bump-by-N seam is out of scope. The machine therefore
+/// drives the existing `#[cfg(test)]` saturation seam and proves the
+/// *no-gating* property — the load-bearing claim — rather than the overflow
+/// arithmetic itself. No new seam was added and no production code changed.
+mod hegel_machine {
+    use super::enforcement_tables::table;
+    use super::gate;
+    use crate::enforcement::action::{
+        ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstSlot, Scope,
+    };
+    use crate::enforcement::policy::{
+        AnyIllegalCause, Effect, UnknownReason, Violation, decide as pure_decide,
+    };
+    use crate::enforcement::state::{AllScopeGate, Enforcement, GateSet, WindowedCounter};
+    use crate::inspection::client_hello::HelloRejectReason;
+    use crate::inspection::connect::ConnectHeadReason;
+    use hegel::TestCase;
+
+    // ---------------------------------------------------------------------
+    // Drawn boot configuration and rule parameters.
+    // ---------------------------------------------------------------------
+
+    fn draw_index(tc: &TestCase, max: usize) -> usize {
+        tc.draw(
+            hegel::generators::integers::<usize>()
+                .min_value(0)
+                .max_value(max),
+        )
+    }
+
+    /// One drawn `(kind, scope)` control; all six legal combinations, because
+    /// the gate arithmetic must be independent of which action a class fires.
+    fn drawn_control(tc: &TestCase) -> Control {
+        match draw_index(tc, 5) {
+            0 => Control::new(ActionKind::Block, Scope::All),
+            1 => Control::new(ActionKind::Block, Scope::Domain),
+            2 => Control::new(ActionKind::Block, Scope::Connection),
+            3 => Control::new(ActionKind::Notify, Scope::All),
+            4 => Control::new(ActionKind::Notify, Scope::Domain),
+            _ => Control::new(ActionKind::Notify, Scope::Connection),
+        }
+    }
+
+    fn drawn_actions(tc: &TestCase, count: usize) -> Vec<(ActionKind, Scope)> {
+        (0..count)
+            .map(|_| {
+                let control = drawn_control(tc);
+                (control.kind(), control.scope())
+            })
+            .collect()
+    }
+
+    fn drawn_table(tc: &TestCase) -> ControlTable {
+        let mut any = [Control::new(ActionKind::Block, Scope::All); AnyIllegalControl::COUNT];
+        for control in &mut any {
+            *control = drawn_control(tc);
+        }
+        let count = draw_index(tc, 2) + 1;
+        table(any, &drawn_actions(tc, count), &drawn_actions(tc, count))
+    }
+
+    /// Thresholds and windows both from 1..=3, so a threshold crossing and a
+    /// window rollover are both reachable inside one drawn case.
+    fn drawn_gate(tc: &TestCase) -> AllScopeGate {
+        let threshold = tc.draw(
+            hegel::generators::integers::<u32>()
+                .min_value(1)
+                .max_value(3),
+        );
+        let window = tc.draw(
+            hegel::generators::integers::<u64>()
+                .min_value(1)
+                .max_value(3),
+        );
+        gate(threshold, window)
+    }
+
+    fn drawn_gates(tc: &TestCase) -> GateSet {
+        GateSet::new(
+            drawn_gate(tc),
+            drawn_gate(tc),
+            drawn_gate(tc),
+            drawn_gate(tc),
+        )
+    }
+
+    /// The four `any_illegal` classes' representative causes. `TlsProfile`
+    /// never carries `EchPresent`: the production constructor routes it to
+    /// `Ech`, so the drawn set stays on reachable causes.
+    fn drawn_any_illegal_cause(tc: &TestCase) -> AnyIllegalCause {
+        match draw_index(tc, 6) {
+            0 => AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
+            1 => AnyIllegalCause::ConnectParse(ConnectHeadReason::TransferEncoding),
+            2 => AnyIllegalCause::HostNotAllowlisted,
+            3 => AnyIllegalCause::TlsProfile(HelloRejectReason::ServerNameMismatch),
+            4 => AnyIllegalCause::TlsProfile(HelloRejectReason::InvalidServerName),
+            5 => AnyIllegalCause::TlsProfile(HelloRejectReason::Profile),
+            _ => AnyIllegalCause::Ech,
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The gate/latch model.
+    // ---------------------------------------------------------------------
+
+    /// The four independent gate classes, in `GateSet` order.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum GateClass {
+        BadHandshake,
+        IllegalFqdn,
+        EarlyData,
+        Ja4,
+    }
+
+    const GATE_CLASSES: [GateClass; 4] = [
+        GateClass::BadHandshake,
+        GateClass::IllegalFqdn,
+        GateClass::EarlyData,
+        GateClass::Ja4,
+    ];
+
+    impl GateClass {
+        const fn index(self) -> usize {
+            match self {
+                GateClass::BadHandshake => 0,
+                GateClass::IllegalFqdn => 1,
+                GateClass::EarlyData => 2,
+                GateClass::Ja4 => 3,
+            }
+        }
+    }
+
+    /// The model's per-class bookkeeping: the windowed counts it derives
+    /// itself, and whether a crossing of this class has admitted an All-scope
+    /// block (E4's admission, distinct from the crossing).
+    #[derive(Clone, Copy, Debug)]
+    struct ModelGate {
+        count: u32,
+        window_start: u64,
+        armed: bool,
+        admitted_all: bool,
+        threshold: u32,
+        window_secs: u64,
+    }
+
+    impl ModelGate {
+        const fn new(gate: AllScopeGate) -> ModelGate {
+            ModelGate {
+                count: 0,
+                window_start: 0,
+                armed: false,
+                admitted_all: false,
+                threshold: gate.threshold(),
+                window_secs: gate.window_secs(),
+            }
+        }
+
+        /// The model's own window arithmetic, re-derived from the documented
+        /// rule: a fact at `secs` rolls the window when
+        /// `secs - window_start >= window_secs`, otherwise increments; an
+        /// armed counter freezes.
+        fn note(&mut self, secs: u64) -> bool {
+            if self.armed {
+                return true;
+            }
+            if secs.saturating_sub(self.window_start) >= self.window_secs {
+                self.count = 0;
+                self.window_start = secs;
+            }
+            self.count += 1;
+            if self.count >= self.threshold {
+                self.armed = true;
+            }
+            self.armed
+        }
+    }
+
+    fn subject_gate(en: &Enforcement, class: GateClass) -> &WindowedCounter {
+        match class {
+            GateClass::BadHandshake => &en.bad_handshake_gate,
+            GateClass::IllegalFqdn => &en.illegal_fqdn_gate,
+            GateClass::EarlyData => &en.early_data_gate,
+            GateClass::Ja4 => &en.ja4_gate,
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum StepKind {
+        Time,
+        AnyIllegal,
+        EarlyData,
+        Ja4,
+        Unknown,
+    }
+
+    /// What the last rule decided, kept so the `always_run` invariants can
+    /// check the fact/action and latch relations of the just-applied step.
+    #[derive(Clone, Copy, Debug)]
+    struct LastStep {
+        kind: StepKind,
+        latch_before: FirstSlot,
+        fact_before: u32,
+        fact_after: u32,
+        fact_tracked: bool,
+        total_before: u64,
+        total_after: u64,
+        effect: Effect,
+        expected_effect: Effect,
+    }
+
+    impl LastStep {
+        const INITIAL: LastStep = LastStep {
+            kind: StepKind::Time,
+            latch_before: FirstSlot::Armed,
+            fact_before: 0,
+            fact_after: 0,
+            fact_tracked: false,
+            total_before: 0,
+            total_after: 0,
+            effect: Effect::BaselineOnly,
+            expected_effect: Effect::BaselineOnly,
+        };
+    }
+
+    struct GateModel {
+        en: Enforcement,
+        table: ControlTable,
+        gates: [ModelGate; 4],
+        latch: FirstSlot,
+        now: u64,
+        expected_block_all: bool,
+        expected_blocked: u32,
+        prev_block_all: bool,
+        prev_blocked: u32,
+        prev_latch: FirstSlot,
+        last: LastStep,
+    }
+
+    impl GateModel {
+        fn new(table: ControlTable, gates: GateSet) -> GateModel {
+            GateModel {
+                en: Enforcement::new(table, gates),
+                table,
+                gates: [
+                    ModelGate::new(gates.bad_handshake()),
+                    ModelGate::new(gates.illegal_fqdn()),
+                    ModelGate::new(gates.early_data()),
+                    ModelGate::new(gates.ja4()),
+                ],
+                latch: FirstSlot::new(),
+                now: 0,
+                expected_block_all: false,
+                expected_blocked: 0,
+                prev_block_all: false,
+                prev_blocked: 0,
+                prev_latch: FirstSlot::Armed,
+                last: LastStep::INITIAL,
+            }
+        }
+
+        /// Snapshot the subject before a rule so the monotonicity invariants
+        /// compare against the previous step, not a constant.
+        fn begin(&mut self) {
+            self.prev_block_all = self.en.block_all();
+            self.prev_blocked = self.subject_blocked_mask();
+            self.prev_latch = self.latch;
+        }
+
+        fn subject_blocked_mask(&self) -> u32 {
+            let mut mask = 0;
+            for index in 0..self.table.len() {
+                let ordinal = self.table.ordinal(index).expect("index below table len");
+                if self.en.is_blocked(ordinal) {
+                    mask |= 1u32 << ordinal.get();
+                }
+            }
+            mask
+        }
+
+        /// The monitor fact counter this violation must fold exactly once, or
+        /// `None` when `decide` does not note a fact for it (`Ja4Change`).
+        fn fact_counter(&self, violation: Violation) -> Option<u32> {
+            let counters = self.en.counters();
+            match violation {
+                Violation::AnyIllegal { cause } => Some(counters.facts_any_illegal(cause)),
+                Violation::EarlyUpstreamData { ordinal } => {
+                    Some(counters.facts_early_data(ordinal))
+                }
+                Violation::EvidenceInsufficient => {
+                    Some(counters.facts_unknown(UnknownReason::NotYetValidated))
+                }
+                Violation::Unattributed => {
+                    Some(counters.facts_unknown(UnknownReason::Unattributed))
+                }
+                Violation::MissingParseResult => {
+                    Some(counters.facts_unknown(UnknownReason::MissingParseResult))
+                }
+                Violation::Ja4Change { .. } => None,
+            }
+        }
+
+        const fn gate_class(violation: Violation, raw: Effect) -> Option<GateClass> {
+            match violation {
+                Violation::AnyIllegal { cause } => Some(match cause {
+                    AnyIllegalCause::HostNotAllowlisted => GateClass::IllegalFqdn,
+                    AnyIllegalCause::ConnectParse(_)
+                    | AnyIllegalCause::TlsProfile(_)
+                    | AnyIllegalCause::Ech => GateClass::BadHandshake,
+                }),
+                Violation::EarlyUpstreamData { .. } => {
+                    if matches!(raw, Effect::Block { scope: Scope::All }) {
+                        Some(GateClass::EarlyData)
+                    } else {
+                        None
+                    }
+                }
+                Violation::Ja4Change { .. } => {
+                    if matches!(raw, Effect::Block { scope: Scope::All }) {
+                        Some(GateClass::Ja4)
+                    } else {
+                        None
+                    }
+                }
+                Violation::EvidenceInsufficient
+                | Violation::Unattributed
+                | Violation::MissingParseResult => None,
+            }
+        }
+
+        const fn step_kind(violation: Violation) -> StepKind {
+            match violation {
+                Violation::AnyIllegal { .. } => StepKind::AnyIllegal,
+                Violation::EarlyUpstreamData { .. } => StepKind::EarlyData,
+                Violation::Ja4Change { .. } => StepKind::Ja4,
+                Violation::EvidenceInsufficient
+                | Violation::Unattributed
+                | Violation::MissingParseResult => StepKind::Unknown,
+            }
+        }
+
+        const fn per_fqdn_ordinal(violation: Violation) -> Option<DomainOrdinal> {
+            match violation {
+                Violation::EarlyUpstreamData { ordinal } | Violation::Ja4Change { ordinal } => {
+                    Some(ordinal)
+                }
+                Violation::AnyIllegal { .. }
+                | Violation::EvidenceInsufficient
+                | Violation::Unattributed
+                | Violation::MissingParseResult => None,
+            }
+        }
+
+        /// Apply one violation: note the class gate from the model's own
+        /// arithmetic, project the gated effect the model expects, then let
+        /// the subject decide and record the observation the invariants read.
+        fn step(&mut self, tc: &TestCase, violation: Violation) {
+            self.begin();
+            let mut probe = self.latch;
+            let raw = pure_decide(&self.table, &mut probe, violation);
+            let class = Self::gate_class(violation, raw);
+            let class_index = class.map(GateClass::index);
+            let (was_armed, window_start_before) = class_index.map_or((false, 0), |index| {
+                (self.gates[index].armed, self.gates[index].window_start)
+            });
+            let crossed = class_index.is_some_and(|index| self.gates[index].note(self.now));
+            if let Some(index) = class_index {
+                if crossed && !was_armed {
+                    tc.event("gate_armed");
+                }
+                if !was_armed && self.gates[index].window_start != window_start_before {
+                    tc.event("window_rollover");
+                }
+                if !crossed {
+                    tc.event("below_threshold");
+                }
+            }
+            let expected_effect = match raw {
+                Effect::Block { scope: Scope::All } if !crossed => Effect::BaselineOnly,
+                other => other,
+            };
+            if matches!(expected_effect, Effect::Block { scope: Scope::All }) {
+                tc.event("all_block_admitted");
+            }
+            let fact_before = self.fact_counter(violation);
+            let total_before = self.en.counters().facts_total();
+            let effect = self.en.decide(&mut self.latch, violation, self.now);
+            let fact_after = self.fact_counter(violation);
+            let total_after = self.en.counters().facts_total();
+            match expected_effect {
+                Effect::Block { scope: Scope::All } => {
+                    self.expected_block_all = true;
+                    let class = class.expect("an All-scope effect is attributed to a class");
+                    self.gates[class.index()].admitted_all = true;
+                }
+                Effect::Block {
+                    scope: Scope::Domain,
+                } => {
+                    if let Some(ordinal) = Self::per_fqdn_ordinal(violation) {
+                        self.expected_blocked |= 1u32 << ordinal.get();
+                    }
+                }
+                Effect::Block {
+                    scope: Scope::Connection,
+                }
+                | Effect::Notify { .. }
+                | Effect::BaselineOnly
+                | Effect::Unknown { .. } => {}
+            }
+            self.last = LastStep {
+                kind: Self::step_kind(violation),
+                latch_before: self.prev_latch,
+                fact_before: fact_before.unwrap_or(0),
+                fact_after: fact_after.unwrap_or(0),
+                fact_tracked: fact_before.is_some(),
+                total_before,
+                total_after,
+                effect,
+                expected_effect,
+            };
+        }
+
+        fn advance_clock(&mut self, step: u64) {
+            self.begin();
+            self.now += step;
+            self.last = LastStep {
+                kind: StepKind::Time,
+                latch_before: self.prev_latch,
+                fact_before: 0,
+                fact_after: 0,
+                fact_tracked: false,
+                total_before: self.en.counters().facts_total(),
+                total_after: self.en.counters().facts_total(),
+                effect: Effect::BaselineOnly,
+                expected_effect: Effect::BaselineOnly,
+            };
+        }
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the hegel state-machine macro hands each rule its own TestCase by value"
+    )]
+    #[hegel::state_machine]
+    impl GateModel {
+        #[rule]
+        fn any_illegal(&mut self, tc: TestCase) {
+            let cause = drawn_any_illegal_cause(&tc);
+            self.step(&tc, Violation::AnyIllegal { cause });
+        }
+
+        #[rule]
+        fn early_upstream_data(&mut self, tc: TestCase) {
+            let index = draw_index(&tc, self.table.len() - 1);
+            let ordinal = self
+                .table
+                .ordinal(index)
+                .expect("drawn index is within the table");
+            self.step(&tc, Violation::EarlyUpstreamData { ordinal });
+        }
+
+        #[rule]
+        fn ja4_change(&mut self, tc: TestCase) {
+            let index = draw_index(&tc, self.table.len() - 1);
+            let ordinal = self
+                .table
+                .ordinal(index)
+                .expect("drawn index is within the table");
+            self.step(&tc, Violation::Ja4Change { ordinal });
+        }
+
+        #[rule]
+        fn evidence_insufficient(&mut self, tc: TestCase) {
+            self.step(&tc, Violation::EvidenceInsufficient);
+        }
+
+        #[rule]
+        fn unattributed(&mut self, tc: TestCase) {
+            self.step(&tc, Violation::Unattributed);
+        }
+
+        #[rule]
+        fn missing_parse_result(&mut self, tc: TestCase) {
+            self.step(&tc, Violation::MissingParseResult);
+        }
+
+        #[rule]
+        fn advance_time(&mut self, tc: TestCase) {
+            let step = tc.draw(
+                hegel::generators::integers::<u64>()
+                    .min_value(0)
+                    .max_value(4),
+            );
+            self.advance_clock(step);
+        }
+
+        #[invariant(always_run)]
+        fn e1_block_latches_are_monotone(&self, _: TestCase) {
+            assert!(
+                !self.prev_block_all || self.en.block_all(),
+                "E1: the All-scope block latch cleared"
+            );
+            let now = self.subject_blocked_mask();
+            assert_eq!(
+                now & self.prev_blocked,
+                self.prev_blocked,
+                "E1: a per-ordinal blocked bit cleared"
+            );
+            assert_eq!(
+                now, self.expected_blocked,
+                "E1: the per-ordinal blocked bitset diverged from the model"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn e2_first_slot_latch_is_armed_to_spent(&self, _: TestCase) {
+            assert!(
+                !self.prev_latch_is_spent_with_armed_latch(),
+                "E2: the first-slot latch went Spent -> Armed"
+            );
+            match self.last.kind {
+                StepKind::AnyIllegal => assert_eq!(
+                    self.latch,
+                    FirstSlot::Spent,
+                    "E2: an AnyIllegal decision left the first-slot latch Armed"
+                ),
+                StepKind::Time | StepKind::EarlyData | StepKind::Ja4 | StepKind::Unknown => {
+                    assert_eq!(
+                        self.latch, self.last.latch_before,
+                        "E2: a non-AnyIllegal decision touched the first-slot latch"
+                    );
+                }
+            }
+        }
+
+        #[invariant(always_run)]
+        fn e3_action_only_after_its_fact(&self, _: TestCase) {
+            if self.last.fact_tracked {
+                assert_eq!(
+                    self.last.fact_after,
+                    self.last.fact_before + 1,
+                    "E3: the decision did not fold its fact exactly once"
+                );
+            }
+            if matches!(self.last.kind, StepKind::Ja4) {
+                assert_eq!(
+                    self.last.total_after, self.last.total_before,
+                    "E3: Ja4Change must not count a fact in decide (the serving path owns it)"
+                );
+                return;
+            }
+            if matches!(
+                self.last.effect,
+                Effect::Block { .. } | Effect::Notify { .. }
+            ) {
+                assert!(
+                    self.last.fact_tracked,
+                    "E3: an action fired for a decision that counted no fact"
+                );
+                assert!(
+                    self.last.fact_after > self.last.fact_before,
+                    "E3: an action fired before its fact was counted"
+                );
+            }
+        }
+
+        #[invariant(always_run)]
+        fn e4_block_all_follows_a_class_crossing(&self, _: TestCase) {
+            let any_admitted = self.gates.iter().any(|gate| gate.admitted_all);
+            assert_eq!(
+                self.expected_block_all, any_admitted,
+                "E4: the model's All latch and its per-class admissions disagree"
+            );
+            assert_eq!(
+                self.en.block_all(),
+                any_admitted,
+                "E4: block_all is not exactly a class crossing that admitted an All-scope block"
+            );
+            if self.en.block_all() {
+                assert!(
+                    self.gates.iter().any(|gate| gate.armed),
+                    "E4: block_all is set with no class gate armed"
+                );
+            }
+            assert_eq!(
+                self.en.counters().actions_block_all(),
+                u32::from(self.en.block_all()),
+                "E4: the All-latch transition count does not match the latch"
+            );
+            assert_eq!(
+                self.last.effect, self.last.expected_effect,
+                "E4: the gated projection diverged from the model's per-class crossing"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn e5_window_arithmetic_matches_the_model(&self, _: TestCase) {
+            for class in GATE_CLASSES {
+                let model = &self.gates[class.index()];
+                let subject = subject_gate(&self.en, class);
+                assert_eq!(
+                    subject.armed, model.armed,
+                    "E5: {class:?} armed diverged from the model's window arithmetic"
+                );
+                assert_eq!(
+                    subject.count, model.count,
+                    "E5: {class:?} count diverged from the model's window arithmetic"
+                );
+                assert_eq!(
+                    subject.window_start, model.window_start,
+                    "E5: {class:?} window_start diverged from the model's window arithmetic"
+                );
+                assert_eq!(subject.threshold, model.threshold, "E5: threshold diverged");
+                assert_eq!(
+                    subject.window_secs, model.window_secs,
+                    "E5: window_secs diverged"
+                );
+            }
+        }
+    }
+
+    impl GateModel {
+        const fn prev_latch_is_spent_with_armed_latch(&self) -> bool {
+            matches!(self.prev_latch, FirstSlot::Spent) && matches!(self.latch, FirstSlot::Armed)
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // E6: a saturated monitor changes no decision.
+    // ---------------------------------------------------------------------
+
+    /// Two subjects with the same drawn table and gates: one with every
+    /// monitor counter saturated through the existing `#[cfg(test)]` seam,
+    /// one clean. Rules apply the same violation stream to both and the
+    /// invariant asserts the returned effects are identical and the saturated
+    /// counters still report `u32::MAX` and overflow.
+    struct SaturationModel {
+        saturated: Enforcement,
+        control: Enforcement,
+        latch_saturated: FirstSlot,
+        latch_control: FirstSlot,
+        now: u64,
+        probe_ordinal: DomainOrdinal,
+        last_saturated: Effect,
+        last_control: Effect,
+    }
+
+    impl SaturationModel {
+        fn new(table: ControlTable, gates: GateSet) -> SaturationModel {
+            let mut saturated = Enforcement::new(table, gates);
+            saturated.monitor_mut().saturate_all_for_test();
+            SaturationModel {
+                saturated,
+                control: Enforcement::new(table, gates),
+                latch_saturated: FirstSlot::new(),
+                latch_control: FirstSlot::new(),
+                now: 0,
+                probe_ordinal: table.ordinal(0).expect("a drawn table has an ordinal"),
+                last_saturated: Effect::BaselineOnly,
+                last_control: Effect::BaselineOnly,
+            }
+        }
+
+        fn step(&mut self, violation: Violation) {
+            self.last_saturated =
+                self.saturated
+                    .decide(&mut self.latch_saturated, violation, self.now);
+            self.last_control = self
+                .control
+                .decide(&mut self.latch_control, violation, self.now);
+        }
+
+        fn advance_clock(&mut self, step: u64) {
+            self.now += step;
+        }
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the hegel state-machine macro hands each rule its own TestCase by value"
+    )]
+    #[hegel::state_machine]
+    impl SaturationModel {
+        #[rule]
+        fn any_illegal(&mut self, tc: TestCase) {
+            let cause = drawn_any_illegal_cause(&tc);
+            self.step(Violation::AnyIllegal { cause });
+        }
+
+        #[rule]
+        fn early_upstream_data(&mut self, tc: TestCase) {
+            let last = self.control.control().len() - 1;
+            let index = draw_index(&tc, last);
+            let ordinal = self
+                .control
+                .control()
+                .ordinal(index)
+                .expect("drawn index is within the drawn table");
+            self.step(Violation::EarlyUpstreamData { ordinal });
+        }
+
+        #[rule]
+        fn ja4_change(&mut self, tc: TestCase) {
+            let last = self.control.control().len() - 1;
+            let index = draw_index(&tc, last);
+            let ordinal = self
+                .control
+                .control()
+                .ordinal(index)
+                .expect("drawn index is within the drawn table");
+            self.step(Violation::Ja4Change { ordinal });
+        }
+
+        #[rule]
+        fn evidence_insufficient(&mut self, _: TestCase) {
+            self.step(Violation::EvidenceInsufficient);
+        }
+
+        #[rule]
+        fn unattributed(&mut self, _: TestCase) {
+            self.step(Violation::Unattributed);
+        }
+
+        #[rule]
+        fn missing_parse_result(&mut self, _: TestCase) {
+            self.step(Violation::MissingParseResult);
+        }
+
+        #[rule]
+        fn advance_time(&mut self, tc: TestCase) {
+            let step = tc.draw(
+                hegel::generators::integers::<u64>()
+                    .min_value(0)
+                    .max_value(4),
+            );
+            self.advance_clock(step);
+        }
+
+        #[invariant(always_run)]
+        fn e6_saturation_never_gates(&self, _: TestCase) {
+            assert_eq!(
+                self.last_saturated, self.last_control,
+                "E6: a saturated monitor changed the decision"
+            );
+            let counters = self.saturated.counters();
+            assert_eq!(
+                counters.facts_any_illegal(AnyIllegalCause::Ech),
+                u32::MAX,
+                "E6: the saturated fact counter did not report u32::MAX"
+            );
+            assert!(
+                counters.facts_any_illegal_overflow(),
+                "E6: the saturated fact counter did not report overflow"
+            );
+            assert_eq!(
+                counters.facts_early_data(self.probe_ordinal),
+                u32::MAX,
+                "E6: the saturated early-data counter did not report u32::MAX"
+            );
+            assert_eq!(
+                counters.facts_unknown(UnknownReason::Unattributed),
+                u32::MAX,
+                "E6: the saturated unknown counter did not report u32::MAX"
+            );
+            assert_eq!(
+                counters.actions_block_all(),
+                u32::MAX,
+                "E6: the saturated All-block action counter did not report u32::MAX"
+            );
+            assert!(
+                counters.actions_overflow(),
+                "E6: the saturated action counters did not report overflow"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Wrappers.
+    // ---------------------------------------------------------------------
+
+    #[hegel::test(derandomize = true)]
+    fn enforcement_gates_and_latches_follow_the_model(tc: TestCase) {
+        let table = drawn_table(&tc);
+        let gates = drawn_gates(&tc);
+        hegel::stateful::machine(GateModel::new(table, gates))
+            .steps(50)
+            .run(tc);
+    }
+
+    #[hegel::test(derandomize = true)]
+    fn enforcement_saturated_monitor_never_gates(tc: TestCase) {
+        let table = drawn_table(&tc);
+        let gates = drawn_gates(&tc);
+        hegel::stateful::machine(SaturationModel::new(table, gates))
+            .steps(50)
+            .run(tc);
+    }
+}
