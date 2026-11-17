@@ -43,17 +43,18 @@ sh scripts/verify.sh e2e shutdown               # host-runnable via rootful harn
 `bounded_suite` in `scripts/verify.sh` owns the stack budget for the lib suites
 it bounds: it exports `RUST_MIN_STACK` at or above its fixed floor for every
 `--lib` invocation it wraps, so a bounded call site carries no prefix of its
-own. That ownership is not yet universal: six direct `cargo atest` invocations
-still run outside the helper — two in `mid foundations`, three in `mid boot`,
-one in `mid clippy` — and in the Linux dispatch path their only provider is the
-`-e RUST_MIN_STACK=16777216` flags in `linux_dispatch_bind` and
-`linux_dispatch_volume`; a native Linux host run of those selectors gets the
-value from the shell or not at all. Routing those six sites through the helper
-and deleting those flags is the tracked follow-up (`alumina-99v9q.14`), not the
-state this file describes. The two gate-only commands above keep their prefix
-as the instruction for a hand run. The lib surface overflows a smaller host
-default test-thread stack (observed on darwin), so a run outside both the
-helper and the dispatch container must set the value itself.
+own. That ownership is not yet universal: six direct `cargo atest`
+invocations in the `mid` selectors still run outside the helper — two in
+`mid foundations`, three in `mid boot`, one in `mid clippy` — and in the Linux
+dispatch path their only provider is the `-e RUST_MIN_STACK=16777216` flags in
+`linux_dispatch_bind` and `linux_dispatch_volume`; a native Linux host run of
+those selectors gets the value from the shell or not at all. Routing those six
+sites through the helper and deleting those flags is the tracked follow-up
+(`alumina-99v9q.14`), not the state this file describes. The two gate-only
+commands above keep their prefix as the instruction for a hand run. The lib
+surface overflows a smaller host default test-thread stack (observed on
+darwin), so a run outside both the helper and the dispatch container must set
+the value itself.
 
 These are independent checks, not a required sequence. For an identity-stability
 check, take the before snapshot before the chosen work and the after snapshot
