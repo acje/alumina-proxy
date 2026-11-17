@@ -2045,18 +2045,20 @@ identity_snapshot() {
 # malformed or incomplete record is UNKNOWN: an older snapshot never passes
 # silently.
 #
-# Two facts are UNOBSERVED, never agreement: a witness with zero rows (two
-# empty maps are not evidence), and a witness that does not cover its own
-# snapshot's inputs.sha256 input set (the record defines the set; a witness
-# never certifies the subset it happens to contain). Exit is tri-state -- 0
-# identical, 1 genuine drift, 2 unobservable -- so the caller can print an
-# UNKNOWN-shaped terminal line rather than a drift it never observed.
+# Three facts are UNOBSERVED, never agreement: a witness with zero rows (two
+# empty maps are not evidence), a row with an empty field (a key with no
+# evidence says nothing about the input it names), and a witness that does not
+# cover its own snapshot's inputs.sha256 input set (the record defines the set;
+# a witness never certifies the subset it happens to contain). Exit is
+# tri-state -- 0 identical, 1 genuine drift, 2 unobservable -- so the caller
+# can print an UNKNOWN-shaped terminal line rather than a drift it never
+# observed. An absent interpreter is unobservable too, never drift.
 identity_compare_witness() {
     _before="$1"
     _after="$2"
     command -v python3 >/dev/null 2>&1 || {
-        echo "SOURCE-IDENTITY FAIL: python3 required for witness compare, not found (not PASS)" >&2
-        return 1
+        echo "SOURCE-IDENTITY-UNKNOWN FAIL: python3 required for witness compare, not found (unobservable, not PASS)" >&2
+        return 2
     }
     python3 - "$_before" "$_after" <<'PY'
 import sys
@@ -2080,7 +2082,9 @@ def expected_inputs(snapshot):
     try:
         with open(path, "r", encoding="utf-8") as handle:
             lines = [line.rstrip("\n") for line in handle if line.strip()]
-    except OSError as exc:
+    # A decode error is the same fact as an I/O error: this record cannot be
+    # observed, so the input set it names is unknown rather than empty.
+    except (OSError, UnicodeDecodeError) as exc:
         unobserved("%s unreadable: %s" % (path, exc))
     if not lines:
         unobserved("%s has zero rows; the input set is unobserved" % path)
@@ -2102,12 +2106,16 @@ def load(path, width):
                 if not line:
                     continue
                 parts = line.split("\t")
-                if len(parts) != width or not parts[0]:
-                    unobserved("malformed %s line %d" % (path, lineno))
+                # A key with no evidence is not a comparison: path\t (width 2)
+                # and path\t\t\t\t (width 5) would otherwise compare equal and
+                # certify STABLE-OK with nothing observed.
+                if len(parts) != width or not all(parts):
+                    unobserved("incomplete %s line %d: a witness row with an "
+                               "empty field is unobserved" % (path, lineno))
                 if parts[0] in rows:
                     unobserved("duplicate %s in %s" % (parts[0], path))
                 rows[parts[0]] = tuple(parts[1:])
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         unobserved("%s unreadable: %s" % (path, exc))
     if not rows:
         unobserved("%s has zero rows (an emptied witness is unobserved, "
@@ -2174,6 +2182,12 @@ PY
 # One record, one decision: a record absent on either side is UNOBSERVED
 # (UNKNOWN), never a difference between two readable values. The witness
 # records are not checked here; the loader is their single presence owner.
+#
+# HEAD and env carry their evidence in their bytes, so a zero-byte file is an
+# empty claim, not an agreement: presence alone cannot tell "nothing was
+# recorded" from "the recorded value was empty". status is legitimately empty
+# on a clean tree, so it stays presence-only. cmp's own refusal to read an
+# operand is unobservable too, never a CHANGED verdict.
 identity_compare_record() {
     _before="$1"
     _after="$2"
@@ -2185,11 +2199,29 @@ identity_compare_record() {
             return 2
         }
     done
-    cmp -s "$_before/$_record" "$_after/$_record" || {
-        echo "SOURCE-IDENTITY-CHANGED FAIL: $_label" >&2
-        return 1
-    }
-    return 0
+    case "$_record" in
+        head | env)
+            for _dir in "$_before" "$_after"; do
+                [ -s "$_dir/$_record" ] || {
+                    echo "SOURCE-IDENTITY-UNKNOWN FAIL: $_record empty in $_dir (record unobservable, not PASS)" >&2
+                    return 2
+                }
+            done
+            ;;
+    esac
+    _cmp=0
+    cmp -s "$_before/$_record" "$_after/$_record" || _cmp=$?
+    case "$_cmp" in
+        0) return 0 ;;
+        1)
+            echo "SOURCE-IDENTITY-CHANGED FAIL: $_label" >&2
+            return 1
+            ;;
+        *)
+            echo "SOURCE-IDENTITY-UNKNOWN FAIL: $_record uncomparable before/after (cmp exit $_cmp; record unobservable, not CHANGED)" >&2
+            return 2
+            ;;
+    esac
 }
 
 identity_compare() {

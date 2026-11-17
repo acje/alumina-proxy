@@ -152,13 +152,31 @@ class Selectors(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             result = self.run_verify("identity", "compare", before, after)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            for name in ("head", "status", "inputs.sha256", "env"):
+            # Each record must reach the terminal class it means, so every case
+            # below is a READABLE difference: an unparseable inputs.sha256 is
+            # UNKNOWN, and pinning only the record line would let the terminal
+            # class move while this test stayed green.
+            for name, payload in (("head", b"changed-head\n"),
+                                  ("status", b"changed-status\n"),
+                                  ("env", b"changed-env\n")):
                 original = (after / name).read_bytes()
-                (after / name).write_bytes(b"changed\n")
+                (after / name).write_bytes(payload)
                 result = self.run_verify("identity", "compare", before, after)
                 self.assertNotEqual(result.returncode, 0, name)
                 self.assertIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+                self.assertIn("boundary inputs not stable", result.stderr)
+                self.assertNotIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
                 (after / name).write_bytes(original)
+            original = (after / "inputs.sha256").read_bytes()
+            digest, paths = original.split(maxsplit=1)
+            other = b"0" * 64 if digest != b"0" * 64 else b"1" * 64
+            (after / "inputs.sha256").write_bytes(other + b" " + paths)
+            result = self.run_verify("identity", "compare", before, after)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+            self.assertIn("boundary inputs not stable", result.stderr)
+            self.assertNotIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            (after / "inputs.sha256").write_bytes(original)
             result = self.run_verify("identity", "compare", before, Path(temp) / "missing")
             self.assertNotEqual(result.returncode, 0)
             with tempfile.TemporaryDirectory(dir=ROOT, prefix=".receipt-executed-") as scratch:
@@ -301,6 +319,11 @@ class Selectors(unittest.TestCase):
                                      env=env, cwd=repo)
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            # The zero-row guard's own message, not just the token: without the
+            # guard this path degrades to "misses inputs the snapshot record
+            # names", which the UNKNOWN token alone cannot distinguish.
+            self.assertIn("inputs.blob has zero rows", result.stderr)
+            self.assertIn("boundary inputs not observable", result.stderr)
             self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
             for (snapshot, witness), payload in saved.items():
                 (snapshot / witness).write_bytes(payload)
@@ -315,6 +338,8 @@ class Selectors(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0, witness)
                     self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
                     self.assertIn(witness, result.stderr)
+                    self.assertIn(f"{witness} has zero rows", result.stderr)
+                    self.assertIn("boundary inputs not observable", result.stderr)
                     self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
                     (target / witness).write_bytes(payload)
 
@@ -336,6 +361,7 @@ class Selectors(unittest.TestCase):
                 # One side emptied is unobservable. DRIFT-CONTENT would assert
                 # an input-set change that the witness never showed.
                 self.assertNotIn("SOURCE-IDENTITY-DRIFT-CONTENT", result.stderr)
+                self.assertIn("boundary inputs not observable", result.stderr)
                 self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
                 (after / witness).write_bytes(saved)
 
@@ -418,6 +444,156 @@ class Selectors(unittest.TestCase):
                 self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
                 self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
                 (after / name).write_bytes(saved)
+
+    def test_identity_compare_refuses_an_evidence_free_witness(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            saved = {(snapshot, witness): (snapshot / witness).read_bytes()
+                     for snapshot in (before, after)
+                     for witness in ("inputs.blob", "inputs.stat")}
+            # Keys with no evidence: path\t (width 2) and path\t\t\t\t (width 5).
+            for (snapshot, witness), payload in saved.items():
+                rows = [row.split(b"\t")[0] + b"\t" * (len(row.split(b"\t")) - 1)
+                        for row in payload.splitlines()]
+                (snapshot / witness).write_bytes(b"\n".join(rows) + b"\n")
+            # Two empty-cell witnesses compared equal and certified STABLE-OK
+            # with nothing observed: that is the false PASS this pin keeps shut.
+            result = self.run_verify("identity", "compare", before, after,
+                                     env=env, cwd=repo)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertIn("incomplete", result.stderr)
+            self.assertIn("boundary inputs not observable", result.stderr)
+            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+            for (snapshot, witness), payload in saved.items():
+                (snapshot / witness).write_bytes(payload)
+
+    def test_identity_compare_refuses_an_empty_head_or_env_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name in ("head", "env"):
+                saved = {snapshot: (snapshot / name).read_bytes()
+                         for snapshot in (before, after)}
+                # Zero bytes on BOTH sides: presence alone compared them equal
+                # and claimed the record identical without a value.
+                for snapshot in (before, after):
+                    (snapshot / name).write_bytes(b"")
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+                self.assertNotEqual(result.returncode, 0, name)
+                self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                self.assertIn(f"{name} empty", result.stderr)
+                self.assertIn("boundary inputs not observable", result.stderr)
+                self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+                for snapshot, payload in saved.items():
+                    (snapshot / name).write_bytes(payload)
+
+    def test_identity_compare_refuses_a_witness_that_invents_an_input(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            saved = (after / "inputs.blob").read_bytes()
+            (after / "inputs.blob").write_bytes(
+                saved + b"invented/input\t" + b"0" * 64 + b"\n")
+            # A row the snapshot's own content record never named is invented
+            # evidence: it must be refused by name, not diffed as a drift.
+            result = self.run_verify("identity", "compare", before, after,
+                                     env=env, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertIn("invented/input", result.stderr)
+            self.assertIn("boundary inputs not observable", result.stderr)
+            self.assertNotIn("SOURCE-IDENTITY-DRIFT-CONTENT", result.stderr)
+            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+            (after / "inputs.blob").write_bytes(saved)
+
+    def test_identity_compare_refuses_a_non_utf8_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name in ("inputs.blob", "inputs.stat", "inputs.sha256"):
+                saved = (after / name).read_bytes()
+                # A record that is not UTF-8 cannot be observed. An uncaught
+                # decode error is a traceback that exits 1, which reads as drift.
+                (after / name).write_bytes(b"\xff\xfe\x00not utf-8\n")
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+                self.assertNotEqual(result.returncode, 0, name)
+                self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                self.assertIn(name, result.stderr)
+                self.assertIn("boundary inputs not observable", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+                (after / name).write_bytes(saved)
+
+    @unittest.skipIf(os.geteuid() == 0,
+                     "root can read a mode-000 record; the unreadable shape is unavailable")
+    def test_identity_compare_refuses_an_unreadable_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            record = after / "head"
+            saved = record.read_bytes()
+            record.chmod(0o000)
+            try:
+                # cmp refuses to read the operand (exit 2). That is an
+                # unobservable record, never a CHANGED verdict about its value.
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+            finally:
+                record.chmod(0o644)
+            self.assertEqual(record.read_bytes(), saved)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertIn("head uncomparable", result.stderr)
+            self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+            self.assertIn("boundary inputs not observable", result.stderr)
+            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+
+    def test_identity_compare_refuses_an_absent_python3_as_unknown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name in ("sh", "cmp"):
+                found = shutil.which(name)
+                self.assertIsNotNone(found, name)
+                (tools / name).symlink_to(found)
+            # No interpreter means the witness was never examined: an absent
+            # tool is unobservable, never a drift about the inputs themselves.
+            result = self.run_verify("identity", "compare", before, after,
+                                     env={**env, "PATH": str(tools)}, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("python3 required", result.stderr)
+            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertIn("boundary inputs not observable", result.stderr)
+            self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
 
     def test_snapshot_refuses_a_failed_witness_producer(self):
         with tempfile.TemporaryDirectory() as temp:
