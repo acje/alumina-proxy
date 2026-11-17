@@ -2682,8 +2682,10 @@ HEREDOC_OPENER = re.compile(
     r"|([A-Za-z_][A-Za-z0-9_]*))")
 # `&`, `&&`, `||`, `;` and `;;` each terminate a command and introduce the one
 # that follows, so the text after the last one is the region that decides the
-# command word: `true & bounded_suite ...` runs the helper in this shell.
-INTRODUCER = re.compile(r"&&|\|\||;;|;&|[&|;]")
+# command word: `true & bounded_suite ...` runs the helper in this shell. A
+# `pattern)` case arm introduces its body the same way, so the closing paren of
+# an arm is an introducer and the arm body stays a current-shell call.
+INTRODUCER = re.compile(r"&&|\|\||;;|;&|[&|;)]")
 
 
 def quote_states(line):
@@ -2798,6 +2800,80 @@ def heredoc_body_lines(text):
     return bodies
 
 
+def quote_span_shape(line, at):
+    """The shape of a quote opened at `at`.
+
+    A quote opens a span whose contents are read by whoever the opening line
+    hands them to, so `sh -c '` names the nested shell and a lone quote names a
+    string no shell evaluates. The line that closes the span never decides."""
+    return "nested shell" if NESTED_SHELL.search(line[:at]) else "quoted string"
+
+
+def carried_span_shapes(text, bodies):
+    """Per line and column, the shape of the span still open from an earlier line.
+
+    A quote, `$(` or backtick that survives the newline reads its contents in a
+    child shell -- or in no shell at all -- so a call written there can never
+    declare anything this reader sees. The scan state is therefore carried
+    across the line loop, the way here-document bodies are precomputed. A
+    here-document body and a comment line are not code, so they neither open
+    nor carry a span. The innermost span wins, and it is named by the line that
+    opened it."""
+    carried = [()]
+    spans = []                          # innermost last: kind, shape, line, depth
+    for number, line in enumerate(text.splitlines(), 1):
+        shapes = [None] * len(line)
+        carried.append(shapes)
+        if number in bodies or line.strip().startswith("#"):
+            continue
+        escaped = False
+        for index, character in enumerate(line):
+            for _kind, shape, opened, _depth in reversed(spans):
+                if opened < number:
+                    shapes[index] = shape
+                    break
+            if escaped:
+                escaped = False
+                continue
+            kind = spans[-1][0] if spans else ""
+            if kind == "single":
+                if character == "'":
+                    spans.pop()
+                continue
+            if kind == "double":
+                if character == "\\":
+                    escaped = True
+                elif character == '"':
+                    spans.pop()
+                elif line.startswith("$(", index):
+                    spans.append(["substitution", "command substitution", number, 0])
+                elif character == "`":
+                    spans.append(["backticks", "backticks", number, 0])
+                continue
+            if kind == "backticks":
+                if character == "`":
+                    spans.pop()
+                continue
+            if kind == "substitution":
+                if character == "(":
+                    spans[-1][3] += 1
+                elif character == ")":
+                    spans[-1][3] -= 1
+                    if spans[-1][3] == 0:
+                        spans.pop()
+                continue
+            if character == "\\":
+                escaped = True
+            elif line.startswith("$(", index):
+                spans.append(["substitution", "command substitution", number, 0])
+            elif character == "`":
+                spans.append(["backticks", "backticks", number, 0])
+            elif character in "'\"":
+                spans.append(["single" if character == "'" else "double",
+                              quote_span_shape(line, index), number, 0])
+    return carried
+
+
 def scan_bounded_suite_call_sites(text):
     """(accepted, refused) for every `bounded_suite` occurrence in a script.
 
@@ -2806,13 +2882,16 @@ def scan_bounded_suite_call_sites(text):
     allowance is applied only to what survives it, so an allowance can never
     act as a line filter over a raw span. Every occurrence on a line is
     examined, not just the first, because a second call on a known line is
-    exactly where a lossy shape hides.
+    exactly where a lossy shape hides. A span opened on an earlier line is
+    carried into the columns it still covers, so the newline cannot launder a
+    child shell into the current one.
 
     Each entry is `(line_number, shape, line)`. Refusals name the line and the
     shape; accepted entries carry the shape too, so a count mismatch has
     something readable to report and the anchor is never the only witness."""
     accepted, refused = [], []
     bodies = heredoc_body_lines(text)
+    carried = carried_span_shapes(text, bodies)
     for number, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
         if stripped.startswith("#") or stripped.startswith("bounded_suite() {"):
@@ -2822,6 +2901,10 @@ def scan_bounded_suite_call_sites(text):
                 refused.append((number, "heredoc body", stripped))
             continue
         for match in BOUNDED_SUITE_TOKEN.finditer(line):
+            shape = carried[number][match.start()]
+            if shape is not None:
+                refused.append((number, shape, stripped))
+                continue
             shape = lossy_call_shape(line, match.start())
             if shape is not None:
                 refused.append((number, shape, stripped))
@@ -2960,6 +3043,60 @@ class ChannelSoundness(unittest.TestCase):
         self.assertEqual([shape for _, shape, _ in refused], ["background"],
                          f"a trailing `&` still backgrounds the call: {refused}")
         self.assertEqual(refused[0][0], first_planted)
+
+    CALL = "bounded_suite cargo atest -p alumina --lib"
+
+    # A span that opens on one line and closes on another is still the child
+    # shell's, so the scan state has to survive the newline. The three executing
+    # forms plus a plain quoted string, which no shell evaluates at all.
+    CROSS_LINE_SPANS = (
+        ("command substitution",
+         f"x=$(\n  {CALL}\n)"),
+        ("backticks",
+         f"x=`\n  {CALL}\n`"),
+        ("nested shell",
+         f"sh -c '\n  {CALL}\n'"),
+        ("quoted string",
+         f"x='\n  {CALL}\n'"),
+    )
+
+    def test_a_span_open_across_lines_carries_its_child_shell_shape(self):
+        """Red on bfe63d7 for all four: the scan state was rebuilt on every
+        line, so a `$(`, a backtick, a `sh -c '` and a plain quote opened on
+        line 1 all left the line-2 token reading as a current-shell call."""
+        for expected, probe in self.CROSS_LINE_SPANS:
+            with self.subTest(shape=expected, probe=probe):
+                accepted, refused = scan_bounded_suite_call_sites(probe + "\n")
+                self.assertEqual(accepted, [],
+                                 "a call inside a carried span was accepted")
+                self.assertEqual(
+                    refused, [(2, expected, self.CALL)],
+                    f"the carried {expected} span was not named at line 2: "
+                    f"{refused}")
+
+    def test_a_case_arm_body_is_a_current_shell_call(self):
+        """Red on bfe63d7: the `foundations)` arm pattern stayed in the command
+        word, so a legitimate case arm was refused as a lossy shape."""
+        probe = f'case "$1" in\n  foundations) {self.CALL} ;;\nesac\n'
+        accepted, refused = scan_bounded_suite_call_sites(probe)
+        self.assertEqual(refused, [])
+        self.assertEqual(accepted, [(2, "current-shell call",
+                                     f"foundations) {self.CALL} ;;")])
+
+    def test_a_call_outside_every_carried_span_stays_a_current_shell_site(self):
+        """The carried layer must widen the hazard set, never filter lines: a
+        plain call, a `&&`-introduced call and a backslash-continued call all
+        stay accepted, while a trailing `&` is still the `background` refusal."""
+        for probe in (self.CALL, f"true && {self.CALL}",
+                      f"{self.CALL} \\\n  -p alumina --lib"):
+            with self.subTest(probe=probe):
+                accepted, refused = scan_bounded_suite_call_sites(probe + "\n")
+                self.assertEqual(refused, [])
+                self.assertEqual(accepted, [(1, "current-shell call",
+                                             probe.splitlines()[0])])
+        accepted, refused = scan_bounded_suite_call_sites(f"{self.CALL} &\n")
+        self.assertEqual(accepted, [])
+        self.assertEqual([shape for _, shape, _ in refused], ["background"])
 
     def test_the_anchor_is_a_backstop_and_names_the_line_it_cannot_count(self):
         """`bounded_suite "$@"` is a legitimate current-shell call, so no shape
