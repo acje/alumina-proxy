@@ -1738,6 +1738,85 @@ identity_snapshot_hash_batch() {
     rm -f "$errf"
 }
 
+# Record the worktree blob identity of every identity input in ONE
+# `git hash-object --stdin-paths` batch: a worktree read, never an index write.
+# Paths are sorted so an unchanged pair compares byte-identically and a changed
+# input set surfaces as a named drift rather than a positional surprise.
+identity_snapshot_blob_batch() {
+    dir="$1"
+    command -v git >/dev/null 2>&1 || {
+        echo "SOURCE-IDENTITY FAIL: git required for blob identity, not found (not PASS)" >&2
+        exit 1
+    }
+    paths="$dir/inputs.blob.paths"
+    shas="$dir/inputs.blob.shas"
+    errf="$dir/inputs.blob.err"
+    # shellcheck disable=SC2086
+    printf '%s\n' $IDENTITY_FILES | LC_ALL=C sort >"$paths" || {
+        echo "SOURCE-IDENTITY FAIL: blob path list failed (not PASS)" >&2
+        exit 1
+    }
+    rc=0
+    git hash-object --stdin-paths <"$paths" >"$shas" 2>"$errf" || rc=$?
+    [ "$rc" -eq 0 ] || {
+        echo "SOURCE-IDENTITY FAIL: blob batch exit $rc (read failure, not PASS)" >&2
+        if [ -s "$errf" ]; then
+            echo "  git stderr:" >&2
+            sed 's/^/    /' "$errf" >&2
+        fi
+        rm -f "$paths" "$shas" "$errf"
+        exit 1
+    }
+    npaths=$(wc -l <"$paths")
+    nshas=$(wc -l <"$shas")
+    [ "$npaths" -eq "$nshas" ] || {
+        echo "SOURCE-IDENTITY FAIL: blob batch returned $nshas hashes for $npaths inputs (mismatch, not PASS)" >&2
+        rm -f "$paths" "$shas" "$errf"
+        exit 1
+    }
+    paste "$paths" "$shas" >"$dir/inputs.blob" || {
+        echo "SOURCE-IDENTITY FAIL: blob record assembly failed (not PASS)" >&2
+        rm -f "$paths" "$shas" "$errf"
+        exit 1
+    }
+    rm -f "$paths" "$shas" "$errf"
+}
+
+# Record the filesystem stat witness (ino, size, mtime_ns, ctime_ns) of every
+# identity input in ONE python3 pass. Content hashes cannot see a rewrite to
+# the same bytes; this tuple can, and it is ordered by path with a fixed field
+# order so an unchanged pair compares byte-identically.
+identity_snapshot_stat_batch() {
+    dir="$1"
+    command -v python3 >/dev/null 2>&1 || {
+        echo "SOURCE-IDENTITY FAIL: python3 required for the stat witness, not found (not PASS)" >&2
+        exit 1
+    }
+    errf="$dir/inputs.stat.err"
+    # shellcheck disable=SC2086
+    python3 -c '
+import os
+import sys
+
+for path in sorted(sys.argv[1:]):
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        sys.stderr.write("stat witness: %s: %s\n" % (path, exc))
+        sys.exit(1)
+    sys.stdout.write("%s\t%d\t%d\t%d\t%d\n" % (
+        path, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+' $IDENTITY_FILES >"$dir/inputs.stat" 2>"$errf" || {
+        echo "SOURCE-IDENTITY FAIL: stat pass failed (not PASS)" >&2
+        if [ -s "$errf" ]; then
+            sed 's/^/    /' "$errf" >&2
+        fi
+        rm -f "$errf"
+        exit 1
+    }
+    rm -f "$errf"
+}
+
 # The effective build env as one record: declared knobs, supply-chain pins and
 # the Cargo config inventory. The single redirect owns the file, so a failure
 # mid-record leaves exactly the lines already produced.
@@ -1890,32 +1969,140 @@ identity_snapshot_env_container() {
     printf 'container_alias_block_sha256=%s\n' "$alihash"
 }
 
-# Boundary identity snapshot: HEAD, working-tree status, one digest per
-# identity input and the effective build env, all written under $dir. Each step
-# exits non-zero on its own failure, so a snapshot that returns 0 is complete.
+# Boundary identity snapshot: HEAD, working-tree status, one digest and one
+# blob/stat witness per identity input, and the effective build env, all
+# written under $dir. Each step exits non-zero on its own failure, so a
+# snapshot that returns 0 is complete.
 identity_snapshot() {
     dir="$1"
     identity_snapshot_head "$dir"
     identity_snapshot_hasher
     identity_snapshot_inputs_present
     identity_snapshot_hash_batch "$dir"
+    identity_snapshot_blob_batch "$dir"
+    identity_snapshot_stat_batch "$dir"
     identity_snapshot_env "$dir"
     echo "SOURCE-IDENTITY: snapshot $dir (HEAD=$head, inputs $(wc -l <"$dir/inputs.sha256"))"
+}
+
+# Compare the additive witness records. Content drift names the path and both
+# blob shas; stat-only drift names the UNCHANGED sha and the changed fields, so
+# a byte-identical rewrite is recorded and refused rather than lost. A
+# malformed or incomplete record is UNKNOWN: an older snapshot never passes
+# silently.
+identity_compare_witness() {
+    _before="$1"
+    _after="$2"
+    command -v python3 >/dev/null 2>&1 || {
+        echo "SOURCE-IDENTITY FAIL: python3 required for witness compare, not found (not PASS)" >&2
+        return 1
+    }
+    python3 - "$_before" "$_after" <<'PY'
+import sys
+
+FIELDS = ("ino", "size", "mtime_ns", "ctime_ns")
+
+
+def load(path, width):
+    rows = {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for lineno, line in enumerate(handle, 1):
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) != width or not parts[0]:
+                    sys.stderr.write(
+                        "SOURCE-IDENTITY-UNKNOWN FAIL: malformed %s line %d\n"
+                        % (path, lineno))
+                    sys.exit(2)
+                if parts[0] in rows:
+                    sys.stderr.write(
+                        "SOURCE-IDENTITY-UNKNOWN FAIL: duplicate %s in %s\n"
+                        % (parts[0], path))
+                    sys.exit(2)
+                rows[parts[0]] = tuple(parts[1:])
+    except OSError as exc:
+        sys.stderr.write(
+            "SOURCE-IDENTITY-UNKNOWN FAIL: %s unreadable: %s\n" % (path, exc))
+        sys.exit(2)
+    return rows
+
+
+before_dir, after_dir = sys.argv[1], sys.argv[2]
+before_blob = load(before_dir + "/inputs.blob", 2)
+after_blob = load(after_dir + "/inputs.blob", 2)
+before_stat = load(before_dir + "/inputs.stat", 5)
+after_stat = load(after_dir + "/inputs.stat", 5)
+
+drift = False
+if set(before_blob) != set(before_stat) or set(after_blob) != set(after_stat):
+    sys.stderr.write(
+        "SOURCE-IDENTITY-UNKNOWN FAIL: blob and stat witnesses cover different inputs\n")
+    drift = True
+
+for path in sorted(set(before_blob) | set(after_blob)):
+    old, new = before_blob.get(path), after_blob.get(path)
+    if old is None or new is None:
+        where = "before-only" if new is None else "after-only"
+        sys.stderr.write(
+            "SOURCE-IDENTITY-DRIFT-CONTENT: input set changed: %s %s\n" % (path, where))
+        drift = True
+        continue
+    if old[0] != new[0]:
+        sys.stderr.write(
+            "SOURCE-IDENTITY-DRIFT-CONTENT: %s blob sha %s -> %s\n"
+            % (path, old[0], new[0]))
+        drift = True
+        continue
+    old_stat, new_stat = before_stat.get(path), after_stat.get(path)
+    if old_stat is None or new_stat is None:
+        where = "before-only" if new_stat is None else "after-only"
+        sys.stderr.write(
+            "SOURCE-IDENTITY-UNKNOWN FAIL: stat witness %s %s\n" % (path, where))
+        drift = True
+        continue
+    if old_stat != new_stat:
+        changed = ", ".join(
+            "%s %s -> %s" % (label, left, right)
+            for label, left, right in zip(FIELDS, old_stat, new_stat)
+            if left != right)
+        sys.stderr.write(
+            "SOURCE-IDENTITY-DRIFT-BYTE-IDENTICAL: %s blob sha %s unchanged; "
+            "stat changed: %s\n" % (path, old[0], changed))
+        drift = True
+
+sys.exit(1 if drift else 0)
+PY
 }
 
 identity_compare() {
     before="$1"
     after="$2"
     ok=1
+    witness_ready=1
+    for _witness in inputs.blob inputs.stat; do
+        for _dir in "$before" "$after"; do
+            [ -f "$_dir/$_witness" ] || {
+                echo "SOURCE-IDENTITY-UNKNOWN FAIL: $_witness missing from $_dir (snapshot predates the witness, not PASS)" >&2
+                ok=0
+                witness_ready=0
+            }
+        done
+    done
     cmp -s "$before/head" "$after/head" || { echo "SOURCE-IDENTITY-CHANGED FAIL: HEAD differs before/after" >&2; ok=0; }
     cmp -s "$before/status" "$after/status" || { echo "SOURCE-IDENTITY-CHANGED FAIL: working-tree status differs before/after" >&2; ok=0; }
     cmp -s "$before/inputs.sha256" "$after/inputs.sha256" || { echo "SOURCE-IDENTITY-CHANGED FAIL: input hashes differ before/after" >&2; ok=0; }
     cmp -s "$before/env" "$after/env" || { echo "SOURCE-IDENTITY-CHANGED FAIL: build env differs before/after" >&2; ok=0; }
+    if [ "$witness_ready" -eq 1 ]; then
+        identity_compare_witness "$before" "$after" || ok=0
+    fi
     [ "$ok" -eq 1 ] || {
         echo "SOURCE-IDENTITY-CHANGED FAIL: boundary inputs not stable; refusing completion markers" >&2
         exit 1
     }
-    echo "SOURCE-IDENTITY-STABLE-OK (HEAD, status, inputs and env identical before/after)"
+    echo "SOURCE-IDENTITY-STABLE-OK (HEAD, status, input content, blob and stat witness, and env identical before/after)"
 }
 
 # G8-C22: pin supply-chain tool versions; a drift from the accepted versions

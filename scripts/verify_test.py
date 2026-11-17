@@ -41,6 +41,45 @@ def extract_gates():
 GATES = extract_gates()
 
 
+def synthetic_identity_repo(temp):
+    """A synthetic repo carrying every identity input and a git stub that
+    answers the three reads a snapshot makes (HEAD, status, blob hashes). The
+    tests drive the shipped `sh scripts/verify.sh identity ...` path; the
+    predicate under test is never re-implemented in Python here."""
+    repo, tools = temp / "repo", temp / "tools"
+    (repo / "scripts").mkdir(parents=True)
+    tools.mkdir()
+    script = ROOT / "scripts/verify.sh"
+    shutil.copyfile(script, repo / "scripts/verify.sh")
+    prefix = script.read_text().split("# Keep snapshot locations", 1)[0]
+    files = subprocess.check_output(
+        ["sh", "-c", prefix + '\nprintf "%s\\n" "$IDENTITY_FILES"',
+         "sh", "identity", "snapshot"], cwd=repo, text=True,
+    ).split()
+    for name in files:
+        if name == "scripts/verify.sh":
+            continue
+        dest = repo / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(f"synthetic input: {name}\n")
+    (repo / "scripts/cargo_config_probe.py").write_text('print("absent")\n')
+    git = tools / "git"
+    git.write_text('''#!/bin/sh
+case "$*" in
+  'rev-parse --verify HEAD') printf 'fixture-head\\n';;
+  'status --porcelain') [ "${FIXTURE_STATUS_FAIL:-0}" = 0 ] || exit 42; printf ' M %s\\n' "$FIXTURE_INPUT";;
+  'hash-object --stdin-paths')
+    [ "${FIXTURE_BLOB_FAIL:-0}" = 0 ] || exit 43
+    while IFS= read -r path; do shasum -a 256 "$path" | cut -d' ' -f1; done;;
+  *) exit 1;;
+esac
+''')
+    git.chmod(0o755)
+    env = {"PATH": f"{tools}:{os.environ['PATH']}", "FIXTURE_INPUT": "AGENTS.md",
+           "CARGO_HOME": str(temp / "cargo-home")}
+    return repo, tools, env, files
+
+
 class Selectors(unittest.TestCase):
     def run_verify(self, *args, env=None, cwd=ROOT):
         return subprocess.run(
@@ -67,42 +106,16 @@ class Selectors(unittest.TestCase):
     def test_dirty_agents_content_drift_is_detected(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)
-            repo, tools = temp / "repo", temp / "tools"
-            (repo / "scripts").mkdir(parents=True)
-            tools.mkdir()
-            script = ROOT / "scripts/verify.sh"
-            shutil.copyfile(script, repo / "scripts/verify.sh")
-            prefix = script.read_text().split("# Keep snapshot locations", 1)[0]
-            files = subprocess.check_output(
-                ["sh", "-c", prefix + '\nprintf "%s\\n" "$IDENTITY_FILES"',
-                 "sh", "identity", "snapshot"], cwd=repo, text=True,
-            ).split()
+            repo, _tools, env, files = synthetic_identity_repo(temp)
             representatives = {"Cargo.toml", "src/main.rs", ".gitignore", "AGENTS.md",
                                "scripts/verify.sh", "scripts/verify_test.py",
                                "docs/qa-package/validate.sh", "docs/qa-package/validate_test.py"}
             self.assertTrue(representatives <= set(files))
-            for name in files:
-                if name == "scripts/verify.sh":
-                    continue
-                dest = repo / name
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(f"synthetic input: {name}\n")
-            (repo / "scripts/cargo_config_probe.py").write_text('print("absent")\n')
-            git = tools / "git"
-            git.write_text('''#!/bin/sh
-case "$*" in
-  'rev-parse --verify HEAD') printf 'fixture-head\\n';;
-  'status --porcelain') [ "${FIXTURE_STATUS_FAIL:-0}" = 0 ] || exit 42; printf ' M %s\\n' "$FIXTURE_INPUT";;
-  *) exit 1;;
-esac
-''')
-            git.chmod(0o755)
             for name in ("AGENTS.md", "docs/qa-package/validate.sh", "docs/qa-package/validate_test.py"):
                 path = repo / name
                 baseline = path.read_bytes()
                 path.write_bytes(baseline + b"\nfixture dirty one\n")
-                env = {"PATH": f"{tools}:{os.environ['PATH']}", "FIXTURE_INPUT": name,
-                       "CARGO_HOME": str(temp / "cargo-home")}
+                env = {**env, "FIXTURE_INPUT": name}
                 before, after = temp / "before", temp / "after"
                 result = self.run_verify("identity", "snapshot", before, env=env, cwd=repo)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -170,6 +183,135 @@ esac
                 result = self.run_verify(*args, env=env)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("SOURCE-IDENTITY FAIL", result.stderr)
+
+    def _blob_sha(self, snapshot, name):
+        for line in (snapshot / "inputs.blob").read_text().splitlines():
+            path, sha = line.split("\t")
+            if path == name:
+                return sha
+        self.fail(f"{name} absent from {snapshot}/inputs.blob")
+
+    def _stat_tuple(self, snapshot, name):
+        for line in (snapshot / "inputs.stat").read_text().splitlines():
+            path, ino, size, mtime, ctime = line.split("\t")
+            if path == name:
+                return (ino, size, mtime, ctime)
+        self.fail(f"{name} absent from {snapshot}/inputs.stat")
+
+    def test_identity_compare_stable_on_untouched_pair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((before / "inputs.blob").is_file())
+            self.assertTrue((before / "inputs.stat").is_file())
+            result = self.run_verify("identity", "compare", before, after, env=env, cwd=repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("SOURCE-IDENTITY-STABLE-OK", result.stdout)
+
+    def test_byte_identical_rewrite_is_refused_by_the_stat_witness(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            target = repo / "src/main.rs"
+            before, after = temp / "before", temp / "after"
+            result = self.run_verify("identity", "snapshot", before, env=env, cwd=repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            original = target.read_bytes()
+            before_sha = self._blob_sha(before, "src/main.rs")
+            before_stat = self._stat_tuple(before, "src/main.rs")
+            # Same bytes, forced distinct mtime: neither the worktree sha256 nor
+            # the git blob sha can see this rewrite; only the stat tuple can.
+            target.write_bytes(original)
+            forced = 1_000_000_000
+            os.utime(target, ns=(forced, forced))
+            result = self.run_verify("identity", "snapshot", after, env=env, cwd=repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self._blob_sha(after, "src/main.rs"), before_sha)
+            self.assertNotEqual(self._stat_tuple(after, "src/main.rs"), before_stat)
+            for record in ("inputs.sha256", "inputs.blob"):
+                self.assertEqual((before / record).read_bytes(),
+                                 (after / record).read_bytes(), record)
+            result = self.run_verify("identity", "compare", before, after, env=env, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY-DRIFT-BYTE-IDENTICAL", result.stderr)
+            self.assertIn("src/main.rs", result.stderr)
+            self.assertIn(before_sha, result.stderr)
+            self.assertIn("mtime_ns", result.stderr)
+
+    def test_identity_compare_names_a_content_drift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            target = repo / "src/main.rs"
+            before, after = temp / "before", temp / "after"
+            result = self.run_verify("identity", "snapshot", before, env=env, cwd=repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            before_sha = self._blob_sha(before, "src/main.rs")
+            target.write_text("synthetic input: src/main.rs changed\n")
+            result = self.run_verify("identity", "snapshot", after, env=env, cwd=repo)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            after_sha = self._blob_sha(after, "src/main.rs")
+            self.assertNotEqual(after_sha, before_sha)
+            result = self.run_verify("identity", "compare", before, after, env=env, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY-DRIFT-CONTENT", result.stderr)
+            self.assertIn("src/main.rs", result.stderr)
+            self.assertIn(before_sha, result.stderr)
+            self.assertIn(after_sha, result.stderr)
+
+    def test_identity_compare_refuses_a_snapshot_without_the_witness(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for witness in ("inputs.blob", "inputs.stat"):
+                saved = (after / witness).read_bytes()
+                (after / witness).unlink()
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+                self.assertNotEqual(result.returncode, 0, witness)
+                self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                self.assertIn(witness, result.stderr)
+                (after / witness).write_bytes(saved)
+
+    def test_snapshot_refuses_a_failed_witness_producer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            result = self.run_verify("identity", "snapshot", temp / "blob-fail",
+                                     env={**env, "FIXTURE_BLOB_FAIL": "1"}, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY FAIL", result.stderr)
+            self.assertIn("blob batch exit 43", result.stderr)
+            shim = temp / "python3"
+            shim.write_text("#!/bin/sh\nexit 44\n")
+            shim.chmod(0o755)
+            result = self.run_verify("identity", "snapshot", temp / "stat-fail",
+                                     env={**env, "PATH": f"{temp}:{env['PATH']}"}, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY FAIL", result.stderr)
+            self.assertIn("stat pass failed", result.stderr)
+
+    def test_snapshot_refuses_an_absent_python3(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, tools, env, _files = synthetic_identity_repo(temp)
+            for name in ("sh", "mkdir", "shasum", "sed", "sort", "paste", "wc", "rm", "cut"):
+                found = shutil.which(name)
+                self.assertIsNotNone(found, name)
+                (tools / name).symlink_to(found)
+            result = self.run_verify("identity", "snapshot", temp / "no-python3",
+                                     env={**env, "PATH": str(tools)}, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY FAIL", result.stderr)
+            self.assertIn("python3 required", result.stderr)
 
     def test_audit_deny_pins_and_failures(self):
         with tempfile.TemporaryDirectory() as temp:
