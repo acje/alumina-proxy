@@ -206,6 +206,10 @@ inv-work verified-by vq-resource
 
 ## Naming debt
 
+Derived by mapping every term above to the code symbol that realises it, then flagging symbols whose noun differs from the term's noun. Churn is `rg` counts over `src` and `tests` at authoring time (files / references): it ranks the proposals and warns about cost, it does not gate them.
+
+A name is flagged when it describes storage or layout instead of meaning (`Fixed`, `Slot`, `Entry`, `Serving`), describes progress where the type is terminal (`ConnectPhase`), abbreviates a word nobody says (`Ch`), generalises past its own range (`AdmissionError` means capacity only), or spends one word on two concepts (`gate`, `serving`, `Outcome`). Names that already speak the language are left alone. Proposals are not applied changes: the target term is settled here first, then each rename ships as its own increment, with an alias across the widest-churn case.
+
 | ID | Current | Proposed | Why | Churn |
 |---|---|---|---|---|
 | `latch` | `FirstSlot` | `FirstIllegalLatch` | "slot" is a tunnel-slot noun | 96 refs / 8 files |
