@@ -14,12 +14,13 @@
 //!   stdout: an empty stdout is the proof that no serving banner is printed
 //!   before the boot decision;
 //! - on Linux, `run_boot` reads `/proc/self/status` and refuses an unmet
-//!   privilege prerequisite *before* it opens the config document, so a
-//!   config-stage diagnostic is itself evidence that the preflight ran and
-//!   passed (`src/boot/preflight.rs`). The child is spawned with the tested
+//!   privilege prerequisite before it opens the config document
+//!   (`src/boot/preflight.rs`). The child is spawned with the tested
 //!   prerequisites — unprivileged UID, empty capability sets, `no_new_privs` —
 //!   because a container-root child would legitimately be refused for its own
-//!   root UID instead of reaching the config stage.
+//!   root UID instead of reaching the config stage. That ordering is not
+//!   observable from outside: with every prerequisite satisfied, swapping the
+//!   two `run_boot` steps yields the same exit code and stderr.
 //!
 //! Off Linux the same spawn pins the other documented arm: the preflight has no
 //! kernel probe to read, so it refuses with `PreflightError::NotLinux`
@@ -28,8 +29,9 @@
 //! binary that silently passes.
 //!
 //! Prove / not prove. Proven: the real binary's boot-failure exit code, the
-//! stderr diagnostic channel, the preflight-before-config ordering on Linux,
-//! and that a failed boot writes no serving banner to stdout. NOT proven: the
+//! stderr diagnostic channel, and that a failed boot writes no serving banner
+//! to stdout. NOT proven: the preflight-before-config ordering, which no
+//! outside observation can separate while the prerequisites hold, and the
 //! serving path — no listener is bound, no CONNECT is attempted, and the
 //! 403/no-serving exchange against the real binary is not exercised here; the
 //! serving half is deferred.
@@ -171,9 +173,9 @@ fn ex_config_failure(output: &Output, scenario: &str) -> String {
 /// A missing config document: the config stage refuses, stdout stays clean.
 ///
 /// The diagnostic is checked only for a stable substring (it names the config
-/// input) and for the absence of the preflight diagnostic: on Linux the
-/// preflight is read and checked before the config document is opened, so
-/// reaching the config stage is itself the ordering evidence.
+/// input) and for the absence of the preflight diagnostic. Which of the two
+/// boot steps ran first is not observable from outside once the prerequisites
+/// are satisfied, so this test claims no ordering.
 #[cfg(target_os = "linux")]
 #[test]
 fn missing_config_exits_ex_config_without_serving() {
@@ -191,11 +193,12 @@ fn missing_config_exits_ex_config_without_serving() {
     );
 }
 
-/// A malformed config document: the same exit code and channel, but the
-/// diagnostic is the parse refusal rather than a hosting prerequisite.
+/// A malformed config document the child can read: the same exit code and
+/// channel, refused by parse/validation instead of by an unreadable document
+/// or a hosting prerequisite — the wrong-reason trap `write_config` names.
 #[cfg(target_os = "linux")]
 #[test]
-fn malformed_config_exits_ex_config_with_the_field_diagnostic() {
+fn malformed_config_exits_ex_config_with_a_parse_diagnostic() {
     let dir = ScratchDir::new("malformed");
     write_config(dir.path(), "bogus = [");
     let output = run_in(dir.path());
@@ -204,6 +207,17 @@ fn malformed_config_exits_ex_config_with_the_field_diagnostic() {
     assert!(
         lowered.contains("config"),
         "the diagnostic must name the config input; stderr was: {stderr:?}"
+    );
+    assert!(
+        !lowered.contains("unreadable"),
+        "the child must have READ the document, so the refusal is parse/validation, \
+         not a read failure (`ConfigError::Unreadable` in src/config/mod.rs); \
+         stderr was: {stderr:?}"
+    );
+    assert!(
+        !lowered.contains("permission denied"),
+        "an unreadable document also reports a 'config' substring, so a permission \
+         refusal must fail here; stderr was: {stderr:?}"
     );
     assert!(
         !lowered.contains("prerequisite failure"),

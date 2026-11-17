@@ -962,11 +962,11 @@ mod workspace {
             .expect("high reply");
         let observed = reply.observe();
         let (kind, extreme, _raw_ad_fact) = observed.probe_facts();
-        assert_eq!(extreme, reply.extreme_ttl());
         assert_eq!(kind, PublishedKind::ResolvedPositive);
         assert!(
             extreme,
-            "the observed view carries the extreme flag from its reply"
+            "the observed view carries the extreme flag from its reply: the fixture's \
+             answer TTL is 400_000, above EXTREME_TTL_THRESHOLD"
         );
 
         // A validated NXDOMAIN with a 300-second SOA leaves the TTL well under

@@ -3015,6 +3015,26 @@ mod generation_tokens {
             "the canonical stored mask is the same field the token packs into"
         );
     }
+
+    #[test]
+    /// Pins the packed token layout as literals. The decode round-trip cannot
+    /// see a layout change because both sides share `GEN_SHIFT`: a generation
+    /// shifted to any other bit would still decode back. These literals fix the
+    /// generation field at `GEN_SHIFT` and slot 0 at local id 1 / `UPSTREAM_BASE`,
+    /// so an unshifted generation, a moved local-id base, or a generation that
+    /// spills into the local-id bits fails here.
+    fn packed_tokens_pin_the_generation_shift_and_local_id_base() {
+        assert_eq!(
+            client_token(1, 0).0,
+            (1usize << GEN_SHIFT) | 1,
+            "the client generation field starts at GEN_SHIFT and slot 0 is local id 1"
+        );
+        assert_eq!(
+            upstream_token(1, 0).0,
+            (1usize << GEN_SHIFT) | UPSTREAM_BASE,
+            "the upstream generation field starts at GEN_SHIFT and slot 0 is UPSTREAM_BASE"
+        );
+    }
 }
 
 mod dialing {

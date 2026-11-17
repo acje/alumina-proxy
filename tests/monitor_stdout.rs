@@ -115,12 +115,13 @@ fn assert_one_summary_per_second(summaries: &[&str], text: &str) {
     let first = secs[0];
     let last = secs[secs.len() - 1];
     assert!(
-        summaries.len() as u64 <= (last - first + 1) + 1,
-        "the monitor family coalesces to at most one summary per whole serving \
-         second, plus at most one forced terminal summary flushed by the owner at \
-         shutdown (`src/runtime/owner.rs::emit_terminal_shutdown_finish` -> \
-         `report_monitor_if_due(now, true)`), so {} summaries cannot span secs \
-         {first}..={last}: {text}",
+        summaries.len() as u64 <= (last - first + 1),
+        "this child's monitor family emits at most one summary per distinct whole \
+         serving second, so {} summaries cannot span secs {first}..={last}. It \
+         serves `LOOPS` refusals and returns from `child_main`, dropping the \
+         runtime, so the owner's forced terminal summary (`src/runtime/owner.rs::\
+         emit_terminal_shutdown_finish` -> `report_monitor_if_due(now, true)`) is \
+         never reached here and earns no allowance: {text}",
         summaries.len()
     );
 }
