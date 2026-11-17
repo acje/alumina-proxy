@@ -2022,10 +2022,18 @@ class InnerTest(unittest.TestCase):
                   'printf "%s\\n" "$*" >> "$WRAPPER_CALLS"\n'
                   'shift 3\n'
                   'exec "$@"\n')
+        # A PATH carrying the cargo stub but no wrapper at all: the
+        # absent-wrapper refusal is reachable even where the host has one.
+        self.cargo_only = self.temp / "cargo-only"
+        self.cargo_only.mkdir()
+        self.stub("cargo",
+                  'printf "%s\\n" "$*" >> "$CARGO_CALLS"\n'
+                  'printf "%s\\n" "${RUST_MIN_STACK-<unset>}" > "$STACK_SEEN"\n'
+                  'exit "${CARGO_RC-0}"\n', directory=self.cargo_only)
         self.driver = self.write_driver("inner.sh", extract_function("inner_test"))
 
-    def stub(self, name, body):
-        path = self.tools / name
+    def stub(self, name, body, directory=None):
+        path = (directory or self.tools) / name
         path.write_text("#!/bin/sh\n" + body)
         path.chmod(0o755)
 
@@ -2074,6 +2082,8 @@ class InnerTest(unittest.TestCase):
         note = self.describe(result)
         self.assertEqual(result.returncode, 0, note)
         self.assertIn("INNER-TEST-OK: foundations", result.stdout, note)
+        self.assertNotIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+        self.assertNotIn("INNER-TEST-OPERATIONAL-FAIL", result.stderr, note)
         shipped = shipped_min_stack()
         self.assertEqual(self.stack_seen.read_text().strip(), shipped, note)
         self.assertIn(f"RUST_MIN_STACK={shipped}", result.stdout, note)
@@ -2097,19 +2107,86 @@ class InnerTest(unittest.TestCase):
         self.assertFalse(self.wrapper_calls.exists(),
                          f"the wrapper was resolved under a refused stack budget: {note}")
 
+    # The helper's own refusal status, pinned as a literal: a test that read the
+    # number out of scripts/verify.sh could not tell a moved constant from a
+    # correct one. 69 is EX_UNAVAILABLE on every host this repo runs on.
+    REFUSAL_STATUS = 69
+
+    def test_every_refusal_returns_the_dedicated_status(self):
+        """All six shipped refusal sites return ONE status no wrapped command
+        owns, so the caller never has to infer a refusal from a shared number.
+
+        Each case names the marker line the shipped helper prints for that
+        refusal; cargo and the wrapper must both stay uninvoked, so nothing but
+        the refusal itself can produce this status."""
+        cases = (
+            ("stack non-numeric", {"GATE_SUITE_MIN_STACK": "16M"},
+             "GATE-SUITE-STACK-UNKNOWN"),
+            ("stack over the digit ceiling", {"GATE_SUITE_MIN_STACK": "9" * 19},
+             "GATE-SUITE-STACK-UNKNOWN"),
+            ("stack below the floor", {"GATE_SUITE_MIN_STACK": "1048576"},
+             "GATE-SUITE-STACK-UNKNOWN"),
+            ("budget non-numeric", {"GATE_SUITE_BUDGET_SECS": "600s"},
+             "GATE-SUITE-TIMEOUT-UNKNOWN"),
+            ("budget of zero", {"GATE_SUITE_BUDGET_SECS": "0"},
+             "GATE-SUITE-TIMEOUT-UNKNOWN"),
+            ("no wrapper on PATH", {"PATH": str(self.cargo_only)},
+             "GATE-SUITE-TIMEOUT-UNKNOWN"),
+        )
+        for name, env, marker in cases:
+            with self.subTest(refusal=name):
+                # Each case must prove cargo was never invoked by itself; a
+                # previous subTest's log would otherwise stand in for it.
+                self.calls.unlink(missing_ok=True)
+                self.wrapper_calls.unlink(missing_ok=True)
+                result = self.run_inner("foundations", env=env)
+                note = self.describe(result)
+                self.assertEqual(result.returncode, self.REFUSAL_STATUS, note)
+                self.assertIn(marker, result.stderr, note)
+                self.assertIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+                self.assertNotIn("INNER-TEST-TIMEOUT-FAIL", result.stderr, note)
+                self.assertNotIn("INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL",
+                                 result.stderr, note)
+                self.assertNotIn("INNER-TEST-OPERATIONAL-FAIL", result.stderr, note)
+                self.assertFalse(self.calls.exists(),
+                                 f"cargo ran under a refused {name}: {note}")
+                self.assertFalse(self.wrapper_calls.exists(),
+                                 f"the wrapper ran under a refused {name}: {note}")
+
+    def test_a_wrapped_status_is_never_read_as_a_refusal_or_an_assertion(self):
+        """The pass-through partition: a status a WRAPPED command returned is
+        never reported as a refusal or as an assertion verdict. 1 is the case
+        that mattered -- it is both a wrapped command's generic failure and what
+        the helper used to return -- and 2/125/126/127 are ordinary wrapper and
+        shell failures that used to land in the assertion arm."""
+        for status in (1, 2, 125, 126, 127):
+            with self.subTest(wrapped=status):
+                result = self.run_inner("foundations", env={"CARGO_RC": str(status)})
+                note = self.describe(result)
+                self.assertEqual(result.returncode, status, note)
+                self.assertIn("INNER-TEST-OPERATIONAL-FAIL", result.stderr, note)
+                self.assertNotIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+                self.assertNotIn("INNER-TEST-TIMEOUT-FAIL", result.stderr, note)
+                self.assertNotIn("INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL",
+                                 result.stderr, note)
+
     def test_a_killed_run_reports_the_budget_not_an_assertion(self):
         result = self.run_inner("foundations", env={"CARGO_RC": "124"})
         note = self.describe(result)
         self.assertEqual(result.returncode, 124, note)
         self.assertIn("INNER-TEST-TIMEOUT-FAIL", result.stderr, note)
         self.assertNotIn("INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL", result.stderr, note)
+        self.assertNotIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+        self.assertNotIn("INNER-TEST-OPERATIONAL-FAIL", result.stderr, note)
 
     def test_a_genuine_failing_assertion_still_points_at_the_mid_tier(self):
         result = self.run_inner("foundations", env={"CARGO_RC": "101"})
         note = self.describe(result)
         self.assertEqual(result.returncode, 101, note)
         self.assertIn("INNER-TEST-HOST-INCOMPATIBLE-OR-FAIL", result.stderr, note)
+        self.assertIn("verify.sh mid", result.stderr, note)
         self.assertNotIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+        self.assertNotIn("INNER-TEST-OPERATIONAL-FAIL", result.stderr, note)
 
     def test_a_bare_cargo_atest_call_turns_the_stack_pin_red(self):
         # Plant: the routing removed, every other shipped line intact. The same
