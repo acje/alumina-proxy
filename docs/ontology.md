@@ -11,7 +11,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 | `hello-profile` | Acceptance checks on the initial ClientHello; never negotiation | `validate`, `HelloRejectReason` |
 | `dns` | Name→address truth with bounded staleness and declared assurance | `Cache`, `Schedules` |
 | `tripwire` | Enumerated surfaces whose deviation becomes a typed fact | `Violation` |
-| `resource` | Fixed capacities, one boot owner, one serving owner, no post-boot allocation | `ServeStorage`, `inventory` |
+| `resource` | Fixed capacities, one boot owner, one serving owner | `ServeStorage`, `inventory` |
 | `observability` | Stdout records only: bounded, lossy, counted | `log` |
 | `boot` | Preflight, config-once, storage construction, bounded startup window | `run_boot` |
 | `out-payload` | No decryption, keys, CA role, or payload inspection | — |
@@ -43,6 +43,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 | ID | Definition | Code |
 |---|---|---|
 | `resolver` | Bare IP (TCP) or `IP#fqdn` with optional pin (DoT) | `ResolverSet`, `Nameserver` |
+| `pin` | Operator-declared SHA-256 SPKI pin on a DoT resolver; assertion substitution, not transport trust | `SpiPin`, `PIN_SHA256_SUFFIX` |
 | `dns-wire` | Untrusted response bytes, validated in staging | `ResponseWorkspace`, `BailiwickZones`, `DnsError` |
 | `exchange-outcome` | Positive / NXDOMAIN / NODATA / exchange failure | `wire::Outcome` |
 | `cache-entry` | Per name × family: bindings, deadlines, generation, proof | `Entry` |
@@ -135,7 +136,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 
 ## Verification
 
-`vq-proto`, `vq-gate`, `vq-life`, `vq-dnsclass`, `vq-dnsobs`, `vq-resource`, `vq-log`, `vq-startup`, `vq-confinement`, `vq-surface`, `vq-perf` — one per bullet in [Verification requirements](alumina-proxy.md#verification-requirements). `inv-nodecrypt`, `inv-fail-stop`, `inv-operator` have no obligation.
+`vq-proto`, `vq-gate`, `vq-life`, `vq-dnsclass`, `vq-dnsobs`, `vq-resource`, `vq-log`, `vq-startup`, `vq-confinement`, `vq-surface`, `vq-perf` — eleven of the twelve bullets in [Verification requirements](alumina-proxy.md#verification-requirements); `Initial deployment` is deployment-qualified and carries none. `vq-proto`, `vq-gate`, `vq-life`, `vq-resource` and `vq-surface` prove invariants; the rest are properties or measurement. `inv-nodecrypt`, `inv-fail-stop`, `inv-operator` have no obligation; `inv-scope` and `inv-silent` are unassigned.
 
 ## Relations
 
@@ -212,8 +213,8 @@ flowchart LR
     policy -->|implements| effect
     all_gate -->|implements| all_scope_gate
     schedule -->|implements| refresh
-    incident -->|implements| incident
-    monitor -->|implements| monitor
+    incident_mod -->|implements| incident
+    monitor_mod -->|implements| monitor
     log -->|implements| record
 ```
 
@@ -249,7 +250,8 @@ flowchart LR
     cache -->|owns| cache_entry
     cache -->|owns| generation
     schedule -->|owns| refresh
-    incident -->|owns| incident
+    incident_mod -->|owns| incident
+    resolver -->|owns| pin
     all_gate -->|owns| latch
     all_gate -->|owns| block_state
     monitor -->|owns| ja4_baseline
@@ -311,24 +313,24 @@ flowchart LR
 
 ## Naming debt
 
-Derived by mapping every term above to the code symbol that realises it, then flagging symbols whose noun differs from the term's noun. Churn is `rg` counts over `src` and `tests` at authoring time (files / references): it ranks the proposals and warns about cost, it does not gate them.
+Derived by mapping every term above to the code symbol that realises it, then flagging symbols whose noun differs from the term's noun.
 
-A name is flagged when it describes storage or layout instead of meaning (`Fixed`, `Slot`, `Entry`, `Serving`), describes progress where the type is terminal (`ConnectPhase`), abbreviates a word nobody says (`Ch`), generalises past its own range (`AdmissionError` means capacity only), or spends one word on two concepts (`gate`, `serving`, `Outcome`). Names that already speak the language are left alone. Proposals are not applied changes: the target term is settled here first, then each rename ships as its own increment, with an alias across the widest-churn case.
+A name is flagged when it describes storage or layout instead of meaning (`Fixed`, `Slot`, `Entry`, `Serving`), describes progress where the type is terminal (`ConnectPhase`), abbreviates a word nobody says (`Ch`), generalises past its own range (`AdmissionError` means capacity only), or spends one word on two concepts (`gate`, `serving`, `Outcome`). Names that already speak the language are left alone. Proposals are not applied changes: the target term is settled here first, then each rename ships as its own increment, with an alias across the widest reach.
 
-| ID | Current | Proposed | Why | Churn |
-|---|---|---|---|---|
-| `latch` | `FirstSlot` | `FirstIllegalLatch` | "slot" is a tunnel-slot noun | 96 refs / 8 files |
-| `admission-verdict` | `ConnectPhase` | `AdmissionVerdict` | terminal incl. `Peer`; "phase" implies progress | 79 / 6 |
-| `capacity-refusal` | `AdmissionError` | `CapacityRefusal` | only slot/pending exhaustion | 2 variants |
-| `forwarding-gate` | `TunnelGate` | `ForwardingGate` | spec term; collides with `AllScopeGate` | 26 / 2 |
-| `approved-hostname` | `FixedHostname` | `ApprovedHostname` | "fixed" is storage; identity is approval | 132 / 13 |
-| `binding-state` | `EntryState::Stale` | `StaleServing` | stale ≠ expired | small |
-| `client-hello` | `ChInspector`, `ChError` | `ClientHelloInspector`, `ClientHelloError` | "Ch" is not a domain word | 43+143 / 8,4 |
-| `connect-head`, `client-hello` | `Feed`, `Inspect` | `ConnectParseStep`, `HelloParseStep` | one vague name, two modules | small |
-| `serving-loop` | `Serving` | `ServingLoop` | "serving" also means mode and storage | 1 file |
-| `serving-loop` | `Stage` | `SlotStage` | distinct from `GatePhase` | private |
-| `cache-entry` | `Entry` | `CacheEntry` | generic name for the DNS component | 3 / 2 |
-| `exchange-outcome` | `wire::Outcome` | `ExchangeOutcome` | collides with `NameOutcome` | small |
-| `block-state` | `Enforcement` | `EnforcementState` | context noun used as state object | small |
+| ID | Current | Proposed | Why |
+|---|---|---|---|
+| `latch` | `FirstSlot` | `FirstIllegalLatch` | "slot" is a tunnel-slot noun |
+| `admission-verdict` | `ConnectPhase` | `AdmissionVerdict` | terminal incl. `Peer`; "phase" implies progress |
+| `capacity-refusal` | `AdmissionError` | `CapacityRefusal` | only slot/pending exhaustion; 2 variants |
+| `forwarding-gate` | `TunnelGate` | `ForwardingGate` | spec term; collides with `AllScopeGate` |
+| `approved-hostname` | `FixedHostname` | `ApprovedHostname` | "fixed" is storage; identity is approval |
+| `binding-state` | `EntryState::Stale` | `StaleServing` | stale ≠ expired |
+| `client-hello` | `ChInspector`, `ChError` | `ClientHelloInspector`, `ClientHelloError` | "Ch" is not a domain word |
+| `connect-head`, `client-hello` | `Feed`, `Inspect` | `ConnectParseStep`, `HelloParseStep` | one vague name, two modules |
+| `serving-loop` | `Serving` | `ServingLoop` | "serving" also means mode and storage |
+| `serving-loop` | `Stage` | `SlotStage` | distinct from `GatePhase` |
+| `cache-entry` | `Entry` | `CacheEntry` | generic name for the DNS component |
+| `exchange-outcome` | `wire::Outcome` | `ExchangeOutcome` | collides with `NameOutcome` |
+| `block-state` | `Enforcement` | `EnforcementState` | context noun used as state object |
 
 Already aligned: `DomainOrdinal`, `Violation`, `Effect`, `decide`, `AllScopeGate`, `WindowedCounter`, `EntryState`, `BailiwickZones`, `AttemptLedger`.

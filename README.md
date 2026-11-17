@@ -83,6 +83,8 @@ For local build and validation prerequisites, follow the
 - [Deployment](docs/deployment.md): container, runtime, and network confinement.
 - [Monitoring](docs/monitoring.md): stdout collection, loss alerting, and
   restart semantics.
+- [Ontology](docs/ontology.md): non-normative term-to-code vocabulary and naming
+  debt.
 - [Benchmark method](docs/benchmarks/e2-micro-1gbps.md): e2-micro target,
   topology, metrics, and historical M-04 readings.
 - [Capability matrix](docs/benchmarks/feature-matrix.md): keyed capabilities vs
