@@ -1516,26 +1516,35 @@ mod slot_table_machine {
         /// admitted seat is graduated immediately instead: graduation keeps the
         /// occupied seat and frees its pending seat, so successive bursts raise
         /// `occupied()` by up to 64 without the pending counter accumulating
-        /// until the table is full. The burst can therefore return either
-        /// refusal reason — the full-table [`AdmissionError::SlotCapacity`] that
-        /// S1's first clause exists to observe, and
-        /// [`AdmissionError::PendingCapacity`] when interleaved admits have
-        /// already spent the global [`MAX_PENDING_SETUPS`] budget or one peer's
-        /// [`MAX_PENDING_PER_PEER`] budget; only a first attempt can, because
-        /// each admitted seat is graduated and `pending()` cannot grow inside
-        /// the burst. Every refusal is checked against the model's own capacity
-        /// state, and the `occupied_at_slot_capacity` / `slot_capacity_refusal`
-        /// coverage events mark the full-table path.
+        /// until the table is full.
+        ///
+        /// The full-table [`AdmissionError::SlotCapacity`] path is reached only
+        /// from a fresh seat: when `occupied()` is at [`MAX_TUNNELS`] no seat is
+        /// left to admit, so no admitted seat is graduated and the table stays
+        /// full for the rest of the burst.
+        ///
+        /// [`AdmissionError::PendingCapacity`] is returned on any attempt whose
+        /// drawn peer is gated. The global [`MAX_PENDING_SETUPS`] budget gates
+        /// an attempt whose `pending()` is already at the cap; the burst cannot
+        /// spend that budget itself, because each admitted seat is graduated,
+        /// but interleaved admits from the other rules can. The per-peer
+        /// [`MAX_PENDING_PER_PEER`] budget gates an attempt that draws a peer
+        /// already holding its cap; graduating the admitted seat frees the
+        /// pending seat of that peer only, so the other peers' counts are
+        /// unchanged across attempts and a later attempt can still be refused.
+        /// Every refusal is checked against the model's own capacity state: the
+        /// `occupied_at_slot_capacity` and `slot_capacity_refusal` events mark
+        /// the full-table path, and `per_peer_capacity_refusal` marks a refusal
+        /// gated by the drawn peer's own budget.
         #[rule(weight = 8.0)]
         fn admit_burst(&mut self, tc: TestCase) {
             let attempts = tc.draw(gs::integers::<usize>().min_value(1).max_value(64));
             for attempt in 0..attempts {
                 let (peer, canonical) = tc.draw(gs::sampled_from(&PEERS[..]));
+                let gated_by_peer = self.pending_from(canonical) >= MAX_PENDING_PER_PEER;
                 let predicted = if self.worker.occupied() >= MAX_TUNNELS {
                     Err(AdmissionError::SlotCapacity)
-                } else if self.worker.pending() >= MAX_PENDING_SETUPS
-                    || self.pending_from(canonical) >= MAX_PENDING_PER_PEER
-                {
+                } else if self.worker.pending() >= MAX_PENDING_SETUPS || gated_by_peer {
                     Err(AdmissionError::PendingCapacity)
                 } else {
                     Ok(())
@@ -1576,6 +1585,8 @@ mod slot_table_machine {
                                     "the table admitted a seat after reporting SlotCapacity while full"
                                 );
                             }
+                        } else if gated_by_peer {
+                            tc.event("per_peer_capacity_refusal");
                         }
                         return;
                     }
@@ -2594,7 +2605,19 @@ fn worker_slot_table_keeps_capacity_and_ownership(tc: hegel::TestCase) {
 /// set property over those handles; CH4 is evidence recorded at admit time from
 /// the live set observed under the same lock as the admit, so it is not implied
 /// by the snapshot CH3 reads. The per-peer cap is checked from the model's own
-/// peer record because the subject exposes no per-peer counter.
+/// peer record because the subject exposes no per-peer counter, and CH1 is its
+/// single owner: the admit rule licenses a `PendingCapacity` refusal exactly
+/// when the canonical peer already holds its cap, so a subject that admits one
+/// further seat there is caught by CH1 counting the seat the model recorded.
+///
+/// Peer canonicalisation: the drawn spellings include an IPv4-mapped IPv6 form
+/// of a peer already in the pool, and the model records the canonical peer on
+/// every setup it admits ([`IpAddr::to_canonical`] maps the mapped form to that
+/// peer's IPv4 address), so the per-peer count is keyed by the peer the kernel
+/// accepted, never by the spelling drawn. Dropping the `to_canonical` call in
+/// [`Worker::admit`] splits one peer into two budgets: the subject admits a
+/// seat the model counts against a peer already at [`MAX_PENDING_PER_PEER`],
+/// and CH1 fails on the per-peer cap.
 ///
 /// Documented non-claims (covered elsewhere, never by this machine): a refused
 /// client's bytes never reach an upstream (the byte-pinned 400/403/502 reactor
@@ -2608,20 +2631,32 @@ mod concurrent_admission_machine {
     use hegel::generators as gs;
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
-    /// Five distinct peers: with the per-peer cap at 32 the global pending cap
-    /// (128) and the per-peer cap stay independently reachable, so neither cap
-    /// check can hide entirely behind the other.
-    const PEERS: [IpAddr; 5] = [
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3)),
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 4)),
-        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 5)),
+    /// The drawn peer spellings, each with the canonical peer it stands for.
+    /// The first two are one peer under two spellings — `127.0.0.1` and its
+    /// IPv4-mapped IPv6 form, which [`IpAddr::to_canonical`] maps to the same
+    /// address — so the per-peer cap must count them once. Five canonical peers
+    /// keep the per-peer cap (32) and the global pending cap (128)
+    /// independently reachable, so neither cap check can hide behind the other.
+    const PEERS: [(IpAddr, usize); 6] = [
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+        (
+            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001)),
+            0,
+        ),
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 1),
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3)), 2),
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 4)), 3),
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 5)), 4),
     ];
+
+    /// The distinct canonical peers the spellings above collapse to.
+    const CANONICAL_PEERS: usize = 5;
 
     /// The handles the subject handed out, in no particular order. Each variant
     /// carries the live handle of its class, so a rule can only apply the
-    /// transition that handle type permits.
+    /// transition that handle type permits. A setup also carries the canonical
+    /// peer it was admitted for, so the per-peer count never splits one peer by
+    /// the spelling the rule drew.
     enum Live {
         Setup { slot: SlotIndex, peer: usize },
         Established(TunnelIndex),
@@ -2719,23 +2754,26 @@ mod concurrent_admission_machine {
         /// share one guard, so the refusal reason is compared against the exact
         /// state the subject decided on, never a stale pre-lock snapshot.
         #[rule(groups = ["ops"], weight = 12.0)]
+        /// Admits a drawn peer spelling. The capacity prediction and the admit
+        /// call share one guard, so the refusal reason is compared against the
+        /// exact state the subject decided on, never a stale pre-lock snapshot.
+        /// The predicted refusal covers the full table and the global pending
+        /// budget; the per-peer budget is licensed here (a refusal is only
+        /// allowed when the canonical peer holds its cap) and capped by CH1.
+        #[rule(groups = ["ops"], weight = 12.0)]
         fn admit(&self, tc: TestCase) {
-            let peer = tc.draw(
-                gs::integers::<usize>()
-                    .min_value(0)
-                    .max_value(PEERS.len() - 1),
-            );
+            let (peer, canonical) = tc.draw(gs::sampled_from(&PEERS[..]));
             let mut inner = guard(&self.inner);
-            let per_peer = peer_pending(&inner.live, peer);
+            let per_peer = peer_pending(&inner.live, canonical);
             let gated_by_peer = per_peer >= MAX_PENDING_PER_PEER;
             let expected = if inner.worker.occupied() >= MAX_TUNNELS {
                 Err(AdmissionError::SlotCapacity)
-            } else if inner.worker.pending() >= MAX_PENDING_SETUPS || gated_by_peer {
+            } else if inner.worker.pending() >= MAX_PENDING_SETUPS {
                 Err(AdmissionError::PendingCapacity)
             } else {
                 Ok(())
             };
-            match (expected, inner.worker.admit(self.now, PEERS[peer])) {
+            match (expected, inner.worker.admit(self.now, peer)) {
                 (Ok(()), Ok(slot)) => {
                     tc.event("admitted");
                     let index = SlotIndex::index(&slot);
@@ -2748,7 +2786,13 @@ mod concurrent_admission_machine {
                     }
                     let was_live = inner.live.iter().any(|live| live.index() == index);
                     inner.reuses.push(ReuseEvidence { index, was_live });
-                    inner.live.push(Live::Setup { slot, peer });
+                    inner.live.push(Live::Setup {
+                        slot,
+                        peer: canonical,
+                    });
+                }
+                (Ok(()), Err(AdmissionError::PendingCapacity)) if gated_by_peer => {
+                    tc.event("refusal_per_peer_capacity");
                 }
                 (Ok(()), Err(actual)) => {
                     panic!("the model predicted a free seat, the worker refused: {actual:?}");
@@ -2762,9 +2806,6 @@ mod concurrent_admission_machine {
                 (Err(predicted), Err(actual)) => {
                     tc.event(match predicted {
                         AdmissionError::SlotCapacity => "refusal_slot_capacity",
-                        AdmissionError::PendingCapacity if gated_by_peer => {
-                            "refusal_per_peer_capacity"
-                        }
                         AdmissionError::PendingCapacity => "refusal_pending_capacity",
                     });
                     assert_eq!(
@@ -2927,7 +2968,7 @@ mod concurrent_admission_machine {
                 pending <= MAX_PENDING_SETUPS,
                 "pending {pending} exceeds the fixed pending budget"
             );
-            for peer in 0..PEERS.len() {
+            for peer in 0..CANONICAL_PEERS {
                 let held = peer_pending(&inner.live, peer);
                 assert!(
                     held <= MAX_PENDING_PER_PEER,
