@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -207,6 +208,13 @@ case "$3 $4" in
 esac
 ''')
             podman.chmod(0o755)
+            # The scan derives its witness-off root from `cargo metadata`; the
+            # fixture repo carries no manifest, so the stub answers as cargo does
+            # for this checkout (the dispatch plumbing, not Cargo, is under test).
+            cargo = Path(temp) / "cargo"
+            cargo.write_text(
+                f"#!/bin/sh\nprintf '%s\\n' '{{\"target_directory\":\"{repo}/target\"}}'\n")
+            cargo.chmod(0o755)
             log = Path(temp) / "calls"
             env = {"PATH": f"{temp}:{os.environ['PATH']}", "PODMAN_CONNECTION": "test",
                    "DISPATCH_LOG": str(log), "ALT_NO_VOLUME": "1"}
@@ -224,24 +232,50 @@ esac
             self.assertIn("ALT-COPY-FAIL", result.stderr)
             self.assertEqual(self.run_verify("host-mid", "unknown", env=env, cwd=repo).returncode, 2)
 
-    def gate_child_scan(self, temp, synthetic, env=None):
+    def gate_child_scan(self, temp, synthetic, env=None, metadata=None, cargo=None,
+                        reject_wide_ps=False, restrict_path=False):
         """Runs the shipped gate-child scan in a temp repo whose `ps` prints the
         real listing plus the planted lines: the real listing satisfies the
         scan's self-listing precondition, so only the planted lines are tested.
         `PWD` pins the logical checkout spelling; `pwd -P` supplies the physical
-        one, so on a host whose temp root is a symlink both are covered."""
+        one, so on a host whose temp root is a symlink both are covered.
+
+        `cargo metadata` is stubbed as well, because the scan derives its
+        witness-off build root from cargo: `metadata` is the JSON text the stub
+        prints (default: a target_directory under the temp repo) and `cargo`
+        replaces the stub outright to drive a failing or unusable producer.
+        `reject_wide_ps` makes the stub refuse every `-ww` form, so the scan
+        falls back to a truncating listing form; `restrict_path` runs the scan
+        with no PATH beyond the stubs (to exercise an absent prerequisite)."""
         repo, tools = temp / "repo", temp / "tools"
         (repo / "scripts").mkdir(parents=True)
         tools.mkdir()
         shutil.copyfile(ROOT / "scripts/verify.sh", repo / "scripts/verify.sh")
+        cat = shutil.which("cat")
         listing = temp / "synthetic-ps.txt"
         listing.write_text("".join(f"{line}\n" for line in synthetic))
         ps = tools / "ps"
-        ps.write_text(f'#!/bin/sh\n"{shutil.which("ps")}" -ww -eo pid=,ppid=,args=\ncat "{listing}"\n')
+        wide_guard = 'case "$*" in *-ww*) exit 1;; esac\n' if reject_wide_ps else ""
+        # Absolute cat: the stubs stay usable when PATH holds nothing else.
+        ps.write_text(f'#!/bin/sh\n{wide_guard}"{shutil.which("ps")}" -eo pid=,ppid=,args=\n"{cat}" "{listing}"\n')
         ps.chmod(0o755)
+        metadata_path = temp / "metadata.json"
+        # Compact JSON, i.e. cargo's own serde_json output shape (the scan reads
+        # an exact `"target_directory":"` field, never a formatted document).
+        metadata_path.write_text(metadata if metadata is not None
+                                 else json.dumps({"target_directory": str(repo / "target")},
+                                                 separators=(",", ":")))
+        cargo_stub = tools / "cargo"
+        cargo_stub.write_text(cargo if cargo is not None
+                              else f'#!/bin/sh\n"{cat}" "{metadata_path}"\n')
+        cargo_stub.chmod(0o755)
+        path = f"{tools}:{os.environ['PATH']}"
+        if restrict_path:
+            (tools / "sh").symlink_to(shutil.which("sh"))
+            path = str(tools)
         result = self.run_verify(
             "gate-children", "scan", cwd=repo,
-            env={"PATH": f"{tools}:{os.environ['PATH']}", "PWD": str(repo), **(env or {})})
+            env={"PATH": path, "PWD": str(repo), **(env or {})})
         return repo, result
 
     def test_gate_child_leak_under_the_alloc_witness_root_fails(self):
@@ -293,6 +327,134 @@ esac
             for checkout in {str(repo), os.path.realpath(repo)}:
                 for room in ("target", "target/aw"):
                     self.assertIn(f"{checkout}/{room}/debug/build/alumina", result.stdout)
+
+    def test_gate_child_scan_follows_cargo_to_a_relocated_target_directory(self):
+        # F2: CARGO_TARGET_DIR (or a config-file build.target-dir) vacates
+        # <checkout>/target, and a hardcoded witness-off root then scans a
+        # directory nothing builds into: a real orphan reports clean.
+        hash_dir, suffix = "0" * 16, "1" * 16
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            relocated = temp / "relocated"
+            orphan = relocated / "debug/build/alumina" / hash_dir / "out" / f"gate_child-{suffix}"
+            _, result = self.gate_child_scan(
+                temp, [f"991010 1 {orphan}"],
+                metadata=json.dumps({"target_directory": str(relocated)},
+                                    separators=(",", ":")),
+                env={"CARGO_TARGET_DIR": str(relocated)})
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-FAIL", result.stderr)
+            self.assertIn(str(orphan), result.stderr)
+
+    def test_gate_child_scan_normalises_a_trailing_slash_knob(self):
+        # F1: cargo execs from <c>/target/aw/debug/... — Path push-join never
+        # repeats a separator — so a literal concatenation scanned
+        # <c>/target/aw//debug/... and reported a real orphan clean.
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo = temp / "repo"
+            orphan = (repo / "target/aw/debug/build/alumina" / ("0" * 16) / "out"
+                      / f"gate_child-{'1' * 16}")
+            _, result = self.gate_child_scan(temp, [f"991011 1 {orphan}"],
+                                             env={"ALT_AW_TARGET_DIR": "target/aw/"})
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-FAIL", result.stderr)
+            self.assertIn(str(orphan), result.stderr)
+
+    def test_gate_child_scan_refuses_an_unprovable_knob_spelling(self):
+        # A spelling the scan cannot prove it can match is refused, never
+        # guessed at: an OK line over a root cargo may not exec from is the
+        # defect class the derived roots exist to remove.
+        for spelling in ("", "./target/aw", "a/../aw", "target//aw"):
+            with self.subTest(spelling=spelling), tempfile.TemporaryDirectory() as temp:
+                _, result = self.gate_child_scan(
+                    Path(temp), [], env={"ALT_AW_TARGET_DIR": spelling})
+                self.assertNotEqual(result.returncode, 0,
+                                    spelling + result.stdout + result.stderr)
+                self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr, spelling)
+                self.assertIn(f"ALT_AW_TARGET_DIR='{spelling}'", result.stderr, spelling)
+
+    def test_gate_child_scan_refuses_an_unusable_metadata_answer(self):
+        # The witness-off root has one authority: cargo's own answer. A failing
+        # producer, a missing field, an empty value and a JSON-escaped (hence
+        # unreadable) path all leave the root underived — UNKNOWN, never a
+        # silent fallback to <checkout>/target.
+        for label, kwargs in (
+            ("producer-failed", {"cargo": "#!/bin/sh\nexit 1\n"}),
+            ("field-missing", {"metadata": "{}\n"}),
+            ("value-empty", {"metadata": '{"target_directory":""}\n'}),
+            ("value-escaped", {"metadata": '{"target_directory":"/tmp/a\\\\b"}\n'}),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as temp:
+                _, result = self.gate_child_scan(Path(temp), [], **kwargs)
+                self.assertNotEqual(result.returncode, 0,
+                                    label + result.stdout + result.stderr)
+                self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr, label)
+                self.assertIn("target_directory", result.stderr, label)
+
+    def test_gate_child_scan_normalises_a_trailing_slash_metadata_answer(self):
+        # Measured cargo behaviour: target_directory is reported verbatim, so
+        # CARGO_TARGET_DIR=target/aw/ answers "<c>/target/aw/". Composing that
+        # literally would scan "<c>/target/aw//debug/..." and report a real
+        # orphan clean — the knob-side defect, one entrance further out.
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo = temp / "repo"
+            orphan = (repo / "target/debug/build/alumina" / ("0" * 16) / "out"
+                      / f"gate_child-{'1' * 16}")
+            _, result = self.gate_child_scan(
+                temp, [f"991012 1 {orphan}"],
+                metadata='{"target_directory":"' + str(repo) + '/target/"}\n',
+                env={"CARGO_TARGET_DIR": "target/"})
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-FAIL", result.stderr)
+            self.assertIn(str(orphan), result.stderr)
+
+    def test_gate_child_scan_refuses_a_non_canonical_metadata_answer(self):
+        # A './' component survives in cargo's answer, so the scan cannot prove
+        # which argv[0] cargo execs from it: refused, never guessed at.
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / "repo"
+            _, result = self.gate_child_scan(
+                Path(temp), [],
+                metadata='{"target_directory":"' + str(repo) + '/./target"}\n')
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr)
+            self.assertIn("cargo metadata target_directory=", result.stderr)
+
+    def test_gate_child_scan_marks_an_absent_root_in_its_ok_line(self):
+        # A root that does not exist (a legitimate pre-build state, or a
+        # mis-spelling) must be visible in the receipt rather than implied.
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo = temp / "repo"
+            (repo / "target/debug/build/alumina").mkdir(parents=True)
+            _, result = self.gate_child_scan(temp, [])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"{repo}/target/debug/build/alumina", result.stdout)
+            self.assertNotIn(f"{repo}/target/debug/build/alumina (absent)", result.stdout)
+            self.assertIn(f"{repo}/target/aw/debug/build/alumina (absent)", result.stdout)
+
+    def test_gate_child_scan_notes_a_truncating_listing_form(self):
+        # F4 residual: busybox `ps` accepts no -ww form, and a truncated argv[0]
+        # makes a real leak look matchless. The scan must not fail closed on the
+        # portable fallback (it would red every busybox host), so it records the
+        # residual in the receipt instead of hiding it.
+        with tempfile.TemporaryDirectory() as temp:
+            _, result = self.gate_child_scan(Path(temp), [], reject_wide_ps=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-OK", result.stdout)
+            self.assertIn("GATE-CHILD-LEAK-NOTE", result.stderr)
+
+    def test_gate_child_scan_without_awk_fails_closed(self):
+        # F6: the scan's helpers run under `set -eu`, so a missing awk must still
+        # produce a named UNKNOWN verdict rather than a bare abort with no
+        # observation verdict at all.
+        with tempfile.TemporaryDirectory() as temp:
+            _, result = self.gate_child_scan(Path(temp), [], restrict_path=True)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr)
+            self.assertIn("awk", result.stderr)
 
     def test_fixture_artifact_provenance_across_connections(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1122,6 +1284,6 @@ class BoundedSuite(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
-    result = unittest.TextTestRunner().run(suite)
-    sys.exit(0 if result.wasSuccessful() else 1)
+    # unittest's own argument handling, so `-k <pattern>` filters for real: a
+    # hand-rolled loader here silently ignored it and ran the whole suite.
+    unittest.main(module=sys.modules[__name__])

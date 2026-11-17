@@ -28,7 +28,7 @@ sh scripts/verify.sh mid union                  # MID tier (Linux-only): release
 sh scripts/verify.sh mid full                   # MID tier (Linux-only): standalone gate-only selector (lib units + the six both-configuration gate binaries witness-off, plus the alloc-witness-only mio_matrix witness-on); surface subsumed by mid union
 sh scripts/verify.sh host-mid union             # host Podman dispatch of Linux mid union, including release artifact copy-out
 sh scripts/verify.sh host-mid foundations       # host Podman dispatch; also boot, clippy, full
-sh scripts/verify.sh gate-children scan         # gate-child leak assertion: no reparented gate child survives under target/debug or $ALT_AW_TARGET_DIR debug build roots
+sh scripts/verify.sh gate-children scan         # gate-child leak assertion: no reparented gate child survives under the cargo metadata target_directory or $ALT_AW_TARGET_DIR debug build roots
 sh scripts/verify.sh docs                       # native offline docs gate: links + physical INTENDED + cfg-parentage + unsafe + spec digest
 sh scripts/verify.sh fixtures boot              # host Podman coordinator; Darwin allowed
 sh scripts/verify.sh supply-chain audit-deny    # host audit and deny, pinned tool versions
@@ -131,24 +131,48 @@ does not own and every receipt after it is chain-ambiguous.
 The scan reads the process table (the procps form, with a busybox fallback) and
 matches only the **executed program** — the first word of the process arguments,
 not a path that merely appears among them — of a reparented process (parent pid
-1) against every debug build root this gate builds into:
+1) against the debug build roots this gate builds into. Both roots are derived,
+never assumed:
 
-- `target/debug/build/alumina` — the witness-off root;
-- `$ALT_AW_TARGET_DIR/debug/build/alumina` — the witness-on root, which holds
-  the alloc-witness gate binaries: the default `target/aw`, with a relative knob
-  resolved against the checkout and an absolute knob used as given.
+- the **witness-off** root, `<target_directory>/debug/build/alumina`, where
+  `target_directory` is what
+  `cargo metadata --no-deps --format-version 1 --locked` reports. Cargo's own
+  answer is the authority here because it honours `CARGO_TARGET_DIR` and a
+  config-file `build.target-dir`; a hardcoded `<checkout>/target` is exactly the
+  root such a setting vacates, and a scan of it would report a real orphan
+  clean. The scan therefore depends on `cargo` (as well as `awk` and a usable
+  `ps`), and there is **no fallback** to `<checkout>/target`: an unavailable,
+  missing, empty or unparsable `target_directory` is `GATE-CHILD-LEAK-UNKNOWN`.
+- the **witness-on** root, which holds the alloc-witness gate binaries:
+  `<checkout>/<ALT_AW_TARGET_DIR>/debug/build/alumina` for a relative knob
+  (trailing slashes stripped, since cargo's own path join never repeats a
+  separator) or the absolute directory itself.
+
+Both sources are **normalised or refused, never guessed at**. A trailing
+separator is stripped, because a path join never repeats one. An empty value, or
+a spelling carrying a `.`, `..` or empty (doubled-slash) path component, is
+`GATE-CHILD-LEAK-UNKNOWN` naming the offending spelling and its source: cargo
+would exec from a path the scan cannot prove it can match, and an OK receipt over
+an unmatchable root is worse than no receipt. The metadata answer needs this too
+— it is reported verbatim, so `CARGO_TARGET_DIR=target/aw/` and
+`CARGO_TARGET_DIR=./target` come back with the separator and the `./` intact
+(measured).
 
 Within a root the shape is a hash-named subdirectory, then its `out`
-subdirectory, then a gate-binary name carrying the same hash suffix. Both the
-logical and the physical checkout spelling are matched, deduped where they
-coincide, so a running compiler or linker that writes into that directory is not
-a match. The `GATE-CHILD-LEAK-OK` line names every build root the scan covered,
-so a root missing from that line is visible rather than implied.
+subdirectory, then a gate-binary name carrying the same hash suffix — matched
+against `argv[0]` only, so a running compiler or linker that merely writes into
+that directory is not a match. Both the logical and the physical checkout
+spelling are scanned where they differ, and deduped by exact string comparison
+where they coincide. The `GATE-CHILD-LEAK-OK` line names every build root the
+scan covered and annotates a root that does not exist yet as `(absent)`, so a
+mis-spelled root is visible in the receipt instead of silently matchless.
 
-The assertion runs **before and after the `host-mid` dispatch**, before and
-after each lib-suite invocation in `mid union` and `mid full`, and standalone as
-above. `GATE-CHILD-LEAK-FAIL` names the pid and the command line and exits
-non-zero.
+The assertion runs **before and after the `host-mid` dispatch**. In `mid union`
+and `mid full` it runs before and after the witness-off lib-suite invocation and
+after the alloc-witness one; nothing scans between the alloc-witness clippy pass
+and the alloc-witness suite, so a child leaked by that clippy run is caught only
+after the suite that follows it. It also runs standalone as above.
+`GATE-CHILD-LEAK-FAIL` names the pid and its `argv[0]` and exits non-zero.
 
 ### The native lib-suite recipe
 
@@ -179,11 +203,22 @@ cannot stop a container hang. What it stops is a receipt recorded against an
 ambiguous host state: a stale orphan on the host holds a loopback listener no
 current gate owns, so the dispatch receipt that follows is chain-ambiguous.
 
-An **unusable observation fails closed**: when `ps` is absent or fails, a build
-root contains whitespace (argv[0] is then not separable from the process
-arguments), the listing cannot be parsed, or the listing does not contain the
-scanning shell, the gate prints `GATE-CHILD-LEAK-UNKNOWN` and exits non-zero. An
-operational error is never a clean scan.
+An **unusable observation fails closed**: when `ps` is absent or fails, `awk` is
+absent, the checkout spelling is empty or not absolute (an unqualified `pwd`
+would otherwise compose `/target/debug/build/alumina`), `cargo metadata` fails
+or reports no usable `target_directory`, a `target_directory` or
+`ALT_AW_TARGET_DIR` spelling is empty, non-absolute where it must be absolute, or
+non-canonical, a build root contains whitespace (argv[0] is then not separable
+from the process arguments), the listing cannot be parsed, the listing does not
+contain the scanning shell, or the derivation yields no root at all, the gate
+prints `GATE-CHILD-LEAK-UNKNOWN` and exits non-zero. An operational error is
+never a clean scan.
+
+Residual: where no `ps` form this host accepts carries `-ww` (busybox accepts
+none portably), a long `argv[0]` may be truncated, and a truncated `argv[0]` can
+make a real orphan look matchless. That path still emits a visible
+`GATE-CHILD-LEAK-NOTE` rather than failing closed, because refusing the portable
+fallback would red every busybox host.
 
 Platform limit: the parent-death signal is Linux-only (it is installed in the one
 guarded spawn in `tests/support/process_harness.rs`, which also refuses to exec a

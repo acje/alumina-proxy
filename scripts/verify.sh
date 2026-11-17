@@ -27,7 +27,7 @@ usage() {
     echo "usage: verify.sh {inner|mid|host-mid|fixtures|e2e|supply-chain|identity|gate-children} <scope> [args] | verify.sh docs" >&2
     echo "       inner test <target> runs ONE integration target host-natively; backs no done-claim." >&2
     echo "       host-mid {foundations|boot|union|full|clippy}; supply-chain audit-deny" >&2
-    echo "       gate-children scan asserts no reparented gate child survives under this checkout's debug build roots (target/debug and ALT_AW_TARGET_DIR)" >&2
+    echo "       gate-children scan asserts no reparented gate child survives under the debug build roots this gate builds into (cargo metadata target_directory and ALT_AW_TARGET_DIR)" >&2
     echo "       identity snapshot <directory> | identity compare <before> <after> | identity artifact <path>" >&2
     exit 2
 }
@@ -49,8 +49,10 @@ ALT_CARGO_HOME_VOL="${ALT_CARGO_HOME_VOL:-alumina-verify-cargo-home}"
 ALT_NO_VOLUME="${ALT_NO_VOLUME:-0}"
 # One target dir per feature config (I1): witness-on and witness-off builds never
 # share a fingerprint graph, so the aw-clippy/aw-test adjacency hazard cannot
-# arise and no ordering workaround is needed.
-ALT_AW_TARGET_DIR="${ALT_AW_TARGET_DIR:-target/aw}"
+# arise and no ordering workaround is needed. `-` not `:-`: an explicitly empty
+# knob is a typo the leak scan refuses (it cannot derive an argv[0] from it),
+# never a silent request for the default.
+ALT_AW_TARGET_DIR="${ALT_AW_TARGET_DIR-target/aw}"
 # I3: one derived, digest-identified image, built once FROM the pinned rust base.
 # Evidence for why: the pinned base carries NO git, NO clippy and NO rustfmt
 # (`rustup component list --installed` = cargo/rustc/rust-std only; `command -v
@@ -239,24 +241,71 @@ whitespace_gate() {
 # A gate-spawned child, or a cargo lib-test child, that outlives its parent
 # keeps a loopback listener alive, so every later gate receipt is
 # chain-ambiguous. The scan matches the EXECUTED program (argv[0]) of a
-# reparented process (ppid 1) against EVERY debug build root this gate builds
-# into: <checkout>/target/debug/build/alumina (witness-off) and
-# <checkout>/<ALT_AW_TARGET_DIR>/debug/build/alumina (witness-on; the default
-# target/aw, or the absolute directory itself when the knob is absolute), for
-# both the logical and physical checkout spelling where they differ, deduped.
+# reparented process (ppid 1) against every debug build root this gate builds
+# into. The roots are derived, never assumed:
+#
+#   witness-off  <target_directory>/debug/build/alumina, where target_directory
+#                is what `cargo metadata --no-deps --format-version 1 --locked`
+#                reports. Cargo's own answer is the authority because it honours
+#                CARGO_TARGET_DIR and a config-file build.target-dir; a
+#                hardcoded <checkout>/target is exactly the root such a setting
+#                vacates, so a real orphan there would report clean.
+#   witness-on   <checkout>/<ALT_AW_TARGET_DIR>/debug/build/alumina for a
+#                relative knob, with trailing slashes stripped, or the absolute
+#                directory itself.
+#
+# Both sources are normalised or refused: a trailing separator is provably
+# harmless, while an empty value or one carrying a '.'/'..'/empty component is
+# refused (cargo would exec from a path the scan cannot derive from it). The
+# metadata answer needs the same treatment — cargo reports it verbatim, so
+# CARGO_TARGET_DIR=target/aw/ and ./target survive into it (measured). Both the
+# logical and physical checkout spelling are covered where they differ, deduped.
 # Within a root the shape is <hash>/out/<gate-binary>-<hash>. A path that
 # merely appears among a process's arguments (a compiler writing into that
 # directory, `ld -o .../out/...`) is not a match. Both the procps and busybox
-# `ps` forms are tried.
-# An operational failure - no usable `ps`, a build root the scan cannot
-# separate from the arguments, an unparsable listing, or a listing that cannot
-# see this shell - is GATE-CHILD-LEAK-UNKNOWN and fails: an observation
-# failure is never a clean gate.
+# `ps` forms are tried; when only a form without -ww answers, a visible
+# GATE-CHILD-LEAK-NOTE records that argv[0] may be truncated, because busybox
+# has no portable unbounded form and refusing the fallback would red every
+# busybox host (residual, docs/verification.md).
+# An operational failure - no usable `ps`, no `awk`, an empty or non-absolute
+# checkout spelling, an underivable or unprovable build root, a root the scan
+# cannot separate from the arguments, an unparsable listing, a listing that
+# cannot see this shell, or no root at all - is GATE-CHILD-LEAK-UNKNOWN and
+# fails: an observation failure is never a clean gate.
+#
+# _gl_component_check <value> <label>: refuse a directory spelling that carries
+# an empty, '.' or '..' component. cargo resolves such a spelling to a path the
+# scan cannot derive (only a trailing separator is provably irrelevant), so the
+# scan names the offending spelling and fails closed instead of composing a root
+# that cannot match what cargo execs.
+_gl_component_check() {
+    _gc_value="$1"
+    _gc_label="$2"
+    _gc_rest="${_gc_value#/}"
+    while :; do
+        case "$_gc_rest" in
+            */*) _gc_comp="${_gc_rest%%/*}" ; _gc_rest="${_gc_rest#*/}" ;;
+            *) _gc_comp="$_gc_rest" ; _gc_rest="" ;;
+        esac
+        case "$_gc_comp" in
+            "" | . | ..)
+                echo "GATE-CHILD-LEAK-UNKNOWN: $_gc_label='$_gc_value' contains an empty, '.' or '..' path component; the scan cannot prove which argv[0] cargo execs from a non-canonical spelling" >&2
+                return 1
+                ;;
+        esac
+        [ -n "$_gc_rest" ] || break
+    done
+}
+
 assert_no_leaked_gate_children() {
     _gl_ps=""
+    _gl_wide=0
     for _gl_form in "-ww -eo pid=,ppid=,args=" "-eo pid=,ppid=,args=" "-o pid=,ppid=,args=" "-ww -o pid=,ppid=,args="; do
         # shellcheck disable=SC2086
         if _gl_ps=$(COLUMNS=4096 ps $_gl_form 2>/dev/null); then
+            case " $_gl_form " in
+                *" -ww "*) _gl_wide=1 ;;
+            esac
             break
         fi
         _gl_ps=""
@@ -265,32 +314,162 @@ assert_no_leaked_gate_children() {
         echo "GATE-CHILD-LEAK-UNKNOWN: ps produced no process listing (procps and busybox forms both failed; operational error is never clean)" >&2
         return 1
     fi
-    # Candidate roots, one per line: both debug build roots for both checkout
-    # spellings. Keeping them line-separated means a root is never re-split into
-    # pieces before the whitespace check sees it.
-    _gl_candidates=""
+    command -v awk >/dev/null 2>&1 || {
+        echo "GATE-CHILD-LEAK-UNKNOWN: awk required for the scan and absent (operational error is never clean)" >&2
+        return 1
+    }
+    if [ "$_gl_wide" -ne 1 ]; then
+        echo "GATE-CHILD-LEAK-NOTE: no ps form this host accepts carries -ww, so a long argv[0] may be truncated and a real leak can look matchless (residual, see docs/verification.md)" >&2
+    fi
+    # Checkout spellings, validated BEFORE composition: an empty or relative
+    # `pwd` would otherwise compose /target/debug/build/alumina — a root that is
+    # not this checkout at all.
+    _gl_checkouts=""
     for _gl_checkout in "$(pwd)" "$(pwd -P)"; do
-        for _gl_target in target "$ALT_AW_TARGET_DIR"; do
-            case "$_gl_target" in
-                /*) _gl_root="$_gl_target/debug/build/alumina" ;;
-                *) _gl_root="$_gl_checkout/$_gl_target/debug/build/alumina" ;;
-            esac
-            case "$_gl_root" in
-                *[[:space:]]*)
-                    echo "GATE-CHILD-LEAK-UNKNOWN: build root contains whitespace, argv[0] is not separable from the arguments: $_gl_root" >&2
-                    return 1
-                    ;;
-            esac
-            _gl_candidates="$_gl_candidates$_gl_root
+        case "$_gl_checkout" in
+            /*) ;;
+            *)
+                echo "GATE-CHILD-LEAK-UNKNOWN: checkout spelling is not an absolute path: '$_gl_checkout' (the scan cannot compose a build root under it)" >&2
+                return 1
+                ;;
+        esac
+        _gl_checkouts="$_gl_checkouts$_gl_checkout
 "
-        done
     done
-    # Dedupe and name in awk: exact string comparison, so a checkout path
-    # carrying glob metacharacters can never drop a root from the scan.
-    _gl_roots=$(printf '%s\n' "$_gl_candidates" | awk '$0 != "" && !seen[$0]++')
-    # The OK line must name every root the scan covered, so a missing root is
-    # visible in the receipt rather than implied.
-    _gl_named=$(printf '%s\n' "$_gl_roots" | awk '$0 != "" { printf "%s%s", sep, $0; sep = ", " }')
+    # The witness-off root: cargo's own answer, or nothing. A fallback to
+    # <checkout>/target would rebuild the fail-open this derivation removes.
+    _gl_meta_rc=0
+    _gl_meta_out=$(cargo metadata --no-deps --format-version 1 --locked 2>/dev/null) || _gl_meta_rc=$?
+    [ "$_gl_meta_rc" -eq 0 ] || {
+        echo "GATE-CHILD-LEAK-UNKNOWN: cargo metadata --no-deps exit $_gl_meta_rc; no target_directory to derive the witness-off build root from, and there is no fallback (operational error is never clean)" >&2
+        return 1
+    }
+    # The field is read as an exact JSON string value: the value must close on an
+    # unescaped quote and carry no backslash, so a JSON-escaped path yields no
+    # value at all and fails closed below rather than being guessed at.
+    _gl_meta=$(printf '%s\n' "$_gl_meta_out" | awk -v key='"target_directory":"' '
+        {
+            line = $0
+            while ((i = index(line, key)) > 0) {
+                rest = substr(line, i + length(key))
+                j = index(rest, "\"")
+                if (j == 0) break
+                val = substr(rest, 1, j - 1)
+                if (val != "" && val !~ /\\/) found = val
+                line = substr(rest, j + 1)
+            }
+        }
+        END { if (found != "") printf "%s", found }
+    ')
+    # The metadata answer is normalised the same way as the knob, because it is
+    # the same hazard from the other entrance: it comes from CARGO_TARGET_DIR or
+    # a config build.target-dir, and cargo reports such a value verbatim (a
+    # trailing separator and a './' component are both preserved — measured).
+    # A trailing separator is provably harmless (a path join never repeats one);
+    # anything else is refused rather than composed into an unmatchable root.
+    while [ "${_gl_meta%/}" != "$_gl_meta" ]; do
+        _gl_meta="${_gl_meta%/}"
+    done
+    [ -n "$_gl_meta" ] || {
+        echo "GATE-CHILD-LEAK-UNKNOWN: cargo metadata reported an empty target_directory; the witness-off build root cannot be derived (operational error is never clean)" >&2
+        return 1
+    }
+    case "$_gl_meta" in
+        /*) ;;
+        *)
+            echo "GATE-CHILD-LEAK-UNKNOWN: cargo metadata target_directory is not absolute: '$_gl_meta' (the scan cannot compose a build root under it)" >&2
+            return 1
+            ;;
+    esac
+    _gl_component_check "$_gl_meta" "cargo metadata target_directory" || return 1
+    # The witness-on knob: strip trailing slashes (cargo's own Path join never
+    # repeats a separator, so "target/aw/" and "target/aw" are one root), then
+    # refuse every spelling whose argv[0] the scan cannot derive.
+    _gl_aw="$ALT_AW_TARGET_DIR"
+    while [ "${_gl_aw%/}" != "$_gl_aw" ]; do
+        _gl_aw="${_gl_aw%/}"
+    done
+    [ -n "$_gl_aw" ] || {
+        echo "GATE-CHILD-LEAK-UNKNOWN: ALT_AW_TARGET_DIR='$ALT_AW_TARGET_DIR' is empty; the witness-on build root cannot be derived" >&2
+        return 1
+    }
+    case "$_gl_aw" in
+        /*) _gl_aw_abs=1 ;;
+        *) _gl_aw_abs=0 ;;
+    esac
+    _gl_component_check "$_gl_aw" "ALT_AW_TARGET_DIR" || return 1
+    # Candidate roots, one per line, composed in awk with exact string
+    # comparison; the values travel via ENVIRON rather than `-v`, because `-v`
+    # processes escape sequences in its value, so a path containing a backslash
+    # would be rewritten. Composition happens here rather than in the shell for
+    # the same reason: re-spelling the metadata answer for the other checkout
+    # spelling needs an exact prefix strip, and an unquoted shell expansion would
+    # make that pattern glob-active. Keeping roots line-separated means a root is
+    # never re-split into pieces before the whitespace check sees it.
+    _gl_derived_rc=0
+    _gl_roots=$(GL_CHECKOUTS="$_gl_checkouts" GL_META="$_gl_meta" GL_AW="$_gl_aw" \
+        GL_AW_ABS="$_gl_aw_abs" awk '
+        function emit(root) {
+            if (root == "" || (root in seen)) return
+            seen[root] = 1
+            printf "%s\n", root
+        }
+        BEGIN {
+            n = split(ENVIRON["GL_CHECKOUTS"], all, "\n")
+            checkouts = 0
+            for (i = 1; i <= n; i++) if (all[i] != "") checkout[++checkouts] = all[i]
+            meta = ENVIRON["GL_META"]
+            aw = ENVIRON["GL_AW"]
+            aw_abs = ENVIRON["GL_AW_ABS"] + 0
+            # The metadata answer lies under one checkout spelling; the same path
+            # is then composed under every spelling, because a child argv[0]
+            # carries whichever spelling the build owner resolved. An answer
+            # outside the checkout (CARGO_TARGET_DIR elsewhere) is used as given.
+            tail = ""
+            for (i = 1; i <= checkouts; i++) {
+                p = checkout[i] "/"
+                if (index(meta, p) == 1) { tail = substr(meta, length(p) + 1); break }
+            }
+            for (c = 1; c <= checkouts; c++) {
+                base = checkout[c]
+                if (tail != "") off = base "/" tail
+                else off = meta
+                emit(off "/debug/build/alumina")
+                if (aw_abs == 1) emit(aw "/debug/build/alumina")
+                else emit(base "/" aw "/debug/build/alumina")
+            }
+        }
+    ' </dev/null) || _gl_derived_rc=$?
+    [ "$_gl_derived_rc" -eq 0 ] || {
+        echo "GATE-CHILD-LEAK-UNKNOWN: build-root derivation exit $_gl_derived_rc (operational error is never clean)" >&2
+        return 1
+    }
+    while IFS= read -r _gl_root; do
+        [ -n "$_gl_root" ] || continue
+        case "$_gl_root" in
+            *[[:space:]]*)
+                echo "GATE-CHILD-LEAK-UNKNOWN: build root contains whitespace, argv[0] is not separable from the arguments: $_gl_root" >&2
+                return 1
+                ;;
+        esac
+    done <<EOF
+$_gl_roots
+EOF
+    # The OK line must name every root the scan covered, annotating a root that
+    # does not exist yet so a mis-spelling is visible in the receipt rather than
+    # silently matchless. (Absence is legitimate before a first build, so it
+    # cannot be fatal.)
+    _gl_named=""
+    while IFS= read -r _gl_root; do
+        [ -n "$_gl_root" ] || continue
+        if [ -d "$_gl_root" ]; then
+            _gl_named="$_gl_named${_gl_named:+, }$_gl_root"
+        else
+            _gl_named="$_gl_named${_gl_named:+, }$_gl_root (absent)"
+        fi
+    done <<EOF
+$_gl_roots
+EOF
     _gl_rc=0
     _gl_out=$(printf '%s\n' "$_gl_ps" | GL_ROOTS="$_gl_roots" awk -v self="$$" '
         BEGIN {
