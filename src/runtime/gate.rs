@@ -523,4 +523,284 @@ mod tests {
             "a barrier-A-closed gate must not record committed bytes"
         );
     }
+
+    /// A model-based machine over [`TunnelGate`]'s two-barrier lifecycle. The
+    /// example tests above pin the orderings somebody wrote down; this machine
+    /// explores the interleavings nobody did — a late head re-application, a
+    /// rejection after the gate opened, a validation in every phase, upstream
+    /// activity observed at every point, writes before and after the hello
+    /// boundary — and checks the barrier invariants after every rule.
+    ///
+    /// Invariants (all `always_run`, so each sees every intermediate state):
+    /// G1 `is_open()` implies `hello_end()` is `Some`: the gate never opens
+    ///    without a validated hello.
+    /// G2 `Terminated` is absorbing, and a terminated setup is never open.
+    /// G3 `upstream_committed()` is monotone non-decreasing across every rule.
+    /// G4 a write reports `BlockedByBarrierA` exactly when the pre-write state
+    ///    had no hello end or was terminated, and `GateOpened`/`Open` only with
+    ///    a hello end.
+    /// G5 the observed phase edges are exactly `AwaitConnect` → `Connecting` →
+    ///    `AwaitResponse` → `Validating` → `RelayActive`, plus termination out
+    ///    of every pre-relay phase; every other observed move is a no-op.
+    ///
+    /// Independence: none of these re-runs the gate's own branch table. G1, G2
+    /// and G4 relate the public surface (`is_open`, `hello_end`, the returned
+    /// [`UpstreamWrite`]) to the state observed *before* a transition, so a
+    /// missing or misplaced guard cannot satisfy its own check; G3 compares
+    /// successive observations across the whole walk instead of trusting the
+    /// accumulator; G5 is an edge table the gate never materialises, checked
+    /// against the model's own previous observation.
+    ///
+    /// The rule weights keep both branches reachable in one walk: the progress
+    /// rules outrank the terminators so the relay-open path is entered (24 of
+    /// the 64 `development`-profile cases reach `RelayActive`), while the
+    /// remaining cases terminate before opening and then exercise the absorbing
+    /// phase.
+    mod lifecycle_machine {
+        use super::*;
+        use hegel::TestCase;
+        use hegel::generators as gs;
+
+        const MAX_HEAD_LEN: usize = 4096;
+        const MAX_HELLO_LEN: usize = 8192;
+        const MAX_WRITE_ADVANCE: usize = 4096;
+        const ACTIVITIES: [Activity; 3] = [Activity::Data, Activity::Eof, Activity::Reset];
+
+        pub(super) struct GateLifecycle {
+            gate: TunnelGate,
+            /// The CONNECT head length the model applied, which anchors the
+            /// drawn validated-hello boundary.
+            head_len: usize,
+            /// The drawn validated-hello end, when the model applied one.
+            hello_end: Option<usize>,
+            phase_before: GatePhase,
+            committed_before: usize,
+            write: Option<WriteObservation>,
+        }
+
+        struct WriteObservation {
+            result: UpstreamWrite,
+            hello_end_before: Option<usize>,
+            terminated_before: bool,
+        }
+
+        impl GateLifecycle {
+            pub(super) fn start() -> GateLifecycle {
+                let gate = TunnelGate::new();
+                GateLifecycle {
+                    phase_before: gate.phase(),
+                    committed_before: gate.upstream_committed(),
+                    gate,
+                    head_len: 0,
+                    hello_end: None,
+                    write: None,
+                }
+            }
+
+            /// Snapshots the pre-transition state, so every invariant compares
+            /// the state a rule produced against the state it was applied to.
+            fn begin(&mut self) {
+                self.phase_before = self.gate.phase();
+                self.committed_before = self.gate.upstream_committed();
+            }
+        }
+
+        fn is_written_down_edge(from: GatePhase, to: GatePhase) -> bool {
+            matches!(
+                (from, to),
+                (GatePhase::AwaitConnect, GatePhase::Connecting)
+                    | (GatePhase::Connecting, GatePhase::AwaitResponse)
+                    | (GatePhase::AwaitResponse, GatePhase::Validating)
+                    | (GatePhase::Validating, GatePhase::RelayActive)
+                    | (
+                        GatePhase::AwaitConnect
+                            | GatePhase::Connecting
+                            | GatePhase::AwaitResponse
+                            | GatePhase::Validating,
+                        GatePhase::Terminated(_)
+                    )
+            )
+        }
+
+        #[expect(
+            clippy::needless_pass_by_value,
+            reason = "the hegel state-machine macro hands each rule its own TestCase by value"
+        )]
+        #[hegel::state_machine]
+        impl GateLifecycle {
+            #[rule(weight = 3.0)]
+            fn on_connect_head(&mut self, tc: TestCase) {
+                self.begin();
+                let head_len =
+                    tc.draw(gs::integers::<usize>().min_value(0).max_value(MAX_HEAD_LEN));
+                if self.phase_before == GatePhase::AwaitConnect {
+                    self.head_len = head_len;
+                }
+                self.gate.on_connect_head(head_len);
+            }
+
+            #[rule(weight = 20.0)]
+            fn on_authorized(&mut self, _: TestCase) {
+                self.begin();
+                self.gate.on_authorized();
+            }
+
+            #[rule(weight = 20.0)]
+            fn on_upstream_connected(&mut self, _: TestCase) {
+                self.begin();
+                self.gate.on_upstream_connected();
+            }
+
+            #[rule(weight = 20.0)]
+            fn on_response_ok(&mut self, _: TestCase) {
+                self.begin();
+                self.gate.on_response_ok();
+            }
+
+            #[rule(weight = 20.0)]
+            fn on_hello_validated(&mut self, tc: TestCase) {
+                self.begin();
+                let offset = tc.draw(
+                    gs::integers::<usize>()
+                        .min_value(0)
+                        .max_value(MAX_HELLO_LEN),
+                );
+                let end = self.head_len + offset;
+                let before = self.gate.hello_end();
+                self.gate.on_hello_validated(ValidatedHello::test_new(end));
+                if self.phase_before == GatePhase::Validating {
+                    self.hello_end = Some(end);
+                    assert_eq!(
+                        self.gate.hello_end(),
+                        self.hello_end,
+                        "a hello validated in Validating is recorded at the drawn end"
+                    );
+                } else {
+                    assert_eq!(
+                        self.gate.hello_end(),
+                        before,
+                        "a hello validation outside Validating must not move the boundary"
+                    );
+                }
+            }
+
+            #[rule(weight = 1.0)]
+            fn on_hello_rejected(&mut self, _: TestCase) {
+                self.begin();
+                self.gate.on_hello_rejected();
+            }
+
+            #[rule(weight = 1.0)]
+            fn observe_upstream_activity(&mut self, tc: TestCase) {
+                self.begin();
+                let activity = tc.draw(gs::sampled_from(&ACTIVITIES[..]));
+                self.gate.observe_upstream_activity(activity);
+            }
+
+            #[rule(weight = 20.0)]
+            fn upstream_write(&mut self, tc: TestCase) {
+                self.begin();
+                let advance = tc.draw(
+                    gs::integers::<usize>()
+                        .min_value(0)
+                        .max_value(MAX_WRITE_ADVANCE),
+                );
+                let hello_end_before = self.gate.hello_end();
+                let terminated_before = matches!(self.phase_before, GatePhase::Terminated(_));
+                let result = self.gate.upstream_write(advance);
+                self.write = Some(WriteObservation {
+                    result,
+                    hello_end_before,
+                    terminated_before,
+                });
+            }
+
+            #[invariant(always_run)]
+            fn g1_open_implies_a_validated_hello(&self, _: TestCase) {
+                if self.gate.is_open() {
+                    assert!(
+                        self.gate.hello_end().is_some(),
+                        "the gate opened without a validated hello boundary"
+                    );
+                }
+            }
+
+            #[invariant(always_run)]
+            fn g2_termination_is_absorbing(&self, _: TestCase) {
+                if matches!(self.gate.phase(), GatePhase::Terminated(_)) {
+                    assert!(
+                        !self.gate.is_open(),
+                        "a terminated setup reports an open gate"
+                    );
+                }
+                if matches!(self.phase_before, GatePhase::Terminated(_)) {
+                    assert!(
+                        matches!(self.gate.phase(), GatePhase::Terminated(_)),
+                        "a terminated setup left the terminating phase: {:?}",
+                        self.gate.phase()
+                    );
+                }
+            }
+
+            #[invariant(always_run)]
+            fn g3_committed_offset_is_monotone(&self, _: TestCase) {
+                assert!(
+                    self.gate.upstream_committed() >= self.committed_before,
+                    "upstream_committed moved backwards: {} after {}",
+                    self.gate.upstream_committed(),
+                    self.committed_before
+                );
+            }
+
+            #[invariant(always_run)]
+            fn g4_write_classification_follows_the_barrier_state(&self, _: TestCase) {
+                let Some(write) = &self.write else { return };
+                let blocked = write.result == UpstreamWrite::BlockedByBarrierA;
+                let should_block = write.hello_end_before.is_none() || write.terminated_before;
+                assert_eq!(
+                    blocked, should_block,
+                    "a write reported {:?} with hello end {:?} and terminated {} before it",
+                    write.result, write.hello_end_before, write.terminated_before
+                );
+                if matches!(
+                    write.result,
+                    UpstreamWrite::GateOpened { .. } | UpstreamWrite::Open
+                ) {
+                    assert!(
+                        write.hello_end_before.is_some(),
+                        "the gate opened in a write issued without a validated hello"
+                    );
+                }
+            }
+
+            #[invariant(always_run)]
+            fn g5_phase_edges_are_the_written_down_set(&self, _: TestCase) {
+                let from = self.phase_before;
+                let to = self.gate.phase();
+                if from == to {
+                    return;
+                }
+                if matches!(from, GatePhase::Terminated(_))
+                    && matches!(to, GatePhase::Terminated(_))
+                {
+                    return;
+                }
+                assert!(
+                    is_written_down_edge(from, to),
+                    "phase edge {from:?} -> {to:?} is outside the written-down set"
+                );
+            }
+        }
+    }
+
+    /// The two-barrier lifecycle as a state machine: model-based coverage of the
+    /// gate's interleavings, over the same production [`TunnelGate`] the example
+    /// tests drive. Its invariant list and independence argument are on
+    /// [`lifecycle_machine`]; `hegel.toml` owns the case count.
+    #[hegel::test(derandomize = true)]
+    fn gate_lifecycle_is_two_barrier_ordered(tc: hegel::TestCase) {
+        hegel::stateful::machine(lifecycle_machine::GateLifecycle::start())
+            .steps(400)
+            .run(tc);
+    }
 }

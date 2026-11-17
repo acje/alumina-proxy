@@ -1317,6 +1317,437 @@ fn serving_decision_path_does_not_allocate_or_deallocate() {
     );
 }
 
+/// A model-based machine over the fixed slot table [`Worker`] owns. The
+/// scripted tests above walk the lifecycles somebody wrote down; this machine
+/// admits, records attempts, graduates, releases and re-admits in generated
+/// orders until the fixed caps bind, and checks the table's accounting and
+/// ownership after every rule.
+///
+/// Invariants (all `always_run`, so each sees every intermediate state):
+/// S1 `occupied() <= MAX_TUNNELS`, `pending() <= MAX_PENDING_SETUPS`, and no
+///    canonical peer holds more than `MAX_PENDING_PER_PEER` pending setups.
+/// S2 `occupied()` equals the model's live handle count and `pending()` equals
+///    its live setup handle count.
+/// S3 live slot indices are pairwise distinct and all below `MAX_TUNNELS`.
+/// S4 a graduated slot exposes no in-setup ledger, while a live setup does.
+/// S5 an index released by `release`/`release_tunnel` is never live again
+///    without a fresh admit, and every live handle's subject slot is occupied
+///    in the class its handle type names.
+///
+/// Independence: the model is a `Vec` of the *handles the subject handed out*,
+/// never a second scan of the subject's slot array. S2 is therefore a genuine
+/// cross-check — the subject's cached counters against the model's handle
+/// count — and not a restatement of the debug lockstep scan; S1's per-peer
+/// clause reads the drawn peers the model remembered, not the subject's
+/// `InSetup` peer fields; S3 and S5 are set properties over those handles. The
+/// admit rule additionally asserts the subject's accept/refuse result and
+/// refusal reason against the model's own capacity state, which is what makes
+/// the per-peer cap observable: the subject exposes no per-peer counter.
+mod slot_table_machine {
+    use super::*;
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
+    /// Five canonical peers, so the global pending budget (four per-peer caps
+    /// would reach exactly `MAX_PENDING_SETUPS` with four) is independently
+    /// binding and a dropped global check cannot hide behind the per-peer one.
+    const CANONICAL_PEERS: usize = 5;
+
+    /// The drawn peers, each with the canonical peer it belongs to. The first
+    /// two are one peer under two spellings, so the per-peer cap must count
+    /// them once.
+    const PEERS: [(IpAddr, u8); 6] = [
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+        (
+            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001)),
+            0,
+        ),
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 1),
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3)), 2),
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 4)), 3),
+        (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 5)), 4),
+    ];
+
+    #[derive(Debug)]
+    enum Live {
+        Setup { slot: SlotIndex, peer: u8 },
+        Established(TunnelIndex),
+    }
+
+    impl Live {
+        fn index(&self) -> usize {
+            match self {
+                Live::Setup { slot, .. } => SlotIndex::index(slot),
+                Live::Established(tunnel) => TunnelIndex::index(tunnel),
+            }
+        }
+
+        fn is_setup(&self) -> bool {
+            matches!(self, Live::Setup { .. })
+        }
+    }
+
+    /// A probe handle naming a slot index: the machine keeps the handles the
+    /// subject handed out, and re-mints one here only to ask the subject what
+    /// state that index is in. A handle mints no capacity — the table owns the
+    /// accounting — so a probe can never free or graduate a slot.
+    fn probe(index: usize) -> SlotIndex {
+        SlotIndex(u16::try_from(index).expect("a slot index fits u16"))
+    }
+
+    pub(super) struct SlotTable {
+        worker: Worker,
+        now: Instant,
+        live: Vec<Live>,
+    }
+
+    impl SlotTable {
+        pub(super) fn start() -> SlotTable {
+            let now = anchor();
+            SlotTable {
+                worker: Worker::boot(clock(now)),
+                now,
+                live: Vec::new(),
+            }
+        }
+
+        fn pending_from(&self, peer: u8) -> usize {
+            self.live
+                .iter()
+                .filter(|live| matches!(live, Live::Setup { peer: p, .. } if *p == peer))
+                .count()
+        }
+
+        /// The position of a live handle of the drawn class, drawn uniformly
+        /// over the handles of that class; `None` when none is live.
+        fn draw_live(&self, tc: &TestCase, setup: bool) -> Option<usize> {
+            let candidates = self
+                .live
+                .iter()
+                .filter(|live| live.is_setup() == setup)
+                .count();
+            if candidates == 0 {
+                return None;
+            }
+            let pick = tc.draw(
+                gs::integers::<usize>()
+                    .min_value(0)
+                    .max_value(candidates - 1),
+            );
+            let mut seen = 0usize;
+            for (position, live) in self.live.iter().enumerate() {
+                if live.is_setup() == setup {
+                    if seen == pick {
+                        return Some(position);
+                    }
+                    seen += 1;
+                }
+            }
+            None
+        }
+
+        fn take_setup(&mut self, position: usize) -> Option<(SlotIndex, u8)> {
+            match self.live.swap_remove(position) {
+                Live::Setup { slot, peer } => Some((slot, peer)),
+                other @ Live::Established(_) => {
+                    self.live.push(other);
+                    None
+                }
+            }
+        }
+
+        fn take_established(&mut self, position: usize) -> Option<TunnelIndex> {
+            match self.live.swap_remove(position) {
+                Live::Established(tunnel) => Some(tunnel),
+                other @ Live::Setup { .. } => {
+                    self.live.push(other);
+                    None
+                }
+            }
+        }
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the hegel state-machine macro hands each rule its own TestCase by value"
+    )]
+    #[hegel::state_machine]
+    impl SlotTable {
+        #[rule(weight = 12.0)]
+        fn admit(&mut self, tc: TestCase) {
+            let (peer, canonical) = tc.draw(gs::sampled_from(&PEERS[..]));
+            let predicted = if self.worker.occupied() >= MAX_TUNNELS {
+                Err(AdmissionError::SlotCapacity)
+            } else if self.worker.pending() >= MAX_PENDING_SETUPS
+                || self.pending_from(canonical) >= MAX_PENDING_PER_PEER
+            {
+                Err(AdmissionError::PendingCapacity)
+            } else {
+                Ok(())
+            };
+            match (predicted, self.worker.admit(self.now, peer)) {
+                (Ok(()), Ok(slot)) => self.live.push(Live::Setup {
+                    slot,
+                    peer: canonical,
+                }),
+                (Ok(()), Err(actual)) => {
+                    panic!("the model predicted a free seat, the worker refused: {actual:?}")
+                }
+                (Err(expected), Ok(_)) => {
+                    panic!("the model predicted {expected:?}, the worker admitted a seat")
+                }
+                (Err(expected), Err(actual)) => assert_eq!(
+                    actual, expected,
+                    "the worker's refusal reason disagrees with the model's capacity state"
+                ),
+            }
+        }
+
+        #[rule(weight = 2.0)]
+        fn record_attempt(&mut self, tc: TestCase) {
+            let Some(position) = self.draw_live(&tc, true) else {
+                return;
+            };
+            let family = tc.draw(gs::sampled_from(&[Family::A, Family::Aaaa][..]));
+            let Some((slot, peer)) = self.take_setup(position) else {
+                return;
+            };
+            let before = self
+                .worker
+                .attempt_ledger(&slot)
+                .expect("a live setup carries a ledger");
+            let after = self
+                .worker
+                .record_attempt(&slot, family)
+                .expect("a live setup records an attempt");
+            assert_eq!(
+                after.previous(),
+                Some(family),
+                "the recorded attempt is the ledger's previous family"
+            );
+            assert!(
+                after.counts().a() >= before.counts().a()
+                    && after.counts().aaaa() >= before.counts().aaaa(),
+                "an attempt never decreases a family counter"
+            );
+            self.live.push(Live::Setup { slot, peer });
+        }
+
+        #[rule(weight = 2.0)]
+        fn finish_setup(&mut self, tc: TestCase) {
+            let Some(position) = self.draw_live(&tc, true) else {
+                return;
+            };
+            let Some((slot, _)) = self.take_setup(position) else {
+                return;
+            };
+            let index = SlotIndex::index(&slot);
+            let occupied_before = self.worker.occupied();
+            let pending_before = self.worker.pending();
+            let tunnel = self.worker.finish_setup(slot);
+            assert_eq!(
+                self.worker.occupied(),
+                occupied_before,
+                "graduation keeps the slot occupied"
+            );
+            assert_eq!(
+                self.worker.pending(),
+                pending_before - 1,
+                "graduation frees exactly one pending seat"
+            );
+            assert_eq!(
+                TunnelIndex::index(&tunnel),
+                index,
+                "graduation keeps the physical slot"
+            );
+            assert!(
+                self.worker.attempt_ledger(&probe(index)).is_none(),
+                "an established tunnel must not expose an in-setup ledger"
+            );
+            self.live.push(Live::Established(tunnel));
+        }
+
+        #[rule(weight = 2.0)]
+        fn release(&mut self, tc: TestCase) {
+            let Some(position) = self.draw_live(&tc, true) else {
+                return;
+            };
+            let Some((slot, _)) = self.take_setup(position) else {
+                return;
+            };
+            let index = SlotIndex::index(&slot);
+            let occupied_before = self.worker.occupied();
+            let pending_before = self.worker.pending();
+            self.worker.release(slot);
+            assert_eq!(
+                self.worker.occupied(),
+                occupied_before - 1,
+                "release frees the occupied seat"
+            );
+            assert_eq!(
+                self.worker.pending(),
+                pending_before - 1,
+                "release frees the pending seat"
+            );
+            assert!(
+                !self.live.iter().any(|live| live.index() == index),
+                "a released index must leave the live set"
+            );
+            assert!(
+                matches!(self.worker.slots[index], SlotState::Free),
+                "a released slot must be free in the table"
+            );
+        }
+
+        #[rule(weight = 2.0)]
+        fn release_tunnel(&mut self, tc: TestCase) {
+            let Some(position) = self.draw_live(&tc, false) else {
+                return;
+            };
+            let Some(tunnel) = self.take_established(position) else {
+                return;
+            };
+            let index = TunnelIndex::index(&tunnel);
+            let occupied_before = self.worker.occupied();
+            let pending_before = self.worker.pending();
+            self.worker.release_tunnel(tunnel);
+            assert_eq!(
+                self.worker.occupied(),
+                occupied_before - 1,
+                "releasing an established tunnel frees its occupied seat"
+            );
+            assert_eq!(
+                self.worker.pending(),
+                pending_before,
+                "releasing an established tunnel leaves the pending count alone"
+            );
+            assert!(
+                !self.live.iter().any(|live| live.index() == index),
+                "a released index must leave the live set"
+            );
+            assert!(
+                matches!(self.worker.slots[index], SlotState::Free),
+                "a released slot must be free in the table"
+            );
+        }
+
+        #[rule(weight = 1.0)]
+        fn observe(&mut self, _: TestCase) {
+            let occupied = self.worker.occupied();
+            let pending = self.worker.pending();
+            assert_eq!(
+                self.worker.occupied(),
+                occupied,
+                "reading the occupied count must not move it"
+            );
+            assert_eq!(
+                self.worker.pending(),
+                pending,
+                "reading the pending count must not move it"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn s1_fixed_capacity_caps_hold(&self, _: TestCase) {
+            assert!(
+                self.worker.occupied() <= MAX_TUNNELS,
+                "occupied {} exceeds the fixed slot budget",
+                self.worker.occupied()
+            );
+            assert!(
+                self.worker.pending() <= MAX_PENDING_SETUPS,
+                "pending {} exceeds the fixed pending budget",
+                self.worker.pending()
+            );
+            for peer in 0..CANONICAL_PEERS {
+                let pending = self.pending_from(u8::try_from(peer).expect("five canonical peers"));
+                assert!(
+                    pending <= MAX_PENDING_PER_PEER,
+                    "peer {peer} holds {pending} pending setups, above the per-peer cap"
+                );
+            }
+        }
+
+        #[invariant(always_run)]
+        fn s2_counters_match_the_model_handles(&self, _: TestCase) {
+            let setups = self.live.iter().filter(|live| live.is_setup()).count();
+            assert_eq!(
+                self.worker.occupied(),
+                self.live.len(),
+                "the occupied counter disagrees with the model's live handles"
+            );
+            assert_eq!(
+                self.worker.pending(),
+                setups,
+                "the pending counter disagrees with the model's setup handles"
+            );
+        }
+
+        #[invariant(always_run)]
+        fn s3_live_indices_are_distinct_and_in_range(&self, _: TestCase) {
+            let mut seen = [false; MAX_TUNNELS];
+            for live in &self.live {
+                let index = live.index();
+                assert!(
+                    index < MAX_TUNNELS,
+                    "live slot index {index} is outside the fixed table"
+                );
+                assert!(!seen[index], "slot index {index} is live more than once");
+                seen[index] = true;
+            }
+        }
+
+        #[invariant(always_run)]
+        fn s4_ledger_follows_the_handle_class(&self, _: TestCase) {
+            for live in &self.live {
+                let index = live.index();
+                let ledger = self.worker.attempt_ledger(&probe(index));
+                if live.is_setup() {
+                    assert!(
+                        ledger.is_some(),
+                        "live setup at slot {index} exposes no attempt ledger"
+                    );
+                } else {
+                    assert!(
+                        ledger.is_none(),
+                        "established tunnel at slot {index} still exposes an in-setup ledger"
+                    );
+                }
+            }
+        }
+
+        #[invariant(always_run)]
+        fn s5_owner_is_the_handle_the_table_granted(&self, _: TestCase) {
+            for live in &self.live {
+                let index = live.index();
+                let occupied = !matches!(self.worker.slots[index], SlotState::Free);
+                assert!(
+                    occupied,
+                    "slot {index} is free while a live handle names it"
+                );
+                let in_setup = matches!(self.worker.slots[index], SlotState::InSetup { .. });
+                assert_eq!(
+                    in_setup,
+                    live.is_setup(),
+                    "slot {index} is in the wrong lifecycle state for its handle"
+                );
+            }
+        }
+    }
+}
+
+/// The slot table as a state machine: model-based coverage of admission,
+/// graduation, release and re-admission under the fixed caps, driving the same
+/// production [`Worker`] the scripted tests above drive. Its invariant list and
+/// independence argument are on [`slot_table_machine`]; `hegel.toml` owns the
+/// case count.
+#[hegel::test(derandomize = true)]
+fn worker_slot_table_keeps_capacity_and_ownership(tc: hegel::TestCase) {
+    hegel::stateful::machine(slot_table_machine::SlotTable::start())
+        .steps(400)
+        .run(tc);
+}
+
 #[test]
 fn each_view_binds_the_same_request_to_its_own_config_position() {
     let cfg_a = parse_config_document(ALLOWLIST_XY).expect("cfg_a");
