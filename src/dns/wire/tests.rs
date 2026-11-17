@@ -4481,3 +4481,101 @@ mod production_apply_route {
         );
     }
 }
+
+/// The fixed query identity every property parse replays against.
+const PROPERTY_TID: u16 = 0x4137;
+
+/// The observation facts bound to one reply parse: extreme-TTL flag, raw AD
+/// bit, and conservative supporting-TTL cap.
+#[derive(Debug, PartialEq, Eq)]
+struct Observation {
+    extreme_ttl: bool,
+    raw_ad: bool,
+    supporting_ttl_cap: Option<u32>,
+}
+
+struct ObservedParse {
+    outcome: Result<Outcome, DnsError>,
+    observation: Option<Observation>,
+}
+
+/// Parses one reply through the same entry the reply tests use, keeping the
+/// observation facts bound to that same parse.
+fn parse_with_observation(msg: &[u8]) -> ObservedParse {
+    let cfg = config();
+    let zones = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick())
+        .expect("validated config keeps suffix count within ALLOWLIST_MAX");
+    let mut ws = ResponseWorkspace::default();
+    match ParsedReply::parse_reply(
+        &mut ws,
+        &zones,
+        &fqdn("sub.example.org"),
+        Family::A,
+        PROPERTY_TID,
+        msg,
+    ) {
+        Ok(reply) => {
+            let observation = Observation {
+                extreme_ttl: reply.extreme_ttl(),
+                raw_ad: reply.raw_ad_fact(),
+                supporting_ttl_cap: reply.supporting_ttl_cap(),
+            };
+            ObservedParse {
+                outcome: Ok(reply.outcome),
+                observation: Some(observation),
+            }
+        }
+        Err(err) => ObservedParse {
+            outcome: Err(err),
+            observation: None,
+        },
+    }
+}
+
+/// Parses `msg` twice and asserts both parses classify and observe identically.
+fn assert_stable_parse(msg: &[u8]) {
+    let first = parse_with_observation(msg);
+    let second = parse_with_observation(msg);
+    let (first_outcome, second_outcome) = (first.outcome, second.outcome);
+    assert_eq!(
+        format!("{first_outcome:?}"),
+        format!("{second_outcome:?}"),
+        "two parses of identical bytes must classify identically"
+    );
+    assert_eq!(
+        first.observation, second.observation,
+        "two parses of identical bytes must observe identically"
+    );
+}
+
+/// Totality and determinism: arbitrary attacker bytes never panic the reply
+/// parser, and identical bytes with the fixed tid, fqdn and family always
+/// classify and observe identically — both for raw bytes and for a
+/// well-formed question followed by arbitrary record-section bytes.
+#[hegel::test(test_cases = 64, derandomize = true)]
+fn dns_reply_parser_is_total_and_deterministic(tc: hegel::TestCase) {
+    let mut raw = tc.draw(hegel::generators::binary().max_size(512));
+    let [tid_hi, tid_lo] = PROPERTY_TID.to_be_bytes();
+    if raw.len() >= 2 {
+        raw[0] = tid_hi;
+        raw[1] = tid_lo;
+    }
+    assert_stable_parse(&raw);
+
+    let tail = tc.draw(hegel::generators::binary().max_size(512));
+    let counters = tail.first().copied().unwrap_or(0);
+    let mut reply = header(
+        PROPERTY_TID,
+        true,
+        0,
+        1,
+        u16::from(counters & 3),
+        u16::from((counters >> 2) & 3),
+        u16::from((counters >> 4) & 3),
+    );
+    reply.extend_from_slice(&qname_bytes("sub.example.org"));
+    reply.extend_from_slice(&family_qtype(Family::A).to_be_bytes());
+    reply.extend_from_slice(&CLASS_IN.to_be_bytes());
+    reply.extend_from_slice(&tail);
+    assert_stable_parse(&reply);
+}

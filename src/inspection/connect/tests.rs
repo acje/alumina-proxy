@@ -596,3 +596,49 @@ fn incremental_scan_finds_delimiter_straddling_feed_boundary() {
         "a delimiter split across feeds must still close the head"
     );
 }
+
+/// The terminal parse state after feeding `bytes` in `chunk`-byte pieces: the
+/// delimiter-consumed head length plus the parser's own settled result. `None`
+/// means no delimiter was ever fed.
+fn terminal_state(
+    bytes: &[u8],
+    chunk: usize,
+) -> Option<(usize, Option<Result<ConnectRequest, ConnectError>>)> {
+    let mut parser = ConnectParser::new();
+    for piece in bytes.chunks(chunk) {
+        match parser
+            .feed(piece)
+            .expect("bounded input stays below the head limit")
+        {
+            Feed::Complete { head_len } => return Some((head_len, parser.result().copied())),
+            Feed::Incomplete => {}
+        }
+    }
+    None
+}
+
+/// Totality and read-boundary independence: arbitrary attacker bytes never
+/// panic the head parser, completion tracks the presence of the delimiter
+/// exactly, and a delimiter-terminated head reaches the same terminal result
+/// (head length, request or error) whether it is fed whole or one byte at a
+/// time.
+#[hegel::test(test_cases = 64, derandomize = true)]
+fn connect_head_parser_is_total_and_incremental(tc: hegel::TestCase) {
+    let mut terminated = tc.draw(hegel::generators::binary().max_size(1024));
+    let has_delimiter = terminated
+        .windows(END_OF_HEAD.len())
+        .any(|window| window == END_OF_HEAD);
+    assert_eq!(
+        terminal_state(&terminated, 1).is_some(),
+        has_delimiter,
+        "completion must track the presence of the CRLFCRLF delimiter"
+    );
+    terminated.extend_from_slice(END_OF_HEAD);
+    let whole = terminal_state(&terminated, terminated.len());
+    let byte_at_a_time = terminal_state(&terminated, 1);
+    assert!(whole.is_some(), "a delimiter-terminated head must settle");
+    assert_eq!(
+        whole, byte_at_a_time,
+        "the terminal parse must not depend on read boundaries"
+    );
+}

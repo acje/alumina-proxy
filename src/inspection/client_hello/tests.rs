@@ -1445,3 +1445,49 @@ fn rejects_empty_sni_host_name() {
         "a zero-length SNI host_name must fail closed at the wire/parser layer"
     );
 }
+
+/// Totality and boundedness: arbitrary attacker bytes never panic the
+/// inspector; a well-formed generated `ClientHello` always completes with the
+/// fixed 36-byte `JA4` shape `t<ver><d|i><cc><ec><alpn>_<12 hex>_<12 hex>`, and
+/// a fresh inspector fed the same bytes consumes exactly the same count.
+#[hegel::test(test_cases = 64, derandomize = true)]
+fn client_hello_inspector_is_total_and_ja4_is_bounded(tc: hegel::TestCase) {
+    let mut arbitrary = ChInspector::new();
+    let _ = arbitrary.feed(&tc.draw(hegel::generators::binary().max_size(2048)));
+
+    let grease: Vec<u16> = tc.draw(
+        hegel::generators::vecs(hegel::generators::sampled_from(&[0x0a0a, 0x1a1a])).max_size(3),
+    );
+    let mut versions = vec![TLS13];
+    versions.extend_from_slice(&grease);
+    let names: Vec<&str> = tc.draw(
+        hegel::generators::vecs(hegel::generators::sampled_from(&[
+            "a.example",
+            "SUB.example.org",
+        ]))
+        .min_size(1)
+        .max_size(2),
+    );
+    let ech = tc.draw(hegel::generators::booleans());
+    let wire = hello_msg(TLS12, &versions, &names, ech);
+
+    let mut first = ChInspector::new();
+    let Ok(Inspect::Complete { consumed }) = first.feed(&wire) else {
+        panic!("a generated well-formed ClientHello must complete");
+    };
+    let ja4 = first.hello().expect("complete has hello").ja4();
+    assert_eq!(
+        (ja4.len(), ja4[0], ja4[10], ja4[23]),
+        (36, b't', b'_', b'_')
+    );
+    assert!(
+        ja4[11..23]
+            .iter()
+            .chain(&ja4[24..36])
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b)),
+        "JA4 hash runs are lowercase hex: {}",
+        String::from_utf8_lossy(&ja4)
+    );
+    let mut second = ChInspector::new();
+    assert_eq!(second.feed(&wire), Ok(Inspect::Complete { consumed }));
+}

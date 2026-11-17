@@ -79,3 +79,27 @@ fn rejects_255_byte_name_with_trailing_dot_without_panic() {
     name.push(b'.');
     assert!(FixedHostname::normalize(&name).is_none());
 }
+
+/// Every accepted input must normalise to a name that normalises to itself.
+fn assert_normalised_fixed_point(input: &[u8]) {
+    if let Some(first) = FixedHostname::normalize(input) {
+        assert_eq!(
+            FixedHostname::normalize(first.as_bytes()),
+            Some(first),
+            "a normalised name must be a fixed point of normalisation"
+        );
+    }
+}
+
+/// Totality and idempotence: arbitrary attacker bytes never panic the
+/// normaliser, and every accepted name is a fixed point of normalisation. The
+/// second, hostname-shaped draw keeps the accept branch reachable: arbitrary
+/// bytes essentially never form a legal FQDN, so a raw-only property would
+/// never test idempotence at all (measured: zero accepted inputs in 64 cases).
+#[hegel::test(test_cases = 64, derandomize = true)]
+fn hostname_normalisation_is_total_and_idempotent(tc: hegel::TestCase) {
+    let raw = tc.draw(hegel::generators::binary().max_size(300));
+    assert_normalised_fixed_point(&raw);
+    let shaped = tc.draw(hegel::generators::domains().max_length(255));
+    assert_normalised_fixed_point(shaped.as_bytes());
+}
