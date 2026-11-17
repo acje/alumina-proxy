@@ -524,6 +524,41 @@ mod tests {
         );
     }
 
+    /// Characterises the behaviour alumina-14l0s records as a finding: the
+    /// `Terminated` *variant* is absorbing but the settled *cause* is not,
+    /// because `terminate` guards on `phase != RelayActive` and `Terminated(_)`
+    /// satisfies that guard. This pins what the gate does *today*, not what it
+    /// should do; making `terminate` total (alumina-14l0s option 1) is meant to
+    /// trip this test.
+    ///
+    /// The ordering is reachable on the public surface but unreachable in the
+    /// reactor, where caller teardown discards the gate before a second
+    /// terminator can arrive: `observe_upstream_activity` at
+    /// `src/runtime/reactor.rs:3337` is followed by `close_slot` ->
+    /// `ws.reset()` -> `TunnelGate::new()` (`src/runtime/reactor.rs:854-857`),
+    /// and `on_hello_rejected`'s only production caller is `reject_hello`
+    /// (`src/runtime/reactor/reject.rs:69`), reached solely from the
+    /// hello-validation path (`src/runtime/reactor.rs:1293`/`:3405`/`:3428`),
+    /// which also closes the slot.
+    #[test]
+    fn re_termination_overwrites_the_settled_cause_on_the_public_surface() {
+        let mut gate = TunnelGate::new();
+        assert_eq!(gate.phase(), GatePhase::AwaitConnect);
+        gate.on_authorized();
+        assert_eq!(gate.phase(), GatePhase::Connecting);
+        gate.observe_upstream_activity(Activity::Data);
+        assert_eq!(
+            gate.phase(),
+            GatePhase::Terminated(TerminateReason::EarlyUpstream(Activity::Data))
+        );
+        gate.on_hello_rejected();
+        assert_eq!(
+            gate.phase(),
+            GatePhase::Terminated(TerminateReason::ClientHelloRejected),
+            "alumina-14l0s: the second terminator overwrites the settled cause"
+        );
+    }
+
     /// A model-based machine over [`TunnelGate`]'s two-barrier lifecycle. The
     /// example tests above pin the orderings somebody wrote down; this machine
     /// explores the interleavings nobody did — a late head re-application, a
@@ -534,7 +569,22 @@ mod tests {
     /// Invariants (all `always_run`, so each sees every intermediate state):
     /// G1 `is_open()` implies `hello_end()` is `Some`: the gate never opens
     ///    without a validated hello.
-    /// G2 `Terminated` is absorbing, and a terminated setup is never open.
+    /// G2 `Terminated` is absorbing as a *variant*, and a terminated setup is
+    ///    never open.
+    /// G2b the settled *cause* is absorbing too: from `Terminated(r)`, every
+    ///    rule the runtime can deliver leaves exactly `Terminated(r)`. The
+    ///    runtime delivers none, because both production terminator sites tear
+    ///    the slot down synchronously (`src/runtime/reactor.rs:3337` ->
+    ///    `close_slot` -> `ws.reset()` -> `TunnelGate::new()`, reset at
+    ///    `src/runtime/reactor.rs:854-857`; `reject_hello` at
+    ///    `src/runtime/reactor/reject.rs:69`, reachable only from the
+    ///    hello-validation path). `(phase, reason)` absorption is therefore a
+    ///    caller-teardown guarantee, not a pub-API property; the one pub-API
+    ///    exception, `on_hello_rejected` after an early-upstream termination,
+    ///    is asserted in `g2b_termination_settles_the_cause` and
+    ///    characterised in
+    ///    `re_termination_overwrites_the_settled_cause_on_the_public_surface`
+    ///    (alumina-14l0s). Each rule tags itself in `begin`.
     /// G3 `upstream_committed()` is monotone non-decreasing across every rule.
     /// G4 a write reports `BlockedByBarrierA` exactly when the pre-write state
     ///    had no hello end or was terminated, and `GateOpened`/`Open` only with
@@ -543,8 +593,8 @@ mod tests {
     ///    `AwaitResponse` → `Validating` → `RelayActive`, plus termination out
     ///    of every pre-relay phase; every other observed move is a no-op.
     ///
-    /// Independence: none of these re-runs the gate's own branch table. G1, G2
-    /// and G4 relate the public surface (`is_open`, `hello_end`, the returned
+    /// Independence: none of these re-runs the gate's own branch table. G1, G2,
+    /// G2b and G4 relate the public surface (`is_open`, `hello_end`, the returned
     /// [`UpstreamWrite`]) to the state observed *before* a transition, so a
     /// missing or misplaced guard cannot satisfy its own check; G3 compares
     /// successive observations across the whole walk instead of trusting the
@@ -575,7 +625,23 @@ mod tests {
             hello_end: Option<usize>,
             phase_before: GatePhase,
             committed_before: usize,
+            /// The rule that produced the transition under inspection.
+            last_rule: Option<Rule>,
             write: Option<WriteObservation>,
+        }
+
+        /// Rule identity, tagged by each rule body through `begin`, so an
+        /// invariant can condition on the rule that produced a transition.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Rule {
+            ConnectHead,
+            Authorized,
+            UpstreamConnected,
+            ResponseOk,
+            HelloValidated,
+            HelloRejected,
+            ObserveUpstreamActivity,
+            UpstreamWrite,
         }
 
         struct WriteObservation {
@@ -593,15 +659,17 @@ mod tests {
                     gate,
                     head_len: 0,
                     hello_end: None,
+                    last_rule: None,
                     write: None,
                 }
             }
 
-            /// Snapshots the pre-transition state, so every invariant compares
-            /// the state a rule produced against the state it was applied to.
-            fn begin(&mut self) {
+            /// Snapshots the pre-transition state and tags the rule about to
+            /// run, so invariants compare the state and the rule together.
+            fn begin(&mut self, rule: Rule) {
                 self.phase_before = self.gate.phase();
                 self.committed_before = self.gate.upstream_committed();
+                self.last_rule = Some(rule);
             }
         }
 
@@ -630,7 +698,7 @@ mod tests {
         impl GateLifecycle {
             #[rule(weight = 3.0)]
             fn on_connect_head(&mut self, tc: TestCase) {
-                self.begin();
+                self.begin(Rule::ConnectHead);
                 let head_len =
                     tc.draw(gs::integers::<usize>().min_value(0).max_value(MAX_HEAD_LEN));
                 if self.phase_before == GatePhase::AwaitConnect {
@@ -641,25 +709,25 @@ mod tests {
 
             #[rule(weight = 20.0)]
             fn on_authorized(&mut self, _: TestCase) {
-                self.begin();
+                self.begin(Rule::Authorized);
                 self.gate.on_authorized();
             }
 
             #[rule(weight = 20.0)]
             fn on_upstream_connected(&mut self, _: TestCase) {
-                self.begin();
+                self.begin(Rule::UpstreamConnected);
                 self.gate.on_upstream_connected();
             }
 
             #[rule(weight = 20.0)]
             fn on_response_ok(&mut self, _: TestCase) {
-                self.begin();
+                self.begin(Rule::ResponseOk);
                 self.gate.on_response_ok();
             }
 
             #[rule(weight = 20.0)]
             fn on_hello_validated(&mut self, tc: TestCase) {
-                self.begin();
+                self.begin(Rule::HelloValidated);
                 let offset = tc.draw(
                     gs::integers::<usize>()
                         .min_value(0)
@@ -686,20 +754,20 @@ mod tests {
 
             #[rule(weight = 1.0)]
             fn on_hello_rejected(&mut self, _: TestCase) {
-                self.begin();
+                self.begin(Rule::HelloRejected);
                 self.gate.on_hello_rejected();
             }
 
             #[rule(weight = 1.0)]
             fn observe_upstream_activity(&mut self, tc: TestCase) {
-                self.begin();
+                self.begin(Rule::ObserveUpstreamActivity);
                 let activity = tc.draw(gs::sampled_from(&ACTIVITIES[..]));
                 self.gate.observe_upstream_activity(activity);
             }
 
             #[rule(weight = 20.0)]
             fn upstream_write(&mut self, tc: TestCase) {
-                self.begin();
+                self.begin(Rule::UpstreamWrite);
                 let advance = tc.draw(
                     gs::integers::<usize>()
                         .min_value(0)
@@ -738,6 +806,34 @@ mod tests {
                         matches!(self.gate.phase(), GatePhase::Terminated(_)),
                         "a terminated setup left the terminating phase: {:?}",
                         self.gate.phase()
+                    );
+                }
+            }
+
+            #[invariant(always_run)]
+            fn g2b_termination_settles_the_cause(&self, _: TestCase) {
+                let GatePhase::Terminated(settled) = self.phase_before else {
+                    return;
+                };
+                if self.last_rule != Some(Rule::HelloRejected) {
+                    assert_eq!(
+                        self.gate.phase(),
+                        self.phase_before,
+                        "rule {:?} changed the settled termination {settled:?} without re-terminating",
+                        self.last_rule
+                    );
+                }
+                if self.gate.phase() != self.phase_before {
+                    assert_eq!(
+                        self.last_rule,
+                        Some(Rule::HelloRejected),
+                        "rule {:?} overwrote the settled cause {settled:?}",
+                        self.last_rule
+                    );
+                    assert_eq!(
+                        self.gate.phase(),
+                        GatePhase::Terminated(TerminateReason::ClientHelloRejected),
+                        "the permitted re-termination must record ClientHelloRejected"
                     );
                 }
             }
