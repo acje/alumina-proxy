@@ -1490,24 +1490,54 @@ def extract_budget_default():
     return match
 
 
-def extract_stack_policy():
-    """The shipped stack floor and default lines, so the tests pin the values
-    the gate actually runs with rather than a copy of them."""
-    text = (ROOT / "scripts/verify.sh").read_text()
-    lines = []
-    for name in ("GATE_SUITE_MIN_STACK_FLOOR", "GATE_SUITE_MIN_STACK"):
-        match = re.search(rf"^{name}=.*$", text, re.M)
-        assert match is not None, f"{name} default not found in scripts/verify.sh"
-        lines.append(match.group(0))
-    return lines
+def suite_knob_names(body=None):
+    """Every GATE_SUITE_* constant the shipped helper reads, taken from the
+    helper's own text: the driver is handed exactly the assignments for these
+    names, so a knob the helper resolves from cannot be missing from the
+    harness (L3)."""
+    body = extract_function("bounded_suite") if body is None else body
+    names = set(re.findall(r"GATE_SUITE_[A-Z_]+", body))
+    assert names, "bounded_suite reads no GATE_SUITE_* constant"
+    return names
+
+
+def shipped_knob_lines(text=None):
+    """The shipped top-level assignment lines for those constants, in file order
+    (the order the resolution depends on: floor and ceiling before the value).
+
+    Exactly one UNINDENTED assignment per name is allowed. A second assignment --
+    at top level or inside a function body -- would leave every value pin reading
+    a line the gate does not resolve from, so the shadow is refused here rather
+    than staying invisible (L3)."""
+    names = suite_knob_names()
+    text = (ROOT / "scripts/verify.sh").read_text() if text is None else text
+    found = {name: [] for name in names}
+    order = []
+    for line in text.splitlines():
+        match = re.match(r"^([ \t]*)([A-Z_][A-Z0-9_]*)=", line)
+        if match is None or match.group(2) not in found:
+            continue
+        found[match.group(2)].append((match.group(1), line))
+        order.append(line)
+    for name in sorted(found):
+        hits = found[name]
+        assert len(hits) == 1, (
+            f"{name} must have exactly ONE assignment in scripts/verify.sh; a shadow "
+            f"assignment leaves the value pins reading a line the helper does not "
+            f"resolve from -- found {len(hits)}: {[hit[1] for hit in hits]}")
+        assert hits[0][0] == "", (
+            f"{name} is assigned inside a function body, not at top level: {hits[0][1]}")
+    return order
 
 
 def shipped_min_stack():
-    """The stack size the shipped default resolves to, read out of the floor
-    line itself: a second declaration of the number here would pin nothing."""
-    floor = extract_stack_policy()[0].split("=", 1)[1].strip('"')
-    assert floor.isdigit(), f"stack floor is not a byte count: {floor}"
-    return floor
+    """The stack size the shipped default resolves to, read out of the floor line
+    itself: a second declaration of the number here would pin nothing."""
+    floor = next(line for line in shipped_knob_lines()
+                 if line.startswith("GATE_SUITE_MIN_STACK_FLOOR="))
+    value = floor.split("=", 1)[1].strip('"')
+    assert value.isdigit(), f"stack floor is not a byte count: {value}"
+    return value
 
 
 class BoundedSuite(unittest.TestCase):
@@ -1530,12 +1560,12 @@ class BoundedSuite(unittest.TestCase):
         self.tools.mkdir()
         self.calls = self.temp / "calls"
         self.stack_seen = self.temp / "stack-seen"
-        # The driver is the shipped constants plus body under the interpreter
-        # options scripts/verify.sh itself runs with.
+        # The driver is every shipped knob assignment the helper reads (in file
+        # order) plus the shipped body, under the interpreter options
+        # scripts/verify.sh itself runs with.
         self.driver = self.temp / "bounded.sh"
         self.driver.write_text(
-            "set -eu\n" + extract_budget_default().group(0) + "\n"
-            + "\n".join(extract_stack_policy()) + "\n\n"
+            "set -eu\n" + "\n".join(shipped_knob_lines()) + "\n\n"
             + extract_function("bounded_suite") + '\n\nbounded_suite "$@"\n')
 
     def stub(self, name, rc):
@@ -1689,22 +1719,127 @@ class BoundedSuite(unittest.TestCase):
                          "the wrapped child did not inherit the shipped RUST_MIN_STACK")
         self.assertIn(f"RUST_MIN_STACK={shipped}", result.stdout)
 
-    def assert_stack_refused(self, value):
-        result = self.run_bounded("suite", env={"PATH": str(self.tools),
-                                                "GATE_SUITE_MIN_STACK": value})
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("GATE-SUITE-STACK-UNKNOWN", result.stderr)
-        self.assertFalse(self.calls.exists(),
-                         "the timeout wrapper ran despite a refused stack budget")
+    def test_a_second_stack_assignment_cannot_hide_from_the_pins(self):
+        # L3: the extraction refuses a duplicate or function-body assignment, so
+        # a shadow value cannot sit in verify.sh unseen by every pin above.
+        text = (ROOT / "scripts/verify.sh").read_text()
+        shadowed = text.replace("bounded_suite() {\n",
+                                "bounded_suite() {\n    GATE_SUITE_MIN_STACK=1048576\n", 1)
+        self.assertNotEqual(shadowed, text)
+        with self.assertRaises(AssertionError):
+            shipped_knob_lines(shadowed)
+        duplicate = text.replace(
+            'GATE_SUITE_MIN_STACK="${GATE_SUITE_MIN_STACK-${RUST_MIN_STACK-$GATE_SUITE_MIN_STACK_FLOOR}}"',
+            'GATE_SUITE_MIN_STACK="${GATE_SUITE_MIN_STACK-${RUST_MIN_STACK-$GATE_SUITE_MIN_STACK_FLOOR}}"\n'
+            'GATE_SUITE_MIN_STACK=1048576', 1)
+        self.assertNotEqual(duplicate, text)
+        with self.assertRaises(AssertionError):
+            shipped_knob_lines(duplicate)
+
+    def test_every_shipped_suite_knob_reaches_the_driver(self):
+        # L3: the driver carries every shipped assignment the helper reads, so a
+        # value the gate resolves from cannot be missing from the harness -- and
+        # it carries no third one the helper never reads.
+        driver = self.driver.read_text()
+        knobs = shipped_knob_lines()
+        self.assertTrue(knobs)
+        for line in knobs:
+            self.assertIn(line + "\n", driver)
+        assignments = [line for line in driver.splitlines()
+                       if re.match(r"^[ \t]*GATE_SUITE_[A-Z_]+=", line)]
+        self.assertEqual(assignments, knobs,
+                         "the driver carries a GATE_SUITE_* assignment the shipped "
+                         "helper does not resolve from")
+
+    def test_the_floor_is_the_documented_magnitude(self):
+        # L2: a floor pinned only to itself stays green when it is lowered, and
+        # lowering it toward the 2 MiB default re-creates the exit-101 class this
+        # increment exists to kill. The documented magnitude is a literal here.
+        self.assertEqual(shipped_min_stack(), "16777216")
+
+    def assert_stack_refused(self, value=None, env=None):
+        """A refused stack budget is refused BEFORE the wrapper is resolved: no
+        argv assembled, no GATE-SUITE-BOUND line, nothing executed. A stub that
+        would exit 0 stands in, so nothing but the refusal can produce a non-zero
+        status here, and the stub's log is compared against its pre-call state
+        because an accepted case in the same test may already have logged one."""
+        self.stub("timeout", 0)
+        supplied = {"PATH": str(self.tools), **(env or {})}
+        if value is not None:
+            supplied["GATE_SUITE_MIN_STACK"] = value
+        before = self.calls.read_text() if self.calls.exists() else None
+        result = self.run_bounded("suite", env=supplied)
+        note = self.describe(result)
+        self.assertNotEqual(result.returncode, 0, note)
+        self.assertIn("GATE-SUITE-STACK-UNKNOWN", result.stderr, note)
+        self.assertNotIn("GATE-SUITE-BOUND", result.stdout, note)
+        after = self.calls.read_text() if self.calls.exists() else None
+        self.assertEqual(after, before,
+                         f"the timeout wrapper ran despite a refused stack budget "
+                         f"{supplied!r}: {note}")
 
     def test_an_empty_stack_budget_fails_closed_before_the_wrapper(self):
-        self.stub("timeout", 0)
         self.assert_stack_refused("")
 
     def test_an_under_floor_or_non_numeric_stack_budget_is_refused(self):
-        self.stub("timeout", 0)
         self.assert_stack_refused("1048576")
         self.assert_stack_refused("16M")
+
+    def test_a_numeral_no_shell_can_compare_is_refused_before_the_comparison(self):
+        # L1: `[ x -lt y ]` on an unrepresentable numeral is an arithmetic error,
+        # and the error takes the false branch -- the value was exported and std
+        # fell back to its 2 MiB default with no marker. The digit ceiling is
+        # checked before any comparison, so the refusal is the stack marker and
+        # the stub wrapper is never invoked.
+        self.assert_stack_refused("12345678901234567890")
+        self.assert_stack_refused("9223372036854775808")
+        self.assert_stack_refused("9" * 40)
+        self.assert_stack_refused(env={"RUST_MIN_STACK": "12345678901234567890"})
+
+    def test_a_leading_zero_stack_budget_is_compared_by_its_value(self):
+        # Leading zeros carry no value: they are stripped before the digit
+        # ceiling, so a padded numeral is neither refused as over-long nor read
+        # as octal.
+        self.stub("timeout", 0)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools),
+                                                "GATE_SUITE_MIN_STACK": "00000016777216"})
+        self.assertEqual(result.returncode, 0, self.describe(result))
+        self.assertEqual(self.stack_seen.read_text().strip(), "16777216")
+        self.assert_stack_refused("0000000001048576")
+
+    def test_the_documented_spelling_is_honoured(self):
+        # B2: RUST_MIN_STACK is the spelling every document teaches. It is an
+        # input the helper honours, not an ambient variable it overwrites.
+        self.stub("timeout", 0)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools),
+                                                "RUST_MIN_STACK": "33554432"})
+        self.assertEqual(result.returncode, 0, self.describe(result))
+        self.assertEqual(self.stack_seen.read_text().strip(), "33554432",
+                         "the documented RUST_MIN_STACK was replaced, not honoured")
+        self.assertIn("RUST_MIN_STACK=33554432", result.stdout)
+
+    def test_the_documented_spelling_is_refused_below_the_floor(self):
+        # B2: honouring the documented spelling is not weakening the floor. An
+        # under-floor RUST_MIN_STACK is REFUSED, never silently clamped up to the
+        # floor and run -- a clamp would resurrect the 22144 class exactly as
+        # silently as the overwrite did.
+        self.assert_stack_refused(env={"RUST_MIN_STACK": "1048576"})
+        self.assert_stack_refused(env={"RUST_MIN_STACK": "0001048576"})
+
+    def test_an_empty_documented_spelling_fails_closed(self):
+        # The resolution is non-colon at BOTH levels: an explicitly empty value is
+        # a refusal at either level, never a fall-through to the next one.
+        self.assert_stack_refused(env={"RUST_MIN_STACK": ""})
+        self.assert_stack_refused("", env={"RUST_MIN_STACK": "33554432"})
+
+    def test_the_gate_knob_takes_precedence_over_the_documented_spelling(self):
+        self.stub("timeout", 0)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools),
+                                                "GATE_SUITE_MIN_STACK": "33554432",
+                                                "RUST_MIN_STACK": "1048576"})
+        self.assertEqual(result.returncode, 0, self.describe(result))
+        self.assertEqual(self.stack_seen.read_text().strip(), "33554432",
+                         "the gate knob must win over RUST_MIN_STACK")
 
     def test_every_lib_suite_call_site_goes_through_the_bound(self):
         for name in ("mid_union", "mid_full"):
@@ -1717,6 +1852,51 @@ class BoundedSuite(unittest.TestCase):
                 self.assertNotIn("RUST_MIN_STACK=", line,
                                  f"{name} carries the stack budget at the call site; "
                                  f"the helper owns it: {line}")
+
+
+class IdentityEnvRecord(unittest.TestCase):
+    """L5: the declared-env record must name the stack input the helper actually
+    resolves from, so a snapshot can never describe a knob nothing reads -- and it
+    must record an explicitly empty value as empty, because empty is the spelling
+    that is refused rather than defaulted."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.temp = Path(self._temp.name)
+        # The shipped function under the interpreter options scripts/verify.sh
+        # runs with, plus the one caller-set variable it reads.
+        self.driver = self.temp / "declared.sh"
+        self.driver.write_text(
+            "set -eu\n"
+            'config_home="${CARGO_HOME:-$HOME/.cargo}"\n'
+            + extract_function("identity_snapshot_env_declared")
+            + "\n\nidentity_snapshot_env_declared\n")
+
+    def render(self, env=None):
+        inherited = {key: value for key, value in os.environ.items()
+                     if key not in ("GATE_SUITE_MIN_STACK", "RUST_MIN_STACK")}
+        result = subprocess.run(
+            [shutil.which("sh") or "/bin/sh", str(self.driver)],
+            cwd=self.temp, text=True, capture_output=True,
+            env={**inherited, **(env or {})})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout.splitlines()
+
+    def test_the_record_names_the_knob_the_helper_reads(self):
+        # The helper resolves from GATE_SUITE_MIN_STACK (defaulted from the
+        # documented RUST_MIN_STACK), so a record naming only the documented
+        # spelling describes a variable nothing in this script consumes.
+        self.assertIn("GATE_SUITE_MIN_STACK", extract_function("bounded_suite"))
+        lines = self.render({"GATE_SUITE_MIN_STACK": "33554432"})
+        self.assertIn("gate_suite_min_stack=33554432", lines)
+        self.assertIn("rust_min_stack=<unset>", lines)
+
+    def test_an_empty_knob_is_recorded_as_empty_not_absent(self):
+        # `:-` folds the refused spelling into <unset>, so the one value a
+        # snapshot most needs to show would read as an untaken default.
+        self.assertIn("gate_suite_min_stack=", self.render({"GATE_SUITE_MIN_STACK": ""}))
+        self.assertIn("rust_min_stack=", self.render({"RUST_MIN_STACK": ""}))
 
 
 # --- A2: discovery completeness ----------------------------------------------

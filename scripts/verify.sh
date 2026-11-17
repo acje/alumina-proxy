@@ -673,18 +673,30 @@ GATE_SUITE_BUDGET_SECS="${GATE_SUITE_BUDGET_SECS-600}"
 # a call that omitted it turned a healthy suite into that exit 101 -- exactly
 # what happened at 22144 and was nearly filed as a bug. 16777216 is therefore a
 # FLOOR as well as the default: a smaller caller value is refused, never run.
-# The `${VAR-default}` spelling (no colon) is deliberate -- unset takes the
-# floor, while an explicitly empty value stays empty and fails closed below.
+# RUST_MIN_STACK is the spelling the documentation teaches, so it is an honoured
+# input and not an ambient variable this helper overwrites: the effective value
+# is GATE_SUITE_MIN_STACK when set, else RUST_MIN_STACK when set, else the floor.
+# The `${VAR-default}` spelling (no colon) is deliberate at BOTH levels -- unset
+# falls through to the next level, while an explicitly empty value stays empty
+# and is refused below instead of being read as silence.
 GATE_SUITE_MIN_STACK_FLOOR=16777216
-GATE_SUITE_MIN_STACK="${GATE_SUITE_MIN_STACK-$GATE_SUITE_MIN_STACK_FLOOR}"
+# A shell comparison cannot represent an arbitrarily long numeral: an 18-digit
+# decimal stays inside every intmax_t a POSIX shell compares with, so the digit
+# count is the named ceiling the helper checks BEFORE any arithmetic.
+GATE_SUITE_MIN_STACK_MAX_DIGITS=18
+GATE_SUITE_MIN_STACK="${GATE_SUITE_MIN_STACK-${RUST_MIN_STACK-$GATE_SUITE_MIN_STACK_FLOOR}}"
 
 # bounded_suite <command...>: run one lib suite under that budget. Both knobs are
 # validated first, so neither an unbounded, unknown-length nor under-budgeted run
 # reaches a wrapper: the stack value is exported as RUST_MIN_STACK for the
 # invocation this helper wraps, and the budget is normalised to a strictly
-# positive decimal integer. A budget is a bound or it is a refusal -- a duration
-# of 0 is "no limit" to both wrappers, so zero is refused rather than passed on,
-# and leading zeros are stripped so no parser can read `0600` as octal or as 0.
+# positive decimal integer. The stack value must be a decimal byte count from
+# whichever knob supplied it, no longer than the digit ceiling, and never below
+# the floor; the checks run in that order, so the magnitude comparison below
+# always has representable operands. A budget is a bound or it is a refusal -- a
+# duration of 0 is "no limit" to both wrappers, so zero is refused rather than
+# passed on, and leading zeros are stripped so no parser can read `0600` as
+# octal or as 0.
 # `timeout` is resolved next, then `gtimeout` (the coreutils spelling); with
 # neither on PATH the run is refused, because an unavailable bound is not an
 # unbounded pass. The budget is enforced with SIGKILL in the portable `-s KILL`
@@ -693,14 +705,26 @@ GATE_SUITE_MIN_STACK="${GATE_SUITE_MIN_STACK-$GATE_SUITE_MIN_STACK_FLOOR}"
 # child under GNU coreutils); libtest's own failure exit 101 passes through
 # unchanged and is never labelled a timeout.
 bounded_suite() {
-    case "$GATE_SUITE_MIN_STACK" in
+    _bs_stack="$GATE_SUITE_MIN_STACK"
+    case "$_bs_stack" in
         "" | *[!0-9]*)
-            echo "GATE-SUITE-STACK-UNKNOWN: GATE_SUITE_MIN_STACK is '${GATE_SUITE_MIN_STACK}' -- not a byte count; refusing to run a lib suite at an unknown test-thread stack" >&2
+            echo "GATE-SUITE-STACK-UNKNOWN: the test-thread stack resolved to '${_bs_stack}' (GATE_SUITE_MIN_STACK, else RUST_MIN_STACK, else the floor) -- not a byte count; refusing to run a lib suite at an unknown test-thread stack" >&2
             return 1
             ;;
     esac
-    if [ "$GATE_SUITE_MIN_STACK" -lt "$GATE_SUITE_MIN_STACK_FLOOR" ]; then
-        echo "GATE-SUITE-STACK-UNKNOWN: GATE_SUITE_MIN_STACK=${GATE_SUITE_MIN_STACK} is below the ${GATE_SUITE_MIN_STACK_FLOOR}-byte floor; refusing to run an under-budgeted lib suite" >&2
+    while :; do
+        case "$_bs_stack" in
+            0?*) _bs_stack="${_bs_stack#0}" ;;
+            *) break ;;
+        esac
+    done
+    [ -n "$_bs_stack" ] || _bs_stack=0
+    if [ "${#_bs_stack}" -gt "$GATE_SUITE_MIN_STACK_MAX_DIGITS" ]; then
+        echo "GATE-SUITE-STACK-UNKNOWN: the test-thread stack resolved to ${_bs_stack}, ${#_bs_stack} digits -- above the ${GATE_SUITE_MIN_STACK_MAX_DIGITS}-digit ceiling a shell comparison can represent; refusing to run a lib suite at an unknown test-thread stack" >&2
+        return 1
+    fi
+    if [ "$_bs_stack" -lt "$GATE_SUITE_MIN_STACK_FLOOR" ]; then
+        echo "GATE-SUITE-STACK-UNKNOWN: the test-thread stack resolved to ${_bs_stack} (GATE_SUITE_MIN_STACK, else RUST_MIN_STACK, else the floor) -- below the ${GATE_SUITE_MIN_STACK_FLOOR}-byte floor; refusing to run an under-budgeted lib suite" >&2
         return 1
     fi
     case "$GATE_SUITE_BUDGET_SECS" in
@@ -720,7 +744,7 @@ bounded_suite() {
         echo "GATE-SUITE-TIMEOUT-UNKNOWN: GATE_SUITE_BUDGET_SECS=0 is a duration of zero, which both timeout and gtimeout read as 'no limit'; refusing to run a lib suite under a bound of zero" >&2
         return 1
     fi
-    export RUST_MIN_STACK="$GATE_SUITE_MIN_STACK"
+    export RUST_MIN_STACK="$_bs_stack"
     _bs_wrapper=""
     for _bs_candidate in timeout gtimeout; do
         if command -v "$_bs_candidate" >/dev/null 2>&1; then
@@ -1833,7 +1857,10 @@ identity_snapshot_env() {
 }
 
 # The declared build environment the snapshot pins verbatim: the resolved
-# compiler identity, hasher, Cargo/rustc knobs and the effective Cargo home.
+# compiler identity, hasher, Cargo/rustc knobs, the lib-suite stack inputs and
+# the effective Cargo home. The stack inputs are recorded in the helper's own
+# precedence order and with the same no-colon spelling, so an explicitly empty
+# value is recorded as empty instead of being hidden as <unset>.
 #
 # No toolchain pin exists in this repository, so the compiler identity is
 # OBSERVED from the host that runs the build. An unobservable compiler is
@@ -1852,7 +1879,8 @@ identity_snapshot_env_declared() {
     printf 'cargo_home=%s\n' "${CARGO_HOME:-<unset>}"
     printf 'cargo_target_dir=%s\n' "${CARGO_TARGET_DIR:-<unset>}"
     printf 'rustflags=%s\n' "${RUSTFLAGS:-<unset>}"
-    printf 'rust_min_stack=%s\n' "${RUST_MIN_STACK:-<unset>}"
+    printf 'gate_suite_min_stack=%s\n' "${GATE_SUITE_MIN_STACK-<unset>}"
+    printf 'rust_min_stack=%s\n' "${RUST_MIN_STACK-<unset>}"
     printf 'rustc=%s\n' "${RUSTC:-<unset>}"
     printf 'rustc_wrapper=%s\n' "${RUSTC_WRAPPER:-<unset>}"
     printf 'rustc_workspace_wrapper=%s\n' "${RUSTC_WORKSPACE_WRAPPER:-<unset>}"
