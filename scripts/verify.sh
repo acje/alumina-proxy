@@ -404,6 +404,48 @@ ALLOC_WITNESS_ONLY_TESTS="--test mio_matrix"
 # gate-only binaries; the witness-on pass adds ALLOC_WITNESS_ONLY_TESTS.
 ALT_TEST_TARGETS="--test foundations --test boot $GATE_ONLY_TESTS"
 
+# --- lib-suite budget --------------------------------------------------------
+# libtest has no timeout of its own, so a suite that deadlocks on a read is
+# indistinguishable from a slow one and consumes the whole gate window.
+# Measured here: the green bracketed lib run took 22.67 s for 1181 tests, while
+# the wedged one showed no progress past 60 s and was still wedged at 9 minutes.
+# 600 s is ~26x the green run and well under the window the wedge consumed. The
+# environment knob exists so the bound can be proven behaviourally (a 1 s budget
+# against `sleep 30`), not to be tuned day to day.
+GATE_SUITE_BUDGET_SECS="${GATE_SUITE_BUDGET_SECS:-600}"
+
+# bounded_suite <command...>: run one lib suite under that budget. `timeout` is
+# resolved first, then `gtimeout` (the coreutils spelling); with neither on PATH
+# the run is refused, because an unavailable bound is not an unbounded pass. The
+# budget is enforced with SIGKILL in the portable `-s KILL` form that both GNU
+# and busybox timeout accept, so a suite cannot ignore the bound. Timeout
+# statuses are 124 (conventional) and 137 (measured for a KILLed child under
+# GNU coreutils); libtest's own failure exit 101 passes through unchanged and is
+# never labelled a timeout.
+bounded_suite() {
+    _bs_wrapper=""
+    for _bs_candidate in timeout gtimeout; do
+        if command -v "$_bs_candidate" >/dev/null 2>&1; then
+            _bs_wrapper="$_bs_candidate"
+            break
+        fi
+    done
+    if [ -z "$_bs_wrapper" ]; then
+        echo "GATE-SUITE-TIMEOUT-UNKNOWN: neither timeout nor gtimeout is on PATH; refusing to run a lib suite unbounded (operational absence is never a pass)" >&2
+        return 1
+    fi
+    echo "GATE-SUITE-BOUND: $_bs_wrapper -s KILL ${GATE_SUITE_BUDGET_SECS}s: $*"
+    _bs_rc=0
+    "$_bs_wrapper" -s KILL "$GATE_SUITE_BUDGET_SECS" "$@" || _bs_rc=$?
+    case "$_bs_rc" in
+        0) ;;
+        124 | 137)
+            echo "GATE-SUITE-TIMEOUT-FAIL: lib suite exceeded the ${GATE_SUITE_BUDGET_SECS}s budget and was killed ($_bs_wrapper exit $_bs_rc); a wedged suite is a failure, not a slow run" >&2
+            ;;
+    esac
+    return "$_bs_rc"
+}
+
 mid_union() {
     [ "$(uname -s)" = "Linux" ] || {
         echo "mid union requires Linux execution" >&2
@@ -418,7 +460,7 @@ mid_union() {
     echo "COMBINED-SUITE-WITNESS-OFF (lib units + foundations + boot + both-configuration gate-only binaries):"
     assert_no_leaked_gate_children
     # shellcheck disable=SC2086
-    cargo atest -p alumina --locked --lib $ALT_TEST_TARGETS
+    bounded_suite cargo atest -p alumina --locked --lib $ALT_TEST_TARGETS
     assert_no_leaked_gate_children
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
     echo "CLIPPY (production, no alloc-witness):"
@@ -427,7 +469,7 @@ mid_union() {
     cargo aclippy -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --all-targets --features alloc-witness -- -D warnings
     echo "COMBINED-SUITE-WITNESS-ON (same surface + alloc-witness-only mio_matrix, alloc-witness):"
     # shellcheck disable=SC2086
-    cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $ALT_TEST_TARGETS $ALLOC_WITNESS_ONLY_TESTS
+    bounded_suite cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $ALT_TEST_TARGETS $ALLOC_WITNESS_ONLY_TESTS
     assert_no_leaked_gate_children
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"
@@ -485,12 +527,12 @@ mid_full() {
     echo "GATE-ONLY-SUITE (lib units + both-configuration gate-only binaries, witness-off):"
     assert_no_leaked_gate_children
     # shellcheck disable=SC2086
-    cargo atest -p alumina --locked --lib $GATE_ONLY_TESTS
+    bounded_suite cargo atest -p alumina --locked --lib $GATE_ONLY_TESTS
     assert_no_leaked_gate_children
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
     echo "GATE-ONLY-SUITE-WITNESS (the same surface + alloc-witness-only mio_matrix, alloc-witness):"
     # shellcheck disable=SC2086
-    cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $GATE_ONLY_TESTS $ALLOC_WITNESS_ONLY_TESTS
+    bounded_suite cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $GATE_ONLY_TESTS $ALLOC_WITNESS_ONLY_TESTS
     assert_no_leaked_gate_children
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"

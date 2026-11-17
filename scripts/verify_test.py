@@ -1016,6 +1016,111 @@ class E2EReceiptInputs(unittest.TestCase):
                             "the tracked dirty diff must still be receipt-carried")
 
 
+def extract_budget_default():
+    """The shipped budget line, so the tests pin the constant the gate actually
+    runs with rather than a copy of it."""
+    match = re.search(r"^GATE_SUITE_BUDGET_SECS=.*$",
+                      (ROOT / "scripts/verify.sh").read_text(), re.M)
+    assert match is not None, "GATE_SUITE_BUDGET_SECS default not found in scripts/verify.sh"
+    return match
+
+
+class BoundedSuite(unittest.TestCase):
+    """Every lib-suite invocation runs under the shipped `bounded_suite` owner,
+    text-extracted from scripts/verify.sh (never a Python re-implementation):
+    libtest has no timeout, so a wedged suite is otherwise indistinguishable
+    from a slow one and consumes the whole window.
+
+    A stub wrapper stands in for `timeout`/`gtimeout` to drive each exit path;
+    the stub records its own argv, so the portable `-s KILL` form and the budget
+    are pinned as the shipped helper passes them."""
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.temp = Path(self._temp.name)
+        self.tools = self.temp / "tools"
+        self.tools.mkdir()
+        self.calls = self.temp / "calls"
+        # The driver is the shipped constant plus body under the interpreter
+        # options scripts/verify.sh itself runs with.
+        self.driver = self.temp / "bounded.sh"
+        self.driver.write_text(
+            "set -eu\n" + extract_budget_default().group(0) + "\n\n"
+            + extract_function("bounded_suite") + '\n\nbounded_suite "$@"\n')
+
+    def stub(self, name, rc):
+        path = self.tools / name
+        path.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\nexit {rc}\n')
+        path.chmod(0o755)
+
+    def run_bounded(self, *args, env=None):
+        # Absolute interpreter: the stub cases run with a PATH that shadows
+        # every wrapper, so `sh` must not be resolved through it.
+        return subprocess.run(
+            [shutil.which("sh") or "/bin/sh", str(self.driver), *map(str, args)],
+            cwd=self.temp, text=True, capture_output=True,
+            env={**os.environ, "CALLS": str(self.calls), **(env or {})})
+
+    def test_an_absent_wrapper_fails_closed(self):
+        result = self.run_bounded("suite", env={"PATH": str(self.tools)})
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GATE-SUITE-TIMEOUT-UNKNOWN", result.stderr)
+
+    def test_a_timed_out_suite_is_labelled_and_fails(self):
+        self.stub("timeout", 124)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools)})
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GATE-SUITE-TIMEOUT-FAIL", result.stderr)
+        self.assertIn("GATE-SUITE-BOUND", result.stdout)
+        self.assertEqual(self.calls.read_text().strip(), "-s KILL 600 suite")
+
+    def test_a_green_suite_passes(self):
+        self.stub("timeout", 0)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("GATE-SUITE-TIMEOUT", result.stderr)
+
+    def test_a_genuine_test_failure_passes_through_unchanged(self):
+        self.stub("timeout", 101)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools)})
+        self.assertEqual(result.returncode, 101, result.stdout + result.stderr)
+        self.assertNotIn("GATE-SUITE-TIMEOUT", result.stdout + result.stderr)
+
+    def test_gtimeout_is_the_fallback_spelling(self):
+        self.stub("gtimeout", 0)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls.read_text().strip(), "-s KILL 600 suite")
+
+    def test_the_shipped_bound_stops_a_long_suite(self):
+        if shutil.which("timeout") is None and shutil.which("gtimeout") is None:
+            self.skipTest("no timeout wrapper on this test host; the absence path "
+                          "is covered as fail-closed above")
+        started = time.monotonic()
+        result = self.run_bounded("sleep", 30, env={"GATE_SUITE_BUDGET_SECS": "1"})
+        elapsed = time.monotonic() - started
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GATE-SUITE-TIMEOUT-FAIL", result.stderr)
+        self.assertLess(elapsed, 10, f"the bound did not stop the suite: {elapsed:.1f}s")
+
+    def test_the_budget_and_the_portable_kill_form_are_pinned(self):
+        self.assertIn('GATE_SUITE_BUDGET_SECS="${GATE_SUITE_BUDGET_SECS:-600}"',
+                      extract_budget_default().group(0))
+        body = extract_function("bounded_suite")
+        self.assertIn('-s KILL "$GATE_SUITE_BUDGET_SECS" "$@"', body)
+        self.assertNotIn("-k ", body)
+
+    def test_every_lib_suite_call_site_goes_through_the_bound(self):
+        for name in ("mid_union", "mid_full"):
+            lib_lines = [line.strip() for line in extract_function(name).splitlines()
+                         if "--lib" in line]
+            self.assertEqual(len(lib_lines), 2, name)
+            for line in lib_lines:
+                self.assertTrue(line.startswith("bounded_suite cargo atest"),
+                                f"{name} runs a lib suite unbounded: {line}")
+
+
 if __name__ == "__main__":
     suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])
     result = unittest.TextTestRunner().run(suite)

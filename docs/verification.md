@@ -153,13 +153,17 @@ non-zero.
 ### The native lib-suite recipe
 
 A host-native lib run must be **bracketed** by the scan, because a host run has
-no dispatch boundary to fail at:
+no dispatch boundary to fail at, and must carry the same 600 s bound the gate
+applies (see [the lib-suite budget](#the-lib-suite-budget)):
 
 ```bash
 sh scripts/verify.sh gate-children scan
-RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --lib
+RUST_MIN_STACK=16777216 timeout -s KILL 600 cargo atest -p alumina --locked --lib
 sh scripts/verify.sh gate-children scan
 ```
+
+`gtimeout` is the fallback spelling where GNU coreutils is installed under that
+name; with neither on `PATH` the run must not proceed.
 
 The **pre-scan** is what makes the bracket load-bearing for a host-native run:
 an orphan that already existed before the run owns a loopback listener, so a lib
@@ -195,6 +199,34 @@ Negative-control shape — the failure path is exercised, not just the clean pat
 2. Disable the guard for one run (forget it) and exit the parent: the child is
    reparented and the scan exits non-zero naming its pid.
 3. Revert: the suite is green again and the scan is clean.
+
+### The lib-suite budget
+
+Every lib-suite invocation in `mid union` and `mid full` runs under one helper,
+`bounded_suite`, with a fixed `GATE_SUITE_BUDGET_SECS` of **600 s**. libtest has
+no timeout of its own, so a suite blocked in a read is indistinguishable from a
+slow one and consumes the whole window.
+
+The budget's evidence, measured on this repository: a green bracketed lib run
+passed 1181 tests in 22.67 s, while a wedged run printed no progress past 60 s
+and was still wedged at 9 minutes on a test blocked in `read_until`. 600 s is
+about 26x the green run and far below the window the wedge consumed.
+
+The helper resolves `timeout`, then `gtimeout` (the coreutils spelling), and
+runs `-s KILL` at the budget: the form GNU and busybox `timeout` both accept, so
+the gate never waits past it. One receipt line and two failure markers:
+
+- `GATE-SUITE-BOUND` on every invocation, naming the resolved wrapper, the
+  budget and the command, so the receipt records the bound that was applied;
+- `GATE-SUITE-TIMEOUT-FAIL` when the wrapper kills the suite, with a non-zero
+  exit (124 conventional, or 137 as measured for a KILLed child);
+- `GATE-SUITE-TIMEOUT-UNKNOWN` when neither wrapper is on `PATH`: the helper
+  refuses to run, because an unavailable bound is never an unbounded pass.
+
+A genuine test failure is not a timeout: libtest's own exit 101 passes through
+unchanged with no timeout marker. The bound releases the gate window; it cannot
+reap a test binary cargo had already spawned, so the bracket above still owns a
+process that outlives its parent.
 
 ## Test suite navigation & ownership
 
