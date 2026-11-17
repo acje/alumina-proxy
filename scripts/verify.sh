@@ -254,12 +254,22 @@ whitespace_gate() {
 #                relative knob, with trailing slashes stripped, or the absolute
 #                directory itself.
 #
-# Both sources are normalised or refused: a trailing separator is provably
-# harmless, while an empty value or one carrying a '.'/'..'/empty component is
-# refused (cargo would exec from a path the scan cannot derive from it). The
-# metadata answer needs the same treatment — cargo reports it verbatim, so
-# CARGO_TARGET_DIR=target/aw/ and ./target survive into it (measured). Both the
-# logical and physical checkout spelling are covered where they differ, deduped.
+# Every SOURCE value — each checkout spelling, cargo's target_directory answer,
+# and ALT_AW_TARGET_DIR — is bound BEFORE composition or splitting: any
+# whitespace in it (LF, CR, TAB, space) is refused. The roots are carried as
+# newline-separated lines, so a separator inside a value would fragment that
+# list into whitespace-free pieces that each pass the per-root check while
+# naming a root cargo never execs from. The per-root whitespace check after
+# composition stays as a second belt, never as the protection itself.
+#
+# The sources are then normalised or refused: a trailing separator is provably
+# harmless, while an empty value, the filesystem root '/', or one carrying a
+# '.'/'..'/empty component is refused (cargo would exec from a path the scan
+# cannot derive from it). The metadata answer needs the same treatment — cargo
+# reports it verbatim, so CARGO_TARGET_DIR=target/aw/ and ./target survive into
+# it (measured) — and an answer carrying the key more than once is ambiguous,
+# refused rather than resolved last-wins. Both the logical and physical checkout
+# spelling are covered where they differ, deduped.
 # Within a root the shape is <hash>/out/<gate-binary>-<hash>. A path that
 # merely appears among a process's arguments (a compiler writing into that
 # directory, `ld -o .../out/...`) is not a match. Both the procps and busybox
@@ -267,11 +277,11 @@ whitespace_gate() {
 # GATE-CHILD-LEAK-NOTE records that argv[0] may be truncated, because busybox
 # has no portable unbounded form and refusing the fallback would red every
 # busybox host (residual, docs/verification.md).
-# An operational failure - no usable `ps`, no `awk`, an empty or non-absolute
-# checkout spelling, an underivable or unprovable build root, a root the scan
-# cannot separate from the arguments, an unparsable listing, a listing that
-# cannot see this shell, or no root at all - is GATE-CHILD-LEAK-UNKNOWN and
-# fails: an observation failure is never a clean gate.
+# An operational failure - no usable `ps`, no `awk`, an empty, whitespace-bearing
+# or non-absolute checkout spelling, an ambiguous, empty, whitespace-bearing or
+# otherwise unprovable build root, an unparsable listing, a listing that cannot
+# see this shell, or no root at all - is GATE-CHILD-LEAK-UNKNOWN and fails: an
+# observation failure is never a clean gate.
 #
 # _gl_component_check <value> <label>: refuse a directory spelling that carries
 # an empty, '.' or '..' component. cargo resolves such a spelling to a path the
@@ -295,6 +305,34 @@ _gl_component_check() {
         esac
         [ -n "$_gc_rest" ] || break
     done
+}
+
+# _gl_source_bind <value> <label>: bind a build-root SOURCE value before it is
+# composed or split. The roots travel as newline-separated lines, so a
+# separator inside a value fragments that list into whitespace-free pieces:
+# each fragment passes the per-root belt below while naming a root cargo never
+# execs from. The refusal therefore binds the value itself, and it covers every
+# whitespace class — LF, CR, TAB and space — not only the space a composed root
+# would carry. `[[:space:]]` in `case` matches CR here (measured, POSIX sh).
+_gl_source_bind() {
+    case "$1" in
+        *[[:space:]]*)
+            echo "GATE-CHILD-LEAK-UNKNOWN: $2 contains whitespace (LF, CR, TAB or space); the scan binds each source value before composition, and a separator inside one would fragment the newline-separated root list into whitespace-free pieces that name roots cargo never execs" >&2
+            return 1
+            ;;
+    esac
+}
+
+# _gl_build_root_source_check <value> <label>: '/' is a real value refused for
+# its real reason — the filesystem root can never be a build root. The
+# empty-component text would name a cause that is not the case.
+_gl_build_root_source_check() {
+    case "$1" in
+        /)
+            echo "GATE-CHILD-LEAK-UNKNOWN: $2='/' is the filesystem root, which cannot be a build root; the scan would look for /debug/build/alumina where nothing is built" >&2
+            return 1
+            ;;
+    esac
 }
 
 assert_no_leaked_gate_children() {
@@ -326,6 +364,7 @@ assert_no_leaked_gate_children() {
     # not this checkout at all.
     _gl_checkouts=""
     for _gl_checkout in "$(pwd)" "$(pwd -P)"; do
+        _gl_source_bind "$_gl_checkout" "checkout spelling" || return 1
         case "$_gl_checkout" in
             /*) ;;
             *)
@@ -346,11 +385,15 @@ assert_no_leaked_gate_children() {
     }
     # The field is read as an exact JSON string value: the value must close on an
     # unescaped quote and carry no backslash, so a JSON-escaped path yields no
-    # value at all and fails closed below rather than being guessed at.
+    # value at all and fails closed below rather than being guessed at. A key
+    # that appears more than once is ambiguous, not last-wins: choosing by order
+    # could scan a root cargo never uses.
+    _gl_meta_awk_rc=0
     _gl_meta=$(printf '%s\n' "$_gl_meta_out" | awk -v key='"target_directory":"' '
         {
             line = $0
             while ((i = index(line, key)) > 0) {
+                hits++
                 rest = substr(line, i + length(key))
                 j = index(rest, "\"")
                 if (j == 0) break
@@ -359,8 +402,26 @@ assert_no_leaked_gate_children() {
                 line = substr(rest, j + 1)
             }
         }
-        END { if (found != "") printf "%s", found }
-    ')
+        END {
+            if (hits > 1) exit 4
+            if (found != "") printf "%s", found
+        }
+    ') || _gl_meta_awk_rc=$?
+    case "$_gl_meta_awk_rc" in
+        0) ;;
+        4)
+            echo "GATE-CHILD-LEAK-UNKNOWN: cargo metadata reports target_directory more than once; the answer is ambiguous and the scan will not resolve it by order (last-wins could scan a root cargo never uses)" >&2
+            return 1
+            ;;
+        *)
+            echo "GATE-CHILD-LEAK-UNKNOWN: target_directory extraction exit $_gl_meta_awk_rc (operational error is never clean)" >&2
+            return 1
+            ;;
+    esac
+    # Bind the answer BEFORE it is normalised or composed: a separator in it
+    # would fragment the newline-separated root list (see _gl_source_bind).
+    _gl_source_bind "$_gl_meta" "cargo metadata target_directory" || return 1
+    _gl_build_root_source_check "$_gl_meta" "cargo metadata target_directory" || return 1
     # The metadata answer is normalised the same way as the knob, because it is
     # the same hazard from the other entrance: it comes from CARGO_TARGET_DIR or
     # a config build.target-dir, and cargo reports such a value verbatim (a
@@ -382,9 +443,12 @@ assert_no_leaked_gate_children() {
             ;;
     esac
     _gl_component_check "$_gl_meta" "cargo metadata target_directory" || return 1
-    # The witness-on knob: strip trailing slashes (cargo's own Path join never
-    # repeats a separator, so "target/aw/" and "target/aw" are one root), then
-    # refuse every spelling whose argv[0] the scan cannot derive.
+    # The witness-on knob: bind the SOURCE value first, then strip trailing
+    # slashes (cargo's own Path join never repeats a separator, so "target/aw/"
+    # and "target/aw" are one root), then refuse every spelling whose argv[0] the
+    # scan cannot derive.
+    _gl_source_bind "$ALT_AW_TARGET_DIR" "ALT_AW_TARGET_DIR" || return 1
+    _gl_build_root_source_check "$ALT_AW_TARGET_DIR" "ALT_AW_TARGET_DIR" || return 1
     _gl_aw="$ALT_AW_TARGET_DIR"
     while [ "${_gl_aw%/}" != "$_gl_aw" ]; do
         _gl_aw="${_gl_aw%/}"
@@ -404,8 +468,9 @@ assert_no_leaked_gate_children() {
     # would be rewritten. Composition happens here rather than in the shell for
     # the same reason: re-spelling the metadata answer for the other checkout
     # spelling needs an exact prefix strip, and an unquoted shell expansion would
-    # make that pattern glob-active. Keeping roots line-separated means a root is
-    # never re-split into pieces before the whitespace check sees it.
+    # make that pattern glob-active. The line-separated shape is only sound
+    # because every value that enters it was bound first (see _gl_source_bind):
+    # a separator here would fragment a root before the whitespace belt sees it.
     _gl_derived_rc=0
     _gl_roots=$(GL_CHECKOUTS="$_gl_checkouts" GL_META="$_gl_meta" GL_AW="$_gl_aw" \
         GL_AW_ABS="$_gl_aw_abs" awk '
@@ -444,6 +509,9 @@ assert_no_leaked_gate_children() {
         echo "GATE-CHILD-LEAK-UNKNOWN: build-root derivation exit $_gl_derived_rc (operational error is never clean)" >&2
         return 1
     }
+    # Second belt: each composed root is checked for whitespace too. It cannot be
+    # the protection itself (a separator in a source value has already fragmented
+    # this list), which is why every source was bound before composition.
     while IFS= read -r _gl_root; do
         [ -n "$_gl_root" ] || continue
         case "$_gl_root" in

@@ -148,15 +148,25 @@ never assumed:
   (trailing slashes stripped, since cargo's own path join never repeats a
   separator) or the absolute directory itself.
 
-Both sources are **normalised or refused, never guessed at**. A trailing
-separator is stripped, because a path join never repeats one. An empty value, or
-a spelling carrying a `.`, `..` or empty (doubled-slash) path component, is
-`GATE-CHILD-LEAK-UNKNOWN` naming the offending spelling and its source: cargo
-would exec from a path the scan cannot prove it can match, and an OK receipt over
-an unmatchable root is worse than no receipt. The metadata answer needs this too
-— it is reported verbatim, so `CARGO_TARGET_DIR=target/aw/` and
-`CARGO_TARGET_DIR=./target` come back with the separator and the `./` intact
-(measured).
+Both sources are **bound at the source value, before composition or splitting,
+then normalised or refused, never guessed at**. The roots travel as
+newline-separated lines, so any whitespace character in a source value — LF, CR,
+TAB or a trailing space, whether it comes from a checkout spelling, from cargo's
+answer or from `ALT_AW_TARGET_DIR` — is `GATE-CHILD-LEAK-UNKNOWN` naming that
+source. A separator would fragment the root list into whitespace-free pieces that
+each pass the per-root check while matching nothing cargo executes, so the check
+after composition is a second belt and never the protection itself.
+
+A trailing separator is then stripped, because a path join never repeats one. An
+empty value, the filesystem root `/` (refused with its own message: it can never
+be a build root), or a spelling carrying a `.`, `..` or empty (doubled-slash)
+path component is `GATE-CHILD-LEAK-UNKNOWN` naming the offending spelling and
+its source: cargo would exec from a path the scan cannot prove it can match. The
+metadata answer needs this too — it is reported verbatim, so
+`CARGO_TARGET_DIR=target/aw/` and `CARGO_TARGET_DIR=./target` come back with the
+separator and the `./` intact (measured) — and an answer carrying
+`target_directory` more than once is ambiguous, refused rather than resolved
+last-wins (order could otherwise choose a root cargo never uses).
 
 Within a root the shape is a hash-named subdirectory, then its `out`
 subdirectory, then a gate-binary name carrying the same hash suffix — matched
@@ -204,15 +214,17 @@ ambiguous host state: a stale orphan on the host holds a loopback listener no
 current gate owns, so the dispatch receipt that follows is chain-ambiguous.
 
 An **unusable observation fails closed**: when `ps` is absent or fails, `awk` is
-absent, the checkout spelling is empty or not absolute (an unqualified `pwd`
-would otherwise compose `/target/debug/build/alumina`), `cargo metadata` fails
-or reports no usable `target_directory`, a `target_directory` or
-`ALT_AW_TARGET_DIR` spelling is empty, non-absolute where it must be absolute, or
-non-canonical, a build root contains whitespace (argv[0] is then not separable
-from the process arguments), the listing cannot be parsed, the listing does not
-contain the scanning shell, or the derivation yields no root at all, the gate
-prints `GATE-CHILD-LEAK-UNKNOWN` and exits non-zero. An operational error is
-never a clean scan.
+absent, the checkout spelling is empty, not absolute or carries any whitespace
+(an unqualified `pwd` would otherwise compose `/target/debug/build/alumina`),
+`cargo metadata` fails or reports no usable `target_directory`, a
+`target_directory` or `ALT_AW_TARGET_DIR` source value carries any whitespace,
+the answer reports `target_directory` more than once (ambiguous), a spelling is
+empty, `/` (the filesystem root is never a build root), non-absolute where it
+must be absolute, or non-canonical, a composed build root carries whitespace
+(argv[0] is then not separable from the process arguments; second belt), the
+listing cannot be parsed, the listing does not contain the scanning shell, or the
+derivation yields no root at all, the gate prints `GATE-CHILD-LEAK-UNKNOWN` and
+exits non-zero. An operational error is never a clean scan.
 
 Residual: where no `ps` form this host accepts carries `-ww` (busybox accepts
 none portably), a long `argv[0]` may be truncated, and a truncated `argv[0]` can

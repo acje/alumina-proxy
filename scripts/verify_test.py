@@ -233,21 +233,24 @@ esac
             self.assertEqual(self.run_verify("host-mid", "unknown", env=env, cwd=repo).returncode, 2)
 
     def gate_child_scan(self, temp, synthetic, env=None, metadata=None, cargo=None,
-                        reject_wide_ps=False, restrict_path=False):
+                        reject_wide_ps=False, restrict_path=False, repo_name="repo"):
         """Runs the shipped gate-child scan in a temp repo whose `ps` prints the
         real listing plus the planted lines: the real listing satisfies the
         scan's self-listing precondition, so only the planted lines are tested.
         `PWD` pins the logical checkout spelling; `pwd -P` supplies the physical
         one, so on a host whose temp root is a symlink both are covered.
+        `repo_name` moves the checkout under a name carrying a separator.
 
         `cargo metadata` is stubbed as well, because the scan derives its
         witness-off build root from cargo: `metadata` is the JSON text the stub
         prints (default: a target_directory under the temp repo) and `cargo`
-        replaces the stub outright to drive a failing or unusable producer.
+        replaces the stub outright to drive a failing or unusable producer. The
+        stub also records every invocation in `cargo-calls.txt` and refuses any
+        argv other than the scan's pinned one.
         `reject_wide_ps` makes the stub refuse every `-ww` form, so the scan
         falls back to a truncating listing form; `restrict_path` runs the scan
         with no PATH beyond the stubs (to exercise an absent prerequisite)."""
-        repo, tools = temp / "repo", temp / "tools"
+        repo, tools = temp / repo_name, temp / "tools"
         (repo / "scripts").mkdir(parents=True)
         tools.mkdir()
         shutil.copyfile(ROOT / "scripts/verify.sh", repo / "scripts/verify.sh")
@@ -266,8 +269,15 @@ esac
                                  else json.dumps({"target_directory": str(repo / "target")},
                                                  separators=(",", ":")))
         cargo_stub = tools / "cargo"
-        cargo_stub.write_text(cargo if cargo is not None
-                              else f'#!/bin/sh\n"{cat}" "{metadata_path}"\n')
+        cargo_calls = temp / "cargo-calls.txt"
+        cargo_stub.write_text(cargo if cargo is not None else (
+            "#!/bin/sh\n"
+            f'printf \'%s\\n\' "$*" >> "{cargo_calls}"\n'
+            'case "$*" in\n'
+            '  "metadata --no-deps --format-version 1 --locked") ;;\n'
+            '  *) echo "cargo stub: unexpected invocation: $*" >&2; exit 64 ;;\n'
+            "esac\n"
+            f'"{cat}" "{metadata_path}"\n'))
         cargo_stub.chmod(0o755)
         path = f"{tools}:{os.environ['PATH']}"
         if restrict_path:
@@ -303,12 +313,133 @@ esac
                 self.assertIn(str(aw), result.stderr, case)
 
     def test_gate_child_scan_fails_closed_on_a_whitespace_build_root(self):
+        # A value carrying a space is refused at the source, before composition:
+        # the composed root is never built from an unbound value.
         with tempfile.TemporaryDirectory() as temp:
-            repo, result = self.gate_child_scan(
+            _, result = self.gate_child_scan(
                 Path(temp), [], env={"ALT_AW_TARGET_DIR": "aw root"})
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr)
-            self.assertIn("aw root/debug/build/alumina", result.stderr)
+            self.assertIn("ALT_AW_TARGET_DIR contains whitespace", result.stderr)
+
+    def test_gate_child_scan_binds_a_separator_in_the_knob_before_composition(self):
+        # B1: the roots travel as newline-separated lines, so a separator inside
+        # a SOURCE value fragments that list into whitespace-free pieces which
+        # each pass the per-root check and name roots cargo never execs. The
+        # refusal has to bind the value, before composition or splitting.
+        for label, value in (
+            ("LF", "aw\nx"),
+            ("CR", "aw\rx"),
+            ("tab", "aw\tx"),
+            ("trailing-space", "aw "),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as temp:
+                _, result = self.gate_child_scan(
+                    Path(temp), [], env={"ALT_AW_TARGET_DIR": value})
+                self.assertNotEqual(result.returncode, 0,
+                                    label + result.stdout + result.stderr)
+                self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr, label)
+                self.assertIn("ALT_AW_TARGET_DIR contains whitespace",
+                              result.stderr, label)
+                self.assertNotIn("GATE-CHILD-LEAK-OK", result.stdout, label)
+
+    def test_gate_child_scan_binds_the_metadata_answer_before_composition(self):
+        # The same source binding applies to cargo's answer. A space survives
+        # verbatim from CARGO_TARGET_DIR and is reachable, so it is bound at the
+        # source; the escaping separators (LF, CR, TAB) are JSON-escaped by cargo
+        # and already leave no readable value, which fails closed too.
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            document = ('{"target_directory":"' + str(temp / "repo" / "tar get")
+                        + '"}\n')
+            _, result = self.gate_child_scan(temp, [], metadata=document)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr)
+            self.assertIn("cargo metadata target_directory contains whitespace",
+                          result.stderr)
+            self.assertNotIn("GATE-CHILD-LEAK-OK", result.stdout)
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            document = ('{"target_directory":"' + str(temp / "repo" / "tar\nget")
+                        + '"}\n')
+            _, result = self.gate_child_scan(temp, [], metadata=document)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr)
+            self.assertNotIn("GATE-CHILD-LEAK-OK", result.stdout)
+
+    def test_gate_child_scan_binds_a_checkout_spelling_before_composition(self):
+        # A checkout spelling is a root source too: an LF in it fragments both
+        # the witness-off and the witness-on root into clean-looking fragments.
+        with tempfile.TemporaryDirectory() as temp:
+            _, result = self.gate_child_scan(Path(temp), [], repo_name="re\npo")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr)
+            self.assertIn("checkout spelling contains whitespace", result.stderr)
+            self.assertNotIn("GATE-CHILD-LEAK-OK", result.stdout)
+
+    def test_gate_child_scan_names_the_filesystem_root_refusal(self):
+        # I2: '/' is a real value, so it is refused for its real reason. The
+        # empty-component text would name a cause that is not the case.
+        for label, env, metadata in (
+            ("knob", {"ALT_AW_TARGET_DIR": "/"}, None),
+            ("metadata", {}, '{"target_directory":"/"}\n'),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as temp:
+                _, result = self.gate_child_scan(
+                    Path(temp), [], env=env, metadata=metadata)
+                self.assertNotEqual(result.returncode, 0,
+                                    label + result.stdout + result.stderr)
+                self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr, label)
+                self.assertIn("is the filesystem root", result.stderr, label)
+                self.assertIn("cannot be a build root", result.stderr, label)
+                self.assertNotIn("empty, '.' or '..'", result.stderr, label)
+                self.assertNotIn("is empty", result.stderr, label)
+
+    def test_gate_child_scan_refuses_an_ambiguous_metadata_answer(self):
+        # A1: last-wins lets a second key choose a root cargo never uses. The
+        # answer is ambiguous, so it is refused rather than resolved by order.
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo = temp / "repo"
+            document = ('{"target_directory":"' + str(repo / "target") + '",'
+                        '"target_directory":"' + str(repo / "other") + '"}')
+            _, result = self.gate_child_scan(temp, [], metadata=document)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("GATE-CHILD-LEAK-UNKNOWN", result.stderr)
+            self.assertIn("more than once", result.stderr)
+            self.assertIn("ambiguous", result.stderr)
+            self.assertNotIn("GATE-CHILD-LEAK-OK", result.stdout)
+
+    def test_gate_child_scan_pins_its_metadata_invocation(self):
+        # A2: the derived root is only as good as the invocation that asked for
+        # it, so the argv is pinned and a realistic cargo document (single-line
+        # JSON, packages first, target_directory among later fields) is parsed to
+        # the expected root.
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo = temp / "repo"
+            document = json.dumps({
+                "packages": [{
+                    "name": "alumina",
+                    "version": "0.1.0",
+                    "id": f"path+file://{repo}#alumina",
+                    "manifest_path": f"{repo}/Cargo.toml",
+                    "targets": [{"kind": ["lib"], "name": "alumina"}],
+                }],
+                "workspace_members": [f"path+file://{repo}#alumina"],
+                "workspace_default_members": [f"path+file://{repo}#alumina"],
+                "resolve": None,
+                "target_directory": str(repo / "target"),
+                "version": 1,
+                "workspace_root": str(repo),
+                "metadata": None,
+            }, separators=(",", ":"))
+            _, result = self.gate_child_scan(temp, [], metadata=document)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"{repo}/target/debug/build/alumina", result.stdout)
+            self.assertEqual(
+                (temp / "cargo-calls.txt").read_text().splitlines(),
+                ["metadata --no-deps --format-version 1 --locked"])
 
     def test_gate_child_scan_ignores_non_matches_and_names_its_roots(self):
         with tempfile.TemporaryDirectory() as temp:
