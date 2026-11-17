@@ -137,6 +137,72 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 
 `vq-proto`, `vq-gate`, `vq-life`, `vq-dnsclass`, `vq-dnsobs`, `vq-resource`, `vq-log`, `vq-startup`, `vq-confinement`, `vq-surface`, `vq-perf` — one per bullet in [Verification requirements](alumina-proxy.md#verification-requirements). `inv-nodecrypt`, `inv-fail-stop`, `inv-operator` have no obligation.
 
+## Views
+
+Rendered subsets of the relation list below; `_` encodes `-`. The list is authoritative.
+
+### Admission pipeline
+
+```mermaid
+flowchart LR
+    startup_decision -->|precedes| connect_head
+    connect_head -->|precedes| approved_hostname
+    approved_hostname -->|precedes| client_hello
+    client_hello -->|precedes| ja4_baseline
+    client_hello -->|precedes| forwarding_gate
+    binding -->|precedes| admission_verdict
+    assurance -->|precedes| admission_verdict
+    admission_verdict -->|precedes| peer
+    peer -->|precedes| forwarding_gate
+    early_data -->|precedes| forwarding_gate
+```
+
+### Resolution
+
+```mermaid
+flowchart LR
+    transport -->|implements| resolver
+    transport -->|configured-by| ctl_resolvers
+    wire -->|implements| exchange_outcome
+    wire -->|configured-by| ctl_bailiwick
+    cache -->|implements| assurance
+    cache -->|configured-by| ctl_assurance
+    cache -->|owns| cache_entry
+    cache -->|owns| generation
+    schedule -->|owns| refresh
+    cache -->|produces| rec_assurance
+```
+
+### Enforcement
+
+```mermaid
+flowchart LR
+    policy -->|implements| effect
+    policy -->|configured-by| ctl_any
+    policy -->|configured-by| ctl_fqdn
+    all_gate -->|implements| all_scope_gate
+    all_gate -->|configured-by| ctl_gates
+    all_gate -->|owns| latch
+    all_gate -->|owns| block_state
+    monitor -->|owns| ja4_baseline
+    monitor -->|produces| rec_monitor
+    reactor -->|produces| rec_refusal
+    gate -->|produces| rec_early
+```
+
+### Refusals
+
+```mermaid
+flowchart LR
+    egress -.->|excludes| out_payload
+    egress -.->|excludes| out_ingress
+    egress -.->|excludes| out_upstream_auth
+    egress -.->|excludes| out_confinement
+    egress -.->|excludes| out_control_plane
+    egress -.->|excludes| out_endpoint_abuse
+    dns -.->|excludes| out_local_dnssec
+```
+
 ## Relations
 
 Predicates: `covers`, `excludes`, `implements`, `enforces`, `owns`, `produces`, `configured-by`, `verified-by`, `precedes`.
