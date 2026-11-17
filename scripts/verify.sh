@@ -255,12 +255,13 @@ whitespace_gate() {
 #                directory itself.
 #
 # Every SOURCE value — each checkout spelling, cargo's target_directory answer,
-# and ALT_AW_TARGET_DIR — is bound BEFORE composition or splitting: any
-# whitespace in it (LF, CR, TAB, space) is refused. The roots are carried as
-# newline-separated lines, so a separator inside a value would fragment that
-# list into whitespace-free pieces that each pass the per-root check while
-# naming a root cargo never execs from. The per-root whitespace check after
-# composition stays as a second belt, never as the protection itself.
+# and ALT_AW_TARGET_DIR — is bound BEFORE composition: any whitespace in it (LF,
+# CR, TAB, space) is refused, because a root carrying whitespace cannot be
+# delimited from the process arguments in the line-oriented listing. Each root is
+# then carried as ONE value (positional parameter, then a per-root environment
+# value for the matcher), never as a line in a joined list that is re-split
+# later. The per-root whitespace check after composition stays as a second belt,
+# never as the protection itself.
 #
 # The sources are then normalised or refused: a trailing separator is provably
 # harmless, while an empty value, the filesystem root '/', or one carrying a
@@ -308,16 +309,17 @@ _gl_component_check() {
 }
 
 # _gl_source_bind <value> <label>: bind a build-root SOURCE value before it is
-# composed or split. The roots travel as newline-separated lines, so a
-# separator inside a value fragments that list into whitespace-free pieces:
-# each fragment passes the per-root belt below while naming a root cargo never
-# execs from. The refusal therefore binds the value itself, and it covers every
-# whitespace class — LF, CR, TAB and space — not only the space a composed root
-# would carry. `[[:space:]]` in `case` matches CR here (measured, POSIX sh).
+# composed. Each root is carried as ONE value — a positional parameter from
+# composition, then a per-root environment value for the matcher — never as a
+# line in a joined list, so any whitespace in a source value would still leave a
+# root the line-oriented listing cannot delimit unambiguously. The refusal
+# therefore binds the value itself, and it covers every whitespace class — LF,
+# CR, TAB and space — not only the space a composed root would carry.
+# `[[:space:]]` in `case` matches CR here (measured, POSIX sh).
 _gl_source_bind() {
     case "$1" in
         *[[:space:]]*)
-            echo "GATE-CHILD-LEAK-UNKNOWN: $2 contains whitespace (LF, CR, TAB or space); the scan binds each source value before composition, and a separator inside one would fragment the newline-separated root list into whitespace-free pieces that name roots cargo never execs" >&2
+            echo "GATE-CHILD-LEAK-UNKNOWN: $2 contains whitespace (LF, CR, TAB or space); the scan binds each source value before composition, and a root carrying whitespace cannot be delimited from the process arguments" >&2
             return 1
             ;;
     esac
@@ -361,9 +363,11 @@ assert_no_leaked_gate_children() {
     fi
     # Checkout spellings, validated BEFORE composition: an empty or relative
     # `pwd` would otherwise compose /target/debug/build/alumina — a root that is
-    # not this checkout at all.
-    _gl_checkouts=""
-    for _gl_checkout in "$(pwd)" "$(pwd -P)"; do
+    # not this checkout at all. The two spellings are carried as two values, not
+    # as a joined list.
+    _gl_cwd_logical=$(pwd)
+    _gl_cwd_physical=$(pwd -P)
+    for _gl_checkout in "$_gl_cwd_logical" "$_gl_cwd_physical"; do
         _gl_source_bind "$_gl_checkout" "checkout spelling" || return 1
         case "$_gl_checkout" in
             /*) ;;
@@ -372,8 +376,6 @@ assert_no_leaked_gate_children() {
                 return 1
                 ;;
         esac
-        _gl_checkouts="$_gl_checkouts$_gl_checkout
-"
     done
     # The witness-off root: cargo's own answer, or nothing. A fallback to
     # <checkout>/target would rebuild the fail-open this derivation removes.
@@ -418,8 +420,8 @@ assert_no_leaked_gate_children() {
             return 1
             ;;
     esac
-    # Bind the answer BEFORE it is normalised or composed: a separator in it
-    # would fragment the newline-separated root list (see _gl_source_bind).
+    # Bind the answer BEFORE it is normalised or composed: a root carrying
+    # whitespace cannot be delimited from the arguments (see _gl_source_bind).
     _gl_source_bind "$_gl_meta" "cargo metadata target_directory" || return 1
     _gl_build_root_source_check "$_gl_meta" "cargo metadata target_directory" || return 1
     # The metadata answer is normalised the same way as the knob, because it is
@@ -462,133 +464,128 @@ assert_no_leaked_gate_children() {
         *) _gl_aw_abs=0 ;;
     esac
     _gl_component_check "$_gl_aw" "ALT_AW_TARGET_DIR" || return 1
-    # Candidate roots, one per line, composed in awk with exact string
-    # comparison; the values travel via ENVIRON rather than `-v`, because `-v`
-    # processes escape sequences in its value, so a path containing a backslash
-    # would be rewritten. Composition happens here rather than in the shell for
-    # the same reason: re-spelling the metadata answer for the other checkout
-    # spelling needs an exact prefix strip, and an unquoted shell expansion would
-    # make that pattern glob-active. The line-separated shape is only sound
-    # because every value that enters it was bound first (see _gl_source_bind):
-    # a separator here would fragment a root before the whitespace belt sees it.
-    _gl_derived_rc=0
-    _gl_roots=$(GL_CHECKOUTS="$_gl_checkouts" GL_META="$_gl_meta" GL_AW="$_gl_aw" \
-        GL_AW_ABS="$_gl_aw_abs" awk '
-        function emit(root) {
-            if (root == "" || (root in seen)) return
-            seen[root] = 1
-            printf "%s\n", root
-        }
-        BEGIN {
-            n = split(ENVIRON["GL_CHECKOUTS"], all, "\n")
-            checkouts = 0
-            for (i = 1; i <= n; i++) if (all[i] != "") checkout[++checkouts] = all[i]
-            meta = ENVIRON["GL_META"]
-            aw = ENVIRON["GL_AW"]
-            aw_abs = ENVIRON["GL_AW_ABS"] + 0
-            # The metadata answer lies under one checkout spelling; the same path
-            # is then composed under every spelling, because a child argv[0]
-            # carries whichever spelling the build owner resolved. An answer
-            # outside the checkout (CARGO_TARGET_DIR elsewhere) is used as given.
-            tail = ""
-            for (i = 1; i <= checkouts; i++) {
-                p = checkout[i] "/"
-                if (index(meta, p) == 1) { tail = substr(meta, length(p) + 1); break }
-            }
-            for (c = 1; c <= checkouts; c++) {
-                base = checkout[c]
-                if (tail != "") off = base "/" tail
-                else off = meta
-                emit(off "/debug/build/alumina")
-                if (aw_abs == 1) emit(aw "/debug/build/alumina")
-                else emit(base "/" aw "/debug/build/alumina")
-            }
-        }
-    ' </dev/null) || _gl_derived_rc=$?
-    [ "$_gl_derived_rc" -eq 0 ] || {
-        echo "GATE-CHILD-LEAK-UNKNOWN: build-root derivation exit $_gl_derived_rc (operational error is never clean)" >&2
-        return 1
-    }
-    # Second belt: each composed root is checked for whitespace too. It cannot be
-    # the protection itself (a separator in a source value has already fragmented
-    # this list), which is why every source was bound before composition.
-    while IFS= read -r _gl_root; do
-        [ -n "$_gl_root" ] || continue
+    # Candidate roots, composed in the shell into POSITIONAL PARAMETERS: each
+    # root is one value from composition to matching, so no representation step
+    # can re-split it. The metadata answer lies under one checkout spelling; the
+    # same path is then composed under every spelling, because a child argv[0]
+    # carries whichever spelling the build owner resolved. An answer outside the
+    # checkout (CARGO_TARGET_DIR elsewhere) is used as given. The prefix strip is
+    # exact and quoted (`${_gl_meta#"$_gl_checkout"/}`), so no glob is active.
+    set --
+    _gl_tail=""
+    for _gl_checkout in "$_gl_cwd_logical" "$_gl_cwd_physical"; do
+        case "$_gl_meta" in
+            "$_gl_checkout"/*)
+                _gl_tail=${_gl_meta#"$_gl_checkout"/}
+                break
+                ;;
+        esac
+    done
+    for _gl_checkout in "$_gl_cwd_logical" "$_gl_cwd_physical"; do
+        if [ -n "$_gl_tail" ]; then
+            _gl_off="$_gl_checkout/$_gl_tail"
+        else
+            _gl_off=$_gl_meta
+        fi
+        if [ "$_gl_aw_abs" -eq 1 ]; then
+            _gl_aw_base=$_gl_aw
+        else
+            _gl_aw_base="$_gl_checkout/$_gl_aw"
+        fi
+        for _gl_candidate in "$_gl_off/debug/build/alumina" \
+            "$_gl_aw_base/debug/build/alumina"; do
+            _gl_dup=0
+            for _gl_root in "$@"; do
+                if [ "$_gl_root" = "$_gl_candidate" ]; then
+                    _gl_dup=1
+                    break
+                fi
+            done
+            if [ "$_gl_dup" -eq 0 ]; then
+                set -- "$@" "$_gl_candidate"
+            fi
+        done
+    done
+    # A root that the line-oriented listing cannot represent unambiguously is
+    # refused before the scan. This is a second belt, never the protection: a
+    # source value carrying whitespace is already refused before composition.
+    for _gl_root in "$@"; do
         case "$_gl_root" in
             *[[:space:]]*)
                 echo "GATE-CHILD-LEAK-UNKNOWN: build root contains whitespace, argv[0] is not separable from the arguments: $_gl_root" >&2
                 return 1
                 ;;
         esac
-    done <<EOF
-$_gl_roots
-EOF
-    # The OK line must name every root the scan covered, annotating a root that
-    # does not exist yet so a mis-spelling is visible in the receipt rather than
-    # silently matchless. (Absence is legitimate before a first build, so it
-    # cannot be fatal.)
+    done
+    [ "$#" -gt 0 ] || {
+        echo "GATE-CHILD-LEAK-UNKNOWN: the scan built no build root to match (operational error is never clean)" >&2
+        return 1
+    }
+    # The OK line must name every root the scan covered, read from the same value
+    # list the matcher consumes, and annotate a root that does not exist yet so a
+    # mis-spelling is visible in the receipt rather than silently matchless.
+    # (Absence is legitimate before a first build, so it cannot be fatal.)
     _gl_named=""
-    while IFS= read -r _gl_root; do
-        [ -n "$_gl_root" ] || continue
+    for _gl_root in "$@"; do
         if [ -d "$_gl_root" ]; then
             _gl_named="$_gl_named${_gl_named:+, }$_gl_root"
         else
             _gl_named="$_gl_named${_gl_named:+, }$_gl_root (absent)"
         fi
-    done <<EOF
-$_gl_roots
-EOF
-    _gl_rc=0
-    _gl_out=$(printf '%s\n' "$_gl_ps" | GL_ROOTS="$_gl_roots" awk -v self="$$" '
-        BEGIN {
-            n = split(ENVIRON["GL_ROOTS"], all, "\n")
-            roots = 0
-            for (i = 1; i <= n; i++) if (all[i] != "") root[++roots] = all[i]
-        }
-        NF >= 3 {
-            pid = $1 + 0
-            if (pid == self) seen_self = 1
-            if ($2 + 0 != 1) next
-            rest = $0
-            sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", rest)
-            argv0 = rest
-            sub(/[ \t].*$/, "", argv0)
-            for (i = 1; i <= roots; i++) {
-                prefix = root[i] "/"
-                if (index(argv0, prefix) != 1) continue
+    done
+    # One matcher pass per root, each root handed to awk as a SINGLE value via
+    # the environment (not `-v`, which rewrites escape sequences in its value),
+    # so no joined word list is ever re-parsed.
+    _gl_bad=0
+    _gl_unlisted=0
+    _gl_parse_rc=0
+    _gl_out=""
+    for _gl_root in "$@"; do
+        _gl_rc=0
+        _gl_root_out=$(printf '%s\n' "$_gl_ps" | GL_ROOT="$_gl_root" awk -v self="$$" '
+            NF >= 3 {
+                pid = $1 + 0
+                if (pid == self) seen_self = 1
+                if ($2 + 0 != 1) next
+                rest = $0
+                sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", rest)
+                argv0 = rest
+                sub(/[ \t].*$/, "", argv0)
+                prefix = ENVIRON["GL_ROOT"] "/"
+                if (index(argv0, prefix) != 1) next
                 tail = substr(argv0, length(prefix) + 1)
                 if (tail ~ /^[0-9a-f]+\/out\/[A-Za-z0-9_]+-[0-9a-f]+$/) {
                     printf "pid=%s ppid=1 argv0=%s\n", pid, argv0
                     bad = 1
                 }
             }
-        }
-        END {
-            if (roots == 0) exit 3
-            if (!seen_self) { print "SELF-NOT-LISTED"; exit 2 }
-            exit (bad ? 1 : 0)
-        }
-    ') || _gl_rc=$?
-    case "$_gl_rc" in
-        0) echo "GATE-CHILD-LEAK-OK: no reparented gate child under $_gl_named" ;;
-        1)
-            printf '%s\n' "$_gl_out" | sed 's/^/  /' >&2
-            echo "GATE-CHILD-LEAK-FAIL: a gate child outlived its parent (ppid 1); it keeps a loopback listener alive and makes every later gate receipt chain-ambiguous" >&2
-            return 1
-            ;;
-        2)
-            echo "GATE-CHILD-LEAK-UNKNOWN: ps listing does not contain this shell (pid $$); the observation is unusable" >&2
-            return 1
-            ;;
-        3)
-            echo "GATE-CHILD-LEAK-UNKNOWN: the scan built no build root to match (operational error is never clean)" >&2
-            return 1
-            ;;
-        *)
-            echo "GATE-CHILD-LEAK-UNKNOWN: listing parse exit $_gl_rc (operational error is never clean)" >&2
-            return 1
-            ;;
-    esac
+            END {
+                if (!seen_self) { print "SELF-NOT-LISTED"; exit 2 }
+                exit (bad ? 1 : 0)
+            }
+        ') || _gl_rc=$?
+        case "$_gl_rc" in
+            0) ;;
+            1) _gl_bad=1 ;;
+            2) _gl_unlisted=1 ;;
+            *) _gl_parse_rc=$_gl_rc ;;
+        esac
+        _gl_out="$_gl_out$_gl_root_out"
+    done
+    if [ "$_gl_unlisted" -ne 0 ]; then
+        echo "GATE-CHILD-LEAK-UNKNOWN: ps listing does not contain this shell (pid $$); the observation is unusable" >&2
+        return 1
+    fi
+    if [ "$_gl_parse_rc" -ne 0 ]; then
+        echo "GATE-CHILD-LEAK-UNKNOWN: listing parse exit $_gl_parse_rc (operational error is never clean)" >&2
+        return 1
+    fi
+    if [ "$_gl_bad" -ne 0 ]; then
+        printf '%s' "$_gl_out" | sed 's/^/  /' >&2
+        echo "GATE-CHILD-LEAK-FAIL: a gate child outlived its parent (ppid 1); it keeps a loopback listener alive and makes every later gate receipt chain-ambiguous" >&2
+        return 1
+    fi
+    echo "GATE-CHILD-LEAK-OK: no reparented gate child under $_gl_named"
 }
 
 # Reverse-dependent closure derivation: single-crate repo, cargo metadata

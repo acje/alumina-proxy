@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused tests for independent verification selectors; no real builds run."""
 
+import ast
 import contextlib
 import hashlib
 import importlib.util
@@ -323,12 +324,14 @@ esac
             self.assertIn("ALT_AW_TARGET_DIR contains whitespace", result.stderr)
 
     def test_gate_child_scan_binds_a_separator_in_the_knob_before_composition(self):
-        # B1: the roots travel as newline-separated lines, so a separator inside
-        # a SOURCE value fragments that list into whitespace-free pieces which
-        # each pass the per-root check and name roots cargo never execs. The
-        # refusal has to bind the value, before composition or splitting.
+        # B1: a whitespace-carrying SOURCE value cannot become one root the
+        # line-oriented listing can delimit, so it is refused at the value. The
+        # defect this pins was a line-joined root list: a separator inside a
+        # value fragmented it into whitespace-free pieces that each passed the
+        # per-root check and named roots cargo never execs from.
         for label, value in (
             ("LF", "aw\nx"),
+            ("LF-pair", "a\nb"),
             ("CR", "aw\rx"),
             ("tab", "aw\tx"),
             ("trailing-space", "aw "),
@@ -342,6 +345,29 @@ esac
                 self.assertIn("ALT_AW_TARGET_DIR contains whitespace",
                               result.stderr, label)
                 self.assertNotIn("GATE-CHILD-LEAK-OK", result.stdout, label)
+
+    def test_gate_child_scan_transports_roots_as_values_not_a_line_list(self):
+        # B1 structural pin: the roots are carried as values (positional
+        # parameters, then a per-root environment value) from composition to
+        # matching. A line-joined intermediate is the representation that
+        # reopened this defect class three times (trailing separator, `./`
+        # prefix, LF), so the banned shapes are asserted absent and the value
+        # transport present. A green behavioural pin alone cannot hold this:
+        # the separator patch kept every behavioural test green.
+        body = extract_function("assert_no_leaked_gate_children")
+        for banned in ('printf "%s\\n", root',
+                       'split(ENVIRON["GL_ROOTS"]',
+                       "GL_ROOTS=",
+                       "_gl_roots",
+                       "<<EOF",
+                       "eval "):
+            self.assertNotIn(banned, body,
+                             f"line-joined root transport is back: {banned}")
+        for required in ("set --", 'for _gl_root in "$@"',
+                         'GL_ROOT="$_gl_root"',
+                         '${_gl_meta#"$_gl_checkout"/}'):
+            self.assertIn(required, body,
+                          f"root value transport is missing: {required}")
 
     def test_gate_child_scan_binds_the_metadata_answer_before_composition(self):
         # The same source binding applies to cargo's answer. A space survives
@@ -525,18 +551,22 @@ esac
 
     def test_gate_child_scan_normalises_a_trailing_slash_metadata_answer(self):
         # Measured cargo behaviour: target_directory is reported verbatim, so
-        # CARGO_TARGET_DIR=target/aw/ answers "<c>/target/aw/". Composing that
-        # literally would scan "<c>/target/aw//debug/..." and report a real
-        # orphan clean — the knob-side defect, one entrance further out.
+        # CARGO_TARGET_DIR=relocated/ answers "<c>/relocated/". Composing that
+        # literally would scan "<c>/relocated//debug/..." and report a real
+        # orphan clean. The metadata root deliberately lies OUTSIDE
+        # <checkout>/target and <checkout>/target/aw: a test whose root lies
+        # inside them also passes against the hardcoded-root scan, so it pins
+        # nothing (it was green on 0754829 for exactly that reason).
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)
             repo = temp / "repo"
-            orphan = (repo / "target/debug/build/alumina" / ("0" * 16) / "out"
+            relocated = repo / "relocated"
+            orphan = (relocated / "debug/build/alumina" / ("0" * 16) / "out"
                       / f"gate_child-{'1' * 16}")
             _, result = self.gate_child_scan(
                 temp, [f"991012 1 {orphan}"],
-                metadata='{"target_directory":"' + str(repo) + '/target/"}\n',
-                env={"CARGO_TARGET_DIR": "target/"})
+                metadata='{"target_directory":"' + str(relocated) + '/"}\n',
+                env={"CARGO_TARGET_DIR": "relocated/"})
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("GATE-CHILD-LEAK-FAIL", result.stderr)
             self.assertIn(str(orphan), result.stderr)
@@ -1414,7 +1444,105 @@ class BoundedSuite(unittest.TestCase):
                                 f"{name} runs a lib suite unbounded: {line}")
 
 
+# --- A2: discovery completeness ----------------------------------------------
+# A test that is defined but never collected runs nothing and proves nothing:
+# a green-on-parent test pins nothing, and a recorded "Ran N" that is smaller
+# than the definitions is not a count of them. The harness therefore compares
+# what the source defines against what the loader collected, before any test
+# runs, and refuses the run naming the difference.
+def iter_suite_tests(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from iter_suite_tests(item)
+        else:
+            yield item
+
+
+def collected_test_ids(suite):
+    """Every collected test in the loader's own identity: `Class.method`."""
+    return {f"{type(test).__name__}.{test._testMethodName}"
+            for test in iter_suite_tests(suite)}
+
+
+def ast_defined_test_ids(source):
+    """Every `Class.test*` defined in a `TestCase` subclass in the source.
+
+    Read from the AST rather than from the module objects, because the failure
+    this guards is a definition the loader never turned into a test object."""
+    defined = set()
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        bases = {base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
+                 for base in node.bases}
+        if "TestCase" not in bases:
+            continue
+        for item in node.body:
+            if (isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name.startswith("test")):
+                defined.add(f"{node.name}.{item.name}")
+    return defined
+
+
+def undiscovered_test_ids(defined, collected):
+    """Pure: the definitions the loader did not collect, in a stable order."""
+    return sorted(set(defined) - set(collected))
+
+
+class DiscoveryCompletenessLoader(unittest.TestLoader):
+    """Loads exactly as `unittest` does, but first refuses a suite smaller than
+    the definitions. The comparison uses an unfiltered load, so `-k` still
+    narrows the run without tripping the guard."""
+
+    def loadTestsFromModule(self, module, *args, **kwargs):
+        suite = super().loadTestsFromModule(module, *args, **kwargs)
+        source = (Path(module.__file__).read_text()
+                  if getattr(module, "__file__", None) else "")
+        patterns = getattr(self, "testNamePatterns", None)
+        self.testNamePatterns = None
+        try:
+            complete = super().loadTestsFromModule(module, *args, **kwargs)
+        finally:
+            self.testNamePatterns = patterns
+        missing = undiscovered_test_ids(ast_defined_test_ids(source),
+                                        collected_test_ids(complete))
+        if missing:
+            print("DISCOVERY-INCOMPLETE: defined in the source but not collected "
+                  f"({len(missing)}): " + ", ".join(missing), file=sys.stderr)
+            raise SystemExit(1)
+        return suite
+
+
+class DiscoveryCompleteness(unittest.TestCase):
+    """The guard's own pins: the pure comparison, the AST reader, and the
+    shipped module's definitions against a real unfiltered load."""
+
+    def test_the_pure_comparison_names_every_uncollected_definition(self):
+        defined = {"Alpha.test_one", "Alpha.test_two", "Beta.test_three"}
+        self.assertEqual(undiscovered_test_ids(defined, {"Alpha.test_one"}),
+                         ["Alpha.test_two", "Beta.test_three"])
+        self.assertEqual(undiscovered_test_ids(defined, defined), [])
+
+    def test_the_ast_reader_sees_test_case_definitions_only(self):
+        source = (
+            "import unittest\n"
+            "class Samples(unittest.TestCase):\n"
+            "    def test_one(self):\n        pass\n"
+            "    def helper(self):\n        pass\n"
+            "class Other:\n"
+            "    def test_not_a_case(self):\n        pass\n")
+        self.assertEqual(ast_defined_test_ids(source), {"Samples.test_one"})
+
+    def test_the_shipped_harness_collects_every_definition(self):
+        defined = ast_defined_test_ids(Path(__file__).read_text())
+        complete = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
+        self.assertGreater(len(defined), 0)
+        self.assertEqual(undiscovered_test_ids(defined, collected_test_ids(complete)), [])
+
+
 if __name__ == "__main__":
     # unittest's own argument handling, so `-k <pattern>` filters for real: a
-    # hand-rolled loader here silently ignored it and ran the whole suite.
-    unittest.main(module=sys.modules[__name__])
+    # hand-rolled loader here silently ignored it and ran the whole suite. The
+    # loader fails the run when the collected suite is smaller than the source.
+    unittest.main(module=sys.modules[__name__],
+                  testLoader=DiscoveryCompletenessLoader())

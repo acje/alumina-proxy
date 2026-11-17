@@ -148,14 +148,22 @@ never assumed:
   (trailing slashes stripped, since cargo's own path join never repeats a
   separator) or the absolute directory itself.
 
-Both sources are **bound at the source value, before composition or splitting,
-then normalised or refused, never guessed at**. The roots travel as
-newline-separated lines, so any whitespace character in a source value — LF, CR,
-TAB or a trailing space, whether it comes from a checkout spelling, from cargo's
-answer or from `ALT_AW_TARGET_DIR` — is `GATE-CHILD-LEAK-UNKNOWN` naming that
-source. A separator would fragment the root list into whitespace-free pieces that
-each pass the per-root check while matching nothing cargo executes, so the check
-after composition is a second belt and never the protection itself.
+Both sources are **bound at the source value, before composition, then
+normalised or refused, never guessed at**. Each build root is carried as **one
+value** end to end — a positional parameter during composition, then a per-root
+environment value for the matcher — never as a line in a joined list that is
+re-split later. Any whitespace character in a source value — LF, CR, TAB or a
+trailing space, whether it comes from a checkout spelling, from cargo's answer or
+from `ALT_AW_TARGET_DIR` — is `GATE-CHILD-LEAK-UNKNOWN` naming that source: a
+root carrying whitespace cannot be delimited from the process arguments in the
+line-oriented listing.
+
+The metadata answer is re-composed under each checkout spelling by an exact,
+quoted prefix strip in the shell (`${answer#"$checkout"/}`), so no glob and no
+re-parse decides which root is scanned. The whitespace check on each composed
+root is a second belt, never the protection itself: it catches a root the
+listing cannot represent unambiguously, while the source binding is what stops a
+value from being turned into a different root.
 
 A trailing separator is then stripped, because a path join never repeats one. An
 empty value, the filesystem root `/` (refused with its own message: it can never
@@ -174,8 +182,9 @@ against `argv[0]` only, so a running compiler or linker that merely writes into
 that directory is not a match. Both the logical and the physical checkout
 spelling are scanned where they differ, and deduped by exact string comparison
 where they coincide. The `GATE-CHILD-LEAK-OK` line names every build root the
-scan covered and annotates a root that does not exist yet as `(absent)`, so a
-mis-spelled root is visible in the receipt instead of silently matchless.
+scan covered, read from the same value list the matcher consumes, and annotates
+a root that does not exist yet as `(absent)`, so a mis-spelled root is visible in
+the receipt instead of silently matchless.
 
 The assertion runs **before and after the `host-mid` dispatch**. In `mid union`
 and `mid full` it runs before and after the witness-off lib-suite invocation and
