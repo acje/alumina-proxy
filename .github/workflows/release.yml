@@ -1,0 +1,152 @@
+name: release
+
+# Publishes exactly the artifact this repository's own Linux boundary gate
+# proved: one container run builds and gates, a later step copies the gated file
+# out. No second build, no registry, no container image.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      expected_tag:
+        description: 'Dry-run rehearsal tag (must equal Cargo.toml version); never publishes'
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Restated explicitly rather than inherited from defaults: contents to create
+    # the release, id-token + attestations for provenance attestation.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      # rust:1.100.0-alpine pinned at its immutable multi-arch index digest
+      # (registry Docker-Content-Digest). Verified by execution 2026-11-17: the
+      # index resolves for linux/amd64 to
+      # sha256:cfbeb9c8c956f048a081ae034a7c8ffbd60242f3ff76b645d3a41523f665f761
+      # = rustc 1.100.0 (0ef1bc386 2026-11-09), host x86_64-unknown-linux-musl;
+      # and for linux/arm64 to
+      # sha256:18b6dc7bc111bde4e2fccf6c4ec95cc4a3486b41e4b090e9b0202eba9540023e
+      # = rustc 1.100.0, host aarch64-unknown-linux-musl.
+      # scripts/verify.sh:68 pins that arm64 child because its podman dispatch
+      # host is arm64; the child cannot serve this workflow's amd64 runner, so
+      # the index digest is pinned here instead. The gate below is still the
+      # repository's own Linux gate and still proves the published artifact.
+      #
+      # Envelope asymmetry is intentional: scripts/verify.sh dispatches with
+      # `podman` on the developer host, GitHub runners provide `docker`, and the
+      # `docker run` below mirrors linux_dispatch_volume
+      # (scripts/verify.sh:2569-2585).
+      BASE_IMAGE: docker.io/library/rust@sha256:de1e0058543a81ed7b046629167db587c67a94bdf37cce14eb27f0ec83baaffb
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag and version guard (fail closed)
+        shell: bash
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.expected_tag }}
+        run: |
+          set -euo pipefail
+          : "${TAG:?TAG is empty: refused}"
+          case "$TAG" in
+            v*) ;;
+            *) echo "TAG-GUARD-FAIL: tag '$TAG' does not match v*" >&2; exit 1 ;;
+          esac
+          VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "(.*)"$/\1/')"
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "TAG-GUARD-FAIL: unnormalizable version '$VERSION' from Cargo.toml" >&2; exit 1 ;;
+          esac
+          if [ "${TAG#v}" != "$VERSION" ]; then
+            echo "TAG-GUARD-FAIL: tag '$TAG' (version '${TAG#v}') != Cargo.toml version '$VERSION'" >&2
+            exit 1
+          fi
+
+      - name: Gate and release build in one container run
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Quoted heredoc: the in-container script carries no host expansion and
+          # no nested quoting, so the gate line stays literal and unescaped.
+          cat > "$RUNNER_TEMP/container.sh" <<'EOF'
+          set -eu
+          # The pinned base ships cargo/rustc/rust-std only, no git, no clippy,
+          # no rustfmt (scripts/verify.sh:56-62). Provision, then gate.
+          apk add --no-cache musl-dev git binutils
+          rustup component add clippy rustfmt
+          mkdir -p /cargo-home
+          cat > /cargo-home/config.toml <<'CFG'
+          [alias]
+          atest = ["test", "--quiet", "--no-fail-fast"]
+          aclippy = ["clippy", "--quiet", "--message-format=short"]
+          CFG
+          # Provisioning, not a gate exception: the checkout is runner-owned
+          # while git runs as root in here, which otherwise fails the whitespace
+          # gate with `fatal: detected dubious ownership`.
+          git config --global --add safe.directory /app
+          sh scripts/verify.sh mid union
+          EOF
+          # The mount is writable (unlike the podman dispatch) because the runner
+          # has no separate target volume and target/ + dist/ must land in the
+          # workspace. On an Alpine amd64 host the build target is
+          # x86_64-unknown-linux-musl, so target/release/alumina is the static
+          # ELF that static_gate (scripts/verify.sh:117-144) proved inside this
+          # same run: the published file is the gated file, never a second build.
+          docker run --rm \
+            -v "$PWD:/app" \
+            -v "$RUNNER_TEMP/container.sh:/container.sh:ro" \
+            -w /app \
+            --user 0:0 \
+            -e CARGO_HOME=/cargo-home \
+            -e CARGO_INCREMENTAL=0 \
+            -e CARGO_TERM_PROGRESS_WHEN=never \
+            -e RUST_MIN_STACK=16777216 \
+            "$BASE_IMAGE" sh /container.sh
+
+      - name: Package dist/
+        shell: bash
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.expected_tag }}
+        run: |
+          set -euo pipefail
+          BIN=target/release/alumina
+          EXAMPLE=docs/qa-package/config.example.toml
+          ASSET="alumina-${TAG}-x86_64-unknown-linux-musl"
+          for f in "$BIN" "$EXAMPLE"; do
+            [ -e "$f" ] || { echo "PACKAGE-FAIL: missing $f" >&2; exit 1; }
+          done
+          [ -x "$BIN" ] || { echo "PACKAGE-FAIL: $BIN not executable" >&2; exit 1; }
+          mkdir -p dist
+          # The container wrote root-owned files; copy so the asset is
+          # runner-owned and the checksum matches a file we can read back.
+          cp -f "$BIN" "dist/$ASSET"
+          chmod 0755 "dist/$ASSET"
+          cp -f "$EXAMPLE" dist/config.example.toml
+          # Names are relative, so `sha256sum -c SHA256SUMS` works from inside dist/.
+          (cd dist && sha256sum "$ASSET" config.example.toml > SHA256SUMS)
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          # Binary asset only, deliberately: SHA256SUMS and the example config are
+          # derived/static, and the attestation must bind the shipped executable.
+          subject-path: dist/alumina-*
+
+      - name: Publish release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # `gh` is preinstalled on ubuntu-latest. --prerelease because the
+          # repository is a scoped local QA candidate, not a qualified release.
+          gh release create "$TAG" dist/* \
+            --prerelease \
+            --verify-tag \
+            --notes-file .github/release-notes.md \
+            --generate-notes
