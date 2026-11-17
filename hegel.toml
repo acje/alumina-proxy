@@ -6,8 +6,8 @@
 # -> CLI — so an attribute such as `test_cases = 64` is layer 4 and silently
 # outranks both the profile and `HEGEL_TEST_CASES`. Properties therefore carry
 # only `derandomize = true`, and the profile named in this file is the single
-# owner of the case count: development for local runs, ci on a CI server, and
-# nightly via `HEGEL_DEFAULT_PROFILE=nightly`.
+# compiled-in owner of the case count: development for local runs, ci on a CI
+# server, and nightly via `HEGEL_DEFAULT_PROFILE=nightly`.
 #
 # `development` and `ci` are siblings over the shipped base profile (the
 # `ci` section merges over the shipped `ci` delta, keeping its
@@ -34,9 +34,11 @@ test_cases = 256
 derandomize = true
 database = "disabled"
 
-# Long-soak breadth, one flag away: HEGEL_DEFAULT_PROFILE=nightly. Every key
-# is explicit so the run is exact-input whatever profile the environment
-# would otherwise have selected.
+# Long-soak breadth, one flag away: HEGEL_DEFAULT_PROFILE=nightly. The three
+# keys above pin its case count and exact-input semantics; `nightly` has no
+# `extends`, so a parent profile still contributes its own settings — inside
+# Antithesis that is the shipped `workload` profile's `backend = "urandom"`,
+# and on a CI server it includes `ci`'s inherited `suppress_health_check`.
 [profiles.nightly]
 test_cases = 10_000
 derandomize = true

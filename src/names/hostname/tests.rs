@@ -100,8 +100,8 @@ fn assert_normalised_fixed_point(input: &[u8]) {
 /// whenever a blob is present and then panics once the fault is fixed, so the
 /// attribute cannot hold a corpus in a green gate (bd alumina-dvgoj). This test
 /// instead replays the same inputs through the same property body on every run,
-/// while the property keeps generating its own cases (64 under the
-/// `development` profile in `hegel.toml`).
+/// while the property keeps generating its own cases at the `development`
+/// profile's case count in `hegel.toml`.
 #[test]
 fn hostname_regression_replays_the_minimised_counterexample() {
     assert_normalised_fixed_point(&[]);
@@ -116,12 +116,12 @@ fn hostname_regression_replays_the_minimised_counterexample() {
 /// second, hostname-shaped draw keeps the accept branch mandatory rather than
 /// merely reachable: arbitrary bytes essentially never form a legal FQDN, so a
 /// raw-only property would never test idempotence at all (measured: zero
-/// accepted inputs across the 64 `development`-profile cases). `domains()`
+/// accepted inputs across the `development` profile's cases). `domains()`
 /// draws RFC 1035 names — dot separated labels that each start and end
-/// alphanumeric, no leading or
-/// trailing dot, no port, and total length at most `max_length` — so at 253
-/// bytes, this crate's `FQDN_MAX_LEN`, every draw is an accepted name and the
-/// assertion below fails the property if that ever stops holding.
+/// alphanumeric, with no leading or trailing dot, no port, and total length at
+/// most `max_length` — so at 253 bytes, this crate's `FQDN_MAX_LEN`, every
+/// draw is an accepted name and the assertion below fails the property if that
+/// ever stops holding.
 #[hegel::test(derandomize = true)]
 fn hostname_normalisation_is_total_and_idempotent(tc: hegel::TestCase) {
     let raw = tc.draw(hegel::generators::binary().max_size(300));

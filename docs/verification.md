@@ -206,8 +206,12 @@ Measured-count recipe for one property (the local default profile, then the
 ```bash
 RUST_MIN_STACK=16777216 HEGEL_STATISTICS=1 cargo atest -p alumina --locked --lib -- hostname_normalisation_is_total_and_idempotent --nocapture   # "over 64 test cases"
 RUST_MIN_STACK=16777216 HEGEL_STATISTICS=1 HEGEL_TEST_CASES=1000 cargo atest -p alumina --locked --lib -- hostname_normalisation_is_total_and_idempotent --nocapture   # "over 1000 test cases"
-HEGEL_DEFAULT_PROFILE=nightly RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --lib
+HEGEL_DEFAULT_PROFILE=nightly RUST_MIN_STACK=16777216 HEGEL_STATISTICS=1 cargo atest -p alumina --locked --lib -- hostname_normalisation_is_total_and_idempotent --nocapture   # "over 10000 test cases"
 ```
+
+All three run the same single property with statistics on, so the printed
+count is the resolved budget; the nightly line is that measurement at
+long-soak breadth, not a whole-library run.
 
 ### Regression corpus is a literal replay
 
