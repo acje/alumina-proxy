@@ -148,6 +148,82 @@ verdicts, or issue records here).
   prefix; a same-name `#[cfg(test)]` externalization preserves it), so a move
   records its name/identity mapping.
 
+## Property-based tests (Hegel)
+
+The properties (`#[hegel::test]` over `hegel::TestCase`) are the only
+generative tests in the tree; each one owns a totality/determinism invariant
+for a parser or normaliser. Two things are owned outside the test bodies:
+**case-count breadth** by `hegel.toml`, and **exact-input semantics** by the
+gates below.
+
+### Profiles own breadth
+
+`hegel.toml` defines exactly three profiles, each stating all three keys
+explicitly. There is no top-level `default` key, so profile selection stays
+with the environment: a CI server still resolves the shipped `ci` profile and
+a local run the `development` block.
+
+| Profile | `test_cases` | Other keys | Selected by |
+|---|---|---|---|
+| `development` | 64 | `derandomize = true`, `database = "disabled"` | local default |
+| `ci` | 256 | `derandomize = true`, `database = "disabled"` | CI environment detection |
+| `nightly` | 10_000 | `derandomize = true`, `database = "disabled"` | `HEGEL_DEFAULT_PROFILE=nightly` |
+
+Breadth is therefore a one-flag change per environment, and a property
+carries only `derandomize = true` — never `test_cases`.
+
+### Settings layers (hegeltest 0.52.7)
+
+Settings resolve in layers, each overriding the ones below it:
+
+```
+base -> profile (hegel.toml) -> environment -> compiled-in attribute -> CLI
+```
+
+The compiled-in attribute is **above** the environment: a property declared
+`#[hegel::test(test_cases = 64)]` keeps 64 however `HEGEL_TEST_CASES` is set,
+so the variable and the profile are both silently defeated. That is why no
+attribute in this tree pins a case count (measured: with the attribute
+present, `HEGEL_TEST_CASES=1000` still reported 64 cases; with it removed,
+the same property reports 1000, and 64 with no variable set).
+
+Gate-relevant environment pins and their 0.52.7 semantics:
+
+| Variable | 0.52.7 semantics |
+|---|---|
+| `HEGEL_TEST_CASES` | Sets `test_cases`; must be a positive integer. Overrides the profile, not a compiled-in attribute. |
+| `HEGEL_SEED` | Sets `seed`: an integer is the seed, `none` clears one the profile set. A fixed seed takes precedence over `derandomize`. |
+| `HEGEL_DERANDOMIZE` | Sets `derandomize`: `true`/`1`/`yes`, or `false`/`0`/`no`. On, the seed is derived from the test name, so every run of that test is identical. |
+| `HEGEL_PRINT_BLOB` | Sets `print_blob` with the same boolean vocabulary. On (the base default), a failing run prints a copy-pasteable `#[hegel::reproduce_failure("…")]` line. |
+| `HEGEL_STATISTICS` | Anything except `0` or the empty string turns `show_statistics` on; the end-of-run report names the number of cases actually executed, which is the direct measurement of the resolved count. |
+
+An empty variable is ignored; any other malformed value is an error raised
+when the settings value is created.
+
+Measured-count recipe for one property (the local default profile, then the
+`HEGEL_TEST_CASES` override, then a nightly profile):
+
+```bash
+RUST_MIN_STACK=16777216 HEGEL_STATISTICS=1 cargo atest -p alumina --locked --lib -- hostname_normalisation_is_total_and_idempotent --nocapture   # "over 64 test cases"
+RUST_MIN_STACK=16777216 HEGEL_STATISTICS=1 HEGEL_TEST_CASES=1000 cargo atest -p alumina --locked --lib -- hostname_normalisation_is_total_and_idempotent --nocapture   # "over 1000 test cases"
+HEGEL_DEFAULT_PROFILE=nightly RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --lib
+```
+
+### Regression corpus is a literal replay
+
+A durable corpus entry is a plain `#[test]` that replays the minimised inputs
+through the same property body on every run (the witness is
+`hostname_regression_replays_the_minimised_counterexample` in
+`src/names/hostname/tests.rs`), **not** a checked-in
+`#[hegel::reproduce_failure("…")]` blob. In 0.52.7 a blob skips generation
+entirely — the property stops exercising its generators — and a run in which
+no blob reproduces a failure panics with an explanatory message, so a blob
+cannot hold a corpus in a green gate once the fault it captures is fixed
+(bd alumina-dvgoj). Use the blob only as a transient capture while
+minimising, then delete it. Named examples belong in
+`#[hegel::explicit_test_case]` / `hegel::ExplicitTestCase`, which draws
+pre-defined values by draw name without entering the generation layer.
+
 ## Docs drift gate
 
 `sh scripts/verify.sh docs` runs `repowise doc-drift --check` over the tracked

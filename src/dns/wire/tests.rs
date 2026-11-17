@@ -4592,7 +4592,7 @@ fn assert_stable_parse(msg: &[u8]) {
 /// parser, and identical bytes with the fixed tid, fqdn and family always
 /// classify and observe identically — both for raw bytes and for a
 /// well-formed question followed by arbitrary record-section bytes.
-#[hegel::test(test_cases = 64, derandomize = true)]
+#[hegel::test(derandomize = true)]
 fn dns_reply_parser_is_total_and_deterministic(tc: hegel::TestCase) {
     let mut raw = tc.draw(hegel::generators::binary().max_size(512));
     let [tid_hi, tid_lo] = PROPERTY_TID.to_be_bytes();

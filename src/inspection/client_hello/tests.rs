@@ -1449,7 +1449,7 @@ fn rejects_empty_sni_host_name() {
 /// Totality and completion determinism: arbitrary attacker bytes never panic
 /// the inspector, and a well-formed generated `ClientHello` completes with a
 /// fresh inspector consuming exactly the same count.
-#[hegel::test(test_cases = 64, derandomize = true)]
+#[hegel::test(derandomize = true)]
 fn client_hello_inspector_is_total_and_completion_is_inspector_independent(tc: hegel::TestCase) {
     let mut arbitrary = ChInspector::new();
     let _ = arbitrary.feed(&tc.draw(hegel::generators::binary().max_size(2048)));

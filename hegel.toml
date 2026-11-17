@@ -1,15 +1,28 @@
 # Gate runs are exact-input: no on-disk example database and a per-test
-# derived seed, so a failing gate run is reproducible. The per-property
-# `#[hegel::test(test_cases = ..., derandomize = true)]` attribute owns the
-# case count; these profiles own the on-disk database and restate
-# `derandomize` so a CI-detected run keeps the same exact-input semantics
-# instead of resting on the shipped defaults. `development` and `ci` are
-# siblings over the shipped base profile, so a CI run selects `ci` and never
-# this file's `development` block. A committed
-# #[hegel::reproduce_failure] blob replays only that capture (generation is
-# skipped) and panics once the fault is fixed, so a durable corpus entry is a
-# deliberate separate replay, not a gate attribute.
+# derived seed, so a failing gate run is reproducible.
+#
+# Case-count breadth is owned here, not by the test attributes. Hegel resolves
+# settings in layers — base -> profile -> environment -> compiled-in attribute
+# -> CLI — so an attribute such as `test_cases = 64` is layer 4 and silently
+# outranks both the profile and `HEGEL_TEST_CASES`. Properties therefore carry
+# only `derandomize = true`, and the profile named in this file is the single
+# owner of the case count: development for local runs, ci on a CI server, and
+# nightly via `HEGEL_DEFAULT_PROFILE=nightly`.
+#
+# `development` and `ci` are siblings over the shipped base profile (the
+# `ci` section merges over the shipped `ci` delta, keeping its
+# `suppress_health_check`), so a CI run selects the shipped `ci` profile and
+# never this file's `development` block. `nightly` states all three keys
+# explicitly rather than relying on whichever profile is the environment's
+# default. No top-level `default` key is set: the environment stays the owner
+# of profile selection, so CI detection still wins over the local default.
+#
+# A committed #[hegel::reproduce_failure] blob replays only that capture
+# (generation is skipped) and panics once the fault is fixed, so a durable
+# corpus entry is a deliberate literal replay test, not a gate attribute
+# (bd alumina-dvgoj).
 [profiles.development]
+test_cases = 64
 derandomize = true
 database = "disabled"
 
@@ -17,5 +30,14 @@ database = "disabled"
 # over the shipped `ci` delta, so the explicit keys here pin exact-input
 # settings without dropping the shipped `suppress_health_check`.
 [profiles.ci]
+test_cases = 256
+derandomize = true
+database = "disabled"
+
+# Long-soak breadth, one flag away: HEGEL_DEFAULT_PROFILE=nightly. Every key
+# is explicit so the run is exact-input whatever profile the environment
+# would otherwise have selected.
+[profiles.nightly]
+test_cases = 10_000
 derandomize = true
 database = "disabled"

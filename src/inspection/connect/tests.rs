@@ -628,7 +628,7 @@ fn terminal_state(
 /// exactly, and a delimiter-terminated head reaches the same terminal result
 /// (head length, request or error) whether it is fed whole or one byte at a
 /// time.
-#[hegel::test(test_cases = 64, derandomize = true)]
+#[hegel::test(derandomize = true)]
 fn connect_head_parser_is_total_and_incremental(tc: hegel::TestCase) {
     let mut terminated = tc.draw(hegel::generators::binary().max_size(1024));
     let has_delimiter = terminated
