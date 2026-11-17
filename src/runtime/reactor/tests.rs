@@ -3021,8 +3021,9 @@ mod generation_tokens {
     /// see a layout change because both sides share `GEN_SHIFT`: a generation
     /// shifted to any other bit would still decode back. These literals fix the
     /// generation field at `GEN_SHIFT` and slot 0 at local id 1 / `UPSTREAM_BASE`,
-    /// so an unshifted generation, a moved local-id base, or a generation that
-    /// spills into the local-id bits fails here.
+    /// so an unshifted generation or a moved local-id base fails here. The
+    /// generation-spills-into-the-local-id case is not exercised here; it is
+    /// pinned by `generation_field_round_trips_at_the_simulated_32_bit_shape`.
     fn packed_tokens_pin_the_generation_shift_and_local_id_base() {
         assert_eq!(
             client_token(1, 0).0,
@@ -3030,9 +3031,19 @@ mod generation_tokens {
             "the client generation field starts at GEN_SHIFT and slot 0 is local id 1"
         );
         assert_eq!(
+            client_token(1, 0).0,
+            2049,
+            "GEN_SHIFT is 11 (2048) and the client local id is index+1 by contract (1)"
+        );
+        assert_eq!(
             upstream_token(1, 0).0,
             (1usize << GEN_SHIFT) | UPSTREAM_BASE,
             "the upstream generation field starts at GEN_SHIFT and slot 0 is UPSTREAM_BASE"
+        );
+        assert_eq!(
+            upstream_token(1, 0).0,
+            2561,
+            "GEN_SHIFT is 11 (2048) and slot 0 is UPSTREAM_BASE, which is MAX_TUNNELS + 1 = 513"
         );
     }
 }

@@ -170,12 +170,14 @@ fn ex_config_failure(output: &Output, scenario: &str) -> String {
     stderr.into_owned()
 }
 
-/// A missing config document: the config stage refuses, stdout stays clean.
+/// A missing config document: the refusal is a config diagnostic, stdout stays
+/// clean.
 ///
-/// The diagnostic is checked only for a stable substring (it names the config
-/// input) and for the absence of the preflight diagnostic. Which of the two
-/// boot steps ran first is not observable from outside once the prerequisites
-/// are satisfied, so this test claims no ordering.
+/// The assertion claims only what it observes: a missing document exits 78 with
+/// a config diagnostic and no serving banner, so the refusal is not the hosting
+/// prerequisite. Which of the two boot steps ran first is not observable from
+/// outside once the prerequisites are satisfied, so this test claims no
+/// ordering.
 #[cfg(target_os = "linux")]
 #[test]
 fn missing_config_exits_ex_config_without_serving() {
@@ -189,7 +191,9 @@ fn missing_config_exits_ex_config_without_serving() {
     );
     assert!(
         !lowered.contains("prerequisite failure"),
-        "the preflight must pass before the config is opened, so this must be the config stage; stderr was: {stderr:?}"
+        "a missing document exits 78 with a config diagnostic and no serving \
+         banner, so the refusal must not be the hosting prerequisite; \
+         stderr was: {stderr:?}"
     );
 }
 
@@ -203,25 +207,20 @@ fn malformed_config_exits_ex_config_with_a_parse_diagnostic() {
     write_config(dir.path(), "bogus = [");
     let output = run_in(dir.path());
     let stderr = ex_config_failure(&output, "malformed config.toml");
-    let lowered = stderr.to_lowercase();
     assert!(
-        lowered.contains("config"),
-        "the diagnostic must name the config input; stderr was: {stderr:?}"
+        stderr.starts_with("alumina: "),
+        "every `run_boot` error reaches stderr through main's `alumina: <err>` \
+         prefix; stderr was: {stderr:?}"
     );
     assert!(
-        !lowered.contains("unreadable"),
-        "the child must have READ the document, so the refusal is parse/validation, \
-         not a read failure (`ConfigError::Unreadable` in src/config/mod.rs); \
-         stderr was: {stderr:?}"
+        stderr.contains("config parse error"),
+        "the refusal must be the toml parse arm of `ConfigError` \
+         (src/config/mod.rs Display); stderr was: {stderr:?}"
     );
     assert!(
-        !lowered.contains("permission denied"),
-        "an unreadable document also reports a 'config' substring, so a permission \
-         refusal must fail here; stderr was: {stderr:?}"
-    );
-    assert!(
-        !lowered.contains("prerequisite failure"),
-        "a malformed document must be refused by the config stage, not by the preflight; stderr was: {stderr:?}"
+        !stderr.contains("prerequisite failure"),
+        "a malformed document is diagnosed as a config parse error, so the \
+         refusal must not be the hosting prerequisite; stderr was: {stderr:?}"
     );
 }
 

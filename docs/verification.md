@@ -135,9 +135,15 @@ verdicts, or issue records here).
   modules — no Cargo target, no production export.
 - **`tests/binary_entry.rs` is the only target that executes the real binary**
   (via `CARGO_BIN_EXE_alumina`, in a scratch working directory). It proves the
-  boot-failure arm — `EX_CONFIG` 78, the stderr diagnostic, empty stdout, and on
-  Linux that the config stage is reached only after the privilege preflight —
-  and it does not prove the serving path.
+  boot-failure arm through the real `main()`: `EX_CONFIG` 78 for a missing and
+  for a malformed `config.toml`, a stderr diagnostic, and empty stdout, with the
+  Linux child dropped to a non-root uid with `no_new_privs` set. It does not
+  prove the serving path, and on Linux it does not prove that the config stage
+  is reached only after the privilege preflight — with every prerequisite
+  satisfied, swapping the two boot steps yields the same exit code and
+  diagnostic. The one ordering fact that is observable off Linux: with no
+  `config.toml` the preflight rejection is the only diagnostic, which pins that
+  the preflight runs first on that platform.
 - **Moving a suite MAY change qualified test names** (a topic child introduces a
   prefix; a same-name `#[cfg(test)]` externalization preserves it), so a move
   records its name/identity mapping.
