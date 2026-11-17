@@ -249,7 +249,7 @@ fn select_enforces_fqdn_label_and_total_length() {
 
 #[test]
 fn resolver_and_normalize_accept_the_canonical_and_max_length_fqdn() {
-    use crate::names::hostname::FixedHostname;
+    use crate::names::hostname::ApprovedHostname;
 
     let canon = "dns.quad9.net";
     assert_eq!(
@@ -261,7 +261,7 @@ fn resolver_and_normalize_accept_the_canonical_and_max_length_fqdn() {
         canon
     );
     assert_eq!(
-        FixedHostname::normalize(canon.as_bytes())
+        ApprovedHostname::normalize(canon.as_bytes())
             .expect("normalize accepts the canonical fqdn")
             .as_str(),
         canon
@@ -273,12 +273,12 @@ fn resolver_and_normalize_accept_the_canonical_and_max_length_fqdn() {
         select(&format!("8.8.8.8#{max_total}")).is_ok(),
         "both accept a 253-char canonical fqdn"
     );
-    assert!(FixedHostname::normalize(max_total.as_bytes()).is_some());
+    assert!(ApprovedHostname::normalize(max_total.as_bytes()).is_some());
 
     let dot_254 = format!("{max_total}.");
     assert_eq!(dot_254.len(), 254);
     assert_eq!(
-        FixedHostname::normalize(dot_254.as_bytes())
+        ApprovedHostname::normalize(dot_254.as_bytes())
             .expect("normalize accepts 253 bytes plus a trailing dot")
             .as_str(),
         max_total
@@ -287,7 +287,7 @@ fn resolver_and_normalize_accept_the_canonical_and_max_length_fqdn() {
 
 #[test]
 fn resolver_rejects_strict_violations_where_normalize_is_lenient() {
-    use crate::names::hostname::FixedHostname;
+    use crate::names::hostname::ApprovedHostname;
 
     let strict_rows = ["ExAmPLe.Com", "dns.quad9.net.", "DNS.QUAD9.NET."];
     for token in strict_rows {
@@ -310,19 +310,19 @@ fn resolver_rejects_strict_violations_where_normalize_is_lenient() {
         "resolver rejects 253 bytes plus a trailing dot"
     );
     assert_eq!(
-        FixedHostname::normalize("ExAmPLe.Com".as_bytes())
+        ApprovedHostname::normalize("ExAmPLe.Com".as_bytes())
             .expect("normalize lowercases uppercase")
             .as_str(),
         "example.com"
     );
     assert_eq!(
-        FixedHostname::normalize("dns.quad9.net.".as_bytes())
+        ApprovedHostname::normalize("dns.quad9.net.".as_bytes())
             .expect("normalize strips a single trailing dot")
             .as_str(),
         "dns.quad9.net"
     );
     assert_eq!(
-        FixedHostname::normalize(dot_254.as_bytes())
+        ApprovedHostname::normalize(dot_254.as_bytes())
             .expect("normalize accepts 253 bytes plus a trailing dot")
             .as_str(),
         max_total
@@ -331,7 +331,7 @@ fn resolver_rejects_strict_violations_where_normalize_is_lenient() {
 
 #[test]
 fn resolver_and_normalize_agree_on_rejected_shapes() {
-    use crate::names::hostname::FixedHostname;
+    use crate::names::hostname::ApprovedHostname;
 
     for token in ["*.example.com", "bücher.example", "1.2.3.4"] {
         assert!(
@@ -339,7 +339,7 @@ fn resolver_and_normalize_agree_on_rejected_shapes() {
             "resolver must reject {token:?}"
         );
         assert!(
-            FixedHostname::normalize(token.as_bytes()).is_none(),
+            ApprovedHostname::normalize(token.as_bytes()).is_none(),
             "normalize must also reject {token:?}"
         );
     }
@@ -353,7 +353,7 @@ fn resolved_and_serving_identity_sizes_stay_inline() {
         "resolver FQDN payload stays 254 bytes (old layout)"
     );
     assert_eq!(
-        core::mem::size_of::<crate::names::hostname::FixedHostname>(),
+        core::mem::size_of::<crate::names::hostname::ApprovedHostname>(),
         254,
         "shared serving/resolver payload shrinks from 264 to 254 bytes"
     );

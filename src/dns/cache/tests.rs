@@ -37,7 +37,7 @@ fn current_gen(cache: &Cache, name: NameIndex, family: Family) -> Generation {
         .generation()
 }
 
-fn read(cache: &Cache, name: NameIndex, family: Family) -> Entry {
+fn read(cache: &Cache, name: NameIndex, family: Family) -> CacheEntry {
     cache.entry(name, family).expect("published entry exists")
 }
 
@@ -324,7 +324,7 @@ fn cache_new_rejects_out_of_range_name_count() {
         Ok(Cache {
             name_count: 1,
             requirements: [evidence::AssuranceRequirement::ResolverTrusted; ALLOWLIST_MAX],
-            entries: [[Entry::EMPTY; 2]; ALLOWLIST_MAX],
+            entries: [[CacheEntry::EMPTY; 2]; ALLOWLIST_MAX],
         })
     );
     assert_eq!(
@@ -379,7 +379,7 @@ fn ttl_above_cap_is_clamped_to_max_freshness() {
         (Some(1000 + TTL_CAP), Some(1000 + TTL_CAP + STALE_GRACE))
     );
     assert_eq!(entry.state(1000 + TTL_CAP - 1), EntryState::Fresh);
-    assert_eq!(entry.state(1000 + TTL_CAP), EntryState::Stale);
+    assert_eq!(entry.state(1000 + TTL_CAP), EntryState::StaleServing);
 }
 
 #[test]
@@ -401,7 +401,7 @@ fn ttl_at_cap_passes_unchanged() {
         (Some(1000 + TTL_CAP), Some(1000 + TTL_CAP + STALE_GRACE))
     );
     assert_eq!(entry.state(1000 + TTL_CAP - 1), EntryState::Fresh);
-    assert_eq!(entry.state(1000 + TTL_CAP), EntryState::Stale);
+    assert_eq!(entry.state(1000 + TTL_CAP), EntryState::StaleServing);
 }
 
 #[test]
@@ -475,12 +475,12 @@ fn fresh_stale_retired_boundaries_across_receipt_ttls() {
         );
         assert_eq!(
             entry.state(1000 + effective),
-            EntryState::Stale,
+            EntryState::StaleServing,
             "ttl={ttl}, at freshness"
         );
         assert_eq!(
             entry.state(retirement - 1),
-            EntryState::Stale,
+            EntryState::StaleServing,
             "ttl={ttl}, before retirement"
         );
         assert_eq!(
@@ -799,7 +799,7 @@ fn exchange_failure_retains_bindings_and_never_extends_retirement() {
     let after = read(&cache, name, Family::A);
     assert_eq!(after.bindings(), &[pub_addr(), v4([8, 8, 8, 8])]);
     assert_eq!(after.deadlines().1, Some(retirement));
-    assert_eq!(after.state(retirement - 1), EntryState::Stale);
+    assert_eq!(after.state(retirement - 1), EntryState::StaleServing);
     assert_eq!(after.state(retirement), EntryState::Retired);
 }
 
@@ -1120,8 +1120,8 @@ fn cache_zero_heap_after_positive_control() {
     );
 
     eprintln!(
-        "size_of Entry={} Cache={}",
-        size_of::<Entry>(),
+        "size_of CacheEntry={} Cache={}",
+        size_of::<CacheEntry>(),
         size_of::<Cache>()
     );
     let ((), counts) = alloc::run_phase(Phase::BackgroundRefresh, || {

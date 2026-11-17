@@ -1,7 +1,7 @@
 use std::fmt;
 use std::net::IpAddr;
 
-use crate::names::hostname::FixedHostname;
+use crate::names::hostname::ApprovedHostname;
 
 pub const RESOLVER_PORT: u16 = 53;
 
@@ -29,14 +29,14 @@ pub const FQDN_MAX_LEN: usize = crate::names::rules::FQDN_MAX_LEN;
 /// ASCII DNS-name syntax (labels 1..=63 `[a-z0-9-]`, no leading/trailing
 /// hyphen), total length at most [`FQDN_MAX_LEN`], no wildcard `*`, no
 /// IDN/non-ASCII bytes, no leading or trailing dot. Carried inline as a
-/// [`FixedHostname`] payload so [`Nameserver`] and [`ResolverSet`] stay
+/// [`ApprovedHostname`] payload so [`Nameserver`] and [`ResolverSet`] stay
 /// `Copy` with no heap allocation (fixed profile): construction reuses the
 /// shared payload type, and [`Fqdn::parse`] applies the strict resolver
 /// gates before the payload is built, so every constructed value already
 /// passed the boundary rules.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Fqdn {
-    payload: FixedHostname,
+    payload: ApprovedHostname,
 }
 
 enum FqdnError {
@@ -67,7 +67,7 @@ impl Fqdn {
         if crate::names::rules::is_ip_literal_shape(value.as_bytes()) {
             return Err(FqdnError::Invalid);
         }
-        let payload = FixedHostname::normalize(value.as_bytes()).ok_or(FqdnError::Invalid)?;
+        let payload = ApprovedHostname::normalize(value.as_bytes()).ok_or(FqdnError::Invalid)?;
         Ok(Fqdn { payload })
     }
 

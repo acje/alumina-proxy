@@ -172,7 +172,7 @@ impl BindingList {
     clippy::large_enum_variant,
     reason = "no-heap fixed-profile; boxing the large variant would add a post-boot allocation; lint cannot be satisfied idiomatically here"
 )]
-pub enum Outcome {
+pub enum ExchangeOutcome {
     /// Validated positive answer with eligible candidates and the earliest
     /// supporting TTL across the rooted CNAME chain.
     Positive {
@@ -1003,15 +1003,15 @@ pub(crate) enum PublishedKind {
 /// Classifies a validated DNS outcome into the window-level published kind: a
 /// positive contributes a usable name only when at least one of its binding
 /// candidates is eligible, so an all-ineligible positive is `NoEligible`.
-pub(crate) fn classify_published(outcome: &Outcome) -> PublishedKind {
+pub(crate) fn classify_published(outcome: &ExchangeOutcome) -> PublishedKind {
     match outcome {
-        Outcome::Positive { bindings, .. }
+        ExchangeOutcome::Positive { bindings, .. }
             if bindings.as_slice().iter().any(|b| b.is_eligible()) =>
         {
             PublishedKind::ResolvedPositive
         }
-        Outcome::Positive { .. } => PublishedKind::NoEligible,
-        Outcome::NxDomain { .. } | Outcome::NoData { .. } => PublishedKind::Negative,
+        ExchangeOutcome::Positive { .. } => PublishedKind::NoEligible,
+        ExchangeOutcome::NxDomain { .. } | ExchangeOutcome::NoData { .. } => PublishedKind::Negative,
     }
 }
 
@@ -1061,7 +1061,7 @@ const fn wire_ttl_floor(ttl: u64) -> u32 {
 /// that same successful parse, owned by the receiver so a later reuse of the
 /// parse workspace cannot repurpose the observation.
 pub(crate) struct ParsedReply {
-    outcome: Outcome,
+    outcome: ExchangeOutcome,
     observation: ReplyFacts,
 }
 
@@ -1227,7 +1227,7 @@ impl<'a> ObservedReply<'a> {
         F: FnMut(publication::ObservationPhase, &Cache, crate::dns::cache::NameIndex, u64),
     {
         let evidence = match &self.reply.outcome {
-            Outcome::Positive { .. } | Outcome::NxDomain { .. } | Outcome::NoData { .. } => Some(
+            ExchangeOutcome::Positive { .. } | ExchangeOutcome::NxDomain { .. } | ExchangeOutcome::NoData { .. } => Some(
                 Evidence::new(
                     self.ad_fact(),
                     origin.origin_authenticated,
@@ -1271,7 +1271,7 @@ pub fn parse_response(
     family: Family,
     tid: u16,
     msg: &[u8],
-) -> Result<Outcome, DnsError> {
+) -> Result<ExchangeOutcome, DnsError> {
     if msg.len() > DNS_MSG_LIMIT {
         return Err(DnsError::MessageTooLong);
     }
@@ -1425,7 +1425,7 @@ fn finish_response(
     fqdn: &Fqdn,
     family: Family,
     rcode: u8,
-) -> Result<Outcome, DnsError> {
+) -> Result<ExchangeOutcome, DnsError> {
     let root = DnsName::from_exact(fqdn.as_str().as_bytes());
     let (chain, chain_ttl) = root_chain(&root, zones, ws)?;
     let terminal = chain.terminal.as_slice();
@@ -1447,7 +1447,7 @@ fn noerror_outcome(
     family: Family,
     terminal: &[u8],
     chain_ttl: u64,
-) -> Result<Outcome, DnsError> {
+) -> Result<ExchangeOutcome, DnsError> {
     let mut bindings = BindingList::default();
     let mut earliest = chain_ttl;
     if let Some(owner) = ws.owners[..ws.owner_len]
@@ -1461,7 +1461,7 @@ fn noerror_outcome(
     }
     if !bindings.is_empty() {
         ws.supporting_ttl_cap = Some(wire_ttl_floor(earliest));
-        return Ok(Outcome::Positive {
+        return Ok(ExchangeOutcome::Positive {
             family,
             bindings,
             ttl: earliest,
@@ -1472,7 +1472,7 @@ fn noerror_outcome(
     };
     let cap = negative_cap(ws, chain_ttl);
     ws.supporting_ttl_cap = cap;
-    Ok(Outcome::NoData {
+    Ok(ExchangeOutcome::NoData {
         family,
         soa: Some(soa),
     })
@@ -1482,7 +1482,7 @@ fn nxdomain_outcome(
     ws: &mut ResponseWorkspace,
     terminal: &[u8],
     chain_ttl: u64,
-) -> Result<Outcome, DnsError> {
+) -> Result<ExchangeOutcome, DnsError> {
     let soa = classify_soa(terminal, ws.soa.as_ref())?;
     let terminal_data = ws.owners[..ws.owner_len]
         .iter()
@@ -1493,7 +1493,7 @@ fn nxdomain_outcome(
     }
     let cap = negative_cap(ws, chain_ttl);
     ws.supporting_ttl_cap = cap;
-    Ok(Outcome::NxDomain { soa })
+    Ok(ExchangeOutcome::NxDomain { soa })
 }
 
 fn parse_authority_section(

@@ -7,7 +7,7 @@ pub(crate) mod test_support;
 pub(crate) mod tunnel;
 
 pub use owner::{AttachFailure, Preallocated, Runtime, RuntimeBuildError};
-pub use reactor::{ServeError, Serving, Shutdown};
+pub use reactor::{ServeError, ServingLoop, Shutdown};
 pub use storage::{
     ServeStorage, ServingMode, StartupDecision, StartupError, StartupOutcome, StartupState,
 };

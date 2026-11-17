@@ -101,7 +101,7 @@ impl From<Generation> for Generations {
 pub enum EntryState {
     Empty,
     Fresh,
-    Stale,
+    StaleServing,
     Retired,
 }
 
@@ -110,7 +110,7 @@ impl EntryState {
         match self {
             EntryState::Empty => "empty",
             EntryState::Fresh => "fresh",
-            EntryState::Stale => "stale",
+            EntryState::StaleServing => "stale",
             EntryState::Retired => "retired",
         }
     }
@@ -119,7 +119,7 @@ impl EntryState {
 /// A single cache entry: bindings, one freshness deadline, one retirement
 /// deadline, and a generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Entry {
+pub struct CacheEntry {
     generation: Generation,
     freshness_deadline: Option<u64>,
     retirement_deadline: Option<u64>,
@@ -136,8 +136,8 @@ pub struct Entry {
     negative: Option<NegativeProof>,
 }
 
-impl Entry {
-    const EMPTY: Entry = Entry {
+impl CacheEntry {
+    const EMPTY: CacheEntry = CacheEntry {
         generation: Generation::INITIAL,
         freshness_deadline: None,
         retirement_deadline: None,
@@ -179,7 +179,7 @@ impl Entry {
             Some(retirement) if now >= retirement => EntryState::Retired,
             Some(_) => match self.freshness_deadline {
                 Some(freshness) if now < freshness => EntryState::Fresh,
-                Some(_) | None => EntryState::Stale,
+                Some(_) | None => EntryState::StaleServing,
             },
         }
     }
@@ -193,7 +193,7 @@ impl Entry {
     pub const fn servable(&self, now: u64) -> bool {
         match self.state(now) {
             EntryState::Fresh => true,
-            EntryState::Stale => match self.freshness_deadline {
+            EntryState::StaleServing => match self.freshness_deadline {
                 Some(freshness) => {
                     self.stale_allowed && now < freshness.saturating_add(STALE_SERVING_WINDOW)
                 }
@@ -238,10 +238,10 @@ impl Entry {
     }
 }
 
-const fn empty_with_generation(generation: Generation) -> Entry {
-    Entry {
+const fn empty_with_generation(generation: Generation) -> CacheEntry {
+    CacheEntry {
         generation,
-        ..Entry::EMPTY
+        ..CacheEntry::EMPTY
     }
 }
 
@@ -256,11 +256,11 @@ pub(crate) enum NegativeProof {
     },
 }
 
-const fn negative_entry(generation: Generation, negative: NegativeProof) -> Entry {
-    Entry {
+const fn negative_entry(generation: Generation, negative: NegativeProof) -> CacheEntry {
+    CacheEntry {
         generation,
         negative: Some(negative),
-        ..Entry::EMPTY
+        ..CacheEntry::EMPTY
     }
 }
 
@@ -425,15 +425,15 @@ fn published_entry(
     next_generation: Generation,
     deadlines: Deadlines,
     bindings: EligibleBindings,
-) -> Entry {
+) -> CacheEntry {
     if bindings.len == 0 {
-        return Entry {
+        return CacheEntry {
             generation: next_generation,
             evidence: staged.evidence,
-            ..Entry::EMPTY
+            ..CacheEntry::EMPTY
         };
     }
-    Entry {
+    CacheEntry {
         generation: next_generation,
         freshness_deadline: Some(deadlines.freshness),
         retirement_deadline: Some(deadlines.retirement),
@@ -483,7 +483,7 @@ impl fmt::Display for CacheError {
 pub struct Cache {
     name_count: u8,
     requirements: [evidence::AssuranceRequirement; ALLOWLIST_MAX],
-    entries: [[Entry; 2]; ALLOWLIST_MAX],
+    entries: [[CacheEntry; 2]; ALLOWLIST_MAX],
 }
 
 impl Cache {
@@ -519,7 +519,7 @@ impl Cache {
         Ok(Cache {
             name_count,
             requirements,
-            entries: [[Entry::EMPTY; 2]; ALLOWLIST_MAX],
+            entries: [[CacheEntry::EMPTY; 2]; ALLOWLIST_MAX],
         })
     }
 
@@ -573,12 +573,12 @@ impl Cache {
     /// # Errors
     ///
     /// Returns `NameOutOfRange` when `name` is not admitted by this cache.
-    pub fn entry(&self, name: NameIndex, family: Family) -> Result<Entry, CacheError> {
+    pub fn entry(&self, name: NameIndex, family: Family) -> Result<CacheEntry, CacheError> {
         self.admit(name)?;
         Ok(*self.entry_ref(name, family))
     }
 
-    fn entry_ref(&self, name: NameIndex, family: Family) -> &Entry {
+    fn entry_ref(&self, name: NameIndex, family: Family) -> &CacheEntry {
         &self.entries[name.get()][family.index()]
     }
 
@@ -621,7 +621,7 @@ impl Cache {
         }
     }
 
-    fn entry_mut(&mut self, name: NameIndex, family: Family) -> &mut Entry {
+    fn entry_mut(&mut self, name: NameIndex, family: Family) -> &mut CacheEntry {
         &mut self.entries[name.get()][family.index()]
     }
 

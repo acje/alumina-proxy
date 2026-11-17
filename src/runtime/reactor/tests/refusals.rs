@@ -94,7 +94,7 @@ fn expire_setup_timeout_carries_requested_hostname_in_reject_record() {
         let mut client = admitted_client(serving, port, 10);
         feed_connect_head(serving, 0, b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n");
         assert!(
-            matches!(serving.slots[0].stage, Stage::ReadingConnect),
+            matches!(serving.slots[0].stage, SlotStage::ReadingConnect),
             "a parser-fed head alone must leave the slot in ReadingConnect"
         );
         serving.expire_setup(0);

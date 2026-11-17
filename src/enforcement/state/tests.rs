@@ -20,12 +20,12 @@ fn gate(threshold: u32, window: u64) -> AllScopeGate {
     )
 }
 
-fn en(t: ControlTable) -> Enforcement {
-    Enforcement::new(t, GateSet::default())
+fn en(t: ControlTable) -> EnforcementState {
+    EnforcementState::new(t, GateSet::default())
 }
 
-fn en_gated(t: ControlTable, gates: GateSet) -> Enforcement {
-    Enforcement::new(t, gates)
+fn en_gated(t: ControlTable, gates: GateSet) -> EnforcementState {
+    EnforcementState::new(t, gates)
 }
 
 fn gates_illegal_fqdn(threshold: u32, window: u64) -> GateSet {
@@ -61,14 +61,14 @@ fn notify_connection_table() -> ControlTable {
     )
 }
 
-fn decide_at(en: &mut Enforcement, violation: Violation, secs: u64) -> Effect {
-    en.decide(&mut FirstSlot::new(), violation, secs)
+fn decide_at(en: &mut EnforcementState, violation: Violation, secs: u64) -> Effect {
+    en.decide(&mut FirstIllegalLatch::new(), violation, secs)
 }
 
 fn isolated_gate_arrangement(
     early_data: AllScopeGate,
     ja4: AllScopeGate,
-) -> (ControlTable, Enforcement) {
+) -> (ControlTable, EnforcementState) {
     let t = all_actions_table();
     let en = en_gated(
         t,
@@ -82,7 +82,7 @@ fn isolated_gate_arrangement(
     (t, en)
 }
 
-fn count_only_arrangement() -> (ControlTable, Enforcement) {
+fn count_only_arrangement() -> (ControlTable, EnforcementState) {
     let t = table(
         any_controls(ActionKind::Block, Scope::All),
         &[
@@ -211,7 +211,7 @@ fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
         ),
     );
     let first = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: crate::enforcement::policy::AnyIllegalCause::HostNotAllowlisted,
         },
@@ -230,7 +230,7 @@ fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
     );
     assert_eq!(en.counters().facts_any_illegal_total(), 1);
     let second = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::TlsProfile(HelloRejectReason::ServerNameMismatch),
         },
@@ -250,7 +250,7 @@ fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
     );
     assert_eq!(en.counters().facts_any_illegal_total(), 2);
     let third = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -262,7 +262,7 @@ fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
         "two HostNotAllowlisted facts are still below the illegal_fqdn threshold"
     );
     let fourth = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -280,7 +280,7 @@ fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
         "the All latch records one transition"
     );
     let fifth = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -303,7 +303,7 @@ fn any_illegal_folds_every_fact_by_exact_cause_and_latches_all_once() {
 fn wrong_port_and_transfer_encoding_fold_into_distinct_cause_counters() {
     let t = block_all_table();
     let mut en = en(t);
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     en.decide(
         &mut latch,
         Violation::AnyIllegal {
@@ -341,7 +341,7 @@ fn early_data_block_domain_sets_bitset_and_counts() {
     let mut en = en(t);
     let ordinal = t.ordinal(0).expect("ordinal");
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::EarlyUpstreamData { ordinal },
         0,
     );
@@ -361,7 +361,7 @@ fn early_data_block_domain_sets_bitset_and_counts() {
 fn early_data_notify_counts_per_ordinal() {
     let t = block_connection_table();
     let mut en = en(t);
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     let ordinal = t.ordinal(0).expect("ordinal");
     assert_eq!(
         en.decide(&mut latch, Violation::EarlyUpstreamData { ordinal }, 0),
@@ -379,7 +379,7 @@ fn all_transition_is_a_derived_latch_count_not_a_duplicate_action_total() {
     let mut en = en_gated(t, gates_illegal_fqdn(3, 60));
     for i in 0..3u64 {
         en.decide(
-            &mut FirstSlot::new(),
+            &mut FirstIllegalLatch::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
@@ -421,7 +421,7 @@ fn block_all_latch_counts_the_transition_once_not_every_all_application() {
     let ordinal = t.ordinal(0).expect("big table ordinal");
     for i in 0..3u64 {
         en.decide(
-            &mut FirstSlot::new(),
+            &mut FirstIllegalLatch::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
@@ -433,7 +433,7 @@ fn block_all_latch_counts_the_transition_once_not_every_all_application() {
         "three HostNotAllowlisted facts arm the illegal_fqdn latch"
     );
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::EarlyUpstreamData { ordinal },
         10,
     );
@@ -457,7 +457,7 @@ fn block_all_latch_counts_the_transition_once_not_every_all_application() {
 fn early_data_unknown_outcome_is_one_detection_fact_not_two() {
     let small = block_connection_table();
     let mut en = en(small);
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     let big = table(
         any_controls(ActionKind::Block, Scope::Connection),
         &[(ActionKind::Block, Scope::All); 2],
@@ -491,7 +491,7 @@ fn early_data_unknown_outcome_is_one_detection_fact_not_two() {
 fn unbound_and_insufficient_evidence_fold_unknown_by_reason_not_baseline() {
     let small = block_all_table();
     let mut en = en(small);
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     let big = table(
         any_controls(ActionKind::Block, Scope::All),
         &[(ActionKind::Block, Scope::All); 2],
@@ -538,7 +538,7 @@ fn unbound_and_insufficient_evidence_fold_unknown_by_reason_not_baseline() {
 fn missing_result_and_unattributed_fold_distinct_unknown_never_block() {
     let t = all_actions_table();
     let mut en = en(t);
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     let effect = en.decide(&mut latch, Violation::MissingParseResult, 0);
     assert_eq!(
         effect,
@@ -625,7 +625,7 @@ fn single_any_illegal_below_threshold_never_latches_all() {
     let t = all_actions_table();
     let mut en = en_gated(t, gates_illegal_fqdn(3, 60));
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -647,7 +647,7 @@ fn three_any_illegal_facts_within_the_window_latch_all() {
     let mut en = en_gated(t, gates_illegal_fqdn(3, 60));
     assert_eq!(
         en.decide(
-            &mut FirstSlot::new(),
+            &mut FirstIllegalLatch::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
@@ -657,7 +657,7 @@ fn three_any_illegal_facts_within_the_window_latch_all() {
     );
     assert_eq!(
         en.decide(
-            &mut FirstSlot::new(),
+            &mut FirstIllegalLatch::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
@@ -667,7 +667,7 @@ fn three_any_illegal_facts_within_the_window_latch_all() {
     );
     assert_eq!(
         en.decide(
-            &mut FirstSlot::new(),
+            &mut FirstIllegalLatch::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
@@ -684,7 +684,7 @@ fn single_any_illegal_arms_all_scope_at_default_threshold() {
     let t = all_actions_table();
     let mut en = en(t);
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -704,7 +704,7 @@ fn per_control_any_illegal_notify_is_recorded_as_first_slot_action() {
     let t = notify_connection_table();
     let mut en = en(t);
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -739,7 +739,7 @@ fn per_fqdn_all_scope_block_is_gated_by_sp001() {
     );
     let ordinal = t.ordinal(0).expect("ordinal");
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::EarlyUpstreamData { ordinal },
         0,
     );
@@ -751,7 +751,7 @@ fn per_fqdn_all_scope_block_is_gated_by_sp001() {
     assert!(!en.block_all());
     assert_eq!(en.counters().actions_domain_block(ordinal), 0);
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::EarlyUpstreamData { ordinal },
         1,
     );
@@ -762,7 +762,7 @@ fn per_fqdn_all_scope_block_is_gated_by_sp001() {
     );
     assert_eq!(en.counters().actions_domain_block(ordinal), 0);
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::EarlyUpstreamData { ordinal },
         2,
     );
@@ -778,7 +778,7 @@ fn per_fqdn_all_scope_block_is_gated_by_sp001() {
         "the crossing application is the first per-FQDN All block"
     );
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::EarlyUpstreamData { ordinal },
         10,
     );
@@ -803,7 +803,7 @@ fn ja4_change_projects_the_per_fqdn_action() {
     );
     let mut en = en(t);
     let ordinal = t.ordinal(0).expect("ordinal");
-    let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, 0);
+    let effect = en.decide(&mut FirstIllegalLatch::new(), Violation::Ja4Change { ordinal }, 0);
     assert_eq!(
         effect,
         Effect::Block {
@@ -834,7 +834,7 @@ fn bad_handshake_facts_never_arm_the_illegal_fqdn_gate() {
     );
     for i in 0..3u64 {
         let effect = en.decide(
-            &mut FirstSlot::new(),
+            &mut FirstIllegalLatch::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
             },
@@ -851,7 +851,7 @@ fn bad_handshake_facts_never_arm_the_illegal_fqdn_gate() {
         "bad_handshake facts never arm the illegal_fqdn gate"
     );
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -879,7 +879,7 @@ fn illegal_fqdn_facts_never_arm_the_bad_handshake_gate() {
     );
     for i in 0..3u64 {
         let effect = en.decide(
-            &mut FirstSlot::new(),
+            &mut FirstIllegalLatch::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::HostNotAllowlisted,
             },
@@ -896,7 +896,7 @@ fn illegal_fqdn_facts_never_arm_the_bad_handshake_gate() {
         "illegal_fqdn facts never arm the bad_handshake gate"
     );
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
         },
@@ -915,7 +915,7 @@ fn early_data_and_ja4_gates_are_isolated() {
     let (t, mut en) = isolated_gate_arrangement(gate(3, 60), gate(10, 60));
     let ordinal = t.ordinal(0).expect("ordinal");
     for i in 0..3u64 {
-        let effect = en.decide(&mut FirstSlot::new(), Violation::Ja4Change { ordinal }, i);
+        let effect = en.decide(&mut FirstIllegalLatch::new(), Violation::Ja4Change { ordinal }, i);
         assert_eq!(
             effect,
             Effect::BaselineOnly,
@@ -962,7 +962,7 @@ fn single_bad_handshake_fact_arms_bad_handshake_not_illegal_fqdn() {
         ),
     );
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
         },
@@ -975,7 +975,7 @@ fn single_bad_handshake_fact_arms_bad_handshake_not_illegal_fqdn() {
     );
     assert!(en.block_all(), "bad_handshake latches all-scope block");
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -1012,7 +1012,7 @@ fn any_illegal_notify_still_counts_its_class_facts() {
     );
     for i in 0..3u64 {
         let effect = en.decide(
-            &mut FirstSlot::new(),
+            &mut FirstIllegalLatch::new(),
             Violation::AnyIllegal {
                 cause: AnyIllegalCause::ConnectParse(ConnectHeadReason::WrongPort),
             },
@@ -1028,7 +1028,7 @@ fn any_illegal_notify_still_counts_its_class_facts() {
     }
     assert!(!en.block_all(), "Notify never latches all-scope block");
     let effect = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::TlsProfile(HelloRejectReason::ServerNameMismatch),
         },
@@ -1095,7 +1095,7 @@ fn early_data_and_ja4_count_only_on_block_all() {
     assert!(!en.block_all());
 }
 
-/// A Hegel state machine over `Enforcement::decide`, asserting the gate and
+/// A Hegel state machine over `EnforcementState::decide`, asserting the gate and
 /// latch invariants after every rule.
 ///
 /// The model draws its own `ControlTable` (an action/scope for each of the
@@ -1148,12 +1148,12 @@ mod hegel_machine {
     use super::enforcement_tables::table;
     use super::gate;
     use crate::enforcement::action::{
-        ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstSlot, Scope,
+        ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstIllegalLatch, Scope,
     };
     use crate::enforcement::policy::{
         AnyIllegalCause, Effect, UnknownReason, Violation, decide as pure_decide,
     };
-    use crate::enforcement::state::{AllScopeGate, Enforcement, GateSet, WindowedCounter};
+    use crate::enforcement::state::{AllScopeGate, EnforcementState, GateSet, WindowedCounter};
     use crate::inspection::client_hello::HelloRejectReason;
     use crate::inspection::connect::ConnectHeadReason;
     use hegel::TestCase;
@@ -1317,7 +1317,7 @@ mod hegel_machine {
         }
     }
 
-    fn subject_gate(en: &Enforcement, class: GateClass) -> &WindowedCounter {
+    fn subject_gate(en: &EnforcementState, class: GateClass) -> &WindowedCounter {
         match class {
             GateClass::BadHandshake => &en.bad_handshake_gate,
             GateClass::IllegalFqdn => &en.illegal_fqdn_gate,
@@ -1340,7 +1340,7 @@ mod hegel_machine {
     #[derive(Clone, Copy, Debug)]
     struct LastStep {
         kind: StepKind,
-        latch_before: FirstSlot,
+        latch_before: FirstIllegalLatch,
         fact_before: u32,
         fact_after: u32,
         fact_tracked: bool,
@@ -1353,7 +1353,7 @@ mod hegel_machine {
     impl LastStep {
         const INITIAL: LastStep = LastStep {
             kind: StepKind::Time,
-            latch_before: FirstSlot::Armed,
+            latch_before: FirstIllegalLatch::Armed,
             fact_before: 0,
             fact_after: 0,
             fact_tracked: false,
@@ -1365,22 +1365,22 @@ mod hegel_machine {
     }
 
     struct GateModel {
-        en: Enforcement,
+        en: EnforcementState,
         table: ControlTable,
         gates: [ModelGate; 4],
-        latch: FirstSlot,
+        latch: FirstIllegalLatch,
         now: u64,
         expected_blocked: u32,
         prev_block_all: bool,
         prev_blocked: u32,
-        prev_latch: FirstSlot,
+        prev_latch: FirstIllegalLatch,
         last: LastStep,
     }
 
     impl GateModel {
         fn new(table: ControlTable, gates: GateSet) -> GateModel {
             GateModel {
-                en: Enforcement::new(table, gates),
+                en: EnforcementState::new(table, gates),
                 table,
                 gates: [
                     ModelGate::new(gates.bad_handshake()),
@@ -1388,12 +1388,12 @@ mod hegel_machine {
                     ModelGate::new(gates.early_data()),
                     ModelGate::new(gates.ja4()),
                 ],
-                latch: FirstSlot::new(),
+                latch: FirstIllegalLatch::new(),
                 now: 0,
                 expected_blocked: 0,
                 prev_block_all: false,
                 prev_blocked: 0,
-                prev_latch: FirstSlot::Armed,
+                prev_latch: FirstIllegalLatch::Armed,
                 last: LastStep::INITIAL,
             }
         }
@@ -1659,7 +1659,7 @@ mod hegel_machine {
             match self.last.kind {
                 StepKind::AnyIllegal => assert_eq!(
                     self.latch,
-                    FirstSlot::Spent,
+                    FirstIllegalLatch::Spent,
                     "E2: an AnyIllegal decision left the first-slot latch Armed"
                 ),
                 StepKind::Time | StepKind::EarlyData | StepKind::Ja4 | StepKind::Unknown => {
@@ -1755,7 +1755,7 @@ mod hegel_machine {
 
     impl GateModel {
         const fn prev_latch_is_spent_with_armed_latch(&self) -> bool {
-            matches!(self.prev_latch, FirstSlot::Spent) && matches!(self.latch, FirstSlot::Armed)
+            matches!(self.prev_latch, FirstIllegalLatch::Spent) && matches!(self.latch, FirstIllegalLatch::Armed)
         }
     }
 
@@ -1769,10 +1769,10 @@ mod hegel_machine {
     /// invariant asserts the returned effects are identical and the saturated
     /// counters still report `u32::MAX` and overflow.
     struct SaturationModel {
-        saturated: Enforcement,
-        control: Enforcement,
-        latch_saturated: FirstSlot,
-        latch_control: FirstSlot,
+        saturated: EnforcementState,
+        control: EnforcementState,
+        latch_saturated: FirstIllegalLatch,
+        latch_control: FirstIllegalLatch,
         now: u64,
         probe_ordinal: DomainOrdinal,
         last_saturated: Effect,
@@ -1781,13 +1781,13 @@ mod hegel_machine {
 
     impl SaturationModel {
         fn new(table: ControlTable, gates: GateSet) -> SaturationModel {
-            let mut saturated = Enforcement::new(table, gates);
+            let mut saturated = EnforcementState::new(table, gates);
             saturated.monitor_mut().saturate_all_for_test();
             SaturationModel {
                 saturated,
-                control: Enforcement::new(table, gates),
-                latch_saturated: FirstSlot::new(),
-                latch_control: FirstSlot::new(),
+                control: EnforcementState::new(table, gates),
+                latch_saturated: FirstIllegalLatch::new(),
+                latch_control: FirstIllegalLatch::new(),
                 now: 0,
                 probe_ordinal: table.ordinal(0).expect("a drawn table has an ordinal"),
                 last_saturated: Effect::BaselineOnly,

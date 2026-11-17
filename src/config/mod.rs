@@ -14,7 +14,7 @@ use crate::enforcement::action::{
     ActionKind, AnyIllegalControl, Control, ControlTable, PerFqdnControl, Scope,
 };
 use crate::enforcement::state::{AllScopeGate, GateSet};
-use crate::names::hostname::{FQDN_MAX_LEN, FixedHostname};
+use crate::names::hostname::{FQDN_MAX_LEN, ApprovedHostname};
 
 pub const CONFIG_DOC_LIMIT: usize = 16384;
 pub const ALLOWLIST_MIN: usize = 1;
@@ -22,7 +22,7 @@ pub const ALLOWLIST_MAX: usize = 32;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Fqdn {
-    name: FixedHostname,
+    name: ApprovedHostname,
     port: u16,
 }
 
@@ -50,8 +50,8 @@ impl Fqdn {
             return Err("allowlist entry is an IP literal; use a DNS hostname".into());
         }
         let port = parse_config_port(port)?;
-        let payload = FixedHostname::normalize(name.as_bytes()).ok_or_else(|| {
-            "internal: validated allowlist hostname rejected by FixedHostname::normalize"
+        let payload = ApprovedHostname::normalize(name.as_bytes()).ok_or_else(|| {
+            "internal: validated allowlist hostname rejected by ApprovedHostname::normalize"
                 .to_string()
         })?;
         Ok(Fqdn {
@@ -1372,13 +1372,13 @@ mod authorization_boundary_tests {
     #[test]
     fn normalize_accepts_alabel_and_rejects_real_non_ascii_bytes() {
         let alabel =
-            FixedHostname::normalize(b"xn--bcher-kva.example").expect("A-label normalizes");
+            ApprovedHostname::normalize(b"xn--bcher-kva.example").expect("A-label normalizes");
         assert_eq!(alabel.as_bytes(), b"xn--bcher-kva.example");
         // Real UTF-8 (>0x7F) must hit the `!input.is_ascii()` reject branch,
         // unlike the pure-ASCII underscore label exercised by
         // `rejects_malformed_labels`.
-        assert!(FixedHostname::normalize("bücher.example".as_bytes()).is_none());
-        assert!(FixedHostname::normalize("b\u{e9}cher.example".as_bytes()).is_none());
+        assert!(ApprovedHostname::normalize("bücher.example".as_bytes()).is_none());
+        assert!(ApprovedHostname::normalize("b\u{e9}cher.example".as_bytes()).is_none());
     }
 }
 

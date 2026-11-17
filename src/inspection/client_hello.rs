@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::names::hostname::{FQDN_MAX_LEN, FixedHostname};
+use crate::names::hostname::{FQDN_MAX_LEN, ApprovedHostname};
 
 mod ja4;
 
@@ -242,7 +242,7 @@ pub struct HelloAccepted {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChError {
+pub enum ClientHelloError {
     TooLarge,
     HandshakeTooLarge { got: usize },
     RecordTooLarge { got: usize },
@@ -267,84 +267,84 @@ pub enum ChError {
     ServerNameMismatch,
 }
 
-impl fmt::Display for ChError {
+impl fmt::Display for ClientHelloError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ChError::TooLarge => write!(f, "ClientHello exceeds 64 KiB inspection bound"),
-            ChError::HandshakeTooLarge { got } => {
+            ClientHelloError::TooLarge => write!(f, "ClientHello exceeds 64 KiB inspection bound"),
+            ClientHelloError::HandshakeTooLarge { got } => {
                 write!(
                     f,
                     "ClientHello handshake message length {got} exceeds 16 KiB"
                 )
             }
-            ChError::RecordTooLarge { got } => {
+            ClientHelloError::RecordTooLarge { got } => {
                 write!(f, "TLS record payload {got} exceeds 16 KiB")
             }
-            ChError::ZeroLengthRecord => write!(f, "TLS handshake record has zero payload"),
-            ChError::NotHandshake { content_type } => {
+            ClientHelloError::ZeroLengthRecord => write!(f, "TLS handshake record has zero payload"),
+            ClientHelloError::NotHandshake { content_type } => {
                 write!(
                     f,
                     "TLS content type {content_type} is not handshake before ClientHello"
                 )
             }
-            ChError::Sslv2Framing => write!(f, "SSLv2 ClientHello framing rejected"),
-            ChError::BadRecordVersion { got } => {
+            ClientHelloError::Sslv2Framing => write!(f, "SSLv2 ClientHello framing rejected"),
+            ClientHelloError::BadRecordVersion { got } => {
                 write!(
                     f,
                     "TLS record legacy version {got:04x} not accepted for initial ClientHello"
                 )
             }
-            ChError::NotClientHello { handshake_type } => {
+            ClientHelloError::NotClientHello { handshake_type } => {
                 write!(f, "handshake type {handshake_type} is not ClientHello")
             }
-            ChError::TruncatedHandshake => write!(f, "handshake message truncated"),
-            ChError::MalformedBody { detail } => write!(f, "ClientHello body malformed: {detail}"),
-            ChError::UnsupportedLegacyVersion { got } => {
+            ClientHelloError::TruncatedHandshake => write!(f, "handshake message truncated"),
+            ClientHelloError::MalformedBody { detail } => write!(f, "ClientHello body malformed: {detail}"),
+            ClientHelloError::UnsupportedLegacyVersion { got } => {
                 write!(
                     f,
                     "legacy_version {got:04x} is not TLS 1.2 compatibility 0x0303"
                 )
             }
-            ChError::MissingSupportedVersions => write!(
+            ClientHelloError::MissingSupportedVersions => write!(
                 f,
                 "ClientHello lacks the supported_versions extension (TLS 1.3-only profile)"
             ),
-            ChError::InvalidVersionOffer { version } => {
+            ClientHelloError::InvalidVersionOffer { version } => {
                 write!(
                     f,
                     "supported_versions offers non-GREASE version {version:04x} other than TLS 1.3"
                 )
             }
-            ChError::MissingCompressionMethods => {
+            ClientHelloError::MissingCompressionMethods => {
                 write!(f, "ClientHello lacks compression methods")
             }
-            ChError::NonNullCompression => write!(
+            ClientHelloError::NonNullCompression => write!(
                 f,
                 "ClientHello compression method is not the single null method"
             ),
-            ChError::DuplicateExtension { ext } => {
+            ClientHelloError::DuplicateExtension { ext } => {
                 write!(f, "duplicate ClientHello extension {ext}")
             }
-            ChError::MalformedExtension { ext } => {
+            ClientHelloError::MalformedExtension { ext } => {
                 write!(f, "ClientHello extension {ext} malformed")
             }
-            ChError::TooManyExtensions => {
+            ClientHelloError::TooManyExtensions => {
                 write!(f, "ClientHello carries more than 64 distinct extensions")
             }
-            ChError::TooManySigAlgs => {
+            ClientHelloError::TooManySigAlgs => {
                 write!(
                     f,
                     "ClientHello carries more than 64 signature_algorithms entries"
                 )
             }
-            ChError::EchPresent => write!(
+            ClientHelloError::EchPresent => write!(
                 f,
                 "encrypted_client_hello (ECH) extension present; rejected"
             ),
-            ChError::InvalidServerName { detail } => {
+            ClientHelloError::InvalidServerName { detail } => {
                 write!(f, "server_name extension invalid: {detail}")
             }
-            ChError::ServerNameMismatch => write!(f, "SNI does not match the approved hostname"),
+            ClientHelloError::ServerNameMismatch => write!(f, "SNI does not match the approved hostname"),
         }
     }
 }
@@ -364,48 +364,48 @@ pub enum HelloRejectReason {
 }
 
 impl HelloRejectReason {
-    /// Projects a [`ChError`] onto its finite discriminant. The SNI-missing /
+    /// Projects a [`ClientHelloError`] onto its finite discriminant. The SNI-missing /
     /// malformed / duplicate / illegal-name cases all share the
     /// `InvalidServerName` kind; record/version/extension/compression and
     /// framing violations collapse to `Profile`.
     #[must_use]
-    pub const fn from_ch_error(err: &ChError) -> HelloRejectReason {
+    pub const fn from_client_hello_error(err: &ClientHelloError) -> HelloRejectReason {
         match err {
-            ChError::EchPresent => HelloRejectReason::EchPresent,
-            ChError::ServerNameMismatch => HelloRejectReason::ServerNameMismatch,
-            ChError::InvalidServerName { .. } => HelloRejectReason::InvalidServerName,
-            ChError::TooLarge
-            | ChError::HandshakeTooLarge { .. }
-            | ChError::RecordTooLarge { .. }
-            | ChError::ZeroLengthRecord
-            | ChError::NotHandshake { .. }
-            | ChError::Sslv2Framing
-            | ChError::BadRecordVersion { .. }
-            | ChError::NotClientHello { .. }
-            | ChError::TruncatedHandshake
-            | ChError::MalformedBody { .. }
-            | ChError::UnsupportedLegacyVersion { .. }
-            | ChError::MissingSupportedVersions
-            | ChError::InvalidVersionOffer { .. }
-            | ChError::MissingCompressionMethods
-            | ChError::NonNullCompression
-            | ChError::DuplicateExtension { .. }
-            | ChError::MalformedExtension { .. }
-            | ChError::TooManyExtensions
-            | ChError::TooManySigAlgs => HelloRejectReason::Profile,
+            ClientHelloError::EchPresent => HelloRejectReason::EchPresent,
+            ClientHelloError::ServerNameMismatch => HelloRejectReason::ServerNameMismatch,
+            ClientHelloError::InvalidServerName { .. } => HelloRejectReason::InvalidServerName,
+            ClientHelloError::TooLarge
+            | ClientHelloError::HandshakeTooLarge { .. }
+            | ClientHelloError::RecordTooLarge { .. }
+            | ClientHelloError::ZeroLengthRecord
+            | ClientHelloError::NotHandshake { .. }
+            | ClientHelloError::Sslv2Framing
+            | ClientHelloError::BadRecordVersion { .. }
+            | ClientHelloError::NotClientHello { .. }
+            | ClientHelloError::TruncatedHandshake
+            | ClientHelloError::MalformedBody { .. }
+            | ClientHelloError::UnsupportedLegacyVersion { .. }
+            | ClientHelloError::MissingSupportedVersions
+            | ClientHelloError::InvalidVersionOffer { .. }
+            | ClientHelloError::MissingCompressionMethods
+            | ClientHelloError::NonNullCompression
+            | ClientHelloError::DuplicateExtension { .. }
+            | ClientHelloError::MalformedExtension { .. }
+            | ClientHelloError::TooManyExtensions
+            | ClientHelloError::TooManySigAlgs => HelloRejectReason::Profile,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Inspect {
+pub enum HelloParseStep {
     /// The full `ClientHello` handshake message is not yet buffered.
     NeedMore,
     /// The `ClientHello` is framed, parsed, and fully captured. `consumed` is the
     /// number of fed bytes that ended the `ClientHello` message, so a forwarding
     /// gate can forward exactly those bytes upstream while retaining the rest.
-    /// The parsed message is available via [`ChInspector::hello`].
+    /// The parsed message is available via [`ClientHelloInspector::hello`].
     Complete { consumed: usize },
 }
 
@@ -422,7 +422,7 @@ pub enum Inspect {
 /// (one instance per in-flight setup, reused across connections); it must not
 /// be constructed per connection on the stack.
 #[derive(Clone, Debug)]
-pub struct ChInspector {
+pub struct ClientHelloInspector {
     buf: [u8; MAX_CLIENT_HELLO],
     len: usize,
     scan_pos: usize,
@@ -432,20 +432,20 @@ pub struct ChInspector {
     consumed: usize,
 }
 
-impl Default for ChInspector {
+impl Default for ClientHelloInspector {
     fn default() -> Self {
-        ChInspector::new()
+        ClientHelloInspector::new()
     }
 }
 
-impl ChInspector {
+impl ClientHelloInspector {
     #[must_use]
     #[expect(
         clippy::large_stack_arrays,
         reason = "designed serving-path two 64 KiB slot buffers; no runtime heap"
     )]
     pub const fn new() -> Self {
-        ChInspector {
+        ClientHelloInspector {
             buf: [0u8; MAX_CLIENT_HELLO],
             len: 0,
             scan_pos: 0,
@@ -456,7 +456,7 @@ impl ChInspector {
         }
     }
 
-    /// The parsed `ClientHello`, present once `feed` returned `Inspect::Complete`.
+    /// The parsed `ClientHello`, present once `feed` returned `HelloParseStep::Complete`.
     #[must_use]
     pub const fn hello(&self) -> Option<&ClientHello> {
         self.hello.as_ref()
@@ -470,9 +470,9 @@ impl ChInspector {
     /// capacity before a complete `ClientHello` was reached, `HandshakeTooLarge`
     /// when the `ClientHello` handshake message length exceeds 16 KiB, and the
     /// framing or profile errors above at the earliest decidable byte count.
-    pub fn feed(&mut self, data: &[u8]) -> Result<Inspect, ChError> {
+    pub fn feed(&mut self, data: &[u8]) -> Result<HelloParseStep, ClientHelloError> {
         if self.hello.is_some() {
-            return Ok(Inspect::Complete {
+            return Ok(HelloParseStep::Complete {
                 consumed: self.consumed,
             });
         }
@@ -485,15 +485,15 @@ impl ChInspector {
         match self.scan_available()? {
             None => {
                 if take < data.len() || self.len >= MAX_CLIENT_HELLO {
-                    return Err(ChError::TooLarge);
+                    return Err(ClientHelloError::TooLarge);
                 }
-                Ok(Inspect::NeedMore)
+                Ok(HelloParseStep::NeedMore)
             }
             Some((msg_len, consumed)) => {
                 let record_version = u16::from_be_bytes([self.buf[1], self.buf[2]]);
                 self.hello = Some(parse_body(&self.scratch[4..4 + msg_len], record_version)?);
                 self.consumed = consumed;
-                Ok(Inspect::Complete { consumed })
+                Ok(HelloParseStep::Complete { consumed })
             }
         }
     }
@@ -503,17 +503,17 @@ impl ChInspector {
     /// `Some((msg_len, consumed))` once the complete `ClientHello` handshake
     /// message (4-byte header plus body) is captured, with the stream byte
     /// count consumed to the end of that message.
-    fn scan_available(&mut self) -> Result<Option<(usize, usize)>, ChError> {
+    fn scan_available(&mut self) -> Result<Option<(usize, usize)>, ClientHelloError> {
         loop {
             let Some((rec_end, rlen)) = scan_record_header(&self.buf, self.scan_pos, self.len)?
             else {
                 return Ok(None);
             };
             if self.flat == 0 && rlen < 4 {
-                return Err(ChError::TruncatedHandshake);
+                return Err(ClientHelloError::TruncatedHandshake);
             }
             if self.flat + rlen > MAX_CLIENT_HELLO {
-                return Err(ChError::TooLarge);
+                return Err(ClientHelloError::TooLarge);
             }
             let payload = self.scan_pos + 5;
             self.scratch[self.flat..self.flat + rlen].copy_from_slice(&self.buf[payload..rec_end]);
@@ -525,12 +525,12 @@ impl ChInspector {
         }
     }
 
-    fn completed_handshake(&self) -> Result<Option<(usize, usize)>, ChError> {
+    fn completed_handshake(&self) -> Result<Option<(usize, usize)>, ClientHelloError> {
         if self.flat < 4 {
             return Ok(None);
         }
         if self.scratch[0] != HANDSHAKE_CLIENT_HELLO {
-            return Err(ChError::NotClientHello {
+            return Err(ClientHelloError::NotClientHello {
                 handshake_type: self.scratch[0],
             });
         }
@@ -539,7 +539,7 @@ impl ChInspector {
             | usize::from(self.scratch[3]);
         let need = 4 + msg_len;
         if need > MAX_HANDSHAKE_LEN {
-            return Err(ChError::HandshakeTooLarge { got: need });
+            return Err(ClientHelloError::HandshakeTooLarge { got: need });
         }
         if self.flat >= need {
             return Ok(Some((msg_len, self.scan_pos + need - self.flat)));
@@ -552,12 +552,12 @@ const fn is_initial_record_version(version: u16) -> bool {
     version == TLS10 || version == TLS12
 }
 
-const fn check_record_payload(rlen: usize) -> Result<(), ChError> {
+const fn check_record_payload(rlen: usize) -> Result<(), ClientHelloError> {
     if rlen > RECORD_PAYLOAD_LIMIT {
-        return Err(ChError::RecordTooLarge { got: rlen });
+        return Err(ClientHelloError::RecordTooLarge { got: rlen });
     }
     if rlen == 0 {
-        return Err(ChError::ZeroLengthRecord);
+        return Err(ClientHelloError::ZeroLengthRecord);
     }
     Ok(())
 }
@@ -566,23 +566,23 @@ fn scan_record_header(
     buf: &[u8],
     pos: usize,
     len: usize,
-) -> Result<Option<(usize, usize)>, ChError> {
+) -> Result<Option<(usize, usize)>, ClientHelloError> {
     if pos >= len {
         return Ok(None);
     }
     let content_type = buf[pos];
     if content_type & 0x80 != 0 {
-        return Err(ChError::Sslv2Framing);
+        return Err(ClientHelloError::Sslv2Framing);
     }
     if pos + 5 > len {
         return Ok(None);
     }
     if content_type != CONTENT_HANDSHAKE {
-        return Err(ChError::NotHandshake { content_type });
+        return Err(ClientHelloError::NotHandshake { content_type });
     }
     let record_version = u16::from_be_bytes([buf[pos + 1], buf[pos + 2]]);
     if !is_initial_record_version(record_version) {
-        return Err(ChError::BadRecordVersion {
+        return Err(ClientHelloError::BadRecordVersion {
             got: record_version,
         });
     }
@@ -595,18 +595,18 @@ fn scan_record_header(
     Ok(Some((rec_end, rlen)))
 }
 
-fn u16_at(buf: &[u8], at: usize) -> Result<u16, ChError> {
-    let hi = *buf.get(at).ok_or(ChError::MalformedBody {
+fn u16_at(buf: &[u8], at: usize) -> Result<u16, ClientHelloError> {
+    let hi = *buf.get(at).ok_or(ClientHelloError::MalformedBody {
         detail: "short read u16",
     })?;
-    let lo = *buf.get(at + 1).ok_or(ChError::MalformedBody {
+    let lo = *buf.get(at + 1).ok_or(ClientHelloError::MalformedBody {
         detail: "short read u16",
     })?;
     Ok(u16::from_be_bytes([hi, lo]))
 }
 
-fn u8_at(buf: &[u8], at: usize) -> Result<u8, ChError> {
-    buf.get(at).copied().ok_or(ChError::MalformedBody {
+fn u8_at(buf: &[u8], at: usize) -> Result<u8, ClientHelloError> {
+    buf.get(at).copied().ok_or(ClientHelloError::MalformedBody {
         detail: "short read u8",
     })
 }
@@ -618,16 +618,16 @@ fn u8_at(buf: &[u8], at: usize) -> Result<u8, ChError> {
 ///
 /// Returns `MalformedBody` when the list length is odd, when it exceeds
 /// `MAX_CIPHERS` suites, or when the list overruns the body.
-fn parse_cipher_list(body: &[u8], at: usize) -> Result<(usize, [u16; MAX_CIPHERS]), ChError> {
+fn parse_cipher_list(body: &[u8], at: usize) -> Result<(usize, [u16; MAX_CIPHERS]), ClientHelloError> {
     let list_len = usize::from(u16_at(body, at)?);
     if list_len % 2 != 0 {
-        return Err(ChError::MalformedBody {
+        return Err(ClientHelloError::MalformedBody {
             detail: "odd cipher-suite list",
         });
     }
     let cs_count = list_len / 2;
     if cs_count > MAX_CIPHERS {
-        return Err(ChError::MalformedBody {
+        return Err(ClientHelloError::MalformedBody {
             detail: "cipher-suite list exceeds bound",
         });
     }
@@ -679,14 +679,14 @@ fn scan_extensions(
     mut pos: usize,
     ext_end: usize,
     state: &mut ExtensionScan,
-) -> Result<(), ChError> {
+) -> Result<(), ClientHelloError> {
     while pos < ext_end {
         let ext_type = u16_at(body, pos)?;
         if state.seen[..state.seen_count].contains(&ext_type) {
-            return Err(ChError::DuplicateExtension { ext: ext_type });
+            return Err(ClientHelloError::DuplicateExtension { ext: ext_type });
         }
         if state.seen_count == state.seen.len() {
-            return Err(ChError::TooManyExtensions);
+            return Err(ClientHelloError::TooManyExtensions);
         }
         state.seen[state.seen_count] = ext_type;
         state.seen_count += 1;
@@ -694,7 +694,7 @@ fn scan_extensions(
         let ext_start = pos + 4;
         let ext_end_i = ext_start + ext_len;
         if ext_end_i > body.len() {
-            return Err(ChError::MalformedExtension { ext: ext_type });
+            return Err(ClientHelloError::MalformedExtension { ext: ext_type });
         }
         apply_extension(state, ext_type, &body[ext_start..ext_end_i])?;
         pos = ext_end_i;
@@ -706,7 +706,7 @@ fn apply_extension(
     state: &mut ExtensionScan,
     ext_type: u16,
     ext_data: &[u8],
-) -> Result<(), ChError> {
+) -> Result<(), ClientHelloError> {
     match ext_type {
         SUPPORTED_VERSIONS => {
             let versions_len = parse_supported_versions(ext_data, &mut state.versions)?;
@@ -736,10 +736,10 @@ fn apply_extension(
     Ok(())
 }
 
-fn parse_body(body: &[u8], record_version: u16) -> Result<ClientHello, ChError> {
+fn parse_body(body: &[u8], record_version: u16) -> Result<ClientHello, ClientHelloError> {
     let legacy = u16_at(body, 0)?;
     if legacy != TLS12 {
-        return Err(ChError::UnsupportedLegacyVersion { got: legacy });
+        return Err(ClientHelloError::UnsupportedLegacyVersion { got: legacy });
     }
     let mut pos = 2 + RANDOM_LEN;
     let sid_len = usize::from(u8_at(body, pos)?);
@@ -749,27 +749,27 @@ fn parse_body(body: &[u8], record_version: u16) -> Result<ClientHello, ChError> 
     let comp_len = usize::from(u8_at(body, pos)?);
     if comp_len != 1 {
         if comp_len == 0 {
-            return Err(ChError::MissingCompressionMethods);
+            return Err(ClientHelloError::MissingCompressionMethods);
         }
-        return Err(ChError::NonNullCompression);
+        return Err(ClientHelloError::NonNullCompression);
     }
     let comp = u8_at(body, pos + 1)?;
     if comp != 0 {
-        return Err(ChError::NonNullCompression);
+        return Err(ClientHelloError::NonNullCompression);
     }
     pos += 1 + comp_len;
     let ext_total = usize::from(u16_at(body, pos)?);
     pos += 2;
     let ext_end = pos + ext_total;
     if ext_end != body.len() {
-        return Err(ChError::MalformedBody {
+        return Err(ClientHelloError::MalformedBody {
             detail: "extensions do not fill the ClientHello body",
         });
     }
     let mut state = ExtensionScan::new();
     scan_extensions(body, pos, ext_end, &mut state)?;
     if !state.sv_present {
-        return Err(ChError::MissingSupportedVersions);
+        return Err(ClientHelloError::MissingSupportedVersions);
     }
     validate_versions(&state.versions[..state.versions_len])?;
     Ok(ClientHello {
@@ -791,19 +791,19 @@ fn parse_body(body: &[u8], record_version: u16) -> Result<ClientHello, ChError> 
     })
 }
 
-fn validate_versions(versions: &[u16]) -> Result<(), ChError> {
+fn validate_versions(versions: &[u16]) -> Result<(), ClientHelloError> {
     let mut has_tls13 = false;
     for &version in versions {
         if is_grease(version) {
             continue;
         }
         if version != TLS13 {
-            return Err(ChError::InvalidVersionOffer { version });
+            return Err(ClientHelloError::InvalidVersionOffer { version });
         }
         has_tls13 = true;
     }
     if !has_tls13 {
-        return Err(ChError::InvalidVersionOffer { version: 0 });
+        return Err(ClientHelloError::InvalidVersionOffer { version: 0 });
     }
     Ok(())
 }
@@ -832,15 +832,15 @@ const fn is_grease(value: u16) -> bool {
         )
 }
 
-fn parse_supported_versions(data: &[u8], out: &mut [u16; MAX_VERSIONS]) -> Result<usize, ChError> {
+fn parse_supported_versions(data: &[u8], out: &mut [u16; MAX_VERSIONS]) -> Result<usize, ClientHelloError> {
     if data.is_empty() || usize::from(data[0]) + 1 != data.len() {
-        return Err(ChError::MalformedExtension {
+        return Err(ClientHelloError::MalformedExtension {
             ext: SUPPORTED_VERSIONS,
         });
     }
     let count = usize::from(data[0]);
     if count % 2 != 0 || count / 2 > MAX_VERSIONS {
-        return Err(ChError::MalformedExtension {
+        return Err(ClientHelloError::MalformedExtension {
             ext: SUPPORTED_VERSIONS,
         });
     }
@@ -859,9 +859,9 @@ fn parse_server_names(
     sni: &mut [u8; FQDN_MAX_LEN],
     sni_len: &mut usize,
     entries: &mut u8,
-) -> Result<(), ChError> {
+) -> Result<(), ClientHelloError> {
     if data.len() < 2 || usize::from(u16_at(data, 0)?) + 2 != data.len() {
-        return Err(ChError::InvalidServerName {
+        return Err(ClientHelloError::InvalidServerName {
             detail: "list-length mismatch",
         });
     }
@@ -872,21 +872,21 @@ fn parse_server_names(
         let start = at + 3;
         let end = start + len;
         if end > data.len() {
-            return Err(ChError::InvalidServerName {
+            return Err(ClientHelloError::InvalidServerName {
                 detail: "name overflows list",
             });
         }
         if name_type != 0 {
-            return Err(ChError::InvalidServerName {
+            return Err(ClientHelloError::InvalidServerName {
                 detail: "non-host_name name type",
             });
         }
-        *entries = entries.checked_add(1).ok_or(ChError::InvalidServerName {
+        *entries = entries.checked_add(1).ok_or(ClientHelloError::InvalidServerName {
             detail: "too many host_name entries",
         })?;
         if *entries == 1 {
             let raw = &data[start..end];
-            let normalized = FixedHostname::normalize(raw).ok_or(ChError::InvalidServerName {
+            let normalized = ApprovedHostname::normalize(raw).ok_or(ClientHelloError::InvalidServerName {
                 detail: "host_name is not a legal FQDN",
             })?;
             let bytes = normalized.as_bytes();
@@ -930,7 +930,7 @@ fn parse_alpn_first_value(data: &[u8], out: &mut [u8; MAX_ALPN_VALUE], out_len: 
 /// `MAX_SIGALGS`. Lenient by design: a malformed (odd-length or
 /// over-declared) list retains nothing. An overlong list is rejected as
 /// `TooManySigAlgs` so the JA4 hash input is never silently lopped.
-fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> Result<usize, ChError> {
+fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> Result<usize, ClientHelloError> {
     if data.len() < 2 {
         return Ok(0);
     }
@@ -945,7 +945,7 @@ fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> Result<usize, Ch
     }
     let count = list.len() / 2;
     if count > MAX_SIGALGS {
-        return Err(ChError::TooManySigAlgs);
+        return Err(ClientHelloError::TooManySigAlgs);
     }
     for (i, slot) in out[..count].iter_mut().enumerate() {
         *slot = u16::from_be_bytes([list[i * 2], list[i * 2 + 1]]);
@@ -965,17 +965,17 @@ fn parse_sig_algs(data: &[u8], out: &mut [u16; MAX_SIGALGS]) -> Result<usize, Ch
 ///
 /// Returns `ServerNameMismatch` when the SNI does not equal `approved`, and
 /// the profile errors above when the ECH or identity rules fail.
-pub fn validate(ch: &ClientHello, approved: &FixedHostname) -> Result<HelloAccepted, ChError> {
+pub fn validate(ch: &ClientHello, approved: &ApprovedHostname) -> Result<HelloAccepted, ClientHelloError> {
     if ch.has_ech {
-        return Err(ChError::EchPresent);
+        return Err(ClientHelloError::EchPresent);
     }
     if ch.sni_entries != 1 {
-        return Err(ChError::InvalidServerName {
+        return Err(ClientHelloError::InvalidServerName {
             detail: "requires exactly one host_name entry",
         });
     }
     if ch.server_name() != approved.as_bytes() {
-        return Err(ChError::ServerNameMismatch);
+        return Err(ClientHelloError::ServerNameMismatch);
     }
     Ok(HelloAccepted { _private: () })
 }

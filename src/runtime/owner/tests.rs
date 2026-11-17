@@ -1397,7 +1397,7 @@ fn arm_zero_wait_hook(owner: &mut Preallocated) -> ZeroWaitObservation {
     let gap_hook = Rc::clone(&observation.worst_gap);
     let last_hook = Rc::clone(&observation.last);
     let continue_hook = Rc::clone(&observation.observed_continue);
-    let hook = Rc::new(move |serving: &Serving| {
+    let hook = Rc::new(move |serving: &ServingLoop| {
         let dns = serving.storage().dns();
         if !dns.has_active_exchange() || dns.needs_wait() {
             return;
@@ -1612,7 +1612,7 @@ fn arm_both_ready_hook(owner: &mut Preallocated, control: HeldFinalControl) {
         release,
         wrote,
     } = control;
-    let hook = std::rc::Rc::new(move |serving: &Serving| {
+    let hook = std::rc::Rc::new(move |serving: &ServingLoop| {
         if fired.get() {
             return;
         }
@@ -1703,7 +1703,7 @@ fn startup_expiry_gates_already_readable_response_body() {
     let held_for_hook = held_flag;
     let release = release_tx;
     let wrote = wrote_rx;
-    let hook = std::rc::Rc::new(move |serving: &Serving| {
+    let hook = std::rc::Rc::new(move |serving: &ServingLoop| {
         if fired.get() {
             return;
         }
@@ -1768,7 +1768,7 @@ fn startup_expiry_gates_response_completing_during_final_turn_body() {
     let held_for_hook = held_flag;
     let release = release_tx;
     let wrote = wrote_rx;
-    let hook = std::rc::Rc::new(move |serving: &Serving| {
+    let hook = std::rc::Rc::new(move |serving: &ServingLoop| {
         if fired.get() {
             return;
         }
@@ -2622,7 +2622,7 @@ fn boot_stalled_runtime(
     (runtime, responder)
 }
 
-fn spin_until_dns_readable(serving: &Serving, limit: Duration) -> bool {
+fn spin_until_dns_readable(serving: &ServingLoop, limit: Duration) -> bool {
     let deadline = Instant::now() + limit;
     while !serving.test_dns_fd_readable() {
         if Instant::now() >= deadline {
@@ -2639,7 +2639,7 @@ fn spin_until(deadline: Instant) {
     }
 }
 
-fn exchange_deadline(serving: &Serving) -> Instant {
+fn exchange_deadline(serving: &ServingLoop) -> Instant {
     serving
         .storage()
         .dns()
@@ -4076,27 +4076,27 @@ fn attachment_result_ownership_layout_is_measured() {
         align_of::<AttachFailure>(),
         size_of::<RuntimeBuildError>(),
         align_of::<RuntimeBuildError>(),
-        size_of::<Serving>(),
-        align_of::<Serving>(),
-        size_of::<Box<Serving>>()
+        size_of::<ServingLoop>(),
+        align_of::<ServingLoop>(),
+        size_of::<Box<ServingLoop>>()
     );
-    assert!(size_of::<Preallocated>() <= size_of::<(Box<Serving>, mio::Token)>());
-    assert!(size_of::<AttachFailure>() <= size_of::<(Box<Serving>, mio::Token, ServeError)>());
+    assert!(size_of::<Preallocated>() <= size_of::<(Box<ServingLoop>, mio::Token)>());
+    assert!(size_of::<AttachFailure>() <= size_of::<(Box<ServingLoop>, mio::Token, ServeError)>());
 }
 
 #[test]
 fn public_owner_accessors_remain_const_callable() {
-    const fn preallocated(owner: &Preallocated) -> &Serving {
+    const fn preallocated(owner: &Preallocated) -> &ServingLoop {
         owner.serving()
     }
-    const fn runtime(owner: &Runtime) -> &Serving {
+    const fn runtime(owner: &Runtime) -> &ServingLoop {
         owner.serving()
     }
     const fn shutdown(owner: &Runtime) -> Shutdown {
         owner.shutdown()
     }
-    let _ = preallocated as fn(&Preallocated) -> &Serving;
-    let _ = runtime as fn(&Runtime) -> &Serving;
+    let _ = preallocated as fn(&Preallocated) -> &ServingLoop;
+    let _ = runtime as fn(&Runtime) -> &ServingLoop;
     let _ = shutdown as fn(&Runtime) -> Shutdown;
 }
 

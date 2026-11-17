@@ -16,7 +16,7 @@ fn any(cause: AnyIllegalCause) -> Violation {
 #[test]
 fn first_any_illegal_fires_its_control_action_once() {
     let t = block_all_table();
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(&t, &mut latch, any(AnyIllegalCause::HostNotAllowlisted)),
         Effect::Block { scope: Scope::All }
@@ -35,7 +35,7 @@ fn first_any_illegal_fires_its_control_action_once() {
 #[test]
 fn first_any_illegal_scoped_connection_yields_block_connection() {
     let t = block_connection_table();
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &t,
@@ -63,7 +63,7 @@ fn any_illegal_cause_selects_its_own_control() {
         &[(ActionKind::Notify, Scope::Connection)],
         &[(ActionKind::Block, Scope::Domain)],
     );
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &t,
@@ -75,13 +75,13 @@ fn any_illegal_cause_selects_its_own_control() {
         },
         "connect_parse selects the connect_parse control"
     );
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(&t, &mut latch, any(AnyIllegalCause::HostNotAllowlisted)),
         Effect::Block { scope: Scope::All },
         "host_not_allowlisted selects the host_not_allowlisted control"
     );
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &t,
@@ -93,7 +93,7 @@ fn any_illegal_cause_selects_its_own_control() {
         Effect::Notify { scope: Scope::All },
         "tls_profile selects the tls_profile control"
     );
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(&t, &mut latch, any(AnyIllegalCause::Ech)),
         Effect::Block {
@@ -106,7 +106,7 @@ fn any_illegal_cause_selects_its_own_control() {
 #[test]
 fn latched_connection_cannot_fire_twice() {
     let t = block_all_table();
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &t,
@@ -138,7 +138,7 @@ fn early_data_selects_configured_block_connection() {
         &[(ActionKind::Block, Scope::Connection)],
         &[(ActionKind::Notify, Scope::Connection)],
     );
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &t,
@@ -154,7 +154,7 @@ fn early_data_selects_configured_block_connection() {
     );
     assert_eq!(
         latch,
-        FirstSlot::Armed,
+        FirstIllegalLatch::Armed,
         "early-data must not consume the first-slot latch"
     );
 }
@@ -172,7 +172,7 @@ fn early_data_selects_configured_notify_scope() {
             (ActionKind::Notify, Scope::Connection),
         ],
     );
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &t,
@@ -206,7 +206,7 @@ fn early_data_ignore_is_baseline_only() {
         Scope::Connection,
     )];
     let t = ControlTable::new(any, &early, &ja4).expect("in-bound test table");
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &t,
@@ -220,7 +220,7 @@ fn early_data_ignore_is_baseline_only() {
     );
     assert_eq!(
         latch,
-        FirstSlot::Armed,
+        FirstIllegalLatch::Armed,
         "ignore must not consume the first-slot latch"
     );
 }
@@ -234,7 +234,7 @@ fn ja4_change_selects_configured_action() {
     )];
     let ja4 = vec![PerFqdnControl::control(ActionKind::Block, Scope::Domain)];
     let t = ControlTable::new(any, &early, &ja4).expect("in-bound test table");
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &t,
@@ -250,7 +250,7 @@ fn ja4_change_selects_configured_action() {
     );
     assert_eq!(
         latch,
-        FirstSlot::Armed,
+        FirstIllegalLatch::Armed,
         "ja4 change must not consume the first-slot latch"
     );
 }
@@ -264,7 +264,7 @@ fn ja4_change_ignore_is_baseline_only() {
     )];
     let ja4 = vec![PerFqdnControl::Ignore];
     let t = ControlTable::new(any, &early, &ja4).expect("in-bound test table");
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &t,
@@ -287,7 +287,7 @@ fn early_data_unbound_ordinal_is_unknown_not_baseline() {
     let big = table(any_controls(ActionKind::Block, Scope::All), &many, &many);
     let unbound = big.ordinal(5).expect("index 5 configured in a full table");
     let small = block_all_table();
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(
             &small,
@@ -308,7 +308,7 @@ fn evidence_insufficient_is_unknown_not_baseline() {
         &[(ActionKind::Notify, Scope::Connection)],
         &[(ActionKind::Block, Scope::All)],
     );
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(&t, &mut latch, Violation::EvidenceInsufficient),
         Effect::Unknown {
@@ -317,7 +317,7 @@ fn evidence_insufficient_is_unknown_not_baseline() {
     );
     assert_eq!(
         latch,
-        FirstSlot::Armed,
+        FirstIllegalLatch::Armed,
         "insufficient evidence must not consume the first-slot latch"
     );
 }
@@ -329,7 +329,7 @@ fn unattributed_is_unknown_not_any_illegal() {
         &[(ActionKind::Notify, Scope::Connection)],
         &[(ActionKind::Block, Scope::All)],
     );
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     assert_eq!(
         decide(&t, &mut latch, Violation::Unattributed),
         Effect::Unknown {
@@ -338,7 +338,7 @@ fn unattributed_is_unknown_not_any_illegal() {
     );
     assert_eq!(
         latch,
-        FirstSlot::Armed,
+        FirstIllegalLatch::Armed,
         "an unattributed anomaly must not consume the first-slot latch"
     );
     assert_eq!(
@@ -356,7 +356,7 @@ fn missing_parse_result_is_unknown_never_an_action() {
         &[(ActionKind::Notify, Scope::Connection)],
         &[(ActionKind::Block, Scope::All)],
     );
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     let effect = decide(&t, &mut latch, Violation::MissingParseResult);
     assert_eq!(
         effect,
@@ -370,7 +370,7 @@ fn missing_parse_result_is_unknown_never_an_action() {
     );
     assert_eq!(
         latch,
-        FirstSlot::Armed,
+        FirstIllegalLatch::Armed,
         "a missing internal parse result must not consume the first-slot latch"
     );
 }
@@ -378,7 +378,7 @@ fn missing_parse_result_is_unknown_never_an_action() {
 #[test]
 fn finite_cause_discriminants_stay_distinct_through_latch() {
     let t = block_connection_table();
-    let mut latch = FirstSlot::new();
+    let mut latch = FirstIllegalLatch::new();
     let first = decide(
         &t,
         &mut latch,

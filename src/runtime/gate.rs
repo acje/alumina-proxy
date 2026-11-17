@@ -90,7 +90,7 @@ pub enum GatePhase {
 /// The pure per-tunnel gate: phase plus the byte-offset accounting for the two
 /// barriers. Holds only the tunnel's own domain state (nothing detachable, no
 /// freestanding provenance).
-pub struct TunnelGate {
+pub struct ForwardingGate {
     phase: GatePhase,
     /// Number of client-stream bytes consumed by the CONNECT head (never
     /// forwarded; the proxy handshake). Tunnel bytes start here.
@@ -141,11 +141,11 @@ impl ValidatedHello {
     }
 }
 
-impl TunnelGate {
+impl ForwardingGate {
     /// A closed gate at the start of CONNECT setup.
     #[must_use]
-    pub const fn new() -> TunnelGate {
-        TunnelGate {
+    pub const fn new() -> ForwardingGate {
+        ForwardingGate {
             phase: GatePhase::AwaitConnect,
             head_len: 0,
             hello_start: 0,
@@ -289,15 +289,15 @@ impl TunnelGate {
     }
 }
 
-impl Default for TunnelGate {
+impl Default for ForwardingGate {
     fn default() -> Self {
-        TunnelGate::new()
+        ForwardingGate::new()
     }
 }
 
-impl fmt::Debug for TunnelGate {
+impl fmt::Debug for ForwardingGate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TunnelGate")
+        f.debug_struct("ForwardingGate")
             .field("phase", &self.phase)
             .field("head_len", &self.head_len)
             .field("hello_start", &self.hello_start)
@@ -312,8 +312,8 @@ impl fmt::Debug for TunnelGate {
 mod tests {
     use super::*;
 
-    fn authorized_gate() -> TunnelGate {
-        let mut gate = TunnelGate::new();
+    fn authorized_gate() -> ForwardingGate {
+        let mut gate = ForwardingGate::new();
         gate.on_connect_head(120);
         gate.on_authorized();
         gate.on_upstream_connected();
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn connecting_phase_rejects_actual_upstream_activity() {
-        let mut data = TunnelGate::new();
+        let mut data = ForwardingGate::new();
         data.on_connect_head(120);
         data.on_authorized();
         data.observe_upstream_activity(Activity::Data);
@@ -440,7 +440,7 @@ mod tests {
             GatePhase::Terminated(TerminateReason::EarlyUpstream(Activity::Data))
         );
 
-        let mut eof = TunnelGate::new();
+        let mut eof = ForwardingGate::new();
         eof.on_connect_head(120);
         eof.on_authorized();
         eof.observe_upstream_activity(Activity::Eof);
@@ -449,7 +449,7 @@ mod tests {
             GatePhase::Terminated(TerminateReason::EarlyUpstream(Activity::Eof))
         );
 
-        let mut reset = TunnelGate::new();
+        let mut reset = ForwardingGate::new();
         reset.on_connect_head(120);
         reset.on_authorized();
         reset.observe_upstream_activity(Activity::Reset);
@@ -458,7 +458,7 @@ mod tests {
             GatePhase::Terminated(TerminateReason::EarlyUpstream(Activity::Reset))
         );
 
-        let mut early = TunnelGate::new();
+        let mut early = ForwardingGate::new();
         early.observe_upstream_activity(Activity::Data);
         assert_eq!(
             early.phase(),
@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn gate_starts_closed_and_authorization_advances_phase() {
-        let mut gate = TunnelGate::new();
+        let mut gate = ForwardingGate::new();
         assert_eq!(gate.phase(), GatePhase::AwaitConnect);
         assert!(!gate.is_open());
         gate.on_connect_head(80);
@@ -535,14 +535,14 @@ mod tests {
     /// reactor, where caller teardown discards the gate before a second
     /// terminator can arrive: `observe_upstream_activity` at
     /// `src/runtime/reactor.rs:3337` is followed by `close_slot` ->
-    /// `ws.reset()` -> `TunnelGate::new()` (`src/runtime/reactor.rs:854-857`),
+    /// `ws.reset()` -> `ForwardingGate::new()` (`src/runtime/reactor.rs:854-857`),
     /// and `on_hello_rejected`'s only production caller is `reject_hello`
     /// (`src/runtime/reactor/reject.rs:69`), reached solely from the
     /// hello-validation path (`src/runtime/reactor.rs:1293`/`:3405`/`:3428`),
     /// which also closes the slot.
     #[test]
     fn re_termination_overwrites_the_settled_cause_on_the_public_surface() {
-        let mut gate = TunnelGate::new();
+        let mut gate = ForwardingGate::new();
         assert_eq!(gate.phase(), GatePhase::AwaitConnect);
         gate.on_authorized();
         assert_eq!(gate.phase(), GatePhase::Connecting);
@@ -559,7 +559,7 @@ mod tests {
         );
     }
 
-    /// A model-based machine over [`TunnelGate`]'s two-barrier lifecycle. The
+    /// A model-based machine over [`ForwardingGate`]'s two-barrier lifecycle. The
     /// example tests above pin the orderings somebody wrote down; this machine
     /// explores the interleavings nobody did — a late head re-application, a
     /// rejection after the gate opened, a validation in every phase, upstream
@@ -575,7 +575,7 @@ mod tests {
     ///    rule the runtime can deliver leaves exactly `Terminated(r)`. The
     ///    runtime delivers none, because both production terminator sites tear
     ///    the slot down synchronously (`src/runtime/reactor.rs:3337` ->
-    ///    `close_slot` -> `ws.reset()` -> `TunnelGate::new()`, reset at
+    ///    `close_slot` -> `ws.reset()` -> `ForwardingGate::new()`, reset at
     ///    `src/runtime/reactor.rs:854-857`; `reject_hello` at
     ///    `src/runtime/reactor/reject.rs:69`, reachable only from the
     ///    hello-validation path). `(phase, reason)` absorption is therefore a
@@ -634,7 +634,7 @@ mod tests {
         const ACTIVITIES: [Activity; 3] = [Activity::Data, Activity::Eof, Activity::Reset];
 
         pub(super) struct GateLifecycle {
-            gate: TunnelGate,
+            gate: ForwardingGate,
             /// The CONNECT head length the model applied, which anchors the
             /// drawn validated-hello boundary. This is the *last* head applied
             /// while the phase was still `AwaitConnect`, mirroring production:
@@ -680,7 +680,7 @@ mod tests {
 
         impl GateLifecycle {
             pub(super) fn start() -> GateLifecycle {
-                let gate = TunnelGate::new();
+                let gate = ForwardingGate::new();
                 GateLifecycle {
                     phase_before: gate.phase(),
                     committed_before: gate.upstream_committed(),
@@ -978,7 +978,7 @@ mod tests {
     }
 
     /// The two-barrier lifecycle as a state machine: model-based coverage of the
-    /// gate's interleavings, over the same production [`TunnelGate`] the example
+    /// gate's interleavings, over the same production [`ForwardingGate`] the example
     /// tests drive. Its invariant list and independence argument are on
     /// [`lifecycle_machine`]; `hegel.toml` owns the case count.
     #[hegel::test(derandomize = true)]

@@ -1,5 +1,5 @@
 use super::action::{
-    ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstSlot, PerFqdnControl,
+    ActionKind, AnyIllegalControl, Control, ControlTable, DomainOrdinal, FirstIllegalLatch, PerFqdnControl,
     Scope,
 };
 use crate::inspection::client_hello::HelloRejectReason;
@@ -110,7 +110,7 @@ pub enum Effect {
 /// `early_data`/`ja4` control, and `ignore` is the per-FQDN opt-out that
 /// yields `BaselineOnly`. The `AnyIllegal` latch is consumed by the first
 /// `AnyIllegal` only; per-FQDN violations never consume it.
-pub fn decide(table: &ControlTable, latch: &mut FirstSlot, violation: Violation) -> Effect {
+pub fn decide(table: &ControlTable, latch: &mut FirstIllegalLatch, violation: Violation) -> Effect {
     match violation {
         Violation::AnyIllegal { cause } => {
             if latch.take_if_armed() {

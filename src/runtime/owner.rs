@@ -14,7 +14,7 @@ use mio::Token;
 use mio::net::TcpListener;
 
 use crate::dns::transport::{STARTUP_WINDOW_SECS, StartupDnsError, TurnResult};
-use crate::runtime::reactor::{ServeError, Serving, Shutdown, ShutdownExit};
+use crate::runtime::reactor::{ServeError, ServingLoop, Shutdown, ShutdownExit};
 use crate::runtime::storage::{ServeStorage, StartupError, StartupOutcome};
 
 /// The bounded number of cooperative DNS advances a single owner turn may make,
@@ -54,7 +54,7 @@ fn emit_terminal_shutdown_finish(
 /// }
 /// ```
 pub struct Preallocated {
-    serving: Box<Serving>,
+    serving: Box<ServingLoop>,
     dns_token: Token,
 }
 
@@ -90,17 +90,17 @@ pub enum RuntimeBuildError {
 
 const _: () = {
     assert!(
-        std::mem::size_of::<Preallocated>() <= std::mem::size_of::<(Box<Serving>, Token)>(),
+        std::mem::size_of::<Preallocated>() <= std::mem::size_of::<(Box<ServingLoop>, Token)>(),
         "preallocated owner must remain one serving box and token"
     );
     assert!(
         std::mem::size_of::<AttachFailure>()
-            <= std::mem::size_of::<(Box<Serving>, Token, ServeError)>(),
+            <= std::mem::size_of::<(Box<ServingLoop>, Token, ServeError)>(),
         "attachment failure must remain bounded by the owner pointer and error"
     );
     assert!(
         std::mem::size_of::<RuntimeBuildError>()
-            <= std::mem::size_of::<(Box<Serving>, Token, ServeError, bool)>(),
+            <= std::mem::size_of::<(Box<ServingLoop>, Token, ServeError, bool)>(),
         "build error must remain bounded by the owner pointer, error and tag"
     );
 };
@@ -139,8 +139,8 @@ impl Preallocated {
         storage: ServeStorage,
         traffic: crate::inventory::TrafficStorage,
     ) -> Result<Preallocated, ServeError> {
-        let dns_token = Serving::dns_token();
-        let serving = Box::new(Serving::preallocate(storage, traffic)?);
+        let dns_token = ServingLoop::dns_token();
+        let serving = Box::new(ServingLoop::preallocate(storage, traffic)?);
         Ok(Preallocated { serving, dns_token })
     }
 
@@ -249,7 +249,7 @@ impl Preallocated {
 
     /// The serving engine, for host observation of pre-attach readiness state.
     #[must_use]
-    pub const fn serving(&self) -> &Serving {
+    pub const fn serving(&self) -> &ServingLoop {
         &self.serving
     }
 }
@@ -262,7 +262,7 @@ impl Preallocated {
 /// it always owns an attached listener and all `sized` serving workspaces:
 /// the serve loop and per-turn dispatch are reachable only here.
 pub struct Runtime {
-    serving: Box<Serving>,
+    serving: Box<ServingLoop>,
     dns_token: Token,
     /// Test-only count of cooperative DNS advances actually made on the most
     /// recent owner turn, so fixtures assert the eight-step turn bound against
@@ -296,7 +296,7 @@ impl Runtime {
 
     /// The serving engine, for host observation.
     #[must_use]
-    pub const fn serving(&self) -> &Serving {
+    pub const fn serving(&self) -> &ServingLoop {
         &self.serving
     }
 
@@ -305,7 +305,7 @@ impl Runtime {
     /// shutdown through [`Self::turn`] (the production path) rather than a
     /// detached helper.
     #[cfg(all(test, feature = "alloc-witness"))]
-    pub(crate) fn serving_mut(&mut self) -> &mut Serving {
+    pub(crate) fn serving_mut(&mut self) -> &mut ServingLoop {
         &mut self.serving
     }
 

@@ -161,7 +161,7 @@ fn parse_response_ws(
     family: Family,
     tid: u16,
     msg: &[u8],
-) -> Result<Outcome, DnsError> {
+) -> Result<ExchangeOutcome, DnsError> {
     let mut ws = ResponseWorkspace::default();
     let zones = BailiwickZones::from_allowlist(config().allowlist(), config().cname_bailiwick())
         .expect("validated config keeps suffix count within ALLOWLIST_MAX");
@@ -224,7 +224,7 @@ fn parse_with_zones(
     family: Family,
     tid: u16,
     msg: &[u8],
-) -> Result<Outcome, DnsError> {
+) -> Result<ExchangeOutcome, DnsError> {
     let mut ws = ResponseWorkspace::default();
     let zones = BailiwickZones::from_allowlist(cfg.allowlist(), cfg.cname_bailiwick())
         .expect("validated config keeps suffix count within ALLOWLIST_MAX");
@@ -236,7 +236,7 @@ fn parse_with_flag(
     family: Family,
     tid: u16,
     msg: &[u8],
-) -> (Result<Outcome, DnsError>, bool) {
+) -> (Result<ExchangeOutcome, DnsError>, bool) {
     let mut ws = ResponseWorkspace::default();
     let zones = BailiwickZones::from_allowlist(config().allowlist(), config().cname_bailiwick())
         .expect("validated config keeps suffix count within ALLOWLIST_MAX");
@@ -250,7 +250,7 @@ fn parse_response_flagged(
     family: Family,
     tid: u16,
     msg: &[u8],
-) -> Result<Outcome, DnsError> {
+) -> Result<ExchangeOutcome, DnsError> {
     let zones = BailiwickZones::from_allowlist(config().allowlist(), config().cname_bailiwick())
         .expect("validated config keeps suffix count within ALLOWLIST_MAX");
     parse_response(ws, &zones, &fqdn(name), family, tid, msg)
@@ -268,7 +268,7 @@ fn parse_reply_into(
     ParsedReply::parse_reply(ws, &zones, &fqdn(name), family, tid, msg)
 }
 
-fn positive_freshness_deadline(outcome: &Outcome, receipt: u64) -> (u64, u64) {
+fn positive_freshness_deadline(outcome: &ExchangeOutcome, receipt: u64) -> (u64, u64) {
     let mut cache = Cache::new(2).expect("cache");
     let mut schedules = Schedules::new(2).expect("schedules");
     let index = cache.name_index(0).expect("index");
@@ -300,7 +300,7 @@ mod positive {
         let out = parse_response_ws("sub.example.org", Family::A, 0x1234, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::Positive {
+            ExchangeOutcome::Positive {
                 family: Family::A,
                 bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(
                     93, 184, 216, 34
@@ -325,7 +325,7 @@ mod positive {
         msg.extend_from_slice(&[140, 82, 121, 5]);
         let out = parse_response_ws("sub.example.org", Family::A, 0x1234, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(140, 82, 121, 5))]
@@ -346,7 +346,7 @@ mod positive {
         msg.extend_from_slice(&a_record("a.sub.example.org", [203, 0, 113, 7], 40));
         let out = parse_response_ws("sub.example.org", Family::A, 9, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(203, 0, 113, 7))]
@@ -500,7 +500,7 @@ mod bailiwick_cname {
         msg.extend_from_slice(&a_record("a.sub.example.org", [203, 0, 113, 7], 40));
         let out = parse_response_ws("sub.example.org", Family::A, 0x1262, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(203, 0, 113, 7))]
@@ -567,7 +567,7 @@ mod bailiwick_cname {
         let out =
             parse_with_zones(&cfg, "sub.example.org", Family::A, 0x1304, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(203, 0, 113, 7))]
@@ -605,7 +605,7 @@ mod bailiwick_cname {
         let out =
             parse_with_zones(&cfg, "sub.example.org", Family::A, 0x1306, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(203, 0, 113, 7))]
@@ -698,7 +698,7 @@ mod bailiwick_cname {
         msg.extend_from_slice(&a_record("bar.github.io", [203, 0, 113, 7], 40));
         let out = parse_with_zones(&cfg, "foo.github.io", Family::A, 0x1402, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(203, 0, 113, 7))]
@@ -742,7 +742,7 @@ mod bailiwick_cname {
         let out =
             parse_with_zones(&cfg, "sub.example.org", Family::A, 0x1404, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(203, 0, 113, 7))]
@@ -913,12 +913,12 @@ mod workspace {
         );
         match (&high_reply.outcome, &normal_reply.outcome) {
             (
-                Outcome::Positive {
+                ExchangeOutcome::Positive {
                     family: hf,
                     bindings: hb,
                     ttl: ht,
                 },
-                Outcome::Positive {
+                ExchangeOutcome::Positive {
                     family: nf,
                     bindings: nb,
                     ttl: nt,
@@ -942,7 +942,7 @@ mod workspace {
             .expect("SOA-bearing NXDOMAIN");
         assert!(matches!(
             negative.outcome,
-            Outcome::NxDomain { soa: Some(_) }
+            ExchangeOutcome::NxDomain { soa: Some(_) }
         ));
         let mut empty = header(0x1333, true, 0, 1, 0, 0, 0);
         empty.extend_from_slice(&qname_bytes("sub.example.org"));
@@ -1018,14 +1018,14 @@ mod workspace {
             "parsed_reply_layout size_reply={} align_reply={} size_outcome={} align_outcome={} size_observed={} align_observed={}",
             std::mem::size_of::<ParsedReply>(),
             std::mem::align_of::<ParsedReply>(),
-            std::mem::size_of::<Outcome>(),
-            std::mem::align_of::<Outcome>(),
+            std::mem::size_of::<ExchangeOutcome>(),
+            std::mem::align_of::<ExchangeOutcome>(),
             std::mem::size_of::<ObservedReply<'_>>(),
             std::mem::align_of::<ObservedReply<'_>>(),
         );
         assert!(
             std::mem::size_of::<ParsedReply>()
-                <= std::mem::size_of::<Outcome>() + std::mem::align_of::<Outcome>(),
+                <= std::mem::size_of::<ExchangeOutcome>() + std::mem::align_of::<ExchangeOutcome>(),
             "the owned reply must stay within one outcome plus one alignment unit"
         );
         assert!(
@@ -1414,7 +1414,7 @@ mod negative_soa {
         let out = parse_response_ws("sub.example.org", Family::A, 11, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::NxDomain {
+            ExchangeOutcome::NxDomain {
                 soa: Some(Soa::new(300, 60)),
             }
         );
@@ -1430,7 +1430,7 @@ mod negative_soa {
         let out = parse_response_ws("sub.example.org", Family::A, 12, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::NoData {
+            ExchangeOutcome::NoData {
                 family: Family::A,
                 soa: Some(Soa::new(300, 60)),
             }
@@ -1462,7 +1462,7 @@ mod negative_soa {
         let out = parse_response_ws("sub.example.org", Family::A, 0x1401, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::NoData {
+            ExchangeOutcome::NoData {
                 family: Family::A,
                 soa: Some(Soa::new(300, 60)),
             }
@@ -1480,7 +1480,7 @@ mod negative_soa {
         let out = parse_response_ws("sub.example.org", Family::A, 0x1402, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::NoData {
+            ExchangeOutcome::NoData {
                 family: Family::A,
                 soa: Some(Soa::new(300, 60)),
             }
@@ -1497,7 +1497,7 @@ mod negative_soa {
         let out = parse_response_ws("sub.example.org", Family::A, 0x1403, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::NxDomain {
+            ExchangeOutcome::NxDomain {
                 soa: Some(Soa::new(300, 60)),
             }
         );
@@ -1542,7 +1542,7 @@ mod authority_soa {
         msg.extend_from_slice(&soa_record("other.example.net", 300, 60));
         let out = parse_response_ws("sub.example.org", Family::A, 0x1248, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
@@ -1574,7 +1574,7 @@ mod authority_soa {
         msg.extend_from_slice(&1u16.to_be_bytes());
         msg.extend_from_slice(&soa_record("example.org", 300, 60));
         let out = parse_response_ws("sub.example.org", Family::A, 27, &msg).expect("parse");
-        assert_eq!(out, Outcome::NxDomain { soa: None });
+        assert_eq!(out, ExchangeOutcome::NxDomain { soa: None });
     }
 
     #[test]
@@ -1587,7 +1587,7 @@ mod authority_soa {
         msg.extend_from_slice(&soa_record("example.org", 300, 60));
         let out = parse_response_ws("sub.example.org", Family::A, 28, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
@@ -1738,7 +1738,7 @@ mod malformed_rdata {
         msg.extend_from_slice(&raw_record("example.org", 41, 1, 0, &[0u8; 11]));
         let out = parse_response_ws("sub.example.org", Family::A, 0x124b, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, .. } => {
+            ExchangeOutcome::Positive { bindings, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
@@ -1758,7 +1758,7 @@ mod malformed_rdata {
         msg.extend_from_slice(&raw_record("example.org", 99, 1, 60, &[10, 11, 12, 13]));
         let out = parse_response_ws("sub.example.org", Family::A, 0x124c, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, .. } => {
+            ExchangeOutcome::Positive { bindings, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
@@ -1828,7 +1828,7 @@ mod cache_schedule {
         let mut schedules = Schedules::new(2).expect("schedules");
         let name = cache.name_index(0).expect("index");
         let generation = cache.entry(name, Family::A).expect("entry").generation();
-        let outcome = Outcome::Positive {
+        let outcome = ExchangeOutcome::Positive {
             family: Family::A,
             bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))])
                 .expect("bindings"),
@@ -1860,7 +1860,7 @@ mod cache_schedule {
         let mut schedules = Schedules::new(2).expect("schedules");
         let name = cache.name_index(0).expect("index");
         let generation = cache.entry(name, Family::A).expect("entry").generation();
-        let outcome = Outcome::Positive {
+        let outcome = ExchangeOutcome::Positive {
             family: Family::A,
             bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(10, 0, 0, 1))])
                 .expect("bindings"),
@@ -1894,7 +1894,7 @@ mod cache_schedule {
         let name = cache.name_index(0).expect("index");
         let gen_a = cache.entry(name, Family::A).expect("entry").generation();
         let gen_aaaa = cache.entry(name, Family::Aaaa).expect("entry").generation();
-        let outcome = Outcome::NxDomain { soa: None };
+        let outcome = ExchangeOutcome::NxDomain { soa: None };
         apply_outcome(&mut cache, &mut schedules, 0, gen_a, 1000, 1000, &outcome).expect("apply");
         assert!(cache.entry(name, Family::A).expect("entry").is_empty());
         assert!(cache.entry(name, Family::Aaaa).expect("entry").is_empty());
@@ -1911,7 +1911,7 @@ mod cache_schedule {
         let name = cache.name_index(0).expect("index");
         let generation = cache.entry(name, Family::A).expect("entry").generation();
         let before_due = schedules.due_time(0, Family::A).expect("due");
-        let outcome = Outcome::Positive {
+        let outcome = ExchangeOutcome::Positive {
             family: Family::A,
             bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(10, 0, 0, 1))])
                 .expect("bindings"),
@@ -1957,7 +1957,7 @@ mod cache_schedule {
             a_generation,
             1000,
             1000,
-            &Outcome::Positive {
+            &ExchangeOutcome::Positive {
                 family: Family::A,
                 bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(
                     93, 184, 216, 34,
@@ -1979,7 +1979,7 @@ mod cache_schedule {
             seeded_generation,
             1000,
             u64::MAX,
-            &Outcome::NxDomain { soa: None },
+            &ExchangeOutcome::NxDomain { soa: None },
         )
         .expect_err("nxdomain schedule deadline overflow must refuse the whole outcome");
         assert!(
@@ -2031,7 +2031,7 @@ mod cache_schedule {
             generation,
             1000,
             1012,
-            &Outcome::NxDomain { soa: None },
+            &ExchangeOutcome::NxDomain { soa: None },
         )
         .expect("apply");
         assert_eq!(
@@ -2074,7 +2074,7 @@ mod cache_schedule {
             gen_a,
             1000,
             1012,
-            &Outcome::Positive {
+            &ExchangeOutcome::Positive {
                 family: Family::A,
                 bindings: BindingList::from_slice(&[NumericAddr::V4(Ipv4Addr::new(
                     93, 184, 216, 34,
@@ -2099,7 +2099,7 @@ mod cache_schedule {
             gen_aaaa,
             1000,
             1020,
-            &Outcome::Positive {
+            &ExchangeOutcome::Positive {
                 family: Family::Aaaa,
                 bindings: BindingList::from_slice(&[NumericAddr::V6(Ipv6Addr::new(
                     0x2606, 0x2800, 0x0220, 0x0001, 0, 0, 0, 0x0248,
@@ -2148,7 +2148,7 @@ mod cache_schedule {
             generation,
             1000,
             1012,
-            &Outcome::NoData {
+            &ExchangeOutcome::NoData {
                 family: Family::A,
                 soa: None,
             },
@@ -2169,7 +2169,7 @@ mod cache_schedule {
             generation,
             1000,
             1020,
-            &Outcome::NxDomain { soa: None },
+            &ExchangeOutcome::NxDomain { soa: None },
         )
         .expect("apply");
         assert_eq!(
@@ -2193,7 +2193,7 @@ mod cache_schedule {
         let out = parse_response_ws("sub.example.org", Family::A, 20, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::NoData {
+            ExchangeOutcome::NoData {
                 family: Family::A,
                 soa: Some(Soa::new(300, 60)),
             }
@@ -2357,7 +2357,7 @@ mod family {
         let out = parse_response_ws("sub.example.org", Family::A, 0x1252, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::NxDomain { soa: None },
+            ExchangeOutcome::NxDomain { soa: None },
             "an NXDOMAIN carrying a wrong-family AAAA at the terminal owner is a clean NxDomain, never TerminalWithoutData"
         );
     }
@@ -2372,7 +2372,7 @@ mod family {
         let out = parse_response_ws("sub.example.org", Family::Aaaa, 0x1253, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::NxDomain { soa: None },
+            ExchangeOutcome::NxDomain { soa: None },
             "an NXDOMAIN carrying a wrong-family A at the terminal owner is a clean NxDomain, never TerminalWithoutData"
         );
     }
@@ -2586,7 +2586,7 @@ mod duplicate_cname {
         msg.extend_from_slice(&a_record("a.sub.example.org", [93, 184, 216, 34], 40));
         let out = parse_response_ws("sub.example.org", Family::A, 0x1264, &msg).expect("parse");
         let parsed_ttl = match &out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
@@ -2617,7 +2617,7 @@ mod duplicate_cname {
         msg.extend_from_slice(&a_record("a.sub.example.org", [93, 184, 216, 34], 40));
         let out = parse_response_ws("sub.example.org", Family::A, 0x1266, &msg).expect("parse");
         let parsed_ttl = match &out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
@@ -2657,7 +2657,7 @@ mod duplicate_cname {
         msg.extend_from_slice(&a_record("deep.a.sub.example.org", [93, 184, 216, 34], 40));
         let out = parse_response_ws("sub.example.org", Family::A, 0x1267, &msg).expect("parse");
         let parsed_ttl = match &out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
@@ -2697,7 +2697,7 @@ mod duplicate_cname {
         msg.extend_from_slice(&a_record("deep.a.sub.example.org", [93, 184, 216, 34], 40));
         let out = parse_response_ws("sub.example.org", Family::A, 0x1268, &msg).expect("parse");
         let parsed_ttl = match &out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
@@ -2731,7 +2731,7 @@ mod robustness {
         msg.extend_from_slice(&a_record("a.sub.example.org", [203, 0, 113, 7], 40));
         let out = parse_response_ws("sub.example.org", Family::A, 22, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, ttl, .. } => {
+            ExchangeOutcome::Positive { bindings, ttl, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(203, 0, 113, 7))]
@@ -2758,7 +2758,7 @@ mod robustness {
         msg.extend_from_slice(&a_record("sub.example.org", [93, 184, 216, 34], 120));
         let out = parse_response_ws("sub.example.org", Family::A, 23, &msg).expect("parse");
         match out {
-            Outcome::Positive { bindings, .. } => {
+            ExchangeOutcome::Positive { bindings, .. } => {
                 assert_eq!(
                     bindings.as_slice(),
                     &[NumericAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
@@ -2802,7 +2802,7 @@ mod alloc_witness {
             counts.all_zero(),
             "positive parse must be allocation-free: {counts:?}"
         );
-        assert!(matches!(out, Outcome::Positive { .. }));
+        assert!(matches!(out, ExchangeOutcome::Positive { .. }));
     }
 
     #[cfg(feature = "alloc-witness")]
@@ -2833,7 +2833,7 @@ mod alloc_witness {
             counts.all_zero(),
             "negative parse must be allocation-free: {counts:?}"
         );
-        assert!(matches!(out, Outcome::NxDomain { .. }));
+        assert!(matches!(out, ExchangeOutcome::NxDomain { .. }));
     }
 }
 
@@ -3034,7 +3034,7 @@ mod embedded_dot {
         let out = parse_response_ws("sub.example.org", Family::A, 68, &msg).expect("parse");
         assert_eq!(
             out,
-            Outcome::NxDomain {
+            ExchangeOutcome::NxDomain {
                 soa: Some(Soa::new(300, 60)),
             }
         );
@@ -3601,7 +3601,7 @@ mod production_apply_route {
     /// Applies one real parsed A reply through [`ObservedReply::apply`] and
     /// returns the published kind and the reply-derived evidence the apply
     /// bound atomically at publication, so each witness drives the actual
-    /// reply path instead of a hand-built `Outcome` DTO.
+    /// reply path instead of a hand-built `ExchangeOutcome` DTO.
     fn apply_positive_reply(
         octets: [u8; 4],
         origin: ApplyOrigin,
@@ -4389,21 +4389,21 @@ mod production_apply_route {
         let baseline = cache;
         let baseline_sched = schedules;
         let soa = Soa::new(300, 60);
-        let no_data = Outcome::NoData {
+        let no_data = ExchangeOutcome::NoData {
             family: Family::A,
             soa: Some(soa),
         };
-        let positive = Outcome::Positive {
+        let positive = ExchangeOutcome::Positive {
             family: Family::A,
             bindings: BindingList::from_slice(&[addr]).expect("list"),
             ttl: 120,
         };
         let cases = [
             ("positive", positive),
-            ("nxdomain", Outcome::NxDomain { soa: Some(soa) }),
+            ("nxdomain", ExchangeOutcome::NxDomain { soa: Some(soa) }),
             (
                 "nodata",
-                Outcome::NoData {
+                ExchangeOutcome::NoData {
                     family: Family::A,
                     soa: Some(soa),
                 },
@@ -4516,7 +4516,7 @@ struct Observation {
 }
 
 struct ObservedParse {
-    outcome: Result<Outcome, DnsError>,
+    outcome: Result<ExchangeOutcome, DnsError>,
     observation: Option<Observation>,
 }
 

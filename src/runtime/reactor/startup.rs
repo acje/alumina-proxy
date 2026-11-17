@@ -7,7 +7,7 @@ use crate::dns::transport::{
 };
 use crate::runtime::storage::{StartupError, StartupOutcome};
 
-use super::{ServeError, Serving};
+use super::{ServeError, ServingLoop};
 
 /// Why the startup window's current iteration stops.
 enum WindowEnd {
@@ -16,7 +16,7 @@ enum WindowEnd {
     Terminated,
 }
 
-impl Serving {
+impl ServingLoop {
     /// Drives the startup DNS window over the single serving poll: a
     /// first-observed SIGTERM is seen within one bounded poll and settles as
     /// the typed terminated outcome, which never binds a listener.

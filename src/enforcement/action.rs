@@ -134,23 +134,23 @@ impl DomainOrdinal {
 /// Per-connection first-AnyIllegal state: armed once, then spent forever, so
 /// the special first-slot action can apply at most once per connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum FirstSlot {
+pub enum FirstIllegalLatch {
     #[default]
     Armed,
     Spent,
 }
 
-impl FirstSlot {
+impl FirstIllegalLatch {
     /// A fresh per-connection latch, armed for the first `AnyIllegal`.
-    pub const fn new() -> FirstSlot {
-        FirstSlot::Armed
+    pub const fn new() -> FirstIllegalLatch {
+        FirstIllegalLatch::Armed
     }
 
     /// Whether this is the first `AnyIllegal` on the connection; consumes the
     /// latch exactly once.
     pub fn take_if_armed(&mut self) -> bool {
-        if *self == FirstSlot::Armed {
-            *self = FirstSlot::Spent;
+        if *self == FirstIllegalLatch::Armed {
+            *self = FirstIllegalLatch::Spent;
             true
         } else {
             false

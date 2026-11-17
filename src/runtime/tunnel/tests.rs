@@ -130,10 +130,10 @@ fn name(cache: &Cache, ordinal: usize) -> NameIndex {
 fn parse_head(head: &[u8]) -> ConnectRequest {
     let mut parser = ConnectParser::new();
     match parser.feed(head).expect("head feed") {
-        crate::inspection::connect::Feed::Complete { .. } => {
+        crate::inspection::connect::ConnectParseStep::Complete { .. } => {
             parser.result().copied().expect("result")
         }
-        crate::inspection::connect::Feed::Incomplete => panic!("head incomplete"),
+        crate::inspection::connect::ConnectParseStep::Incomplete => panic!("head incomplete"),
     }
     .expect("valid connect")
 }
@@ -160,7 +160,7 @@ fn forbidden_host_is_effect_nonreachable_even_with_usable_cache() {
         setup_at(t0),
     )
     .expect("decision");
-    assert_eq!(phase, ConnectPhase::Forbidden);
+    assert_eq!(phase, AdmissionVerdict::Forbidden);
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn same_host_different_port_is_forbidden_even_with_usable_cache() {
     .expect("decision");
     assert_eq!(
         phase,
-        ConnectPhase::Forbidden,
+        AdmissionVerdict::Forbidden,
         "a same-host different-port pair must be denied even when the hostname is allowlisted"
     );
 }
@@ -255,7 +255,7 @@ fn allowlisted_authorizes_and_selects_ipv4_first_when_both_families_remain() {
         next_phase(&view.resolve(&req), now, AttemptCounts::new(), None, setup).expect("decision");
     assert_eq!(
         phase,
-        ConnectPhase::Peer {
+        AdmissionVerdict::Peer {
             addr: pub_v4(),
             family: Family::A,
             connect_deadline: Deadline::connect_attempt(now, setup),
@@ -280,7 +280,7 @@ fn alternates_to_aaaa_after_a_first_attempt() {
         next_phase(&view.resolve(&req), now, counts, Some(Family::A), setup).expect("decision");
     assert_eq!(
         phase,
-        ConnectPhase::Peer {
+        AdmissionVerdict::Peer {
             addr: pub_v6(),
             family: Family::Aaaa,
             connect_deadline: Deadline::connect_attempt(now, setup),
@@ -303,7 +303,7 @@ fn address_index_equals_earlier_attempts_in_family() {
     let phase = next_phase(&view.resolve(&req), now, counts, None, setup).expect("decision");
     assert_eq!(
         phase,
-        ConnectPhase::Peer {
+        AdmissionVerdict::Peer {
             addr: pub_v4_b(),
             family: Family::A,
             connect_deadline: Deadline::connect_attempt(now, setup),
@@ -326,7 +326,7 @@ fn single_family_remains_uses_it() {
         next_phase(&view.resolve(&req), now, AttemptCounts::new(), None, setup).expect("decision");
     assert_eq!(
         phase,
-        ConnectPhase::Peer {
+        AdmissionVerdict::Peer {
             addr: pub_v6(),
             family: Family::Aaaa,
             connect_deadline: Deadline::connect_attempt(now, setup),
@@ -360,7 +360,7 @@ fn family_exhausted_at_current_address_count_uses_other_family() {
         next_phase(&view.resolve(&req), now, counts, Some(Family::A), setup).expect("decision");
     assert_eq!(
         phase,
-        ConnectPhase::Peer {
+        AdmissionVerdict::Peer {
             addr: pub_v6(),
             family: Family::Aaaa,
             connect_deadline: Deadline::connect_attempt(now, setup),
@@ -429,7 +429,7 @@ fn setup_deadline_expiry_returns_deadline_exhausted() {
         setup_at(t0),
     )
     .expect("decision");
-    assert_eq!(phase, ConnectPhase::DeadlineExhausted);
+    assert_eq!(phase, AdmissionVerdict::DeadlineExhausted);
 }
 
 #[test]
@@ -445,7 +445,7 @@ fn expired_prior_connect_deadline_retries_while_setup_is_live() {
     let setup = setup_at(t0);
     let phase =
         next_phase(&view.resolve(&req), now, AttemptCounts::new(), None, setup).expect("decision");
-    let ConnectPhase::Peer {
+    let AdmissionVerdict::Peer {
         addr,
         family,
         connect_deadline,
@@ -480,7 +480,7 @@ fn attempt_budget_exhausted_returns_candidates_exhausted() {
         setup_at(t0),
     )
     .expect("decision");
-    assert_eq!(phase, ConnectPhase::CandidatesExhausted);
+    assert_eq!(phase, AdmissionVerdict::CandidatesExhausted);
 }
 
 #[test]
@@ -502,7 +502,7 @@ fn worker_admits_up_to_128_pending_setups_and_rejects_the_129th() {
     assert_eq!(worker.pending(), MAX_PENDING_SETUPS);
     assert_eq!(
         worker.admit(t0, peer(peers)),
-        Err(AdmissionError::PendingCapacity),
+        Err(CapacityRefusal::PendingCapacity),
         "a fresh peer is still refused at the global pending cap"
     );
     // The global cap, not per-peer ownership, was the blocker: a seat released
@@ -530,7 +530,7 @@ fn per_peer_pending_cap_denies_one_peer_and_admits_a_distinct_peer() {
     assert_eq!(worker.pending(), MAX_PENDING_PER_PEER);
     assert_eq!(
         worker.admit(t0, peer_a),
-        Err(AdmissionError::PendingCapacity),
+        Err(CapacityRefusal::PendingCapacity),
         "a peer at its per-peer pending cap must be refused through the capacity path"
     );
     assert_eq!(
@@ -564,7 +564,7 @@ fn per_peer_pending_cap_frees_only_its_own_peer_seat() {
     }
     assert_eq!(
         worker.admit(t0, peer_a),
-        Err(AdmissionError::PendingCapacity)
+        Err(CapacityRefusal::PendingCapacity)
     );
     let b_slot = worker.admit(t0, peer_b).expect("distinct peer admitted");
 
@@ -575,7 +575,7 @@ fn per_peer_pending_cap_frees_only_its_own_peer_seat() {
         .expect("A's released seat restores one A seat");
     assert_eq!(
         worker.admit(t0, peer_a),
-        Err(AdmissionError::PendingCapacity),
+        Err(CapacityRefusal::PendingCapacity),
         "only the released seat returns; A is not admitted beyond its cap"
     );
 
@@ -618,7 +618,7 @@ fn one_peer_under_two_spellings_shares_a_single_pending_budget() {
     }
     assert_eq!(
         worker.admit(t0, plain),
-        Err(AdmissionError::PendingCapacity),
+        Err(CapacityRefusal::PendingCapacity),
         "the peer already holds its cap; a second spelling must not buy a second budget"
     );
     assert_eq!(
@@ -635,7 +635,7 @@ fn one_peer_under_two_spellings_shares_a_single_pending_budget() {
     }
     assert_eq!(
         worker.admit(t0, mapped),
-        Err(AdmissionError::PendingCapacity),
+        Err(CapacityRefusal::PendingCapacity),
         "a mapped spelling of a peer at its cap is the same peer, not a fresh one"
     );
     assert_eq!(worker.pending(), MAX_PENDING_PER_PEER);
@@ -682,7 +682,7 @@ fn worker_binds_slot_capacity_at_512_occupied_tunnels() {
         let slot = worker.admit(t0, peer(0)).expect("admitted to a free slot");
         tunnels.push(worker.finish_setup(slot));
     }
-    assert_eq!(worker.admit(t0, peer(0)), Err(AdmissionError::SlotCapacity));
+    assert_eq!(worker.admit(t0, peer(0)), Err(CapacityRefusal::SlotCapacity));
     assert_eq!(worker.pending(), 0);
     assert_eq!(worker.occupied(), MAX_TUNNELS);
     for tunnel in tunnels {
@@ -943,12 +943,12 @@ fn cache_for_config_matches_the_allowlist_for_every_ordinal() {
 #[test]
 fn refusal_statuses_follow_the_canonical_fixed_matrix() {
     let t0 = anchor();
-    assert_eq!(ConnectPhase::Forbidden.status(), 403);
-    assert_eq!(ConnectPhase::NoBinding.status(), 502);
-    assert_eq!(ConnectPhase::CandidatesExhausted.status(), 502);
-    assert_eq!(ConnectPhase::DeadlineExhausted.status(), 504);
+    assert_eq!(AdmissionVerdict::Forbidden.status(), 403);
+    assert_eq!(AdmissionVerdict::NoBinding.status(), 502);
+    assert_eq!(AdmissionVerdict::CandidatesExhausted.status(), 502);
+    assert_eq!(AdmissionVerdict::DeadlineExhausted.status(), 504);
     assert_eq!(
-        ConnectPhase::Peer {
+        AdmissionVerdict::Peer {
             addr: pub_v4(),
             family: Family::A,
             connect_deadline: setup_at(t0)
@@ -973,7 +973,7 @@ fn never_resolved_and_exhausted_attempts_are_distinct_502_verdicts() {
         setup_at(t0),
     )
     .expect("decision");
-    assert_eq!(never_resolved, ConnectPhase::NoBinding);
+    assert_eq!(never_resolved, AdmissionVerdict::NoBinding);
 
     let mut cache = cache_with(2);
     let n = name(&cache, 0);
@@ -993,7 +993,7 @@ fn never_resolved_and_exhausted_attempts_are_distinct_502_verdicts() {
         setup_at(t0),
     )
     .expect("decision");
-    assert_eq!(exhausted, ConnectPhase::CandidatesExhausted);
+    assert_eq!(exhausted, AdmissionVerdict::CandidatesExhausted);
 }
 
 #[test]
@@ -1005,8 +1005,8 @@ fn chunked_connect_feed_still_authorizes() {
     let mut parser = ConnectParser::new();
     for chunk in head.chunks(3) {
         match parser.feed(chunk).expect("head feed") {
-            crate::inspection::connect::Feed::Incomplete => {}
-            crate::inspection::connect::Feed::Complete { .. } => break,
+            crate::inspection::connect::ConnectParseStep::Incomplete => {}
+            crate::inspection::connect::ConnectParseStep::Complete { .. } => break,
         }
     }
     let req = parser.result().copied().expect("result").expect("valid");
@@ -1019,7 +1019,7 @@ fn chunked_connect_feed_still_authorizes() {
         next_phase(&view.resolve(&req), now, AttemptCounts::new(), None, setup).expect("decision");
     assert_eq!(
         phase,
-        ConnectPhase::Peer {
+        AdmissionVerdict::Peer {
             addr: pub_v4(),
             family: Family::A,
             connect_deadline: Deadline::connect_attempt(now, setup),
@@ -1063,14 +1063,14 @@ fn worker_decide_reads_the_slot_deadline_instead_of_a_free_setup() {
     assert!(
         matches!(
             phase,
-            ConnectPhase::Peer {
+            AdmissionVerdict::Peer {
                 family: Family::A,
                 ..
             }
         ),
         "slot-bound setup must authorize this owned cache: {phase:?}"
     );
-    let ConnectPhase::Peer {
+    let AdmissionVerdict::Peer {
         connect_deadline, ..
     } = phase
     else {
@@ -1104,7 +1104,7 @@ fn unknown_pair_forbids_even_when_setup_expired_and_cache_usable() {
     .expect("decision");
     assert_eq!(
         phase,
-        ConnectPhase::Forbidden,
+        AdmissionVerdict::Forbidden,
         "a pair miss must Forbid before the expired setup deadline is consulted"
     );
 }
@@ -1159,7 +1159,7 @@ fn setup_deadline_expiry_precedes_attempt_budget_exhaust() {
     .expect("decision");
     assert_eq!(
         phase,
-        ConnectPhase::DeadlineExhausted,
+        AdmissionVerdict::DeadlineExhausted,
         "setup-deadline expiry is decided before the attempt-budget exhaust is consulted"
     );
 }
@@ -1226,7 +1226,7 @@ fn decide_reads_its_budget_from_the_slot_ledger_not_a_caller_arg() {
     assert!(
         matches!(
             phase,
-            ConnectPhase::Peer {
+            AdmissionVerdict::Peer {
                 family: Family::A,
                 ..
             }
@@ -1242,7 +1242,7 @@ fn decide_reads_its_budget_from_the_slot_ledger_not_a_caller_arg() {
                 later(t0, u64::try_from(i).unwrap()),
             )
             .expect("decision within budget");
-        let ConnectPhase::Peer { family, .. } = phase else {
+        let AdmissionVerdict::Peer { family, .. } = phase else {
             panic!("an in-budget decision must offer a peer, got {phase:?}");
         };
         seen.push(family);
@@ -1260,7 +1260,7 @@ fn decide_reads_its_budget_from_the_slot_ledger_not_a_caller_arg() {
         .expect("decision past the budget");
     assert_eq!(
         phase,
-        ConnectPhase::CandidatesExhausted,
+        AdmissionVerdict::CandidatesExhausted,
         "the slot ledger must self-enforce the {MAX_UPSTREAM_ATTEMPTS}-attempt budget"
     );
     worker.release(slot);
@@ -1532,11 +1532,11 @@ mod slot_table_machine {
         fn admit(&mut self, tc: TestCase) {
             let (peer, canonical) = tc.draw(gs::sampled_from(&PEERS[..]));
             let predicted = if self.worker.occupied() >= MAX_TUNNELS {
-                Err(AdmissionError::SlotCapacity)
+                Err(CapacityRefusal::SlotCapacity)
             } else if self.worker.pending() >= MAX_PENDING_SETUPS
                 || self.pending_from(canonical) >= MAX_PENDING_PER_PEER
             {
-                Err(AdmissionError::PendingCapacity)
+                Err(CapacityRefusal::PendingCapacity)
             } else {
                 Ok(())
             };
@@ -1569,14 +1569,14 @@ mod slot_table_machine {
         ///
         /// The burst admits and graduates only, so it never frees an occupied
         /// seat and whatever `occupied()` it enters with is a floor for the
-        /// rest of the burst. The full-table [`AdmissionError::SlotCapacity`]
+        /// rest of the burst. The full-table [`CapacityRefusal::SlotCapacity`]
         /// path is reached when `occupied()` is already [`MAX_TUNNELS`] at that
         /// attempt: a burst entered with a full table refuses from its first
         /// attempt with zero admissions, and the table stays full for the rest
         /// of the burst.
         ///
         /// The full-table check precedes every other refusal, so
-        /// [`AdmissionError::PendingCapacity`] can only be returned by an
+        /// [`CapacityRefusal::PendingCapacity`] can only be returned by an
         /// attempt that passes it. The global [`MAX_PENDING_SETUPS`] budget
         /// gates an attempt whose `pending()` is already at the cap; the burst
         /// cannot spend that budget itself, because each admitted seat is
@@ -1597,9 +1597,9 @@ mod slot_table_machine {
                 let (peer, canonical) = tc.draw(gs::sampled_from(&PEERS[..]));
                 let gated_by_peer = self.pending_from(canonical) >= MAX_PENDING_PER_PEER;
                 let predicted = if self.worker.occupied() >= MAX_TUNNELS {
-                    Err(AdmissionError::SlotCapacity)
+                    Err(CapacityRefusal::SlotCapacity)
                 } else if self.worker.pending() >= MAX_PENDING_SETUPS || gated_by_peer {
-                    Err(AdmissionError::PendingCapacity)
+                    Err(CapacityRefusal::PendingCapacity)
                 } else {
                     Ok(())
                 };
@@ -1628,14 +1628,14 @@ mod slot_table_machine {
                             actual, expected,
                             "the worker's refusal reason disagrees with the model's capacity state"
                         );
-                        if expected == AdmissionError::SlotCapacity {
+                        if expected == CapacityRefusal::SlotCapacity {
                             tc.event("slot_capacity_refusal");
                             let (peer, _) = tc.draw(gs::sampled_from(&PEERS[..]));
                             let follow_up = (attempts - attempt - 1).max(1);
                             for _ in 0..follow_up {
                                 assert_eq!(
                                     self.worker.admit(self.now, peer),
-                                    Err(AdmissionError::SlotCapacity),
+                                    Err(CapacityRefusal::SlotCapacity),
                                     "the table admitted a seat after reporting SlotCapacity while full"
                                 );
                             }
@@ -1897,7 +1897,7 @@ mod slot_table_machine {
 /// staged-positive route the production DNS adapter uses, the attempt counters
 /// it recorded, and the setup instant it admitted. Every invariant is computed
 /// from the model's own publication record and attempt ledger plus the
-/// subject's returned [`ConnectPhase`]; none re-calls `select_peer` or reads a
+/// subject's returned [`AdmissionVerdict`]; none re-calls `select_peer` or reads a
 /// selection cursor as an oracle.
 ///
 /// The drawn address pools hold only eligible, pairwise-distinct addresses, so
@@ -2064,7 +2064,7 @@ mod peer_selection_machine {
     /// retroactively reinterpret an earlier decision.
     struct Snapshot {
         ordinal: Option<usize>,
-        phase: ConnectPhase,
+        phase: AdmissionVerdict,
         now: Instant,
         cache_now: u64,
         setup_limit: Instant,
@@ -2183,7 +2183,7 @@ mod peer_selection_machine {
             self.slot = Some(slot);
         }
 
-        fn decide_probe(&self, index: usize) -> Result<ConnectPhase, DecideError> {
+        fn decide_probe(&self, index: usize) -> Result<AdmissionVerdict, DecideError> {
             let view = view_of_clocked(&self.cfg, &self.cache, self.clock);
             let resolved = view.resolve(&self.allowed_request);
             self.worker.decide(&probe(index), &resolved, self.now)
@@ -2273,14 +2273,14 @@ mod peer_selection_machine {
                 .decide(slot, &resolved, self.now)
                 .expect("a live setup decides");
             let (bit, label) = match phase {
-                ConnectPhase::Forbidden => (0b000_001u8, "decide_forbidden"),
-                ConnectPhase::NoBinding => (0b000_010u8, "decide_no_binding"),
-                ConnectPhase::DeadlineExhausted => (0b000_100u8, "decide_deadline_exhausted"),
-                ConnectPhase::CandidatesExhausted => (0b001_000u8, "decide_candidates_exhausted"),
-                ConnectPhase::Peer {
+                AdmissionVerdict::Forbidden => (0b000_001u8, "decide_forbidden"),
+                AdmissionVerdict::NoBinding => (0b000_010u8, "decide_no_binding"),
+                AdmissionVerdict::DeadlineExhausted => (0b000_100u8, "decide_deadline_exhausted"),
+                AdmissionVerdict::CandidatesExhausted => (0b001_000u8, "decide_candidates_exhausted"),
+                AdmissionVerdict::Peer {
                     family: Family::A, ..
                 } => (0b010_000u8, "decide_peer_ipv4"),
-                ConnectPhase::Peer {
+                AdmissionVerdict::Peer {
                     family: Family::Aaaa,
                     ..
                 } => (0b100_000u8, "decide_peer_ipv6"),
@@ -2459,7 +2459,7 @@ mod peer_selection_machine {
                 return;
             };
             assert_eq!(
-                snapshot.phase == ConnectPhase::Forbidden,
+                snapshot.phase == AdmissionVerdict::Forbidden,
                 snapshot.ordinal.is_none(),
                 "P1: Forbidden must hold exactly when the resolved allowlist ordinal is absent"
             );
@@ -2474,7 +2474,7 @@ mod peer_selection_machine {
                 return;
             }
             assert_eq!(
-                snapshot.phase == ConnectPhase::DeadlineExhausted,
+                snapshot.phase == AdmissionVerdict::DeadlineExhausted,
                 snapshot.now >= snapshot.setup_limit,
                 "P2: DeadlineExhausted must hold exactly when now has reached the model's setup deadline"
             );
@@ -2490,7 +2490,7 @@ mod peer_selection_machine {
             }
             let budget_spent = usize::from(snapshot.counts.total()) >= MAX_UPSTREAM_ATTEMPTS;
             assert_eq!(
-                snapshot.phase == ConnectPhase::CandidatesExhausted,
+                snapshot.phase == AdmissionVerdict::CandidatesExhausted,
                 snapshot.now < snapshot.setup_limit && budget_spent,
                 "P3: CandidatesExhausted must hold exactly when the model's attempt total reached the fixed budget before the setup deadline"
             );
@@ -2501,7 +2501,7 @@ mod peer_selection_machine {
             let Some(snapshot) = &self.last else {
                 return;
             };
-            let ConnectPhase::Peer { addr, family, .. } = snapshot.phase else {
+            let AdmissionVerdict::Peer { addr, family, .. } = snapshot.phase else {
                 return;
             };
             assert!(
@@ -2537,7 +2537,7 @@ mod peer_selection_machine {
             let Some(snapshot) = &self.last else {
                 return;
             };
-            let ConnectPhase::Peer { family, .. } = snapshot.phase else {
+            let AdmissionVerdict::Peer { family, .. } = snapshot.phase else {
                 return;
             };
             if snapshot.ordinal.is_none() {
@@ -2576,7 +2576,7 @@ mod peer_selection_machine {
                 && snapshot.candidate(Family::A).is_none()
                 && snapshot.candidate(Family::Aaaa).is_none();
             assert_eq!(
-                snapshot.phase == ConnectPhase::NoBinding,
+                snapshot.phase == AdmissionVerdict::NoBinding,
                 cursor_blocked,
                 "P6: NoBinding must hold exactly when neither family has a usable published binding at its attempt cursor"
             );
@@ -2587,7 +2587,7 @@ mod peer_selection_machine {
             let Some(snapshot) = &self.last else {
                 return;
             };
-            let ConnectPhase::Peer {
+            let AdmissionVerdict::Peer {
                 connect_deadline, ..
             } = snapshot.phase
             else {
@@ -2817,9 +2817,9 @@ mod concurrent_admission_machine {
             let per_peer = peer_pending(&inner.live, canonical);
             let gated_by_peer = per_peer >= MAX_PENDING_PER_PEER;
             let expected = if inner.worker.occupied() >= MAX_TUNNELS {
-                Err(AdmissionError::SlotCapacity)
+                Err(CapacityRefusal::SlotCapacity)
             } else if inner.worker.pending() >= MAX_PENDING_SETUPS {
-                Err(AdmissionError::PendingCapacity)
+                Err(CapacityRefusal::PendingCapacity)
             } else {
                 Ok(())
             };
@@ -2841,7 +2841,7 @@ mod concurrent_admission_machine {
                         peer: canonical,
                     });
                 }
-                (Ok(()), Err(AdmissionError::PendingCapacity)) if gated_by_peer => {
+                (Ok(()), Err(CapacityRefusal::PendingCapacity)) if gated_by_peer => {
                     tc.event("refusal_per_peer_capacity");
                 }
                 (Ok(()), Err(actual)) => {
@@ -2855,8 +2855,8 @@ mod concurrent_admission_machine {
                 }
                 (Err(predicted), Err(actual)) => {
                     tc.event(match predicted {
-                        AdmissionError::SlotCapacity => "refusal_slot_capacity",
-                        AdmissionError::PendingCapacity => "refusal_pending_capacity",
+                        CapacityRefusal::SlotCapacity => "refusal_slot_capacity",
+                        CapacityRefusal::PendingCapacity => "refusal_pending_capacity",
                     });
                     assert_eq!(
                         actual, predicted,
@@ -3106,7 +3106,7 @@ fn each_view_binds_the_same_request_to_its_own_config_position() {
     let request = auth_request("x.example.org");
     let t0 = anchor();
     let now = later(t0, 1);
-    let expected = || ConnectPhase::Peer {
+    let expected = || AdmissionVerdict::Peer {
         addr: pub_v4(),
         family: Family::A,
         connect_deadline: Deadline::connect_attempt(now, setup_at(t0)),

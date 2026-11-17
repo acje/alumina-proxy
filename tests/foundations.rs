@@ -8,7 +8,7 @@
 use alumina::alloc::{self, Phase};
 use alumina::dns::{
     BailiwickZones, BindingList, DNS_MSG_LIMIT, DnsError, EXTREME_TTL_THRESHOLD, MAX_CNAME_LINKS,
-    MAX_TOTAL_RR, Outcome as DnsOutcome, ResponseWorkspace, build_query, parse_response,
+    MAX_TOTAL_RR, ExchangeOutcome as DnsOutcome, ResponseWorkspace, build_query, parse_response,
 };
 use alumina::qa::fuzz::{
     CorpusOwnership, DeterministicGen, DriveOutcome, FuzzRun, ParserTarget, RegisterError, Seed,

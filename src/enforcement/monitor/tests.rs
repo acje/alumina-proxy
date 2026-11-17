@@ -2,10 +2,10 @@ use std::net::Ipv4Addr;
 
 use super::*;
 use crate::enforcement::action::{
-    ActionKind, AnyIllegalControl, Control, FirstSlot, PerFqdnControl, Scope,
+    ActionKind, AnyIllegalControl, Control, FirstIllegalLatch, PerFqdnControl, Scope,
 };
 use crate::enforcement::policy::{Effect, Violation};
-use crate::enforcement::state::{Enforcement, GateSet};
+use crate::enforcement::state::{EnforcementState, GateSet};
 
 fn any_controls(kind: ActionKind, scope: Scope) -> [Control; AnyIllegalControl::COUNT] {
     [Control::new(kind, scope); AnyIllegalControl::COUNT]
@@ -218,8 +218,8 @@ fn report_drop_is_counted_once_and_mark_reported_clears() {
 
 #[test]
 fn split_facts_actions_and_refusals_through_enforcement() {
-    let mut latch = FirstSlot::new();
-    let mut en = Enforcement::new(
+    let mut latch = FirstIllegalLatch::new();
+    let mut en = EnforcementState::new(
         table(
             any_controls(ActionKind::Block, Scope::Connection),
             &[(ActionKind::Notify, Scope::Connection)],
@@ -252,7 +252,7 @@ fn split_facts_actions_and_refusals_through_enforcement() {
 #[test]
 fn domain_block_action_and_later_refusal_are_distinct_channels() {
     let actions = [(ActionKind::Block, Scope::Domain)];
-    let mut en = Enforcement::new(
+    let mut en = EnforcementState::new(
         table(
             any_controls(ActionKind::Block, Scope::Connection),
             &actions,
@@ -262,7 +262,7 @@ fn domain_block_action_and_later_refusal_are_distinct_channels() {
     );
     let ordinal = DomainOrdinal::from_index(0).expect("bound-level ordinal");
     let v = en.decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::EarlyUpstreamData { ordinal },
         0,
     );

@@ -5,7 +5,7 @@
 //! boot-fixed parser fed incrementally (new bytes only), asks the retained
 //! worker for the one decision over its own clock and the accept-owned slot
 //! deadline, writes the canonical fixed refusal bodies for every
-//! non-authorizing phase, and on an authorized [`ConnectPhase::Peer`] dials
+//! non-authorizing phase, and on an authorized [`AdmissionVerdict::Peer`] dials
 //! the decided eligible destination, sends the fixed `200 Connection
 //! established` response to the client, validates the client TLS `ClientHello`
 //! against the approved hostname before forwarding, then relays in both
@@ -47,17 +47,17 @@ use crate::config::ALLOWLIST_MAX;
 use crate::dns::cache::{EntryState, Family, MAX_ADDRESSES};
 use crate::dns::transport::StartupDnsError;
 use crate::eligibility::NumericAddr;
-use crate::enforcement::action::{DomainOrdinal, FirstSlot, PerFqdnControl, Scope};
+use crate::enforcement::action::{DomainOrdinal, FirstIllegalLatch, PerFqdnControl, Scope};
 use crate::enforcement::monitor::{CapturedDetail, CapturedFact, SlotCapture};
 use crate::enforcement::policy::{AnyIllegalCause, Effect, UnknownReason, Violation};
-use crate::inspection::client_hello::{self, ChInspector, HelloRejectReason, Inspect};
-use crate::inspection::connect::{ConnectHeadReason, ConnectParser, ConnectRequest, Feed};
+use crate::inspection::client_hello::{self, ClientHelloInspector, HelloRejectReason, HelloParseStep};
+use crate::inspection::connect::{ConnectHeadReason, ConnectParser, ConnectRequest, ConnectParseStep};
 use crate::log::{ActivityKind, RejectReason};
-use crate::names::hostname::FixedHostname;
-use crate::runtime::gate::{Activity, TunnelGate, UpstreamWrite, ValidatedHello};
+use crate::names::hostname::ApprovedHostname;
+use crate::runtime::gate::{Activity, ForwardingGate, UpstreamWrite, ValidatedHello};
 use crate::runtime::storage::ServeStorage;
 use crate::runtime::tunnel::{
-    ConnectPhase, Deadline, DecideError, MAX_TUNNELS, SlotIndex, TunnelIndex,
+    AdmissionVerdict, Deadline, DecideError, MAX_TUNNELS, SlotIndex, TunnelIndex,
 };
 
 mod policy;
@@ -226,7 +226,7 @@ const BODY_200: &[u8] = b"HTTP/1.1 200 Connection established\r\n\r\n";
 const BODY_503: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 12\r\n\r\nno capacity\n";
 
 /// Capacity of the test-only accept-fault queue (see
-/// [`Serving::inject_accept_fault`]); fixed so the seam never allocates.
+/// [`ServingLoop::inject_accept_fault`]); fixed so the seam never allocates.
 #[cfg(test)]
 const ACCEPT_FAULT_TEST_CAP: usize = 4;
 
@@ -402,7 +402,7 @@ enum ConnectState {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Stage {
+enum SlotStage {
     Idle,
     ReadingConnect,
     RunningDecision,
@@ -709,13 +709,13 @@ struct SlotWorkspace {
     client: Option<TcpStream>,
     upstream: Option<TcpStream>,
     parser: ConnectParser,
-    inspector: ChInspector,
-    gate: TunnelGate,
-    approved: Option<FixedHostname>,
+    inspector: ClientHelloInspector,
+    gate: ForwardingGate,
+    approved: Option<ApprovedHostname>,
     approved_port: u16,
-    first_slot: FirstSlot,
+    first_slot: FirstIllegalLatch,
     capture: SlotCapture,
-    stage: Stage,
+    stage: SlotStage,
     buf: Box<[u8]>,
     buf_base: usize,
     buf_len: usize,
@@ -733,24 +733,24 @@ struct SlotWorkspace {
     /// C15 snapshot of the absolute per-setup deadline
     /// (§Architecture), fixed at admit and immutable until release:
     /// `Some` exactly while the slot holds its worker setup handle (pre-gate),
-    /// so the [`Serving::poll_timeout`] slot fold reads a local field instead
+    /// so the [`ServingLoop::poll_timeout`] slot fold reads a local field instead
     /// of a storage Vec access per occupied slot. Cleared when the handle is
     /// taken at gate open and on slot release; mirrors
     /// `ServeStorage::setup_deadline` for the handle-bearing window.
     setup_deadline: Option<Instant>,
     /// The family of the in-flight upstream dial, when a decision granted a
-    /// [`ConnectPhase::Peer`] peer for this slot. Tracked so a failed
+    /// [`AdmissionVerdict::Peer`] peer for this slot. Tracked so a failed
     /// establishment records on the exact family attempted and retries through
     /// the slot-carried ledger. `None` outside a live decision dial.
     connect_family: Option<Family>,
     /// The allowlist ordinal whose DNS incident report this slot's tunnel
-    /// activity belongs to, set when a [`ConnectPhase::Peer`] decision commits
+    /// activity belongs to, set when a [`AdmissionVerdict::Peer`] decision commits
     /// the upstream peer and cleared on reset. `None` while the slot has no
     /// committed peer, so pre-relay writes are never attributed.
     report_name: Option<usize>,
     /// The clipped per-attempt connect deadline anchored at this attempt's
     /// initiation (§Architecture). Only meaningful while
-    /// `stage == Stage::Dialing`; `None` otherwise.
+    /// `stage == SlotStage::Dialing`; `None` otherwise.
     connect_deadline: Option<Deadline>,
     /// The destination IP the slot's upstream dial established, set on the
     /// successful `TcpStream::connect` and cleared on reset. The JA4 baseline
@@ -787,13 +787,13 @@ impl SlotWorkspace {
             client: None,
             upstream: None,
             parser: ConnectParser::new(),
-            inspector: ChInspector::new(),
-            gate: TunnelGate::new(),
+            inspector: ClientHelloInspector::new(),
+            gate: ForwardingGate::new(),
             approved: None,
             approved_port: 443,
-            first_slot: FirstSlot::new(),
+            first_slot: FirstIllegalLatch::new(),
             capture: SlotCapture::fresh(0, 0),
-            stage: Stage::Idle,
+            stage: SlotStage::Idle,
             buf: up,
             buf_base: 0,
             buf_len: 0,
@@ -853,13 +853,13 @@ impl SlotWorkspace {
 
     fn reset(&mut self) {
         self.parser = ConnectParser::new();
-        self.inspector = ChInspector::new();
-        self.gate = TunnelGate::new();
+        self.inspector = ClientHelloInspector::new();
+        self.gate = ForwardingGate::new();
         self.approved = None;
         self.approved_port = 443;
-        self.first_slot = FirstSlot::new();
+        self.first_slot = FirstIllegalLatch::new();
         self.capture = SlotCapture::default();
-        self.stage = Stage::Idle;
+        self.stage = SlotStage::Idle;
         self.buf_len = 0;
         self.buf_base = 0;
         self.fwd = 0;
@@ -895,11 +895,11 @@ impl SlotWorkspace {
     }
 
     /// Whether this slot currently feeds any deadline into
-    /// [`Serving::poll_timeout`]: the C15 setup snapshot, the connect deadline
+    /// [`ServingLoop::poll_timeout`]: the C15 setup snapshot, the connect deadline
     /// (kept live conservatively beyond the `Dialing`-only fold guard so a
     /// post-dial slot never loses its bit early), the idle deadline, or the
     /// drain deadline. This is the per-slot predicate the C50
-    /// [`Serving::sync_live_deadline`] re-derives the presence bitmap from.
+    /// [`ServingLoop::sync_live_deadline`] re-derives the presence bitmap from.
     const fn has_live_deadline(&self) -> bool {
         self.setup_deadline.is_some()
             || self.connect_deadline.is_some()
@@ -909,7 +909,7 @@ impl SlotWorkspace {
 
     fn applicable_deadline(&self) -> Option<Instant> {
         let mut candidate = self.setup_deadline;
-        if self.stage == Stage::Dialing
+        if self.stage == SlotStage::Dialing
             && let Some(connect) = self.connect_deadline
         {
             candidate = Some(candidate.map_or(connect.limit(), |c| c.min(connect.limit())));
@@ -968,12 +968,12 @@ impl std::error::Error for ServeError {}
 const DEADLINE_SLOT_WORDS: usize = MAX_TUNNELS / 64;
 
 /// Fixed per-slot presence bitmap: bit `i` set when slot `i` currently holds
-/// at least one armed deadline source folded by [`Serving::poll_timeout`]
+/// at least one armed deadline source folded by [`ServingLoop::poll_timeout`]
 /// (the C15 setup snapshot, connect, idle, or drain). The C50 O(1) gate that
 /// lets the per-poll slot fold iterate only deadline-bearing slots instead of
 /// all [`MAX_TUNNELS`]. Re-derived in lockstep at every slot-lifecycle
-/// deadline write/clear via [`Serving::sync_live_deadline`]; a stale-clear
-/// bit can at worst postpone one sweep to the next [`Serving::recheck_now`]
+/// deadline write/clear via [`ServingLoop::sync_live_deadline`]; a stale-clear
+/// bit can at worst postpone one sweep to the next [`ServingLoop::recheck_now`]
 /// backstop, never postpone a real deadline beyond the bounded recheck window.
 #[derive(Clone, Copy)]
 struct DeadlineSlots([u64; DEADLINE_SLOT_WORDS]);
@@ -1034,8 +1034,8 @@ impl DeadlineSlots {
 /// from the registry, so the state that says "paused" is also the state that
 /// says "not registered": the rearm therefore uses `register`, never
 /// `reregister` (mio requires a previously registered source for the latter).
-/// [`Serving::pause_listener`] and [`Serving::resume_listener`] own the pause
-/// cycle; [`Serving::attach_listener`] establishes the registered state for a
+/// [`ServingLoop::pause_listener`] and [`ServingLoop::resume_listener`] own the pause
+/// cycle; [`ServingLoop::attach_listener`] establishes the registered state for a
 /// newly attached listener, so the two can never disagree.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ListenerArm {
@@ -1046,7 +1046,7 @@ enum ListenerArm {
     Paused { at: Instant },
 }
 
-pub struct Serving {
+pub struct ServingLoop {
     poll: Poll,
     storage: ServeStorage,
     listener: Option<TcpListener>,
@@ -1127,9 +1127,9 @@ pub struct Serving {
 }
 
 #[cfg(test)]
-type PrePollHook = Rc<dyn Fn(&Serving)>;
+type PrePollHook = Rc<dyn Fn(&ServingLoop)>;
 
-/// The direction whose `EPOLL_CTL_MOD` a [`Serving::reschedule`] re-arm issues
+/// The direction whose `EPOLL_CTL_MOD` a [`ServingLoop::reschedule`] re-arm issues
 /// on a budget-exhausted or re-queued visit: `Client` and `Upstream` name the
 /// one busy side, `Both` the two sides serving pending work together. Making
 /// the choice a typed sum keeps "re-arm nothing on a visit that still holds
@@ -1149,8 +1149,8 @@ enum DialProbe {
     Connected,
 }
 
-fn dial_probe(serving: &Serving, index: usize) -> DialProbe {
-    if serving.slots[index].stage != Stage::Dialing {
+fn dial_probe(serving: &ServingLoop, index: usize) -> DialProbe {
+    if serving.slots[index].stage != SlotStage::Dialing {
         return DialProbe::Skipped;
     }
     match serving.upstream_connectedness(index) {
@@ -1160,7 +1160,7 @@ fn dial_probe(serving: &Serving, index: usize) -> DialProbe {
     }
 }
 
-fn live_slot_token(serving: &Serving, raw: usize, local: usize) -> Option<(usize, bool)> {
+fn live_slot_token(serving: &ServingLoop, raw: usize, local: usize) -> Option<(usize, bool)> {
     let upstream = local >= UPSTREAM_BASE;
     let index = if upstream {
         local - UPSTREAM_BASE
@@ -1177,7 +1177,7 @@ fn live_slot_token(serving: &Serving, raw: usize, local: usize) -> Option<(usize
 }
 
 fn upstream_error_read(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     index: usize,
     ready: Readiness,
 ) -> Result<bool, ServeError> {
@@ -1188,11 +1188,11 @@ fn upstream_error_read(
         return Ok(false);
     }
     serving.upstream_readable(index)?;
-    Ok(serving.slots[index].stage != Stage::Idle && !serving.visit.exhausted())
+    Ok(serving.slots[index].stage != SlotStage::Idle && !serving.visit.exhausted())
 }
 
 fn dispatch_error_arm(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     index: usize,
     upstream: bool,
     ready: Readiness,
@@ -1219,7 +1219,7 @@ fn dispatch_error_arm(
 }
 
 fn dispatch_upstream_ready(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     index: usize,
     ready: Readiness,
 ) -> Result<(), ServeError> {
@@ -1233,7 +1233,7 @@ fn dispatch_upstream_ready(
 }
 
 fn dispatch_client_ready(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     index: usize,
     ready: Readiness,
 ) -> Result<(), ServeError> {
@@ -1247,7 +1247,7 @@ fn dispatch_client_ready(
 }
 
 fn dispatch_ready_arm(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     index: usize,
     upstream: bool,
     ready: Readiness,
@@ -1273,30 +1273,30 @@ enum ClientStep {
     Return,
 }
 
-fn client_can_progress(serving: &Serving, index: usize) -> bool {
+fn client_can_progress(serving: &ServingLoop, index: usize) -> bool {
     match serving.slots[index].stage {
-        Stage::ReadingConnect | Stage::ValidatingHello => true,
-        Stage::Relay => !matches!(serving.slots[index].directional.up, SideEof::Eof { .. }),
+        SlotStage::ReadingConnect | SlotStage::ValidatingHello => true,
+        SlotStage::Relay => !matches!(serving.slots[index].directional.up, SideEof::Eof { .. }),
         _ => false,
     }
 }
 
-fn refuse_no_room(serving: &mut Serving, index: usize) {
+fn refuse_no_room(serving: &mut ServingLoop, index: usize) {
     match serving.slots[index].stage {
-        Stage::ReadingConnect => {
+        SlotStage::ReadingConnect => {
             serving.any_illegal(
                 index,
                 AnyIllegalCause::ConnectParse(ConnectHeadReason::TooLong),
             );
             serving.refuse(index, Refusal::BadRequest);
         }
-        Stage::ValidatingHello => serving.reject_hello(index, HelloRejectReason::Profile),
+        SlotStage::ValidatingHello => serving.reject_hello(index, HelloRejectReason::Profile),
         _ => {}
     }
 }
 
-fn flush_relay_backlog(serving: &mut Serving, index: usize) -> bool {
-    if serving.slots[index].stage != Stage::Relay
+fn flush_relay_backlog(serving: &mut ServingLoop, index: usize) -> bool {
+    if serving.slots[index].stage != SlotStage::Relay
         || serving.slots[index].fwd >= serving.slots[index].buf_len
     {
         return false;
@@ -1315,7 +1315,7 @@ fn flush_relay_backlog(serving: &mut Serving, index: usize) -> bool {
     false
 }
 
-fn client_prepare_read(serving: &mut Serving, index: usize) -> Option<usize> {
+fn client_prepare_read(serving: &mut ServingLoop, index: usize) -> Option<usize> {
     if serving.buf_room(index) < MIN_BUF_ROOM {
         refuse_no_room(serving, index);
         return None;
@@ -1331,7 +1331,7 @@ fn client_prepare_read(serving: &mut Serving, index: usize) -> Option<usize> {
     Some(room)
 }
 
-fn read_client_bytes(serving: &mut Serving, index: usize, room: usize) -> Option<usize> {
+fn read_client_bytes(serving: &mut ServingLoop, index: usize, room: usize) -> Option<usize> {
     let result = {
         let ws = &mut serving.slots[index];
         let client = ws.client.as_mut()?;
@@ -1340,7 +1340,7 @@ fn read_client_bytes(serving: &mut Serving, index: usize, room: usize) -> Option
     match result {
         Ok(0) => {
             serving.note_op(index, 0);
-            if serving.slots[index].stage == Stage::Relay {
+            if serving.slots[index].stage == SlotStage::Relay {
                 serving.observe_up_eof(index);
             } else {
                 serving.close_slot(index);
@@ -1360,25 +1360,25 @@ fn read_client_bytes(serving: &mut Serving, index: usize, room: usize) -> Option
     }
 }
 
-fn advance_client_stage(serving: &mut Serving, index: usize) -> Result<bool, ServeError> {
+fn advance_client_stage(serving: &mut ServingLoop, index: usize) -> Result<bool, ServeError> {
     match serving.slots[index].stage {
-        Stage::ReadingConnect => serving.buffer_and_parse(index, &[])?,
-        Stage::ValidatingHello => serving.buffer_and_validate(index, &[]),
-        Stage::Relay => serving.flush_client_upstream(index),
+        SlotStage::ReadingConnect => serving.buffer_and_parse(index, &[])?,
+        SlotStage::ValidatingHello => serving.buffer_and_validate(index, &[]),
+        SlotStage::Relay => serving.flush_client_upstream(index),
         _ => return Ok(false),
     }
     Ok(true)
 }
 
-fn client_post_read_continue(serving: &Serving, index: usize) -> bool {
+fn client_post_read_continue(serving: &ServingLoop, index: usize) -> bool {
     match serving.slots[index].stage {
-        Stage::ReadingConnect | Stage::ValidatingHello => true,
-        Stage::Relay => serving.slots[index].fwd >= serving.slots[index].buf_len,
+        SlotStage::ReadingConnect | SlotStage::ValidatingHello => true,
+        SlotStage::Relay => serving.slots[index].fwd >= serving.slots[index].buf_len,
         _ => false,
     }
 }
 
-fn client_readable_step(serving: &mut Serving, index: usize) -> Result<ClientStep, ServeError> {
+fn client_readable_step(serving: &mut ServingLoop, index: usize) -> Result<ClientStep, ServeError> {
     if serving.visit_exhausted(index) {
         serving.reschedule(index, serving.client_visit_reschedule_arm(index));
         return Ok(ClientStep::Return);
@@ -1439,7 +1439,7 @@ fn arm_tunnel_idle(ws: &mut SlotWorkspace) -> bool {
     expired
 }
 
-fn upstream_write_once(serving: &mut Serving, index: usize, room: usize) -> (WriteOutcome, bool) {
+fn upstream_write_once(serving: &mut ServingLoop, index: usize, room: usize) -> (WriteOutcome, bool) {
     let ws = &mut serving.slots[index];
     if ws.fwd >= ws.buf_len {
         return (WriteOutcome::None, false);
@@ -1459,7 +1459,7 @@ fn upstream_write_once(serving: &mut Serving, index: usize, room: usize) -> (Wri
     }
 }
 
-fn drain_upstream_loop(serving: &mut Serving, index: usize, secs: u64) -> (usize, DrainEnd) {
+fn drain_upstream_loop(serving: &mut ServingLoop, index: usize, secs: u64) -> (usize, DrainEnd) {
     let mut written = 0;
     loop {
         if serving.visit_exhausted(index) {
@@ -1489,7 +1489,7 @@ fn drain_upstream_loop(serving: &mut Serving, index: usize, secs: u64) -> (usize
     }
 }
 
-fn down_write_once(serving: &mut Serving, index: usize, room: usize) -> (WriteOutcome, bool) {
+fn down_write_once(serving: &mut ServingLoop, index: usize, room: usize) -> (WriteOutcome, bool) {
     let ws = &mut serving.slots[index];
     if ws.down_off >= ws.down_len {
         return (WriteOutcome::None, false);
@@ -1509,14 +1509,14 @@ fn down_write_once(serving: &mut Serving, index: usize, room: usize) -> (WriteOu
     }
 }
 
-fn note_down_written(serving: &mut Serving, index: usize, bytes: usize, secs: u64) {
+fn note_down_written(serving: &mut ServingLoop, index: usize, bytes: usize, secs: u64) {
     serving.note_op(index, bytes);
     if bytes > 0 {
         serving.note_incident_tunnel_bytes(index, bytes as u64, secs);
     }
 }
 
-fn flush_down_loop(serving: &mut Serving, index: usize, secs: u64) -> DrainEnd {
+fn flush_down_loop(serving: &mut ServingLoop, index: usize, secs: u64) -> DrainEnd {
     loop {
         if serving.visit_exhausted(index) {
             return DrainEnd::Exhausted;
@@ -1543,7 +1543,7 @@ fn flush_down_loop(serving: &mut Serving, index: usize, secs: u64) -> DrainEnd {
     }
 }
 
-fn flush_down_drained(serving: &mut Serving, index: usize) {
+fn flush_down_drained(serving: &mut ServingLoop, index: usize) {
     if serving.visit_exhausted(index) {
         serving.reschedule(index, RescheduleArm::Client);
         return;
@@ -1559,12 +1559,12 @@ fn flush_down_drained(serving: &mut Serving, index: usize) {
 struct DecisionState {
     ordinal: Option<DomainOrdinal>,
     now: Instant,
-    approved: FixedHostname,
+    approved: ApprovedHostname,
     approved_port: u16,
     observed: Option<EntryState>,
 }
 
-impl Serving {
+impl ServingLoop {
     /// Builds the loop's retained serving workspaces over boot-completed
     /// storage and the boot-owned traffic store, moving the retained per-slot
     /// buffer pairs into the fixed slot workspaces without a second traffic
@@ -1590,7 +1590,7 @@ impl Serving {
     pub(crate) fn preallocate(
         storage: ServeStorage,
         traffic: crate::inventory::TrafficStorage,
-    ) -> Result<Serving, ServeError> {
+    ) -> Result<ServingLoop, ServeError> {
         let poll = Poll::new()?;
         let slots = traffic
             .into_slots()
@@ -1604,11 +1604,11 @@ impl Serving {
             test,
             expect(
                 clippy::used_underscore_binding,
-                reason = "test-only wake pipe stored in the cfg(test)-restricted Serving field; the underscore keeps the tuple element unused-clean in production builds"
+                reason = "test-only wake pipe stored in the cfg(test)-restricted ServingLoop field; the underscore keeps the tuple element unused-clean in production builds"
             )
         )]
         let (signal_rx, signal_registration, _test_wake) = Self::create_signal_source()?;
-        let mut serving = Serving {
+        let mut serving = ServingLoop {
             poll,
             storage,
             listener: None,
@@ -1736,7 +1736,7 @@ impl Serving {
         storage: ServeStorage,
         listener: TcpListener,
         traffic: crate::inventory::TrafficStorage,
-    ) -> Result<Serving, ServeError> {
+    ) -> Result<ServingLoop, ServeError> {
         let mut serving = Self::preallocate(storage, traffic)?;
         serving.attach_listener(listener)?;
         Ok(serving)
@@ -1824,7 +1824,7 @@ impl Serving {
             .map_err(ServeError::from)
     }
 
-    /// Maximum poll invocations in a single [`Serving::run_once`] call,
+    /// Maximum poll invocations in a single [`ServingLoop::run_once`] call,
     /// `Interrupted` results included; on exhaustion the call returns
     /// normally (`Ok(())`) with an empty event batch, so signal/timer
     /// handling still runs this turn and stale events are never replayed.
@@ -1989,7 +1989,7 @@ impl Serving {
     ///
     /// Pass 2 dispatches each distinct slot contiguously in arrival order with
     /// its directions ordered by first arrival (`client_first`), each arm
-    /// guarded so a slot closed (`Stage::Idle`) or re-admitted at a newer
+    /// guarded so a slot closed (`SlotStage::Idle`) or re-admitted at a newer
     /// generation by [`Self::accept_all`], [`Self::recheck_now`], or the slot's
     /// own first arm is never dispatched onto stale state. The first arm opens
     /// the slot's single visit and the second merges into it,
@@ -2053,7 +2053,7 @@ impl Serving {
         if index >= self.slots.len() {
             return None;
         }
-        if self.slots[index].stage == Stage::Idle {
+        if self.slots[index].stage == SlotStage::Idle {
             return None;
         }
         if event_gen != self.slots[index].slot_gen {
@@ -2088,7 +2088,7 @@ impl Serving {
         slot_gen: u64,
         (token, ready): (Token, Option<Readiness>),
     ) -> Result<(), ServeError> {
-        if self.slots[index].slot_gen != slot_gen || self.slots[index].stage == Stage::Idle {
+        if self.slots[index].slot_gen != slot_gen || self.slots[index].stage == SlotStage::Idle {
             return Ok(());
         }
         let Some(ready) = ready else {
@@ -2108,7 +2108,7 @@ impl Serving {
     /// The single rearm site for a paused listener. It re-registers the
     /// withdrawn listener once the backoff has elapsed, so a transient accept
     /// failure is retried on a bounded cadence, never an immediate readiness
-    /// hot loop. Because [`Serving::pause_listener`] withdrew the listener from
+    /// hot loop. Because [`ServingLoop::pause_listener`] withdrew the listener from
     /// the poll registry, the matching call is `register` — `reregister`
     /// requires a previously registered source and fails on a withdrawn one.
     fn resume_listener(&mut self, now: Instant) -> Result<(), ServeError> {
@@ -2316,14 +2316,14 @@ impl Serving {
     fn close_pending_setups(&mut self) {
         for index in 0..self.slots.len() {
             match self.slots[index].stage {
-                Stage::Idle | Stage::Relay | Stage::Closing => {}
-                Stage::ReadingConnect
-                | Stage::RunningDecision
-                | Stage::Dialing
-                | Stage::SendingConnected
-                | Stage::ValidatingHello
-                | Stage::WritingHello
-                | Stage::Refusing(_) => self.close_slot(index),
+                SlotStage::Idle | SlotStage::Relay | SlotStage::Closing => {}
+                SlotStage::ReadingConnect
+                | SlotStage::RunningDecision
+                | SlotStage::Dialing
+                | SlotStage::SendingConnected
+                | SlotStage::ValidatingHello
+                | SlotStage::WritingHello
+                | SlotStage::Refusing(_) => self.close_slot(index),
             }
         }
     }
@@ -2361,7 +2361,7 @@ impl Serving {
     /// deadline: no established tunnel may outlive the shutdown grace.
     fn force_close_remaining_sockets(&mut self) {
         for index in 0..self.slots.len() {
-            if self.slots[index].stage != Stage::Idle {
+            if self.slots[index].stage != SlotStage::Idle {
                 self.close_slot(index);
             }
         }
@@ -2392,7 +2392,7 @@ impl Serving {
             let ws = &mut self.slots[index];
             ws.upstream = Some(up);
             ws.client = Some(client);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 4;
             ws.buf_base = 0;
             ws.gate.on_connect_head(4);
@@ -2527,7 +2527,7 @@ impl Serving {
     /// `now + ACCEPT_BACKOFF` and the listener is withdrawn from the poll
     /// registry (one state, so the rearm cannot choose `reregister` for a
     /// withdrawn source). A level-triggered readability edge therefore cannot
-    /// spin the turn loop while paused. [`Serving::resume_listener`] is the only
+    /// spin the turn loop while paused. [`ServingLoop::resume_listener`] is the only
     /// site that clears the pause and re-registers once it has elapsed. A
     /// `NotFound` deregistration means the listener was not registered, which is
     /// the same paused state; any other registry error is propagated and the
@@ -2570,7 +2570,7 @@ impl Serving {
                 ws.capture = SlotCapture::fresh(index, ws.slot_gen);
                 ws.handle = Some(slot);
                 ws.client = Some(stream);
-                ws.stage = Stage::ReadingConnect;
+                ws.stage = SlotStage::ReadingConnect;
                 if self.register_client(index).is_err() {
                     self.close_slot(index);
                 }
@@ -2668,7 +2668,7 @@ impl Serving {
     }
 
     /// Folds one successful relay-phase write into the slot's name incident
-    /// report window (§Configuration & DNS): only `Stage::Relay` writes are
+    /// report window (§Configuration & DNS): only `SlotStage::Relay` writes are
     /// tunnel payload bytes — the CONNECT request, the CONNECT response, and
     /// refusal bodies are excluded. The slot's committed peer ordinal and
     /// generation stamp attribute the bytes to the exact tunnel and name.
@@ -2676,7 +2676,7 @@ impl Serving {
         let Some(name) = self.slots[index].report_name else {
             return;
         };
-        if self.slots[index].stage != Stage::Relay {
+        if self.slots[index].stage != SlotStage::Relay {
             return;
         }
         let slot_gen = self.slots[index].slot_gen;
@@ -2711,7 +2711,7 @@ impl Serving {
     fn read_room(&self, index: usize, slab_cap: usize, slab_len: usize) -> usize {
         let slab_room = slab_cap - slab_len;
         let rem = self.io_room(index, usize::MAX);
-        if self.slots[index].stage == Stage::Relay {
+        if self.slots[index].stage == SlotStage::Relay {
             if rem <= MIN_BUF_ROOM {
                 0
             } else {
@@ -2853,20 +2853,20 @@ impl Serving {
                 ws.parse_rel = end;
                 res
             } else {
-                Ok(Feed::Incomplete)
+                Ok(ConnectParseStep::Incomplete)
             }
         };
         match head {
-            Ok(Feed::Complete { head_len }) => {
+            Ok(ConnectParseStep::Complete { head_len }) => {
                 let slot = &mut self.slots[index];
                 slot.head_len = head_len;
                 slot.insp_rel = head_len;
                 slot.hello_consumed = 0;
                 slot.gate.on_connect_head(head_len);
-                slot.stage = Stage::RunningDecision;
+                slot.stage = SlotStage::RunningDecision;
                 self.run_decision(index)
             }
-            Ok(Feed::Incomplete) => Ok(()),
+            Ok(ConnectParseStep::Incomplete) => Ok(()),
             Err(err) => {
                 self.any_illegal(
                     index,
@@ -2886,7 +2886,7 @@ impl Serving {
         if !self.block_all_latched() {
             return false;
         }
-        if self.slots[index].stage != Stage::Idle && self.slots[index].stage != Stage::Closing {
+        if self.slots[index].stage != SlotStage::Idle && self.slots[index].stage != SlotStage::Closing {
             self.close_slot(index);
         }
         true
@@ -2898,7 +2898,7 @@ impl Serving {
         }
         self.stop_admission_latched();
         for index in 0..self.slots.len() {
-            if self.slots[index].stage != Stage::Idle && self.slots[index].stage != Stage::Closing {
+            if self.slots[index].stage != SlotStage::Idle && self.slots[index].stage != SlotStage::Closing {
                 self.close_slot(index);
             }
         }
@@ -2910,8 +2910,8 @@ impl Serving {
 
     fn stop_domain_block(&mut self, ordinal: DomainOrdinal) {
         for index in 0..self.slots.len() {
-            if self.slots[index].stage != Stage::Idle
-                && self.slots[index].stage != Stage::Closing
+            if self.slots[index].stage != SlotStage::Idle
+                && self.slots[index].stage != SlotStage::Closing
                 && self.slot_ordinal(index) == Some(ordinal)
             {
                 self.close_slot(index);
@@ -2963,8 +2963,8 @@ impl Serving {
                     violation
                 {
                     self.stop_domain_block(ordinal);
-                    if self.slots[index].stage != Stage::Idle
-                        && self.slots[index].stage != Stage::Closing
+                    if self.slots[index].stage != SlotStage::Idle
+                        && self.slots[index].stage != SlotStage::Closing
                     {
                         self.close_slot(index);
                     }
@@ -3018,7 +3018,7 @@ impl Serving {
         };
         let phase = self.storage.decide(slot, &resolved, now);
         let observed = match &phase {
-            Ok(ConnectPhase::Peer { family, .. }) => {
+            Ok(AdmissionVerdict::Peer { family, .. }) => {
                 ordinal.and_then(|_| resolved.peer_state(*family, now))
             }
             _ => None,
@@ -3056,7 +3056,7 @@ impl Serving {
         }
     }
 
-    fn refuse_blocked(&mut self, index: usize, ordinal: DomainOrdinal, approved: FixedHostname) {
+    fn refuse_blocked(&mut self, index: usize, ordinal: DomainOrdinal, approved: ApprovedHostname) {
         self.storage.enforcement_mut().note_domain_block(ordinal);
         self.refuse_with_hostname(index, Refusal::Forbidden, approved);
     }
@@ -3064,28 +3064,28 @@ impl Serving {
     fn apply_decision(
         &mut self,
         index: usize,
-        phase: &Result<ConnectPhase, DecideError>,
+        phase: &Result<AdmissionVerdict, DecideError>,
         state: DecisionState,
     ) -> Result<(), ServeError> {
         match phase {
-            Err(_) | Ok(ConnectPhase::CandidatesExhausted) => {
+            Err(_) | Ok(AdmissionVerdict::CandidatesExhausted) => {
                 self.refuse_with_hostname(index, Refusal::DialFailed, state.approved);
                 Ok(())
             }
-            Ok(ConnectPhase::Forbidden) => {
+            Ok(AdmissionVerdict::Forbidden) => {
                 self.any_illegal(index, AnyIllegalCause::HostNotAllowlisted);
                 self.refuse_with_hostname(index, Refusal::Forbidden, state.approved);
                 Ok(())
             }
-            Ok(ConnectPhase::NoBinding) => {
+            Ok(AdmissionVerdict::NoBinding) => {
                 self.refuse_with_hostname(index, Refusal::NoResolvedAddresses, state.approved);
                 Ok(())
             }
-            Ok(ConnectPhase::DeadlineExhausted) => {
+            Ok(AdmissionVerdict::DeadlineExhausted) => {
                 self.refuse_with_hostname(index, Refusal::SetupTimeout, state.approved);
                 Ok(())
             }
-            Ok(ConnectPhase::Peer {
+            Ok(AdmissionVerdict::Peer {
                 addr,
                 connect_deadline,
                 ..
@@ -3097,7 +3097,7 @@ impl Serving {
                     slot.approved = Some(state.approved);
                     slot.approved_port = state.approved_port;
                     slot.gate.on_authorized();
-                    slot.stage = Stage::Dialing;
+                    slot.stage = SlotStage::Dialing;
                 }
                 self.apply_slot_deadline(index, |ws| {
                     ws.connect_deadline = Some(*connect_deadline);
@@ -3109,10 +3109,10 @@ impl Serving {
 
     /// Folds the admitted peer's selected-entry freshness into the persistent
     /// "serving from a stale cache entry" monitor level bit: a
-    /// `Stale` observation latches the bit, a `Fresh` observation clears it.
+    /// `StaleServing` observation latches the bit, a `Fresh` observation clears it.
     /// `Empty`/`Retired` and `None` are unreachable on a granted `Peer`
-    /// (usable-peer gates on `Fresh | Stale`) and are no-ops. A first
-    /// admission on a `Stale` entry also records a stale-binding admission in
+    /// (usable-peer gates on `Fresh | StaleServing`) and are no-ops. A first
+    /// admission on a `StaleServing` entry also records a stale-binding admission in
     /// the name's incident report window (§Configuration & DNS): retries
     /// (the slot already carries a `connect_family`) and relay activity are
     /// not admissions. The state arrives from the bound-context observation
@@ -3129,7 +3129,7 @@ impl Serving {
             return;
         };
         match observed {
-            Some(EntryState::Stale) => {
+            Some(EntryState::StaleServing) => {
                 self.storage.enforcement_mut().note_serving_stale();
                 if self.slots[index].connect_family.is_none() {
                     let secs = self.storage.cache_secs(now);
@@ -3150,7 +3150,7 @@ impl Serving {
     /// it keeps the pre-retry single-failure refusal. Never replaces a peer the
     /// gate has already committed to.
     fn fail_current_attempt(&mut self, index: usize) -> Result<(), ServeError> {
-        if self.slots[index].stage != Stage::Dialing {
+        if self.slots[index].stage != SlotStage::Dialing {
             return Ok(());
         }
         let family = self.slots[index].connect_family;
@@ -3232,7 +3232,7 @@ impl Serving {
             return Ok(());
         }
         match self.slots[index].stage {
-            Stage::Dialing => match self.upstream_connectedness(index) {
+            SlotStage::Dialing => match self.upstream_connectedness(index) {
                 ConnectState::Pending => Ok(()),
                 ConnectState::Failed => self.fail_current_attempt(index),
                 ConnectState::Connected => {
@@ -3247,30 +3247,30 @@ impl Serving {
                     ws.down_off = 0;
                     ws.down[..BODY_200.len()].copy_from_slice(BODY_200);
                     ws.down_len = BODY_200.len();
-                    ws.stage = Stage::SendingConnected;
+                    ws.stage = SlotStage::SendingConnected;
                     self.flush_down(index);
                     let sent = {
                         let ws = &self.slots[index];
-                        ws.stage == Stage::SendingConnected && ws.down_len == 0
+                        ws.stage == SlotStage::SendingConnected && ws.down_len == 0
                     };
                     if sent {
                         let ws = &mut self.slots[index];
                         ws.gate.on_response_ok();
-                        ws.stage = Stage::ValidatingHello;
+                        ws.stage = SlotStage::ValidatingHello;
                         return self.enter_validating_hello(index);
                     }
                     Ok(())
                 }
             },
-            Stage::WritingHello => {
+            SlotStage::WritingHello => {
                 self.flush_client_upstream(index);
                 Ok(())
             }
-            Stage::Relay => {
+            SlotStage::Relay => {
                 self.flush_client_upstream(index);
                 self.finish_drain(index);
                 self.maybe_close_drained(index);
-                if self.slots[index].stage == Stage::Relay
+                if self.slots[index].stage == SlotStage::Relay
                     && self.slots[index].fwd >= self.slots[index].buf_len
                 {
                     return self.client_readable(index);
@@ -3289,7 +3289,7 @@ impl Serving {
             return self.relay_upstream_to_client(index);
         }
         match self.slots[index].stage {
-            Stage::Dialing => match self.upstream_connectedness(index) {
+            SlotStage::Dialing => match self.upstream_connectedness(index) {
                 ConnectState::Pending => Ok(()),
                 ConnectState::Failed => self.fail_current_attempt(index),
                 ConnectState::Connected => self.observe_upstream_read(index),
@@ -3352,7 +3352,7 @@ impl Serving {
                         self.project_tripwire(index, violation);
                     }
                     let secs = self.storage.cache_secs(Instant::now());
-                    let hostname = approved.as_ref().map(FixedHostname::as_str);
+                    let hostname = approved.as_ref().map(ApprovedHostname::as_str);
                     self.storage
                         .logs_mut()
                         .early_activity(secs, hostname, peer, activity_kind);
@@ -3360,7 +3360,7 @@ impl Serving {
                     return Ok(());
                 }
                 ReadOutcome::Failed => {
-                    if self.slots[index].stage == Stage::Dialing {
+                    if self.slots[index].stage == SlotStage::Dialing {
                         self.refuse(index, Refusal::DialFailed);
                         return Ok(());
                     }
@@ -3397,15 +3397,15 @@ impl Serving {
                 ws.insp_rel = end;
                 res
             } else {
-                Ok(Inspect::NeedMore)
+                Ok(HelloParseStep::NeedMore)
             }
         };
         match inspection {
             Err(err) => {
-                self.reject_hello(index, HelloRejectReason::from_ch_error(&err));
+                self.reject_hello(index, HelloRejectReason::from_client_hello_error(&err));
             }
-            Ok(Inspect::NeedMore) => {}
-            Ok(Inspect::Complete { consumed }) => {
+            Ok(HelloParseStep::NeedMore) => {}
+            Ok(HelloParseStep::Complete { consumed }) => {
                 self.slots[index].hello_consumed = consumed;
                 self.hello_complete(index);
             }
@@ -3425,7 +3425,7 @@ impl Serving {
         let accepted = match verdict {
             Some(Ok(accepted)) => accepted,
             Some(Err(err)) => {
-                self.reject_hello(index, HelloRejectReason::from_ch_error(&err));
+                self.reject_hello(index, HelloRejectReason::from_client_hello_error(&err));
                 return;
             }
             None => {
@@ -3438,7 +3438,7 @@ impl Serving {
         let end = ws.head_len + ws.hello_consumed;
         ws.gate
             .on_hello_validated(ValidatedHello::new(accepted, end));
-        ws.stage = Stage::WritingHello;
+        ws.stage = SlotStage::WritingHello;
         ws.fwd = ws.head_len - ws.buf_base;
         if !self.maybe_record_ja4_baseline(index) {
             self.flush_client_upstream(index);
@@ -3512,7 +3512,7 @@ impl Serving {
     /// waiting for a fresh readable edge.
     fn enter_validating_hello(&mut self, index: usize) -> Result<(), ServeError> {
         self.buffer_and_validate(index, &[]);
-        if self.slots[index].stage == Stage::ValidatingHello {
+        if self.slots[index].stage == SlotStage::ValidatingHello {
             self.client_readable(index)?;
         }
         Ok(())
@@ -3578,7 +3578,7 @@ impl Serving {
         self.apply_slot_deadline(index, |ws| {
             ws.setup_deadline = None;
             ws.idle_deadline = Some(Instant::now() + IDLE_SECS);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
         });
         let (written2, failed2) = self.drain_to_upstream(index);
         if failed2 {
@@ -3662,28 +3662,28 @@ impl Serving {
             return Ok(());
         }
         match self.slots[index].stage {
-            Stage::SendingConnected => {
+            SlotStage::SendingConnected => {
                 self.flush_down(index);
                 let sent = {
                     let ws = &self.slots[index];
-                    ws.stage == Stage::SendingConnected && ws.down_len == 0
+                    ws.stage == SlotStage::SendingConnected && ws.down_len == 0
                 };
                 if sent {
                     let ws = &mut self.slots[index];
                     ws.gate.on_response_ok();
-                    ws.stage = Stage::ValidatingHello;
+                    ws.stage = SlotStage::ValidatingHello;
                     return self.enter_validating_hello(index);
                 }
                 Ok(())
             }
-            Stage::Refusing(_) => {
+            SlotStage::Refusing(_) => {
                 self.flush_down(index);
                 if self.slots[index].down_len == 0 {
                     self.close_slot(index);
                 }
                 Ok(())
             }
-            Stage::Relay => {
+            SlotStage::Relay => {
                 self.flush_down(index);
                 self.finish_drain(index);
                 self.maybe_close_drained(index);
@@ -3691,7 +3691,7 @@ impl Serving {
                     let ws = &self.slots[index];
                     matches!(ws.directional.down, SideEof::Open)
                         && ws.down_off >= ws.down_len
-                        && ws.stage == Stage::Relay
+                        && ws.stage == SlotStage::Relay
                 };
                 if resume {
                     return self.relay_upstream_to_client(index);
@@ -3855,7 +3855,7 @@ impl Serving {
     /// here (§Configuration & DNS — "each with a 2-second deadline"),
     /// so a slow-but-healthy connect that crossed the 2 s bound is failed and
     /// retried or refused exactly like a refused one. The `Result` of
-    /// [`Serving::fail_current_attempt`] is intentionally discarded: the sweep
+    /// [`ServingLoop::fail_current_attempt`] is intentionally discarded: the sweep
     /// has no caller to carry an error, and every failure path inside it
     /// already refuses or re-decides the slot itself.
     fn note_expired_dial(&mut self, i: usize) {
@@ -3881,7 +3881,7 @@ impl Serving {
                 self.expire_setup(i);
                 continue;
             }
-            if self.slots[i].stage == Stage::Dialing
+            if self.slots[i].stage == SlotStage::Dialing
                 && self.slots[i]
                     .connect_deadline
                     .is_some_and(|d| d.is_expired(now))
@@ -3905,7 +3905,7 @@ impl Serving {
     /// flush is closed on the next sweep, so the passed deadline cannot spin.
     fn expire_setup(&mut self, i: usize) {
         match self.slots[i].stage {
-            Stage::ReadingConnect | Stage::RunningDecision | Stage::Dialing => {
+            SlotStage::ReadingConnect | SlotStage::RunningDecision | SlotStage::Dialing => {
                 match self.slots[i].parser.result().copied() {
                     Some(Ok(request)) => {
                         self.refuse_with_hostname(
@@ -3917,11 +3917,11 @@ impl Serving {
                     _ => self.refuse(i, Refusal::SetupTimeout),
                 }
             }
-            Stage::SendingConnected | Stage::ValidatingHello | Stage::WritingHello => {
+            SlotStage::SendingConnected | SlotStage::ValidatingHello | SlotStage::WritingHello => {
                 self.flush_down(i);
                 self.close_slot(i);
             }
-            Stage::Refusing(_) | Stage::Relay | Stage::Closing | Stage::Idle => {
+            SlotStage::Refusing(_) | SlotStage::Relay | SlotStage::Closing | SlotStage::Idle => {
                 self.close_slot(i);
             }
         }

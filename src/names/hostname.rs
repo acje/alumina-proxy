@@ -5,12 +5,12 @@ pub const FQDN_MAX_LEN: usize = crate::names::rules::FQDN_MAX_LEN;
 /// per-connection allocation. The label rules mirror the config `Fqdn` type;
 /// the numeric-shorthand (IP-literal-looking) form is rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FixedHostname {
+pub struct ApprovedHostname {
     bytes: [u8; FQDN_MAX_LEN],
     len: u8,
 }
 
-impl FixedHostname {
+impl ApprovedHostname {
     /// The normalized lowercase bytes, without a trailing dot.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
@@ -26,10 +26,10 @@ impl FixedHostname {
     #[must_use]
     #[expect(
         clippy::expect_used,
-        reason = "FixedHostname normalization keeps only ASCII bytes, so they are always valid UTF-8"
+        reason = "ApprovedHostname normalization keeps only ASCII bytes, so they are always valid UTF-8"
     )]
     pub fn as_str(&self) -> &str {
-        std::str::from_utf8(self.as_bytes()).expect("FixedHostname is ASCII")
+        std::str::from_utf8(self.as_bytes()).expect("ApprovedHostname is ASCII")
     }
 
     /// Normalizes `input` into a legal lowercase FQDN without a trailing dot,
@@ -39,9 +39,9 @@ impl FixedHostname {
     /// valid 253-byte name plus a trailing dot is accepted; any other 254-byte
     /// input is rejected without copying outside the fixed buffer.
     #[must_use]
-    pub fn normalize(input: &[u8]) -> Option<FixedHostname> {
+    pub fn normalize(input: &[u8]) -> Option<ApprovedHostname> {
         let len = normalized_len(input)?;
-        let mut out = FixedHostname {
+        let mut out = ApprovedHostname {
             bytes: [0u8; FQDN_MAX_LEN],
             len: u8::try_from(len).ok()?,
         };

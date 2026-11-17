@@ -2,7 +2,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use crate::eligibility::NumericAddr;
 
-use super::action::{ControlTable, DomainOrdinal, FirstSlot, Scope};
+use super::action::{ControlTable, DomainOrdinal, FirstIllegalLatch, Scope};
 use super::monitor::{DnsAnomalyKind, Monitor, SlotCapture};
 use super::policy::{AnyIllegalCause, Effect, UnknownReason, Violation, decide as pure_decide};
 
@@ -215,7 +215,7 @@ impl Default for SaturatingCounter {
     }
 }
 
-pub struct Enforcement {
+pub struct EnforcementState {
     control: ControlTable,
     block_all: bool,
     blocked: u32,
@@ -226,9 +226,9 @@ pub struct Enforcement {
     ja4_gate: WindowedCounter,
 }
 
-impl Enforcement {
-    pub fn new(control: ControlTable, gates: GateSet) -> Enforcement {
-        Enforcement {
+impl EnforcementState {
+    pub fn new(control: ControlTable, gates: GateSet) -> EnforcementState {
+        EnforcementState {
             control,
             block_all: false,
             blocked: 0,
@@ -261,7 +261,7 @@ impl Enforcement {
         (self.blocked >> ordinal.get()) & 1 == 1
     }
 
-    pub fn decide(&mut self, latch: &mut FirstSlot, violation: Violation, secs: u64) -> Effect {
+    pub fn decide(&mut self, latch: &mut FirstIllegalLatch, violation: Violation, secs: u64) -> Effect {
         let effect = self.select_gated_effect(latch, violation, secs);
         match violation {
             Violation::AnyIllegal { cause } => {
@@ -310,7 +310,7 @@ impl Enforcement {
 
     fn select_gated_effect(
         &mut self,
-        latch: &mut FirstSlot,
+        latch: &mut FirstIllegalLatch,
         violation: Violation,
         secs: u64,
     ) -> Effect {

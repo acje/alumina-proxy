@@ -3,7 +3,7 @@ use crate::dns::cache::{Cache, CacheError, Family, Generation, NameIndex, Staged
 use crate::dns::schedule::{
     IncidentTransition, OutcomeIncidents, PerTypeTransition, Schedules, family_slot,
 };
-use crate::dns::wire::{DnsError, Outcome};
+use crate::dns::wire::{DnsError, ExchangeOutcome};
 
 /// The positional apply context grouped to keep the shared route below the
 /// argument-count gate: the allowlist `index`, the in-flight `generation`,
@@ -49,7 +49,7 @@ pub fn apply_outcome(
     generation: Generation,
     receipt: u64,
     now: u64,
-    outcome: &Outcome,
+    outcome: &ExchangeOutcome,
 ) -> Result<OutcomeIncidents, DnsError> {
     apply_route(
         cache,
@@ -71,7 +71,7 @@ pub(super) fn apply_route(
     cache: &mut Cache,
     schedules: &mut Schedules,
     context: ApplyContext,
-    outcome: &Outcome,
+    outcome: &ExchangeOutcome,
     evidence: Option<evidence::Evidence>,
 ) -> Result<OutcomeIncidents, DnsError> {
     apply_route_observed(
@@ -88,7 +88,7 @@ pub(super) fn apply_route_observed<F>(
     cache: &mut Cache,
     schedules: &mut Schedules,
     context: ApplyContext,
-    outcome: &Outcome,
+    outcome: &ExchangeOutcome,
     evidence: Option<evidence::Evidence>,
     observer: &mut F,
 ) -> Result<OutcomeIncidents, DnsError>
@@ -112,7 +112,7 @@ where
         .map_err(DnsError::Cache)?;
     observer(ObservationPhase::BeforeCommit, cache, name, now);
     match outcome {
-        Outcome::Positive {
+        ExchangeOutcome::Positive {
             bindings,
             ttl,
             family: positive_family,
@@ -144,7 +144,7 @@ where
                 per_type,
             })
         }
-        Outcome::NxDomain { soa } => {
+        ExchangeOutcome::NxDomain { soa } => {
             let prepared = schedules
                 .prepare_nxdomain(index, *soa, receipt, now)
                 .map_err(|err| DnsError::Cache(map_schedule(err)))?;
@@ -169,7 +169,7 @@ where
                 per_type,
             })
         }
-        Outcome::NoData {
+        ExchangeOutcome::NoData {
             family: no_data_family,
             soa,
         } => {
@@ -218,7 +218,7 @@ fn reject_obsolete_generation(
     cache: &Cache,
     name: crate::dns::cache::NameIndex,
     context: ApplyContext,
-    outcome: &Outcome,
+    outcome: &ExchangeOutcome,
 ) -> Result<(), DnsError> {
     let ApplyContext {
         generation: queried_generation,
@@ -227,7 +227,7 @@ fn reject_obsolete_generation(
         ..
     } = context;
     match outcome {
-        Outcome::Positive { family, .. } => {
+        ExchangeOutcome::Positive { family, .. } => {
             let queried_now = cache
                 .entry(name, *family)
                 .map_err(DnsError::Cache)?
@@ -236,7 +236,7 @@ fn reject_obsolete_generation(
                 return Err(DnsError::Cache(CacheError::StaleGeneration));
             }
         }
-        Outcome::NxDomain { .. } => {
+        ExchangeOutcome::NxDomain { .. } => {
             let (Some(query_family), Some(other_generation)) = (query_family, other_generation)
             else {
                 return Ok(());
@@ -257,7 +257,7 @@ fn reject_obsolete_generation(
                 return Err(DnsError::Cache(CacheError::StaleGeneration));
             }
         }
-        Outcome::NoData { family, .. } => {
+        ExchangeOutcome::NoData { family, .. } => {
             let (Some(query_family), Some(_)) = (query_family, other_generation) else {
                 return Ok(());
             };

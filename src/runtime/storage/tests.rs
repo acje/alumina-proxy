@@ -444,8 +444,8 @@ fn serve_storage_boot_corresponds_allowlist_at_boundary() {
 
 #[test]
 fn work_view_is_bound_to_the_owning_storages_state() {
-    use crate::inspection::connect::{ConnectParser, Feed};
-    use crate::runtime::tunnel::{ConnectPhase, Deadline};
+    use crate::inspection::connect::{ConnectParser, ConnectParseStep};
+    use crate::runtime::tunnel::{AdmissionVerdict, Deadline};
     use std::time::Instant;
     let mut storage = booted(1, 0);
     publish_a(&mut storage.cache, 0, FRESH + 5, TTL);
@@ -454,8 +454,8 @@ fn work_view_is_bound_to_the_owning_storages_state() {
     let mut parser = ConnectParser::new();
     let head = b"CONNECT alpha.example.org:443 HTTP/1.1\r\n\r\n";
     match parser.feed(head).expect("valid connect head") {
-        Feed::Complete { .. } => {}
-        Feed::Incomplete => panic!("head should parse to completion"),
+        ConnectParseStep::Complete { .. } => {}
+        ConnectParseStep::Incomplete => panic!("head should parse to completion"),
     }
     let req = *parser
         .result()
@@ -472,7 +472,7 @@ fn work_view_is_bound_to_the_owning_storages_state() {
     assert!(
         matches!(
             phase,
-            ConnectPhase::Peer {
+            AdmissionVerdict::Peer {
                 family: Family::A,
                 ..
             }
@@ -511,8 +511,8 @@ fn storage_cache_secs_is_mounted_on_the_dns_epoch() {
 
 #[test]
 fn storage_decide_reads_slot_deadline_and_epoch_scale() {
-    use crate::inspection::connect::{ConnectParser, Feed};
-    use crate::runtime::tunnel::ConnectPhase;
+    use crate::inspection::connect::{ConnectParser, ConnectParseStep};
+    use crate::runtime::tunnel::AdmissionVerdict;
     use std::time::Instant;
     const DNS_EPOCH: u64 = 1_700_000_000;
     let mut storage = booted(1, 0);
@@ -523,8 +523,8 @@ fn storage_decide_reads_slot_deadline_and_epoch_scale() {
     let mut parser = ConnectParser::new();
     let head = b"CONNECT alpha.example.org:443 HTTP/1.1\r\n\r\n";
     match parser.feed(head).expect("valid connect head") {
-        Feed::Complete { .. } => {}
-        Feed::Incomplete => panic!("head should parse to completion"),
+        ConnectParseStep::Complete { .. } => {}
+        ConnectParseStep::Incomplete => panic!("head should parse to completion"),
     }
     let req = *parser
         .result()
@@ -538,14 +538,14 @@ fn storage_decide_reads_slot_deadline_and_epoch_scale() {
     assert!(
         matches!(
             phase,
-            ConnectPhase::Peer {
+            AdmissionVerdict::Peer {
                 family: Family::A,
                 ..
             }
         ),
         "fresh on the DNS scale must authorize the peer: {phase:?}"
     );
-    let ConnectPhase::Peer {
+    let AdmissionVerdict::Peer {
         connect_deadline, ..
     } = phase
     else {
@@ -562,7 +562,7 @@ fn storage_decide_reads_slot_deadline_and_epoch_scale() {
 
 #[test]
 fn monitor_report_emits_at_whole_second_cadence_clears_on_commit_and_admits_ring_full_summary() {
-    use crate::enforcement::action::FirstSlot;
+    use crate::enforcement::action::FirstIllegalLatch;
     use crate::enforcement::policy::{AnyIllegalCause, Violation};
     use std::time::Instant;
     const DNS_EPOCH: u64 = 1_700_000_000;
@@ -577,7 +577,7 @@ fn monitor_report_emits_at_whole_second_cadence_clears_on_commit_and_admits_ring
 
     let secs = storage.cache_secs(origin);
     storage.enforcement_mut().decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -604,7 +604,7 @@ fn monitor_report_emits_at_whole_second_cadence_clears_on_commit_and_admits_ring
 
     let secs = storage.cache_secs(one_second);
     storage.enforcement_mut().decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -624,7 +624,7 @@ fn monitor_report_emits_at_whole_second_cadence_clears_on_commit_and_admits_ring
     let next = one_second + Duration::from_secs(1);
     let secs = storage.cache_secs(next);
     storage.enforcement_mut().decide(
-        &mut FirstSlot::new(),
+        &mut FirstIllegalLatch::new(),
         Violation::AnyIllegal {
             cause: AnyIllegalCause::HostNotAllowlisted,
         },
@@ -691,7 +691,7 @@ fn startup_split_emission_over_full_allowlist_spends_zero_allocations() {
 #[test]
 fn monitor_detection_report_and_drain_paths_spend_zero_allocations() {
     use crate::alloc::{Phase, run_phase};
-    use crate::enforcement::action::FirstSlot;
+    use crate::enforcement::action::FirstIllegalLatch;
     use crate::enforcement::policy::{AnyIllegalCause, Violation};
     const DNS_EPOCH: u64 = 1_700_000_000;
     let mut storage = booted(1, 0);
@@ -700,7 +700,7 @@ fn monitor_detection_report_and_drain_paths_spend_zero_allocations() {
     let ((), counts) = run_phase(Phase::Serving, || {
         for _ in 0..256 {
             storage.enforcement_mut().decide(
-                &mut FirstSlot::new(),
+                &mut FirstIllegalLatch::new(),
                 Violation::AnyIllegal { cause },
                 DNS_EPOCH,
             );
@@ -768,11 +768,11 @@ fn monitor_nonempty_detail_ring_report_and_drain_spend_zero_allocations() {
 }
 
 fn connect_request(head: &[u8]) -> crate::inspection::connect::ConnectRequest {
-    use crate::inspection::connect::{ConnectParser, Feed};
+    use crate::inspection::connect::{ConnectParser, ConnectParseStep};
     let mut parser = ConnectParser::new();
     match parser.feed(head).expect("valid connect head") {
-        Feed::Complete { .. } => {}
-        Feed::Incomplete => panic!("head should parse to completion"),
+        ConnectParseStep::Complete { .. } => {}
+        ConnectParseStep::Incomplete => panic!("head should parse to completion"),
     }
     *parser
         .result()

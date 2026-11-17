@@ -8,8 +8,8 @@
 use crate::config::Fqdn;
 use crate::dns::cache::Family;
 use crate::dns::wire::{BailiwickZones, DNS_MSG_LIMIT, ResponseWorkspace, parse_response};
-use crate::inspection::client_hello::{ChInspector, Inspect};
-use crate::inspection::connect::{ConnectParser, Feed};
+use crate::inspection::client_hello::{ClientHelloInspector, HelloParseStep};
+use crate::inspection::connect::{ConnectParser, ConnectParseStep};
 
 /// The fixed transaction id every DNS-wire input is anchored on: the corpus
 /// message answers `(sub.example.org, A, tid 0x0ded)`.
@@ -170,16 +170,16 @@ fn drive(target: ParserTarget, input: &[u8]) -> DriveOutcome {
         ParserTarget::ConnectHeaders => {
             let mut parser = ConnectParser::new();
             match parser.feed(input) {
-                Ok(Feed::Complete { .. }) => DriveOutcome::Complete,
-                Ok(Feed::Incomplete) => DriveOutcome::NeedMore,
+                Ok(ConnectParseStep::Complete { .. }) => DriveOutcome::Complete,
+                Ok(ConnectParseStep::Incomplete) => DriveOutcome::NeedMore,
                 Err(_) => DriveOutcome::Rejected,
             }
         }
         ParserTarget::ClientHello => {
-            let mut inspector = ChInspector::new();
+            let mut inspector = ClientHelloInspector::new();
             match inspector.feed(input) {
-                Ok(Inspect::Complete { .. }) => DriveOutcome::Complete,
-                Ok(Inspect::NeedMore) => DriveOutcome::NeedMore,
+                Ok(HelloParseStep::Complete { .. }) => DriveOutcome::Complete,
+                Ok(HelloParseStep::NeedMore) => DriveOutcome::NeedMore,
                 Err(_) => DriveOutcome::Rejected,
             }
         }

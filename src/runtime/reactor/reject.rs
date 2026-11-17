@@ -3,12 +3,12 @@ use std::time::Instant;
 use crate::enforcement::policy::AnyIllegalCause;
 use crate::inspection::client_hello::HelloRejectReason;
 use crate::log::RejectReason;
-use crate::names::hostname::FixedHostname;
+use crate::names::hostname::ApprovedHostname;
 
 use super::Refusal;
-use super::{Serving, Stage};
+use super::{ServingLoop, SlotStage};
 
-impl Serving {
+impl ServingLoop {
     pub(super) fn refuse(&mut self, index: usize, refusal: Refusal) {
         let hostname = self.slots[index].approved;
         self.refuse_impl(index, refusal, hostname);
@@ -22,12 +22,12 @@ impl Serving {
         &mut self,
         index: usize,
         refusal: Refusal,
-        hostname: FixedHostname,
+        hostname: ApprovedHostname,
     ) {
         self.refuse_impl(index, refusal, Some(hostname));
     }
 
-    fn refuse_impl(&mut self, index: usize, refusal: Refusal, hostname: Option<FixedHostname>) {
+    fn refuse_impl(&mut self, index: usize, refusal: Refusal, hostname: Option<ApprovedHostname>) {
         let wire = refusal.descriptor();
         self.emit_reject(index, wire.reason, hostname);
         if self.block_all_latched() {
@@ -38,7 +38,7 @@ impl Serving {
         ws.down_off = 0;
         ws.down[..wire.body.len()].copy_from_slice(wire.body);
         ws.down_len = wire.body.len();
-        ws.stage = Stage::Refusing(wire.body);
+        ws.stage = SlotStage::Refusing(wire.body);
         self.flush_down(index);
         if self.slots[index].down_len == 0 {
             self.close_slot(index);
@@ -52,14 +52,14 @@ impl Serving {
         &mut self,
         index: usize,
         reason: RejectReason,
-        hostname: Option<FixedHostname>,
+        hostname: Option<ApprovedHostname>,
     ) {
         let secs = self.storage.cache_secs(Instant::now());
         let client = self.slots[index]
             .client
             .as_ref()
             .and_then(|c| c.peer_addr().ok());
-        let hostname = hostname.as_ref().map(FixedHostname::as_str);
+        let hostname = hostname.as_ref().map(ApprovedHostname::as_str);
         self.storage
             .logs_mut()
             .reject(secs, reason, client, hostname);
@@ -79,7 +79,7 @@ impl Serving {
     pub(super) fn close_slot(&mut self, index: usize) {
         let now = Instant::now();
         let ws = &mut self.slots[index];
-        ws.stage = Stage::Closing;
+        ws.stage = SlotStage::Closing;
         let slot = ws.handle.take();
         let tunnel = ws.tunnel.take();
         ws.client.take();

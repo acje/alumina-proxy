@@ -4,7 +4,7 @@ use std::mem::size_of;
 use crate::config::CONFIG_DOC_LIMIT;
 use crate::dns::transport::{QUERY_BUF_LEN, RECV_BUF_LEN};
 use crate::dns::wire::ResponseWorkspace;
-use crate::inspection::client_hello::ChInspector;
+use crate::inspection::client_hello::ClientHelloInspector;
 use crate::inspection::connect::ConnectParser;
 
 pub const TUNNEL_SLOTS: usize = 512;
@@ -17,7 +17,7 @@ pub const TRAFFIC_STORAGE_BYTES: usize = TUNNEL_SLOTS * BUFFERS_PER_SLOT * BUFFE
 pub const CONFIG_DOC_BUFFER_BYTES: usize = CONFIG_DOC_LIMIT + 1;
 
 /// The retained per-slot serving workspace: the fixed [`ConnectParser`] head
-/// and the [`ChInspector`] retained once per tunnel slot for the process
+/// and the [`ClientHelloInspector`] retained once per tunnel slot for the process
 /// lifetime and reused across connections. The inspector stores its parsed
 /// [`crate::inspection::client_hello::ClientHello`] by value — including the fixed
 /// cipher-suite, extension, ALPN, and signature-algorithm arrays that back the
@@ -27,7 +27,7 @@ pub const CONFIG_DOC_BUFFER_BYTES: usize = CONFIG_DOC_LIMIT + 1;
 /// bound on the slot's retained bytes: the per-slot serving workspace also
 /// carries gate, capture, cursors, and the approved hostname, which are
 /// deliberately not folded in here.
-pub const SLOT_WORKSPACE_BYTES: usize = size_of::<ConnectParser>() + size_of::<ChInspector>();
+pub const SLOT_WORKSPACE_BYTES: usize = size_of::<ConnectParser>() + size_of::<ClientHelloInspector>();
 
 /// The total retained serving-workspace bytes across all 512 tunnel slots:
 /// every slot carries its own parser + inspector (incl. the retained JA4
@@ -251,12 +251,12 @@ mod alloc_fault {
 #[cfg(test)]
 mod workspace_byte_constants {
     use super::*;
-    use crate::inspection::client_hello::ChInspector;
+    use crate::inspection::client_hello::ClientHelloInspector;
     use crate::inspection::connect::ConnectParser;
 
     #[test]
     fn slot_workspace_pinned_as_documented_tripwire() {
-        let per_slot = size_of::<ConnectParser>() + size_of::<ChInspector>();
+        let per_slot = size_of::<ConnectParser>() + size_of::<ClientHelloInspector>();
         assert_eq!(
             SLOT_WORKSPACE_BYTES, 156_840,
             "measured type-derived figure is {per_slot} bytes; investigate retained-array/layout changes before rebasing this pin"

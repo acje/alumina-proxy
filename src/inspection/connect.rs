@@ -2,7 +2,7 @@ use std::fmt;
 
 #[cfg(test)]
 use crate::config::Allowlist;
-use crate::names::hostname::FixedHostname;
+use crate::names::hostname::ApprovedHostname;
 
 /// Maximum CONNECT request-head size, including headers and the terminating
 /// CRLF sequence. The bound applies to the head only, never to tunnel bytes
@@ -19,7 +19,7 @@ const HTTP_11: &[u8] = b"HTTP/1.1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectRequest {
-    hostname: FixedHostname,
+    hostname: ApprovedHostname,
     port: u16,
 }
 
@@ -39,7 +39,7 @@ impl ConnectRequest {
     /// The fixed-capacity validated hostname type, for gate validation that
     /// compares an SNI against the approved CONNECT host without allocation.
     #[must_use]
-    pub const fn fixed_hostname(&self) -> &FixedHostname {
+    pub const fn fixed_hostname(&self) -> &ApprovedHostname {
         &self.hostname
     }
 }
@@ -169,7 +169,7 @@ impl ConnectHeadReason {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Feed {
+pub enum ConnectParseStep {
     /// The request head is not yet delimited; supply more bytes.
     Incomplete,
     /// The request head is delimited. `head_len` is the number of bytes of
@@ -226,9 +226,9 @@ impl ConnectParser {
     ///
     /// Returns `TooLong` when the head bytes (excluding any tunnel bytes
     /// coalesced after the delimiter) exceed `CONNECT_LIMIT`.
-    pub fn feed(&mut self, data: &[u8]) -> Result<Feed, ConnectError> {
+    pub fn feed(&mut self, data: &[u8]) -> Result<ConnectParseStep, ConnectError> {
         if self.result.is_some() {
-            return Ok(Feed::Complete {
+            return Ok(ConnectParseStep::Complete {
                 head_len: self.head_len,
             });
         }
@@ -243,12 +243,12 @@ impl ConnectParser {
             let head = &self.head[..delim];
             self.result = Some(parse_request(head));
             self.head_len = head_len;
-            return Ok(Feed::Complete { head_len });
+            return Ok(ConnectParseStep::Complete { head_len });
         }
         if take < data.len() {
             return Err(ConnectError::TooLong);
         }
-        Ok(Feed::Incomplete)
+        Ok(ConnectParseStep::Incomplete)
     }
 
     /// Incrementally locates the `\r\n\r\n` head terminator, scanning only the
@@ -526,7 +526,7 @@ fn parse_port(port: &[u8]) -> Result<u16, ConnectError> {
     u16::try_from(port_u32).map_err(|_| ConnectError::PortOutOfRange { got: port_u32 })
 }
 
-fn parse_host(host: &[u8]) -> Result<FixedHostname, ConnectError> {
+fn parse_host(host: &[u8]) -> Result<ApprovedHostname, ConnectError> {
     if host.contains(&b':') && !host.starts_with(b"[") {
         return Err(ConnectError::InvalidHostname {
             detail: "IPv6 literal rejected",
@@ -537,7 +537,7 @@ fn parse_host(host: &[u8]) -> Result<FixedHostname, ConnectError> {
             detail: "address literal rejected",
         });
     }
-    FixedHostname::normalize(host).ok_or(ConnectError::InvalidHostname {
+    ApprovedHostname::normalize(host).ok_or(ConnectError::InvalidHostname {
         detail: "hostname is not a lowercase ASCII FQDN",
     })
 }

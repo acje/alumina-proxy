@@ -128,16 +128,16 @@ fn record(payload: &[u8]) -> Vec<u8> {
     record_with_version(payload, TLS10)
 }
 
-fn parse_one(bytes: &[u8]) -> Result<ClientHello, ChError> {
-    let mut inspector = ChInspector::new();
+fn parse_one(bytes: &[u8]) -> Result<ClientHello, ClientHelloError> {
+    let mut inspector = ClientHelloInspector::new();
     match inspector.feed(bytes)? {
-        Inspect::Complete { .. } => Ok(inspector.hello().expect("complete has hello").clone()),
-        Inspect::NeedMore => panic!("test message must complete within a single feed"),
+        HelloParseStep::Complete { .. } => Ok(inspector.hello().expect("complete has hello").clone()),
+        HelloParseStep::NeedMore => panic!("test message must complete within a single feed"),
     }
 }
 
-fn approved(name: &str) -> FixedHostname {
-    FixedHostname::normalize(name.as_bytes()).expect("valid approved name")
+fn approved(name: &str) -> ApprovedHostname {
+    ApprovedHostname::normalize(name.as_bytes()).expect("valid approved name")
 }
 
 fn server_name_ext(names: &[(u8, &[u8])]) -> Vec<u8> {
@@ -285,11 +285,11 @@ fn accepts_record_version_0303() {
 #[test]
 fn fragmented_records_are_boundary_independent() {
     let msg = hello_msg(TLS12, &[TLS13], &["sub.example.org"], false);
-    let mut inspector = ChInspector::new();
+    let mut inspector = ClientHelloInspector::new();
     for chunk in msg.chunks(4) {
         match inspector.feed(chunk).expect("feed") {
-            Inspect::NeedMore => {}
-            Inspect::Complete { .. } => {
+            HelloParseStep::NeedMore => {}
+            HelloParseStep::Complete { .. } => {
                 let hello = inspector.hello().expect("complete has hello");
                 validate(hello, &approved("sub.example.org")).expect("valid");
                 return;
@@ -304,14 +304,14 @@ fn handshake_split_across_records_completes() {
     let msg = hello_msg(TLS12, &[TLS13], &["sub.example.org"], false);
     let mut split = record(&msg[5..5 + 12]);
     split.extend_from_slice(&record(&msg[5 + 12..]));
-    let mut inspector = ChInspector::new();
+    let mut inspector = ClientHelloInspector::new();
     match inspector.feed(&split).expect("feed") {
-        Inspect::Complete { consumed } => {
+        HelloParseStep::Complete { consumed } => {
             let hello = inspector.hello().expect("complete has hello");
             validate(hello, &approved("sub.example.org")).expect("valid");
             assert_eq!(consumed, split.len(), "consumed ends at the hello");
         }
-        Inspect::NeedMore => panic!("multi-record handshake must complete"),
+        HelloParseStep::NeedMore => panic!("multi-record handshake must complete"),
     }
 }
 
@@ -419,9 +419,9 @@ fn split_hello_inside_extension_data_completes() {
         .ja4();
     let mut split = record_with_version(&handshake[..split_at], TLS12);
     split.extend_from_slice(&record_with_version(&handshake[split_at..], TLS12));
-    let mut inspector = ChInspector::new();
+    let mut inspector = ClientHelloInspector::new();
     match inspector.feed(&split).expect("feed") {
-        Inspect::Complete { consumed } => {
+        HelloParseStep::Complete { consumed } => {
             let hello = inspector.hello().expect("complete has hello");
             validate(hello, &approved("sub.example.org")).expect("valid");
             assert_eq!(consumed, split.len(), "consumed ends at the hello");
@@ -431,7 +431,7 @@ fn split_hello_inside_extension_data_completes() {
                 "record boundaries inside extension data must not change the fingerprint"
             );
         }
-        Inspect::NeedMore => panic!("a hello split inside extension data must complete"),
+        HelloParseStep::NeedMore => panic!("a hello split inside extension data must complete"),
     }
 }
 
@@ -440,7 +440,7 @@ fn rejects_tls12_only_offer() {
     let msg = hello_msg(TLS12, &[TLS12], &["sub.example.org"], false);
     assert_eq!(
         parse_one(&msg),
-        Err(ChError::InvalidVersionOffer { version: TLS12 })
+        Err(ClientHelloError::InvalidVersionOffer { version: TLS12 })
     );
 }
 
@@ -449,7 +449,7 @@ fn rejects_mixed_offer_with_extra_non_grease() {
     let msg = hello_msg(TLS12, &[TLS13, TLS12], &["sub.example.org"], false);
     assert_eq!(
         parse_one(&msg),
-        Err(ChError::InvalidVersionOffer { version: TLS12 })
+        Err(ClientHelloError::InvalidVersionOffer { version: TLS12 })
     );
 }
 
@@ -464,7 +464,7 @@ fn rejects_grease_only_versions() {
     let msg = hello_msg(TLS12, &[0x0a0a], &["sub.example.org"], false);
     assert_eq!(
         parse_one(&msg),
-        Err(ChError::InvalidVersionOffer { version: 0 })
+        Err(ClientHelloError::InvalidVersionOffer { version: 0 })
     );
 }
 
@@ -485,13 +485,13 @@ fn rejects_missing_supported_versions() {
     handshake.extend_from_slice(&hl.to_be_bytes()[1..]);
     handshake.extend_from_slice(&body);
     let record = record(&handshake);
-    assert_eq!(parse_one(&record), Err(ChError::MissingSupportedVersions));
+    assert_eq!(parse_one(&record), Err(ClientHelloError::MissingSupportedVersions));
 }
 
 #[test]
 fn rejects_non_null_compression() {
     let msg = hello_msg_comp(TLS12, &[TLS13], &["sub.example.org"], false, 1);
-    assert_eq!(parse_one(&msg), Err(ChError::NonNullCompression));
+    assert_eq!(parse_one(&msg), Err(ClientHelloError::NonNullCompression));
 }
 
 #[test]
@@ -508,7 +508,7 @@ fn rejects_multiple_compression_methods() {
     multi.push(1);
     multi.extend_from_slice(&body[44..]);
     let record = record(&multi);
-    assert_eq!(parse_one(&record), Err(ChError::NonNullCompression));
+    assert_eq!(parse_one(&record), Err(ClientHelloError::NonNullCompression));
 }
 
 #[test]
@@ -536,7 +536,7 @@ fn trailing_bytes_after_extensions_rejected() {
     let record = record(&handshake);
     assert!(matches!(
         parse_one(&record),
-        Err(ChError::MalformedBody { .. })
+        Err(ClientHelloError::MalformedBody { .. })
     ));
 }
 
@@ -546,7 +546,7 @@ fn rejects_ech() {
     let ch = parse_one(&msg).expect("parse");
     assert_eq!(
         validate(&ch, &approved("sub.example.org")),
-        Err(ChError::EchPresent)
+        Err(ClientHelloError::EchPresent)
     );
 }
 
@@ -561,7 +561,7 @@ fn rejects_esni_codepoint() {
     assert!(ch.has_ech());
     assert_eq!(
         validate(&ch, &approved("sub.example.org")),
-        Err(ChError::EchPresent)
+        Err(ClientHelloError::EchPresent)
     );
 }
 
@@ -571,7 +571,7 @@ fn rejects_mismatched_sni() {
     let ch = parse_one(&msg).expect("parse");
     assert_eq!(
         validate(&ch, &approved("sub.example.org")),
-        Err(ChError::ServerNameMismatch)
+        Err(ClientHelloError::ServerNameMismatch)
     );
 }
 
@@ -597,7 +597,7 @@ fn rejects_two_sni_entries() {
     let ch = parse_one(&msg).expect("parse");
     assert_eq!(
         validate(&ch, &approved("sub.example.org")),
-        Err(ChError::InvalidServerName {
+        Err(ClientHelloError::InvalidServerName {
             detail: "requires exactly one host_name entry",
         })
     );
@@ -632,7 +632,7 @@ fn rejects_duplicate_extension() {
     let record = record(&handshake);
     assert_eq!(
         parse_one(&record),
-        Err(ChError::DuplicateExtension { ext: 0xfe00 })
+        Err(ClientHelloError::DuplicateExtension { ext: 0xfe00 })
     );
 }
 
@@ -640,38 +640,38 @@ fn rejects_duplicate_extension() {
 fn rejects_ssl_framing_first_byte() {
     let mut msg = hello_msg(TLS12, &[TLS13], &["sub.example.org"], false);
     msg[0] = 0x80;
-    assert_eq!(parse_one(&msg), Err(ChError::Sslv2Framing));
+    assert_eq!(parse_one(&msg), Err(ClientHelloError::Sslv2Framing));
 }
 
 #[test]
 fn rejects_ssl_framing_feed_time() {
-    let mut inspector = ChInspector::new();
-    assert_eq!(inspector.feed(&[0x80]), Err(ChError::Sslv2Framing));
+    let mut inspector = ClientHelloInspector::new();
+    assert_eq!(inspector.feed(&[0x80]), Err(ClientHelloError::Sslv2Framing));
 }
 
 #[test]
 fn rejects_non_handshake_at_feed_time() {
-    let mut inspector = ChInspector::new();
+    let mut inspector = ClientHelloInspector::new();
     let mut header = vec![23u8, 0x03, 0x01, 0x00, 0x00];
     header.extend_from_slice(&[0xab; 4]);
     assert_eq!(
         inspector.feed(&header),
-        Err(ChError::NotHandshake { content_type: 23 })
+        Err(ClientHelloError::NotHandshake { content_type: 23 })
     );
 }
 
 #[test]
 fn short_record_does_not_panic() {
-    let mut inspector = ChInspector::new();
+    let mut inspector = ClientHelloInspector::new();
     let result = inspector.feed(&[22, 3, 1, 0, 0]);
-    assert_eq!(result, Err(ChError::ZeroLengthRecord));
+    assert_eq!(result, Err(ClientHelloError::ZeroLengthRecord));
 }
 
 #[test]
 fn short_two_byte_payload_does_not_panic() {
-    let mut inspector = ChInspector::new();
+    let mut inspector = ClientHelloInspector::new();
     let result = inspector.feed(&[22, 3, 1, 0, 2, 1, 0]);
-    assert_eq!(result, Err(ChError::TruncatedHandshake));
+    assert_eq!(result, Err(ClientHelloError::TruncatedHandshake));
 }
 
 #[test]
@@ -686,7 +686,7 @@ fn rejects_record_payload_over_limit() {
     record.extend_from_slice(&big);
     assert_eq!(
         parse_one(&record),
-        Err(ChError::RecordTooLarge {
+        Err(ClientHelloError::RecordTooLarge {
             got: RECORD_PAYLOAD_LIMIT + 1
         })
     );
@@ -701,7 +701,7 @@ fn rejects_handshake_length_claim_over_bound() {
     let wire = record(&payload);
     assert_eq!(
         parse_one(&wire),
-        Err(ChError::HandshakeTooLarge {
+        Err(ClientHelloError::HandshakeTooLarge {
             got: 4 + claimed as usize,
         }),
         "a ClientHello whose 3-byte handshake length claims more than 16 KiB must be rejected"
@@ -714,10 +714,10 @@ fn handshake_claim_exactly_at_bound_is_not_length_rejected() {
     let mut payload = vec![HANDSHAKE_CLIENT_HELLO];
     payload.extend_from_slice(&claimed.to_be_bytes()[1..]);
     payload.extend_from_slice(&[0xabu8; 28]);
-    let mut inspector = ChInspector::new();
+    let mut inspector = ClientHelloInspector::new();
     assert_eq!(
         inspector.feed(&record(&payload)),
-        Ok(Inspect::NeedMore),
+        Ok(HelloParseStep::NeedMore),
         "a handshake claiming exactly the 16 KiB cap is incomplete, not length-rejected"
     );
 }
@@ -728,7 +728,7 @@ fn rejects_zero_length_handshake_record_between_fragments() {
     let mut split = record(&msg[5..5 + 12]);
     split.extend_from_slice(&record(&[]));
     split.extend_from_slice(&record(&msg[5 + 12..]));
-    assert_eq!(parse_one(&split), Err(ChError::ZeroLengthRecord));
+    assert_eq!(parse_one(&split), Err(ClientHelloError::ZeroLengthRecord));
 }
 
 #[test]
@@ -751,11 +751,11 @@ fn exact_fill_64k_incomplete_stream_does_not_panic() {
         MAX_CLIENT_HELLO,
         "exactly fills the inspection budget"
     );
-    let mut inspector = ChInspector::new();
+    let mut inspector = ClientHelloInspector::new();
     let result = inspector.feed(&wire);
     assert_eq!(
         result,
-        Err(ChError::HandshakeTooLarge { got: 65536 }),
+        Err(ClientHelloError::HandshakeTooLarge { got: 65536 }),
         "full buffer without a complete hello must not panic"
     );
 }
@@ -766,7 +766,7 @@ fn non_handshake_pre_clienthello_rejected() {
     msg[0] = 23;
     assert_eq!(
         parse_one(&msg),
-        Err(ChError::NotHandshake { content_type: 23 })
+        Err(ClientHelloError::NotHandshake { content_type: 23 })
     );
 }
 
@@ -780,7 +780,7 @@ fn non_host_name_sni_rejected() {
     ]);
     assert_eq!(
         parse_one(&wire),
-        Err(ChError::InvalidServerName {
+        Err(ClientHelloError::InvalidServerName {
             detail: "non-host_name name type",
         }),
         "a server_name entry whose NameType is not host_name (0) must fail closed"
@@ -798,7 +798,7 @@ fn host_name_then_non_host_name_entry_rejected() {
     ]);
     assert_eq!(
         parse_one(&wire),
-        Err(ChError::InvalidServerName {
+        Err(ClientHelloError::InvalidServerName {
             detail: "non-host_name name type",
         }),
         "a non-host_name entry must not be silently ignored, even alongside a valid host_name"
@@ -812,7 +812,7 @@ fn absent_sni_is_missing_identity() {
     assert_eq!(ch.sni_entries(), 0);
     assert_eq!(
         validate(&ch, &approved("sub.example.org")),
-        Err(ChError::InvalidServerName {
+        Err(ClientHelloError::InvalidServerName {
             detail: "requires exactly one host_name entry",
         })
     );
@@ -820,11 +820,11 @@ fn absent_sni_is_missing_identity() {
 
 #[test]
 fn fragmented_short_first_record_is_rejected() {
-    let mut inspector = ChInspector::new();
-    assert_eq!(inspector.feed(&[22, 3, 1, 0, 2]), Ok(Inspect::NeedMore));
+    let mut inspector = ClientHelloInspector::new();
+    assert_eq!(inspector.feed(&[22, 3, 1, 0, 2]), Ok(HelloParseStep::NeedMore));
     assert_eq!(
         inspector.feed(&[1, 0]),
-        Err(ChError::TruncatedHandshake),
+        Err(ClientHelloError::TruncatedHandshake),
         "a <4-byte first-record payload must fail closed regardless of fragmentation"
     );
 }
@@ -836,7 +836,7 @@ fn trailing_dot_other_domain_mismatch_still_rejected() {
     assert_eq!(ch.server_name(), b"sub.example.com");
     assert_eq!(
         validate(&ch, &approved("sub.example.org")),
-        Err(ChError::ServerNameMismatch),
+        Err(ClientHelloError::ServerNameMismatch),
         "normalizing a trailing dot must not mask a genuine two-domain mismatch"
     );
 }
@@ -855,7 +855,7 @@ fn rejects_more_than_32_offered_versions() {
     let msg = hello_msg(TLS12, &versions, &["sub.example.org"], false);
     assert_eq!(
         parse_one(&msg),
-        Err(ChError::MalformedExtension {
+        Err(ClientHelloError::MalformedExtension {
             ext: SUPPORTED_VERSIONS,
         })
     );
@@ -882,7 +882,7 @@ fn rejects_more_than_64_extensions() {
     }
     assert_eq!(
         parse_one(&hello_with_extensions(&exts)),
-        Err(ChError::TooManyExtensions)
+        Err(ClientHelloError::TooManyExtensions)
     );
 }
 
@@ -1282,7 +1282,7 @@ fn sigalgs_over_max_sigalgs_rejected() {
     let values: Vec<u16> = (0..70u16).map(|i| 0x0400 + i).collect();
     let data = sigalgs_ext(&values);
     let wire = hello_with_extensions(&[(SUPPORTED_VERSIONS, SV), (SIGNATURE_ALGORITHMS, &data)]);
-    assert_eq!(parse_one(&wire), Err(ChError::TooManySigAlgs));
+    assert_eq!(parse_one(&wire), Err(ClientHelloError::TooManySigAlgs));
 }
 
 #[test]
@@ -1299,7 +1299,7 @@ fn sigalgs_at_max_sigalgs_accepted() {
 #[test]
 fn sigalgs_over_max_rejects_as_profile() {
     assert_eq!(
-        HelloRejectReason::from_ch_error(&ChError::TooManySigAlgs),
+        HelloRejectReason::from_client_hello_error(&ClientHelloError::TooManySigAlgs),
         HelloRejectReason::Profile
     );
 }
@@ -1399,7 +1399,7 @@ fn rejects_bad_record_version() {
         let mut msg = hello_msg(TLS12, &[TLS13], &["sub.example.org"], false);
         msg[1] = (bad >> 8) as u8;
         msg[2] = (bad & 0xff) as u8;
-        assert_eq!(parse_one(&msg), Err(ChError::BadRecordVersion { got: bad }));
+        assert_eq!(parse_one(&msg), Err(ClientHelloError::BadRecordVersion { got: bad }));
     }
 }
 
@@ -1409,7 +1409,7 @@ fn rejects_unsupported_legacy_version() {
         let msg = hello_msg(legacy, &[TLS13], &["sub.example.org"], false);
         assert_eq!(
             parse_one(&msg),
-            Err(ChError::UnsupportedLegacyVersion { got: legacy })
+            Err(ClientHelloError::UnsupportedLegacyVersion { got: legacy })
         );
     }
 }
@@ -1428,7 +1428,7 @@ fn rejects_missing_compression_methods() {
     no_comp.extend_from_slice(&hl.to_be_bytes()[1..]);
     no_comp.extend_from_slice(&new_body);
     let record = record(&no_comp);
-    assert_eq!(parse_one(&record), Err(ChError::MissingCompressionMethods));
+    assert_eq!(parse_one(&record), Err(ClientHelloError::MissingCompressionMethods));
 }
 
 #[test]
@@ -1439,7 +1439,7 @@ fn rejects_empty_sni_host_name() {
     ]);
     assert_eq!(
         parse_one(&wire),
-        Err(ChError::InvalidServerName {
+        Err(ClientHelloError::InvalidServerName {
             detail: "host_name is not a legal FQDN",
         }),
         "a zero-length SNI host_name must fail closed at the wire/parser layer"
@@ -1451,7 +1451,7 @@ fn rejects_empty_sni_host_name() {
 /// fresh inspector consuming exactly the same count.
 #[hegel::test(derandomize = true)]
 fn client_hello_inspector_is_total_and_completion_is_inspector_independent(tc: hegel::TestCase) {
-    let mut arbitrary = ChInspector::new();
+    let mut arbitrary = ClientHelloInspector::new();
     let _ = arbitrary.feed(&tc.draw(hegel::generators::binary().max_size(2048)));
 
     let grease: Vec<u16> = tc.draw(
@@ -1470,10 +1470,10 @@ fn client_hello_inspector_is_total_and_completion_is_inspector_independent(tc: h
     let ech = tc.draw(hegel::generators::booleans());
     let wire = hello_msg(TLS12, &versions, &names, ech);
 
-    let mut first = ChInspector::new();
-    let Ok(Inspect::Complete { consumed }) = first.feed(&wire) else {
+    let mut first = ClientHelloInspector::new();
+    let Ok(HelloParseStep::Complete { consumed }) = first.feed(&wire) else {
         panic!("a generated well-formed ClientHello must complete");
     };
-    let mut second = ChInspector::new();
-    assert_eq!(second.feed(&wire), Ok(Inspect::Complete { consumed }));
+    let mut second = ClientHelloInspector::new();
+    assert_eq!(second.feed(&wire), Ok(HelloParseStep::Complete { consumed }));
 }

@@ -13,8 +13,8 @@ fn config() -> Config {
 fn parse_full(bytes: &[u8]) -> Result<ConnectRequest, ConnectError> {
     let mut parser = ConnectParser::new();
     match parser.feed(bytes).expect("no limit error") {
-        Feed::Complete { .. } => parser.result().copied().expect("complete has result"),
-        Feed::Incomplete => Err(ConnectError::MalformedRequestLine {
+        ConnectParseStep::Complete { .. } => parser.result().copied().expect("complete has result"),
+        ConnectParseStep::Incomplete => Err(ConnectError::MalformedRequestLine {
             detail: "incomplete",
         }),
     }
@@ -42,12 +42,12 @@ fn coalesced_tunnel_bytes_do_not_block_completion() {
     combined.extend_from_slice(head);
     combined.push(0x16);
     match parser.feed(&combined).expect("feed") {
-        Feed::Complete { head_len } => {
+        ConnectParseStep::Complete { head_len } => {
             let req = parser.result().copied().expect("settled");
             assert_eq!(req.expect("parse").hostname(), "sub.example.org");
             assert_eq!(head_len, head.len(), "consumed must stop at the delimiter");
         }
-        Feed::Incomplete => panic!("coalesced ClientHello must not block the CONNECT head"),
+        ConnectParseStep::Incomplete => panic!("coalesced ClientHello must not block the CONNECT head"),
     }
 }
 
@@ -67,8 +67,8 @@ fn fragmented_feed_is_boundary_independent() {
     let mut parser = ConnectParser::new();
     for chunk in HEAD.as_bytes().chunks(5) {
         match parser.feed(chunk).expect("no limit") {
-            Feed::Incomplete => {}
-            Feed::Complete { .. } => {
+            ConnectParseStep::Incomplete => {}
+            ConnectParseStep::Complete { .. } => {
                 let req = parser.result().copied().expect("settled");
                 assert_eq!(req.expect("parse").hostname(), "sub.example.org");
                 return;
@@ -355,11 +355,11 @@ fn over_limit_applies_to_head_not_trailing() {
     big.extend_from_slice(head);
     big.extend_from_slice(&[0x16; CONNECT_LIMIT]);
     match parser.feed(&big).expect("feed") {
-        Feed::Complete { .. } => {
+        ConnectParseStep::Complete { .. } => {
             let req = parser.result().copied().expect("settled");
             assert_eq!(req.expect("parse").hostname(), "sub.example.org");
         }
-        Feed::Incomplete => panic!("trailing bytes must not count toward the head bound"),
+        ConnectParseStep::Incomplete => panic!("trailing bytes must not count toward the head bound"),
     }
 }
 
@@ -592,7 +592,7 @@ fn incremental_scan_finds_delimiter_straddling_feed_boundary() {
     parser.feed(b"st: x\r\n\r").expect("incomplete");
     let f = parser.feed(b"\n").expect("complete");
     assert!(
-        matches!(f, Feed::Complete { .. }),
+        matches!(f, ConnectParseStep::Complete { .. }),
         "a delimiter split across feeds must still close the head"
     );
 }
@@ -611,13 +611,13 @@ fn terminal_state(
             .feed(piece)
             .expect("bounded input stays below the head limit")
         {
-            Feed::Complete { head_len } => {
+            ConnectParseStep::Complete { head_len } => {
                 return Some((
                     head_len,
                     parser.result().copied().expect("complete has result"),
                 ));
             }
-            Feed::Incomplete => {}
+            ConnectParseStep::Incomplete => {}
         }
     }
     None

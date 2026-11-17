@@ -27,16 +27,16 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 | ID | Definition | Code |
 |---|---|---|
 | `connect-head` | Untrusted request head; incremental, read-boundary independent | `ConnectParser`, `ConnectRequest`, `ConnectError`, `ConnectHeadReason` |
-| `admission-verdict` | Terminal pre-dial decision: admit with peer, or refuse with a class | `ConnectPhase` |
-| `approved-hostname` | Host after allowlist match; identity SNI must reproduce | `FixedHostname` |
+| `admission-verdict` | Terminal pre-dial decision: admit with peer, or refuse with a class | `AdmissionVerdict` |
+| `approved-hostname` | Host after allowlist match; identity SNI must reproduce | `ApprovedHostname` |
 | `ordinal` | Sorted position of an entry; the only per-domain key | `DomainOrdinal` |
-| `client-hello` | Initial TLS message; untrusted, framed, capped | `ClientHello`, `ChInspector` |
+| `client-hello` | Initial TLS message; untrusted, framed, capped | `ClientHello`, `ClientHelloInspector` |
 | `ja4-baseline` | First distinct fingerprint per ordinal; later ones are changes | `FactCounters::ja4_value` |
-| `forwarding-gate` | Two-barrier byte permission; opens after validated hello + peer | `TunnelGate`, `GatePhase`, `ValidatedHello` |
+| `forwarding-gate` | Two-barrier byte permission; opens after validated hello + peer | `ForwardingGate`, `GatePhase`, `ValidatedHello` |
 | `early-data` | Upstream activity seen through I/O before the gate opens | `Activity`, `TerminateReason`, `observe_upstream_activity` |
 | `peer` | Committed upstream endpoint; fixed for the tunnel's life | `PeerDecision`, `Deadline` |
 | `refusal` | Wire status + reason ending an attempt | `Refusal`, `RefusalWire`, `RejectReason` |
-| `capacity-refusal` | Slots or pending setups exhausted | `AdmissionError` |
+| `capacity-refusal` | Slots or pending setups exhausted | `CapacityRefusal` |
 
 ## Resolution
 
@@ -45,8 +45,8 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 | `resolver` | Bare IP (TCP) or `IP#fqdn` with optional pin (DoT) | `ResolverSet`, `Nameserver` |
 | `pin` | Operator-declared SHA-256 SPKI pin on a DoT resolver; assertion substitution, not transport trust | `SpiPin`, `PIN_SHA256_SUFFIX` |
 | `dns-wire` | Untrusted response bytes, validated in staging | `ResponseWorkspace`, `BailiwickZones`, `DnsError` |
-| `exchange-outcome` | Positive / NXDOMAIN / NODATA / exchange failure | `wire::Outcome` |
-| `cache-entry` | Per name × family: bindings, deadlines, generation, proof | `Entry` |
+| `exchange-outcome` | Positive / NXDOMAIN / NODATA / exchange failure | `ExchangeOutcome` |
+| `cache-entry` | Per name × family: bindings, deadlines, generation, proof | `CacheEntry` |
 | `binding` | One eligible address in an entry, sharing its deadlines | `EligibleBindings`, `BindingList`, `StagedPositive` |
 | `binding-state` | Fresh / stale-serving / retired; derived, never stored | `EntryState` |
 | `generation` | Isolation token rejecting stale results and events | `Generation`, `Generations` |
@@ -61,9 +61,9 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 | `fact` | AnyIllegal, EarlyUpstreamData, Ja4Change, or Unknown | `Violation`, `AnyIllegalCause`, `UnknownReason` |
 | `control` | One configured key with exactly one `{action, scope}` | `Control`, `PerFqdnControl`, `AnyIllegalControl`, `ControlTable`, `Scope`, `ActionKind` |
 | `effect` | BaselineOnly \| Notify \| Block \| Unknown | `Effect`, `decide` |
-| `latch` | Lets exactly one unattributable violation select an action | `FirstSlot` |
+| `latch` | Lets exactly one unattributable violation select an action | `FirstIllegalLatch` |
 | `all-scope-gate` | Per-class threshold/window; sticky once armed | `AllScopeGate`, `GateSet`, `WindowedCounter` |
-| `block-state` | Connection / ordinal / all; ordinal and all sticky | `Enforcement` |
+| `block-state` | Connection / ordinal / all; ordinal and all sticky | `EnforcementState` |
 | `monitor` | Counters + bounded capture + reserved summary | `Monitor`, `FactCounters`, `ActionCounters`, `RefusalCounters` |
 
 ## Ownership
@@ -99,7 +99,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 |---|---|---|
 | `startup-window` | Bounded resolution before the listener exists | `run_startup`, `StartupOutcome` |
 | `startup-decision` | Serve (full/degraded), exit 75, or terminated | `StartupDecision`, `ServingMode` |
-| `serving-loop` | Single owner loop over sockets, DNS, timers, logs | `Serving`, `Stage` |
+| `serving-loop` | Single owner loop over sockets, DNS, timers, logs | `ServingLoop`, `SlotStage` |
 | `shutdown` | SIGTERM stops accepting, drains bounded, exits | `Shutdown`, `ShutdownExit` |
 | `ctl-any` | Four unattributable keys; action notify/block, scope connection/all | `AnyIllegalControl` |
 | `ctl-fqdn` | `early_data`, `ja4`; action notify/block/ignore, scope connection/fqdn/all | `PerFqdnControl` |
@@ -116,15 +116,15 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 | ID | Prevents | Code |
 |---|---|---|
 | `inv-binding` | "authorise once, dial later against new DNS" | `Worker` |
-| `inv-auth` | "forward first, validate second" | `TunnelGate` |
+| `inv-auth` | "forward first, validate second" | `ForwardingGate` |
 | `inv-fail-closed` | "be permissive on ambiguity" | `publication` |
 | `inv-zalloc` | "memory/latency grow with load" | `alloc` |
 | `inv-bounds` | "exhaustion becomes growth" | `inventory` |
 | `inv-ownership` | "two writers, one connection" | slot table |
 | `inv-generation` | "slow answer writes into a reused slot" | `Generations` |
 | `inv-work` | "one busy connection starves a deadline" | reactor budget |
-| `inv-transition` | "readiness treated as success" | `Stage` |
-| `inv-parse` | "decision depends on TCP split" | `ConnectParser`, `ChInspector` |
+| `inv-transition` | "readiness treated as success" | `SlotStage` |
+| `inv-parse` | "decision depends on TCP split" | `ConnectParser`, `ClientHelloInspector` |
 | `inv-nodecrypt` | "the proxy becomes a CA, hence a target" | — |
 | `inv-bytes` | "silently skip a chunk and continue" | gate accounting |
 | `inv-deadline` | "progress renews an expired phase" | `Deadline` |
@@ -313,24 +313,27 @@ flowchart LR
 
 ## Naming debt
 
-Derived by mapping every term above to the code symbol that realises it, then flagging symbols whose noun differs from the term's noun.
+None outstanding. The map below was applied to the code in one mechanical,
+behaviour-preserving commit on 2026-11-17 (`bd alumina-c06x4`), so the target
+term and the code's term are the same word everywhere above.
 
-A name is flagged when it describes storage or layout instead of meaning (`Fixed`, `Slot`, `Entry`, `Serving`), describes progress where the type is terminal (`ConnectPhase`), abbreviates a word nobody says (`Ch`), generalises past its own range (`AdmissionError` means capacity only), or spends one word on two concepts (`gate`, `serving`, `Outcome`). Names that already speak the language are left alone. Proposals are not applied changes: the target term is settled here first, then each rename ships as its own increment, with an alias across the widest reach.
+| Code | Formerly |
+|---|---|
+| `FirstIllegalLatch` | `FirstSlot` |
+| `AdmissionVerdict` | `ConnectPhase` |
+| `CapacityRefusal` | `AdmissionError` |
+| `ForwardingGate` | `TunnelGate` |
+| `ApprovedHostname` | `FixedHostname` |
+| `EntryState::StaleServing` | `EntryState::Stale` |
+| `ClientHelloInspector`, `ClientHelloError` | `ChInspector`, `ChError` |
+| `ConnectParseStep`, `HelloParseStep` | `Feed`, `Inspect` |
+| `ServingLoop`, `SlotStage` | `Serving`, `Stage` |
+| `CacheEntry` | `Entry` |
+| `ExchangeOutcome` | `wire::Outcome` |
+| `EnforcementState` | `Enforcement` |
 
-| ID | Current | Proposed | Why |
-|---|---|---|---|
-| `latch` | `FirstSlot` | `FirstIllegalLatch` | "slot" is a tunnel-slot noun |
-| `admission-verdict` | `ConnectPhase` | `AdmissionVerdict` | terminal incl. `Peer`; "phase" implies progress |
-| `capacity-refusal` | `AdmissionError` | `CapacityRefusal` | only slot/pending exhaustion; 2 variants |
-| `forwarding-gate` | `TunnelGate` | `ForwardingGate` | spec term; collides with `AllScopeGate` |
-| `approved-hostname` | `FixedHostname` | `ApprovedHostname` | "fixed" is storage; identity is approval |
-| `binding-state` | `EntryState::Stale` | `StaleServing` | stale ≠ expired |
-| `client-hello` | `ChInspector`, `ChError` | `ClientHelloInspector`, `ClientHelloError` | "Ch" is not a domain word |
-| `connect-head`, `client-hello` | `Feed`, `Inspect` | `ConnectParseStep`, `HelloParseStep` | one vague name, two modules |
-| `serving-loop` | `Serving` | `ServingLoop` | "serving" also means mode and storage |
-| `serving-loop` | `Stage` | `SlotStage` | distinct from `GatePhase` |
-| `cache-entry` | `Entry` | `CacheEntry` | generic name for the DNS component |
-| `exchange-outcome` | `wire::Outcome` | `ExchangeOutcome` | collides with `NameOutcome` |
-| `block-state` | `Enforcement` | `EnforcementState` | context noun used as state object |
-
-Already aligned: `DomainOrdinal`, `Violation`, `Effect`, `decide`, `AllScopeGate`, `WindowedCounter`, `EntryState`, `BailiwickZones`, `AttemptLedger`.
+Same-word survivors are distinct concepts, not debt: `Shutdown::Serving` (owner
+phase), `ExchangeClass::Serving` and `Phase::Serving` (exchange and allocator
+phases), `ServingMode`, `STALE_SERVING_WINDOW`, `grade_key::Outcome` (the cache's
+own exchange classification), `log::encoding`'s private `Entry` writer, and
+`EntryState::as_str()`'s `stale` token.

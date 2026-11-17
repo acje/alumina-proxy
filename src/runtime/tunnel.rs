@@ -269,7 +269,7 @@ pub enum PeerDecision {
 /// is opened is decided here, so a refusal outcome guarantees no upstream peer
 /// is ever attempted (effect non-reachability).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConnectPhase {
+pub enum AdmissionVerdict {
     /// The CONNECT hostname is not allowlisted (HTTP 403).
     Forbidden,
     /// Allowlisted but the name currently has no eligible non-retired binding
@@ -280,7 +280,7 @@ pub enum ConnectPhase {
     /// opened (HTTP 504; §CONNECT request).
     DeadlineExhausted,
     /// All allowed upstream attempts were consumed (HTTP 502, "upstream
-    /// connection failed"; §CONNECT request). Distinct from [`ConnectPhase::NoBinding`]
+    /// connection failed"; §CONNECT request). Distinct from [`AdmissionVerdict::NoBinding`]
     /// so the two 502 reasons and bodies are never conflated.
     CandidatesExhausted,
     /// Proceed: dial this eligible destination for this family within the
@@ -293,22 +293,22 @@ pub enum ConnectPhase {
     },
 }
 
-impl ConnectPhase {
+impl AdmissionVerdict {
     /// The canonical fixed status for this phase (§CONNECT request;
     /// canonical refusal matrix at src/serving/policy.rs:8-24): 403
     /// not-allowlisted, 502 for both no-binding and candidates-exhausted, 504
     /// setup deadline, 200 for an authorized `Peer`. HTTP 503 is
-    /// capacity-only and lives in [`AdmissionError`]; HTTP 400 malformed is
+    /// capacity-only and lives in [`CapacityRefusal`]; HTTP 400 malformed is
     /// parser-owned and never reaches the worker. Pinned by
     /// `refusal_statuses_follow_the_canonical_fixed_matrix`.
     #[must_use]
     #[cfg(test)]
     pub const fn status(self) -> u16 {
         match self {
-            ConnectPhase::Forbidden => 403,
-            ConnectPhase::NoBinding | ConnectPhase::CandidatesExhausted => 502,
-            ConnectPhase::DeadlineExhausted => 504,
-            ConnectPhase::Peer { .. } => 200,
+            AdmissionVerdict::Forbidden => 403,
+            AdmissionVerdict::NoBinding | AdmissionVerdict::CandidatesExhausted => 502,
+            AdmissionVerdict::DeadlineExhausted => 504,
+            AdmissionVerdict::Peer { .. } => 200,
         }
     }
 }
@@ -365,7 +365,7 @@ pub enum SlotState {
 
 /// Reasons the single worker can refuse a new setup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdmissionError {
+pub enum CapacityRefusal {
     SlotCapacity,
     PendingCapacity,
 }
@@ -465,16 +465,16 @@ impl Worker {
         &mut self,
         now: Instant,
         peer: IpAddr,
-    ) -> Result<SlotIndex, AdmissionError> {
+    ) -> Result<SlotIndex, CapacityRefusal> {
         if self.occupied_count >= MAX_TUNNELS {
-            return Err(AdmissionError::SlotCapacity);
+            return Err(CapacityRefusal::SlotCapacity);
         }
         if self.pending_count >= MAX_PENDING_SETUPS {
-            return Err(AdmissionError::PendingCapacity);
+            return Err(CapacityRefusal::PendingCapacity);
         }
         let peer = peer.to_canonical();
         if self.pending_from_peer(peer) >= MAX_PENDING_PER_PEER {
-            return Err(AdmissionError::PendingCapacity);
+            return Err(CapacityRefusal::PendingCapacity);
         }
         let index = self.take_min_free();
         self.slots[index as usize] = SlotState::InSetup {
@@ -547,7 +547,7 @@ impl Worker {
         slot: &SlotIndex,
         resolved: &ResolvedRequest<'_>,
         now: Instant,
-    ) -> Result<ConnectPhase, DecideError> {
+    ) -> Result<AdmissionVerdict, DecideError> {
         let setup = self.setup_deadline(slot).ok_or(DecideError::NotInSetup)?;
         let attempts = self.attempt_ledger(slot).ok_or(DecideError::NotInSetup)?;
         next_phase(resolved, now, attempts.counts(), attempts.previous(), setup)
@@ -558,7 +558,7 @@ impl Worker {
     /// advancing its ledger toward the fixed attempt budget. The budget is
     /// self-enforcing: once [`MAX_UPSTREAM_ATTEMPTS`] attempts are recorded,
     /// any later [`Worker::decide`] for the slot resolves
-    /// [`ConnectPhase::CandidatesExhausted`].
+    /// [`AdmissionVerdict::CandidatesExhausted`].
     ///
     /// # Errors
     ///
@@ -920,29 +920,29 @@ pub(crate) fn next_phase(
     counts: AttemptCounts,
     previous: Option<Family>,
     setup_deadline: Deadline,
-) -> Result<ConnectPhase, CacheError> {
+) -> Result<AdmissionVerdict, CacheError> {
     let view = &resolved.view;
     let Some(ordinal) = resolved.ordinal() else {
-        return Ok(ConnectPhase::Forbidden);
+        return Ok(AdmissionVerdict::Forbidden);
     };
     let name = view
         .cache
         .name_index(ordinal)
         .ok_or(CacheError::NameOutOfRange)?;
     if setup_deadline.is_expired(now) {
-        return Ok(ConnectPhase::DeadlineExhausted);
+        return Ok(AdmissionVerdict::DeadlineExhausted);
     }
     if usize::from(counts.total()) >= MAX_UPSTREAM_ATTEMPTS {
-        return Ok(ConnectPhase::CandidatesExhausted);
+        return Ok(AdmissionVerdict::CandidatesExhausted);
     }
     let cache_now = view.clock.cache_secs(now);
     match select_peer(view.cache, name, cache_now, counts, previous)? {
-        PeerDecision::Peer { addr, family } => Ok(ConnectPhase::Peer {
+        PeerDecision::Peer { addr, family } => Ok(AdmissionVerdict::Peer {
             addr,
             family,
             connect_deadline: Deadline::connect_attempt(now, setup_deadline),
         }),
-        PeerDecision::NoFamily => Ok(ConnectPhase::NoBinding),
+        PeerDecision::NoFamily => Ok(AdmissionVerdict::NoBinding),
     }
 }
 

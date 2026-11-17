@@ -1468,7 +1468,7 @@ mod exchange {
     }
     #[test]
     fn ineligible_only_positive_classifies_as_no_eligible() {
-        let outcome = wire::Outcome::Positive {
+        let outcome = wire::ExchangeOutcome::Positive {
             family: Family::A,
             bindings: wire::BindingList::from_slice(&[crate::eligibility::NumericAddr::V4(
                 std::net::Ipv4Addr::new(10, 0, 0, 1),

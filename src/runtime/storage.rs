@@ -22,13 +22,13 @@ use crate::dns::transport::{
 #[cfg(test)]
 use crate::enforcement::action::DomainOrdinal;
 use crate::enforcement::monitor::DnsAnomalyKind;
-use crate::enforcement::state::Enforcement;
+use crate::enforcement::state::EnforcementState;
 use crate::inspection::connect::ConnectRequest;
 use crate::log::{Level, LogStore, ResolverProbeSegment, StartupStatus};
 #[cfg(test)]
-use crate::names::hostname::FixedHostname;
+use crate::names::hostname::ApprovedHostname;
 use crate::runtime::tunnel::{
-    AdmissionError, AttemptLedger, ConnectPhase, Deadline, DecideError, ResolvedRequest, SlotIndex,
+    CapacityRefusal, AttemptLedger, AdmissionVerdict, Deadline, DecideError, ResolvedRequest, SlotIndex,
     TunnelIndex, Worker, WorkerClock, WorkerView,
 };
 
@@ -62,7 +62,7 @@ pub struct ServeStorage {
     dns: StartupDns,
     config: Config,
     worker: Worker,
-    enforcement: Enforcement,
+    enforcement: EnforcementState,
     origin: Instant,
     now0: u64,
     logs: LogStore,
@@ -355,7 +355,7 @@ impl ServeStorage {
         dns.configure_bailiwick(config)?;
         let origin = Instant::now();
         let worker = Worker::boot(WorkerClock::new(origin, 0));
-        let enforcement = Enforcement::new(*config.control(), config.gates());
+        let enforcement = EnforcementState::new(*config.control(), config.gates());
         Ok(ServeStorage {
             cache,
             schedules,
@@ -649,11 +649,11 @@ impl ServeStorage {
         &mut self.incident_report
     }
 
-    pub(crate) const fn enforcement(&self) -> &Enforcement {
+    pub(crate) const fn enforcement(&self) -> &EnforcementState {
         &self.enforcement
     }
 
-    pub(crate) const fn enforcement_mut(&mut self) -> &mut Enforcement {
+    pub(crate) const fn enforcement_mut(&mut self) -> &mut EnforcementState {
         &mut self.enforcement
     }
 
@@ -668,7 +668,7 @@ impl ServeStorage {
     #[cfg(test)]
     pub(crate) fn ordinal_for_pair(
         &self,
-        hostname: &FixedHostname,
+        hostname: &ApprovedHostname,
         port: u16,
     ) -> Option<DomainOrdinal> {
         let index = self.config.allowlist_position(hostname.as_str(), port)?;
@@ -1380,7 +1380,7 @@ impl ServeStorage {
         &mut self,
         now: Instant,
         peer: IpAddr,
-    ) -> Result<SlotIndex, AdmissionError> {
+    ) -> Result<SlotIndex, CapacityRefusal> {
         self.worker.admit(now, peer)
     }
 
@@ -1412,7 +1412,7 @@ impl ServeStorage {
         slot: &SlotIndex,
         resolved: &ResolvedRequest<'_>,
         now: Instant,
-    ) -> Result<ConnectPhase, DecideError> {
+    ) -> Result<AdmissionVerdict, DecideError> {
         self.worker.decide(slot, resolved, now)
     }
 

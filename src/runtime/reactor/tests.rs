@@ -15,14 +15,14 @@ fn config(port: u16) -> crate::config::Config {
     crate::config::parse_config_document(&doc).expect("valid test config")
 }
 
-fn with_serving_stack(port: u16, body: impl FnOnce(&mut Serving) + Send + 'static) {
+fn with_serving_stack(port: u16, body: impl FnOnce(&mut ServingLoop) + Send + 'static) {
     with_serving_stack_within(port, SERVING_JOIN_DEADLINE, body);
 }
 
 fn with_serving_stack_within(
     port: u16,
     deadline: Duration,
-    body: impl FnOnce(&mut Serving) + Send + 'static,
+    body: impl FnOnce(&mut ServingLoop) + Send + 'static,
 ) {
     run_serving_thread(deadline, move || serve_on(port), body);
 }
@@ -35,8 +35,8 @@ fn with_serving_stack_within(
 /// `serving_body_panic_still_reaches_the_test`.
 fn run_serving_thread(
     deadline: Duration,
-    build: impl FnOnce() -> Serving + Send + 'static,
-    body: impl FnOnce(&mut Serving) + Send + 'static,
+    build: impl FnOnce() -> ServingLoop + Send + 'static,
+    body: impl FnOnce(&mut ServingLoop) + Send + 'static,
 ) {
     let (finished, done) = std::sync::mpsc::channel();
     let handle = std::thread::Builder::new()
@@ -60,12 +60,12 @@ fn run_serving_thread(
     }
 }
 
-fn serve_on(port: u16) -> Serving {
+fn serve_on(port: u16) -> ServingLoop {
     let storage = ServeStorage::boot(&config(port)).expect("boot storage");
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), port))
         .expect("bind listener");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    Serving::new(storage, listener, traffic).expect("serving")
+    ServingLoop::new(storage, listener, traffic).expect("serving")
 }
 
 fn transfer_body() {
@@ -77,7 +77,7 @@ fn transfer_body() {
     let traffic = TrafficStorage::allocate().expect("boot traffic");
     let first_up = traffic.slots()[0].up.as_ptr();
     let last_down = traffic.slots()[MAX_TUNNELS - 1].down.as_ptr();
-    let serving = Serving::new(storage, listener, traffic).expect("serving");
+    let serving = ServingLoop::new(storage, listener, traffic).expect("serving");
     assert_eq!(
         serving.slots[0].buf.as_ptr(),
         first_up,
@@ -90,7 +90,7 @@ fn transfer_body() {
     );
 }
 
-fn pump(serving: &mut Serving, times: usize) {
+fn pump(serving: &mut ServingLoop, times: usize) {
     for _ in 0..times {
         serving
             .run_once(Some(Duration::from_millis(2)))
@@ -228,7 +228,7 @@ fn read_quiet_window(stream: &mut TcpStream, window: Duration) -> Vec<u8> {
 /// Reads the last log record as the reject record for `reason`, asserting the
 /// record kind and reason, and returns the record text so the caller can pin
 /// the fields it owns (requested hostname, ordinals, and so on).
-fn last_reject_record(serving: &Serving, reason: &str) -> String {
+fn last_reject_record(serving: &ServingLoop, reason: &str) -> String {
     let record = serving
         .storage()
         .logs()
@@ -245,7 +245,7 @@ fn last_reject_record(serving: &Serving, reason: &str) -> String {
 
 /// Connects one client, pumps `times` owner turns, and asserts it holds exactly
 /// one admitted setup seat; returns the client for the caller's exchange.
-fn admitted_client(serving: &mut Serving, port: u16, times: usize) -> TcpStream {
+fn admitted_client(serving: &mut ServingLoop, port: u16, times: usize) -> TcpStream {
     let client = connect(port);
     pump(serving, times);
     assert_eq!(
@@ -258,19 +258,19 @@ fn admitted_client(serving: &mut Serving, port: u16, times: usize) -> TcpStream 
 
 /// Feeds one complete CONNECT head into `slot`'s parser, asserting the head
 /// parses to completion.
-fn feed_connect_head(serving: &mut Serving, slot: usize, head: &[u8]) {
-    use crate::inspection::connect::Feed;
+fn feed_connect_head(serving: &mut ServingLoop, slot: usize, head: &[u8]) {
+    use crate::inspection::connect::ConnectParseStep;
     match serving.slots[slot].parser.feed(head).expect("head feed") {
-        Feed::Complete { .. } => {}
-        Feed::Incomplete => panic!("head should parse to completion"),
+        ConnectParseStep::Complete { .. } => {}
+        ConnectParseStep::Incomplete => panic!("head should parse to completion"),
     }
 }
 
 /// Puts the slot into an open-gate relay with a typed head/hello boundary,
 /// so focused relay tests can drive real sockets through the actual owner.
-fn open_relay(serving: &mut Serving, index: usize) {
+fn open_relay(serving: &mut ServingLoop, index: usize) {
     let ws = &mut serving.slots[index];
-    ws.stage = Stage::Relay;
+    ws.stage = SlotStage::Relay;
     ws.gate.on_connect_head(4);
     ws.gate.on_authorized();
     ws.gate.on_upstream_connected();
@@ -393,9 +393,9 @@ fn hello_wire_no_sni() -> Vec<u8> {
     record
 }
 
-fn drive_hello(serving: &mut Serving, wire: &[u8], approved: &str) {
+fn drive_hello(serving: &mut ServingLoop, wire: &[u8], approved: &str) {
     let index = 0;
-    let approved = FixedHostname::normalize(approved.as_bytes()).expect("approved hostname");
+    let approved = ApprovedHostname::normalize(approved.as_bytes()).expect("approved hostname");
     {
         let ws = &mut serving.slots[index];
         ws.buf_base = 0;
@@ -407,7 +407,7 @@ fn drive_hello(serving: &mut Serving, wire: &[u8], approved: &str) {
         ws.hello_consumed = 0;
         ws.fwd = 0;
         ws.approved = Some(approved);
-        ws.stage = Stage::ValidatingHello;
+        ws.stage = SlotStage::ValidatingHello;
         ws.gate.on_connect_head(0);
         ws.gate.on_authorized();
         ws.gate.on_upstream_connected();
@@ -440,7 +440,7 @@ fn spawn_sink_reader(
     })
 }
 
-fn wait_for_queued_burst(serving: &Serving, index: usize, peek_target: usize) {
+fn wait_for_queued_burst(serving: &ServingLoop, index: usize, peek_target: usize) {
     let mut peekbuf = vec![0u8; 32 * 1024];
     let avail_start = Instant::now();
     loop {
@@ -469,7 +469,7 @@ fn wait_for_queued_burst(serving: &Serving, index: usize, peek_target: usize) {
 }
 
 fn armed_budget_relay(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     index: usize,
 ) -> (
     TcpStream,
@@ -491,7 +491,7 @@ fn armed_budget_relay(
         let ws = &mut serving.slots[index];
         ws.upstream = Some(up);
         ws.client = Some(client);
-        ws.stage = Stage::Relay;
+        ws.stage = SlotStage::Relay;
         ws.head_len = 4;
         ws.buf_base = 0;
     }
@@ -505,7 +505,7 @@ fn armed_budget_relay(
 }
 
 fn drain_rescheduled_visit(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     token: Token,
     received: &std::sync::Mutex<Vec<u8>>,
     payload_len: usize,
@@ -533,7 +533,7 @@ fn run_budget_visit_fixture(
     port: u16,
     first_n: usize,
     peek_target: usize,
-    assert_first_visit: impl FnOnce(&mut Serving, usize) + Send + 'static,
+    assert_first_visit: impl FnOnce(&mut ServingLoop, usize) + Send + 'static,
 ) {
     with_serving_stack(port, move |serving| {
         let index = 0;
@@ -646,10 +646,10 @@ fn shutdown_alloc_witness_body() {
     {
         let serving = runtime.serving_mut();
         let ws = &mut serving.slots[index];
-        ws.approved = FixedHostname::normalize(b"sub.example.org");
+        ws.approved = ApprovedHostname::normalize(b"sub.example.org");
         ws.gate.on_connect_head(0);
         ws.gate.on_authorized();
-        ws.stage = Stage::Dialing;
+        ws.stage = SlotStage::Dialing;
         ws.upstream = Some(upstream);
         ws.head_len = 0;
         ws.buf_base = 0;
@@ -672,7 +672,7 @@ fn shutdown_alloc_witness_body() {
         "the promoted relay must graduate to a real storage tunnel handle"
     );
     assert!(
-        matches!(runtime.serving().slots[index].stage, Stage::Relay),
+        matches!(runtime.serving().slots[index].stage, SlotStage::Relay),
         "an established relay holds the second slot before the signal"
     );
     assert!(
@@ -699,7 +699,7 @@ fn shutdown_alloc_witness_body() {
             "the pending setup is closed at the first signal; the established relay keeps draining"
         );
         assert!(
-            matches!(runtime.serving().slots[index].stage, Stage::Relay),
+            matches!(runtime.serving().slots[index].stage, SlotStage::Relay),
             "the established relay keeps draining past the first signal"
         );
         assert_eq!(
@@ -762,12 +762,12 @@ const _: () = assert!(
     "two 128 KiB buffers per tunnel across 512 slots is the 128 MiB traffic profile"
 );
 
-fn serve_on_cfg(port: u16, cfg: &crate::config::Config) -> Serving {
+fn serve_on_cfg(port: u16, cfg: &crate::config::Config) -> ServingLoop {
     let storage = ServeStorage::boot(cfg).expect("boot storage");
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4([127, 0, 0, 1].into()), port))
         .expect("bind listener");
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic");
-    Serving::new(storage, listener, traffic).expect("serving")
+    ServingLoop::new(storage, listener, traffic).expect("serving")
 }
 
 fn cfg_doc1(port: u16, any_scope: &str, kind: &str, action_scope: &str) -> crate::config::Config {
@@ -789,7 +789,7 @@ fn cfg_two_ports(port: u16, kind: &str, action_scope: &str) -> crate::config::Co
 fn with_serving_stack_cfg(
     port: u16,
     cfg: crate::config::Config,
-    body: impl FnOnce(&mut Serving) + Send + 'static,
+    body: impl FnOnce(&mut ServingLoop) + Send + 'static,
 ) {
     with_serving_stack_cfg_within(port, cfg, SERVING_JOIN_DEADLINE, body);
 }
@@ -798,35 +798,35 @@ fn with_serving_stack_cfg_within(
     port: u16,
     cfg: crate::config::Config,
     deadline: Duration,
-    body: impl FnOnce(&mut Serving) + Send + 'static,
+    body: impl FnOnce(&mut ServingLoop) + Send + 'static,
 ) {
     run_serving_thread(deadline, move || serve_on_cfg(port, &cfg), body);
 }
 
-fn fabric_validated_early_data(serving: &mut Serving, test_data: Option<usize>) {
+fn fabric_validated_early_data(serving: &mut ServingLoop, test_data: Option<usize>) {
     fabric_validated_early_data_at(serving, 0, test_data);
 }
 
-fn fabric_validated_early_data_at(serving: &mut Serving, index: usize, test_data: Option<usize>) {
+fn fabric_validated_early_data_at(serving: &mut ServingLoop, index: usize, test_data: Option<usize>) {
     let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
     let origin_addr = origin.local_addr().expect("origin addr");
     let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
     let _origin_stream = origin.accept().expect("accept origin side").0;
     {
         let ws = &mut serving.slots[index];
-        ws.approved = FixedHostname::normalize(b"sub.example.org");
+        ws.approved = ApprovedHostname::normalize(b"sub.example.org");
         let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
         ws.head_len = head_len;
         ws.gate.on_connect_head(head_len);
         ws.gate.on_authorized();
         ws.gate.on_upstream_connected();
-        ws.stage = Stage::Dialing;
+        ws.stage = SlotStage::Dialing;
         ws.upstream = Some(up);
     }
     let committed = serving
         .storage()
         .ordinal_for_pair(
-            &FixedHostname::normalize(b"sub.example.org").expect("approved hostname"),
+            &ApprovedHostname::normalize(b"sub.example.org").expect("approved hostname"),
             serving.slots[index].approved_port,
         )
         .map(crate::enforcement::action::DomainOrdinal::get);
@@ -838,14 +838,14 @@ fn fabric_validated_early_data_at(serving: &mut Serving, index: usize, test_data
     }
 }
 
-fn fabric_relay_slot(serving: &mut Serving, index: usize, approved: &[u8], pending_down: &[u8]) {
+fn fabric_relay_slot(serving: &mut ServingLoop, index: usize, approved: &[u8], pending_down: &[u8]) {
     let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
     let sink_addr = sink.local_addr().expect("sink addr");
     let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
     let _sink_stream = sink.accept().expect("accept sink side").0;
     {
         let ws = &mut serving.slots[index];
-        ws.approved = FixedHostname::normalize(approved);
+        ws.approved = ApprovedHostname::normalize(approved);
         ws.upstream = Some(up);
         ws.head_len = 4;
         ws.buf_base = 0;
@@ -853,7 +853,7 @@ fn fabric_relay_slot(serving: &mut Serving, index: usize, approved: &[u8], pendi
         ws.down_off = 0;
         ws.down[..pending_down.len()].copy_from_slice(pending_down);
         ws.down_len = pending_down.len();
-        ws.stage = Stage::Relay;
+        ws.stage = SlotStage::Relay;
         ws.gate.on_connect_head(4);
         ws.gate.on_authorized();
         ws.gate.on_upstream_connected();
@@ -866,7 +866,7 @@ fn fabric_relay_slot(serving: &mut Serving, index: usize, approved: &[u8], pendi
 /// `fabric_validated_early_data_at` plus an explicit `approved_port`: the
 /// pair-aware attribution fixture.
 fn fabric_validated_early_data_pair(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     index: usize,
     host: &[u8],
     port: u16,
@@ -878,7 +878,7 @@ fn fabric_validated_early_data_pair(
     let _origin_stream = origin.accept().expect("accept origin side").0;
     {
         let ws = &mut serving.slots[index];
-        ws.approved = FixedHostname::normalize(host);
+        ws.approved = ApprovedHostname::normalize(host);
         ws.approved_port = port;
         let head_len = format!(
             "CONNECT {}:{} HTTP/1.1\r\n\r\n",
@@ -890,7 +890,7 @@ fn fabric_validated_early_data_pair(
         ws.gate.on_connect_head(head_len);
         ws.gate.on_authorized();
         ws.gate.on_upstream_connected();
-        ws.stage = Stage::Dialing;
+        ws.stage = SlotStage::Dialing;
         ws.upstream = Some(up);
     }
     serving.register_upstream(index).expect("register upstream");
@@ -909,7 +909,7 @@ fn fresh_client_source() -> mio::net::TcpStream {
 }
 
 /// Fire one validated-early-data event on the given slot.
-fn fire_early_data(serving: &mut Serving, index: usize, test_data: Option<usize>) {
+fn fire_early_data(serving: &mut ServingLoop, index: usize, test_data: Option<usize>) {
     serving.slots[index].client = Some(fresh_client_source());
     fabric_validated_early_data_at(serving, index, test_data);
     {
@@ -986,12 +986,12 @@ fn wait_readable(stream: &mio::net::TcpStream, label: &str) {
     assert!(readable, "{label} never became readable on the proxy side");
 }
 
-fn stage_relay_slot(serving: &mut Serving, up: mio::net::TcpStream, client: mio::net::TcpStream) {
+fn stage_relay_slot(serving: &mut ServingLoop, up: mio::net::TcpStream, client: mio::net::TcpStream) {
     {
         let ws = &mut serving.slots[0];
         ws.upstream = Some(up);
         ws.client = Some(client);
-        ws.stage = Stage::Relay;
+        ws.stage = SlotStage::Relay;
         ws.head_len = 4;
         ws.buf_base = 0;
     }
@@ -1023,7 +1023,7 @@ fn relay_peer_pair() -> (mio::net::TcpStream, TcpStream) {
     (client, peer_stream)
 }
 
-fn await_relay_payload_readable(serving: &Serving, index: usize) {
+fn await_relay_payload_readable(serving: &ServingLoop, index: usize) {
     let deadline = Instant::now() + Duration::from_secs(2);
     while serving.slots[index]
         .client
@@ -1040,7 +1040,7 @@ fn await_relay_payload_readable(serving: &Serving, index: usize) {
     }
 }
 
-fn await_client_fin_readable(serving: &Serving, index: usize) {
+fn await_client_fin_readable(serving: &ServingLoop, index: usize) {
     let deadline = Instant::now() + Duration::from_secs(2);
     while serving.slots[index]
         .client
@@ -1057,7 +1057,7 @@ fn await_client_fin_readable(serving: &Serving, index: usize) {
     }
 }
 
-fn await_upstream_fin_readable(serving: &Serving, index: usize) {
+fn await_upstream_fin_readable(serving: &ServingLoop, index: usize) {
     let deadline = Instant::now() + Duration::from_secs(2);
     while serving.slots[index]
         .upstream
@@ -1348,7 +1348,7 @@ mod run_once {
                 .expect("an interrupted poll storm is a bounded yield, never a fatal serve error");
             assert_eq!(
                 serving.poll_attempts,
-                Serving::SERVING_POLL_INTERRUPT_ALLOWANCE as u64,
+                ServingLoop::SERVING_POLL_INTERRUPT_ALLOWANCE as u64,
                 "a sustained interrupted poll storm must cap at the allowance, not spin (got {})",
                 serving.poll_attempts
             );
@@ -1420,7 +1420,7 @@ mod serving {
                 ws.down[..BODY_200.len()].copy_from_slice(BODY_200);
                 ws.down_len = BODY_200.len();
                 ws.down_off = 0;
-                ws.stage = Stage::SendingConnected;
+                ws.stage = SlotStage::SendingConnected;
             }
             let start = Instant::now();
             while serving.storage().occupied() > 0 {
@@ -1569,12 +1569,12 @@ mod connect_setup {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let wire = hello_wire(b"evil.example.net", false);
-            let mut insp = ChInspector::new();
-            assert!(matches!(insp.feed(&wire), Ok(Inspect::Complete { .. })));
-            let approved = FixedHostname::normalize(b"sub.example.org");
+            let mut insp = ClientHelloInspector::new();
+            assert!(matches!(insp.feed(&wire), Ok(HelloParseStep::Complete { .. })));
+            let approved = ApprovedHostname::normalize(b"sub.example.org");
             assert_eq!(
                 client_hello::validate(insp.hello().expect("parsed hello"), &approved.unwrap()),
-                Err(client_hello::ChError::ServerNameMismatch),
+                Err(client_hello::ClientHelloError::ServerNameMismatch),
                 "the fixture must fail validation only on the SNI, not on parsing"
             );
             drive_hello(serving, &wire, "sub.example.org");
@@ -1595,12 +1595,12 @@ mod connect_setup {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let wire = hello_wire(b"sub.example.org", true);
-            let mut insp = ChInspector::new();
-            assert!(matches!(insp.feed(&wire), Ok(Inspect::Complete { .. })));
-            let approved = FixedHostname::normalize(b"sub.example.org");
+            let mut insp = ClientHelloInspector::new();
+            assert!(matches!(insp.feed(&wire), Ok(HelloParseStep::Complete { .. })));
+            let approved = ApprovedHostname::normalize(b"sub.example.org");
             assert_eq!(
                 client_hello::validate(insp.hello().expect("parsed hello"), &approved.unwrap()),
-                Err(client_hello::ChError::EchPresent),
+                Err(client_hello::ClientHelloError::EchPresent),
                 "the fixture must fail validation on ECH"
             );
             drive_hello(serving, &wire, "sub.example.org");
@@ -1618,15 +1618,15 @@ mod connect_setup {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let wire = hello_wire_no_sni();
-            let mut insp = ChInspector::new();
+            let mut insp = ClientHelloInspector::new();
             assert!(
-                matches!(insp.feed(&wire), Ok(Inspect::Complete { .. })),
+                matches!(insp.feed(&wire), Ok(HelloParseStep::Complete { .. })),
                 "the absent-SNI fixture must parse so validation is what denies it"
             );
-            let approved = FixedHostname::normalize(b"sub.example.org");
+            let approved = ApprovedHostname::normalize(b"sub.example.org");
             assert_eq!(
                 client_hello::validate(insp.hello().expect("parsed hello"), &approved.unwrap()),
-                Err(client_hello::ChError::InvalidServerName {
+                Err(client_hello::ClientHelloError::InvalidServerName {
                     detail: "requires exactly one host_name entry",
                 }),
                 "an absent SNI is a missing-identity denial, not a mismatch"
@@ -1649,11 +1649,11 @@ mod connect_setup {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let wire = hello_wire(b"!bad", false);
-            let mut insp = ChInspector::new();
+            let mut insp = ClientHelloInspector::new();
             assert!(
                 matches!(
                     insp.feed(&wire),
-                    Err(client_hello::ChError::InvalidServerName { .. })
+                    Err(client_hello::ClientHelloError::InvalidServerName { .. })
                 ),
                 "an illegal FQDN host_name must fail parsing as malformed identity"
             );
@@ -1677,7 +1677,7 @@ mod connect_setup {
             let wire = hello_wire(b"sub.example.org", false);
             drive_hello(serving, &wire, "sub.example.org");
             let ws = &serving.slots[0];
-            assert!(matches!(ws.stage, Stage::WritingHello));
+            assert!(matches!(ws.stage, SlotStage::WritingHello));
             assert_eq!(ws.gate.hello_end(), Some(wire.len()));
             assert_eq!(ws.fwd, 0, "no upstream socket yet; nothing forwarded");
         });
@@ -1715,8 +1715,8 @@ mod connect_setup {
             {
                 let ws = &mut serving.slots[index];
                 ws.client = Some(client);
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
-                ws.stage = Stage::SendingConnected;
+                ws.approved = ApprovedHostname::normalize(b"sub.example.org");
+                ws.stage = SlotStage::SendingConnected;
                 ws.head_len = 0;
                 ws.buf_base = 0;
                 ws.buf_len = 0;
@@ -1736,7 +1736,7 @@ mod connect_setup {
                 "a ClientHello pipelined before the CONNECT response must be validated on the phase entry without a new readable edge"
             );
             assert!(
-                matches!(serving.slots[index].stage, Stage::WritingHello),
+                matches!(serving.slots[index].stage, SlotStage::WritingHello),
                 "the validated hello advances into the hello write"
             );
         });
@@ -1882,8 +1882,8 @@ mod connect_setup {
                 ws.head_len = 0;
                 ws.hello_consumed = 0;
                 ws.fwd = 0;
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
-                ws.stage = Stage::ValidatingHello;
+                ws.approved = ApprovedHostname::normalize(b"sub.example.org");
+                ws.stage = SlotStage::ValidatingHello;
                 ws.gate.on_connect_head(0);
                 ws.gate.on_authorized();
                 ws.gate.on_upstream_connected();
@@ -1891,7 +1891,7 @@ mod connect_setup {
             }
             serving.buffer_and_validate(0, &[]);
             assert!(
-                matches!(serving.slots[0].stage, Stage::ValidatingHello),
+                matches!(serving.slots[0].stage, SlotStage::ValidatingHello),
                 "a validly-framed but incomplete TLS record must keep the slot in ValidatingHello"
             );
             assert_eq!(
@@ -1961,7 +1961,7 @@ mod connect_setup {
             {
                 let ws = &mut serving.slots[index];
                 ws.upstream = Some(up);
-                ws.stage = Stage::WritingHello;
+                ws.stage = SlotStage::WritingHello;
                 ws.head_len = 4;
                 ws.buf_base = 0;
                 ws.gate.on_connect_head(4);
@@ -1981,7 +1981,7 @@ mod connect_setup {
 
             let ws = &serving.slots[index];
             assert!(
-                ws.stage != Stage::Relay,
+                ws.stage != SlotStage::Relay,
                 "an expired setup snapshot must not graduate to Relay"
             );
             assert!(
@@ -2155,7 +2155,7 @@ mod deadlines {
             let connect_limit = now + Duration::from_secs(6);
             let idle_limit = now + Duration::from_secs(9);
             let drain_limit = now + Duration::from_secs(3);
-            serving.slots[0].stage = Stage::Dialing;
+            serving.slots[0].stage = SlotStage::Dialing;
             serving.slots[0].connect_deadline =
                 Some(Deadline::connect_attempt(connect_limit, setup));
             serving.slots[0].idle_deadline = Some(idle_limit);
@@ -2178,7 +2178,7 @@ mod deadlines {
             // Shedding the connect source must not change the fold: setup+idle+drain
             // still produce the same minimum.
             serving.slots[0].connect_deadline = None;
-            serving.slots[0].stage = Stage::ReadingConnect;
+            serving.slots[0].stage = SlotStage::ReadingConnect;
             serving.sync_live_deadline(0);
             serving.poll_timeout();
             assert_eq!(
@@ -2224,7 +2224,7 @@ mod deadlines {
     fn connect_deadline_expired_still_retries_through_gate() {
         use crate::dns::cache::Family;
         use crate::eligibility::NumericAddr;
-        use crate::inspection::connect::Feed;
+        use crate::inspection::connect::ConnectParseStep;
         use std::net::Ipv4Addr;
         let port = ephemeral_port();
         let upstream_port = ephemeral_port();
@@ -2248,17 +2248,17 @@ mod deadlines {
                 .feed(head.as_bytes())
                 .expect("head feed")
             {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("head should parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("head should parse to completion"),
             }
             let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
             let setup = serving
                 .storage()
                 .setup_deadline(handle)
                 .expect("setup deadline");
-            serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+            serving.slots[0].approved = ApprovedHostname::normalize(b"sub.example.org");
             serving.slots[0].approved_port = upstream_port;
-            serving.slots[0].stage = Stage::Dialing;
+            serving.slots[0].stage = SlotStage::Dialing;
             serving.slots[0].connect_family = Some(Family::A);
             serving.slots[0].connect_deadline =
                 Some(crate::runtime::tunnel::Deadline::connect_attempt(
@@ -2355,7 +2355,7 @@ mod generation_tokens {
         });
     }
 
-    fn release_slot_once_without_double_accounting(serving: &mut Serving) {
+    fn release_slot_once_without_double_accounting(serving: &mut ServingLoop) {
         serving.close_slot(0);
         assert_eq!(
             serving.storage().occupied(),
@@ -2372,7 +2372,7 @@ mod generation_tokens {
         assert_eq!(serving.storage().pending(), 0);
     }
 
-    fn arm_dialing_origin_early_data(serving: &mut Serving) -> TcpStream {
+    fn arm_dialing_origin_early_data(serving: &mut ServingLoop) -> TcpStream {
         let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
         let origin_addr = origin.local_addr().expect("origin addr");
         let up = mio::net::TcpStream::connect(origin_addr).expect("upstream connect");
@@ -2380,10 +2380,10 @@ mod generation_tokens {
         {
             let ws = &mut serving.slots[0];
             ws.upstream = Some(up);
-            ws.approved = FixedHostname::normalize(b"sub.example.org");
+            ws.approved = ApprovedHostname::normalize(b"sub.example.org");
             ws.gate.on_connect_head(7);
             ws.gate.on_authorized();
-            ws.stage = Stage::Dialing;
+            ws.stage = SlotStage::Dialing;
         }
         origin_stream
             .write_all(b"X")
@@ -2391,7 +2391,7 @@ mod generation_tokens {
         origin_stream
     }
 
-    fn dispatch_stale_upstream(serving: &mut Serving, stale_up: Token, probe: &mut [u8; 1]) {
+    fn dispatch_stale_upstream(serving: &mut ServingLoop, stale_up: Token, probe: &mut [u8; 1]) {
         let before = (
             serving.slots[0].buf_len,
             serving.slots[0].fwd,
@@ -2412,7 +2412,7 @@ mod generation_tokens {
             1,
             "the stale upstream token must not dispatch or release the new connection"
         );
-        assert!(matches!(serving.slots[0].stage, Stage::Dialing));
+        assert!(matches!(serving.slots[0].stage, SlotStage::Dialing));
         assert_eq!(
             (
                 serving.slots[0].buf_len,
@@ -2435,7 +2435,7 @@ mod generation_tokens {
         );
     }
 
-    fn dispatch_live_upstream_tripwire(serving: &mut Serving) {
+    fn dispatch_live_upstream_tripwire(serving: &mut ServingLoop) {
         serving
             .dispatch_readiness(
                 upstream_token(serving.slots[0].slot_gen, 0),
@@ -2529,7 +2529,7 @@ mod generation_tokens {
     /// arrival. Covers socket-arrival latency only — never use it for a stale or
     /// pre-wrap token, whose inertness proof must stay a single dispatch.
     fn dispatch_new_generation_token_until_queued_head_read(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         token: Token,
         expected_len: usize,
     ) {
@@ -2557,7 +2557,7 @@ mod generation_tokens {
     #[test]
     /// G1.R3 — one coalesced batch re-admits a released slot index mid-batch
     /// (`accept_all` between two same-slot tokens): the slot is still free
-    /// (`Stage::Idle`) when the stale pre-reuse token folds, so it is dropped by
+    /// (`SlotStage::Idle`) when the stale pre-reuse token folds, so it is dropped by
     /// the fold-time idle guard (src/serving.rs:1373) before it can claim the
     /// slot; only the new-generation token dispatches onto the reused connection.
     /// Proves batch dedup cannot resurrect a prior generation (matrix
@@ -2631,13 +2631,13 @@ mod generation_tokens {
                 PARTIAL.len(),
                 "only the new-generation token dispatched and read the queued head"
             );
-            assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+            assert!(matches!(serving.slots[0].stage, SlotStage::ReadingConnect));
             assert_eq!(serving.storage().occupied(), 1);
         });
     }
 
     fn dispatch_accept_first_reuse_batch(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         batch: &[(Token, Readiness)],
         new_gen: u64,
     ) {
@@ -2657,7 +2657,7 @@ mod generation_tokens {
         }
     }
 
-    fn assert_stale_pre_reuse_token_inert(serving: &mut Serving, old_gen: u64, partial_len: usize) {
+    fn assert_stale_pre_reuse_token_inert(serving: &mut ServingLoop, old_gen: u64, partial_len: usize) {
         // The stale pre-reuse token, re-dispatched after the batch, is still
         // inert (dirty work never resurrects the prior generation). The visit
         // count is the strong witness: an unguarded dispatch would pass the
@@ -2741,14 +2741,14 @@ mod generation_tokens {
                 PARTIAL.len(),
                 "only the new-generation token dispatched and read the queued head"
             );
-            assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+            assert!(matches!(serving.slots[0].stage, SlotStage::ReadingConnect));
             assert_eq!(serving.storage().occupied(), 1);
 
             assert_stale_pre_reuse_token_inert(serving, old_gen, PARTIAL.len());
         });
     }
 
-    fn accept_wrapped_generation(serving: &mut Serving, port: u16) -> (TcpStream, TcpStream) {
+    fn accept_wrapped_generation(serving: &mut ServingLoop, port: u16) -> (TcpStream, TcpStream) {
         serving.slots[0].slot_gen = u64::MAX;
         let mut client = connect(port);
         let reader = client.try_clone().expect("clone client socket");
@@ -2774,7 +2774,7 @@ mod generation_tokens {
         (client, reader)
     }
 
-    fn assert_pre_wrap_token_inert(serving: &mut Serving, pre_wrap: Token) {
+    fn assert_pre_wrap_token_inert(serving: &mut ServingLoop, pre_wrap: Token) {
         assert_ne!(
             (pre_wrap.0 >> GEN_SHIFT) as u64,
             0,
@@ -2792,7 +2792,7 @@ mod generation_tokens {
             )
             .expect("dispatch pre-wrap stale token");
         assert_eq!(serving.storage().occupied(), 1);
-        assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+        assert!(matches!(serving.slots[0].stage, SlotStage::ReadingConnect));
         assert_eq!(
             serving.slots[0].buf_len, 0,
             "the pre-wrap stale token must not read from the wrapped connection"
@@ -2803,12 +2803,12 @@ mod generation_tokens {
     /// its queued malformed head is read and the seat is released: the accept
     /// retry breaks the instant the slot is re-admitted, which can precede byte
     /// arrival, so the first dispatch may `WouldBlock`. Re-dispatch is inert once
-    /// the slot returns to `Stage::Idle` (an idle slot cannot progress), making
+    /// the slot returns to `SlotStage::Idle` (an idle slot cannot progress), making
     /// the retry idempotent and the released-seat post-condition sticky. Covers
     /// socket-arrival latency only — never use it for a stale or pre-wrap token,
     /// whose inertness proof must stay a single dispatch. `released` is the
     /// per-site post-condition failure message.
-    fn dispatch_own_token_until_released(serving: &mut Serving, token: Token, released: &str) {
+    fn dispatch_own_token_until_released(serving: &mut ServingLoop, token: Token, released: &str) {
         for _ in 0..10_000 {
             serving
                 .dispatch_readiness(
@@ -2827,7 +2827,7 @@ mod generation_tokens {
         assert_eq!(serving.storage().occupied(), 0, "{released}");
     }
 
-    fn dispatch_own_wrapped_token(serving: &mut Serving) {
+    fn dispatch_own_wrapped_token(serving: &mut ServingLoop) {
         // The wrapped connection's own token (generation 0, exactly what
         // register_client encoded at admit) dispatches and drives the full
         // read -> parse -> decision -> release path.
@@ -2836,7 +2836,7 @@ mod generation_tokens {
             client_token(0, 0),
             "the wrapped connection's own token dispatched — the malformed head was read, refused, and the seat released",
         );
-        assert!(matches!(serving.slots[0].stage, Stage::Idle));
+        assert!(matches!(serving.slots[0].stage, SlotStage::Idle));
     }
 
     #[test]
@@ -2888,7 +2888,7 @@ mod generation_tokens {
     }
 
     fn accept_field_ceiling_connection(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         port: u16,
         field_ceiling: u64,
     ) -> (TcpStream, TcpStream, u64) {
@@ -2918,7 +2918,7 @@ mod generation_tokens {
         (client, reader, live)
     }
 
-    fn dispatch_field_ceiling_own_token(serving: &mut Serving, live: u64) {
+    fn dispatch_field_ceiling_own_token(serving: &mut ServingLoop, live: u64) {
         let own = client_token(live, 0); // identical to what register_client encoded
         assert_eq!(
             own.0 & LOCAL_MASK,
@@ -2931,7 +2931,7 @@ mod generation_tokens {
             own,
             "the connection's own token must dispatch — the malformed head is read, refused, and the seat released",
         );
-        assert!(matches!(serving.slots[0].stage, Stage::Idle));
+        assert!(matches!(serving.slots[0].stage, SlotStage::Idle));
         assert_eq!(
             live, 0,
             "the field-ceiling generation wraps to 0 at the single canonical increment"
@@ -3194,7 +3194,7 @@ mod dialing {
     use super::*;
 
     fn arm_early_origin_data(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         port: u16,
     ) -> (TcpStream, TcpStream, mio::net::TcpStream) {
         let origin = StdListener::bind("127.0.0.1:0").expect("origin bind");
@@ -3213,10 +3213,10 @@ mod dialing {
         let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
         {
             let ws = &mut serving.slots[0];
-            ws.approved = FixedHostname::normalize(b"sub.example.org");
+            ws.approved = ApprovedHostname::normalize(b"sub.example.org");
             ws.gate.on_connect_head(head_len);
             ws.gate.on_authorized();
-            ws.stage = Stage::Dialing;
+            ws.stage = SlotStage::Dialing;
         }
         origin_stream
             .write_all(b"X")
@@ -3267,7 +3267,7 @@ mod dialing {
             );
             let ws = &serving.slots[0];
             assert!(
-                ws.stage == Stage::Idle,
+                ws.stage == SlotStage::Idle,
                 "the terminated setup must leave the workspace idle, never advanced to a 200-sending stage"
             );
             assert!(
@@ -3302,10 +3302,10 @@ mod dialing {
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
             {
                 let ws = &mut serving.slots[index];
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
+                ws.approved = ApprovedHostname::normalize(b"sub.example.org");
                 ws.gate.on_connect_head(head_len);
                 ws.gate.on_authorized();
-                ws.stage = Stage::Dialing;
+                ws.stage = SlotStage::Dialing;
                 ws.upstream = Some(up);
             }
 
@@ -3327,7 +3327,7 @@ mod dialing {
                 "a WouldBlock readiness with no origin data must not terminate the setup"
             );
             assert!(
-                serving.slots[0].stage == Stage::ValidatingHello,
+                serving.slots[0].stage == SlotStage::ValidatingHello,
                 "with no origin data the combined event must only advance the connection (200 sent, hello pending)"
             );
         });
@@ -3337,30 +3337,30 @@ mod dialing {
     /// read. The gate stays closed: no upstream byte has been permitted
     /// through it, and the hello boundary is not validated, so a read projects
     /// `EvidenceInsufficient` exactly as a real dialing slot does.
-    fn fabric_pre_gate_queued_upstream(serving: &mut Serving, test_data: usize) {
+    fn fabric_pre_gate_queued_upstream(serving: &mut ServingLoop, test_data: usize) {
         fabric_validated_early_data(serving, Some(test_data));
     }
 
     /// The same pre-gate slot with the validated hello boundary already
     /// committed, standing in for the `ValidatingHello` stage: an upstream data
     /// read there projects `EarlyUpstreamData` against the committed ordinal.
-    fn fabric_validated_pre_gate_queued_upstream(serving: &mut Serving, test_data: usize) {
+    fn fabric_validated_pre_gate_queued_upstream(serving: &mut ServingLoop, test_data: usize) {
         fabric_pre_gate_queued_upstream(serving, test_data);
         {
             let ws = &mut serving.slots[0];
             ws.gate.on_response_ok();
             ws.gate.on_hello_validated(ValidatedHello::test_new(10));
-            ws.stage = Stage::ValidatingHello;
+            ws.stage = SlotStage::ValidatingHello;
         }
     }
 
     /// The slot's committed domain ordinal, captured before a close resets the
     /// slot's approved pair.
-    fn committed_ordinal(serving: &Serving) -> crate::enforcement::action::DomainOrdinal {
+    fn committed_ordinal(serving: &ServingLoop) -> crate::enforcement::action::DomainOrdinal {
         serving
             .storage()
             .ordinal_for_pair(
-                &FixedHostname::normalize(b"sub.example.org").expect("approved hostname"),
+                &ApprovedHostname::normalize(b"sub.example.org").expect("approved hostname"),
                 serving.slots[0].approved_port,
             )
             .expect("committed ordinal")
@@ -3428,7 +3428,7 @@ mod dialing {
                 "the slot must still release its admitted seat"
             );
             assert!(
-                serving.slots[0].stage == Stage::Idle,
+                serving.slots[0].stage == SlotStage::Idle,
                 "the slot must close after the pre-gate read"
             );
             assert!(
@@ -3496,7 +3496,7 @@ mod dialing {
                 "the observed early activity must release the admitted seat"
             );
             assert!(
-                serving.slots[0].stage == Stage::Idle,
+                serving.slots[0].stage == SlotStage::Idle,
                 "the slot must close on the observed activity, not advance to send the 200"
             );
             assert!(
@@ -3540,7 +3540,7 @@ mod dialing {
                 "an error-only event must still close the pre-gate slot"
             );
             assert!(
-                serving.slots[0].stage == Stage::Idle,
+                serving.slots[0].stage == SlotStage::Idle,
                 "an error-only event must still close the pre-gate slot"
             );
             let last = serving
@@ -3595,10 +3595,10 @@ mod dialing {
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
             {
                 let ws = &mut serving.slots[index];
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
+                ws.approved = ApprovedHostname::normalize(b"sub.example.org");
                 ws.gate.on_connect_head(head_len);
                 ws.gate.on_authorized();
-                ws.stage = Stage::Dialing;
+                ws.stage = SlotStage::Dialing;
                 ws.upstream = Some(up);
             }
             serving.register_upstream(index).expect("register upstream");
@@ -3626,7 +3626,7 @@ mod dialing {
                 "an interrupted read burst must neither release the seat nor wait silently"
             );
             assert!(
-                serving.slots[index].stage == Stage::Dialing,
+                serving.slots[index].stage == SlotStage::Dialing,
                 "an interrupted burst must not advance or terminate the setup"
             );
             let early = read_quiet_window(&mut client, QUIET_WINDOW);
@@ -3680,10 +3680,10 @@ mod dialing {
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
             {
                 let ws = &mut serving.slots[index];
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
+                ws.approved = ApprovedHostname::normalize(b"sub.example.org");
                 ws.gate.on_connect_head(head_len);
                 ws.gate.on_authorized();
-                ws.stage = Stage::Dialing;
+                ws.stage = SlotStage::Dialing;
                 ws.upstream = Some(up);
             }
             serving.register_upstream(index).expect("register upstream");
@@ -3701,7 +3701,7 @@ mod dialing {
                 .expect("connect the upstream and send 200");
 
             assert!(
-                serving.slots[index].stage == Stage::ValidatingHello,
+                serving.slots[index].stage == SlotStage::ValidatingHello,
                 "a connected, silent upstream advances past the 200 and waits for hello"
             );
 
@@ -3749,10 +3749,10 @@ mod dialing {
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
             {
                 let ws = &mut serving.slots[index];
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
+                ws.approved = ApprovedHostname::normalize(b"sub.example.org");
                 ws.gate.on_connect_head(head_len);
                 ws.gate.on_authorized();
-                ws.stage = Stage::Dialing;
+                ws.stage = SlotStage::Dialing;
             }
             serving.register_upstream(index).expect("register upstream");
 
@@ -3805,10 +3805,10 @@ mod dialing {
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
             {
                 let ws = &mut serving.slots[index];
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
+                ws.approved = ApprovedHostname::normalize(b"sub.example.org");
                 ws.gate.on_connect_head(head_len);
                 ws.gate.on_authorized();
-                ws.stage = Stage::Dialing;
+                ws.stage = SlotStage::Dialing;
                 ws.upstream = Some(up);
             }
             serving.register_upstream(index).expect("register upstream");
@@ -3849,7 +3849,7 @@ mod dialing {
     /// `NoBinding` 502. The pair-authorized slot then dials its entry port directly
     /// into a deterministic in-process loopback listener, and `close_slot`
     /// resets `approved_port` back to the 443 default.
-    /// `Serving::dial` itself does not re-check `V4_EXCLUSIONS` (only the DNS
+    /// `ServingLoop::dial` itself does not re-check `V4_EXCLUSIONS` (only the DNS
     /// cache does), so the loopback dial is a legitimate seam; a hardcoded-443
     /// bug would instead dial the loopback's 443 and trip the capture assertions.
     fn non443_connect_dials_the_entry_port_then_resets_approved_port_on_close_slot() {
@@ -3912,11 +3912,11 @@ mod dialing {
                 "the entry-port CONNECT passes pair-authorization and must not add a fact"
             );
 
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ws = &mut serving.slots[0];
             ws.approved = Some(approved);
             ws.approved_port = dial_port;
-            ws.stage = Stage::Dialing;
+            ws.stage = SlotStage::Dialing;
             serving
                 .dial(
                     0,
@@ -3930,13 +3930,13 @@ mod dialing {
                 "the dial must target the entry port, not the 443 default"
             );
             assert!(
-                ws.stage == Stage::Dialing,
+                ws.stage == SlotStage::Dialing,
                 "the dialed slot must still hold Dialing"
             );
             serving.close_slot(0);
             let ws = &serving.slots[0];
             assert!(
-                ws.stage == Stage::Idle,
+                ws.stage == SlotStage::Idle,
                 "close_slot must idle the workspace"
             );
             assert_eq!(
@@ -3951,7 +3951,7 @@ mod dialing {
     }
 
     fn admit_member_client(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         port: u16,
         member: crate::eligibility::NumericAddr,
     ) -> TcpStream {
@@ -3968,7 +3968,7 @@ mod dialing {
     }
 
     fn arm_denied_loopback_dial(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         dial_port: u16,
         member: crate::eligibility::NumericAddr,
     ) -> crate::eligibility::NumericAddr {
@@ -3978,9 +3978,9 @@ mod dialing {
             .feed(head.as_bytes())
             .expect("valid head");
         serving.slots[0].approved =
-            Some(FixedHostname::normalize(b"sub.example.org").expect("norm"));
+            Some(ApprovedHostname::normalize(b"sub.example.org").expect("norm"));
         serving.slots[0].approved_port = dial_port;
-        serving.slots[0].stage = Stage::Dialing;
+        serving.slots[0].stage = SlotStage::Dialing;
         let req = serving.slots[0]
             .parser
             .result()
@@ -4063,7 +4063,7 @@ mod dialing {
     fn first_dial_failure_records_and_re_decides_to_no_binding_502() {
         use crate::dns::cache::Family;
         use crate::eligibility::NumericAddr;
-        use crate::inspection::connect::Feed;
+        use crate::inspection::connect::ConnectParseStep;
         use std::net::Ipv4Addr;
         let port = ephemeral_port();
         let upstream_port = ephemeral_port();
@@ -4082,13 +4082,13 @@ mod dialing {
                 .feed(head.as_bytes())
                 .expect("head feed")
             {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("head should parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("head should parse to completion"),
             }
-            serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+            serving.slots[0].approved = ApprovedHostname::normalize(b"sub.example.org");
             serving.slots[0].approved_port = upstream_port;
             serving.slots[0].gate.on_authorized();
-            serving.slots[0].stage = Stage::Dialing;
+            serving.slots[0].stage = SlotStage::Dialing;
             serving.slots[0].connect_family = Some(Family::A);
             serving
                 .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
@@ -4134,11 +4134,11 @@ mod dialing {
                 1,
                 "the connecting client must be admitted"
             );
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ws = &mut serving.slots[0];
             ws.approved = Some(approved);
             ws.approved_port = upstream_port;
-            ws.stage = Stage::Dialing;
+            ws.stage = SlotStage::Dialing;
             serving
                 .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
                 .expect("loopback upstream dial");
@@ -4172,7 +4172,7 @@ mod dialing {
     }
 
     fn record_alternation_round(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         handle: &SlotIndex,
         family: Family,
     ) -> Family {
@@ -4186,7 +4186,7 @@ mod dialing {
         seen
     }
 
-    fn assert_alternation_exhausted(seen: &[Family], body: &[u8], serving: &Serving) {
+    fn assert_alternation_exhausted(seen: &[Family], body: &[u8], serving: &ServingLoop) {
         assert!(
             body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
             "the exhausted budget must refuse a pre-200 502, got {body:?}"
@@ -4222,7 +4222,7 @@ mod dialing {
     /// from cache selection, so a hermetic served seam cannot select these
     /// addresses itself.
     fn full_family_alternation_retry_loop_exhausts_at_four_real_dials() {
-        use crate::inspection::connect::Feed;
+        use crate::inspection::connect::ConnectParseStep;
         let port = ephemeral_port();
         let upstream_port = ephemeral_port();
         let (v4, v6) = live_dual_stack_listeners(upstream_port);
@@ -4240,8 +4240,8 @@ mod dialing {
                 .feed(head.as_bytes())
                 .expect("head feed")
             {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("head should parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("head should parse to completion"),
             }
             let handle = enter_retry_seam_dialing(serving, upstream_port);
             let plan = retry_plan(&v4, &v6);
@@ -4304,14 +4304,14 @@ mod dialing {
         ]
     }
 
-    fn admit_retry_loop_client(serving: &mut Serving, port: u16) -> TcpStream {
+    fn admit_retry_loop_client(serving: &mut ServingLoop, port: u16) -> TcpStream {
         let client = connect(port);
         pump(serving, 10);
         client
     }
 
     #[cfg(all(test, feature = "alloc-witness"))]
-    fn admitted_retry_seam_serving(port: u16, upstream_port: u16) -> (Serving, TcpStream) {
+    fn admitted_retry_seam_serving(port: u16, upstream_port: u16) -> (ServingLoop, TcpStream) {
         let cfg = config_pair(port, upstream_port);
         let mut serving = serve_on_cfg(port, &cfg);
         let client = admit_retry_loop_client(&mut serving, port);
@@ -4323,11 +4323,11 @@ mod dialing {
         (serving, client)
     }
 
-    fn enter_retry_seam_dialing(serving: &mut Serving, upstream_port: u16) -> SlotIndex {
-        serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+    fn enter_retry_seam_dialing(serving: &mut ServingLoop, upstream_port: u16) -> SlotIndex {
+        serving.slots[0].approved = ApprovedHostname::normalize(b"sub.example.org");
         serving.slots[0].approved_port = upstream_port;
         serving.slots[0].gate.on_authorized();
-        serving.slots[0].stage = Stage::Dialing;
+        serving.slots[0].stage = SlotStage::Dialing;
         serving.slots[0]
             .handle
             .take()
@@ -4336,7 +4336,7 @@ mod dialing {
 
     #[cfg(all(test, feature = "alloc-witness"))]
     fn record_dial_round(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         handle: &SlotIndex,
         family: Family,
     ) -> Option<Family> {
@@ -4348,7 +4348,7 @@ mod dialing {
         seen
     }
 
-    fn exhaust_retry_seam(serving: &mut Serving, handle: SlotIndex) {
+    fn exhaust_retry_seam(serving: &mut ServingLoop, handle: SlotIndex) {
         serving.slots[0].handle = Some(handle);
         serving
             .fail_current_attempt(0)
@@ -4360,7 +4360,7 @@ mod dialing {
     fn assert_retry_seam_exhausted(
         seen: [Option<Family>; crate::runtime::tunnel::MAX_UPSTREAM_ATTEMPTS],
         body: &[u8],
-        serving: &Serving,
+        serving: &ServingLoop,
     ) {
         use crate::dns::cache::Family;
         assert_eq!(
@@ -4395,7 +4395,7 @@ mod dialing {
     /// selection, so a hermetic served seam cannot select these addresses itself.
     fn full_retry_seam_records_redecides_and_redials_with_zero_allocations() {
         enforcement_witness_thread(|| {
-            use crate::inspection::connect::Feed;
+            use crate::inspection::connect::ConnectParseStep;
             let port = ephemeral_port();
             let upstream_port = ephemeral_port();
             let (v4, v6) = live_dual_stack_listeners(upstream_port);
@@ -4406,8 +4406,8 @@ mod dialing {
                 .feed(head.as_bytes())
                 .expect("head feed")
             {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("head should parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("head should parse to completion"),
             }
             let handle = enter_retry_seam_dialing(&mut serving, upstream_port);
             let plan = retry_plan(&v4, &v6);
@@ -4451,7 +4451,7 @@ mod dialing {
     fn closed_dial_exhausts_the_full_attempt_budget_to_502_upstream_failed() {
         use crate::dns::cache::Family;
         use crate::eligibility::NumericAddr;
-        use crate::inspection::connect::Feed;
+        use crate::inspection::connect::ConnectParseStep;
         use std::net::Ipv4Addr;
         let port = ephemeral_port();
         let upstream_port = ephemeral_port();
@@ -4470,13 +4470,13 @@ mod dialing {
                 .feed(head.as_bytes())
                 .expect("head feed")
             {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("head should parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("head should parse to completion"),
             }
-            serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+            serving.slots[0].approved = ApprovedHostname::normalize(b"sub.example.org");
             serving.slots[0].approved_port = upstream_port;
             serving.slots[0].gate.on_authorized();
-            serving.slots[0].stage = Stage::Dialing;
+            serving.slots[0].stage = SlotStage::Dialing;
             serving.slots[0].connect_family = Some(Family::A);
             let handle = serving.slots[0].handle.take().expect("admitted handle");
             for _ in 0..3 {
@@ -4534,10 +4534,10 @@ mod dialing {
                 .storage()
                 .setup_deadline(handle)
                 .expect("setup deadline");
-            serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+            serving.slots[0].approved = ApprovedHostname::normalize(b"sub.example.org");
             serving.slots[0].approved_port = origin_port;
             serving.slots[0].gate.on_authorized();
-            serving.slots[0].stage = Stage::Dialing;
+            serving.slots[0].stage = SlotStage::Dialing;
             serving.slots[0].connect_family = Some(Family::A);
             serving.slots[0].connect_deadline =
                 Some(crate::runtime::tunnel::Deadline::connect_attempt(
@@ -4581,7 +4581,7 @@ mod dialing {
     fn expired_connect_deadline_while_dialing_records_a_retry_through_expire_sweep() {
         use crate::dns::cache::Family;
         use crate::eligibility::NumericAddr;
-        use crate::inspection::connect::Feed;
+        use crate::inspection::connect::ConnectParseStep;
         use std::net::Ipv4Addr;
         let port = ephemeral_port();
         let upstream_port = ephemeral_port();
@@ -4605,17 +4605,17 @@ mod dialing {
                 .feed(head.as_bytes())
                 .expect("head feed")
             {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("head should parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("head should parse to completion"),
             }
             let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
             let setup = serving
                 .storage()
                 .setup_deadline(handle)
                 .expect("setup deadline");
-            serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+            serving.slots[0].approved = ApprovedHostname::normalize(b"sub.example.org");
             serving.slots[0].approved_port = upstream_port;
-            serving.slots[0].stage = Stage::Dialing;
+            serving.slots[0].stage = SlotStage::Dialing;
             serving.slots[0].connect_family = Some(Family::A);
             serving.slots[0].connect_deadline =
                 Some(crate::runtime::tunnel::Deadline::connect_attempt(
@@ -4649,7 +4649,7 @@ mod dialing {
         enforcement_witness_thread(|| {
             use crate::dns::cache::Family;
             use crate::eligibility::NumericAddr;
-            use crate::inspection::connect::Feed;
+            use crate::inspection::connect::ConnectParseStep;
             use std::net::Ipv4Addr;
             let port = ephemeral_port();
             let upstream_port = ephemeral_port();
@@ -4673,17 +4673,17 @@ mod dialing {
                 .feed(head.as_bytes())
                 .expect("head feed")
             {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("head should parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("head should parse to completion"),
             }
             let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
             let setup = serving
                 .storage()
                 .setup_deadline(handle)
                 .expect("setup deadline");
-            serving.slots[0].approved = FixedHostname::normalize(b"sub.example.org");
+            serving.slots[0].approved = ApprovedHostname::normalize(b"sub.example.org");
             serving.slots[0].approved_port = upstream_port;
-            serving.slots[0].stage = Stage::Dialing;
+            serving.slots[0].stage = SlotStage::Dialing;
             serving.slots[0].connect_family = Some(Family::A);
             serving.slots[0].connect_deadline =
                 Some(crate::runtime::tunnel::Deadline::connect_attempt(
@@ -4740,10 +4740,10 @@ mod dialing {
             let now = Instant::now();
             {
                 let ws = &mut serving.slots[index];
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
+                ws.approved = ApprovedHostname::normalize(b"sub.example.org");
                 ws.gate.on_connect_head(head_len);
                 ws.gate.on_authorized();
-                ws.stage = Stage::Dialing;
+                ws.stage = SlotStage::Dialing;
                 ws.upstream = Some(up);
                 // Anchored 3 s ago: the 2 s attempt window elapsed 1 s before
                 // this readiness edge reports Connected.
@@ -4768,10 +4768,10 @@ mod dialing {
             assert!(
                 !matches!(
                     ws.stage,
-                    Stage::SendingConnected
-                        | Stage::ValidatingHello
-                        | Stage::WritingHello
-                        | Stage::Relay
+                    SlotStage::SendingConnected
+                        | SlotStage::ValidatingHello
+                        | SlotStage::WritingHello
+                        | SlotStage::Relay
                 ),
                 "an expired connect deadline must not be extended by a Connected writable edge"
             );
@@ -4795,12 +4795,12 @@ mod dialing {
 mod relay {
     use super::*;
 
-    fn assert_expired_relay_writes_closed(serving: &Serving) {
+    fn assert_expired_relay_writes_closed(serving: &ServingLoop) {
         let mut survived = Vec::new();
-        if serving.slots[0].stage == Stage::Relay {
+        if serving.slots[0].stage == SlotStage::Relay {
             survived.push("client->upstream");
         }
-        if serving.slots[1].stage == Stage::Relay {
+        if serving.slots[1].stage == SlotStage::Relay {
             survived.push("upstream->client");
         }
         assert!(
@@ -4833,7 +4833,7 @@ mod relay {
             {
                 let ws = &mut serving.slots[up_index];
                 ws.upstream = Some(up);
-                ws.stage = Stage::Relay;
+                ws.stage = SlotStage::Relay;
                 ws.head_len = 4;
                 ws.buf_base = 0;
                 ws.buf_len = 20;
@@ -4844,7 +4844,7 @@ mod relay {
             serving.register_upstream(up_index).expect("register up");
             serving.flush_client_upstream(up_index);
             assert!(
-                serving.slots[up_index].stage == Stage::Relay,
+                serving.slots[up_index].stage == SlotStage::Relay,
                 "the fixture must start from an established relay"
             );
             serving.slots[up_index].idle_deadline = Some(Instant::now() - Duration::from_millis(1));
@@ -4855,7 +4855,7 @@ mod relay {
             {
                 let ws = &mut serving.slots[down_index];
                 ws.client = Some(client);
-                ws.stage = Stage::Relay;
+                ws.stage = SlotStage::Relay;
                 ws.head_len = 4;
                 ws.down[..5].copy_from_slice(b"HELLO");
                 ws.down_len = 5;
@@ -4923,7 +4923,7 @@ mod relay {
             ws.buf_len = 20;
             ws.fwd = 4;
             ws.buf[..20].copy_from_slice(b"HEADHELLO!0123456789");
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.gate.on_connect_head(4);
             ws.gate.on_authorized();
             ws.gate.on_upstream_connected();
@@ -4951,7 +4951,7 @@ mod relay {
     }
 
     fn stage_compaction_workspace(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         up: mio::net::TcpStream,
     ) -> (usize, Option<usize>, Vec<u8>) {
         let markers = {
@@ -4960,7 +4960,7 @@ mod relay {
             ws.head_len = 4;
             ws.buf_base = 0;
             ws.fwd = 4;
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.gate.on_connect_head(4);
             ws.gate.on_authorized();
             ws.gate.on_upstream_connected();
@@ -4997,7 +4997,7 @@ mod relay {
         reason = "test staging buffer, not runtime path"
     )]
     fn drain_compacted_stream(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         sink_stream: &mut TcpStream,
         expected_len: usize,
     ) -> Vec<u8> {
@@ -5070,7 +5070,7 @@ mod relay {
         });
     }
 
-    fn arm_relay_client_fin(serving: &mut Serving) -> (TcpStream, TcpStream) {
+    fn arm_relay_client_fin(serving: &mut ServingLoop) -> (TcpStream, TcpStream) {
         let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
         let sink_addr = sink.local_addr().expect("sink addr");
         let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
@@ -5085,7 +5085,7 @@ mod relay {
             let ws = &mut serving.slots[0];
             ws.upstream = Some(up);
             ws.client = Some(client);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 4;
             ws.buf_base = 0;
             ws.buf_len = 10;
@@ -5107,7 +5107,7 @@ mod relay {
         (sink_stream, peer_stream)
     }
 
-    fn drain_pending_to_sink_eof(serving: &mut Serving, sink_stream: &mut TcpStream) -> Vec<u8> {
+    fn drain_pending_to_sink_eof(serving: &mut ServingLoop, sink_stream: &mut TcpStream) -> Vec<u8> {
         let mut pending = Vec::new();
         let mut tmp = [0u8; 64];
         let mut eof_seen = false;
@@ -5131,13 +5131,13 @@ mod relay {
         pending
     }
 
-    fn close_after_both_eof(serving: &mut Serving, sink_stream: &mut TcpStream) {
+    fn close_after_both_eof(serving: &mut ServingLoop, sink_stream: &mut TcpStream) {
         sink_stream.write_all(b"down!").expect("origin writes down");
         sink_stream
             .shutdown(std::net::Shutdown::Write)
             .expect("origin fin");
         let close_start = Instant::now();
-        while serving.slots[0].stage != Stage::Idle {
+        while serving.slots[0].stage != SlotStage::Idle {
             assert!(
                 close_start.elapsed() < Duration::from_secs(3),
                 "both-EOF drain never closed the slot"
@@ -5179,7 +5179,7 @@ mod relay {
                 "a client FIN must conserve the accepted bytes through the half-close, not drop them"
             );
             assert!(
-                matches!(serving.slots[0].stage, Stage::Relay),
+                matches!(serving.slots[0].stage, SlotStage::Relay),
                 "the reverse direction stays open after the client EOF"
             );
             assert!(
@@ -5224,7 +5224,7 @@ mod relay {
                 let ws = &mut serving.slots[index];
                 ws.upstream = Some(up);
                 ws.client = Some(client);
-                ws.stage = Stage::Relay;
+                ws.stage = SlotStage::Relay;
                 ws.head_len = 4;
                 ws.buf_base = 0;
                 ws.buf_len = 6;
@@ -5263,7 +5263,7 @@ mod relay {
     }
 
     fn stage_retained_up_tail(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         up: mio::net::TcpStream,
         client: mio::net::TcpStream,
     ) -> (Vec<u8>, Vec<u8>) {
@@ -5274,7 +5274,7 @@ mod relay {
             let ws = &mut serving.slots[index];
             ws.upstream = Some(up);
             ws.client = Some(client);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 4;
             ws.buf_base = 0;
             ws.fwd = 0;
@@ -5378,7 +5378,7 @@ mod relay {
             {
                 let ws = &mut serving.slots[index];
                 ws.upstream = Some(up);
-                ws.stage = Stage::Relay;
+                ws.stage = SlotStage::Relay;
                 ws.head_len = 4;
                 ws.buf_base = 0;
                 ws.fwd = 0;
@@ -5463,7 +5463,7 @@ mod relay {
                 let ws = &mut serving.slots[index];
                 ws.upstream = Some(up);
                 ws.client = Some(client);
-                ws.stage = Stage::Relay;
+                ws.stage = SlotStage::Relay;
                 ws.head_len = 4;
                 ws.buf_base = 0;
                 ws.fwd = 0;
@@ -5489,7 +5489,7 @@ mod relay {
                 .expect("no-room upstream-readable visit");
 
             assert!(
-                matches!(serving.slots[index].stage, Stage::Relay),
+                matches!(serving.slots[index].stage, SlotStage::Relay),
                 "a full down buffer must apply backpressure, not close the tunnel"
             );
             assert_eq!(
@@ -5514,12 +5514,12 @@ mod relay {
         });
     }
 
-    fn arm_stalled_reverse_buffer(serving: &mut Serving, client: mio::net::TcpStream) {
+    fn arm_stalled_reverse_buffer(serving: &mut ServingLoop, client: mio::net::TcpStream) {
         let payload = b"STALLED-REVERSE-PAYLOAD-0123456789";
         {
             let ws = &mut serving.slots[0];
             ws.client = Some(client);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 4;
             ws.buf_base = 0;
             ws.directional.down = SideEof::Open;
@@ -5538,7 +5538,7 @@ mod relay {
             "the reverse EOF must be recorded as half-close pending while bytes remain buffered"
         );
         assert!(
-            matches!(serving.slots[0].stage, Stage::Relay),
+            matches!(serving.slots[0].stage, SlotStage::Relay),
             "a stalled reverse buffer must keep the tunnel open (no premature half-close/close)"
         );
     }
@@ -5580,7 +5580,7 @@ mod relay {
                 .shutdown(std::net::Shutdown::Write)
                 .expect("client fin");
             let close_start = Instant::now();
-            while !matches!(serving.slots[0].stage, Stage::Idle) {
+            while !matches!(serving.slots[0].stage, SlotStage::Idle) {
                 assert!(
                     close_start.elapsed() < Duration::from_secs(5),
                     "the slot never closed once both directions drained"
@@ -5592,7 +5592,7 @@ mod relay {
         });
     }
 
-    fn arm_full_up_buffer(serving: &mut Serving) -> (TcpStream, TcpStream, Vec<u8>) {
+    fn arm_full_up_buffer(serving: &mut ServingLoop) -> (TcpStream, TcpStream, Vec<u8>) {
         let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
         let sink_addr = sink.local_addr().expect("sink addr");
         let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
@@ -5609,7 +5609,7 @@ mod relay {
             let ws = &mut serving.slots[0];
             ws.upstream = Some(up);
             ws.client = Some(client);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 4;
             ws.buf_base = 0;
             ws.fwd = 0;
@@ -5625,7 +5625,7 @@ mod relay {
         (sink_stream, peer_stream, pattern)
     }
 
-    fn dispatch_no_room_visit(serving: &mut Serving) {
+    fn dispatch_no_room_visit(serving: &mut ServingLoop) {
         let token = client_token(serving.slots[0].slot_gen, 0);
         serving
             .dispatch_readiness(
@@ -5638,9 +5638,9 @@ mod relay {
             .expect("no-room readable visit");
     }
 
-    fn assert_full_buffer_backpressure(serving: &Serving) {
+    fn assert_full_buffer_backpressure(serving: &ServingLoop) {
         assert!(
-            matches!(serving.slots[0].stage, Stage::Relay),
+            matches!(serving.slots[0].stage, SlotStage::Relay),
             "a full buffer must apply backpressure, not close the tunnel"
         );
         assert_eq!(
@@ -5655,7 +5655,7 @@ mod relay {
     }
 
     fn drain_full_up_buffer(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         sink_got: &std::sync::Mutex<Vec<u8>>,
         expected_len: usize,
     ) {
@@ -5725,7 +5725,7 @@ mod relay {
                 let ws = &mut serving.slots[index];
                 ws.upstream = Some(up);
                 ws.client = Some(client);
-                ws.stage = Stage::Relay;
+                ws.stage = SlotStage::Relay;
                 ws.head_len = 4;
                 ws.down[..4].copy_from_slice(b"DOWN");
                 ws.down_len = 4;
@@ -5857,7 +5857,7 @@ mod visit_budget {
         );
     }
 
-    fn arm_one_batch_slot(serving: &mut Serving) -> (TcpStream, TcpStream) {
+    fn arm_one_batch_slot(serving: &mut ServingLoop) -> (TcpStream, TcpStream) {
         let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
         let sink_addr = sink.local_addr().expect("sink addr");
         let up = mio::net::TcpStream::connect(sink_addr).expect("upstream connect");
@@ -5872,7 +5872,7 @@ mod visit_budget {
             let ws = &mut serving.slots[0];
             ws.upstream = Some(up);
             ws.client = Some(client);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 4;
             ws.buf_base = 0;
         }
@@ -5905,7 +5905,7 @@ mod visit_budget {
         })
     }
 
-    fn wait_client_burst_readable(serving: &Serving) {
+    fn wait_client_burst_readable(serving: &ServingLoop) {
         let avail_start = Instant::now();
         while serving.slots[0]
             .client
@@ -5922,7 +5922,7 @@ mod visit_budget {
         }
     }
 
-    fn dispatch_one_slot_two_tokens(serving: &mut Serving) {
+    fn dispatch_one_slot_two_tokens(serving: &mut ServingLoop) {
         let client_token = client_token(serving.slots[0].slot_gen, 0);
         let up_token = upstream_token(serving.slots[0].slot_gen, 0);
         serving.in_batch = true;
@@ -5947,7 +5947,7 @@ mod visit_budget {
         serving.in_batch = false;
     }
 
-    fn assert_single_visit_budget(serving: &Serving, moved: usize, sink_total: usize) {
+    fn assert_single_visit_budget(serving: &ServingLoop, moved: usize, sink_total: usize) {
         assert!(
             moved <= 64 * 1024,
             "one batch with both arms of one slot must stay inside one 64 KiB visit, moved {moved}"
@@ -6107,7 +6107,7 @@ mod visit_budget {
     }
 
     fn interleaved_lane_slot(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         index: usize,
         pattern: &[u8],
     ) -> (TcpStream, TcpStream) {
@@ -6126,7 +6126,7 @@ mod visit_budget {
             let ws = &mut serving.slots[index];
             ws.upstream = Some(up);
             ws.client = Some(client);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 4;
             ws.buf_base = 0;
         }
@@ -6140,7 +6140,7 @@ mod visit_budget {
         (sink_stream, peer_stream)
     }
 
-    fn dispatch_interleaved_a_b_a_batch(serving: &mut Serving) -> (usize, usize, usize, u16) {
+    fn dispatch_interleaved_a_b_a_batch(serving: &mut ServingLoop) -> (usize, usize, usize, u16) {
         serving.batch_gen = serving.batch_gen.wrapping_add(1);
         let gen_a = serving.slots[0].slot_gen;
         let gen_b = serving.slots[1].slot_gen;
@@ -6190,7 +6190,7 @@ mod visit_budget {
     }
 
     fn pump_interleaved_both_lanes(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         lanes: [(&std::sync::Mutex<Vec<u8>>, usize); 2],
     ) {
         let mut pumps = 0;
@@ -6208,18 +6208,18 @@ mod visit_budget {
         }
     }
 
-    fn sweep_expired_interleaved_timer(serving: &mut Serving) {
+    fn sweep_expired_interleaved_timer(serving: &mut ServingLoop) {
         serving.slots[0].idle_deadline = Some(Instant::now() - Duration::from_millis(1));
         serving.sync_live_deadline(0);
         serving
             .run_once(Some(Duration::from_millis(2)))
             .expect("sweep poll");
         assert!(
-            matches!(serving.slots[0].stage, Stage::Idle),
+            matches!(serving.slots[0].stage, SlotStage::Idle),
             "one expired relay timer must be swept on the next owner turn (slot 0 was not idle)"
         );
         assert!(
-            matches!(serving.slots[1].stage, Stage::Relay),
+            matches!(serving.slots[1].stage, SlotStage::Relay),
             "the timer sweep must not touch the other hot slot (slot 1 was not relay)"
         );
     }
@@ -6376,13 +6376,13 @@ mod visit_budget {
         });
     }
 
-    fn stage_pending_upstream_relay(serving: &mut Serving, pending: usize, seed: u32) -> TcpStream {
+    fn stage_pending_upstream_relay(serving: &mut ServingLoop, pending: usize, seed: u32) -> TcpStream {
         let (sink_stream, up) = sink_pair();
         let _ = sink_stream.set_read_timeout(Some(Duration::from_millis(50)));
         {
             let ws = &mut serving.slots[0];
             ws.upstream = Some(up);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 0;
             ws.buf_base = 0;
             ws.buf_len = pending;
@@ -6395,7 +6395,7 @@ mod visit_budget {
     }
 
     fn assert_single_visit_forwards_within_budget(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         token: Token,
         pending: usize,
     ) -> usize {
@@ -6466,7 +6466,7 @@ mod visit_budget {
                 "bytes forwarded across budget-split visits must arrive once, unduplicated"
             );
             assert!(
-                serving.slots[0].stage == Stage::Relay,
+                serving.slots[0].stage == SlotStage::Relay,
                 "a budget-split relay visit must not advance or close the tunnel"
             );
         });
@@ -6486,7 +6486,7 @@ mod visit_budget {
             {
                 let ws = &mut serving.slots[index];
                 ws.upstream = Some(up);
-                ws.stage = Stage::Relay;
+                ws.stage = SlotStage::Relay;
                 ws.head_len = 0;
                 ws.buf_base = 0;
                 ws.buf_len = 128 * 1024;
@@ -6571,7 +6571,7 @@ mod visit_budget {
             {
                 let ws = &mut serving.slots[index];
                 ws.upstream = Some(up);
-                ws.stage = Stage::Relay;
+                ws.stage = SlotStage::Relay;
                 ws.head_len = 4;
                 ws.buf_base = 0;
                 ws.fwd = 0;
@@ -6606,7 +6606,7 @@ mod visit_budget {
              polls with the sink quiescent: saw {progress_polls} progress polls"
             );
             assert!(
-                serving.slots[index].stage == Stage::Relay,
+                serving.slots[index].stage == SlotStage::Relay,
                 "a budget-split drain must not advance or close the tunnel"
             );
             assert_eq!(
@@ -6618,14 +6618,14 @@ mod visit_budget {
         });
     }
 
-    fn stage_preloaded_hold(serving: &mut Serving, pattern: &[u8]) -> TcpStream {
+    fn stage_preloaded_hold(serving: &mut ServingLoop, pattern: &[u8]) -> TcpStream {
         let (sink_stream, up) = sink_pair();
         let _ = sink_stream.set_nonblocking(true);
         let hold = pattern.len();
         {
             let ws = &mut serving.slots[0];
             ws.upstream = Some(up);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 4;
             ws.buf_base = 0;
             ws.fwd = 0;
@@ -6699,7 +6699,7 @@ mod visit_budget {
              {progress_polls}"
             );
             assert!(
-                serving.slots[0].stage == Stage::Relay,
+                serving.slots[0].stage == SlotStage::Relay,
                 "a budget-split drain must not advance or close the tunnel"
             );
             finish_consuming_drain(reader, &stop_reader, &sink_got, &pattern);
@@ -6707,7 +6707,7 @@ mod visit_budget {
     }
 
     fn arm_read_direction_held_peer(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         hold: usize,
     ) -> (TcpStream, TcpStream, Vec<u8>) {
         let sink = StdListener::bind("127.0.0.1:0").expect("sink bind");
@@ -6726,7 +6726,7 @@ mod visit_budget {
             let ws = &mut serving.slots[0];
             ws.upstream = Some(up);
             ws.client = Some(client);
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.head_len = 4;
             ws.buf_base = 0;
             ws.fwd = 0;
@@ -6742,7 +6742,7 @@ mod visit_budget {
         (sink_stream, peer_stream, pattern)
     }
 
-    fn drain_held_peer_until_forwarded(serving: &mut Serving, hold: usize) -> usize {
+    fn drain_held_peer_until_forwarded(serving: &mut ServingLoop, hold: usize) -> usize {
         let mut progress_polls = 0usize;
         let mut last_fwd = 0usize;
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -6777,7 +6777,7 @@ mod visit_budget {
     }
 
     fn assert_read_direction_drained(
-        serving: &Serving,
+        serving: &ServingLoop,
         got: &[u8],
         pattern: &[u8],
         progress_polls: usize,
@@ -6795,7 +6795,7 @@ mod visit_budget {
          progress polls"
         );
         assert!(
-            serving.slots[0].stage == Stage::Relay,
+            serving.slots[0].stage == SlotStage::Relay,
             "a budget-split read drain must not advance or close the tunnel"
         );
     }
@@ -6919,7 +6919,7 @@ mod visit_budget {
         received: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     }
 
-    fn stage_four_mib_relay(serving: &mut Serving, direction: RelayBudgetDirection) -> RelayBurst {
+    fn stage_four_mib_relay(serving: &mut ServingLoop, direction: RelayBudgetDirection) -> RelayBurst {
         let (upstream_peer, up) = sink_pair();
         let (client, client_peer) = relay_peer_pair();
         stage_relay_slot(serving, up, client);
@@ -6959,7 +6959,7 @@ mod visit_budget {
     }
 
     fn dispatch_direction_visits(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         direction: RelayBudgetDirection,
         generation: u64,
     ) {
@@ -7081,7 +7081,7 @@ mod visit_budget {
     }
 
     fn stage_gateopening_drain(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         up: mio::net::TcpStream,
         client: mio::net::TcpStream,
     ) {
@@ -7090,7 +7090,7 @@ mod visit_budget {
             let ws = &mut serving.slots[index];
             ws.upstream = Some(up);
             ws.client = Some(client);
-            ws.stage = Stage::WritingHello;
+            ws.stage = SlotStage::WritingHello;
             ws.head_len = 4;
             ws.buf_base = 0;
             ws.fwd = 0;
@@ -7119,9 +7119,9 @@ mod visit_budget {
     }
 
     fn dispatch_one_gate_crossing_visit(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         index: usize,
-    ) -> (u16, u32, usize, bool, Stage) {
+    ) -> (u16, u32, usize, bool, SlotStage) {
         serving.in_batch = true;
         serving.batch_gen = serving.batch_gen.wrapping_add(1);
         let token = upstream_token(serving.slots[index].slot_gen, index);
@@ -7167,7 +7167,7 @@ mod visit_budget {
                 dispatch_one_gate_crossing_visit(serving, index);
 
             assert!(
-                gate_open && matches!(stage_after, Stage::Relay),
+                gate_open && matches!(stage_after, SlotStage::Relay),
                 "the single visit must succeed in opening the gate prior to relay (gate={gate_open})"
             );
             assert!(
@@ -7283,7 +7283,7 @@ mod sigterm_shutdown {
             let client = connect(port);
             pump(serving, 40);
             assert_eq!(serving.storage().occupied(), 1);
-            serving.slots[0].stage = Stage::Relay;
+            serving.slots[0].stage = SlotStage::Relay;
 
             serving.on_sigterm().expect("first SIGTERM observation");
             assert_eq!(
@@ -7483,7 +7483,7 @@ mod enforcement {
                 0,
                 "Notify never delays the mandatory denial"
             );
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -7555,7 +7555,7 @@ mod enforcement {
                 1,
                 "missing validated identity folds Unknown(NotYetValidated), never a block verdict"
             );
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -7629,14 +7629,14 @@ mod enforcement {
             let first = serving
                 .storage()
                 .ordinal_for_pair(
-                    &FixedHostname::normalize(b"a.example").expect("normalize"),
+                    &ApprovedHostname::normalize(b"a.example").expect("normalize"),
                     443,
                 )
                 .expect("first ordinal");
             let second = serving
                 .storage()
                 .ordinal_for_pair(
-                    &FixedHostname::normalize(b"a.example").expect("normalize"),
+                    &ApprovedHostname::normalize(b"a.example").expect("normalize"),
                     8443,
                 )
                 .expect("second ordinal");
@@ -7655,7 +7655,7 @@ mod enforcement {
         crate::config::parse_config_document(&doc).expect("valid two-port ja4-block config")
     }
 
-    fn seed_ja4_baseline_overflow(serving: &mut Serving, blocked: DomainOrdinal) {
+    fn seed_ja4_baseline_overflow(serving: &mut ServingLoop, blocked: DomainOrdinal) {
         for i in 0..MAX_ADDRESSES - 1 {
             let mut synthetic = [b'x'; 36];
             synthetic[0] = b'a' + u8::try_from(i).expect("addr index fits u8");
@@ -7667,7 +7667,7 @@ mod enforcement {
         }
     }
 
-    fn assert_ja4_domain_latch(serving: &Serving, blocked: DomainOrdinal, sibling: DomainOrdinal) {
+    fn assert_ja4_domain_latch(serving: &ServingLoop, blocked: DomainOrdinal, sibling: DomainOrdinal) {
         assert!(
             serving.storage().enforcement().is_blocked(blocked),
             "the Domain-scope ja4 decision must latch the exact 443 pair blocked"
@@ -7687,18 +7687,18 @@ mod enforcement {
         );
     }
 
-    fn arm_blocked_pair_connect(serving: &mut Serving, port: u16) -> (TcpStream, usize) {
+    fn arm_blocked_pair_connect(serving: &mut ServingLoop, port: u16) -> (TcpStream, usize) {
         let client = connect(port);
         pump(serving, 20);
         let index = serving
             .slots
             .iter()
-            .position(|slot| slot.handle.is_some() && slot.stage == Stage::ReadingConnect)
+            .position(|slot| slot.handle.is_some() && slot.stage == SlotStage::ReadingConnect)
             .expect("an in-setup slot reading the blocked CONNECT head");
         (client, index)
     }
 
-    fn exhaust_blocked_pair_ledger(serving: &mut Serving, index: usize) {
+    fn exhaust_blocked_pair_ledger(serving: &mut ServingLoop, index: usize) {
         use crate::dns::cache::Family;
         let handle = serving.slots[index].handle.take().expect("in-setup handle");
         for _ in 0..crate::runtime::tunnel::MAX_UPSTREAM_ATTEMPTS {
@@ -7719,14 +7719,14 @@ mod enforcement {
                 .storage()
                 .decide(&handle, &resolved, Instant::now())
                 .expect("decision on the exhausted ledger"),
-            ConnectPhase::CandidatesExhausted,
+            AdmissionVerdict::CandidatesExhausted,
             "the exhausted ledger alone would refuse DialFailed/502"
         );
         serving.slots[index].handle = Some(handle);
         serving.run_decision(index).expect("blocked-pair decision");
     }
 
-    fn assert_forbidden_refusal_record(serving: &Serving, blocked: DomainOrdinal) {
+    fn assert_forbidden_refusal_record(serving: &ServingLoop, blocked: DomainOrdinal) {
         let text = last_reject_record(serving, "forbidden");
         assert!(
             text.contains("hostname=\"a.example\""),
@@ -7745,7 +7745,7 @@ mod enforcement {
 
     #[test]
     fn blocked_pair_forbids_before_exhausted_ledger_through_real_decision() {
-        use crate::inspection::connect::Feed;
+        use crate::inspection::connect::ConnectParseStep;
         let port = ephemeral_port();
         let cfg = blocked_pair_config(port);
         with_serving_stack_cfg(port, cfg, move |serving| {
@@ -7758,7 +7758,7 @@ mod enforcement {
 
             serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
             drive_hello(serving, &wire_a, "a.example");
-            let host = FixedHostname::normalize(b"a.example").expect("normalize");
+            let host = ApprovedHostname::normalize(b"a.example").expect("normalize");
             let blocked = serving
                 .storage()
                 .ordinal_for_pair(&host, 443)
@@ -7785,8 +7785,8 @@ mod enforcement {
                 .feed(b"CONNECT a.example:443 HTTP/1.1\r\n\r\n")
                 .expect("blocked-pair head feed")
             {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("the full head must parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("the full head must parse to completion"),
             }
             exhaust_blocked_pair_ledger(serving, index);
             let body = read_until(&mut client, b"\r\n\r\n");
@@ -7798,7 +7798,7 @@ mod enforcement {
         });
     }
 
-    fn stage_blocked_relay_payload(serving: &mut Serving, up: mio::net::TcpStream) {
+    fn stage_blocked_relay_payload(serving: &mut ServingLoop, up: mio::net::TcpStream) {
         let index = 0;
         {
             let ws = &mut serving.slots[index];
@@ -7811,7 +7811,7 @@ mod enforcement {
             ws.down[..16].copy_from_slice(b"DOWNSTRM00XXXXXX");
             ws.down_len = 16;
             ws.down_off = 0;
-            ws.stage = Stage::Relay;
+            ws.stage = SlotStage::Relay;
             ws.gate.on_connect_head(4);
             ws.gate.on_authorized();
             ws.gate.on_upstream_connected();
@@ -7820,7 +7820,7 @@ mod enforcement {
         serving.register_upstream(index).expect("register upstream");
     }
 
-    fn assert_pending_relay_payload(serving: &Serving) {
+    fn assert_pending_relay_payload(serving: &ServingLoop) {
         let index = 0;
         assert_eq!(
             serving.slots[index].buf_len, 8,
@@ -7832,7 +7832,7 @@ mod enforcement {
         );
     }
 
-    fn drive_block_all_latch(serving: &mut Serving, port: u16) {
+    fn drive_block_all_latch(serving: &mut ServingLoop, port: u16) {
         for _ in 0..3 {
             let mut evil = connect(port);
             evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
@@ -7841,7 +7841,7 @@ mod enforcement {
         }
     }
 
-    fn dispatch_stale_client_writable(serving: &mut Serving, index: usize) {
+    fn dispatch_stale_client_writable(serving: &mut ServingLoop, index: usize) {
         let ctoken = client_token(serving.slots[index].slot_gen, index);
         serving
             .dispatch_readiness(
@@ -7908,7 +7908,7 @@ mod enforcement {
         });
     }
 
-    fn trip_block_all_with_evil_connects(serving: &mut Serving, port: u16) {
+    fn trip_block_all_with_evil_connects(serving: &mut ServingLoop, port: u16) {
         for _ in 0..3 {
             let mut evil = connect(port);
             evil.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
@@ -7917,13 +7917,13 @@ mod enforcement {
         }
     }
 
-    fn arm_latch_relay_slot(serving: &mut Serving, client: mio::net::TcpStream) {
+    fn arm_latch_relay_slot(serving: &mut ServingLoop, client: mio::net::TcpStream) {
         let ws = &mut serving.slots[0];
         ws.client = Some(client);
         ws.down_off = 0;
         ws.down[..16].copy_from_slice(b"DOWNSTRM00XXXXXX");
         ws.down_len = 16;
-        ws.stage = Stage::Relay;
+        ws.stage = SlotStage::Relay;
         ws.gate.on_connect_head(4);
         ws.gate.on_authorized();
         ws.gate.on_upstream_connected();
@@ -7946,7 +7946,7 @@ mod enforcement {
             let (client, mut reader) = relay_peer_pair();
             arm_latch_relay_slot(serving, client);
             assert!(
-                serving.slots[0].client.is_some() && matches!(serving.slots[0].stage, Stage::Relay),
+                serving.slots[0].client.is_some() && matches!(serving.slots[0].stage, SlotStage::Relay),
                 "the fault-injected relay slot is live after the sweep"
             );
 
@@ -7961,7 +7961,7 @@ mod enforcement {
                 )
                 .expect("post-latch client writable handled through the guard");
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle | Stage::Closing),
+                matches!(serving.slots[0].stage, SlotStage::Idle | SlotStage::Closing),
                 "the latch guard must close the live slot without any I/O"
             );
             assert!(
@@ -8044,7 +8044,7 @@ mod enforcement {
                 ws.hello_consumed = 0;
                 ws.fwd = 0;
                 ws.approved = None;
-                ws.stage = Stage::ValidatingHello;
+                ws.stage = SlotStage::ValidatingHello;
                 ws.gate.on_connect_head(0);
                 ws.gate.on_authorized();
                 ws.gate.on_upstream_connected();
@@ -8053,11 +8053,11 @@ mod enforcement {
             fabric_relay_slot(serving, 1, b"sub.example.org", b"KEEP-00");
             serving.buffer_and_validate(0, &[]);
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle),
+                matches!(serving.slots[0].stage, SlotStage::Idle),
                 "the internal-fault slot closes locally"
             );
             assert!(
-                matches!(serving.slots[1].stage, Stage::Relay),
+                matches!(serving.slots[1].stage, SlotStage::Relay),
                 "an unrelated live flow survives the internal absence"
             );
             assert!(
@@ -8092,8 +8092,8 @@ mod enforcement {
         with_serving_stack_cfg(port, cfg, move |serving| {
             {
                 let ws = &mut serving.slots[0];
-                ws.approved = FixedHostname::normalize(b"sub.example.org");
-                ws.stage = Stage::ValidatingHello;
+                ws.approved = ApprovedHostname::normalize(b"sub.example.org");
+                ws.stage = SlotStage::ValidatingHello;
                 ws.gate.on_connect_head(0);
                 ws.gate.on_authorized();
                 ws.gate.on_upstream_connected();
@@ -8101,7 +8101,7 @@ mod enforcement {
             }
             serving.hello_complete(0);
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle),
+                matches!(serving.slots[0].stage, SlotStage::Idle),
                 "the internal-fault slot closes locally"
             );
             assert!(
@@ -8135,15 +8135,15 @@ mod enforcement {
         let cfg = cfg_doc1(port, "all", "notify", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
             let wire = hello_wire(b"evil.example.net", false);
-            let mut insp = ChInspector::new();
-            assert!(matches!(insp.feed(&wire), Ok(Inspect::Complete { .. })));
-            let approved = FixedHostname::normalize(b"sub.example.org");
+            let mut insp = ClientHelloInspector::new();
+            assert!(matches!(insp.feed(&wire), Ok(HelloParseStep::Complete { .. })));
+            let approved = ApprovedHostname::normalize(b"sub.example.org");
             assert_eq!(
                 client_hello::validate(
                     insp.hello().expect("parsed hello"),
                     &approved.expect("approx")
                 ),
-                Err(client_hello::ChError::ServerNameMismatch),
+                Err(client_hello::ClientHelloError::ServerNameMismatch),
                 "the fixture must fail validation only on the SNI, not on parsing"
             );
             for _ in 0..3 {
@@ -8310,10 +8310,10 @@ mod enforcement {
             let port = ephemeral_port();
             let cfg = cfg_doc1(port, "all", "notify", "connection");
             let mut serving = serve_on_cfg(port, &cfg);
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             for ws in serving.slots.iter_mut() {
                 ws.approved = Some(approved);
-                ws.stage = Stage::Dialing;
+                ws.stage = SlotStage::Dialing;
             }
             let ((), counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
                 for i in 0..3 {
@@ -8338,7 +8338,7 @@ mod enforcement {
                     serving
                         .slots
                         .iter()
-                        .all(|s| s.stage == Stage::Idle || s.stage == Stage::Closing),
+                        .all(|s| s.stage == SlotStage::Idle || s.stage == SlotStage::Closing),
                     "the Block-All sweep must recycle every one of the 128 occupied workspaces"
                 );
             });
@@ -8354,7 +8354,7 @@ mod enforcement {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "connection", "block", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -8394,7 +8394,7 @@ mod enforcement {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "connection", "block", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -8455,7 +8455,7 @@ mod enforcement {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "connection", "block", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -8570,7 +8570,7 @@ mod admission {
     fn peer_admission_freshness_folds_serving_stale_level_bit() {
         use crate::dns::cache::Family;
         use crate::eligibility::NumericAddr;
-        use crate::inspection::connect::Feed;
+        use crate::inspection::connect::ConnectParseStep;
         use std::net::Ipv4Addr;
         let port = ephemeral_port();
         let upstream_port = ephemeral_port();
@@ -8579,8 +8579,8 @@ mod admission {
             let mut parser = crate::inspection::connect::ConnectParser::new();
             let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
             match parser.feed(head.as_bytes()).expect("head feed") {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("head should parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("head should parse to completion"),
             }
             let request = parser
                 .result()
@@ -8652,17 +8652,17 @@ mod admission {
     }
 
     fn arm_stale_peer_setup(
-        serving: &mut Serving,
+        serving: &mut ServingLoop,
         port: u16,
         upstream_port: u16,
-    ) -> (Instant, TcpStream, usize, Feed) {
+    ) -> (Instant, TcpStream, usize, ConnectParseStep) {
         let origin = Instant::now();
         let client = connect(port);
         pump(serving, 10);
         let index = serving
             .slots
             .iter()
-            .position(|slot| slot.handle.is_some() && slot.stage == Stage::ReadingConnect)
+            .position(|slot| slot.handle.is_some() && slot.stage == SlotStage::ReadingConnect)
             .expect("an in-setup slot reading the CONNECT head");
         let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
         let feed = serving.slots[index]
@@ -8672,21 +8672,21 @@ mod admission {
         (origin, client, index, feed)
     }
 
-    fn assert_not_serving_stale(serving: &Serving) {
+    fn assert_not_serving_stale(serving: &ServingLoop) {
         assert!(
             !serving.storage().enforcement().monitor().serving_stale(),
             "a fresh monitor must not be serving stale"
         );
     }
 
-    fn assert_serving_stale(serving: &Serving) {
+    fn assert_serving_stale(serving: &ServingLoop) {
         assert!(
             serving.storage().enforcement().monitor().serving_stale(),
             "a real stale Peer grant must latch the serving-stale level bit"
         );
     }
 
-    fn assert_incident_summary_counts_stale_once(serving: &mut Serving, origin: Instant) {
+    fn assert_incident_summary_counts_stale_once(serving: &mut ServingLoop, origin: Instant) {
         serving
             .storage_mut()
             .report_incident_if_due(origin + Duration::from_secs(3600));
@@ -8702,7 +8702,7 @@ mod admission {
         );
     }
 
-    fn seed_stale_binding(serving: &mut Serving, origin: Instant) {
+    fn seed_stale_binding(serving: &mut ServingLoop, origin: Instant) {
         use crate::dns::cache::Family;
         use crate::dns::transport::FailureReason;
         use crate::eligibility::NumericAddr;
@@ -8728,11 +8728,11 @@ mod admission {
         let upstream_port = ephemeral_port();
         let cfg = config_pair(port, upstream_port);
         with_serving_stack_cfg(port, cfg, move |serving| {
-            use crate::inspection::connect::Feed;
+            use crate::inspection::connect::ConnectParseStep;
             let (origin, client, index, feed) = arm_stale_peer_setup(serving, port, upstream_port);
             match feed {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("the full head must parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("the full head must parse to completion"),
             }
             seed_stale_binding(serving, origin);
             assert_not_serving_stale(serving);
@@ -8753,7 +8753,7 @@ mod admission {
                 .decide(&handle, &resolved, now)
                 .expect("real stale-grant decision")
             {
-                ConnectPhase::Peer { family, .. } => family,
+                AdmissionVerdict::Peer { family, .. } => family,
                 other => panic!("the stale binding must grant a peer, got {other:?}"),
             };
             let observed = resolved.peer_state(family, now);
@@ -8770,7 +8770,7 @@ mod admission {
                         .storage()
                         .decide(&handle, &fresh, now)
                         .expect("re-decision after the failed attempt"),
-                    ConnectPhase::Peer { .. }
+                    AdmissionVerdict::Peer { .. }
                 ),
                 "the exhausted single binding must not regrant a peer on retry"
             );
@@ -8783,7 +8783,7 @@ mod admission {
     /// The serving-path wiring seam for tunnel activity (M2): a committed relay
     /// peer's forwarded bytes are attributed to the name's incident window through
     /// `note_incident_tunnel_bytes`, and the boundary rotation emits them in the
-    /// summary. Only `Stage::Relay` writes with a committed `report_name` count.
+    /// summary. Only `SlotStage::Relay` writes with a committed `report_name` count.
     fn incident_tunnel_bytes_counted_through_real_path() {
         use crate::dns::cache::Family;
         use crate::dns::transport::FailureReason;
@@ -8799,7 +8799,7 @@ mod admission {
             serving.storage_mut().report_incident_if_due(origin);
             // A committed relay peer attributes tunnel bytes to the name window.
             serving.slots[0].report_name = Some(0);
-            serving.slots[0].stage = Stage::Relay;
+            serving.slots[0].stage = SlotStage::Relay;
             serving.note_incident_tunnel_bytes(0, 100, 1010);
             serving.note_incident_tunnel_bytes(0, 50, 1020);
             // The 3600s boundary rotation emits the summary with the counted
@@ -8831,7 +8831,7 @@ mod admission {
         use crate::dns::cache::Family;
         use crate::dns::transport::FailureReason;
         use crate::eligibility::NumericAddr;
-        use crate::inspection::connect::Feed;
+        use crate::inspection::connect::ConnectParseStep;
         use std::net::Ipv4Addr;
         let port = ephemeral_port();
         let upstream_port = ephemeral_port();
@@ -8855,8 +8855,8 @@ mod admission {
             let mut parser = crate::inspection::connect::ConnectParser::new();
             let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
             match parser.feed(head.as_bytes()).expect("head feed") {
-                Feed::Complete { .. } => {}
-                Feed::Incomplete => panic!("head should parse to completion"),
+                ConnectParseStep::Complete { .. } => {}
+                ConnectParseStep::Incomplete => panic!("head should parse to completion"),
             }
             let request = parser
                 .result()
@@ -9084,7 +9084,7 @@ mod coalescing {
                 "the coarse-relayed payload must be byte exact"
             );
             assert!(
-                matches!(serving.slots[0].stage, Stage::Relay),
+                matches!(serving.slots[0].stage, SlotStage::Relay),
                 "the relay must stay open after the coarse read"
             );
             let ws = &serving.slots[0];
@@ -9150,7 +9150,7 @@ mod coalescing {
              upstream error arm closed the slot first, the 403 never arrives"
             );
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle),
+                matches!(serving.slots[0].stage, SlotStage::Idle),
                 "the first arm's refusal close must leave the slot idle"
             );
             assert_eq!(
@@ -9211,7 +9211,7 @@ mod coalescing {
                 "the first arm's error close must drop the client handle"
             );
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle),
+                matches!(serving.slots[0].stage, SlotStage::Idle),
                 "the first arm's error close must leave the slot idle"
             );
             assert_eq!(
@@ -9234,7 +9234,7 @@ mod coalescing {
 
     #[test]
     /// Tokens folded for a slot carry the slot's generation at fold time, and the
-    /// Pass 2 guard also refuses to dispatch onto `Stage::Idle` state; a stale
+    /// Pass 2 guard also refuses to dispatch onto `SlotStage::Idle` state; a stale
     /// token for an already-closed slot (the review's LISTENER-reuse generation
     /// case, reachable here as a closed slot at its old generation) must be dropped
     /// without folding, dispatching, or opening a visit.
@@ -9265,7 +9265,7 @@ mod coalescing {
                 .dispatch_coalesced_batch(&tokens)
                 .expect("error close batch");
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle),
+                matches!(serving.slots[0].stage, SlotStage::Idle),
                 "the error token must close the admitted slot"
             );
             assert_eq!(
@@ -9297,7 +9297,7 @@ mod coalescing {
                 .dispatch_coalesced_batch(&stale)
                 .expect("stale token batch");
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle),
+                matches!(serving.slots[0].stage, SlotStage::Idle),
                 "a stale token for a closed slot must never re-arm it"
             );
             assert_eq!(
@@ -9398,7 +9398,7 @@ mod ja4_baseline {
             let wire = hello_wire(b"sub.example.org", false);
             serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
             drive_hello(serving, &wire, "sub.example.org");
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -9454,14 +9454,14 @@ mod ja4_baseline {
             let second = serving
                 .storage()
                 .ordinal_for_pair(
-                    &FixedHostname::normalize(b"a.example").expect("normalize"),
+                    &ApprovedHostname::normalize(b"a.example").expect("normalize"),
                     8443,
                 )
                 .expect("second ordinal");
             let first = serving
                 .storage()
                 .ordinal_for_pair(
-                    &FixedHostname::normalize(b"a.example").expect("normalize"),
+                    &ApprovedHostname::normalize(b"a.example").expect("normalize"),
                     443,
                 )
                 .expect("first ordinal");
@@ -9481,7 +9481,7 @@ mod ja4_baseline {
     #[test]
     fn ja4_set_overflow_flares_signal_once_per_connection() {
         with_serving_stack(ephemeral_port(), |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -9592,7 +9592,7 @@ mod ja4_baseline {
     )]
     fn ja4_set_overflow_fires_decision_on_each_new_distinct_beyond_capacity() {
         with_serving_stack(ephemeral_port(), |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -9715,7 +9715,7 @@ mod ja4_baseline {
         with_serving_stack(ephemeral_port(), |serving| {
             let wire = hello_wire(b"sub.example.org", false);
             drive_hello(serving, &wire, "sub.example.org");
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -9784,7 +9784,7 @@ mod ja4_baseline {
     #[test]
     fn ja4_baseline_set_overflow_suppresses_and_dedups_unchanged() {
         with_serving_stack(ephemeral_port(), |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -9825,7 +9825,7 @@ mod ja4_baseline {
     #[test]
     fn ja4_set_unchanged_does_not_reseed_or_signal_across_ips() {
         with_serving_stack(ephemeral_port(), |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -9867,7 +9867,7 @@ mod ja4_baseline {
         let port = ephemeral_port();
         let cfg = cfg_ja4_block(port, "fqdn");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -9905,7 +9905,7 @@ mod ja4_baseline {
         let port = ephemeral_port();
         let cfg = cfg_ja4_block(port, "fqdn");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -9960,7 +9960,7 @@ mod ja4_baseline {
         let port = ephemeral_port();
         let cfg = cfg_ja4_block(port, "fqdn");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -10004,7 +10004,7 @@ mod ja4_baseline {
     #[test]
     fn ja4_in_capacity_change_updates_value_peer_and_change_counter() {
         with_serving_stack(ephemeral_port(), |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -10093,7 +10093,7 @@ mod ja4_baseline {
         );
         let cfg = crate::config::parse_config_document(&doc).expect("valid ja4 ignore config");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -10166,7 +10166,7 @@ mod ja4_baseline {
     #[test]
     fn ja4_set_overflow_emits_monitor_dnj_record() {
         with_serving_stack(ephemeral_port(), |serving| {
-            let approved = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&approved, 443)
@@ -10278,7 +10278,7 @@ mod ja4_baseline {
         crate::config::parse_config_document(&doc).expect("valid ja4 block test config")
     }
 
-    fn seed_full_ja4_set(serving: &mut Serving, ordinal: DomainOrdinal, first_wire: &[u8]) {
+    fn seed_full_ja4_set(serving: &mut ServingLoop, ordinal: DomainOrdinal, first_wire: &[u8]) {
         serving.slots[0].dest_ip = Some(NumericAddr::V4(Ipv4Addr::from([203, 0, 113, 1])));
         drive_hello(serving, first_wire, "sub.example.org");
         for i in 0..MAX_ADDRESSES - 1 {
@@ -10292,7 +10292,7 @@ mod ja4_baseline {
         }
     }
 
-    fn arm_ja4_all_gate(serving: &mut Serving) {
+    fn arm_ja4_all_gate(serving: &mut ServingLoop) {
         for alpn in [0x32u8, 0x33] {
             let wire = hello_wire_ext(
                 b"sub.example.org",
@@ -10325,7 +10325,7 @@ mod ja4_baseline {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "connection", "block", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let host = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&host, 443)
@@ -10363,7 +10363,7 @@ mod ja4_baseline {
         let port = ephemeral_port();
         let cfg = cfg_ja4_block(port, "all");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let host = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&host, 443)
@@ -10413,7 +10413,7 @@ mod ja4_baseline {
         let port = ephemeral_port();
         let cfg = cfg_ja4_block(port, "all");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let host = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&host, 443)
@@ -10462,7 +10462,7 @@ mod ja4_baseline {
                 received.len()
             );
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle),
+                matches!(serving.slots[0].stage, SlotStage::Idle),
                 "the blocked slot must be closed"
             );
             assert!(
@@ -10486,7 +10486,7 @@ mod ja4_baseline {
         let port = ephemeral_port();
         let cfg = cfg_doc1(port, "connection", "block", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let host = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&host, 443)
@@ -10504,7 +10504,7 @@ mod ja4_baseline {
             drive_hello(serving, &wire_b, "sub.example.org");
 
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle),
+                matches!(serving.slots[0].stage, SlotStage::Idle),
                 "a Block Connection decision must terminate the offending connection"
             );
             assert!(
@@ -10524,7 +10524,7 @@ mod ja4_baseline {
         let port = ephemeral_port();
         let cfg = cfg_ja4_block(port, "fqdn");
         with_serving_stack_cfg(port, cfg, move |serving| {
-            let host = FixedHostname::normalize(b"sub.example.org").expect("normalize");
+            let host = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ordinal = serving
                 .storage()
                 .ordinal_for_pair(&host, 443)
@@ -10536,7 +10536,7 @@ mod ja4_baseline {
                 let sibling = &mut serving.slots[1];
                 sibling.approved = Some(host);
                 sibling.report_name = Some(ordinal.get());
-                sibling.stage = Stage::Relay;
+                sibling.stage = SlotStage::Relay;
             }
 
             let wire_b = hello_wire_ext(
@@ -10549,7 +10549,7 @@ mod ja4_baseline {
             drive_hello(serving, &wire_b, "sub.example.org");
 
             assert!(
-                matches!(serving.slots[0].stage, Stage::Idle),
+                matches!(serving.slots[0].stage, SlotStage::Idle),
                 "a Block Domain decision must terminate the triggering connection"
             );
             assert!(
@@ -10557,7 +10557,7 @@ mod ja4_baseline {
                 "the offending slot must release its admission handle"
             );
             assert!(
-                matches!(serving.slots[1].stage, Stage::Idle),
+                matches!(serving.slots[1].stage, SlotStage::Idle),
                 "a Block Domain decision must also terminate a concurrent same-ordinal flow"
             );
             assert!(
@@ -10575,7 +10575,7 @@ mod ja4_baseline {
 
 #[cfg(feature = "alloc-witness")]
 struct IdleExpiryCase {
-    serving: Serving,
+    serving: ServingLoop,
     reader: std::os::unix::net::UnixStream,
     boot: [u8; 8192],
 }
@@ -10695,7 +10695,7 @@ fn seeded_idle_expiry_case(dual_family: bool) -> IdleExpiryCase {
     assert!(reader.read(&mut boot).unwrap() > 0);
     assert_eq!(storage.logs().len(), 0);
     let traffic = crate::inventory::TrafficStorage::allocate().expect("boot traffic storage");
-    let serving = Serving::new(storage, listener, traffic).expect("serving on the seeded storage");
+    let serving = ServingLoop::new(storage, listener, traffic).expect("serving on the seeded storage");
     // Mounted at the DNS window origin: cache_secs at the origin reads now0.
     let origin = serving.storage().dns().window_start();
     assert_eq!(serving.storage().cache_secs(origin), 1000);
@@ -10707,7 +10707,7 @@ fn seeded_idle_expiry_case(dual_family: bool) -> IdleExpiryCase {
 }
 
 #[cfg(feature = "alloc-witness")]
-fn fill_idle_log_queue(serving: &mut Serving) {
+fn fill_idle_log_queue(serving: &mut ServingLoop) {
     use crate::dns::cache::Family;
     for _ in 0..crate::log::QUEUE_SLOTS {
         serving.storage_mut().logs_mut().startup_warning_ctx(
@@ -10722,7 +10722,7 @@ fn fill_idle_log_queue(serving: &mut Serving) {
 }
 
 #[cfg(feature = "alloc-witness")]
-fn await_proof_expiry_gap(serving: &mut Serving) {
+fn await_proof_expiry_gap(serving: &mut ServingLoop) {
     let before = Instant::now();
     let expiry = serving
         .storage()
@@ -10748,7 +10748,7 @@ fn await_proof_expiry_gap(serving: &mut Serving) {
 }
 
 #[cfg(feature = "alloc-witness")]
-fn check_idle_signal_effect(serving: &Serving, signal_first: bool) {
+fn check_idle_signal_effect(serving: &ServingLoop, signal_first: bool) {
     if signal_first {
         assert!(
             serving.is_shutdown(),
@@ -10850,7 +10850,7 @@ fn idle_run_once_observes_trusted_proof_expiry_without_dns_publication() {
 
 #[cfg(feature = "alloc-witness")]
 fn check_second_family_expiry(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     reader: &mut std::os::unix::net::UnixStream,
     boot: &mut [u8; 8192],
 ) {
@@ -10880,7 +10880,7 @@ fn check_second_family_expiry(
 
 #[cfg(feature = "alloc-witness")]
 fn watched_idle_turn(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     mut wake: std::os::unix::net::UnixStream,
     timeout: Duration,
 ) -> crate::alloc::Counts {
@@ -10902,7 +10902,7 @@ fn watched_idle_turn(
 
 #[cfg(feature = "alloc-witness")]
 fn check_idle_expiry_log(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     full_queue: bool,
     dual_family: bool,
     dropped_before: u64,
@@ -11227,7 +11227,7 @@ fn idle_negative_expiry_does_not_revive_positive_bindings() {
                 assert!(reader.read(&mut bytes).unwrap() > 0);
                 assert_eq!(storage.logs().len(), 0);
                 let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-                let mut serving = Serving::new(storage, listener, traffic).unwrap();
+                let mut serving = ServingLoop::new(storage, listener, traffic).unwrap();
                 // Mounted at the DNS window origin: cache_secs at the origin reads now0.
                 let origin = serving.storage().dns().window_start();
                 assert_eq!(serving.storage().cache_secs(origin), 1000);
@@ -11331,7 +11331,7 @@ fn idle_strong_proof_expiry_denies_new_peer_admission() {
             assert!(reader.read(&mut bytes).unwrap() > 0);
             assert_eq!(storage.logs().len(), 0);
             let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-            let mut serving = Serving::new(storage, listener, traffic).unwrap();
+            let mut serving = ServingLoop::new(storage, listener, traffic).unwrap();
             // Mounted at the DNS window origin: cache_secs at the origin reads now0.
             let origin = serving.storage().dns().window_start();
             assert_eq!(serving.storage().cache_secs(origin), 1000);
@@ -11402,7 +11402,7 @@ fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
             let mut bytes = [0u8; 8192];
             assert!(reader.read(&mut bytes).unwrap() > 0);
             let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-            let mut serving = Serving::new(storage, listener, traffic).unwrap();
+            let mut serving = ServingLoop::new(storage, listener, traffic).unwrap();
             let exchange_deadline = start_waiting_dns_exchange(&mut serving);
             // The mounted deadline falls before the exchange deadline by
             // construction, so a waiting DNS exchange must not mask the expiry.
@@ -11448,7 +11448,7 @@ fn waiting_dns_exchange_does_not_mask_idle_proof_expiry() {
 }
 
 #[cfg(feature = "alloc-witness")]
-fn start_waiting_dns_exchange(serving: &mut Serving) -> Instant {
+fn start_waiting_dns_exchange(serving: &mut ServingLoop) -> Instant {
     use crate::dns::transport::{ExchangeClass, TurnResult};
     serving
         .attach_dns_shared()
@@ -11503,7 +11503,7 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
                 let mut boot = [0u8; 8192];
                 assert!(reader.read(&mut boot).unwrap() > 0);
                 let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-                let mut serving = Serving::new(storage, listener, traffic).unwrap();
+                let mut serving = ServingLoop::new(storage, listener, traffic).unwrap();
                 let (mut sink_stream, up) = sink_pair();
                 sink_stream
                     .set_read_timeout(Some(Duration::from_millis(40)))
@@ -11520,7 +11520,7 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
                 let counts = watched_idle_turn(&mut serving, wake, Duration::from_secs(3));
                 assert!(counts.all_zero(), "relay expiry turn allocated: {counts:?}");
                 assert!(!serving.is_shutdown());
-                assert!(matches!(serving.slots[0].stage, Stage::Relay));
+                assert!(matches!(serving.slots[0].stage, SlotStage::Relay));
                 assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
                 if full_queue {
                     assert_eq!(serving.storage().logs().dropped(), dropped + 1);
@@ -11542,7 +11542,7 @@ fn primed_live_relay_survives_idle_expiry_and_full_log_drop() {
 }
 
 #[cfg(feature = "alloc-witness")]
-fn fill_relay_log_until_expiry(serving: &mut Serving) {
+fn fill_relay_log_until_expiry(serving: &mut ServingLoop) {
     for _ in 0..crate::log::QUEUE_SLOTS {
         serving.storage_mut().logs_mut().startup_warning_ctx(
             1000,
@@ -11569,7 +11569,7 @@ fn fill_relay_log_until_expiry(serving: &mut Serving) {
 /// much wall time fixture setup consumed. The deadline is a cache-seconds
 /// value, so mounting `now0` at it is exact rather than a wall-clock guess.
 #[cfg(feature = "alloc-witness")]
-fn advance_to_proof_expiry(serving: &mut Serving) -> Instant {
+fn advance_to_proof_expiry(serving: &mut ServingLoop) -> Instant {
     let deadline = serving
         .storage()
         .cache()
@@ -11589,7 +11589,7 @@ fn advance_to_proof_expiry(serving: &mut Serving) -> Instant {
 }
 
 #[cfg(feature = "alloc-witness")]
-fn prime_expiry_relay(serving: &mut Serving, up: mio::net::TcpStream, client: mio::net::TcpStream) {
+fn prime_expiry_relay(serving: &mut ServingLoop, up: mio::net::TcpStream, client: mio::net::TcpStream) {
     let slot = &mut serving.slots[0];
     slot.upstream = Some(up);
     slot.client = Some(client);
@@ -11608,13 +11608,13 @@ fn prime_expiry_relay(serving: &mut Serving, up: mio::net::TcpStream, client: mi
     serving
         .run_once(Some(Duration::ZERO))
         .expect("the zero-timeout primed relay turn must complete");
-    assert!(matches!(serving.slots[0].stage, Stage::Relay));
+    assert!(matches!(serving.slots[0].stage, SlotStage::Relay));
     assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
 }
 
 #[cfg(feature = "alloc-witness")]
 fn assert_expiry_relay_forwards(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     peer: &mut TcpStream,
     sink_stream: &mut TcpStream,
 ) {
@@ -11650,7 +11650,7 @@ fn assert_expiry_relay_forwards(
         }
     }
     assert_eq!(&got, b"ping");
-    assert!(matches!(serving.slots[0].stage, Stage::Relay));
+    assert!(matches!(serving.slots[0].stage, SlotStage::Relay));
 }
 
 #[cfg(feature = "alloc-witness")]
@@ -11704,14 +11704,14 @@ fn actual_client_setup_deadline_precedes_idle_proof_expiry() {
             let mut log_bytes = [0u8; 8192];
             assert!(reader.read(&mut log_bytes).unwrap() > 0);
             let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-            let mut serving = Serving::new(storage, listener, traffic).unwrap();
+            let mut serving = ServingLoop::new(storage, listener, traffic).unwrap();
             let mut client = TcpStream::connect(address).unwrap();
             client
                 .set_read_timeout(Some(Duration::from_millis(500)))
                 .unwrap();
             serving.run_once(Some(Duration::from_secs(2))).unwrap();
             assert_eq!(serving.storage().occupied(), 1);
-            assert!(matches!(serving.slots[0].stage, Stage::ReadingConnect));
+            assert!(matches!(serving.slots[0].stage, SlotStage::ReadingConnect));
             serving.run_once(Some(Duration::ZERO)).unwrap();
             let client_deadline = serving.slots[0].setup_deadline.unwrap();
             let proof_deadline = serving
@@ -11747,7 +11747,7 @@ fn actual_client_setup_deadline_precedes_idle_proof_expiry() {
 
 #[cfg(feature = "alloc-witness")]
 fn assert_client_deadline_precedes_proof(
-    serving: &mut Serving,
+    serving: &mut ServingLoop,
     name: crate::dns::cache::NameIndex,
     client_deadline: Instant,
     proof_deadline: Instant,
@@ -11853,7 +11853,7 @@ fn synthetic_expiry_clock_fault_is_reported_without_losing_poll_buffer() {
                 Ok(AssuranceObservation::Unchanged)
             );
             let traffic = crate::inventory::TrafficStorage::allocate().unwrap();
-            let mut serving = Serving::new(storage, listener, traffic).unwrap();
+            let mut serving = ServingLoop::new(storage, listener, traffic).unwrap();
             let sink = StdListener::bind("127.0.0.1:0").unwrap();
             let upstream = mio::net::TcpStream::connect(sink.local_addr().unwrap()).unwrap();
             let (_sink_peer, _) = sink.accept().unwrap();
@@ -11872,7 +11872,7 @@ fn synthetic_expiry_clock_fault_is_reported_without_losing_poll_buffer() {
 }
 
 #[cfg(feature = "alloc-witness")]
-fn assert_expiry_clock_fault_preserves_poll_buffer(serving: &mut Serving) {
+fn assert_expiry_clock_fault_preserves_poll_buffer(serving: &mut ServingLoop) {
     let length = serving.storage().logs().len();
     serving
         .storage_mut()
@@ -11894,7 +11894,7 @@ fn assert_expiry_clock_fault_preserves_poll_buffer(serving: &mut Serving) {
         "{frame}"
     );
     assert!(!serving.is_shutdown() && serving.listener.is_some());
-    assert!(matches!(serving.slots[0].stage, Stage::Relay));
+    assert!(matches!(serving.slots[0].stage, SlotStage::Relay));
     assert!(serving.slots[0].client.is_some() && serving.slots[0].upstream.is_some());
     let (result, counts) = crate::alloc::run_phase(crate::alloc::Phase::Serving, || {
         serving.run_once(Some(Duration::ZERO))
@@ -11958,7 +11958,7 @@ fn assert_expiry_clock_fault_preserves_poll_buffer(serving: &mut Serving) {
 /// two-pass protocol — every token is folded in Pass 1 and the chain is popped
 /// only afterwards — so a `fold` drawn after a successful pop in the same
 /// batch is skipped. That order is unreachable through
-/// [`Serving::dispatch_coalesced_batch`], which folds the whole token snapshot
+/// [`ServingLoop::dispatch_coalesced_batch`], which folds the whole token snapshot
 /// before it pops any slot, and it is deliberately not modelled because a
 /// re-folded index would reuse its stale `next` link. Token order, generation
 /// changes, directions and readiness values themselves stay fully drawn.

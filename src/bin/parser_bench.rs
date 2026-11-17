@@ -1,5 +1,5 @@
 //! Dependency-free machine-instruction-count microbenchmark for the two
-//! reachable parsing seams of the serving path: `ChInspector::feed` and
+//! reachable parsing seams of the serving path: `ClientHelloInspector::feed` and
 //! `ja4_fingerprint` (both in `alumina::client_hello`).
 //!
 //! This is a developer harness, not the serving binary. It links the
@@ -10,8 +10,8 @@
 //! framework.
 //!
 //! The `feed` seam is measured with a differential baseline. Loop A measures
-//! `ChInspector::new()` construction alone; loop B measures construction plus
-//! a single `feed` that must return `Inspect::Complete`; the reported
+//! `ClientHelloInspector::new()` construction alone; loop B measures construction plus
+//! a single `feed` that must return `HelloParseStep::Complete`; the reported
 //! `feed_parse_delta_ns` is loop B minus loop A. The `ja4_fingerprint` seam is
 //! measured directly on the wire-order lists extracted from one parsed
 //! `ClientHello` fixture.
@@ -42,7 +42,7 @@ use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::Instant;
 
-use alumina::inspection::{ChInspector, Inspect, ja4_fingerprint};
+use alumina::inspection::{ClientHelloInspector, HelloParseStep, ja4_fingerprint};
 
 const RECORD_CONTENT_HANDSHAKE: u8 = 22;
 const HANDSHAKE_CLIENT_HELLO: u8 = 1;
@@ -184,18 +184,18 @@ fn build_tls13_hello() -> Vec<u8> {
 fn bench_feed(hello: &[u8], iterations: u64) -> (u128, u128) {
     let construct_start = Instant::now();
     for _ in 0..iterations {
-        let mut inspector = ChInspector::new();
+        let mut inspector = ClientHelloInspector::new();
         black_box(&mut inspector);
     }
     let construct_ns = construct_start.elapsed().as_nanos();
 
     let parse_start = Instant::now();
     for _ in 0..iterations {
-        let mut inspector = ChInspector::new();
+        let mut inspector = ClientHelloInspector::new();
         let result = inspector.feed(hello);
         black_box(&result);
         assert!(
-            matches!(result, Ok(Inspect::Complete { .. })),
+            matches!(result, Ok(HelloParseStep::Complete { .. })),
             "fixture must complete in a single feed"
         );
         black_box(&mut inspector);
@@ -206,10 +206,10 @@ fn bench_feed(hello: &[u8], iterations: u64) -> (u128, u128) {
 }
 
 fn bench_ja4(hello: &[u8], iterations: u64) -> (u128, [u8; 36], [u8; 36]) {
-    let mut inspector = ChInspector::new();
+    let mut inspector = ClientHelloInspector::new();
     let result = inspector.feed(hello);
     assert!(
-        matches!(result, Ok(Inspect::Complete { .. })),
+        matches!(result, Ok(HelloParseStep::Complete { .. })),
         "fixture must complete in a single feed"
     );
     let ch = inspector.hello().expect("complete hello is present");
