@@ -5,7 +5,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 ## Scope
 
 | ID | Definition | Code |
-|---|---|---|
+| --- | --- | --- |
 | `egress` | Police CONNECT egress from a trusted-at-rest workload | — |
 | `allowlist` | Operator's `name:port` set is the only admission authority | `Config`, `Allowlist` |
 | `hello-profile` | Acceptance checks on the initial ClientHello; never negotiation | `validate`, `HelloRejectReason` |
@@ -25,7 +25,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 ## Admission
 
 | ID | Definition | Code |
-|---|---|---|
+| --- | --- | --- |
 | `connect-head` | Untrusted request head; incremental, read-boundary independent | `ConnectParser`, `ConnectRequest`, `ConnectError`, `ConnectHeadReason` |
 | `admission-verdict` | Terminal pre-dial decision: admit with peer, or refuse with a class | `AdmissionVerdict` |
 | `approved-hostname` | Host after allowlist match; identity SNI must reproduce | `ApprovedHostname` |
@@ -41,7 +41,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 ## Resolution
 
 | ID | Definition | Code |
-|---|---|---|
+| --- | --- | --- |
 | `resolver` | Bare IP (TCP) or `IP#fqdn` with optional pin (DoT) | `ResolverSet`, `Nameserver` |
 | `pin` | Operator-declared SHA-256 SPKI pin on a DoT resolver; assertion substitution, not transport trust | `SpiPin`, `PIN_SHA256_SUFFIX` |
 | `dns-wire` | Untrusted response bytes, validated in staging | `ResponseWorkspace`, `BailiwickZones`, `DnsError` |
@@ -57,7 +57,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 ## Enforcement
 
 | ID | Definition | Code |
-|---|---|---|
+| --- | --- | --- |
 | `fact` | AnyIllegal, EarlyUpstreamData, Ja4Change, or Unknown | `Violation`, `AnyIllegalCause`, `UnknownReason` |
 | `control` | One configured key with exactly one `{action, scope}` | `Control`, `PerFqdnControl`, `AnyIllegalControl`, `ControlTable`, `Scope`, `ActionKind` |
 | `effect` | BaselineOnly \| Notify \| Block \| Unknown | `Effect`, `decide` |
@@ -69,7 +69,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 ## Ownership
 
 | ID | Definition | Code |
-|---|---|---|
+| --- | --- | --- |
 | `slot` | Preallocated connection workspace; outlives many tunnels | `SlotIndex`, `TrafficBuffer` |
 | `tunnel` | Relay between admitted client and committed peer | `Worker`, `Worker::admit` |
 | `turn` | Bounded work before timers and other slots are rechecked | `VISIT_OPS`, `VISIT_BYTES`, `TIMER_RECHECK_EVERY` |
@@ -80,7 +80,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 ## Observations
 
 | ID | Definition | Code |
-|---|---|---|
+| --- | --- | --- |
 | `record` | One bounded stdout line; emitted whole or dropped whole | `log::Kind` |
 | `record-class` | Reserved (verdict) vs normal (detail) | queue priority |
 | `drop-accounting` | Loss counted, never silent | `log` |
@@ -96,7 +96,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 ## Boot and operator surface
 
 | ID | Definition | Code |
-|---|---|---|
+| --- | --- | --- |
 | `startup-window` | Bounded resolution before the listener exists | `run_startup`, `StartupOutcome` |
 | `startup-decision` | Serve (full/degraded), exit 75, or terminated | `StartupDecision`, `ServingMode` |
 | `serving-loop` | Single owner loop over sockets, DNS, timers, logs | `ServingLoop`, `SlotStage` |
@@ -114,7 +114,7 @@ Non-normative vocabulary map; [`alumina-proxy.md`](alumina-proxy.md) governs.
 ## Invariants
 
 | ID | Prevents | Code |
-|---|---|---|
+| --- | --- | --- |
 | `inv-binding` | "authorise once, dial later against new DNS" | `Worker` |
 | `inv-auth` | "forward first, validate second" | `ForwardingGate` |
 | `inv-fail-closed` | "be permissive on ambiguity" | `publication` |
@@ -310,30 +310,3 @@ flowchart LR
     inv_ownership -->|verified-by| vq_surface
     inv_work -->|verified-by| vq_resource
 ```
-
-## Naming debt
-
-None outstanding. The map below was applied to the code in one mechanical,
-behaviour-preserving commit on 2026-11-17 (`bd alumina-c06x4`), so the target
-term and the code's term are the same word everywhere above.
-
-| Code | Formerly |
-|---|---|
-| `FirstIllegalLatch` | `FirstSlot` |
-| `AdmissionVerdict` | `ConnectPhase` |
-| `CapacityRefusal` | `AdmissionError` |
-| `ForwardingGate` | `TunnelGate` |
-| `ApprovedHostname` | `FixedHostname` |
-| `EntryState::StaleServing` | `EntryState::Stale` |
-| `ClientHelloInspector`, `ClientHelloError` | `ChInspector`, `ChError` |
-| `ConnectParseStep`, `HelloParseStep` | `Feed`, `Inspect` |
-| `ServingLoop`, `SlotStage` | `Serving`, `Stage` |
-| `CacheEntry` | `Entry` |
-| `ExchangeOutcome` | `wire::Outcome` |
-| `EnforcementState` | `Enforcement` |
-
-Same-word survivors are distinct concepts, not debt: `Shutdown::Serving` (owner
-phase), `ExchangeClass::Serving` and `Phase::Serving` (exchange and allocator
-phases), `ServingMode`, `STALE_SERVING_WINDOW`, `grade_key::Outcome` (the cache's
-own exchange classification), `log::encoding`'s private `Entry` writer, and
-`EntryState::as_str()`'s `stale` token.
