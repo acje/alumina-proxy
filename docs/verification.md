@@ -137,9 +137,29 @@ same hash suffix. Both the logical and the physical checkout spelling are
 matched, so a running compiler or linker that writes into that directory is not
 a match.
 
-The assertion runs before and after each lib-suite invocation in `mid union` and
-`mid full`, after the `host-mid` dispatch, and standalone as above.
-`GATE-CHILD-LEAK-FAIL` names the pid and the command line and exits non-zero.
+The assertion runs **before and after the `host-mid` dispatch**, before and
+after each lib-suite invocation in `mid union` and `mid full`, and standalone as
+above. `GATE-CHILD-LEAK-FAIL` names the pid and the command line and exits
+non-zero.
+
+### The native lib-suite recipe
+
+A host-native lib run must be **bracketed** by the scan, because a host run has
+no dispatch boundary to fail at:
+
+```bash
+sh scripts/verify.sh gate-children scan
+RUST_MIN_STACK=16777216 cargo atest -p alumina --locked --lib
+sh scripts/verify.sh gate-children scan
+```
+
+The **pre-scan** is what makes the bracket load-bearing: an orphan that already
+existed before the run owns a loopback listener, so a lib unit that binds or
+connects against it *waits* rather than failing — observed as a host lib run
+hung for over 30 minutes on a listener it never created. The pre-scan converts a
+stale orphan into a fail instead of a hang, and the post-scan proves the run
+left no new one. `host-mid` applies the same ordering for the same reason: its
+scan runs before the container dispatch, not only after it.
 
 An **unusable observation fails closed**: when `ps` is absent or fails, the
 listing cannot be parsed, or the listing does not contain the scanning shell, the

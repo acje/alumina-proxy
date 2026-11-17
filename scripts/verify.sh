@@ -2229,6 +2229,13 @@ case "$TIER/$SCOPE" in
     mid/full) mid_full ;;
     host-mid/foundations|host-mid/boot|host-mid/clippy|host-mid/union|host-mid/full)
         [ "$#" -eq 2 ] || usage
+        # Scan BEFORE the dispatch: an orphan that predates this run holds its
+        # loopback listener for the whole suite, and a lib unit that binds or
+        # connects against it waits instead of failing (observed: a >30 minute
+        # host lib hang). A post-dispatch scan detects that state but cannot
+        # prevent the hang, so the pre-scan is what converts a stale orphan
+        # into a named failure.
+        assert_no_leaked_gate_children || exit 1
         linux_dispatch "sh scripts/verify.sh mid $SCOPE"
         if [ "$SCOPE" = "union" ]; then
             copy_out_artifact "release/alumina" "target/release/alumina" || exit 1
