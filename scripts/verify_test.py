@@ -1348,6 +1348,26 @@ def extract_budget_default():
     return match
 
 
+def extract_stack_policy():
+    """The shipped stack floor and default lines, so the tests pin the values
+    the gate actually runs with rather than a copy of them."""
+    text = (ROOT / "scripts/verify.sh").read_text()
+    lines = []
+    for name in ("GATE_SUITE_MIN_STACK_FLOOR", "GATE_SUITE_MIN_STACK"):
+        match = re.search(rf"^{name}=.*$", text, re.M)
+        assert match is not None, f"{name} default not found in scripts/verify.sh"
+        lines.append(match.group(0))
+    return lines
+
+
+def shipped_min_stack():
+    """The stack size the shipped default resolves to, read out of the floor
+    line itself: a second declaration of the number here would pin nothing."""
+    floor = extract_stack_policy()[0].split("=", 1)[1].strip('"')
+    assert floor.isdigit(), f"stack floor is not a byte count: {floor}"
+    return floor
+
+
 class BoundedSuite(unittest.TestCase):
     """Every lib-suite invocation runs under the shipped `bounded_suite` owner,
     text-extracted from scripts/verify.sh (never a Python re-implementation):
@@ -1356,7 +1376,9 @@ class BoundedSuite(unittest.TestCase):
 
     A stub wrapper stands in for `timeout`/`gtimeout` to drive each exit path;
     the stub records its own argv, so the portable `-s KILL` form and the budget
-    are pinned as the shipped helper passes them."""
+    are pinned as the shipped helper passes them, and it echoes its own
+    `$RUST_MIN_STACK`, so the stack budget is proven observed by the child it
+    wraps rather than asserted from the helper's source text."""
 
     def setUp(self):
         self._temp = tempfile.TemporaryDirectory()
@@ -1365,25 +1387,35 @@ class BoundedSuite(unittest.TestCase):
         self.tools = self.temp / "tools"
         self.tools.mkdir()
         self.calls = self.temp / "calls"
-        # The driver is the shipped constant plus body under the interpreter
+        self.stack_seen = self.temp / "stack-seen"
+        # The driver is the shipped constants plus body under the interpreter
         # options scripts/verify.sh itself runs with.
         self.driver = self.temp / "bounded.sh"
         self.driver.write_text(
-            "set -eu\n" + extract_budget_default().group(0) + "\n\n"
+            "set -eu\n" + extract_budget_default().group(0) + "\n"
+            + "\n".join(extract_stack_policy()) + "\n\n"
             + extract_function("bounded_suite") + '\n\nbounded_suite "$@"\n')
 
     def stub(self, name, rc):
         path = self.tools / name
-        path.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\nexit {rc}\n')
+        path.write_text('#!/bin/sh\n'
+                        'printf "%s\\n" "$*" >> "$CALLS"\n'
+                        'printf "%s\\n" "${RUST_MIN_STACK-<unset>}" > "$STACK_SEEN"\n'
+                        f'exit {rc}\n')
         path.chmod(0o755)
 
     def run_bounded(self, *args, env=None):
         # Absolute interpreter: the stub cases run with a PATH that shadows
-        # every wrapper, so `sh` must not be resolved through it.
+        # every wrapper, so `sh` must not be resolved through it. The stack
+        # knobs are scrubbed from the host environment so a developer's export
+        # cannot stand in for the shipped default.
+        inherited = {key: value for key, value in os.environ.items()
+                     if key not in ("GATE_SUITE_MIN_STACK", "RUST_MIN_STACK")}
         return subprocess.run(
             [shutil.which("sh") or "/bin/sh", str(self.driver), *map(str, args)],
             cwd=self.temp, text=True, capture_output=True,
-            env={**os.environ, "CALLS": str(self.calls), **(env or {})})
+            env={**inherited, "CALLS": str(self.calls),
+                 "STACK_SEEN": str(self.stack_seen), **(env or {})})
 
     def test_an_absent_wrapper_fails_closed(self):
         result = self.run_bounded("suite", env={"PATH": str(self.tools)})
@@ -1434,6 +1466,32 @@ class BoundedSuite(unittest.TestCase):
         self.assertIn('-s KILL "$GATE_SUITE_BUDGET_SECS" "$@"', body)
         self.assertNotIn("-k ", body)
 
+    def test_the_child_observes_the_shipped_stack_budget(self):
+        self.stub("timeout", 0)
+        result = self.run_bounded("suite", env={"PATH": str(self.tools)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        shipped = shipped_min_stack()
+        self.assertEqual(self.stack_seen.read_text().strip(), shipped,
+                         "the wrapped child did not inherit the shipped RUST_MIN_STACK")
+        self.assertIn(f"RUST_MIN_STACK={shipped}", result.stdout)
+
+    def assert_stack_refused(self, value):
+        result = self.run_bounded("suite", env={"PATH": str(self.tools),
+                                                "GATE_SUITE_MIN_STACK": value})
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("GATE-SUITE-STACK-UNKNOWN", result.stderr)
+        self.assertFalse(self.calls.exists(),
+                         "the timeout wrapper ran despite a refused stack budget")
+
+    def test_an_empty_stack_budget_fails_closed_before_the_wrapper(self):
+        self.stub("timeout", 0)
+        self.assert_stack_refused("")
+
+    def test_an_under_floor_or_non_numeric_stack_budget_is_refused(self):
+        self.stub("timeout", 0)
+        self.assert_stack_refused("1048576")
+        self.assert_stack_refused("16M")
+
     def test_every_lib_suite_call_site_goes_through_the_bound(self):
         for name in ("mid_union", "mid_full"):
             lib_lines = [line.strip() for line in extract_function(name).splitlines()
@@ -1442,6 +1500,9 @@ class BoundedSuite(unittest.TestCase):
             for line in lib_lines:
                 self.assertTrue(line.startswith("bounded_suite cargo atest"),
                                 f"{name} runs a lib suite unbounded: {line}")
+                self.assertNotIn("RUST_MIN_STACK=", line,
+                                 f"{name} carries the stack budget at the call site; "
+                                 f"the helper owns it: {line}")
 
 
 # --- A2: discovery completeness ----------------------------------------------

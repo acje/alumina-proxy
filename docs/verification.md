@@ -40,10 +40,12 @@ sh scripts/verify.sh e2e relay                  # host-runnable; auto-dispatches
 sh scripts/verify.sh e2e shutdown               # host-runnable via rootful harness
 ```
 
-The two gate-only `cargo atest` commands above carry `RUST_MIN_STACK=16777216`
-(the Linux dispatch sets the same value for the same suite in `scripts/verify.sh`):
-the lib surface overflows a smaller host default test-thread stack (observed on
-darwin), so a bare host run must carry it too.
+`bounded_suite` in `scripts/verify.sh` owns the stack budget: it exports
+`RUST_MIN_STACK` at its fixed floor for every lib suite it bounds, so neither a
+call site nor the container `-e` flags carry it. The two gate-only commands
+above keep their prefix as the instruction for a hand run. The lib surface
+overflows a smaller host default test-thread stack (observed on darwin), so a
+run outside the helper must carry the same value.
 
 These are independent checks, not a required sequence. For an identity-stability
 check, take the before snapshot before the chosen work and the after snapshot
@@ -268,16 +270,27 @@ passed 1181 tests in 22.67 s, while a wedged run printed no progress past 60 s
 and was still wedged at 9 minutes on a test blocked in `read_until`. 600 s is
 about 26x the green run and far below the window the wedge consumed.
 
+The helper also owns the stack budget the suite runs at. The lib surface
+overflows a smaller default test-thread stack (on darwin the suite dies at
+libtest exit 101 with no failing test, which reads as a product symptom), so the
+helper exports a fixed `RUST_MIN_STACK` floor for the invocation it wraps. A
+caller-supplied value below that floor is refused, never run: an under-budgeted
+suite is not evidence either.
+
 The helper resolves `timeout`, then `gtimeout` (the coreutils spelling), and
 runs `-s KILL` at the budget: the form GNU and busybox `timeout` both accept, so
-the gate never waits past it. One receipt line and two failure markers:
+the gate never waits past it. One receipt line and three failure markers:
 
 - `GATE-SUITE-BOUND` on every invocation, naming the resolved wrapper, the
-  budget and the command, so the receipt records the bound that was applied;
+  budget, the exported stack size and the command, so the receipt records the
+  bound that was applied;
 - `GATE-SUITE-TIMEOUT-FAIL` when the wrapper kills the suite, with a non-zero
   exit (124 conventional, or 137 as measured for a KILLed child);
 - `GATE-SUITE-TIMEOUT-UNKNOWN` when neither wrapper is on `PATH`: the helper
-  refuses to run, because an unavailable bound is never an unbounded pass.
+  refuses to run, because an unavailable bound is never an unbounded pass;
+- `GATE-SUITE-STACK-UNKNOWN` when the stack budget is empty, non-numeric, or
+  below the floor: the helper refuses before resolving a wrapper, so the suite
+  runs neither unbounded nor under-budgeted.
 
 A genuine test failure is not a timeout: libtest's own exit 101 passes through
 unchanged with no timeout marker. The bound releases the gate window; it cannot

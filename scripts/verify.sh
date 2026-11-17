@@ -658,15 +658,42 @@ ALT_TEST_TARGETS="--test foundations --test boot $GATE_ONLY_TESTS"
 # against `sleep 30`), not to be tuned day to day.
 GATE_SUITE_BUDGET_SECS="${GATE_SUITE_BUDGET_SECS:-600}"
 
-# bounded_suite <command...>: run one lib suite under that budget. `timeout` is
-# resolved first, then `gtimeout` (the coreutils spelling); with neither on PATH
-# the run is refused, because an unavailable bound is not an unbounded pass. The
-# budget is enforced with SIGKILL in the portable `-s KILL` form that both GNU
-# and busybox timeout accept, so a suite cannot ignore the bound. Timeout
-# statuses are 124 (conventional) and 137 (measured for a KILLed child under
-# GNU coreutils); libtest's own failure exit 101 passes through unchanged and is
-# never labelled a timeout.
+# The stack budget is this helper's to own, not its callers'. The lib surface
+# overflows a smaller default test-thread stack (observed on darwin, where the
+# suite dies at libtest exit 101 with no failing test and reads as a product
+# symptom), so a suite run without it is not evidence. It used to be supplied
+# only by the Linux dispatch `-e` flags and by hand-written command prefixes, so
+# a call that omitted it turned a healthy suite into that exit 101 -- exactly
+# what happened at 22144 and was nearly filed as a bug. 16777216 is therefore a
+# FLOOR as well as the default: a smaller caller value is refused, never run.
+# The `${VAR-default}` spelling (no colon) is deliberate -- unset takes the
+# floor, while an explicitly empty value stays empty and fails closed below.
+GATE_SUITE_MIN_STACK_FLOOR=16777216
+GATE_SUITE_MIN_STACK="${GATE_SUITE_MIN_STACK-$GATE_SUITE_MIN_STACK_FLOOR}"
+
+# bounded_suite <command...>: run one lib suite under that budget. The stack
+# budget is validated first, so neither an unknown-length nor an under-budgeted
+# run reaches a wrapper; the validated value is exported as RUST_MIN_STACK for
+# the invocation this helper wraps. `timeout` is resolved next, then `gtimeout`
+# (the coreutils spelling); with neither on PATH the run is refused, because an
+# unavailable bound is not an unbounded pass. The budget is enforced with
+# SIGKILL in the portable `-s KILL` form that both GNU and busybox timeout
+# accept, so a suite cannot ignore the bound. Timeout statuses are 124
+# (conventional) and 137 (measured for a KILLed child under GNU coreutils);
+# libtest's own failure exit 101 passes through unchanged and is never labelled
+# a timeout.
 bounded_suite() {
+    case "$GATE_SUITE_MIN_STACK" in
+        "" | *[!0-9]*)
+            echo "GATE-SUITE-STACK-UNKNOWN: GATE_SUITE_MIN_STACK is '${GATE_SUITE_MIN_STACK}' -- not a byte count; refusing to run a lib suite at an unknown test-thread stack" >&2
+            return 1
+            ;;
+    esac
+    if [ "$GATE_SUITE_MIN_STACK" -lt "$GATE_SUITE_MIN_STACK_FLOOR" ]; then
+        echo "GATE-SUITE-STACK-UNKNOWN: GATE_SUITE_MIN_STACK=${GATE_SUITE_MIN_STACK} is below the ${GATE_SUITE_MIN_STACK_FLOOR}-byte floor; refusing to run an under-budgeted lib suite" >&2
+        return 1
+    fi
+    export RUST_MIN_STACK="$GATE_SUITE_MIN_STACK"
     _bs_wrapper=""
     for _bs_candidate in timeout gtimeout; do
         if command -v "$_bs_candidate" >/dev/null 2>&1; then
@@ -678,7 +705,7 @@ bounded_suite() {
         echo "GATE-SUITE-TIMEOUT-UNKNOWN: neither timeout nor gtimeout is on PATH; refusing to run a lib suite unbounded (operational absence is never a pass)" >&2
         return 1
     fi
-    echo "GATE-SUITE-BOUND: $_bs_wrapper -s KILL ${GATE_SUITE_BUDGET_SECS}s: $*"
+    echo "GATE-SUITE-BOUND: $_bs_wrapper -s KILL ${GATE_SUITE_BUDGET_SECS}s RUST_MIN_STACK=${RUST_MIN_STACK}: $*"
     _bs_rc=0
     "$_bs_wrapper" -s KILL "$GATE_SUITE_BUDGET_SECS" "$@" || _bs_rc=$?
     case "$_bs_rc" in
@@ -1719,6 +1746,7 @@ identity_snapshot_env_declared() {
     printf 'cargo_home=%s\n' "${CARGO_HOME:-<unset>}"
     printf 'cargo_target_dir=%s\n' "${CARGO_TARGET_DIR:-<unset>}"
     printf 'rustflags=%s\n' "${RUSTFLAGS:-<unset>}"
+    printf 'rust_min_stack=%s\n' "${RUST_MIN_STACK:-<unset>}"
     printf 'rustc=%s\n' "${RUSTC:-<unset>}"
     printf 'rustc_wrapper=%s\n' "${RUSTC_WRAPPER:-<unset>}"
     printf 'rustc_workspace_wrapper=%s\n' "${RUSTC_WORKSPACE_WRAPPER:-<unset>}"
