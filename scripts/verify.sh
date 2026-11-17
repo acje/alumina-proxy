@@ -2018,6 +2018,13 @@ identity_snapshot() {
 # a byte-identical rewrite is recorded and refused rather than lost. A
 # malformed or incomplete record is UNKNOWN: an older snapshot never passes
 # silently.
+#
+# Two facts are UNOBSERVED, never agreement: a witness with zero rows (two
+# empty maps are not evidence), and a witness that does not cover its own
+# snapshot's inputs.sha256 input set (the record defines the set; a witness
+# never certifies the subset it happens to contain). Exit is tri-state -- 0
+# identical, 1 genuine drift, 2 unobservable -- so the caller can print an
+# UNKNOWN-shaped terminal line rather than a drift it never observed.
 identity_compare_witness() {
     _before="$1"
     _after="$2"
@@ -2031,6 +2038,35 @@ import sys
 FIELDS = ("ino", "size", "mtime_ns", "ctime_ns")
 
 
+def unobserved(message):
+    sys.stderr.write("SOURCE-IDENTITY-UNKNOWN FAIL: %s\n" % message)
+    sys.exit(2)
+
+
+def expected_inputs(snapshot):
+    """The snapshot's OWN input set, taken from its content record.
+
+    The witness is evidence about this set, never its definition: a witness
+    that defined the set it is checked against could certify the subset it
+    happens to contain.
+    """
+    path = snapshot + "/inputs.sha256"
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = [line.rstrip("\n") for line in handle if line.strip()]
+    except OSError as exc:
+        unobserved("%s unreadable: %s" % (path, exc))
+    if not lines:
+        unobserved("%s has zero rows; the input set is unobserved" % path)
+    paths = set()
+    for lineno, line in enumerate(lines, 1):
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2 or not parts[1]:
+            unobserved("malformed %s line %d" % (path, lineno))
+        paths.add(parts[1])
+    return paths
+
+
 def load(path, width):
     rows = {}
     try:
@@ -2041,35 +2077,45 @@ def load(path, width):
                     continue
                 parts = line.split("\t")
                 if len(parts) != width or not parts[0]:
-                    sys.stderr.write(
-                        "SOURCE-IDENTITY-UNKNOWN FAIL: malformed %s line %d\n"
-                        % (path, lineno))
-                    sys.exit(2)
+                    unobserved("malformed %s line %d" % (path, lineno))
                 if parts[0] in rows:
-                    sys.stderr.write(
-                        "SOURCE-IDENTITY-UNKNOWN FAIL: duplicate %s in %s\n"
-                        % (parts[0], path))
-                    sys.exit(2)
+                    unobserved("duplicate %s in %s" % (parts[0], path))
                 rows[parts[0]] = tuple(parts[1:])
     except OSError as exc:
-        sys.stderr.write(
-            "SOURCE-IDENTITY-UNKNOWN FAIL: %s unreadable: %s\n" % (path, exc))
-        sys.exit(2)
+        unobserved("%s unreadable: %s" % (path, exc))
+    if not rows:
+        unobserved("%s has zero rows (an emptied witness is unobserved, "
+                   "never identical)" % path)
     return rows
 
 
+def require_coverage(path, expected, rows):
+    missing = sorted(expected - set(rows))
+    if missing:
+        unobserved("%s misses inputs the snapshot record names: %s"
+                   % (path, ", ".join(missing)))
+    extra = sorted(set(rows) - expected)
+    if extra:
+        unobserved("%s names inputs the snapshot record does not: %s"
+                   % (path, ", ".join(extra)))
+
+
 before_dir, after_dir = sys.argv[1], sys.argv[2]
+before_expected = expected_inputs(before_dir)
+after_expected = expected_inputs(after_dir)
 before_blob = load(before_dir + "/inputs.blob", 2)
 after_blob = load(after_dir + "/inputs.blob", 2)
 before_stat = load(before_dir + "/inputs.stat", 5)
 after_stat = load(after_dir + "/inputs.stat", 5)
 
-drift = False
-if set(before_blob) != set(before_stat) or set(after_blob) != set(after_stat):
-    sys.stderr.write(
-        "SOURCE-IDENTITY-UNKNOWN FAIL: blob and stat witnesses cover different inputs\n")
-    drift = True
+for path, expected, rows in (
+        (before_dir + "/inputs.blob", before_expected, before_blob),
+        (after_dir + "/inputs.blob", after_expected, after_blob),
+        (before_dir + "/inputs.stat", before_expected, before_stat),
+        (after_dir + "/inputs.stat", after_expected, after_stat)):
+    require_coverage(path, expected, rows)
 
+drift = False
 for path in sorted(set(before_blob) | set(after_blob)):
     old, new = before_blob.get(path), after_blob.get(path)
     if old is None or new is None:
@@ -2085,12 +2131,6 @@ for path in sorted(set(before_blob) | set(after_blob)):
         drift = True
         continue
     old_stat, new_stat = before_stat.get(path), after_stat.get(path)
-    if old_stat is None or new_stat is None:
-        where = "before-only" if new_stat is None else "after-only"
-        sys.stderr.write(
-            "SOURCE-IDENTITY-UNKNOWN FAIL: stat witness %s %s\n" % (path, where))
-        drift = True
-        continue
     if old_stat != new_stat:
         changed = ", ".join(
             "%s %s -> %s" % (label, left, right)
@@ -2105,31 +2145,63 @@ sys.exit(1 if drift else 0)
 PY
 }
 
+# One record, one decision: a record absent on either side is UNOBSERVED
+# (UNKNOWN), never a difference between two readable values. The witness
+# records are not checked here; the loader is their single presence owner.
+identity_compare_record() {
+    _before="$1"
+    _after="$2"
+    _record="$3"
+    _label="$4"
+    for _dir in "$_before" "$_after"; do
+        [ -f "$_dir/$_record" ] || {
+            echo "SOURCE-IDENTITY-UNKNOWN FAIL: $_record missing from $_dir (record unobservable, not PASS)" >&2
+            return 2
+        }
+    done
+    cmp -s "$_before/$_record" "$_after/$_record" || {
+        echo "SOURCE-IDENTITY-CHANGED FAIL: $_label" >&2
+        return 1
+    }
+    return 0
+}
+
 identity_compare() {
     before="$1"
     after="$2"
-    ok=1
-    witness_ready=1
-    for _witness in inputs.blob inputs.stat; do
-        for _dir in "$before" "$after"; do
-            [ -f "$_dir/$_witness" ] || {
-                echo "SOURCE-IDENTITY-UNKNOWN FAIL: $_witness missing from $_dir (snapshot predates the witness, not PASS)" >&2
-                ok=0
-                witness_ready=0
-            }
-        done
+    unknown=0
+    drift=0
+    for _pair in \
+        "head|HEAD differs before/after" \
+        "status|working-tree status differs before/after" \
+        "inputs.sha256|input hashes differ before/after" \
+        "env|build env differs before/after"
+    do
+        _record="${_pair%%|*}"
+        _label="${_pair#*|}"
+        _rc=0
+        identity_compare_record "$before" "$after" "$_record" "$_label" || _rc=$?
+        case "$_rc" in
+            0) ;;
+            1) drift=1 ;;
+            *) unknown=1 ;;
+        esac
     done
-    cmp -s "$before/head" "$after/head" || { echo "SOURCE-IDENTITY-CHANGED FAIL: HEAD differs before/after" >&2; ok=0; }
-    cmp -s "$before/status" "$after/status" || { echo "SOURCE-IDENTITY-CHANGED FAIL: working-tree status differs before/after" >&2; ok=0; }
-    cmp -s "$before/inputs.sha256" "$after/inputs.sha256" || { echo "SOURCE-IDENTITY-CHANGED FAIL: input hashes differ before/after" >&2; ok=0; }
-    cmp -s "$before/env" "$after/env" || { echo "SOURCE-IDENTITY-CHANGED FAIL: build env differs before/after" >&2; ok=0; }
-    if [ "$witness_ready" -eq 1 ]; then
-        identity_compare_witness "$before" "$after" || ok=0
+    _rc=0
+    identity_compare_witness "$before" "$after" || _rc=$?
+    case "$_rc" in
+        0) ;;
+        1) drift=1 ;;
+        *) unknown=1 ;;
+    esac
+    if [ "$unknown" -eq 1 ]; then
+        echo "SOURCE-IDENTITY-UNKNOWN FAIL: boundary inputs not observable; refusing completion markers" >&2
+        exit 1
     fi
-    [ "$ok" -eq 1 ] || {
+    if [ "$drift" -eq 1 ]; then
         echo "SOURCE-IDENTITY-CHANGED FAIL: boundary inputs not stable; refusing completion markers" >&2
         exit 1
-    }
+    fi
     echo "SOURCE-IDENTITY-STABLE-OK (HEAD, status, input content, blob and stat witness, and env identical before/after)"
 }
 

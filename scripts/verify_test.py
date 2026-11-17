@@ -281,6 +281,144 @@ class Selectors(unittest.TestCase):
                 self.assertIn(witness, result.stderr)
                 (after / witness).write_bytes(saved)
 
+    def test_identity_compare_refuses_an_emptied_witness(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            witnesses = ("inputs.blob", "inputs.stat")
+            saved = {(snapshot, witness): (snapshot / witness).read_bytes()
+                     for snapshot in (before, after) for witness in witnesses}
+            for snapshot in (before, after):
+                for witness in witnesses:
+                    (snapshot / witness).write_bytes(b"")
+            # Zero rows on both sides must never compare equal: that was the
+            # false PASS (exit 0, STABLE-OK) this test exists to keep closed.
+            result = self.run_verify("identity", "compare", before, after,
+                                     env=env, cwd=repo)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+            for (snapshot, witness), payload in saved.items():
+                (snapshot / witness).write_bytes(payload)
+            # One witness emptied in either snapshot is unobservable too, and
+            # the refusal names the record that could not be read.
+            for witness in witnesses:
+                for target in (before, after):
+                    payload = (target / witness).read_bytes()
+                    (target / witness).write_bytes(b"")
+                    result = self.run_verify("identity", "compare", before, after,
+                                             env=env, cwd=repo)
+                    self.assertNotEqual(result.returncode, 0, witness)
+                    self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                    self.assertIn(witness, result.stderr)
+                    self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+                    (target / witness).write_bytes(payload)
+
+    def test_identity_compare_names_one_empty_witness_unknown_not_drift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for witness in ("inputs.blob", "inputs.stat"):
+                saved = (after / witness).read_bytes()
+                (after / witness).write_bytes(b"")
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+                self.assertNotEqual(result.returncode, 0, witness)
+                self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                # One side emptied is unobservable. DRIFT-CONTENT would assert
+                # an input-set change that the witness never showed.
+                self.assertNotIn("SOURCE-IDENTITY-DRIFT-CONTENT", result.stderr)
+                self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+                (after / witness).write_bytes(saved)
+
+    def test_identity_compare_refuses_a_witness_that_drops_an_input(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            saved = {witness: (after / witness).read_bytes()
+                     for witness in ("inputs.blob", "inputs.stat")}
+            rows = {witness: payload.splitlines(keepends=True)
+                    for witness, payload in saved.items()}
+            dropped = rows["inputs.stat"][0].split(b"\t")[0]
+            self.assertIn(dropped, {row.split(b"\t")[0]
+                                    for row in rows["inputs.blob"]})
+            # Drop the SAME input from both witnesses, so the pair still covers
+            # one another; only the snapshot's own content record still names
+            # the input, and that is what the witness must be measured against.
+            for witness, payload in rows.items():
+                kept = [row for row in payload
+                        if not row.startswith(dropped + b"\t")]
+                self.assertEqual(len(kept), len(payload) - 1, witness)
+                (after / witness).write_bytes(b"".join(kept))
+            hashed = {line.split(maxsplit=1)[1]
+                      for line in (after / "inputs.sha256").read_text().splitlines()}
+            self.assertIn(dropped.decode(), hashed)
+            result = self.run_verify("identity", "compare", before, after,
+                                     env=env, cwd=repo)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+            self.assertIn(dropped.decode(), result.stderr)
+            self.assertNotIn("SOURCE-IDENTITY-DRIFT-CONTENT", result.stderr)
+            self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+            for witness, payload in saved.items():
+                (after / witness).write_bytes(payload)
+
+    def test_identity_compare_refuses_an_unreadable_input_set(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            saved = (after / "inputs.sha256").read_bytes()
+            # The expected input set is the content record's own, so a record
+            # that is empty or unparseable leaves the coverage claim
+            # unobservable rather than satisfied.
+            for unreadable in (b"", b"not-a-digest-and-path\n"):
+                (after / "inputs.sha256").write_bytes(unreadable)
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+                self.assertNotEqual(result.returncode, 0, unreadable)
+                self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                self.assertIn("inputs.sha256", result.stderr)
+                self.assertIn("boundary inputs not observable", result.stderr)
+                self.assertNotIn("SOURCE-IDENTITY-DRIFT-CONTENT", result.stderr)
+                self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+            (after / "inputs.sha256").write_bytes(saved)
+
+    def test_identity_compare_names_a_missing_record_unknown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            repo, _tools, env, _files = synthetic_identity_repo(temp)
+            before, after = temp / "before", temp / "after"
+            for snapshot in (before, after):
+                result = self.run_verify("identity", "snapshot", snapshot, env=env, cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name in ("head", "status", "inputs.sha256", "env"):
+                saved = (after / name).read_bytes()
+                (after / name).unlink()
+                result = self.run_verify("identity", "compare", before, after,
+                                         env=env, cwd=repo)
+                self.assertNotEqual(result.returncode, 0, name)
+                self.assertIn("SOURCE-IDENTITY-UNKNOWN", result.stderr)
+                self.assertIn(name, result.stderr)
+                self.assertNotIn("SOURCE-IDENTITY-CHANGED", result.stderr)
+                self.assertNotIn("STABLE-OK", result.stdout + result.stderr)
+                (after / name).write_bytes(saved)
+
     def test_snapshot_refuses_a_failed_witness_producer(self):
         with tempfile.TemporaryDirectory() as temp:
             temp = Path(temp)
