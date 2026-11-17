@@ -3038,7 +3038,7 @@ inner_test() {
         # No channel, but not no run: announce the lost declaration exactly once,
         # then clear the inherited path so no child can write one this reader will
         # never read. The status captured below is still the suite's own.
-        echo "GATE-SUITE-DECLARATION-UNKNOWN: $_target — no per-run declaration file could be created under ${TMPDIR:-/tmp}; the suite still runs and its status stands, but the declaration is lost, so the classification will be unknown" >&2
+        echo "GATE-SUITE-DECLARATION-UNKNOWN: $_target — no per-run declaration file could be created under ${TMPDIR:-/tmp}; the run proceeds without a declaration, so whatever it returns cannot be classified: a non-zero status is the wrapped command's, and a 0 is not a pass" >&2
         GATE_SUITE_DECLARATION_FILE=""
         export GATE_SUITE_DECLARATION_FILE
     else
@@ -3059,7 +3059,7 @@ inner_test() {
     # still a run, so only its classification is unknown.
     if [ -z "$_it_declaration" ]; then
         _itr_declared=""
-        echo "INNER-TEST-CLASSIFICATION-UNKNOWN: $_target exit $_itr — no per-run declaration file could be created under ${TMPDIR:-/tmp} (announced above), so the suite ran and its status stands, but nothing about it can be classified; this backs no pass" >&2
+        echo "INNER-TEST-CLASSIFICATION-UNKNOWN: $_target exit $_itr — no per-run declaration file could be created under ${TMPDIR:-/tmp} (announced above), so nothing about the run can be classified: a non-zero status is the wrapped command's, and a 0 is not a pass" >&2
     else
         _itr_declared=$(cat "$_it_declaration" 2>/dev/null) || _itr_declared=""
         rm -f "$_it_declaration"
