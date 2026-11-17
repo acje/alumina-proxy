@@ -3,11 +3,11 @@ mod dns_responder;
 #[path = "support/process_harness.rs"]
 mod process_harness;
 use dns_responder::{DnsResponder, build_positive};
-use process_harness::{attach_serving_runtime, current_exe, wait_for_exit};
+use process_harness::{ChildGuard, attach_serving_runtime, gate_command, wait_for_exit};
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -34,19 +34,24 @@ fn main() {
 }
 
 /// Spawns the child with a piped stdout whose read end is closed in this
-/// parent, so the child's sink permanently fails. Returns the child plus its
-/// stderr pipe when requested (used to read the serving port).
-fn spawn_closed(child_args: &[&str], capture_stderr: bool) -> Child {
-    let mut child = Command::new(current_exe())
+/// parent, so the child's sink permanently fails. Returns the guard plus its
+/// stderr pipe when requested (used to read the serving port); the guard reaps
+/// the child if the parent panics before its bounded wait.
+fn spawn_closed(child_args: &[&str], capture_stderr: bool) -> ChildGuard {
+    let mut command = gate_command();
+    command
         .args(child_args)
         .stdout(Stdio::piped())
         .stderr(if capture_stderr {
             Stdio::piped()
         } else {
             Stdio::inherit()
-        })
-        .spawn()
-        .expect("spawn child with a piped, then-closed stdout");
+        });
+    let mut child = ChildGuard::new(
+        command
+            .spawn()
+            .expect("spawn child with a piped, then-closed stdout"),
+    );
     drop(child.stdout.take());
     child
 }

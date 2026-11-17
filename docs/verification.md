@@ -28,6 +28,7 @@ sh scripts/verify.sh mid union                  # MID tier (Linux-only): release
 sh scripts/verify.sh mid full                   # MID tier (Linux-only): standalone gate-only selector (lib units + the six both-configuration gate binaries witness-off, plus the alloc-witness-only mio_matrix witness-on); surface subsumed by mid union
 sh scripts/verify.sh host-mid union             # host Podman dispatch of Linux mid union, including release artifact copy-out
 sh scripts/verify.sh host-mid foundations       # host Podman dispatch; also boot, clippy, full
+sh scripts/verify.sh gate-children scan         # gate-child leak assertion: no reparented gate child survives under target/debug/build/alumina
 sh scripts/verify.sh docs                       # native offline docs gate: links + physical INTENDED + cfg-parentage + unsafe + spec digest
 sh scripts/verify.sh fixtures boot              # host Podman coordinator; Darwin allowed
 sh scripts/verify.sh supply-chain audit-deny    # host audit and deny, pinned tool versions
@@ -119,6 +120,46 @@ verdict; it explains the shapes `verify.sh` enforces.
   `ALT_NO_VOLUME=1` restores host bind-mount behaviour for an
   apples-to-apples baseline measurement; `alt image` / `alt smoke` warm and
   prove the container plumbing and back no claim.
+
+## Gate-child leak assertion
+
+`sh scripts/verify.sh gate-children scan` asserts that no gate child survived its
+parent. A spawned child that outlives the process that spawned it keeps its
+loopback listener open, so a later gate binds or connects against a listener it
+does not own and every receipt after it is chain-ambiguous.
+
+The scan reads the process table (the procps form, with a busybox fallback) and
+matches only the **executed program** — the first word of the process arguments,
+not a path that merely appears among them — of a reparented process (parent pid
+1) against this checkout's `target/debug/build/alumina` directory: a hash-named
+subdirectory, then its `out` subdirectory, then a gate-binary name carrying the
+same hash suffix. Both the logical and the physical checkout spelling are
+matched, so a running compiler or linker that writes into that directory is not
+a match.
+
+The assertion runs before and after each lib-suite invocation in `mid union` and
+`mid full`, after the `host-mid` dispatch, and standalone as above.
+`GATE-CHILD-LEAK-FAIL` names the pid and the command line and exits non-zero.
+
+An **unusable observation fails closed**: when `ps` is absent or fails, the
+listing cannot be parsed, or the listing does not contain the scanning shell, the
+gate prints `GATE-CHILD-LEAK-UNKNOWN` and exits non-zero. An operational error is
+never a clean scan.
+
+Platform limit: the parent-death signal is Linux-only (it is installed in the one
+guarded spawn in `tests/support/process_harness.rs`, which also refuses to exec a
+gate binary whose parent is already gone). On Darwin the guard reaps a child
+while the parent unwinds, but a child that outlives an abrupt parent death
+(SIGKILL) is not signalled by the kernel: it stays until the next gate's scan
+fails on it.
+
+Negative-control shape — the failure path is exercised, not just the clean path:
+
+1. Plant a panic in the parent between spawn and the bounded wait: unwinding runs
+   the guard's drop, so no orphan remains and the scan stays clean.
+2. Disable the guard for one run (forget it) and exit the parent: the child is
+   reparented and the scan exits non-zero naming its pid.
+3. Revert: the suite is green again and the scan is clean.
 
 ## Test suite navigation & ownership
 

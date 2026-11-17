@@ -24,9 +24,10 @@ TIER="${1:-}"
 SCOPE="${2:-}"
 
 usage() {
-    echo "usage: verify.sh {inner|mid|host-mid|fixtures|e2e|supply-chain|identity} <scope> [args] | verify.sh docs" >&2
+    echo "usage: verify.sh {inner|mid|host-mid|fixtures|e2e|supply-chain|identity|gate-children} <scope> [args] | verify.sh docs" >&2
     echo "       inner test <target> runs ONE integration target host-natively; backs no done-claim." >&2
     echo "       host-mid {foundations|boot|union|full|clippy}; supply-chain audit-deny" >&2
+    echo "       gate-children scan asserts no reparented gate child survives under target/debug/build/alumina" >&2
     echo "       identity snapshot <directory> | identity compare <before> <after> | identity artifact <path>" >&2
     exit 2
 }
@@ -234,6 +235,86 @@ whitespace_gate() {
     echo "WHITESPACE-GATE-OK (native git, HEAD=$head)"
 }
 
+# --- gate-child leak assertion ----------------------------------------------
+# A gate-spawned child, or a cargo lib-test child, that outlives its parent
+# keeps a loopback listener alive, so every later gate receipt is
+# chain-ambiguous. The scan matches the EXECUTED program (argv[0]) of a
+# reparented process (ppid 1) against this checkout's debug build tree:
+# <root>/target/debug/build/alumina/<hash>/out/<gate-binary>-<hash>. A path that
+# merely appears among a process's arguments (a compiler writing into that
+# directory, `ld -o .../out/...`) is not a match. Both the logical and physical
+# checkout spellings are matched, against the procps and busybox `ps` forms.
+# An operational failure - no usable `ps`, an unparsable listing, or a listing
+# that cannot see this shell - is GATE-CHILD-LEAK-UNKNOWN and fails: an
+# observation failure is never a clean gate.
+assert_no_leaked_gate_children() {
+    _gl_ps=""
+    for _gl_form in "-ww -eo pid=,ppid=,args=" "-eo pid=,ppid=,args=" "-o pid=,ppid=,args=" "-ww -o pid=,ppid=,args="; do
+        # shellcheck disable=SC2086
+        if _gl_ps=$(COLUMNS=4096 ps $_gl_form 2>/dev/null); then
+            break
+        fi
+        _gl_ps=""
+    done
+    if [ -z "$_gl_ps" ]; then
+        echo "GATE-CHILD-LEAK-UNKNOWN: ps produced no process listing (procps and busybox forms both failed; operational error is never clean)" >&2
+        return 1
+    fi
+    _gl_roots="$(pwd)"
+    _gl_phys="$(pwd -P)"
+    [ "$_gl_phys" = "$_gl_roots" ] || _gl_roots="$_gl_roots $_gl_phys"
+    for _gl_root in $_gl_roots; do
+        case "$_gl_root" in
+            *[[:space:]]*)
+                echo "GATE-CHILD-LEAK-UNKNOWN: checkout path contains whitespace, argv[0] is not separable from the arguments: $_gl_root" >&2
+                return 1
+                ;;
+        esac
+    done
+    _gl_rc=0
+    _gl_out=$(printf '%s\n' "$_gl_ps" | awk -v self="$$" -v roots="$_gl_roots" '
+        BEGIN { n = split(roots, root, " ") }
+        NF >= 3 {
+            pid = $1 + 0
+            if (pid == self) seen_self = 1
+            if ($2 + 0 != 1) next
+            rest = $0
+            sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]*/, "", rest)
+            argv0 = rest
+            sub(/[ \t].*$/, "", argv0)
+            for (i = 1; i <= n; i++) {
+                prefix = root[i] "/target/debug/build/alumina/"
+                if (index(argv0, prefix) != 1) continue
+                tail = substr(argv0, length(prefix) + 1)
+                if (tail ~ /^[0-9a-f]+\/out\/[A-Za-z0-9_]+-[0-9a-f]+$/) {
+                    printf "pid=%s ppid=1 argv0=%s\n", pid, argv0
+                    bad = 1
+                }
+            }
+        }
+        END {
+            if (!seen_self) { print "SELF-NOT-LISTED"; exit 2 }
+            exit (bad ? 1 : 0)
+        }
+    ') || _gl_rc=$?
+    case "$_gl_rc" in
+        0) echo "GATE-CHILD-LEAK-OK: no reparented gate child under $(pwd)/target/debug/build/alumina" ;;
+        1)
+            printf '%s\n' "$_gl_out" | sed 's/^/  /' >&2
+            echo "GATE-CHILD-LEAK-FAIL: a gate child outlived its parent (ppid 1); it keeps a loopback listener alive and makes every later gate receipt chain-ambiguous" >&2
+            return 1
+            ;;
+        2)
+            echo "GATE-CHILD-LEAK-UNKNOWN: ps listing does not contain this shell (pid $$); the observation is unusable" >&2
+            return 1
+            ;;
+        *)
+            echo "GATE-CHILD-LEAK-UNKNOWN: listing parse exit $_gl_rc (operational error is never clean)" >&2
+            return 1
+            ;;
+    esac
+}
+
 # Reverse-dependent closure derivation: single-crate repo, cargo metadata
 # names every package that links `alumina`; the closure is `alumina` itself.
 closure_metadata() {
@@ -306,8 +387,10 @@ mid_union() {
     echo "FMT:"
     cargo fmt --check
     echo "COMBINED-SUITE-WITNESS-OFF (lib units + foundations + boot + both-configuration gate-only binaries):"
+    assert_no_leaked_gate_children
     # shellcheck disable=SC2086
     cargo atest -p alumina --locked --lib $ALT_TEST_TARGETS
+    assert_no_leaked_gate_children
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
     echo "CLIPPY (production, no alloc-witness):"
     cargo aclippy -p alumina --locked --all-targets -- -D warnings
@@ -316,6 +399,7 @@ mid_union() {
     echo "COMBINED-SUITE-WITNESS-ON (same surface + alloc-witness-only mio_matrix, alloc-witness):"
     # shellcheck disable=SC2086
     cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $ALT_TEST_TARGETS $ALLOC_WITNESS_ONLY_TESTS
+    assert_no_leaked_gate_children
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"
     whitespace_gate
@@ -370,12 +454,15 @@ mid_full() {
         exit 1
     }
     echo "GATE-ONLY-SUITE (lib units + both-configuration gate-only binaries, witness-off):"
+    assert_no_leaked_gate_children
     # shellcheck disable=SC2086
     cargo atest -p alumina --locked --lib $GATE_ONLY_TESTS
+    assert_no_leaked_gate_children
     echo "GATE-ONLY-SUITE-WITNESS-OFF-OK"
     echo "GATE-ONLY-SUITE-WITNESS (the same surface + alloc-witness-only mio_matrix, alloc-witness):"
     # shellcheck disable=SC2086
     cargo atest -p alumina --locked --target-dir "$ALT_AW_TARGET_DIR" --features alloc-witness --lib $GATE_ONLY_TESTS $ALLOC_WITNESS_ONLY_TESTS
+    assert_no_leaked_gate_children
     echo "GATE-ONLY-SUITE-WITNESS-ON-OK"
     echo "GATE-ONLY-SUITE-MID-OK"
 }
@@ -2146,7 +2233,9 @@ case "$TIER/$SCOPE" in
         if [ "$SCOPE" = "union" ]; then
             copy_out_artifact "release/alumina" "target/release/alumina" || exit 1
         fi
+        assert_no_leaked_gate_children
         ;;
+    gate-children/scan) assert_no_leaked_gate_children ;;
     fixtures/boot) boot_fixtures ;;
     supply-chain/audit-deny) [ "$#" -eq 2 ] || usage; audit_deny_owner ;;
     identity/snapshot) [ "$#" -eq 3 ] && [ -n "$3" ] || usage; identity_snapshot "$3" ;;

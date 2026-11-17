@@ -1,10 +1,12 @@
 //! Test-only owner of the harness shared by every gate binary: a child copy's
-//! executable path, the `--child` dispatch that selects a child body from the
-//! parent's own entry point, a piped child spawn, the two bounded exit waits,
-//! the stdout capture, the serving config document and boot the child starts
-//! from, and the one-exchange refusal driver the parent-side gates replay. Both
-//! waits kill and reap a child that outlives its deadline, so a hung or leaked
-//! child fails its own test rather than the runner.
+//! executable path, the one guarded command builder, the `--child` dispatch
+//! that selects a child body from the parent's own entry point, a piped child
+//! spawn, the two bounded exit waits, the stdout capture, the serving config
+//! document and boot the child starts from, and the one-exchange refusal
+//! driver the parent-side gates replay. Every spawn returns a guard whose
+//! `Drop` kills and reaps, so a parent panic cannot orphan a child; both waits
+//! additionally kill and reap a child that outlives its deadline, so a hung or
+//! leaked child fails its own test rather than the runner.
 #![allow(
     dead_code,
     reason = "shared `#[path]` owner; each inclusion site uses only its subset"
@@ -42,15 +44,106 @@ pub(super) fn run_child_or_parent(parent: fn(), child: fn()) {
     }
 }
 
+/// The one gate-child command builder every spawn site starts from: this
+/// executable, plus (Linux only) the parent-death signal installed before
+/// `exec`. A child whose parent is already gone refuses to exec, so a
+/// reparented gate binary fails instead of serving on. The Darwin path is
+/// unchanged: the platform has no parent-death signal, so a stale orphan is
+/// caught by the next gate's leak scan.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        unused_mut,
+        reason = "the Linux parent-death hook is the only mutation"
+    )
+)]
+pub(super) fn gate_command() -> Command {
+    let mut command = Command::new(current_exe());
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // SAFETY: the closure runs in the forked child between fork and exec,
+        // so it calls only async-signal-safe libc primitives (`prctl`,
+        // `getppid`) and builds an allocation-free `io::Error` from an errno.
+        // PDEATHSIG is installed before the ppid check, so a parent that dies
+        // between the two still kills the child (the kernel applies the signal
+        // on the parent's exit); a child forked after that death observes
+        // getppid() == 1 and refuses to exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(
+                    libc::PR_SET_PDEATHSIG,
+                    libc::SIGKILL as libc::c_ulong,
+                    0,
+                    0,
+                    0,
+                ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() == 1 {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
+    command
+}
+
+/// A spawned gate child that reaps itself: `Drop` kills and waits, because
+/// `std::process::Child` has no kill-on-drop and a panic between spawn and wait
+/// would otherwise leave the child, and its loopback listener, running. Derefs
+/// to `Child`, so every existing `&mut Child` call site is unchanged.
+#[must_use = "dropping the guard kills and reaps the child"]
+pub(super) struct ChildGuard {
+    child: Option<Child>,
+}
+
+impl ChildGuard {
+    pub(super) fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+}
+
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        self.child.as_ref().expect("child present until drop")
+    }
+}
+
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child present until drop")
+    }
+}
+
+impl Drop for ChildGuard {
+    /// `Child` caches the exit status, so once a wait has completed the `kill`
+    /// fails with `InvalidInput` and `wait` returns the cached status without a
+    /// second `waitpid`: the guard is idempotent with `wait_for_success` and
+    /// `wait_for_exit`.
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 /// Spawns this binary in `--child` mode with a piped stdout the parent owns and
 /// inherited stderr.
-pub(super) fn spawn_piped_child() -> Child {
-    Command::new(current_exe())
+pub(super) fn spawn_piped_child() -> ChildGuard {
+    let mut command = gate_command();
+    command
         .arg(CHILD_FLAG)
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn child with a piped stdout")
+        .stderr(Stdio::inherit());
+    ChildGuard::new(command.spawn().expect("spawn child with a piped stdout"))
 }
 
 /// Waits for the child to exit 0 within `timeout`, killing and reaping it on
