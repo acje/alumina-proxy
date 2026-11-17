@@ -593,6 +593,55 @@ fn per_peer_pending_cap_frees_only_its_own_peer_seat() {
 }
 
 #[test]
+/// One peer under two address-family spellings shares one pending budget. A
+/// client the kernel accepted on a dual-stack listener arrives as an
+/// IPv4-mapped IPv6 address, and [`IpAddr::to_canonical`] maps it to the same
+/// IPv4 peer, so the per-peer cap must count the peer once rather than once per
+/// rendering. Deleting the canonicalisation in [`Worker::admit`] splits one
+/// peer into two budgets and doubles what a single reachable client may hold,
+/// which is why this is pinned deterministically and not left to the property
+/// machines' draw.
+fn one_peer_under_two_spellings_shares_a_single_pending_budget() {
+    let t0 = anchor();
+    let mapped = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001));
+    let plain = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    // Fixture sanity: the premise is that these two renderings denote one peer.
+    assert_eq!(
+        mapped.to_canonical(),
+        plain,
+        "the mapped form must map to the IPv4 peer this test holds"
+    );
+
+    let mut worker = Worker::boot(clock(t0));
+    for _ in 0..MAX_PENDING_PER_PEER {
+        worker.admit(t0, mapped).expect("within the per-peer cap");
+    }
+    assert_eq!(
+        worker.admit(t0, plain),
+        Err(AdmissionError::PendingCapacity),
+        "the peer already holds its cap; a second spelling must not buy a second budget"
+    );
+    assert_eq!(
+        worker.pending(),
+        MAX_PENDING_PER_PEER,
+        "the refused spelling consumes no pending seat"
+    );
+
+    // The reverse order must behave identically: the cap is keyed by the peer,
+    // never by the rendering that arrived first.
+    let mut worker = Worker::boot(clock(t0));
+    for _ in 0..MAX_PENDING_PER_PEER {
+        worker.admit(t0, plain).expect("within the per-peer cap");
+    }
+    assert_eq!(
+        worker.admit(t0, mapped),
+        Err(AdmissionError::PendingCapacity),
+        "a mapped spelling of a peer at its cap is the same peer, not a fresh one"
+    );
+    assert_eq!(worker.pending(), MAX_PENDING_PER_PEER);
+}
+
+#[test]
 fn releasing_a_setup_slot_frees_pending_capacity() {
     let t0 = anchor();
     let mut worker = Worker::boot(clock(t0));
