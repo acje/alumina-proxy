@@ -2671,7 +2671,13 @@ class InnerTest(unittest.TestCase):
 
 
 BOUNDED_SUITE_TOKEN = re.compile(r"\bbounded_suite\b")
-CURRENT_SHELL_KEYWORDS = ("", "if", "elif", "while", "until", "!")
+# The shell words that admit the command after them as a command in the CURRENT
+# shell. `then`/`else`/`do` open a compound body, `{ ; }` groups in this shell,
+# and `time`/`command` prefix a command without a child shell; `env FOO=1` and a
+# bare assignment do not appear, because those do change what the command word
+# is. Every entry here is a spelling that costs the declaration nothing.
+CURRENT_SHELL_KEYWORDS = ("", "if", "elif", "then", "else", "while", "until",
+                          "do", "!", "{", "time", "command")
 CALL_WORD = "bounded_suite"
 NESTED_SHELL = re.compile(r"\b(?:sh|bash|zsh|dash|ksh)\s+-c\b")
 # A here-document's body is read by a child shell (or by a consumer that never
@@ -2809,25 +2815,94 @@ def quote_span_shape(line, at):
     return "nested shell" if NESTED_SHELL.search(line[:at]) else "quoted string"
 
 
-def carried_span_shapes(text, bodies):
-    """Per line and column, the shape of the span still open from an earlier line.
+def step_quotes(segment, quote, escaped):
+    """The quoting state after one physical line, and whether its newline is removed.
+
+    POSIX removes an unquoted backslash-newline before tokenizing, and the
+    escaped newline inside double quotes goes with it, but a backslash inside
+    single quotes is literal text: the join decision needs the quote a line is
+    written in, not just its last character."""
+    removed = False
+    for character in segment:
+        was_escaped = escaped
+        escaped = removed = False
+        if was_escaped:
+            continue
+        if quote == "single":
+            if character == "'":
+                quote = ""
+            continue
+        if character == "\\":
+            escaped = removed = True
+            continue
+        if character == "'" and quote != "double":
+            quote = "single"
+        elif character == '"':
+            quote = "" if quote == "double" else "double"
+    return quote, escaped, removed
+
+
+def joined_command_units(text, bodies):
+    """(first physical line, its stripped text, joined text) per command unit.
+
+    POSIX removes an unquoted backslash-newline before the shell tokenizes, so
+    `bounded_suite ... \\` followed by `| cat` is ONE command whose pipeline is
+    written on the second physical line; a line-local scan can never see the
+    operator that decides that call. A unit therefore spans the physical lines
+    a continuation joins, while every entry keeps the FIRST physical line and
+    its stripped text, so a join never renumbers a report.
+
+    A here-document body is body text, not a continuation: verify.sh:2386 ends
+    in a backslash inside an ALTCF body, and joining it would rename every line
+    after it. Bodies are enumerated on physical lines and are neither joined nor
+    joined into. A comment line is a barrier for the same reason -- its text is
+    not code, so it opens no unit and is never scanned for a call."""
+    lines = text.splitlines()
+    units = []
+    quote, escaped = "", False
+    number = 0
+    while number < len(lines):
+        first = number + 1
+        number += 1
+        stripped = lines[first - 1].strip()
+        if first in bodies or stripped.startswith("#"):
+            units.append((first, stripped, lines[first - 1]))
+            continue
+        parts = [lines[first - 1]]
+        while True:
+            quote, escaped, removed = step_quotes(parts[-1], quote, escaped)
+            following = number + 1
+            if (not removed or following > len(lines) or following in bodies
+                    or lines[number].strip().startswith("#")):
+                break
+            parts.append(lines[number])
+            number += 1
+            escaped = False             # the removed newline was the escaped character
+        escaped = False                 # a trailing backslash escapes no character
+        units.append((first, stripped,
+                      "".join(part[:-1] for part in parts[:-1]) + parts[-1]))
+    return units
+
+
+def carried_span_shapes(units, bodies):
+    """Per unit, the shape of the span still open from an earlier unit.
 
     A quote, `$(` or backtick that survives the newline reads its contents in a
     child shell -- or in no shell at all -- so a call written there can never
-    declare anything this reader sees. The scan state is therefore carried
-    across the line loop, the way here-document bodies are precomputed. A
+    declare anything this reader sees. The span state is therefore carried
+    across the unit loop, the way here-document bodies are precomputed. A
     here-document body and a comment line are not code, so they neither open
-    nor carry a span. The innermost span wins, and it is named by the line that
+    nor carry a span. The innermost span wins, and it is named by the unit that
     opened it."""
-    carried = [()]
-    spans = []                          # innermost last: kind, shape, line, depth
-    for number, line in enumerate(text.splitlines(), 1):
-        shapes = [None] * len(line)
+    carried = []
+    spans = []                          # innermost last: kind, shape, unit, depth
+    for number, stripped, joined in units:
+        shapes = [None] * len(joined)
         carried.append(shapes)
-        if number in bodies or line.strip().startswith("#"):
+        if number in bodies or stripped.startswith("#"):
             continue
         escaped = False
-        for index, character in enumerate(line):
+        for index, character in enumerate(joined):
             for _kind, shape, opened, _depth in reversed(spans):
                 if opened < number:
                     shapes[index] = shape
@@ -2845,7 +2920,7 @@ def carried_span_shapes(text, bodies):
                     escaped = True
                 elif character == '"':
                     spans.pop()
-                elif line.startswith("$(", index):
+                elif joined.startswith("$(", index):
                     spans.append(["substitution", "command substitution", number, 0])
                 elif character == "`":
                     spans.append(["backticks", "backticks", number, 0])
@@ -2864,13 +2939,13 @@ def carried_span_shapes(text, bodies):
                 continue
             if character == "\\":
                 escaped = True
-            elif line.startswith("$(", index):
+            elif joined.startswith("$(", index):
                 spans.append(["substitution", "command substitution", number, 0])
             elif character == "`":
                 spans.append(["backticks", "backticks", number, 0])
             elif character in "'\"":
                 spans.append(["single" if character == "'" else "double",
-                              quote_span_shape(line, index), number, 0])
+                              quote_span_shape(joined, index), number, 0])
     return carried
 
 
@@ -2880,38 +2955,44 @@ def scan_bounded_suite_call_sites(text):
     A declaration only exists if it survives to the reader, so every call must
     run in the CURRENT shell. The hazard layer runs FIRST and the diagnostic
     allowance is applied only to what survives it, so an allowance can never
-    act as a line filter over a raw span. Every occurrence on a line is
-    examined, not just the first, because a second call on a known line is
-    exactly where a lossy shape hides. A span opened on an earlier line is
-    carried into the columns it still covers, so the newline cannot launder a
-    child shell into the current one.
+    act as a line filter over a raw span. Every occurrence is examined, not just
+    the first, because a second call on a known unit is exactly where a lossy
+    shape hides.
 
-    Each entry is `(line_number, shape, line)`. Refusals name the line and the
-    shape; accepted entries carry the shape too, so a count mismatch has
-    something readable to report and the anchor is never the only witness."""
+    The scan unit is the shell command unit, not the physical line: POSIX
+    removes an unquoted backslash-newline before tokenizing, so an operator
+    written on a continuation line still decides the call. A span opened on an
+    earlier unit is carried into the columns it still covers, so neither a
+    newline nor a join can launder a child shell into the current one.
+
+    Each entry is `(line_number, shape, line)`, where the line number is the
+    FIRST physical line of the unit and the text is that line's stripped text,
+    never the joined text. Refusals name the line and the shape; accepted
+    entries carry the shape too, so a count mismatch has something readable to
+    report and the anchor is never the only witness."""
     accepted, refused = [], []
     bodies = heredoc_body_lines(text)
-    carried = carried_span_shapes(text, bodies)
-    for number, line in enumerate(text.splitlines(), 1):
-        stripped = line.strip()
+    units = joined_command_units(text, bodies)
+    carried = carried_span_shapes(units, bodies)
+    for (number, stripped, joined), shapes in zip(units, carried):
         if stripped.startswith("#") or stripped.startswith("bounded_suite() {"):
             continue
         if number in bodies:
-            for _match in BOUNDED_SUITE_TOKEN.finditer(line):
+            for _match in BOUNDED_SUITE_TOKEN.finditer(joined):
                 refused.append((number, "heredoc body", stripped))
             continue
-        for match in BOUNDED_SUITE_TOKEN.finditer(line):
-            shape = carried[number][match.start()]
+        for match in BOUNDED_SUITE_TOKEN.finditer(joined):
+            shape = shapes[match.start()]
             if shape is not None:
                 refused.append((number, shape, stripped))
                 continue
-            shape = lossy_call_shape(line, match.start())
+            shape = lossy_call_shape(joined, match.start())
             if shape is not None:
                 refused.append((number, shape, stripped))
                 continue
             if stripped.startswith(("echo ", "printf ")):
                 continue
-            if command_word(line, match.start()) not in CURRENT_SHELL_KEYWORDS:
+            if command_word(joined, match.start()) not in CURRENT_SHELL_KEYWORDS:
                 refused.append((number, "not a current-shell command word", stripped))
                 continue
             accepted.append((number, "current-shell call", stripped))
@@ -3097,6 +3178,59 @@ class ChannelSoundness(unittest.TestCase):
         accepted, refused = scan_bounded_suite_call_sites(f"{self.CALL} &\n")
         self.assertEqual(accepted, [])
         self.assertEqual([shape for _, shape, _ in refused], ["background"])
+
+    # POSIX removes an unquoted backslash-newline before the shell tokenizes,
+    # so an operator written on the continuation line still terminates the
+    # call's command span. The refusal names the unit's FIRST physical line.
+    CONTINUATION_HAZARDS = (
+        ("pipeline", f"{CALL} \\\n  | cat"),
+        ("background", f"{CALL} \\\n  & wait"),
+    )
+
+    def test_a_continuation_cannot_hide_the_operator_on_the_next_line(self):
+        """Red on 976b2f2 for both: the command span ended at the backslash, so
+        the `|` and the `&` written on the continuation line were never read."""
+        for expected, probe in self.CONTINUATION_HAZARDS:
+            with self.subTest(shape=expected, probe=probe):
+                accepted, refused = scan_bounded_suite_call_sites(probe + "\n")
+                self.assertEqual(accepted, [],
+                                 "the operator on the continuation line was "
+                                 "not read at all")
+                self.assertEqual(
+                    refused, [(1, expected, f"{self.CALL} \\")],
+                    "the refusal must name the joined unit's first physical "
+                    f"line: {refused}")
+
+    def test_a_joined_unit_reports_its_first_physical_line(self):
+        """Convention, pinned because a join is where renumbering would hide:
+        the call is written on physical line 2, and the unit reports line 1."""
+        probe = f"true \\\n  && {self.CALL}"
+        accepted, refused = scan_bounded_suite_call_sites(probe + "\n")
+        self.assertEqual(refused, [])
+        self.assertEqual(accepted, [(1, "current-shell call", "true \\")])
+
+    # Every shell word that admits the command after it as a command in the
+    # CURRENT shell. None of them is a shape the declaration can be lost to.
+    KEYWORD_INTRODUCERS = (
+        f"if true; then {CALL}; fi",
+        f"if false; then true; else {CALL}; fi",
+        f"for x in a; do {CALL}; done",
+        f"{{ {CALL} ; }}",
+        f"time {CALL}",
+        f"command {CALL}",
+    )
+
+    def test_every_shell_word_that_admits_a_command_admits_the_call(self):
+        """Red on 976b2f2 for all six: `then`, `else`, `do`, `{`, `time` and
+        `command` each introduce a command that runs in this shell, so the
+        keyword set -- not the call -- was the incomplete part."""
+        for probe in self.KEYWORD_INTRODUCERS:
+            with self.subTest(probe=probe):
+                accepted, refused = scan_bounded_suite_call_sites(probe + "\n")
+                self.assertEqual(refused, [],
+                                 "a shell word that admits a command is not a "
+                                 f"lossy shape: {refused}")
+                self.assertEqual(accepted, [(1, "current-shell call", probe)])
 
     def test_the_anchor_is_a_backstop_and_names_the_line_it_cannot_count(self):
         """`bounded_suite "$@"` is a legitimate current-shell call, so no shape
