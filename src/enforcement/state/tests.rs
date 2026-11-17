@@ -1370,7 +1370,6 @@ mod hegel_machine {
         gates: [ModelGate; 4],
         latch: FirstSlot,
         now: u64,
-        expected_block_all: bool,
         expected_blocked: u32,
         prev_block_all: bool,
         prev_blocked: u32,
@@ -1391,7 +1390,6 @@ mod hegel_machine {
                 ],
                 latch: FirstSlot::new(),
                 now: 0,
-                expected_block_all: false,
                 expected_blocked: 0,
                 prev_block_all: false,
                 prev_blocked: 0,
@@ -1530,7 +1528,6 @@ mod hegel_machine {
             let total_after = self.en.counters().facts_total();
             match expected_effect {
                 Effect::Block { scope: Scope::All } => {
-                    self.expected_block_all = true;
                     let class = class.expect("an All-scope effect is attributed to a class");
                     self.gates[class.index()].admitted_all = true;
                 }
@@ -1708,10 +1705,6 @@ mod hegel_machine {
         #[invariant(always_run)]
         fn e4_block_all_follows_a_class_crossing(&self, _: TestCase) {
             let any_admitted = self.gates.iter().any(|gate| gate.admitted_all);
-            assert_eq!(
-                self.expected_block_all, any_admitted,
-                "E4: the model's All latch and its per-class admissions disagree"
-            );
             assert_eq!(
                 self.en.block_all(),
                 any_admitted,

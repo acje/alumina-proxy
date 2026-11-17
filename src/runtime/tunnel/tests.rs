@@ -1343,6 +1343,12 @@ fn serving_decision_path_does_not_allocate_or_deallocate() {
 /// admit rule additionally asserts the subject's accept/refuse result and
 /// refusal reason against the model's own capacity state, which is what makes
 /// the per-peer cap observable: the subject exposes no per-peer counter.
+///
+/// The single-admit rule cannot reach `occupied() == MAX_TUNNELS` on its own:
+/// the pending budget `MAX_PENDING_SETUPS` (128) binds before the slot budget
+/// `MAX_TUNNELS` (512). The `admit_burst` rule graduates each admitted seat,
+/// freeing its pending seat while keeping it occupied, so a case reaches the
+/// full-table `SlotCapacity` refusal that S1's first clause needs.
 mod slot_table_machine {
     use super::*;
     use hegel::TestCase;
@@ -1500,6 +1506,78 @@ mod slot_table_machine {
                     actual, expected,
                     "the worker's refusal reason disagrees with the model's capacity state"
                 ),
+            }
+        }
+
+        /// A burst of up to 64 admissions. The pending budget
+        /// ([`MAX_PENDING_SETUPS`]) is smaller than the slot budget
+        /// ([`MAX_TUNNELS`]), so a burst of bare admits stops at
+        /// `PendingCapacity` with the table still below its slot budget. Each
+        /// admitted seat is graduated immediately: graduation keeps the
+        /// occupied seat and frees its pending seat, so the burst raises
+        /// `occupied()` by up to 64 and the only refusal it can reach is the
+        /// full-table [`AdmissionError::SlotCapacity`] that S1's first clause
+        /// exists to observe.
+        #[rule(weight = 8.0)]
+        fn admit_burst(&mut self, tc: TestCase) {
+            let attempts = tc.draw(gs::integers::<usize>().min_value(1).max_value(64));
+            for attempt in 0..attempts {
+                let (peer, canonical) = tc.draw(gs::sampled_from(&PEERS[..]));
+                let predicted = if self.worker.occupied() >= MAX_TUNNELS {
+                    Err(AdmissionError::SlotCapacity)
+                } else if self.worker.pending() >= MAX_PENDING_SETUPS
+                    || self.pending_from(canonical) >= MAX_PENDING_PER_PEER
+                {
+                    Err(AdmissionError::PendingCapacity)
+                } else {
+                    Ok(())
+                };
+                match (predicted, self.worker.admit(self.now, peer)) {
+                    (Ok(()), Ok(slot)) => {
+                        let index = SlotIndex::index(&slot);
+                        let occupied = self.worker.occupied();
+                        let tunnel = self.worker.finish_setup(slot);
+                        assert_eq!(
+                            TunnelIndex::index(&tunnel),
+                            index,
+                            "graduating an admitted seat keeps its physical slot"
+                        );
+                        assert_eq!(
+                            self.worker.occupied(),
+                            occupied,
+                            "graduating an admitted seat keeps it occupied"
+                        );
+                        self.live.push(Live::Established(tunnel));
+                        if occupied == MAX_TUNNELS {
+                            tc.event("occupied_at_slot_capacity");
+                        }
+                    }
+                    (Err(expected), Err(actual)) => {
+                        assert_eq!(
+                            actual, expected,
+                            "the worker's refusal reason disagrees with the model's capacity state"
+                        );
+                        if expected == AdmissionError::SlotCapacity {
+                            tc.event("slot_capacity_refusal");
+                            let (peer, _) = tc.draw(gs::sampled_from(&PEERS[..]));
+                            let follow_up = (attempts - attempt - 1).max(1);
+                            for _ in 0..follow_up {
+                                assert_eq!(
+                                    self.worker.admit(self.now, peer),
+                                    Err(AdmissionError::SlotCapacity),
+                                    "the table admitted a seat after reporting SlotCapacity while full"
+                                );
+                            }
+                        }
+                        return;
+                    }
+                    (Ok(()), Err(actual)) => {
+                        panic!("the model predicted a free seat, the worker refused: {actual:?}")
+                    }
+                    (Err(expected), Ok(_)) => {
+                        panic!("the model predicted {expected:?}, the worker admitted a seat")
+                    }
+                }
             }
         }
 

@@ -592,6 +592,14 @@ mod tests {
     /// G5 the observed phase edges are exactly `AwaitConnect` → `Connecting` →
     ///    `AwaitResponse` → `Validating` → `RelayActive`, plus termination out
     ///    of every pre-relay phase; every other observed move is a no-op.
+    /// G6 the returned [`UpstreamWrite`] payload accounts for exactly the bytes
+    ///    the pre-write ledger did not already hold: `BlockedByBarrierA`
+    ///    records nothing, `WritingHello { total }` reports the model's own
+    ///    hello length and advances the ledger by the drawn delta,
+    ///    `GateOpened { crossing, relay_from_open }` has `crossing` equal to
+    ///    the post-write ledger and split into the validated hello prefix plus
+    ///    `relay_from_open`, and `Open` acknowledges a relay report without
+    ///    recording further bytes (the ledger stops at the opening crossing).
     ///
     /// Independence: none of these re-runs the gate's own branch table. G1, G2,
     /// G2b and G4 relate the public surface (`is_open`, `hello_end`, the returned
@@ -599,13 +607,17 @@ mod tests {
     /// missing or misplaced guard cannot satisfy its own check; G3 compares
     /// successive observations across the whole walk instead of trusting the
     /// accumulator; G5 is an edge table the gate never materialises, checked
-    /// against the model's own previous observation.
+    /// against the model's own previous observation. G6 reads the payload
+    /// channel the other invariants never inspect, and derives its hello length
+    /// from the model's own first-head record rather than from the gate's
+    /// private `head_len`/`hello_start`, so an off-by-one at H, a mis-based
+    /// `relay_from_open`, or a blocked write that records bytes cannot satisfy
+    /// its own check.
     ///
     /// The rule weights keep both branches reachable in one walk: the progress
-    /// rules outrank the terminators so the relay-open path is entered (24 of
-    /// the 64 `development`-profile cases reach `RelayActive`), while the
-    /// remaining cases terminate before opening and then exercise the absorbing
-    /// phase.
+    /// rules outrank the terminators so the relay-open path is entered in the
+    /// `development` profile's cases, while the remaining cases terminate
+    /// before opening and then exercise the absorbing phase.
     mod lifecycle_machine {
         use super::*;
         use hegel::TestCase;
@@ -619,7 +631,10 @@ mod tests {
         pub(super) struct GateLifecycle {
             gate: TunnelGate,
             /// The CONNECT head length the model applied, which anchors the
-            /// drawn validated-hello boundary.
+            /// drawn validated-hello boundary. Only the first head applied in
+            /// `AwaitConnect` is recorded, mirroring production: a later
+            /// `on_connect_head` is ignored, so this stays the model's own
+            /// first-head record for G6's hello-length derivation.
             head_len: usize,
             /// The drawn validated-hello end, when the model applied one.
             hello_end: Option<usize>,
@@ -646,6 +661,9 @@ mod tests {
 
         struct WriteObservation {
             result: UpstreamWrite,
+            /// The delta the model drew for this write, so G6 can hold the
+            /// payload to exactly the bytes it claims to have advanced.
+            advance: usize,
             hello_end_before: Option<usize>,
             terminated_before: bool,
         }
@@ -778,6 +796,7 @@ mod tests {
                 let result = self.gate.upstream_write(advance);
                 self.write = Some(WriteObservation {
                     result,
+                    advance,
                     hello_end_before,
                     terminated_before,
                 });
@@ -885,6 +904,65 @@ mod tests {
                     is_written_down_edge(from, to),
                     "phase edge {from:?} -> {to:?} is outside the written-down set"
                 );
+            }
+
+            #[invariant(always_run)]
+            fn g6_write_payload_accounts_for_bytes(&self, _: TestCase) {
+                if self.last_rule != Some(Rule::UpstreamWrite) {
+                    return;
+                }
+                let Some(write) = &self.write else { return };
+                let committed_after = self.gate.upstream_committed();
+                if write.result == UpstreamWrite::BlockedByBarrierA {
+                    assert_eq!(
+                        committed_after, self.committed_before,
+                        "a blocked write recorded bytes: {committed_after} after {}",
+                        self.committed_before
+                    );
+                    return;
+                }
+                let hello_len = self
+                    .hello_end
+                    .and_then(|end| end.checked_sub(self.head_len))
+                    .expect("a permitted write requires a hello end after the first head");
+                match write.result {
+                    UpstreamWrite::BlockedByBarrierA => unreachable!("handled above"),
+                    UpstreamWrite::WritingHello { total } => {
+                        assert_eq!(
+                            total, hello_len,
+                            "a writing-hello report named {total} bytes, the model's hello is {hello_len}"
+                        );
+                        assert_eq!(
+                            committed_after,
+                            self.committed_before.saturating_add(write.advance),
+                            "a writing-hello report advanced the ledger by the wrong delta"
+                        );
+                    }
+                    UpstreamWrite::GateOpened {
+                        crossing,
+                        relay_from_open,
+                    } => {
+                        assert_eq!(
+                            crossing, committed_after,
+                            "the opening report crossed {crossing} bytes, the ledger holds {committed_after}"
+                        );
+                        assert!(
+                            crossing >= hello_len,
+                            "the gate opened after crossing {crossing} bytes, before the {hello_len}-byte hello"
+                        );
+                        assert_eq!(
+                            relay_from_open,
+                            crossing - hello_len,
+                            "the opening report based relay_from_open on the wrong hello length"
+                        );
+                    }
+                    UpstreamWrite::Open => {
+                        assert_eq!(
+                            committed_after, self.committed_before,
+                            "an open relay recorded further bytes; the ledger stops at the opening crossing"
+                        );
+                    }
+                }
             }
         }
     }
