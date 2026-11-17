@@ -2799,12 +2799,13 @@ class InnerTest(unittest.TestCase):
 
     def test_a_blocked_declaration_channel_runs_the_suite_and_classifies_unknown(
             self):
-        """A channel that cannot be created withholds the CLAIM, never the RUN:
-        the suite runs, its status stands, and the reader says so once. The
-        declaration was lost, so nothing about the run can be classified -- but
-        that is one unknown line, not a refusal, and not a budget fact (no check
-        ran nothing). Both shapes are pinned: an `mktemp` that runs and fails,
-        and one that is absent altogether."""
+        """A channel that cannot be created withholds the CLAIM, never the
+        INVOCATION: the helper is still called, and the reader says so once. The
+        declaration was lost, so nothing can be classified -- but that is one
+        unknown line, not a refusal and not a budget fact: nothing here proves a
+        check ran nothing, and the helper may itself refuse (the sibling pin
+        below covers that conjunction). Both shapes are pinned: an `mktemp` that
+        runs and fails, and one that is absent altogether."""
         failing = self.temp / "mktemp-fails"
         failing.mkdir()
         self.stub("mktemp", "exit 1\n", directory=failing)
@@ -2859,6 +2860,43 @@ class InnerTest(unittest.TestCase):
                 self.assertEqual(red.returncode, 101, self.describe(red))
                 self.assertIn("INNER-TEST-CLASSIFICATION-UNKNOWN", red.stderr,
                               self.describe(red))
+
+    def test_a_blocked_channel_beside_a_refusal_never_attributes_the_status(self):
+        """The blocked channel and the helper's refusal are reachable together --
+        and most likely on the same degraded host: no `mktemp`, and a stack below
+        the floor. Nothing runs, so a summary that names a command to blame sends
+        the operator to the wrong place. The summary names the helper's own
+        refusal as the first possibility instead, and the refusal is not converted
+        into a budget fact the lost declaration never carried."""
+        result = self.run_inner(
+            "foundations",
+            env={"PATH": f"{self.tools}:{self.no_mktemp}",
+                 "GATE_SUITE_MIN_STACK": "1048576"})
+        note = self.describe(result)
+        self.assertEqual(result.returncode, 1, note)
+        self.assertIn("GATE-SUITE-STACK-UNKNOWN", result.stderr, note)
+        self.assertEqual(
+            result.stderr.count("GATE-SUITE-DECLARATION-UNKNOWN"), 1,
+            f"the lost channel was not announced exactly once: {note}")
+        summaries = [line for line in result.stderr.splitlines()
+                     if line.startswith("INNER-TEST-CLASSIFICATION-UNKNOWN")]
+        self.assertEqual(len(summaries), 1,
+                         f"the unclassifiable run was not reported exactly "
+                         f"once: {note}")
+        # The attribution that 6bebdeb shipped: the summary must not hand the
+        # operator a wrapped command that never started.
+        self.assertNotIn("wrapped command's", result.stderr, note)
+        self.assertIn("bounded_suite may itself have refused", summaries[0], note)
+        self.assertIn("no command was started", summaries[0], note)
+        # The declaration that would make this a budget fact is exactly what the
+        # blocked channel lost, so no budget claim is available here.
+        self.assertNotIn("INNER-TEST-BUDGET-REFUSED", result.stderr, note)
+        self.assertNotIn("INNER-TEST-OK", result.stdout + result.stderr, note)
+        self.assertNotIn("INNER-TEST-UNKNOWN", result.stderr, note)
+        self.assertFalse(self.calls.exists(),
+                         f"cargo ran under a refused stack budget: {note}")
+        self.assertFalse(self.wrapper_calls.exists(),
+                         f"the wrapper ran under a refused stack budget: {note}")
 
     def test_a_pipeline_call_site_still_reports_the_refusal(self):
         """The seam: the helper runs in a subshell here, so a shell-variable
@@ -3344,6 +3382,31 @@ def scan_bounded_suite_call_sites(text):
     return accepted, refused
 
 
+def call_site_report_lines(text):
+    """The `lint call-sites` report: one actionable line per refused call site,
+    then a count. Report-only by contract -- a hazard named here is a warning for
+    a reader, and a clean report certifies nothing."""
+    accepted, refused = scan_bounded_suite_call_sites(text)
+    lines = [f"{number}: {shape}: {line}"
+             for number, shape, line in refused]
+    lines.append(f"report: {len(accepted)} accepted, {len(refused)} refused")
+    return lines
+
+
+def report_call_sites(target):
+    """Print the lint for one script and always return 0. An unreadable target is
+    named as unavailable: report-only does not turn an operational failure into a
+    clean report."""
+    try:
+        text = Path(target).read_text()
+    except OSError as error:
+        print(f"unavailable: {target} could not be read ({error.strerror})")
+        return 0
+    for line in call_site_report_lines(text):
+        print(line)
+    return 0
+
+
 class CallSiteLint(unittest.TestCase):
     """LINT: it may warn, it may not certify.
 
@@ -3393,16 +3456,51 @@ class CallSiteLint(unittest.TestCase):
             self.assertIsInstance(line, str, f"warning carries no line text: {entry}")
 
     def test_the_shipped_path_reports_a_planted_hazard_readably(self):
-        """The same report, on the real document: a legal-or-lossy call appended
-        to scripts/verify.sh is named at its own line with its own shape. This is
-        what a reader gets; it is not a verdict on what was already there."""
-        text = self.shipped()
-        first_planted = len(text.splitlines()) + 1
+        """The same report, on the real document: a lossy call planted at the
+        HEAD is named at its own line with its own shape. The head is a position
+        no carried span from the shipped text can reach, so this pin cannot fail
+        on a lexical property of scripts/verify.sh (a tail that ends mid-unit
+        would otherwise decide the test). This is what a reader gets; it is not
+        a verdict on what was already there."""
+        plant = "bounded_suite cargo atest -p alumina --lib | cat\n"
         _accepted, warnings = lint_bounded_suite_call_sites(
-            text + "\n" + "bounded_suite cargo atest -p alumina --lib | cat\n")
-        planted = [entry for entry in warnings if entry[0] >= first_planted]
-        self.assertEqual([shape for _, shape, _ in planted], ["pipeline"])
+            plant + self.shipped())
+        planted = [entry for entry in warnings if entry[0] == 1]
+        self.assertEqual([shape for _, shape, _ in planted], ["pipeline"],
+                         f"the planted head line was not named: {warnings}")
         self.assertIn("bounded_suite cargo atest", planted[0][2])
+
+    def test_the_report_only_selector_names_a_hazard_and_still_exits_zero(self):
+        """A demoted control nobody can invoke warns nobody, so `lint call-sites`
+        is the lint's operator-visible path -- and it is a report, not a gate: a
+        hazardous call site is printed with its shape and the selector still
+        exits 0. The plant sits in a function body of a synthetic repo's copy, so
+        no hazard has to exist in (or be executed from) the real checkout."""
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / "repo"
+            (repo / "scripts").mkdir(parents=True)
+            for name in ("verify.sh", "verify_test.py"):
+                shutil.copyfile(ROOT / "scripts" / name, repo / "scripts" / name)
+            script = repo / "scripts/verify.sh"
+            script.write_text(
+                script.read_text()
+                + "\nnever_called() {\n"
+                  "    bounded_suite cargo atest -p alumina --lib | cat\n"
+                  "}\n")
+            result = subprocess.run(
+                [shutil.which("sh") or "/bin/sh", "scripts/verify.sh",
+                 "lint", "call-sites"],
+                cwd=repo, text=True, capture_output=True)
+        note = (f"exit: {result.returncode}\n"
+                f"stdout: {result.stdout}stderr: {result.stderr}")
+        self.assertEqual(result.returncode, 0,
+                         "a report-only selector must not gate: " + note)
+        self.assertIn("CALL-SITE-LINT-REPORT-ONLY", result.stdout, note)
+        named = [line for line in result.stdout.splitlines()
+                 if "pipeline" in line]
+        self.assertEqual(len(named), 1,
+                         "the planted hazard was not named exactly once: " + note)
+        self.assertIn("bounded_suite cargo atest", named[0], note)
 
     # One line per shape, each carrying the ordinary anchored spelling so the
     # only thing that differs from the baseline call is the shape itself.
@@ -3823,6 +3921,12 @@ class DiscoveryCompleteness(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    # `--report-call-sites` is the operator-visible path to the demoted lint
+    # (verify.sh's `lint call-sites` selector): it prints and exits 0, so a
+    # hazard warns a reader and gates nothing. Everything else is unittest's own
+    # argument handling.
+    if sys.argv[1:2] == ["--report-call-sites"]:
+        sys.exit(report_call_sites(ROOT / "scripts/verify.sh"))
     # unittest's own argument handling, so `-k <pattern>` filters for real: a
     # hand-rolled loader here silently ignored it and ran the whole suite. The
     # loader fails the run when the collected suite is smaller than the source.

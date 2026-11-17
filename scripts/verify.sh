@@ -28,6 +28,7 @@ usage() {
     echo "       inner test <target> runs ONE integration target host-natively; backs no done-claim." >&2
     echo "       host-mid {foundations|boot|union|full|clippy}; supply-chain audit-deny" >&2
     echo "       gate-children scan asserts no reparented gate child survives under the debug build roots this gate builds into (cargo metadata target_directory and ALT_AW_TARGET_DIR)" >&2
+    echo "       lint call-sites prints the report-only bounded_suite call-site lint for scripts/verify.sh and always exits 0" >&2
     echo "       identity snapshot <directory> | identity compare <before> <after> | identity artifact <path>" >&2
     exit 2
 }
@@ -1384,6 +1385,32 @@ ref_check_report_only() {
             ;;
         *) echo "REF-CHECK-REPORT-ONLY: unavailable (adapter exit $rr_rc)" ;;
     esac
+    return 0
+}
+
+# =============================================================================
+# bounded_suite call-site lint (report-only)
+#
+# One report-only lint: scripts/verify_test.py classifies every `bounded_suite`
+# call site in this script, and every lossy shape it names is printed for a
+# reader. It certifies nothing -- the declaration a reader consumes is the file
+# the running helper writes, so a clean report here is not evidence that a call
+# site is sound. No gate invokes this, and it always returns 0, including on a
+# hazard it names: the demotion removed the certification, not the observation.
+# =============================================================================
+call_site_lint_report_only() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "CALL-SITE-LINT-REPORT-ONLY: unavailable (python3 not on PATH)"
+        return 0
+    fi
+    if [ ! -f scripts/verify_test.py ]; then
+        echo "CALL-SITE-LINT-REPORT-ONLY: unavailable (scripts/verify_test.py missing)"
+        return 0
+    fi
+    cl_rc=0
+    cl_out="$(python3 scripts/verify_test.py --report-call-sites 2>&1)" || cl_rc=$?
+    echo "CALL-SITE-LINT-REPORT-ONLY: exit=$cl_rc (report-only, not failing)"
+    printf '%s\n' "$cl_out" | sed 's/^/  CALL-SITE-LINT: /'
     return 0
 }
 
@@ -3004,9 +3031,10 @@ alt_smoke() {
 # UNCLASSIFIABLE: one line says so and names both observations, because two
 # observations that disagree support neither a budget fact nor a pass.
 # A channel that cannot be created at all (`mktemp` absent or failing) withholds
-# only the classification: the suite still runs, its status still stands, and the
-# reader reports the unknown instead of refusing the run. Fail-closed on the
-# CLAIM, not on the RUN.
+# only the classification: the reader still calls the helper and reports the
+# unknown instead of refusing to invoke it. What the helper then does is open --
+# it may itself refuse, and then nothing ran at all and only the helper's own
+# status remains. Fail-closed on the CLAIM, not on the INVOCATION.
 inner_test() {
     _target="$1"
     case "$_target" in
@@ -3035,10 +3063,10 @@ inner_test() {
     # `mktemp` creates keeps the channel out of every other process's reach.
     _it_declaration=$(mktemp "${TMPDIR:-/tmp}/alumina-suite-outcome.XXXXXX") || _it_declaration=""
     if [ -z "$_it_declaration" ]; then
-        # No channel, but not no run: announce the lost declaration exactly once,
-        # then clear the inherited path so no child can write one this reader will
-        # never read. The status captured below is still the suite's own.
-        echo "GATE-SUITE-DECLARATION-UNKNOWN: $_target — no per-run declaration file could be created under ${TMPDIR:-/tmp}; the run proceeds without a declaration, so whatever it returns cannot be classified: a non-zero status is the wrapped command's, and a 0 is not a pass" >&2
+        # No channel: announce the lost declaration exactly once, then clear the
+        # inherited path so no child can write one this reader will never read.
+        # The status captured below is the helper's, not a claim about the run.
+        echo "GATE-SUITE-DECLARATION-UNKNOWN: $_target — no per-run declaration file could be created under ${TMPDIR:-/tmp}; this invocation cannot be classified: bounded_suite may itself have refused, and then its GATE-SUITE-*-UNKNOWN line names the check and no command was started; otherwise 125|126|127 or 124|137 is the wrapper's, another status is the command's, and a 0 is not a pass" >&2
         GATE_SUITE_DECLARATION_FILE=""
         export GATE_SUITE_DECLARATION_FILE
     else
@@ -3055,11 +3083,11 @@ inner_test() {
     # leaves the channel EMPTY (which is UNKNOWN, never OK), and the `||` keeps
     # `set -e` from turning a missing file into an exit before the triage below
     # can report it. The file is removed on every one of the reader's exits --
-    # and a blocked channel has no file to read or remove: the run above was
-    # still a run, so only its classification is unknown.
+    # and a blocked channel has no file to read or remove: only its
+    # classification is unknown, whatever the helper did above.
     if [ -z "$_it_declaration" ]; then
         _itr_declared=""
-        echo "INNER-TEST-CLASSIFICATION-UNKNOWN: $_target exit $_itr — no per-run declaration file could be created under ${TMPDIR:-/tmp} (announced above), so nothing about the run can be classified: a non-zero status is the wrapped command's, and a 0 is not a pass" >&2
+        echo "INNER-TEST-CLASSIFICATION-UNKNOWN: $_target exit $_itr — no per-run declaration file could be created under ${TMPDIR:-/tmp} (announced above), so this status cannot be classified: bounded_suite may itself have refused, and then the GATE-SUITE-*-UNKNOWN line above names the check and no command was started; otherwise 125|126|127 or 124|137 is the wrapper's, another status is the command's, and a 0 is not a pass" >&2
     else
         _itr_declared=$(cat "$_it_declaration" 2>/dev/null) || _itr_declared=""
         rm -f "$_it_declaration"
@@ -3134,6 +3162,7 @@ case "$TIER/$SCOPE" in
         assert_no_leaked_gate_children
         ;;
     gate-children/scan) assert_no_leaked_gate_children ;;
+    lint/call-sites) call_site_lint_report_only ;;
     fixtures/boot) boot_fixtures ;;
     supply-chain/audit-deny) [ "$#" -eq 2 ] || usage; audit_deny_owner ;;
     identity/snapshot) [ "$#" -eq 3 ] && [ -n "$3" ] || usage; identity_snapshot "$3" ;;
