@@ -90,11 +90,103 @@ fn transfer_body() {
     );
 }
 
+/// One pump tick's readiness slice: a ready loop leaves the poll at once, so
+/// this is the idle cost of a tick and never a floor on a wait.
+const PUMP_SLICE: Duration = Duration::from_millis(2);
+
+/// The wall-clock bound on waiting for work to arrive. A loopback arrival lands
+/// within a millisecond or two on an idle host; a loaded host running the whole
+/// lib suite can take tens of milliseconds. The bound absorbs that with room to
+/// spare, and a loop that is genuinely stuck fails here by name long before the
+/// 60 s serving join deadline could hide it.
+const ARRIVAL_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Ticks the loop `times` times at [`PUMP_SLICE`] per idle poll: the fixed
+/// budget for the sites whose claim is about elapsed loop time — a deadline
+/// that must expire, or a window in which nothing may happen. A site whose
+/// claim depends on work *arriving* ticks with [`pump_until`] instead, so a
+/// loaded host waits out its own latency rather than a budget the call site
+/// guessed on a quieter machine.
 fn pump(serving: &mut ServingLoop, times: usize) {
     for _ in 0..times {
-        serving
-            .run_once(Some(Duration::from_millis(2)))
-            .expect("pump poll");
+        serving.run_once(Some(PUMP_SLICE)).expect("pump poll");
+    }
+}
+
+/// Ticks the loop until `arrived` holds, failing by name once
+/// [`ARRIVAL_DEADLINE`] has passed: the honest "wait until the work arrives"
+/// form. The condition is checked after every tick, so at least one tick always
+/// runs and the loop advances even when the condition is already true.
+fn pump_until(
+    serving: &mut ServingLoop,
+    what: &str,
+    mut arrived: impl FnMut(&ServingLoop) -> bool,
+) {
+    let start = Instant::now();
+    loop {
+        serving.run_once(Some(PUMP_SLICE)).expect("pump poll");
+        if arrived(serving) {
+            return;
+        }
+        assert!(
+            start.elapsed() < ARRIVAL_DEADLINE,
+            "pump on thread {} waited {ARRIVAL_DEADLINE:?} for {what} and the loop never got there",
+            current_thread_name(),
+        );
+    }
+}
+
+/// Ticks the loop until exactly `seats` setup seats are occupied.
+fn pump_until_seats(serving: &mut ServingLoop, seats: usize, what: &str) {
+    pump_until(serving, what, |serving| {
+        serving.storage().occupied() == seats
+    });
+}
+
+/// Ticks the loop until the just-connected client is admitted into its one
+/// setup seat: `connect` returns once the client handshake completes, which can
+/// precede the server side reaching the accept queue.
+fn pump_until_admitted(serving: &mut ServingLoop, what: &str) {
+    pump_until_seats(serving, 1, what);
+}
+
+/// Ticks the loop until it has written to `client` (or closed it), leaving the
+/// bytes queued for the caller's own read: `peek` is non-destructive, so the
+/// wire-body assertions after this still see exactly what the loop wrote. The
+/// probe flips the socket to non-blocking for its own peeks and back to the
+/// blocking mode this module's `connect` leaves it in; every read helper here
+/// re-arms its own timeout.
+fn pump_until_client_ready(serving: &mut ServingLoop, client: &TcpStream, what: &str) {
+    client
+        .set_nonblocking(true)
+        .expect("arm the readiness probe");
+    let mut probe = [0u8; 1];
+    pump_until(serving, what, |_| {
+        !matches!(
+            client.peek(&mut probe),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock
+        )
+    });
+    client
+        .set_nonblocking(false)
+        .expect("restore the client's blocking reads");
+}
+
+/// Waits until `arrived` holds for a socket the test owns, outside the serving
+/// loop, failing by name once [`ARRIVAL_DEADLINE`] has passed: the arrival owes
+/// nothing to the loop, so this yields the CPU instead of ticking it.
+fn wait_until(what: &str, mut arrived: impl FnMut() -> bool) {
+    let start = Instant::now();
+    loop {
+        if arrived() {
+            return;
+        }
+        assert!(
+            start.elapsed() < ARRIVAL_DEADLINE,
+            "thread {} waited {ARRIVAL_DEADLINE:?} for {what}",
+            current_thread_name(),
+        );
+        std::thread::sleep(MIN_READ_WAIT);
     }
 }
 
@@ -140,15 +232,9 @@ fn connect(port: u16) -> TcpStream {
 }
 
 fn wait_upstream_connected(up: &mio::net::TcpStream) {
-    let mut connected = false;
-    for _ in 0..10_000 {
-        if up.peer_addr().is_ok() {
-            connected = true;
-            break;
-        }
-        std::thread::yield_now();
-    }
-    assert!(connected, "the nonblocking upstream connect never resolved");
+    wait_until("the nonblocking upstream connect to resolve", || {
+        up.peer_addr().is_ok()
+    });
 }
 
 /// A normal reactor test finishes far under a second, so 30 s is more than 100x
@@ -242,16 +328,11 @@ fn last_reject_record(serving: &ServingLoop, reason: &str) -> String {
     text
 }
 
-/// Connects one client, pumps `times` owner turns, and asserts it holds exactly
-/// one admitted setup seat; returns the client for the caller's exchange.
-fn admitted_client(serving: &mut ServingLoop, port: u16, times: usize) -> TcpStream {
+/// Connects one client and ticks until it holds exactly one admitted setup
+/// seat; returns the client for the caller's exchange.
+fn admitted_client(serving: &mut ServingLoop, port: u16) -> TcpStream {
     let client = connect(port);
-    pump(serving, times);
-    assert_eq!(
-        serving.storage().occupied(),
-        1,
-        "the connecting client must be admitted"
-    );
+    pump_until_admitted(serving, "the connecting client must be admitted");
     client
 }
 
@@ -983,15 +1064,7 @@ fn drain_prefix(stream: &mut TcpStream, want: usize) -> Vec<u8> {
 /// so a synthetic readiness dispatch never races loopback delivery.
 fn wait_readable(stream: &mio::net::TcpStream, label: &str) {
     let mut probe = [0u8; 1];
-    let mut readable = false;
-    for _ in 0..10_000 {
-        if matches!(stream.peek(&mut probe), Ok(n) if n > 0) {
-            readable = true;
-            break;
-        }
-        std::thread::yield_now();
-    }
-    assert!(readable, "{label} never became readable on the proxy side");
+    wait_until(label, || matches!(stream.peek(&mut probe), Ok(n) if n > 0));
 }
 
 fn stage_relay_slot(
@@ -1420,12 +1493,7 @@ mod serving {
             client
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("client read timeout");
-            pump(serving, 20);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "silent client must be admitted"
-            );
+            pump_until_admitted(serving, "silent client must be admitted");
 
             {
                 let ws = &mut serving.slots[0];
@@ -1517,7 +1585,7 @@ mod connect_setup {
             client
                 .write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
                 .expect("write head");
-            pump(serving, 80);
+            pump_until_client_ready(serving, &client, "the 403 body for a forbidden CONNECT");
             let body = read_until(&mut client, b"\r\n\r\n");
             assert!(
                 body.starts_with(b"HTTP/1.1 403"),
@@ -1538,14 +1606,18 @@ mod connect_setup {
             let mut c1 = connect(port);
             c1.write_all(b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n")
                 .expect("write head");
-            pump(serving, 80);
+            pump_until_client_ready(serving, &c1, "the 403 body for the first forbidden CONNECT");
             let b1 = read_until(&mut c1, b"\r\n\r\n");
             assert!(b1.starts_with(b"HTTP/1.1 403"));
 
             let mut c2 = connect(port);
             c2.write_all(b"CONNECT also-not.example.net:443 HTTP/1.1\r\n\r\n")
                 .expect("write head");
-            pump(serving, 80);
+            pump_until_client_ready(
+                serving,
+                &c2,
+                "the 403 body for the second forbidden CONNECT",
+            );
             let b2 = read_until(&mut c2, b"\r\n\r\n");
             assert!(b2.starts_with(b"HTTP/1.1 403"));
             assert_eq!(
@@ -1567,11 +1639,14 @@ mod connect_setup {
             client
                 .shutdown(std::net::Shutdown::Write)
                 .expect("client fin during reading connect");
-            pump(serving, 80);
-            assert_eq!(
-                serving.storage().occupied(),
+            pump_until_admitted(
+                serving,
+                "the client FIN during ReadingConnect to be admitted first",
+            );
+            pump_until_seats(
+                serving,
                 0,
-                "a client FIN during ReadingConnect must release the setup seat immediately"
+                "a client FIN during ReadingConnect to release the setup seat immediately",
             );
         });
     }
@@ -1775,7 +1850,7 @@ mod connect_setup {
             client
                 .write_all(&head)
                 .expect("write 6 KiB head in one write");
-            pump(serving, 120);
+            pump_until_client_ready(serving, &client, "the 403 body for a multi-read head");
             let body = read_until(&mut client, b"\r\n\r\n");
             assert!(
                 body.starts_with(b"HTTP/1.1 403"),
@@ -1792,7 +1867,7 @@ mod connect_setup {
         with_serving_stack(port, move |serving| {
             let mut client = connect(port);
             client.write_all(b"\r\n\r\n").expect("write malformed head");
-            pump(serving, 80);
+            pump_until_client_ready(serving, &client, "the 400 body for a malformed CONNECT");
             let body = read_until(&mut client, b"\r\n\r\n");
             assert!(
                 body.starts_with(b"HTTP/1.1 400"),
@@ -1816,7 +1891,11 @@ mod connect_setup {
                     pump(serving, 4);
                 }
             }
-            pump(serving, 80);
+            pump_until_client_ready(
+                serving,
+                &socks[MAX_PENDING_PER_PEER],
+                "the per-peer capacity 503 body",
+            );
             let mut last = socks[MAX_PENDING_PER_PEER].try_clone().expect("clone");
             let body = read_until(&mut last, b"\r\n\r\n");
             assert!(
@@ -1842,11 +1921,10 @@ mod connect_setup {
                     pump(serving, 4);
                 }
             }
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
+            pump_until_seats(
+                serving,
                 MAX_PENDING_PER_PEER,
-                "the silent setups fill one peer's pending seats"
+                "the silent setups fill one peer's pending seats",
             );
             let start = Instant::now();
             while serving.storage().occupied() > 0 {
@@ -1879,11 +1957,9 @@ mod connect_setup {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let client = connect(port);
-            pump(serving, 1);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "precondition: the connecting client is admitted into one setup seat"
+            pump_until_admitted(
+                serving,
+                "precondition: the connecting client is admitted into one setup seat",
             );
 
             // A slow-client pseudo-handshake: one validly-framed TLS record whose
@@ -1948,7 +2024,7 @@ mod connect_setup {
             client
                 .write_all(b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n")
                 .expect("allowlisted connect head queued");
-            pump(serving, 60);
+            pump_until_client_ready(serving, &client, "the refusal body");
             let body = read_all(&mut client);
             assert_eq!(
             &body[..],
@@ -2026,11 +2102,9 @@ mod deadlines {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let client = connect(port);
-            pump(serving, 1);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted into one setup seat"
+            pump_until_admitted(
+                serving,
+                "the connecting client must be admitted into one setup seat",
             );
             assert_eq!(
                 serving.sweeps, 0,
@@ -2055,14 +2129,12 @@ mod deadlines {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let client = connect(port);
-            pump(serving, 1);
-            assert_eq!(serving.storage().occupied(), 1, "one admitted setup");
+            pump_until_admitted(serving, "the connecting client must be admitted");
             serving.slots[0].idle_deadline = Some(Instant::now() - Duration::from_millis(1));
-            pump(serving, 1);
-            assert_eq!(
-                serving.storage().occupied(),
+            pump_until_seats(
+                serving,
                 0,
-                "a deadline already elapsed must still be enforced by the C16-gated sweep"
+                "a deadline already elapsed must still be enforced by the C16-gated sweep",
             );
             assert!(
                 serving.sweeps >= 1,
@@ -2161,8 +2233,7 @@ mod deadlines {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let _client = connect(port);
-            pump(serving, 1);
-            assert_eq!(serving.storage().occupied(), 1, "one admitted setup");
+            pump_until_admitted(serving, "the connecting client must be admitted");
             let now = Instant::now();
             let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
             let setup = serving
@@ -2216,15 +2287,13 @@ mod deadlines {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let client = connect(port);
-            pump(serving, 1);
-            assert_eq!(serving.storage().occupied(), 1, "one admitted setup");
+            pump_until_admitted(serving, "the connecting client must be admitted");
             serving.slots[0].drain_deadline = Some(Instant::now() - Duration::from_millis(1));
             serving.sync_live_deadline(0);
-            pump(serving, 1);
-            assert_eq!(
-                serving.storage().occupied(),
+            pump_until_seats(
+                serving,
                 0,
-                "an elapsed drain deadline must still be enforced by the C16-gated sweep"
+                "an elapsed drain deadline must still be enforced by the C16-gated sweep",
             );
             assert!(
                 serving.sweeps >= 1,
@@ -2254,12 +2323,7 @@ mod deadlines {
                 Family::A,
             );
             let mut client = connect(port);
-            pump(serving, 10);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
             let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
             match serving.slots[0]
                 .parser
@@ -2284,11 +2348,10 @@ mod deadlines {
                     setup,
                 ));
             serving.sync_live_deadline(0);
-            pump(serving, 10);
-            assert_eq!(
-                serving.storage().occupied(),
+            pump_until_seats(
+                serving,
                 0,
-                "the expired-dial retry must re-decide to NoBinding and release the seat"
+                "the expired-dial retry must re-decide to NoBinding and release the seat",
             );
             let body = read_all(&mut client);
             assert!(
@@ -2516,26 +2579,20 @@ mod generation_tokens {
 
             let mut probe = [0u8; 1];
             let _origin = arm_dialing_origin_early_data(serving);
-            let mut waits = 0;
-            loop {
-                match serving.slots[0]
+            wait_until(
+                "the upstream early data to become readable on the socket",
+                || match serving.slots[0]
                     .upstream
                     .as_ref()
                     .expect("upstream present")
                     .peek(&mut probe[..])
                 {
-                    Ok(1) => break,
-                    Ok(_) => {}
-                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                    Ok(1) => true,
+                    Ok(_) => false,
+                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => false,
                     Err(err) => panic!("peek upstream early data: {err}"),
-                }
-                waits += 1;
-                assert!(
-                    waits < 2000,
-                    "upstream early data never became readable on the socket"
-                );
-                std::thread::yield_now();
-            }
+                },
+            );
             dispatch_stale_upstream(serving, stale_up, &mut probe);
             dispatch_live_upstream_tripwire(serving);
         });
@@ -2551,10 +2608,8 @@ mod generation_tokens {
         token: Token,
         expected_len: usize,
     ) {
-        for _ in 0..10_000 {
-            if serving.slots[0].buf_len == expected_len {
-                return;
-            }
+        let start = Instant::now();
+        while serving.slots[0].buf_len != expected_len {
             serving
                 .dispatch_readiness(
                     token,
@@ -2564,12 +2619,12 @@ mod generation_tokens {
                     },
                 )
                 .expect("dispatch the new-generation token");
-            std::thread::yield_now();
+            assert!(
+                start.elapsed() < ARRIVAL_DEADLINE,
+                "the new-generation token never read the queued head within {ARRIVAL_DEADLINE:?}"
+            );
+            std::thread::sleep(MIN_READ_WAIT);
         }
-        assert_eq!(
-            serving.slots[0].buf_len, expected_len,
-            "the new-generation token never read the queued head"
-        );
     }
 
     #[test]
@@ -2622,7 +2677,8 @@ mod generation_tokens {
                     },
                 ),
             ];
-            for _ in 0..10_000 {
+            let start = Instant::now();
+            loop {
                 serving.batch_gen = serving.batch_gen.wrapping_add(1);
                 serving.in_batch = true;
                 serving
@@ -2632,7 +2688,11 @@ mod generation_tokens {
                 if serving.slots[0].slot_gen == new_gen {
                     break;
                 }
-                std::thread::yield_now();
+                assert!(
+                    start.elapsed() < ARRIVAL_DEADLINE,
+                    "the mid-batch accept never reused slot 0 at the new generation within {ARRIVAL_DEADLINE:?}"
+                );
+                std::thread::sleep(MIN_READ_WAIT);
             }
 
             assert_eq!(
@@ -2659,7 +2719,8 @@ mod generation_tokens {
         batch: &[(Token, Readiness)],
         new_gen: u64,
     ) {
-        for _ in 0..10_000 {
+        let start = Instant::now();
+        loop {
             // Batch: [accept -> gen 2, stale(1), new(2)]. The stale token
             // reaches the fold-time generation guard at 1376 (live gen already 2).
             serving.batch_gen = serving.batch_gen.wrapping_add(1);
@@ -2671,7 +2732,11 @@ mod generation_tokens {
             if serving.slots[0].slot_gen == new_gen {
                 break;
             }
-            std::thread::yield_now();
+            assert!(
+                start.elapsed() < ARRIVAL_DEADLINE,
+                "the accept-first batch never reused slot 0 at the new generation within {ARRIVAL_DEADLINE:?}"
+            );
+            std::thread::sleep(MIN_READ_WAIT);
         }
     }
 
@@ -2778,7 +2843,8 @@ mod generation_tokens {
         // Bounded accept retry (no timers): until the accept lands, accept_all
         // WouldBlocks and the batch is a no-op, so re-running is idempotent.
         let accept_batch = [(Token(0), Readiness::none())];
-        for _ in 0..10_000 {
+        let start = Instant::now();
+        loop {
             serving.batch_gen = serving.batch_gen.wrapping_add(1);
             serving.in_batch = true;
             serving
@@ -2787,7 +2853,11 @@ mod generation_tokens {
             if serving.slots[0].slot_gen == 0 {
                 break;
             }
-            std::thread::yield_now();
+            assert!(
+                start.elapsed() < ARRIVAL_DEADLINE,
+                "the wrapped-generation connection was never accepted within {ARRIVAL_DEADLINE:?}"
+            );
+            std::thread::sleep(MIN_READ_WAIT);
         }
         assert_eq!(
             serving.slots[0].slot_gen, 0,
@@ -2831,7 +2901,8 @@ mod generation_tokens {
     /// whose inertness proof must stay a single dispatch. `released` is the
     /// per-site post-condition failure message.
     fn dispatch_own_token_until_released(serving: &mut ServingLoop, token: Token, released: &str) {
-        for _ in 0..10_000 {
+        let start = Instant::now();
+        loop {
             serving
                 .dispatch_readiness(
                     token,
@@ -2844,9 +2915,12 @@ mod generation_tokens {
             if serving.storage().occupied() == 0 {
                 return;
             }
-            std::thread::yield_now();
+            assert!(
+                start.elapsed() < ARRIVAL_DEADLINE,
+                "{released} (waited {ARRIVAL_DEADLINE:?})"
+            );
+            std::thread::sleep(MIN_READ_WAIT);
         }
-        assert_eq!(serving.storage().occupied(), 0, "{released}");
     }
 
     fn dispatch_own_wrapped_token(serving: &mut ServingLoop) {
@@ -2925,7 +2999,8 @@ mod generation_tokens {
         // Bounded accept retry (no timers): until the accept lands, accept_all
         // WouldBlocks and the batch is a no-op, so re-running is idempotent.
         let accept_batch = [(Token(0), Readiness::none())];
-        for _ in 0..10_000 {
+        let start = Instant::now();
+        loop {
             serving.batch_gen = serving.batch_gen.wrapping_add(1);
             serving.in_batch = true;
             serving
@@ -2934,7 +3009,11 @@ mod generation_tokens {
             if serving.slots[0].slot_gen != field_ceiling {
                 break;
             }
-            std::thread::yield_now();
+            assert!(
+                start.elapsed() < ARRIVAL_DEADLINE,
+                "the field-boundary connection was never accepted within {ARRIVAL_DEADLINE:?}"
+            );
+            std::thread::sleep(MIN_READ_WAIT);
         }
         let live = serving.slots[0].slot_gen;
         (client, reader, live)
@@ -3225,12 +3304,7 @@ mod dialing {
         let mut origin_stream = origin.accept().expect("accept origin side").0;
 
         let client = connect(port);
-        pump(serving, 40);
-        assert_eq!(
-            serving.storage().occupied(),
-            1,
-            "the connecting client must be admitted"
-        );
+        pump_until_admitted(serving, "the connecting client must be admitted");
 
         let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
         {
@@ -3252,22 +3326,15 @@ mod dialing {
         with_serving_stack(port, move |serving| {
             let (_client, _origin_stream, up) = arm_early_origin_data(serving, port);
             let index = 0;
-            let mut probe = [0u8; 1];
-            let mut waits = 0;
-            loop {
-                match up.peek(&mut probe) {
-                    Ok(1) => break,
-                    Ok(_) => {}
-                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => {}
+            wait_until(
+                "the origin early data to become readable on the upstream socket",
+                || match up.peek(&mut [0u8; 1]) {
+                    Ok(1) => true,
+                    Ok(_) => false,
+                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => false,
                     Err(err) => panic!("peek origin early data: {err}"),
-                }
-                waits += 1;
-                assert!(
-                    waits < 2000,
-                    "origin early data never became readable on the upstream socket"
-                );
-                std::thread::yield_now();
-            }
+                },
+            );
             serving.slots[index].upstream = Some(up);
 
             let token = upstream_token(serving.slots[index].slot_gen, index);
@@ -3313,12 +3380,7 @@ mod dialing {
             let mut _origin_stream = origin.accept().expect("accept origin side").0;
 
             let _client = connect(port);
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             let index = 0;
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
@@ -3401,12 +3463,7 @@ mod dialing {
             client
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("client read timeout");
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             fabric_validated_pre_gate_queued_upstream(serving, 8);
             let ordinal = committed_ordinal(serving);
@@ -3473,12 +3530,7 @@ mod dialing {
             client
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("client read timeout");
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             fabric_pre_gate_queued_upstream(serving, 8);
             let token = upstream_token(serving.slots[0].slot_gen, 0);
@@ -3536,12 +3588,7 @@ mod dialing {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let _client = connect(port);
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             fabric_validated_pre_gate_queued_upstream(serving, 8);
             let ordinal = committed_ordinal(serving);
@@ -3606,12 +3653,7 @@ mod dialing {
             client
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("client read timeout");
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             let index = 0;
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
@@ -3691,12 +3733,7 @@ mod dialing {
             client
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("client read timeout");
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             let index = 0;
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
@@ -3760,12 +3797,7 @@ mod dialing {
             client
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("client read timeout");
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             let index = 0;
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
@@ -3816,12 +3848,7 @@ mod dialing {
             client
                 .set_read_timeout(Some(Duration::from_millis(50)))
                 .expect("client read timeout");
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             let index = 0;
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
@@ -3891,7 +3918,11 @@ mod dialing {
             mismatch
                 .write_all(b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n")
                 .expect("443 head");
-            pump(serving, 20);
+            pump_until_client_ready(
+                serving,
+                &mismatch,
+                "the 403 body for the port-mismatched pair",
+            );
             let mb = read_until(&mut mismatch, b"\r\n\r\n");
             assert!(
                 mb.starts_with(b"HTTP/1.1 403"),
@@ -3913,7 +3944,7 @@ mod dialing {
                     format!("CONNECT sub.example.org:{dial_port} HTTP/1.1\r\n\r\n").as_bytes(),
                 )
                 .expect("entry head");
-            pump(serving, 20);
+            pump_until_client_ready(serving, &entry, "the 502 body for the entry-port pair");
             let eb = read_until(&mut entry, b"\r\n\r\n");
             assert!(
                 eb.starts_with(b"HTTP/1.1 502 Bad Gateway"),
@@ -3981,10 +4012,10 @@ mod dialing {
             .storage_mut()
             .publish_test_addr(0, member, Family::A);
         let client = connect(port);
-        pump(serving, 10);
-        assert!(
-            serving.slots[0].handle.is_some(),
-            "the connected client must be accepted into slot 0 before the manual state is set"
+        pump_until(
+            serving,
+            "the connected client to be accepted into slot 0 before the manual state is set",
+            |serving| serving.slots[0].handle.is_some(),
         );
         client
     }
@@ -4040,7 +4071,7 @@ mod dialing {
                 serving.slots[0].upstream.is_none(),
                 "the fresh guard must deny the loopback dial before any upstream socket"
             );
-            pump(serving, 20);
+            pump_until_client_ready(serving, &client, "the NoResolvedAddresses refusal head");
             client.set_nonblocking(true).expect("nonblocking reader");
             let read_start = std::time::Instant::now();
             let mut buf = [0u8; 64];
@@ -4092,12 +4123,7 @@ mod dialing {
         let cfg = config_pair(port, upstream_port);
         with_serving_stack_cfg(port, cfg, move |serving| {
             let mut client = connect(port);
-            pump(serving, 10);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
             let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
             match serving.slots[0]
                 .parser
@@ -4115,7 +4141,7 @@ mod dialing {
             serving
                 .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
                 .expect("dial");
-            pump(serving, 10);
+            pump_until_client_ready(serving, &client, "the pre-200 502 refusal body");
             let body = read_all(&mut client);
             assert!(
                 body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
@@ -4150,12 +4176,7 @@ mod dialing {
         let cfg = config_pair(port, upstream_port);
         with_serving_stack_cfg(port, cfg, move |serving| {
             let _client = connect(port);
-            pump(serving, 10);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
             let approved = ApprovedHostname::normalize(b"sub.example.org").expect("normalize");
             let ws = &mut serving.slots[0];
             ws.approved = Some(approved);
@@ -4328,7 +4349,7 @@ mod dialing {
 
     fn admit_retry_loop_client(serving: &mut ServingLoop, port: u16) -> TcpStream {
         let client = connect(port);
-        pump(serving, 10);
+        pump_until_admitted(serving, "the connecting client must be admitted");
         client
     }
 
@@ -4375,7 +4396,7 @@ mod dialing {
         serving
             .fail_current_attempt(0)
             .expect("the exhausted budget resolves to the refusal");
-        pump(serving, 10);
+        pump_until_seats(serving, 0, "the exhausted retry budget to release the seat");
     }
 
     #[cfg(all(test, feature = "alloc-witness"))]
@@ -4480,12 +4501,7 @@ mod dialing {
         let cfg = config_pair(port, upstream_port);
         with_serving_stack_cfg(port, cfg, move |serving| {
             let mut client = connect(port);
-            pump(serving, 10);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
             let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
             match serving.slots[0]
                 .parser
@@ -4511,7 +4527,7 @@ mod dialing {
             serving
                 .dial(0, NumericAddr::V4(Ipv4Addr::from([127, 0, 0, 1])))
                 .expect("dial");
-            pump(serving, 10);
+            pump_until_client_ready(serving, &client, "the pre-200 502 refusal body");
             let body = read_all(&mut client);
             assert!(
                 body.starts_with(b"HTTP/1.1 502 Bad Gateway"),
@@ -4545,11 +4561,9 @@ mod dialing {
         let cfg = config_pair(port, origin_port);
         with_serving_stack_cfg(port, cfg, move |serving| {
             let mut client = connect(port);
-            pump(serving, 10);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted and dialing"
+            pump_until_admitted(
+                serving,
+                "the connecting client must be admitted and dialing",
             );
             let handle = serving.slots[0].handle.as_ref().expect("admitted handle");
             let setup = serving
@@ -4586,7 +4600,7 @@ mod dialing {
                 deadline.limit()
             );
             let _origin_stream = origin.accept().expect("accept origin side").0;
-            pump(serving, 30);
+            pump_until_client_ready(serving, &client, "the response head");
             let body = read_until(&mut client, b"\r\n\r\n");
             assert!(
                 body.starts_with(b"HTTP/1.1 200"),
@@ -4615,12 +4629,7 @@ mod dialing {
                 Family::A,
             );
             let mut client = connect(port);
-            pump(serving, 10);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
             let head = format!("CONNECT sub.example.org:{upstream_port} HTTP/1.1\r\n\r\n");
             match serving.slots[0]
                 .parser
@@ -4645,11 +4654,10 @@ mod dialing {
                     setup,
                 ));
             serving.expire_sweep(Instant::now());
-            pump(serving, 10);
-            assert_eq!(
-                serving.storage().occupied(),
+            pump_until_seats(
+                serving,
                 0,
-                "the expired-dial retry must re-decide to NoBinding and release the seat"
+                "the expired-dial retry must re-decide to NoBinding and release the seat",
             );
             let body = read_all(&mut client);
             assert!(
@@ -4750,12 +4758,7 @@ mod dialing {
             wait_upstream_connected(&up);
 
             let _client = connect(port);
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the connecting client must be admitted"
-            );
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             let index = 0;
             let head_len = b"CONNECT sub.example.org:443 HTTP/1.1\r\n\r\n".len();
@@ -7226,11 +7229,9 @@ mod sigterm_shutdown {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let client = connect(port);
-            pump(serving, 40);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "a connecting client must be admitted before the signal"
+            pump_until_admitted(
+                serving,
+                "a connecting client must be admitted before the signal",
             );
             assert!(
                 serving.listener.is_some(),
@@ -7242,10 +7243,10 @@ mod sigterm_shutdown {
                 .expect("the serving owns the self-pipe write end")
                 .write_all(&[1])
                 .expect("write the signal byte into the self-pipe");
-            pump(serving, 40);
-            assert!(
-                serving.is_shutdown(),
-                "a self-pipe signal must reach draining through the shared poll"
+            pump_until(
+                serving,
+                "a self-pipe signal to reach draining through the shared poll",
+                ServingLoop::is_shutdown,
             );
             assert!(
                 matches!(serving.shutdown(), Shutdown::Draining { .. }),
@@ -7313,8 +7314,7 @@ mod sigterm_shutdown {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let client = connect(port);
-            pump(serving, 40);
-            assert_eq!(serving.storage().occupied(), 1);
+            pump_until_admitted(serving, "the connecting client must be admitted");
             serving.slots[0].stage = SlotStage::Relay;
 
             serving.on_sigterm().expect("first SIGTERM observation");
@@ -7370,8 +7370,7 @@ mod sigterm_shutdown {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let client = connect(port);
-            pump(serving, 40);
-            assert_eq!(serving.storage().occupied(), 1);
+            pump_until_admitted(serving, "the connecting client must be admitted");
 
             serving.on_sigterm().expect("first SIGTERM observation");
             let raw = 0;
@@ -7421,26 +7420,50 @@ mod enforcement {
             let mut a = connect(port);
             a.write_all(b"CONNECT sub.example.org:44")
                 .expect("partial head A");
-            pump(serving, 20);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "a partial CONNECT head must hold an admitted pending seat"
+            pump_until_admitted(
+                serving,
+                "a partial CONNECT head must hold an admitted pending seat",
             );
             assert!(!serving.storage().enforcement().block_all());
 
             let mut b = connect(port);
             b.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
                 .expect("head B1");
-            pump(serving, 30);
+            pump_until(
+                serving,
+                "the first offender's AnyIllegal fact to be counted",
+                |serving| {
+                    serving
+                        .storage()
+                        .enforcement()
+                        .counters()
+                        .facts_any_illegal(AnyIllegalCause::HostNotAllowlisted)
+                        >= 1
+                },
+            );
             let mut b2 = connect(port);
             b2.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
                 .expect("head B2");
-            pump(serving, 30);
+            pump_until(
+                serving,
+                "the second offender's AnyIllegal fact to be counted",
+                |serving| {
+                    serving
+                        .storage()
+                        .enforcement()
+                        .counters()
+                        .facts_any_illegal(AnyIllegalCause::HostNotAllowlisted)
+                        >= 2
+                },
+            );
             let mut b3 = connect(port);
             b3.write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
                 .expect("head B3");
-            pump(serving, 30);
+            pump_until(
+                serving,
+                "the third AnyIllegal with scope all to latch",
+                |serving| serving.storage().enforcement().block_all(),
+            );
             assert!(
                 serving.storage().enforcement().block_all(),
                 "the third AnyIllegal with scope all must latch before erasure"
@@ -7490,8 +7513,7 @@ mod enforcement {
         let cfg = cfg_doc1(port, "connection", "notify", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
             let _client = connect(port);
-            pump(serving, 20);
-            assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
+            pump_until_admitted(serving, "boot traffic admitted");
             fabric_validated_early_data(serving, Some(5));
             {
                 let ws = &mut serving.slots[0];
@@ -7557,8 +7579,7 @@ mod enforcement {
         let cfg = cfg_doc1(port, "connection", "block", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
             let _client = connect(port);
-            pump(serving, 20);
-            assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
+            pump_until_admitted(serving, "boot traffic admitted");
             fabric_validated_early_data(serving, Some(5));
             serving.slots[0].approved = None;
             let token = upstream_token(serving.slots[0].slot_gen, 0);
@@ -7629,8 +7650,7 @@ mod enforcement {
         let cfg = cfg_two_ports(port, "block", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
             let _client = connect(port);
-            pump(serving, 20);
-            assert_eq!(serving.storage().occupied(), 1, "boot traffic admitted");
+            pump_until_admitted(serving, "boot traffic admitted");
             fabric_validated_early_data_pair(serving, 0, b"a.example", 9999, Some(5));
             {
                 let ws = &mut serving.slots[0];
@@ -7725,7 +7745,16 @@ mod enforcement {
 
     fn arm_blocked_pair_connect(serving: &mut ServingLoop, port: u16) -> (TcpStream, usize) {
         let client = connect(port);
-        pump(serving, 20);
+        pump_until(
+            serving,
+            "an in-setup slot reading the blocked CONNECT head",
+            |serving| {
+                serving
+                    .slots
+                    .iter()
+                    .any(|slot| slot.handle.is_some() && slot.stage == SlotStage::ReadingConnect)
+            },
+        );
         let index = serving
             .slots
             .iter()
@@ -7834,6 +7863,14 @@ mod enforcement {
         });
     }
 
+    /// Spends the single writable edge a fresh client registration delivers,
+    /// while no downstream payload is staged. A payload staged afterwards can
+    /// then only be drained by the arm a test dispatches on purpose, never by
+    /// the registration's own edge.
+    fn spend_registration_writable_edge(serving: &mut ServingLoop) {
+        pump(serving, 2);
+    }
+
     fn stage_blocked_relay_payload(serving: &mut ServingLoop, up: mio::net::TcpStream) {
         let index = 0;
         {
@@ -7875,6 +7912,9 @@ mod enforcement {
                 .expect("evil head");
             pump(serving, 40);
         }
+        pump_until(serving, "the AnyIllegal All latch to fire", |serving| {
+            serving.storage().enforcement().block_all()
+        });
     }
 
     fn dispatch_stale_client_writable(serving: &mut ServingLoop, index: usize) {
@@ -7896,12 +7936,8 @@ mod enforcement {
         let cfg = cfg_doc1(port, "all", "notify", "connection");
         with_serving_stack_cfg(port, cfg, move |serving| {
             let mut relay_client = connect(port);
-            pump(serving, 20);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "relay client admitted before the latch"
-            );
+            pump_until_admitted(serving, "relay client admitted before the latch");
+            spend_registration_writable_edge(serving);
             let index = 0;
             let (_sink_stream, up) = sink_pair();
             stage_blocked_relay_payload(serving, up);
@@ -7951,6 +7987,9 @@ mod enforcement {
                 .expect("evil head");
             pump(serving, 30);
         }
+        pump_until(serving, "the AnyIllegal All latch to fire", |serving| {
+            serving.storage().enforcement().block_all()
+        });
     }
 
     fn arm_latch_relay_slot(serving: &mut ServingLoop, client: mio::net::TcpStream) {
@@ -8402,8 +8441,7 @@ mod enforcement {
             serving.storage_mut().publish_test_a(ordinal.get());
 
             let _first = connect(port);
-            pump(serving, 20);
-            assert_eq!(serving.storage().occupied(), 1, "pre-block peer admitted");
+            pump_until_admitted(serving, "pre-block peer admitted");
             assert!(
                 serving.slots[0].capture.detail.is_none(),
                 "a fresh slot carries no fact (generation {}), only the admit stamp",
@@ -8417,7 +8455,7 @@ mod enforcement {
 
             serving.close_slot(0);
             let _second = connect(port);
-            pump(serving, 20);
+            pump_until_admitted(serving, "the reused slot to admit the second peer");
             assert!(
                 serving.slots[0].capture.detail.is_none(),
                 "a reused slot starts with no stale generation's fact"
@@ -8442,14 +8480,12 @@ mod enforcement {
             serving.storage_mut().publish_test_a(ordinal.get());
 
             let _first = connect(port);
-            pump(serving, 20);
-            assert_eq!(serving.storage().occupied(), 1, "first peer admitted");
+            pump_until_admitted(serving, "first peer admitted");
             let _second = connect(port);
-            pump(serving, 20);
-            assert_eq!(
-                serving.storage().occupied(),
+            pump_until_seats(
+                serving,
                 2,
-                "a second peer occupies a non-zero slot so the identity pin discriminates"
+                "a second peer occupies a non-zero slot so the identity pin discriminates",
             );
             assert!(
                 serving.slots[1].handle.is_some(),
@@ -8503,8 +8539,7 @@ mod enforcement {
             serving.storage_mut().publish_test_a(ordinal.get());
 
             let _first = connect(port);
-            pump(serving, 20);
-            assert_eq!(serving.storage().occupied(), 1, "peer admitted on slot 0");
+            pump_until_admitted(serving, "peer admitted on slot 0");
             assert!(
                 serving.slots[0].capture.detail.is_none(),
                 "an admitted slot carries no detection fact until the first violation"
@@ -8698,7 +8733,16 @@ mod admission {
     ) -> (Instant, TcpStream, usize, ConnectParseStep) {
         let origin = Instant::now();
         let client = connect(port);
-        pump(serving, 10);
+        pump_until(
+            serving,
+            "an in-setup slot reading the CONNECT head",
+            |serving| {
+                serving
+                    .slots
+                    .iter()
+                    .any(|slot| slot.handle.is_some() && slot.stage == SlotStage::ReadingConnect)
+            },
+        );
         let index = serving
             .slots
             .iter()
@@ -8958,12 +9002,7 @@ mod coalescing {
 
             let mut client0 = connect(port);
             let mut client1 = connect(port);
-            pump(serving, 30);
-            assert_eq!(
-                serving.storage().occupied(),
-                2,
-                "both relay clients must be admitted"
-            );
+            pump_until_seats(serving, 2, "both relay clients must be admitted");
 
             serving.slots[0].upstream = Some(up0);
             open_relay(serving, 0);
@@ -9081,8 +9120,7 @@ mod coalescing {
             let mut sink_stream = sink.accept().expect("accept sink").0;
 
             let mut client = connect(port);
-            pump(serving, 30);
-            assert_eq!(serving.storage().occupied(), 1, "relay client admitted");
+            pump_until_admitted(serving, "relay client admitted");
             serving.slots[0].upstream = Some(up);
             open_relay(serving, 0);
 
@@ -9145,11 +9183,9 @@ mod coalescing {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let mut client = connect(port);
-            pump(serving, 30);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the client must be admitted before the synthetic batch"
+            pump_until_admitted(
+                serving,
+                "the client must be admitted before the synthetic batch",
             );
             client
                 .write_all(b"CONNECT nope.example.net:443 HTTP/1.1\r\n\r\n")
@@ -9214,11 +9250,9 @@ mod coalescing {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let _client = connect(port);
-            pump(serving, 30);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the client must be admitted before the synthetic batch"
+            pump_until_admitted(
+                serving,
+                "the client must be admitted before the synthetic batch",
             );
 
             let visits_before = serving.slots[0].visits;
@@ -9282,12 +9316,7 @@ mod coalescing {
         let port = ephemeral_port();
         with_serving_stack(port, move |serving| {
             let _client = connect(port);
-            pump(serving, 30);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the client must be admitted before the batch"
-            );
+            pump_until_admitted(serving, "the client must be admitted before the batch");
             let gen_before = serving.slots[0].slot_gen;
 
             let visits_before = serving.slots[0].visits;
@@ -11069,17 +11098,19 @@ mod listener_backoff {
             serving.listener_arm = ListenerArm::Paused {
                 at: Instant::now() - Duration::from_millis(1),
             };
-            pump(serving, 3);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "an elapsed pause must resume admission of the queued client"
+            pump_until_admitted(
+                serving,
+                "an elapsed pause must resume admission of the queued client",
             );
 
             client
                 .write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
                 .expect("write head");
-            pump(serving, 10);
+            pump_until_client_ready(
+                serving,
+                &client,
+                "the resumed listener to serve the queued client",
+            );
             let body = read_until(&mut client, b"\r\n\r\n");
             assert!(
                 body.starts_with(b"HTTP/1.1 403"),
@@ -11111,17 +11142,19 @@ mod listener_backoff {
                 .resume_listener(Instant::now() + ACCEPT_BACKOFF + Duration::from_secs(1))
                 .expect("the rearm must re-register the deregistered listener");
 
-            pump(serving, 3);
-            assert_eq!(
-                serving.storage().occupied(),
-                1,
-                "the re-armed listener must accept the client queued during the pause"
+            pump_until_admitted(
+                serving,
+                "the re-armed listener must accept the client queued during the pause",
             );
 
             client
                 .write_all(b"CONNECT evil.example.net:443 HTTP/1.1\r\n\r\n")
                 .expect("write head");
-            pump(serving, 10);
+            pump_until_client_ready(
+                serving,
+                &client,
+                "the re-armed listener to serve the queued client",
+            );
             let body = read_until(&mut client, b"\r\n\r\n");
             assert!(
                 body.starts_with(b"HTTP/1.1 403"),
