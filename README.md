@@ -1,6 +1,6 @@
 # Alumina Proxy
 
-Alumina is an egress control boundary built on **least privilege and least
+Alumina is a full chain of trust egress proxy built on **least privilege and least
 capability**. A workload may connect only to explicitly approved domains and
 ports. The proxy has one responsibility: enforce that boundary, with the minimum
 protocol scope and runtime capability needed to do so.
